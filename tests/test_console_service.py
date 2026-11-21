@@ -25,7 +25,7 @@ from unittest import mock
 
 from agent_tools.console import console as console_module
 from agent_tools.console import capacity, deliveries, digest, movement, probe, service, sessions, signin, sprints
-from agent_tools.console import signin_run, spend, view
+from agent_tools.console import event_log, peer, register, signin_run, spend, view
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.write_guard import TokenError
 from agent_tools.console.view import derive_view, encode_view, project_states
@@ -80,7 +80,7 @@ class Tripwire:
         raise AssertionError(f"the log was used: {name}")
 
 
-def state_under_tripwires(svc):
+def state_under_tripwires(svc, connection=None):
     log = svc.log
     tripwire = Tripwire()
     svc.log = tripwire
@@ -93,7 +93,12 @@ def state_under_tripwires(svc):
             stack.enter_context(metadata_tripwires())
             ARMED.set()
             try:
-                status, _, body = support.request(svc.address, "GET", "/api/state")
+                if connection is None:
+                    status, _, body = support.request(svc.address, "GET", "/api/state")
+                else:
+                    connection.request("GET", "/api/state")
+                    response = connection.getresponse()
+                    status, body = response.status, response.read()
             finally:
                 ARMED.clear()
     finally:
@@ -201,6 +206,18 @@ class RestartTest(Case):
         self.assertEqual(listed(second), {})
 
 
+class UnregisteredRowTest(Case):
+    def test_an_unregistered_row_names_the_root_it_removed(self):
+        items = support.entries(2)
+        svc = self.start(items)
+        support.write_registry(self.registry, items[:1])
+        svc.refresh()
+        rows = [row for row in support.log_rows(self.store) if row[2] == "project.unregistered"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][3], items[1]["project_id"])
+        self.assertEqual(json.loads(rows[0][4]), {"root": items[1]["root"]})
+
+
 class AppendOnlyTest(Case):
     def test_every_operation_keeps_earlier_rows(self):
         previous = []
@@ -288,6 +305,25 @@ class NoIoTest(Case):
         self.assertNotEqual(
             [thread for name, thread in HITS if name == "os.stat"][0],
             threading.current_thread().name)
+
+
+    @unittest.skipUnless(sys.platform == "darwin" or sys.platform.startswith("linux"),
+                         "no platform peer reader")
+    def test_an_admitted_connection_serves_state_with_no_io(self):
+        svc = support.service(self, self.store, self.registry,
+                              peer_reader=peer.reader_for(sys.platform))
+        conn = http.client.HTTPConnection(*svc.address, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/api/state")
+        conn.getresponse().read()
+        HITS.clear()
+        status, body, touched, mocks = state_under_tripwires(svc, conn)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, svc.view_bytes)
+        self.assertEqual(HITS, [])
+        self.assertEqual(touched, [])
+        for replacement in mocks.values():
+            replacement.assert_not_called()
 
 
 class LoopbackTest(Case):
@@ -1509,6 +1545,63 @@ class DigestExpiryTest(Case):
             return json.loads(body)["digest"]["recent"] == []
 
         self.assertTrue(wait_until(emptied))
+
+
+class RegistrationFoldServiceTest(Case):
+    """The page's registration folds back when its project is unregistered (#1334)."""
+
+    def registration(self, svc):
+        _, _, body = support.request(svc.address, "GET", "/api/state")
+        return json.loads(body)["registration"]
+
+    def seed(self, rows, clock=None):
+        log = event_log.EventLog(self.store, **({} if clock is None else {"clock": clock}))
+        try:
+            log.append(rows)
+        finally:
+            log.close()
+
+    def rows(self):
+        y_srv = register.dismissed(register.failed("/srv/y", "failed"))
+        r_srv = {**register.failed("/srv/p00", "failed"), "project_id": "owner/p00",
+                 "result": "registered", "note": None}
+        return register.ended(y_srv), register.ended(r_srv)
+
+    def test_an_unregistered_project_gives_the_page_back_its_previous_registration(self):
+        self.seed(list(self.rows()))
+        svc = self.start(support.entries(1))
+        self.assertIsNone(self.registration(svc))
+        support.write_registry(self.registry, [])
+        svc.refresh()
+        shown = self.registration(svc)
+        self.assertEqual(shown["root"], "/srv/y")
+        self.assertEqual(shown["note"], register.LATER_NOTE)
+        svc.close()
+        svc = self.start()
+        again = self.registration(svc)
+        self.assertEqual(again["root"], shown["root"])
+        self.assertEqual(again["at"], shown["at"])
+
+    def test_a_retention_pass_rebuilds_the_chain(self):
+        def iso(t):
+            return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="microseconds")
+
+        y_row, r_row = self.rows()
+        self.seed([y_row], lambda: iso(T0))
+        self.seed([r_row], lambda: iso(T0 + 60 * 86400))
+        now = [T0 + 60 * 86400]
+        svc = self.start(support.entries(1), retention_seconds=86400, **clocks(now))
+        now[0] = T0 + 95 * 86400
+        removed = svc.retain()
+        support.write_registry(self.registry, [])
+        svc.refresh()
+        running = self.registration(svc)
+        svc.close()
+        second = support.service(self, self.store, self.registry, **clocks(now))
+        restarted = self.registration(second)
+        self.assertGreaterEqual(removed, 1)
+        self.assertIsNone(running)
+        self.assertIsNone(restarted)
 
 
 class RetentionServiceTest(Case):

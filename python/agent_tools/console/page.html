@@ -63,6 +63,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .btn-primary:disabled, .btn-primary[aria-disabled="true"] { background: var(--s1); border-color: var(--s2); color: var(--sub0); }
 .btn-option[aria-pressed="true"] { background: rgba(183, 189, 248, .10); }
 .btn-option[aria-pressed="true"] kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
+.btn-option.keyless { grid-template-columns: minmax(0, 1fr) auto; }
 /* end controls: desk */
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
@@ -106,8 +107,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
 #accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-open { flex: 0 0 auto; }
-.share-line, .share-last, .share-none { margin-top: 6px; }
-.share-tailnet-row, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
+.share-name, .share-line, .share-outside, .share-last, .share-none { margin-top: 6px; }
+.share-switch, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-people { list-style: none; }
 .share-person { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--hair); }
 .share-who { color: var(--sub1); overflow-wrap: anywhere; }
@@ -129,6 +130,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
+.card .look-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -214,6 +216,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .goal-hint { font-size: .8125rem; color: var(--sub0); }
 .sprint-blocks { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; padding: 12px 16px; border: 1px solid var(--hair); border-radius: 12px; overflow-wrap: anywhere; font-size: .8125rem; color: var(--sub0); }
+.overlap { padding: 0 16px; font-size: .8125rem; color: var(--sub0); overflow-wrap: anywhere; min-width: 0; }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
 .sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
@@ -249,6 +252,24 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-messages { flex: 1 0 100%; list-style: none; padding: 0 0 0 16px; }
 .sprint-messages li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; color: var(--sub0); }
 .message-state, .message-reply { color: var(--ov2); }
+.started-by, .sprint-account { color: var(--ov2); }
+.pool { margin-bottom: 24px; font-size: .8125rem; color: var(--sub0); }
+.pool-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.pool-accounts { list-style: none; margin: 8px 0 0; padding: 0; }
+.pool-account { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 4px 0; }
+.pool-account b { font-weight: 600; color: var(--text); }
+.pool-status { color: var(--ov2); }
+.pool-yours b { color: var(--lav); }
+.pool-remove-box { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; padding-left: 16px; color: var(--sub1); }
+.pool-remove-box p { flex-basis: 100%; margin: 0; }
+.cap-owner, .acct-owner { color: var(--ov2); overflow-wrap: anywhere; margin-right: 6px; }
+.own-account { margin-bottom: 24px; font-size: .8125rem; color: var(--sub0); }
+.guest-account { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
+.guest-account p { flex-basis: 100%; margin: 0; }
+.guest-consent { color: var(--text); }
+.guest-agree { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; }
+.guest-tick { width: 32px; height: 32px; margin: 0; accent-color: var(--lav); }
+.pool-week, .pool-session { flex: 1 0 100%; padding-left: 16px; }
 .message-reply { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); overflow-wrap: anywhere; }
 .manager-line .message-reply { flex: 1 1 auto; padding-left: 0; }
 .message-action { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); }
@@ -424,6 +445,8 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .signin-failed { color: var(--red); }
 .signin-link { color: var(--blue); overflow-wrap: anywhere; }
 .signin-code { flex: 1 1 14rem; max-width: 24rem; }
+.signin-route { flex-basis: 100%; margin: 0; color: var(--sub0); }
+.signin-forward { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; overflow-wrap: anywhere; user-select: all; }
 .account-add { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: .8125rem; color: var(--sub0); }
 .account-name, .account-code { flex: 1 1 10rem; max-width: 16rem; }
 .account-add-note { margin: 0; color: var(--text); }
@@ -533,6 +556,8 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 <section id="digest" aria-label="Since you last looked"></section>
 </main>
 <aside class="side" aria-label="Projects">
+<section class="pool" id="pool" aria-label="Accounts" hidden></section>
+<section class="own-account" id="own-account" aria-label="Your account" hidden></section>
 <section id="projects"></section>
 <section id="unmanaged"></section>
 <section class="register" id="register" aria-label="Register project"></section>
@@ -820,9 +845,19 @@ let reading = null;
 let readingReveal = null;
 let sprintRedraw = 0;
 function messageLabel(message) {
+  if (message.kind === "answer" && typeof message.question === "string") {
+    const answer = typeof message.words === "string" ? message.text + ": " + message.words : message.text;
+    return message.question + " Answer: " + answer;
+  }
   if (message.kind === "approved") return "Approved version " + message.version;
   if (message.kind === "changes") return "Asked for changes to version " + message.version + ": " + message.text;
   return typeof message.words === "string" ? message.text + ": " + message.words : message.text;
+}
+// Who wrote a line: the colleague's login when `by` names one, else the owner ("You" on the owner's door).
+function messageSays(message) {
+  const label = messageLabel(message);
+  if (typeof message.by !== "string") return ownerSays("You") + ": " + label;
+  return (message.kind === "answer" ? "Answered by " + message.by : message.by) + ": " + label;
 }
 function messageList(messages) {
   const list = el("ul", "sprint-messages");
@@ -835,7 +870,7 @@ function messageList(messages) {
       continue;
     }
     const row = el("li", "message");
-    row.appendChild(el("span", "message-text", ownerSays("You") + ": " + messageLabel(message)));
+    row.appendChild(el("span", "message-text", messageSays(message)));
     row.appendChild(el("span", "message-state", message.state_text));
     if (message.new === true) row.appendChild(el("span", "message-new", "new"));
     if (typeof message.action_text === "string") {
@@ -956,8 +991,30 @@ function focusCard(card) {
 function openCheckCard(check) {
   focusCard(inboxCards.get(check.project_id + "#" + check.key));
 }
+// A sprint the colleague started that holds one of their own open cards: the two texts naming "you" are true for them.
+function steersHere(sprint) {
+  return guestDoor && sprint.steer === true && lastView !== null && lastView.inbox !== undefined
+    && lastView.inbox.open.some((open) => open.steer === true && open.sprint_id === sprint.sprint_id);
+}
+// The card the sprint's `now_text` speaks of: its brief, or its first unanswered question (the order the view reads).
+function nowSteers(sprint) {
+  if (!guestDoor || sprint.steer !== true || lastView === null || lastView.inbox === undefined) return false;
+  const cards = lastView.inbox.open.filter((open) => open.sprint_id === sprint.sprint_id
+    && open.answered !== true && (open.reason === "brief" || open.reason === "question"));
+  cards.sort((a, b) => (a.round === undefined ? -1 : a.round) - (b.round === undefined ? -1 : b.round)
+    || (a.index === undefined ? -1 : a.index) - (b.index === undefined ? -1 : b.index));
+  return cards.length > 0 && cards[0].steer === true;
+}
+const YOURS_NOW = ["waiting for your approval of the brief", "waiting for your answer: "];
+function nowWords(text, acts) {
+  return acts && typeof text === "string" && YOURS_NOW.some((lead) => text.startsWith(lead)) ? text : ownerWords(text);
+}
+function ballWords(text, acts) {
+  return acts && text === "waiting on you" ? text : ownerWords(text);
+}
 function drawSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
+  const yours = steersHere(sprint);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
   item.dataset.sprintId = sprint.sprint_id;
   const before = Array.from(item.children).find((c) => c.className === "sprint-detail");
@@ -992,11 +1049,12 @@ function drawSprint(item, entry, sprint) {
     prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
     head.appendChild(prog);
   }
-  const now = el("p", "sp-now", ownerWords(sprint.now_text));
-  now.setAttribute("title", ownerWords(sprint.now_text));
+  const nowYours = nowSteers(sprint);
+  const now = el("p", "sp-now", nowWords(sprint.now_text, nowYours));
+  now.setAttribute("title", nowWords(sprint.now_text, nowYours));
   head.appendChild(now);
   const words = el("p", "sp-status");
-  words.appendChild(el("span", "sprint-ball " + look.tone, ownerWords(sprint.ball_text)));
+  words.appendChild(el("span", "sprint-ball " + look.tone, ballWords(sprint.ball_text, yours)));
   if (typeof sprint.state_until === "string") {
     words.appendChild(timeEl("weekday", sprint.state_until, "until"));
   }
@@ -1007,6 +1065,8 @@ function drawSprint(item, entry, sprint) {
   age.appendChild(el("span", "", "goal set "));
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
   words.appendChild(age);
+  if (typeof sprint.started_by === "string") words.appendChild(el("span", "started-by", "started by " + sprint.started_by));
+  if (guestDoor && typeof sprint.account_label === "string") words.appendChild(el("span", "sprint-account", "on " + sprint.account_label));
   head.appendChild(words);
   item.appendChild(head);
   const spendBox = spendLine("sprint", sprint.sprint_id);
@@ -1030,7 +1090,7 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
   }
   const retrying = retries.get(sprint.sprint_id);
-  if (sprint.retry === true) {
+  if (sprint.retry === true && !guestDoor) {
     const again = actionButton("retry btn-quiet", "Retry", () => retry(item, entry, sprint));
     if (retrying !== undefined && retrying.phase === "sending") again.setAttribute("disabled", "");
     markBusy(again, retrying !== undefined && retrying.phase === "sending");
@@ -1053,9 +1113,14 @@ function drawSprint(item, entry, sprint) {
   if (typeof sprint.reach_text === "string") {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
-  if (guestDoor) return;
+  if (guestDoor && sprint.steer !== true) return;
   const controls = el("div", "sprint-acts");
   controls.appendChild(tellBox(item, entry, sprint));
+  if (guestDoor) {
+    controls.dataset.steer = "1";
+    item.appendChild(controls);
+    return;
+  }
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
@@ -1202,6 +1267,7 @@ async function withdraw(item, entry, sprint) {
   }
 }
 async function retry(item, entry, sprint) {
+  if (guestDoor) return;
   const id = sprint.sprint_id;
   const current = retries.get(id);
   if (current !== undefined && current.phase === "sending") return;
@@ -1335,16 +1401,71 @@ function isProgress(item) {
 function isAdoption(item) {
   return item.reason === "adoption";
 }
+const adoptionMerges = new Map();
+async function mergeAdoption(item) {
+  const key = item.key + "\n" + item.number + "\n" + item.commit;
+  const current = adoptionMerges.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "", plan: item.key, number: item.number, commit: item.commit, name: item.project_id || item.name };
+  adoptionMerges.set(key, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await fetch("/api/adoption-merge", {
+      method: "POST", headers: ownerHeaders(),
+      body: JSON.stringify({ plan_id: item.plan_id, number: item.number, commit: item.commit }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "the console did not answer";
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (adoptionMerges.get(key) !== state) return;
+  if (reason === null) adoptionMerges.delete(key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
 function adoptionCard(item) {
   const card = el("article", "card adoption");
   card.appendChild(pathWords(el("p", "q"), item.headline));
   card.appendChild(phrase("p", "meta", pathWords(el("span", "proj"), item.project_id || item.name), " \u00b7 waiting ", timeEl("since", item.waiting_since, "")));
+  if (typeof item.why === "string") card.appendChild(el("span", "reason", item.why));
+  if (item.merge === true) {
+    const state = adoptionMerges.get(item.key + "\n" + item.number + "\n" + item.commit);
+    const sending = state !== undefined && state.phase === "sending";
+    const merge = actionButton("adoption-merge btn-primary", "Merge", () => mergeAdoption(item));
+    if (sending) merge.setAttribute("disabled", "");
+    markBusy(merge, sending);
+    const act = el("div", "act");
+    act.appendChild(merge);
+    if (state !== undefined && state.phase === "failed") {
+      act.appendChild(el("span", "fail", "Could not merge: " + state.reason));
+    }
+    card.appendChild(act);
+  }
   if (isHttps(item.url)) {
     const link = el("a", "pr-link", "Open the pull request");
     link.href = item.url;
     link.rel = "noreferrer";
     card.appendChild(link);
   }
+  return card;
+}
+function adoptionNotice(key, state) {
+  const card = el("article", "card adoption-failed");
+  card.appendChild(pathWords(el("p", "q"), "Could not merge the adoption of " + state.name));
+  card.appendChild(el("span", "reason", state.reason));
+  const act = el("div", "act");
+  act.appendChild(actionButton("adoption-failed-dismiss btn-quiet", "Dismiss", () => {
+    adoptionMerges.delete(key);
+    redraw();
+  }));
+  card.appendChild(act);
   return card;
 }
 function progressCard(item) {
@@ -1440,6 +1561,54 @@ function exclusionControls(acct, p) {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
   }
 }
+// A colleague's profile carries his login; the owner may sign it out beside Remove (ADR-console-087 D3).
+const signoutPosts = new Map();
+async function signOutAccount(p) {
+  const current = signoutPosts.get(p.profile);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  signoutPosts.set(p.profile, state);
+  redrawAccounts();
+  let reason = null;
+  try {
+    const response = await fetch("/api/account-signout", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({profile: p.profile}),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (signoutPosts.get(p.profile) !== state) return;
+  if (reason === null) signoutPosts.delete(p.profile);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawAccounts();
+}
+function signoutControls(acct, p) {
+  if (typeof p.owner !== "string" || p.owner === "") return;
+  const state = signoutPosts.get(p.profile);
+  // A sign-out that was done but left a manager behind answers 502 after the account reads signed out: the failure stays shown with no button.
+  if (signedOut(p)) {
+    if (state !== undefined && state.phase === "failed") acct.appendChild(el("span", "fail", "Could not sign out: " + state.reason));
+    return;
+  }
+  const sending = state !== undefined && state.phase === "sending";
+  const button = actionButton("acct-signout btn-quiet", "Sign out", () => signOutAccount(p));
+  // aria-disabled, not disabled, as the exclusion button: the focus must stay restorable.
+  if (sending) button.setAttribute("aria-disabled", "true");
+  markBusy(button, sending);
+  acct.appendChild(button);
+  if (state !== undefined && state.phase === "failed") {
+    acct.appendChild(el("span", "fail", "Could not sign out: " + state.reason));
+  }
+}
 function pinnedProfile(p) {
   return p.pinned === true;
 }
@@ -1490,12 +1659,19 @@ const removeOpen = new Set();
 const removeDrafts = new Map();
 const removePosts = new Map();
 let removeFields = new Map();
-function removeSessionsWords(p, view) {
+function removeSessionsWords(p, view, colleague) {
   const counts = view.profile_sessions;
   if (counts === null || typeof counts !== "object" || !Object.prototype.hasOwnProperty.call(counts, p)) return null;
   const n = counts[p];
   if (typeof n !== "number") return null;
   if (n === 0) return "No session is running under " + p + ".";
+  if (colleague) {
+    // A colleague's account: its managers move to the pool's choice (ADR-console-087 D5).
+    if (n === 1) {
+      return "1 session is running under " + p + ". A manager on it moves to another account, or waits for one with room; any other session keeps running.";
+    }
+    return n + " sessions are running under " + p + ". Each manager on it moves to another account, or waits for one with room; the other sessions keep running.";
+  }
   if (n === 1) return "1 session is running under " + p + " and keeps running.";
   return n + " sessions are running under " + p + " and keep running.";
 }
@@ -1546,7 +1722,7 @@ function removeControls(act, row, p, view) {
   const state = removePosts.get(name);
   const sending = state !== undefined && state.phase === "sending";
   const box = el("div", "acct-remove-box");
-  const words = removeSessionsWords(name, view);
+  const words = removeSessionsWords(name, view, typeof p.owner === "string" && p.owner !== "");
   if (words !== null) box.appendChild(el("span", "acct-remove-sessions", words));
   box.appendChild(el("span", "acct-remove-note", "Type " + name + " to remove it. It is signed out first."));
   const input = el("input", "acct-remove-name field-line");
@@ -1595,6 +1771,7 @@ let accountSignin = null;
 let accountAttempt = null;
 let accountConfirmed = false;
 let accountLink = null;
+let accountRoute = null;
 let accountOutcome = null;
 const SIGNIN_NOTES = new Map([
   ["running", "A sign-in is running."],
@@ -1623,6 +1800,32 @@ function knownSigninAttempt(profile) {
   }
   return newest;
 }
+// How the sign-in returns, read from an answer: the route, the loopback port and the forward command, each null unless it is well formed. An older console sends none of them.
+function signinRoute(answer) {
+  const none = { route: null, port: null, forward: null };
+  if (answer === null || typeof answer !== "object") return none;
+  let route = ["manual", "loopback", "unknown"].includes(answer.route) ? answer.route : null;
+  const port = Number.isInteger(answer.port) && answer.port >= 1 && answer.port <= 65535 ? answer.port : null;
+  if (route === "loopback" && port === null) route = "unknown";
+  if (route !== "loopback") return { route, port: null, forward: null };
+  const shape = typeof answer.forward === "string" ? /^ssh -N -L (\d+):localhost:\1 [A-Za-z0-9][A-Za-z0-9-]*$/.exec(answer.forward) : null;
+  return { route, port, forward: shape !== null && Number(shape[1]) === port ? answer.forward : null };
+}
+const ROUTE_WORDS = new Map([
+  ["manual", "Sign in on that page; it then shows a code. Paste the code here and press Send code."],
+  ["unknown", "The console could not tell where this sign-in returns, so a browser on another machine may not finish it."],
+]);
+// The sentence under the link that says how to finish the sign-in, or null when the answer said nothing of the route.
+function signinRouteNote(held) {
+  if (held === null || held === undefined) return null;
+  if (ROUTE_WORDS.has(held.route)) return el("p", "signin-route", ROUTE_WORDS.get(held.route));
+  if (held.route !== "loopback") return null;
+  const words = "This sign-in returns to port " + held.port + " on the console's machine. If your browser is on another machine, forward that port to it first";
+  if (held.forward === null) return el("p", "signin-route", words + ".");
+  const note = el("p", "signin-route", words + ": ");
+  note.appendChild(el("code", "signin-forward", held.forward));
+  return note;
+}
 // An answer that arrives after its run ended or its item closed is held for no frame: the redraw that follows reconciles it away.
 function holdSigninLink(profile, answer, added = false) {
   if (answer === null || typeof answer !== "object") return;
@@ -1632,7 +1835,7 @@ function holdSigninLink(profile, answer, added = false) {
   if (!Number.isInteger(answer.attempt) || answer.attempt < 1) return;
   // An answer for an attempt older than one this page knows never replaces the newer attempt's link.
   if (answer.attempt < knownSigninAttempt(profile)) return;
-  signinLinks.set(profile, { link, attempt: answer.attempt, added });
+  signinLinks.set(profile, { link, attempt: answer.attempt, added, ...signinRoute(answer) });
 }
 // One ask per profile and attempt, kept after a refusal or a null link: a page that holds no link for a running sign-in asks the console for it once.
 const signinAsked = new Set();
@@ -1645,6 +1848,7 @@ function signinStillRunning(profile, attempt) {
     run !== null && run !== undefined && typeof run === "object" && run.state === "running" && run.attempt === attempt);
 }
 async function askSigninLink(profile, attempt) {
+  if (guestDoor) return;
   signinAsked.add(profile + "\n" + attempt);
   try {
     const response = await fetch("/api/signin-link", { method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }) });
@@ -1714,6 +1918,12 @@ function signinLive(profile) {
   const run = runs[profile];
   return (run !== null && run !== undefined && typeof run === "object" && run.state === "running") || signinLinks.has(profile);
 }
+// The profiles of the newest capacity that a colleague added (#1361: an entry's `owner` is his login).
+function colleagueProfiles(view) {
+  const cap = view.capacity;
+  const listed = cap !== null && typeof cap === "object" && Array.isArray(cap.profiles) ? cap.profiles : [];
+  return new Set(listed.filter((p) => typeof p.owner === "string" && p.owner !== "").map((p) => p.profile));
+}
 function signinListed(profile) {
   const cap = lastView === null ? null : lastView.capacity;
   return cap !== null && typeof cap === "object" && Array.isArray(cap.profiles) && cap.profiles.some((p) => p.profile === profile);
@@ -1747,6 +1957,8 @@ function signinAct(item, quiet = false) {
     act.appendChild(signinStartButton(item, quiet ? "signin-start acct-signin btn-quiet" : "signin-start btn-primary"));
   } else {
     act.appendChild(signinLinkNode("signin-link", held));
+    const routeNote = signinRouteNote(held);
+    if (routeNote !== null) act.appendChild(routeNote);
     const input = document.createElement("input");
     input.type = "text";
     input.autocomplete = "off";
@@ -2721,10 +2933,61 @@ function settledCapacity(source) {
   cap.resumes_at = cap.all_out && until.length ? until[0] : null;
   return cap;
 }
+function stampLapsed(stamp) {
+  if (typeof stamp !== "string") return false;
+  const at = Date.parse(stamp);
+  return Number.isFinite(at) && at <= Date.now();
+}
+// The guest pool settles each window on its own, as capacity.profile_capacity does on the server.
+function settledPool(pool) {
+  let freed = false;
+  const accounts = pool.accounts.map((row) => {
+    const weekGone = stampLapsed(row.week_reset);
+    const sessionGone = stampLapsed(row.five_hour_reset);
+    const outGone = row.state === "out" && stampLapsed(row.out_until);
+    if (!weekGone && !sessionGone && !outGone) return row;
+    const next = {...row};
+    if (weekGone) { next.week_left = 100; next.week_reset = null; }
+    if (sessionGone) { next.five_hour_left = 100; next.five_hour_reset = null; }
+    const ahead = [next.week_reset, next.five_hour_reset].filter((stamp) => typeof stamp === "string").sort();
+    next.next_reset = ahead.length ? ahead[0] : null;
+    // "reset, not yet used" needs every window to read full with no reset left: a window still part used keeps the account ok.
+    const unused = [next.week_left, next.five_hour_left].every((left) => left === null || left === 100);
+    if (outGone) {
+      next.state = ahead.length || !unused ? "ok" : "reset";
+      next.out_until = null;
+      if (row.in_use === true) freed = true;
+    } else if (row.state === "ok" && !ahead.length && unused) {
+      next.state = "reset";
+    }
+    return next;
+  });
+  if (!freed) return {...pool, accounts};
+  const considered = accounts.filter((row) => row.in_use === true);
+  const room = considered.filter((row) => row.state === "ok" || row.state === "reset").length;
+  const allOut = considered.length > 0 && considered.every((row) => row.state === "out");
+  const tight = considered.length >= 2 && room === 1
+    && considered.every((row) => row.state === "ok" || row.state === "reset" || row.state === "out");
+  const until = considered.map((row) => row.out_until).filter((stamp) => typeof stamp === "string").sort();
+  const read = considered.some((row) => row.state !== "unknown");
+  return {...pool, accounts, all_out: allOut, tight, resumes_at: allOut && until.length ? until[0] : null,
+    state: !read ? null : allOut ? "out" : tight ? "tight" : "fine"};
+}
 let lapsedDrawn = "";
 function lapsedNow(view) {
   const profiles = view !== null && view.capacity && Array.isArray(view.capacity.profiles) ? view.capacity.profiles : [];
-  return profiles.filter(lapsedReset).map((p) => p.profile + "\n" + (p.state === "out" ? p.out_until : p.next_reset)).join("\n");
+  const lapsed = profiles.filter(lapsedReset).map((p) => p.profile + "\n" + (p.state === "out" ? p.out_until : p.next_reset));
+  const rows = view !== null && view.pool && Array.isArray(view.pool.accounts) ? view.pool.accounts : [];
+  for (const row of rows) {
+    for (const key of ["week_reset", "five_hour_reset", "out_until"]) {
+      if (stampLapsed(row[key])) lapsed.push(row.label + "\n" + row[key]);
+    }
+  }
+  return lapsed.join("\n");
+}
+// The login of the colleague who added a profile, shown beside its name, or null when the owner added it.
+function ownerMark(cls, p) {
+  return typeof p.owner === "string" && p.owner !== "" ? el("span", cls, p.owner) : null;
 }
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
@@ -2759,9 +3022,14 @@ function renderCapacity(view) {
       const who = el("b", "", p.profile);
       who.setAttribute("title", p.profile);
       acct.appendChild(who);
+      const owner = ownerMark("cap-owner", p);
+      if (owner !== null) acct.appendChild(owner);
       if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
       if (pinnedProfile(p)) acct.appendChild(el("span", "cap-pin-mark", "pinned"));
-      if (signedOut(p)) acct.appendChild(el("span", "cap-signin", "signed out"));
+      if (signedOut(p)) {
+        const waits = typeof p.owner === "string" && p.owner !== "";
+        acct.appendChild(el("span", "cap-signin", waits ? "waits for " + p.owner + " to sign in" : "signed out"));
+      }
       else if (asks(p)) acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
       nodes.push(acct);
       continue;
@@ -2775,6 +3043,8 @@ function renderCapacity(view) {
     const name = el("b", "", p.profile);
     name.setAttribute("title", p.profile);
     acct.appendChild(name);
+    const owner = ownerMark("cap-owner", p);
+    if (owner !== null) acct.appendChild(owner);
     if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
     if (pinnedProfile(p)) acct.appendChild(el("span", "cap-pin-mark", "pinned"));
     if (known(p.week_left)) {
@@ -2814,6 +3084,8 @@ function accountRow(shown, view) {
   const who = el("b", "acct-name", name);
   who.setAttribute("title", name);
   row.appendChild(who);
+  const owner = ownerMark("acct-owner", p);
+  if (owner !== null) row.appendChild(owner);
   if (excludedProfile(p)) row.appendChild(el("span", "acct-excl", "excluded"));
   if (pinnedProfile(p)) row.appendChild(el("span", "acct-pin-mark", "pinned"));
   const detail = el("p", "acct-detail");
@@ -2849,9 +3121,12 @@ function accountRow(shown, view) {
   row.appendChild(act);
   exclusionControls(act, p);
   pinControls(act, p);
+  signoutControls(act, p);
   const elsewhere = accountSignin === name && accountCont !== null;
   const live = signinLive(name);
-  if (!elsewhere && !live) {
+  // The service refuses the owner a sign-in of a profile a colleague added (#1361), so the row offers none.
+  const colleagues = typeof p.owner === "string" && p.owner !== "";
+  if (!elsewhere && !live && !colleagues) {
     act.appendChild(signinStartButton(item, "acct-signin btn-quiet"));
     const failed = signinPosts.get("start\n" + name);
     if (failed !== undefined && failed.phase === "failed") {
@@ -2972,30 +3247,45 @@ document.getElementById("capacity").addEventListener("click", () => {
 });
 let sharingOpen = false;
 let sharingReturn = null;
-let tailnetDraft = null;
 let loginDraft = "";
 const sharePicks = new Set();
 const sharePosts = new Map();
 const SHARE_LINES = new Map([
-  ["unchecked", (t) => "Sharing is on at " + t + ", but the console cannot tell whether Tailscale Serve is set up for the guest port."],
-  ["not_proxying", (t) => "Sharing is on at " + t + ", but Tailscale Serve is not set up for the guest port."],
-  ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest port."],
+  ["unchecked", (t) => "Sharing is on at " + t + ", but the console cannot tell whether Tailscale Serve is set up for the guest door."],
+  ["not_proxying", (t) => "Sharing is on at " + t + ", but Tailscale Serve is not set up for the guest door."],
+  ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest door."],
 ]);
 const SHARE_WHY = new Map([
-  ["sharing_off", "sharing is off"], ["host", "the Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+  ["sharing_off", "sharing is off"], ["name_unread", "the console could not read this host's tailnet name"], ["host", "the Host is not localhost or the forwarded Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+function shareName(sharing) {
+  return typeof sharing.tailnet === "string" ? "This host's tailnet name, read from Tailscale: " + sharing.tailnet + "." : null;
+}
 function shareLine(sharing) {
-  const words = SHARE_LINES.get(sharing.state);
-  return sharing.tailnet === null || words === undefined ? "Sharing is off: no tailnet name is set." : words(sharing.tailnet);
+  if (typeof sharing.tailnet !== "string") {
+    return sharing.shared === true
+      ? "Sharing is on, but the console can't read this host's tailnet name from Tailscale, so guests can't get in."
+      : "Sharing is off, and the console can't read this host's tailnet name from Tailscale.";
+  }
+  if (sharing.shared !== true || sharing.state === "off") return "Sharing is off.";
+  return (SHARE_LINES.get(sharing.state) || SHARE_LINES.get("unchecked"))(sharing.tailnet);
+}
+function shareOutside(sharing) {
+  if (sharing.shared !== true) return null;
+  return sharing.other_device_seen === true
+    ? "A request from another device has reached the guest door since the console started."
+    : "No request from another device has reached the guest door since the console started; the tailnet's access rules must allow TCP 443 to this host for the people this console is shared with.";
 }
 function shareLast(r) {
-  if (r === null || typeof r !== "object") return "No request has come to the guest port yet.";
+  if (r === null || typeof r !== "object") return "No request has come to the guest door yet.";
   const host = r.host !== null ? "Host " + r.host : r.hosts === 0 ? "no Host" : r.hosts > 1 ? r.hosts + " Host headers" : "a Host the console does not keep";
+  const forwarded = r.forwarded_host !== null ? "forwarded Host " + r.forwarded_host : r.forwarded_hosts === 0 ? "no forwarded Host" : r.forwarded_hosts > 1 ? r.forwarded_hosts + " forwarded Host headers" : "a forwarded Host the console does not keep";
   const login = r.login_headers === 0 ? "no login header" : r.login_headers === 1 ? "a login header" : r.login_headers + " login headers";
   const why = r.reason === "not_shared" && r.login_headers !== 1 ? "it had not exactly one login header" : SHARE_WHY.get(r.reason);
-  return "Last request on the guest port: " + host + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
+  const from = r.client === "this_host" ? ", from this host" : r.client === "other_device" ? ", from another device" : "";
+  return "Last request on the guest door" + from + ": " + host + ", " + forwarded + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
 }
-function shareTailnet(tailnet) {
-  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ tailnet }) });
+function shareSwitch(shared) {
+  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ shared }) });
 }
 async function postShare(key, send, done, cls) {
   const current = sharePosts.get(key);
@@ -3051,7 +3341,7 @@ function renderSharing(view) {
     body.replaceChildren();
     return;
   }
-  const sharing = view.sharing || { tailnet: null, colleagues: [], state: "off", last_request: null };
+  const sharing = view.sharing || { shared: false, tailnet: null, colleagues: [], state: "off", last_request: null, other_device_seen: false };
   const projects = view.recent_projects || [];
   for (const id of [...sharePicks]) if (!projects.includes(id)) sharePicks.delete(id);
   let kept = null;
@@ -3065,20 +3355,18 @@ function renderSharing(view) {
   const head = el("div", "acct-head");
   head.appendChild(el("h2", "sec-h", "Sharing"));
   head.appendChild(actionButton("share-close btn-quiet", "Close", closeSharing));
-  const row = el("div", "share-tailnet-row");
-  const tailnet = accountField("share-tailnet field-line", "Tailnet name", "<host>.<tailnet>.ts.net");
-  const typed = tailnetDraft === null ? sharing.tailnet || "" : tailnetDraft;
-  tailnet.value = typed;
-  tailnet.addEventListener("input", () => {
-    tailnetDraft = tailnet.value;
-    renderSharing(lastView);
-  });
-  row.appendChild(tailnet);
-  shareAct(row, "tailnet", "share-tailnet-save btn-quiet", "Save", () => postShare("tailnet", () => shareTailnet(typed.trim()), () => { if (tailnetDraft === typed) tailnetDraft = null; }, "share-tailnet-save"), typed.trim() === "");
-  if (sharing.tailnet !== null) {
-    shareAct(row, "tailnet", "share-off btn-danger", "Turn sharing off", () => postShare("tailnet", () => shareTailnet(null), () => {}, "share-off"), false);
+  const row = el("div", "share-switch");
+  if (sharing.shared === true) {
+    shareAct(row, "sharing", "share-off btn-danger", "Turn sharing off", () => postShare("sharing", () => shareSwitch(false), () => {}, "share-off"), false);
+  } else {
+    shareAct(row, "sharing", "share-on btn-quiet", "Turn sharing on", () => postShare("sharing", () => shareSwitch(true), () => {}, "share-on"), false);
   }
-  const parts = [head, el("p", "share-line", shareLine(sharing)), el("p", "share-last", shareLast(sharing.last_request)), row];
+  const parts = [head];
+  if (shareName(sharing) !== null) parts.push(el("p", "share-name", shareName(sharing)));
+  parts.push(el("p", "share-line", shareLine(sharing)));
+  const outside = shareOutside(sharing);
+  if (outside !== null) parts.push(el("p", "share-outside", outside));
+  parts.push(el("p", "share-last", shareLast(sharing.last_request)), row);
   if (sharing.colleagues.length === 0) parts.push(el("p", "share-none", "No colleague has access."));
   else {
     const list = el("ul", "share-people");
@@ -3331,6 +3619,37 @@ function itemId(item) {
 }
 function isQuestion(item) {
   return item.reason === "question";
+}
+function lookOf(item) {
+  return isQuestion(item) && item.look !== null && typeof item.look === "object" ? item.look : null;
+}
+function lookLine(node, item) {
+  const look = lookOf(item);
+  if (look !== null && typeof look.line === "string") node.appendChild(el("p", "look-line", look.line));
+}
+function isLookCard(item) {
+  return item.answered === true && lookOf(item) !== null;
+}
+function lookCard(item) {
+  const card = el("article", "card look-card");
+  card.appendChild(headLine(item));
+  card.appendChild(pathWords(el("h2", "q"), item.headline));
+  lookLine(card, item);
+  if (item.look.state === "failed") {
+    const again = stallPosts.get("look-retry\n" + itemId(item));
+    const sending = again !== undefined && again.phase === "sending";
+    const retry = actionButton("look-retry btn-primary", "Retry", () => stallPost({ sprint_id: itemId(item) }, "look-retry", "Could not retry: ", () => fetch("/api/look-retry", {
+      method: "POST", headers: stallHeaders(),
+      body: JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index }),
+    })));
+    if (sending) retry.setAttribute("disabled", "");
+    markBusy(retry, sending);
+    const act = el("div", "act");
+    act.appendChild(retry);
+    if (again !== undefined && again.phase === "failed") act.appendChild(el("span", "fail", again.failure + again.reason));
+    card.appendChild(act);
+  }
+  return card;
 }
 const pictureCache = new Map();
 function pictureSequence(pictures) {
@@ -3619,17 +3938,32 @@ function recommendedIndex(q) {
   if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
   return q.options.indexOf(q.recommended);
 }
+// The option that carries the Recommended badge: a consequential card names it in badge_index and leaves recommended null (#1265).
+function badgeIndex(q) {
+  const i = q.badge_index;
+  if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
+  return recommendedIndex(q);
+}
 function soleOption(item) {
   return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
+}
+// A card the manager marked consequential, and every look card, never starts its recommendation picked: an approval is the owner's own pick (#1260, #1265).
+function consequential(item) {
+  return item.consequential === true || lookOf(item) !== null;
 }
 function startPicks(item) {
   if (soleOption(item)) return [0];
   return item.questions.map((q) => {
     const chosen = q.options.indexOf(q.chosen);
     if (chosen >= 0) return chosen;
+    if (consequential(item)) return null;
     const recommended = recommendedIndex(q);
     return recommended >= 0 ? recommended : null;
   });
+}
+// The picks a card opened with on its recommendation and the owner has not touched since: an upgrade to the consequential form takes them back (#1265).
+function seededPicks(item) {
+  return item.questions.map((q) => !soleOption(item) && q.options.indexOf(q.chosen) < 0 && !consequential(item) && recommendedIndex(q) >= 0);
 }
 function answerState(item) {
   const id = itemId(item);
@@ -3638,10 +3972,14 @@ function answerState(item) {
     const picks = startPicks(item);
     const first = picks.indexOf(null);
     state = {
-      phase: "choosing", picks, q: first >= 0 ? first : 0, timer: null, reason: "", notice: "", pending: null,
+      phase: "choosing", picks, seeded: seededPicks(item), q: first >= 0 ? first : 0, timer: null, reason: "", notice: "", pending: null,
       project_id: item.project_id, key: item.key, id,
     };
     answers.set(id, state);
+  } else if (choosable(state) && consequential(item) && state.seeded.includes(true)) {
+    state.picks = state.picks.map((pick, i) => (state.seeded[i] ? null : pick));
+    state.seeded = state.seeded.map(() => false);
+    state.q = Math.max(state.picks.indexOf(null), 0);
   }
   return state;
 }
@@ -3700,6 +4038,7 @@ function redraw() {
 function choose(state, qi, oi) {
   if (!choosable(state)) return;
   state.picks[qi] = oi;
+  if (state.seeded) state.seeded[qi] = false;
   state.q = qi;
   state.phase = "choosing";
   state.reason = "";
@@ -3825,7 +4164,7 @@ const NO_REASON = "the console did not say why.";
 const WORDS_NEEDED_NOTICE = "Say what to change.";
 function trackerAnswer(state) {
   return state.pending !== undefined && state.pending !== null
-    && !state.pending.round && !state.pending.retry && !state.pending.plan;
+    && !state.pending.retry && !state.pending.plan;
 }
 function sendAgain(item, state) {
   if (state.phase !== "failed" || state.again !== true || !trackerAnswer(state)) return false;
@@ -4156,7 +4495,8 @@ function statusLine(act, state, item) {
     act.appendChild(el("span", "", words ? words : isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") {
-      act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+      const look = lookOf(item);
+      if (look === null || look.state !== "moved" || look.line !== state.reason) act.appendChild(el("span", "fail", "Could not send: " + state.reason));
       if (state.again === true && trackerAnswer(state)) {
         act.appendChild(actionButton("try-again answer-again btn-quiet", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
       }
@@ -4356,14 +4696,14 @@ function answerBox(item, state, lead) {
     if (soleOption(item)) return;
     const list = el("ul", "opts");
     q.options.forEach((option, oi) => {
-      const button = el("button", "opt btn-option");
+      const button = el("button", guestDoor ? "opt btn-option keyless" : "opt btn-option");
       button.type = "button";
       if (!live) button.setAttribute("disabled", "");
       markBusy(button, state.phase === "sending");
-      button.appendChild(el("kbd", "", String(oi + 1)));
+      if (!guestDoor) button.appendChild(el("kbd", "", String(oi + 1)));
       button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
       button.appendChild(pathWords(el("span", "ot"), option === q.chosen ? "chosen: " + option : option));
-      if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
+      if (oi === badgeIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
         choose(state, qi, isQuestion(item) && state.picks[qi] === oi ? null : oi);
@@ -4398,6 +4738,7 @@ function leadItem(item) {
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
   if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
+  lookLine(card, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) card.appendChild(gallery);
@@ -4439,6 +4780,7 @@ function itemLine(item) {
   }
   if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
+  lookLine(line, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) line.appendChild(gallery);
@@ -4526,9 +4868,10 @@ function seatHint(strip, host) {
 function renderInbox(view) {
   holdPictures(() => drawInbox(view));
 }
-function drawInbox(view) {
-  const fresh = view !== lastView;
-  lastView = view;
+// `guest` is null on the owner's door; on the guest's it is { fresh }, the guest's own cards only: renderGuest alone assigns lastView, to the whole frame.
+function drawInbox(view, guest = null) {
+  const fresh = guest === null ? view !== lastView : guest.fresh;
+  if (guest === null) lastView = view;
   const section = document.getElementById("inbox");
   const active = document.activeElement;
   const held = active && active.dataset && active.dataset.draft !== undefined
@@ -4539,28 +4882,31 @@ function drawInbox(view) {
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
-  const open = view.inbox.open;
+  const open = guest === null ? view.inbox.open : view.inbox.open.filter((item) => item.steer === true);
   const briefs = open.filter(isBrief);
   const stalls = open.filter(isStall);
   const starts = open.filter(isFailedStart);
   const progress = open.filter(isProgress);
   const signins = open.filter(isSignin);
-  const signinRuns = view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
+  const signinRuns = guest === null && view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
   for (const [profile, run] of Object.entries(signinRuns)) {
     if (run === null || typeof run !== "object" || run.state !== "running" || !Number.isInteger(run.attempt)) continue;
     if (profile === accountSignin || signins.some((item) => item.profile === profile)) continue;
+    // A profile a colleague added is signed in by him (#1361): his running attempt raises no card here.
+    if (colleagueProfiles(view).has(profile)) continue;
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isLookCard(item));
+  const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
-    const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
+    const shown = key.startsWith("look-retry\n") ? looks : key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
       : key.startsWith("start-retry\n") || key.startsWith("start-withdraw\n") ? starts : stalls;
-    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id || itemId(item) === id)) stallPosts.delete(key);
   }
   // While the accounts panel is open a listed profile keeps its sign-in request state as one with a card does.
-  const profiles = view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
+  const profiles = guest === null && view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
     ? view.capacity.profiles : [];
   const listed = new Set(profiles.map((p) => p.profile));
   for (const [profile, held] of [...signinLinks]) {
@@ -4583,7 +4929,7 @@ function drawInbox(view) {
       signinLinks.delete(profile);
     }
   }
-  for (const item of signins) {
+  for (const item of guest === null ? signins : []) {
     const run = item.run;
     if (run === null || typeof run !== "object" || run.state !== "running" || !Number.isInteger(run.attempt)) continue;
     const have = signinLinks.get(item.profile);
@@ -4641,9 +4987,17 @@ function drawInbox(view) {
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
   for (const [id, state] of answers) {
-    if (!present.has(id) && keptWords(state)) section.appendChild(keptWordsCard(id, state));
+    if (present.has(id) || !keptWords(state)) continue;
+    const kept = keptWordsCard(id, state);
+    if (guest !== null) kept.dataset.steer = "1";
+    section.appendChild(kept);
   }
-  for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
+  const adoptions = open.filter(isAdoption);
+  for (const item of adoptions) section.appendChild(adoptionCard(item));
+  for (const [key, state] of adoptionMerges) {
+    if (state.phase === "failed" && !adoptions.some((item) => item.key === state.plan && item.number === state.number && item.commit === state.commit)) section.appendChild(adoptionNotice(key, state));
+  }
+  for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
     const lead = leadItem(tracked[0]);
     cardOf.set(stateId(tracked[0]), lead);
@@ -4660,7 +5014,10 @@ function drawInbox(view) {
     section.appendChild(rest);
   }
   inboxCards = cardOf;
-  const answered = view.inbox.answered;
+  if (guest !== null) {
+    for (const host of cardOf.values()) (host.card !== undefined ? host.card : host).dataset.steer = "1";
+  }
+  const answered = guest === null ? view.inbox.answered : [];
   if (answered.length > 0) {
     const done = el("ul", "done");
     for (const item of answered) done.appendChild(answeredLine(item));
@@ -4673,7 +5030,7 @@ function drawInbox(view) {
   if (keyHint !== null) keyHint.remove();
   keyHint = null;
   hintHost = null;
-  const strip = keyStrip(current, open);
+  const strip = guest === null ? keyStrip(current, open) : null;
   if (strip !== null) {
     const owner = current !== null ? current.item : open.find((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; });
     const host = owner === undefined ? undefined : cardOf.get(stateId(owner));
@@ -4795,6 +5152,7 @@ function finishedLine(sprint) {
   const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
   summary.appendChild(el("span", "outcome", counted ? closing.counts_text : ownerWords(sprint.state_text)));
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
+  if (typeof sprint.started_by === "string") summary.appendChild(el("span", "started-by", "started by " + sprint.started_by));
   if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
   fold.appendChild(summary);
   const spendBox = spendLine("sprint", sprint.sprint_id);
@@ -4847,6 +5205,12 @@ function activationLine(view) {
   }
   return line;
 }
+function overlapLine(overlap) {
+  const item = el("li", "overlap");
+  pathWords(item, overlap.text);
+  return item;
+}
+
 function drawProjects(view) {
   const section = document.getElementById("projects");
   const heading = el("h2", "sec-h", "Work");
@@ -4968,10 +5332,25 @@ function drawProjects(view) {
   }
   if (running.length > 0) {
     const blocks = el("ul", "sprint-blocks");
+    const position = new Map(running.map(({ sprint }, i) => [sprint.sprint_id, i]));
+    const after = new Map();
+    for (const entry of view.entries) {
+      for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
+        for (const overlap of Array.isArray(project.overlaps) ? project.overlaps : []) {
+          if (!Array.isArray(overlap.sprints) || overlap.sprints.length !== 2 || typeof overlap.text !== "string") continue;
+          const [x, y] = overlap.sprints;
+          if (!position.has(x) || !position.has(y)) continue;
+          const later = position.get(x) > position.get(y) ? x : y;
+          if (!after.has(later)) after.set(later, []);
+          after.get(later).push(overlap);
+        }
+      }
+    }
     for (const { entry, sprint } of running) {
       const item = el("li", "sprint");
       fillSprint(item, entry, sprint);
       blocks.appendChild(item);
+      for (const overlap of after.get(sprint.sprint_id) || []) blocks.appendChild(overlapLine(overlap));
     }
     section.appendChild(blocks);
   }
@@ -5083,6 +5462,8 @@ function goalMatches() {
   return recentProjects.filter((id) => id.toLowerCase().includes(needle));
 }
 function chosenProject() {
+  // A choice that left the list is not replaced by the first match: the draft waits for a new choice.
+  if (draft.project !== null && !recentProjects.includes(draft.project)) return null;
   const matches = goalMatches();
   if (draft.project !== null && matches.includes(draft.project)) return draft.project;
   return matches.length > 0 ? matches[0] : null;
@@ -5255,6 +5636,7 @@ async function accountAddPost() {
         accountConfirmed = false;
         accountOutcome = null;
         accountLink = isHttps(answer.link) ? answer.link : null;
+        accountRoute = signinRoute(answer);
         accountName.value = "";
         accountState.phase = "closed";
       } else {
@@ -5315,11 +5697,14 @@ function beginAccountSignin() {
       // A continuation that ended meanwhile leaves the link to the profile's card.
       holdSigninLink(profile, answer, accountSignin === profile);
       if (accountSignin === profile && answer !== null && typeof answer === "object"
-          && answer.attempt === accountAttempt && isHttps(answer.link)) accountLink = answer.link;
+          && answer.attempt === accountAttempt && isHttps(answer.link)) {
+        accountLink = answer.link;
+        accountRoute = signinRoute(answer);
+      }
       redraw();
     }, 200);
   });
-  accountCont = { note: el("p", "account-add-note", "Added " + accountSignin + ". Its sign-in has started."), link: null, code, send, cancel, fetchLink };
+  accountCont = { note: el("p", "account-add-note", "Added " + accountSignin + ". Its sign-in has started."), link: null, route: null, code, send, cancel, fetchLink };
   accountState.phase = "closed";
   accountState.failure = "";
 }
@@ -5328,6 +5713,7 @@ function endAccountSignin() {
   accountAttempt = null;
   accountConfirmed = false;
   accountLink = null;
+  accountRoute = null;
   accountCont = null;
   accountState.codeSending = false;
   accountState.cancelling = false;
@@ -5366,7 +5752,10 @@ function renderAccountAdd(view) {
     const linked = accountLink !== null;
     want = linked ? "signin" : "signin-wait";
     reason = accountState.failure;
-    if (linked && accountCont.link === null) accountCont.link = signinLinkNode("account-add-link", { link: accountLink });
+    if (linked && accountCont.link === null) {
+      accountCont.link = signinLinkNode("account-add-link", { link: accountLink });
+      accountCont.route = signinRouteNote(accountRoute);
+    }
     accountCont.fetchLink.disabled = accountState.fetching;
     markBusy(accountCont.fetchLink, accountState.fetching);
     accountCont.send.disabled = accountCont.code.value.trim() === "" || accountState.codeSending;
@@ -5385,7 +5774,7 @@ function renderAccountAdd(view) {
   if (accountState.shown !== want) {
     accountState.shown = want;
     const parts = want === "signin"
-      ? [accountCont.note, accountCont.link, accountCont.code, accountCont.send, accountCont.cancel, accountReason]
+      ? [accountCont.note, accountCont.link, ...(accountCont.route === null ? [] : [accountCont.route]), accountCont.code, accountCont.send, accountCont.cancel, accountReason]
       : want === "signin-wait" ? [accountCont.note, accountCont.fetchLink, accountCont.cancel, accountReason]
       : want === "outcome" ? [accountOutcomeNote, accountOpen]
       : want === "naming" ? [accountName, accountSend, accountCancel, accountReason] : [accountOpen];
@@ -5801,10 +6190,10 @@ function tick() {
 }
 setTimeout(tick, TICK_MS);
 const token = document.getElementById("console-token").content;
-const GUEST_TOP = "The owner's console, shared with you to read";
+const GUEST_TOP = "The owner's console, shared with you";
 const STALE_LEAD = "The tracker could not be read for ";
 const GUEST_KEEPS = new Set(["pic-thumb", "sprint-check"]);
-const OWNER_PARTS = ["spend-link", "goal", "capacity", "accounts", "accounts-body", "account-add", "sharing-open",
+const OWNER_PARTS = ["spend-link", "capacity", "accounts", "accounts-body", "account-add", "sharing-open",
   "sharing", "sharing-body", "promoted", "digest", "unmanaged", "register"];
 const guestDoor = document.getElementById("console-door").content !== "owner";
 if (guestDoor) {
@@ -5815,6 +6204,10 @@ if (guestDoor) {
   const who = document.getElementById("top-who");
   who.textContent = GUEST_TOP;
   who.hidden = false;
+  // The goal bar stays, with no shortcut: the guest door has no keys (P8).
+  document.getElementById("goal").hidden = false;
+  for (const key of document.querySelectorAll("#goal kbd")) key.remove();
+  goalText.removeAttribute("aria-keyshortcuts");
 } else {
   for (const id of ["spend-link", "goal", "capacity", "sharing-open"]) document.getElementById(id).hidden = false;
 }
@@ -5827,20 +6220,22 @@ function ownerWords(text, whole) {
   return [lead.replace(/\bYour\b/g, "The owner's").replace(/\byour\b/g, "the owner's").replace(/\byou\b/g, "the owner"), ...rest].join(": ");
 }
 function renderGuestStatement(view) {
-  const n = view.statement.inbox_items;
+  const steer = view.inbox.open.filter((item) => item.steer === true).length;
+  const n = view.statement.inbox_items - steer;
   const sentence = view.statement.sentence;
   const stale = typeof sentence === "string" && sentence.startsWith(STALE_LEAD);
   const none = "Nothing " + (stale || view.statement.stale === true ? "known " : "") + "waits on the owner";
   const nodes = [el("h1", "", n === 0 ? none : n === 1 ? "1 thing waits on the owner" : n + " things wait on the owner")];
   if (stale) nodes.push(el("p", "sub", ownerWords(sentence)));
+  if (steer > 0) nodes.push(el("p", "sub", steer === 1 ? "1 thing waits on you" : steer + " things wait on you"));
   document.getElementById("statement").replaceChildren(...nodes);
 }
+// The open items the colleague cannot act on, one "Waiting on the owner" row each, after the cards drawInbox drew.
 function renderGuestInbox(view) {
-  const cards = new Map();
-  const nodes = [];
-  if (view.inbox.open.length > 0) {
+  const rest = view.inbox.open.filter((item) => item.steer !== true);
+  if (rest.length > 0) {
     const list = el("ul", "guest-items");
-    for (const item of view.inbox.open) {
+    for (const item of rest) {
       const row = el("li", "guest-item");
       const [word, id] = kindOf(item);
       const kind = el("span", "guest-kind");
@@ -5853,19 +6248,23 @@ function renderGuestInbox(view) {
         ? phrase("span", "guest-wait", "Waiting on the owner for ", timeEl("since", item.waiting_since, ""))
         : el("span", "guest-wait", "Waiting on the owner"));
       if (item.stale) row.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
-      cards.set(stateId(item), row);
+      inboxCards.set(stateId(item), row);
       list.appendChild(row);
     }
-    nodes.push(list);
+    document.getElementById("inbox").appendChild(list);
   }
-  inboxCards = cards;
-  document.getElementById("inbox").replaceChildren(...nodes);
+}
+function steered(node) {
+  for (let n = node; n; n = n.parentNode) {
+    if (n.dataset !== undefined && n.dataset.steer === "1") return true;
+  }
+  return false;
 }
 function sweepGuest() {
   for (const id of ["statement", "inbox", "projects"]) {
     for (const tag of ["button", "input", "textarea", "select"]) {
       for (const node of document.querySelectorAll("#" + id + " " + tag)) {
-        if (!GUEST_KEEPS.has(node.className.split(" ")[0])) node.remove();
+        if (!GUEST_KEEPS.has(node.className.split(" ")[0]) && !steered(node)) node.remove();
       }
     }
     for (const link of document.querySelectorAll("#" + id + " a")) {
@@ -5873,14 +6272,376 @@ function sweepGuest() {
     }
   }
 }
+function poolWindow(cls, left, name, reset) {
+  const parts = [left !== null && left !== undefined ? left + "% of the " + name + " left" : name + " unknown"];
+  if (typeof reset === "string") parts.push(", resets ", timeEl("weekday", reset, ""));
+  return phrase("span", cls, ...parts);
+}
+// The change buttons the last pool drawing made, so the one that held the focus can take it back.
+let poolButtons = [];
+function renderPool(view) {
+  poolButtons = [];
+  const box = document.getElementById("pool");
+  if (box === null) return;
+  if (view.pool === null || typeof view.pool !== "object" || !Array.isArray(view.pool.accounts)) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  const pool = settledPool(view.pool);
+  const line = el("p", "pool-line");
+  const tones = {fine: ["cap-fine", "tick-icon"], tight: ["cap-tight", "clock-icon"], out: ["cap-out", "stop-icon"]};
+  if (pool.state === "fine" || pool.state === "tight" || pool.state === "out") {
+    const [tone, mark] = tones[pool.state];
+    const word = el("span", "cap-state " + tone);
+    word.appendChild(icon(mark));
+    word.appendChild(el("span", "", pool.state));
+    line.appendChild(word);
+    if (pool.state === "fine") {
+      const room = pool.accounts.some((row) => row.in_use === true && (row.state === "ok" || row.state === "reset"));
+      line.appendChild(el("span", "", room ? "The pool has room." : "No account read so far has room."));
+    }
+    else if (pool.state === "tight") line.appendChild(el("span", "", "The pool is tight: one account has room."));
+    else if (typeof pool.resumes_at === "string") {
+      line.appendChild(phrase("span", "", "Every account is out until ", timeEl("weekday", pool.resumes_at, ""), "."));
+    } else line.appendChild(el("span", "", "Every account is out; when one comes back is unknown."));
+  } else {
+    line.appendChild(el("span", "", pool.accounts.length === 0 ? "No accounts in the pool."
+      : !pool.accounts.some((row) => row.in_use === true) ? "No account is in use."
+        : "No account in use has a reading yet."));
+  }
+  if (pool.no_reading) line.appendChild(el("span", "cap-none", pool.no_reading));
+  const nodes = [line];
+  if (pool.accounts.length) {
+    const list = el("ul", "pool-accounts");
+    for (const row of pool.accounts) {
+      const item = el("li", row.label === "yours" ? "pool-account pool-yours" : "pool-account");
+      item.appendChild(el("b", "", row.label));
+      if (row.in_use !== true) item.appendChild(el("span", "pool-status", "not in use"));
+      else if (row.state === "out") item.appendChild(outWords(row, "pool-status"));
+      else if (row.state === "reset") item.appendChild(el("span", "pool-status", "reset, not yet used"));
+      else if (row.state === "unknown") item.appendChild(el("span", "pool-status", "no reading yet"));
+      if (row.state !== "unknown") {
+        item.appendChild(poolWindow("pool-week", row.week_left, "week", row.week_reset));
+        item.appendChild(poolWindow("pool-session", row.five_hour_left, "session", row.five_hour_reset));
+      }
+      if (row.label === "yours" && Number.isInteger(row.number) && row.number > 0 && typeof row.ident === "string" && row.ident !== "") poolChangeControls(item, row);
+      list.appendChild(item);
+    }
+    nodes.push(list);
+  }
+  const active = document.activeElement;
+  const held = active !== null && active.dataset !== undefined && active.dataset.number !== undefined
+    ? { role: active.className.split(" ")[0], number: active.dataset.number } : null;
+  box.replaceChildren(...nodes);
+  box.hidden = false;
+  const again = held === null ? undefined : poolButtons.find((node) => node.className.split(" ")[0] === held.role && node.dataset.number === held.number);
+  if (again !== undefined) again.focus();
+}
+// The guest's own sign-out and removal, kept by account number across frames: {phase: "sending"|"failed", reason}, and the
+// Remove confirmations that are open, by account number with the token of the account that was asked about: a number is
+// recycled, so a frame that brings another account under it closes the confirmation, and "Remove it" can only send the
+// token the confirmation was opened on.
+const poolChange = new Map();
+const poolRemoveOpen = new Map();
+// One write of a pool row: its failure line is kept under the row's number until the next press or the confirmation's Cancel.
+async function poolPost(row, failure, send) {
+  const current = poolChange.get(row.number);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  poolChange.set(row.number, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await send();
+    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (poolChange.get(row.number) !== state) return;
+  if (reason === null) {
+    poolChange.delete(row.number);
+    poolRemoveOpen.delete(row.number);
+  } else {
+    state.phase = "failed";
+    state.reason = failure + reason;
+  }
+  redraw();
+}
+function poolSignOut(row) {
+  return poolPost(row, "Could not sign out: ", () => fetch("/api/guest-account-signout", {
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({account: row.number, ident: row.ident}),
+  }));
+}
+function poolRemove(row) {
+  return poolPost(row, "Could not remove: ", () => fetch("/api/guest-account-remove", {
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({account: row.number, ident: row.ident}),
+  }));
+}
+const POOL_REMOVE_NOTE = "Remove your account from the pool? It is signed out first. Each manager on it moves to another account, or waits for one with room; any other session keeps running.";
+// On his own `yours` row only: Sign out posts at once, Remove asks first.
+function poolChangeControls(item, row) {
+  if (poolRemoveOpen.has(row.number) && poolRemoveOpen.get(row.number) !== row.ident) {
+    poolRemoveOpen.delete(row.number);
+  }
+  const state = poolChange.get(row.number);
+  const sending = state !== undefined && state.phase === "sending";
+  const mark = (button) => {
+    button.dataset.number = String(row.number);
+    // aria-disabled, not disabled: the focus must stay restorable.
+    if (sending) button.setAttribute("aria-disabled", "true");
+    markBusy(button, sending);
+    poolButtons.push(button);
+    return button;
+  };
+  item.appendChild(mark(actionButton("pool-signout btn-quiet", "Sign out", () => poolSignOut(row))));
+  item.appendChild(mark(actionButton("pool-remove btn-danger", "Remove", () => {
+    poolRemoveOpen.set(row.number, row.ident);
+    redraw();
+  })));
+  if (poolRemoveOpen.has(row.number)) {
+    const box = el("div", "pool-remove-box");
+    box.appendChild(el("p", "pool-remove-note", POOL_REMOVE_NOTE));
+    box.appendChild(mark(actionButton("pool-remove-send btn-danger", "Remove it", () => poolRemove(row))));
+    box.appendChild(mark(actionButton("pool-remove-cancel btn-quiet", "Cancel", () => {
+      const now = poolChange.get(row.number);
+      if (now !== undefined && now.phase === "sending") return;
+      poolRemoveOpen.delete(row.number);
+      poolChange.delete(row.number);
+      redraw();
+    })));
+    item.appendChild(box);
+  }
+  if (state !== undefined && state.phase === "failed") item.appendChild(el("span", "fail", state.reason));
+}
+const GUEST_CONSENT = "Your sign-in is kept on the owner's host under the owner's user, so any process the owner runs can use it.";
+const GUEST_LOOPBACK = "This sign-in can only finish on the owner's machine, so it cannot finish from here. Cancel it and tell the owner.";
+const GUEST_NO_LINK = "No sign-in link came yet. Press Sign in again to fetch it, or Cancel.";
+// The guest's own-account form: whether it is open, the consent tick, a request in flight, the answer held ({attempt, link, route}),
+// the code typed, the last refusal, the attempt whose ending the form still explains, and the held attempt a frame has
+// shown running (`confirmed`: once shown, its disappearing from the frames ends it).
+const guestAccount = { open: false, ticked: false, posting: false, held: null, draft: "", failure: null, watched: null, confirmed: null };
+const GUEST_FOCUS = new Set(["pool-add", "guest-tick", "guest-signin", "signin-code", "guest-code", "guest-cancel"]);
+// The answer of the add: attempt, the link only when https and not loopback, the route only when known; null when it is not that shape.
+function guestAnswer(text) {
+  let answer = null;
+  try {
+    answer = JSON.parse(text);
+  } catch (error) {
+    return null;
+  }
+  if (answer === null || typeof answer !== "object" || !Number.isInteger(answer.attempt)) return null;
+  const route = ["manual", "loopback", "unknown"].includes(answer.route) ? answer.route : null;
+  return { attempt: answer.attempt, link: route !== "loopback" && isHttps(answer.link) ? answer.link : null, route };
+}
+// One write of the form: its answer text on success, null after a refusal or a lost answer (the reason held for the redraw).
+async function guestAccountPost(failure, send) {
+  guestAccount.failure = null;
+  guestAccount.posting = true;
+  redraw();
+  let text = null;
+  try {
+    const response = await send();
+    const answer = await response.text();
+    if (response.ok) text = answer;
+    else guestAccount.failure = failure + (answer.trim() || "HTTP " + response.status);
+  } catch (error) {
+    console.error(error);
+    guestAccount.failure = failure + "the console did not answer";
+  }
+  guestAccount.posting = false;
+  return text;
+}
+async function guestSignIn() {
+  const g = guestAccount;
+  if (!g.ticked || g.posting) return;
+  // With an attempt held (no link yet) or shown running (a page reloaded during a sign-in holds none) the press only
+  // joins that attempt; the console creates nothing then, and refuses an attempt that is over.
+  const shown = g.held === null && lastView !== null && lastView.own_signin !== null && typeof lastView.own_signin === "object"
+    && lastView.own_signin.state === "running" && Number.isInteger(lastView.own_signin.attempt) ? lastView.own_signin.attempt : null;
+  const attempt = g.held !== null ? g.held.attempt : shown;
+  const body = attempt === null ? { consent: true } : { consent: true, attempt };
+  const text = await guestAccountPost("Could not start the sign-in: ", () => fetch("/api/guest-account", {
+    method: "POST", headers: stallHeaders(), body: JSON.stringify(body),
+  }));
+  if (text !== null) {
+    const held = guestAnswer(text);
+    if (held === null) g.failure = "Could not start the sign-in: the console's answer was not understood";
+    else {
+      if (g.held === null || g.held.attempt !== held.attempt) {
+        g.draft = "";
+        g.confirmed = null;
+      }
+      g.held = held;
+      g.watched = null;
+    }
+  }
+  redraw();
+}
+async function guestSendCode() {
+  const g = guestAccount;
+  const code = g.draft.trim();
+  if (g.posting || code === "" || g.held === null) return;
+  const attempt = g.held.attempt;
+  await guestAccountPost("Could not send the code: ", () => fetch("/api/guest-signin-code", {
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({ attempt, code }),
+  }));
+  redraw();
+}
+async function guestCancel() {
+  const g = guestAccount;
+  if (g.posting || g.held === null) return;
+  const attempt = g.held.attempt;
+  const text = await guestAccountPost("Could not cancel: ", () => fetch("/api/guest-signin-cancel", {
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({ attempt }),
+  }));
+  if (text !== null && g.held !== null && g.held.attempt === attempt) {
+    g.watched = g.held.attempt;
+    g.held = null;
+    g.draft = "";
+    g.ticked = false;
+  }
+  redraw();
+}
+// Rebuilt on every frame from guestAccount; the control that held focus holds it again, the code field with its caret.
+function renderOwnAccount(view) {
+  const box = document.getElementById("own-account");
+  if (box === null) return;
+  const g = guestAccount;
+  const run = view.own_signin !== null && typeof view.own_signin === "object" ? view.own_signin : null;
+  if (g.held !== null && signinEnded(run, g.held.attempt)) {
+    if (run.attempt === g.held.attempt) {
+      if (run.state === "signed_in") {
+        g.open = false;
+        g.ticked = false;
+        g.watched = null;
+      } else g.watched = g.held.attempt;
+    }
+    g.held = null;
+    g.draft = "";
+    g.ticked = false;
+  }
+  if (g.held !== null) {
+    if (run !== null && run.attempt === g.held.attempt && run.state === "running") g.confirmed = g.held.attempt;
+    else if (g.confirmed === g.held.attempt && (run === null || run.attempt < g.held.attempt)) {
+      // A frame showed this attempt running and the newest now shows an older one or none: it is over, so its link and id go.
+      g.held = null;
+      g.draft = "";
+      g.ticked = false;
+      g.confirmed = null;
+    }
+  }
+  const active = document.activeElement;
+  const role = active !== null && typeof active.className === "string" ? active.className.split(" ")[0] : "";
+  const refocus = GUEST_FOCUS.has(role) ? { role, start: active.selectionStart, end: active.selectionEnd } : null;
+  const made = new Map();
+  const make = (key, node) => {
+    made.set(key, node);
+    return node;
+  };
+  const toggle = make("pool-add", actionButton("pool-add btn-quiet", "Add your account", () => {
+    const open = !(g.open && g.held === null && !g.posting);
+    if (open !== g.open) g.ticked = false;
+    g.open = open;
+    redraw();
+  }));
+  toggle.setAttribute("aria-expanded", g.open ? "true" : "false");
+  const nodes = [toggle];
+  if (g.open) {
+    const group = el("div", "guest-account");
+    group.setAttribute("role", "group");
+    group.setAttribute("aria-label", "Add your account");
+    group.appendChild(el("p", "guest-consent", GUEST_CONSENT));
+    const agree = el("label", "guest-agree");
+    const tick = make("guest-tick", el("input", "guest-tick"));
+    tick.type = "checkbox";
+    tick.checked = g.ticked;
+    agree.appendChild(tick);
+    agree.appendChild(el("span", "", "I agree"));
+    group.appendChild(agree);
+    const loopback = g.held !== null && g.held.route === "loopback";
+    const linked = g.held !== null && g.held.link !== null;
+    if (g.held === null || (!linked && !loopback)) {
+      const signin = make("guest-signin", actionButton("guest-signin btn-primary", "Sign in", guestSignIn));
+      const lock = () => {
+        if (!g.ticked || g.posting) signin.setAttribute("disabled", "");
+        else signin.removeAttribute("disabled");
+      };
+      lock();
+      markBusy(signin, g.posting);
+      tick.addEventListener("change", () => {
+        g.ticked = tick.checked === true;
+        lock();
+      });
+      group.appendChild(signin);
+    } else {
+      tick.addEventListener("change", () => {
+        g.ticked = tick.checked === true;
+      });
+    }
+    if (g.held === null) {
+      if (run !== null && SIGNIN_NOTES.has(run.state) && (run.state === "running" || run.attempt === g.watched)) {
+        group.appendChild(el("p", "signin-run", SIGNIN_NOTES.get(run.state)));
+      }
+    } else if (loopback) {
+      group.appendChild(el("p", "guest-loopback", GUEST_LOOPBACK));
+    } else if (!linked) {
+      group.appendChild(el("p", "guest-nolink", GUEST_NO_LINK));
+    } else {
+      group.appendChild(signinLinkNode("signin-link", g.held));
+      const routeNote = signinRouteNote(g.held);
+      if (routeNote !== null) group.appendChild(routeNote);
+      const input = make("signin-code", el("input", "signin-code field-code"));
+      input.type = "text";
+      input.autocomplete = "off";
+      input.setAttribute("placeholder", "Code from the sign-in page");
+      input.setAttribute("aria-label", "Sign-in code");
+      input.value = g.draft;
+      const send = make("guest-code", actionButton("guest-code btn-quiet", "Send code", guestSendCode));
+      const lock = () => {
+        if (g.draft.trim() === "" || g.posting) send.setAttribute("disabled", "");
+        else send.removeAttribute("disabled");
+      };
+      input.addEventListener("input", () => {
+        g.draft = input.value;
+        lock();
+      });
+      lock();
+      markBusy(send, g.posting);
+      group.appendChild(input);
+      group.appendChild(send);
+    }
+    if (g.held !== null) {
+      const cancel = make("guest-cancel", actionButton("guest-cancel btn-quiet", "Cancel", guestCancel));
+      if (g.posting) cancel.setAttribute("disabled", "");
+      group.appendChild(cancel);
+    }
+    if (g.failure !== null) group.appendChild(el("p", "signin-failed", g.failure));
+    nodes.push(group);
+  }
+  box.replaceChildren(...nodes);
+  box.hidden = false;
+  const again = refocus === null ? undefined : made.get(refocus.role);
+  if (again !== undefined) {
+    again.focus({ preventScroll: true });
+    if (refocus.role === "signin-code" && typeof refocus.start === "number") again.setSelectionRange(refocus.start, refocus.end);
+  }
+}
 function renderGuest(view) {
   holdPictures(() => {
     const wasOpen = new Set();
     for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
+    const fresh = view !== lastView;
     lastView = view;
+    recentProjects = view.recent_projects || [];
     renderGuestStatement(view);
+    renderGoal();
+    drawInbox(view, { fresh });
     renderGuestInbox(view);
     renderProjects(view);
+    renderPool(view);
+    renderOwnAccount(view);
     for (const fold of document.querySelectorAll("details")) {
       if (wasOpen.has(fold.dataset.key)) fold.open = true;
     }

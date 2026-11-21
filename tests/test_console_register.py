@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import stat
@@ -14,10 +15,12 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import approve, contract_draft, plan_questions, register
 from agent_tools.console.event_log import Event
 from agent_tools.console.register import Adopter, RunFailed
+from agent_tools.system import siblings
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 
@@ -33,12 +36,17 @@ def git_init(path: Path) -> Path:
 
 class ParseTest(unittest.TestCase):
     def test_a_path_body_is_parsed(self):
-        self.assertEqual(register.parse_register_request(b'{"path": "/srv/x"}'), "/srv/x")
-        self.assertEqual(register.parse_register_request(b'{"path": ""}'), "")
+        self.assertEqual(register.parse_register_request(b'{"path": "/srv/x"}'), ("/srv/x", False))
+        self.assertEqual(register.parse_register_request(b'{"path": ""}'), ("", False))
+        self.assertEqual(
+            register.parse_register_request(b'{"path": "/srv/x", "unless_open": true}'),
+            ("/srv/x", True))
 
     def test_other_bodies_raise(self):
         for body in (b"[]", b"{}", b'{"path": 1}', b'{"path": "/a", "x": 1}',
                      b'{"path": "/a\\u0000"}', b'{"path": "/a\\n"}', b'{"path": "/a\\u007f"}',
+                     b'{"path": "/a", "unless_open": false}', b'{"path": "/a", "unless_open": 1}',
+                     b'{"path": "/a", "unless_open": "true"}', b'{"unless_open": true}',
                      b"\xff"):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 register.parse_register_request(body)
@@ -634,6 +642,36 @@ class CancelFoldTest(unittest.TestCase):
         self.assertIsNone(register.latest([self.cancel_event(2)], state))
         self.assertIsNotNone(state)
 
+    def test_a_restoring_cancel_folds_back_to_the_registration_before(self):
+        a = Event(1, "t1", register.ENDED, None,
+                  register.dismissed(register.failed("/x/a", "failed")))
+        ended = self.ended_event(2)
+        row = register.cancelled_row("/x/r", "P", restore=True)
+        restoring = Event(3, "t3", row[0], None, row[2])
+        self.assertEqual(row[2], {"by": "owner", "root": "/x/r", "plan_id": "P", "restore": True})
+        found = register.fold([a, ended, restoring])
+        self.assertEqual(found.latest["root"], "/x/a")
+        self.assertEqual(found.latest["at"], "t1")
+        self.assertEqual(found.before, ())
+        self.assertIsNone(register.fold([a, ended, self.cancel_event(3)]).latest)
+
+    def test_a_restoring_cancel_never_returns_an_older_entry_of_a_recurring_root(self):
+        a1 = register.dismissed(register.failed("/x/a", "failed"))
+        b = register.failed("/x/b", "failed")
+        a2 = register.failed("/x/a", "failed")
+
+        def restoring(seq, root):
+            row = register.cancelled_row(root, None, restore=True)
+            return Event(seq, f"t{seq}", row[0], None, row[2])
+
+        events = [Event(1, "t1", register.ENDED, None, a1), Event(2, "t2", register.ENDED, None, b),
+                  Event(3, "t3", register.ENDED, None, a2), restoring(4, "/x/a"),
+                  restoring(5, "/x/b")]
+        self.assertEqual(register.fold(events[:4]).latest["root"], "/x/b")
+        found = register.fold(events)
+        self.assertIsNone(found.latest)
+        self.assertEqual(found.before, ())
+
     def test_cancellable_before_apply_only(self):
         planned = {"result": "planned"}
         self.assertFalse(register.cancellable(None, None))
@@ -646,8 +684,11 @@ class CancelFoldTest(unittest.TestCase):
                 self.assertFalse(register.cancellable(planned, {"step": step}))
 
     def test_parse_cancel_request(self):
-        self.assertEqual(register.parse_cancel_request(b'{"root": "/x/r"}'), "/x/r")
-        for body in (b'{"root": "/x/r", "choice": "register"}', b'{}', b'{"root": ""}',
+        self.assertEqual(register.parse_cancel_request(b'{"root": "/x/r"}'), ("/x/r", False))
+        self.assertEqual(register.parse_cancel_request(b'{"root": "/x/r", "restore": true}'),
+                         ("/x/r", True))
+        for body in (b'{"root": "/x/r", "restore": false}', b'{"root": "/x/r", "restore": 1}',
+                     b'{"root": "/x/r", "choice": "register"}', b'{}', b'{"root": ""}',
                      b'{"root": 3}', b'{"root": "/x\nr"}', b'{"root": "/x\u007fr"}',
                      b'not json', b'\xff', b'[]'):
             with self.subTest(body=body), self.assertRaises(ValueError):
@@ -658,6 +699,163 @@ class CancelFoldTest(unittest.TestCase):
             register.CANCEL_DISCARD_FAILED,
             "The copy that the failed attempt left on this computer could not be removed, so the "
             "registration was not cancelled. Choose Cancel registration to try again.")
+
+
+class OpenShownTest(unittest.TestCase):
+    def test_only_none_and_a_dismissed_entry_are_not_open(self):
+        self.assertEqual(register.OPEN_SHOWN, "another registration is open on the page")
+        self.assertIs(register.open_shown(None), False)
+        self.assertIs(register.open_shown(
+            {"root": "/x/r", "status": "done", "note": register.LATER_NOTE}), False)
+        for entry in ({"root": "/x/r", "status": "done", "note": None},
+                      {"root": "/x/r", "status": "running", "note": None},
+                      {"root": "/x/r", "status": "done", "note": "The plan is a draft."},
+                      "not a dict"):
+            with self.subTest(entry=entry):
+                self.assertIs(register.open_shown(entry), True)
+
+
+class UnregisteredFoldTest(unittest.TestCase):
+    """A registration whose project is unregistered gives way to the one shown before it (#1334)."""
+
+    y = register.dismissed(register.failed("/x/y", "failed"))
+    r_wait = {**register.failed("/x/r", "failed"), "project_id": "c/r", "result": "not_registered",
+              "outcome": "no_change", "note": register.CONFIRM_NOTE}
+    r_done = {**r_wait, "result": "registered", "note": None}
+
+    @staticmethod
+    def ended(seq, row):
+        return Event(seq, f"t{seq}", register.ENDED, None, row)
+
+    @staticmethod
+    def reg(seq, project, root):
+        return Event(seq, f"t{seq}", "project.registered", project, {"root": root})
+
+    @staticmethod
+    def gone(seq, payload, project="c/r"):
+        return Event(seq, f"t{seq}", "project.unregistered", project, payload)
+
+    def a_events(self):
+        return [self.ended(1, self.y), self.ended(2, self.r_wait), self.reg(3, "c/r", "/x/r"),
+                self.ended(4, self.r_done), self.gone(5, {"root": "/x/r"})]
+
+    def test_an_unregistered_root_gives_way_to_the_registration_shown_before_it(self):
+        events = self.a_events()
+        folded = register.fold(events)
+        self.assertEqual(folded.latest["root"], "/x/y")
+        self.assertEqual(folded.latest["at"], "t1")
+        self.assertEqual(folded.latest["note"], register.LATER_NOTE)
+        self.assertEqual(folded.before, ())
+        self.assertEqual(dict(folded.roots), {})
+        self.assertEqual(register.latest(events)["at"], "t1")
+        run = register.fold(events[:4])
+        self.assertEqual(run.latest["at"], "t4")
+        self.assertEqual([e["root"] for e in run.before], ["/x/y"])
+
+    def test_with_nothing_before_it_the_registration_folds_to_none(self):
+        folded = register.fold([self.ended(1, self.r_wait), self.ended(2, self.r_done),
+                                self.gone(3, {"root": "/x/r"})])
+        self.assertIsNone(folded.latest)
+        self.assertEqual(folded.before, ())
+
+    def test_a_rootless_row_takes_its_root_from_the_registered_row(self):
+        folded = register.fold(self.a_events()[:4] + [self.gone(5, {})])
+        self.assertEqual(folded.latest["root"], "/x/y")
+
+    def test_a_rootless_row_of_an_unknown_or_other_root_changes_nothing(self):
+        card2 = {**self.r_wait, "root": "/x/r2"}
+        cases = {
+            "other root": ([self.ended(1, self.y), self.reg(2, "c/r", "/x/r1"),
+                            self.ended(3, card2), self.gone(4, {})], "t3"),
+            "unknown": ([self.ended(1, self.y), self.ended(2, card2), self.gone(3, {})], "t2"),
+        }
+        for name, (events, at) in cases.items():
+            with self.subTest(name=name):
+                folded = register.fold(events)
+                self.assertEqual(folded.latest["root"], "/x/r2")
+                self.assertEqual(folded.latest["at"], at)
+
+    def test_an_unregistered_row_of_another_registration_changes_nothing(self):
+        for other in (self.gone(4, {"root": "/x/other"}, "c/other"), self.gone(4, {}, "c/other"),
+                      self.gone(4, {"root": "/x/other"}, "c/r")):
+            with self.subTest(other=other):
+                folded = register.fold([self.ended(1, self.y), self.ended(2, self.r_wait),
+                                        self.ended(3, self.r_done), other])
+                self.assertEqual(folded.latest["root"], "/x/r")
+                self.assertEqual(folded.latest["at"], "t3")
+
+    def test_a_root_another_project_still_holds_keeps_its_registration(self):
+        events = self.a_events()[:3] + [self.reg(4, "c/r2", "/x/r"), self.ended(5, self.r_done),
+                                        self.gone(6, {"root": "/x/r"}),
+                                        self.gone(7, {"root": "/x/r"}, "c/r2")]
+        held = register.fold(events[:6])
+        self.assertEqual((held.latest["root"], held.latest["at"]), ("/x/r", "t5"))
+        self.assertEqual([e["root"] for e in held.before], ["/x/y"])
+        self.assertEqual(dict(held.roots), {"c/r2": "/x/r"})
+        left = register.fold(events)
+        self.assertEqual((left.latest["root"], left.latest["at"]), ("/x/y", "t1"))
+        self.assertEqual(dict(left.roots), {})
+
+    def test_a_removed_root_never_returns_from_the_chain(self):
+        a1 = register.dismissed(register.failed("/x/a", "failed"))
+        b = register.failed("/x/b", "failed")
+        a2 = register.failed("/x/a", "failed")
+        events = [self.ended(1, a1), self.ended(2, b), self.ended(3, a2),
+                  self.gone(4, {"root": "/x/b"}, "c/b"), self.gone(5, {"root": "/x/a"}, "c/a")]
+        three = register.fold(events[:3])
+        final = register.fold(events)
+        self.assertEqual(three.latest["at"], "t3")
+        self.assertEqual([(e["root"], e["at"]) for e in three.before], [("/x/b", "t2")])
+        self.assertIsNone(final.latest)
+        self.assertEqual(final.before, ())
+
+    def with_check(self):
+        a = register.dismissed(register.failed("/x/a", "failed"))
+        b_done = {**register.failed("/x/b", "failed"), "project_id": "o/b", "result": "registered",
+                  "note": None}
+        c_wait = {**self.r_wait, "root": "/x/c", "project_id": "c/c"}
+        c_done = {**c_wait, "result": "registered", "note": None}
+        owner = [("ended", a), ("reg", "o/b", "/x/b"), ("ended", b_done)]
+        check = [("ended", c_wait), ("reg", "c/c", "/x/c"), ("ended", c_done),
+                 ("gone", {"root": "/x/c"}, "c/c")]
+        tail = [("gone", {"root": "/x/b"}, "o/b")]
+
+        def build(spec):
+            events = []
+            for seq, (kind, *args) in enumerate(spec, 1):
+                events.append({"ended": self.ended, "reg": self.reg, "gone": self.gone}[kind](
+                    seq, *args))
+            return events
+
+        return build(owner + tail), build(owner + check + tail)
+
+    def test_a_check_in_between_leaves_a_later_removal_unchanged(self):
+        without, with_check = self.with_check()
+        for events in (without, with_check):
+            folded = register.fold(events)
+            self.assertEqual(folded.latest["root"], "/x/a")
+            self.assertEqual(folded.latest["at"], "t1")
+
+    def test_an_owner_cancel_clears_the_chain(self):
+        f = register.failed("/x/f", "failed")
+        row = register.cancelled_row("/x/f", None)
+        cancel = Event(3, "t3", row[0], None, row[2])
+        events = [self.ended(1, self.y), self.ended(2, f), cancel, self.ended(4, self.r_done),
+                  self.gone(5, {"root": "/x/r"})]
+        cleared = register.fold(events[:3])
+        self.assertIsNone(cleared.latest)
+        self.assertEqual(cleared.before, ())
+        self.assertIsNone(register.fold(events).latest)
+
+    def test_an_incremental_fold_equals_the_whole_fold(self):
+        _, with_check = self.with_check()
+        whole = register.fold(with_check)
+        for i in range(len(with_check) + 1):
+            with self.subTest(split=i):
+                first = register.fold(with_check[:i])
+                kept = copy.deepcopy(first)
+                self.assertEqual(register.fold(with_check[i:], first), whole)
+                self.assertEqual(first, kept)
 
 
 class RowTest(unittest.TestCase):
@@ -1111,10 +1309,40 @@ class AdopterTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
 
 
+FORBIDDEN = ("systemd-run", "systemctl", "/proc")
+
+
 class PlatformTest(unittest.TestCase):
-    def test_adopter_for(self):
-        self.assertIsInstance(register.adopter_for("linux"), Adopter)
-        self.assertIsNone(register.adopter_for("darwin"))
+    def test_adopter_for_each_platform(self):
+        for platform in ("linux", "darwin", "win32"):
+            with self.subTest(platform=platform):
+                found = register.adopter_for(platform)
+                if platform == "win32":
+                    self.assertIsNone(found)
+                else:
+                    self.assertIsInstance(found, Adopter)
+
+    def test_a_darwin_adopter_runs_only_its_sibling_and_no_linux_tool(self):
+        records = []
+
+        def run(argv, **kwargs):
+            records.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, b'{"plan": {}}', None)
+
+        with mock.patch.object(register.manager, "run_in_own_group", run):
+            adopter = register.adopter_for("darwin")
+            plan_id = "sha256:" + "a" * 64
+            adopter.plan("/r")
+            adopter.register("/r", integration_branch="main", plan_id=plan_id)
+            adopter.apply(plan_id, acknowledge_deletions=True, discard_retained=True)
+            adopter.discard(plan_id)
+        sibling = siblings.sibling_argv("project_contract.adopt_project")
+        self.assertEqual(len(records), 4)
+        for argv, kwargs in records:
+            with self.subTest(argv=argv):
+                self.assertEqual(argv[:len(sibling)], sibling)
+                self.assertFalse(any(word in element for word in FORBIDDEN for element in argv))
+                self.assertIs(kwargs["start_new_session"], True)
 
 
 if __name__ == "__main__":

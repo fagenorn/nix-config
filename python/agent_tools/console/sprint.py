@@ -71,18 +71,35 @@ round is
                     "options": ["<one line, at most 80 characters>", ...],
                     "recommended": "<exact text of one option>",
                     "needs_words": ["<exact text of an option>", ...],
+                    "owner_only": true,
+                    "consequential": true,
                     "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
                                   "pair": "before" | "after"}, ...],
+                    "look": {"issue": <n>, "pr": <n>, "head": "<40-hex>", "approve": "<exact text of one option>"},
                     "replaces": {"round": <id>, "index": <n>}}, ...],
      "blocker": true | false}                   (blocker optional, default false)
+
+`look` is optional and marks the question as the owner's look at a pull request before merge: the console
+checks it and records the owner's approval itself when that option is picked with no words typed beside it
+(see the manager contract). A question with a `look` must carry a picture marked `"pair": "before"` and one marked
+`"pair": "after"`, whatever its words say.
 
 `needs_words` is optional and holds the exact text of each option that needs the owner's own words:
 the page refuses that option until the owner writes what to change, the console checks it
 (`NEEDS_WORDS_SHAPE`) and the command sends it as given.
 
+`owner_only` is optional and, when given, must be `true`: it marks a question only the console's owner
+answers, never a colleague who started the sprint (`OWNER_ONLY_SHAPE`); the command sends it as given. The
+manager contract requires it on a question whose answer is itself a go-ahead (a release, a production step,
+spend, a permission escalation), never on a design choice.
+
 `replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
 in the order the round was sent), and the console takes that question back in the write that
 accepts the new one. The command sends it as given and validates no more than it did: the console decides.
+
+`consequential` is optional and, when given, must be `true` (`CONSEQUENTIAL_SHAPE`): the owner's card opens with no
+option picked and nothing sends until the owner picks or types; without it a card that is not a look card opens
+with the recommended option picked. A look card is consequential without it. The command sends it as given.
 
 `pictures` is optional, at most 8 to a question, and `pair` is optional; a question whose ask or context
 names screenshots, a `.png` file or a screenshots folder must carry one, else the console refuses the
@@ -122,7 +139,8 @@ object is exit 2 with no request sent; a 200 answer without an integer `notice` 
 
 `sprint notices` reads the secret the same way and sends `POST /api/notices` with `{"sprint_id",
 "secret"}`, no `Origin`. It prints the console's answer as returned, one JSON line `{"notices":
-[...]}` of the open notices of the sprint's project, oldest first, and exit 0.
+[...], "overlaps": [...]}`: the open notices of the sprint's project, oldest first, and the console's
+reading of the claims that overlap, and exit 0.
 
 `sprint withdraw-notice` reads the secret the same way and sends `POST /api/withdraw-notice` with
 `{"sprint_id", "secret", "notice"}`, no `Origin`, for the notice `--notice` (an integer of at least
@@ -141,11 +159,13 @@ member of the closing report: the console decides, in one place.
 
 `sprint inbox` reads the secret the same way and sends `POST /api/inbox` with
 `{"sprint_id", "secret"}`, no `Origin`. It prints the console's answer as one line of JSON,
-`{"messages": [{"id", "kind", "version", "text", "at"}, ...]}`: the owner's messages the manager has
-not read, in id order, each once, and exit 0. An answer to one of the manager's questions (kind
+`{"messages": [{"id", "kind", "version", "text", "at"}, ...]}`: the unread messages of the sprint, in id
+order, each once, and exit 0. An entry from a listed colleague who started the sprint also carries the
+optional `"by"` login; a message without `by` is the owner's, and one with `by` is never the owner's
+authorization. An answer to one of the manager's questions (kind
 `answer`) also carries `"question"` (the question's text), `"round"` (the round id) and `"chosen"`
 (the option's text, or null for the owner's own words) and `"words"` (the owner's words, or null for
-an option alone). An inbox with nothing unread is
+an option alone). A notice from the console that a look card is stale (kind `look-moved`, #1260) carries its text only. An inbox with nothing unread is
 `{"messages": []}`. Before the inbox request the command sends `POST /api/notices` with the same body
 and, after the JSON line, prints `sprints.notice_block` of that answer: the open notices of the
 project's other sprints, the head line and then one line each, and nothing when there are none, so
@@ -322,7 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
                        ("notices", "print the project's open notices"),
                        ("withdraw-notice", "take back one of the sprint's notices"),
                        ("close", "send the sprint's closing report"),
-                       ("inbox", "print the owner's unread messages to the sprint"),
+                       ("inbox", "print the unread messages to the sprint, the owner's and a colleague's"),
                        ("recap", "print what a manager needs to pick the sprint up"),
                        ("reply", "answer one of the owner's messages"),
                        ("picture", "send one PNG picture to the console"),

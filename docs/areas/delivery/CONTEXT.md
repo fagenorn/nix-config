@@ -10,7 +10,7 @@ Delivery turns one tracker issue into a merged change through the agent skills, 
 ## Language
 
 **Awaiting look**:
-The stage a delivery of a marked issue stops at after verify, with its branch up to date with the integration branch, pushed and its pull request open, holding no land lock and merging nothing; the owner's approve or changes answer resumes it (issue 1139).
+The stage a delivery of a marked issue stops at after verify, with its branch up to date with the integration branch, pushed, its pull request open and every required check at that head green (a red one fixed first, within the delivery's one red-check fix; issue 1373), holding no land lock and merging nothing; the owner's approve or changes answer resumes it (issue 1139).
 _Avoid_: hold (a hold is the post-merge verification hold)
 
 **Code map**:
@@ -28,7 +28,7 @@ _Avoid_: track, tier
 The project-declared reduced route for changes that a project's contract names as light. A project that declares none, or `null`, does not support it, and the verdict falls back to the standard route.
 
 **Look approval**:
-The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved`, `fix` (approved with one worded fix) or `changes`, and the console message it came from (issue 1138). It covers its head and every later head of that pull request that keeps it (issue 1211): the approved head is an ancestor, and no later commit of the pull request changed a look file other than by a clean merge of the integration branch, except one commit under a `fix` answer. The latest answer for a head decides. A delivery that lands under it ticks the look marker's box (`look-approval tick`, issue 1186).
+The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved`, `fix` (approved with one worded fix) or `changes`, and the console message it came from (issue 1138). It covers its head and every later head of that pull request that keeps it (issue 1211): the approved head is an ancestor, and no later commit of the pull request changed a look file other than by a clean merge of the integration branch, except one commit under a `fix` answer. The latest answer for a head decides. A delivery that lands under it ticks the look marker's box (`look-approval tick`, issue 1186). The console records an approval the owner gives on a look card; a delivery reads it (ADR-console-074).
 
 **Look file set**:
 The path globs, declared per area in `.github/look-files.json` on the integration branch, whose change a look approval covers (issue 1211); a pull request is judged by the set at its base commit, never its own. An area with none keeps one approval per head.

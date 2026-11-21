@@ -8,7 +8,7 @@ guard-policy reader, never the checkout's working tree, index or local branches)
 runs (a detached worktree at the one commit the caller chose, removed afterwards: a `command` run
 executes at the contract commit, a `script` or `at` run at the commit the lint checked, the block's
 `merge` unless `at` names another) and how its exit is read (P5: 0 met, 1 not met, 75 not yet,
-anything else, or the 10-minute timeout, leaves the check pending; P2: output is trimmed, never
+anything else, or the 11-minute timeout, leaves the check pending; P2: output is trimmed, never
 trusted). Every git child, the source reader's included, runs without `GITHUB_TOKEN` and
 `GH_TOKEN` (P16). No shell is ever involved: a run becomes an argv or
 nothing.
@@ -31,7 +31,7 @@ from agent_tools import canonical
 from agent_tools.guard import guard_policy
 from agent_tools.project_contract import adopt_inspection, adopt_verify
 
-TIMEOUT = 600
+TIMEOUT = 660
 OUTPUT_LIMIT = 2000
 GIT_TIMEOUT = 120
 
@@ -159,6 +159,17 @@ def is_workspace(path: str) -> bool:
     spelling of the same directory both match."""
     p = Path(path)
     return p.name == WORKSPACE_LEAF and _WORKSPACE_PARENT.fullmatch(p.parent.name) is not None
+
+
+def script_text(root: Path, commit: str, path: str) -> str | None:
+    """The text of the file `path` at `commit` in `root`, or None when it cannot be read."""
+    try:
+        if not ensure_commit(root, commit):
+            return None
+        shown = _git(root, "show", f"{commit}:{path}")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return shown.stdout if shown.returncode == 0 else None
 
 
 @contextlib.contextmanager

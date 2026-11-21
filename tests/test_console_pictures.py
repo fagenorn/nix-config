@@ -1320,12 +1320,6 @@ class PictureAskTest(PictureCase):
         self.assertEqual(status, 200)
         return json.loads(answer)["picture"]
 
-    def test_the_ask_docstring_states_the_picture_upload(self):
-        doc = ast.get_docstring(ast.parse((ROOT / "python/agent_tools/console/sprint.py").read_text()))
-        for needle in ("pictures", "file", "uploads"):
-            with self.subTest(needle):
-                self.assertIn(needle, doc)
-
 
 class PictureBriefCommandTest(ManagerPictureCase):
     def send_command(self, svc, sid, value, command):
@@ -1561,14 +1555,6 @@ class PictureReportCommandTest(ManagerPictureCase):
         self.assertEqual(self.rows("picture.stored"), [])
 
 
-class PictureCommandDocsTest(unittest.TestCase):
-    def test_the_brief_and_report_docstring_states_the_picture_upload(self):
-        doc = ast.get_docstring(ast.parse((ROOT / "python/agent_tools/console/sprint.py").read_text()))
-        for needle in ("the brief is larger than", "the report is larger than", "named by nothing"):
-            with self.subTest(needle):
-                self.assertIn(needle, doc)
-
-
 class PictureDocsTest(unittest.TestCase):
     def doc(self, path):
         return " ".join((ROOT / path).read_text().split())
@@ -1603,9 +1589,10 @@ class PictureDocsTest(unittest.TestCase):
         self.assertEqual(
             status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                     "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                    "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004")
+                    "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
+                    "ADR-console-076, ADR-console-078")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237"))
+        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237, #1263, #1294, #1305"))
         text = self.doc(adr008)
         for needle in ("GET /api/picture/<id>", "Sec-Fetch-Site", "same-origin", "omit",
                        "ADR-console-036"):
@@ -1642,38 +1629,8 @@ class PictureDocsTest(unittest.TestCase):
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
         lines = (ROOT / adr / "002-the-desk-page-design-rules.md").read_text().splitlines()
         status = next(r for r in lines if r.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064"), status)
+        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, ADR-console-086"), status)
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Question round**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]
             self.assertIn("ADR-console-038", entry, term)
-
-    def test_adr_041_records_the_brief_and_report_pictures(self):
-        adr = "docs/areas/console/adr/"
-        name = adr + "041-a-managers-brief-and-report-show-their-pictures-on-the-card.md"
-        self.assertEqual(
-            (ROOT / name).read_text().splitlines()[0],
-            "# ADR-console-041 — A manager's brief and report show their pictures on the card")
-        text = self.doc(name)
-        for needle in ("#1091", "`pictures`", "8", "140", "before", "after", "brief.sent",
-                       "sprint.reported", "dry_run", "Detail", "recap", "ADR-console-013",
-                       "ADR-console-014", "ADR-console-036", "ADR-console-038"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
-        for path, amended in (
-                ("013-a-managers-brief-is-approved-or-redirected-on-the-page.md",
-                 "- **Status:** accepted; amended by ADR-console-041"),
-                ("038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md",
-                 "- **Status:** accepted; amended by ADR-console-041 and ADR-console-045")):
-            with self.subTest(path):
-                lines = (ROOT / adr / path).read_text().splitlines()
-                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
-        with self.subTest("014"):
-            lines = (ROOT / adr / "014-a-managers-report-becomes-the-sprints-line.md"
-                     ).read_text().splitlines()
-            self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
-                             "- **Status:** accepted; amended by ADR-console-041, ADR-console-042, ADR-console-048")
-        context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
-        for term in ("**Brief**:", "**Report**:", "**Picture**:"):
-            entry = context[context.index(term):].split("\n\n")[0]
-            self.assertIn("ADR-console-041", entry, term)

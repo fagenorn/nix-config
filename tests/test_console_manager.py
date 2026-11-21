@@ -10,16 +10,19 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import exclusion, manager, permission, pin, revive_check, sessions
+from agent_tools.console import (
+    capacity, exclusion, manager, permission, pin, revive_check, sessions)
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
 from . import console_test_support as support
+from .test_console_capacity import T, reading_of, report, window
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,11 +33,19 @@ LEAD = ("You are the manager of one sprint, started by the console. "
 PROMPT = LEAD + "make it resumable"
 REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
            "another way that needs no permission, or bring the choice to the owner with "
-           "`sprint ask`.")
+           "`sprint ask`, marking the question `owner_only`.")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def cap(*rows, all_out=False, resumes_at=None):
-    def entry(p, s, w, f, signin=None, excluded=False, pinned=False):
+    def entry(p, s, w, f, signin=None, excluded=False, pinned=False, owner=None):
         row = {"profile": p, "state": s, "week_left": w, "five_hour_left": f,
                "next_reset": None, "out_until": None, "read_at": None}
         if signin is not None:
@@ -43,6 +54,8 @@ def cap(*rows, all_out=False, resumes_at=None):
             row["excluded"] = True
         if pinned:
             row["pinned"] = True
+        if owner is not None:
+            row["owner"] = owner
         return row
     return {"tight": False, "all_out": all_out, "resumes_at": resumes_at,
             "profiles": [entry(*row) for row in rows]}
@@ -107,6 +120,13 @@ class CommandTest(Case):
             "--name", NAME, "--settings", str(self.settings), PROMPT])
         self.assertFalse([part for part in command if "s3cret" in part])
 
+    def test_the_macos_command_runs_the_manager_in_its_own_session(self):
+        command = manager.launch_command(self.launch(), "darwin")
+        self.assertEqual(command, [
+            "claude-account", "run", "--bg", "--name", NAME, "--settings", str(self.settings),
+            PROMPT])
+        self.assertFalse([part for part in command if "s3cret" in part])
+
     def test_the_prompt_sends_the_manager_to_its_contract_then_states_the_goal(self):
         goal = "keep  `the` goal's \"text\" verbatim"
         launch = manager.new_launch(SID, "owner/p01", goal, "/srv/p01", "work", "s3cret", self.dir)
@@ -153,14 +173,23 @@ class CommandTest(Case):
                 self.assertEqual(support.goal_of(launch(quoting, block).prompt), quoting)
                 self.assertEqual(launch("finish it", "").prompt, lead + "finish it")
                 self.assertEqual(support.goal_of(lead + "finish it"), "finish it")
-        self.assertIn("notice_block", manager.__doc__)
 
-    def test_no_command_is_built_on_macos(self):
-        self.assertIsNone(manager.launch_command(self.launch(), "darwin"))
-        self.assertIs(manager.supported("darwin"), False)
+    def test_managers_are_supported_on_linux_and_macos_only(self):
         self.assertIs(manager.supported("linux"), True)
-        self.assertIsNone(manager.launcher_for("darwin"))
+        self.assertIs(manager.supported("darwin"), True)
+        self.assertIs(manager.supported("win32"), False)
         self.assertIs(manager.launcher_for("linux"), manager.run_launch)
+        self.assertIs(manager.launcher_for("darwin"), manager.run_launch)
+        self.assertIs(manager.stopper_for("darwin"), manager.stop_session)
+        self.assertIsNone(manager.launch_command(self.launch(), "win32"))
+        self.assertIsNone(manager.launcher_for("win32"))
+        self.assertIsNone(manager.stopper_for("win32"))
+
+    def test_launch_tools_name_what_each_platform_runs(self):
+        self.assertEqual(manager.launch_tools("linux"), manager.LAUNCH_TOOLS)
+        self.assertEqual(manager.launch_tools("darwin"),
+                         ("bash", "dirname", "mkdir", "chmod", "ln"))
+        self.assertEqual(manager.launch_tools("win32"), ())
 
 
 class RunTest(Case):
@@ -188,6 +217,49 @@ class RunTest(Case):
         self.assertEqual(kwargs["timeout"], 60)
         self.assertEqual(kwargs["env"], {"PATH": "/h/.agents/bin:/p", "HOME": "/h",
                                          "CLAUDE_ACCOUNT": "work"})
+
+    def test_a_macos_launch_starts_in_its_own_session(self):
+        launch = self.launch(root=str(self.root))
+        run = self.fake()
+        manager.run_launch(launch, platform="darwin", run=run, environ=self.ENVIRON)
+        self.assertEqual(len(run.calls), 1)
+        argv, kwargs = run.calls[0]
+        self.assertEqual(argv, manager.launch_command(launch, "darwin"))
+        self.assertEqual(argv[0], "claude-account")
+        self.assertNotIn("systemd-run", argv)
+        self.assertFalse([part for part in argv if "s3cret" in part])
+        self.assertIs(kwargs["start_new_session"], True)
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["cwd"], str(self.root))
+        self.assertEqual(kwargs["env"], {"PATH": "/h/.agents/bin:/p", "HOME": "/h",
+                                         "CLAUDE_ACCOUNT": "work"})
+
+    def fake_client(self, body):
+        """A `claude-account` on its own PATH that runs `body`; returns the environ for `run_launch`."""
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        client = bin_dir / "claude-account"
+        client.write_text("#!/bin/sh\n" + body)
+        client.chmod(0o755)
+        return {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.tmp), "PIDFILE": str(self.tmp / "pid")}
+
+    def wait_dead(self, pid, seconds=5.0):
+        end = time.monotonic() + seconds
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        return not alive(pid)
+
+    def test_a_macos_launch_that_times_out_ends_the_whole_group(self):
+        environ = self.fake_client('sh -c \'echo $$ > "$PIDFILE"; exec sleep 60\' &\nwait\n')
+        launch = self.launch(root=str(self.root))
+        with mock.patch.object(manager, "LAUNCH_TIMEOUT", 1):
+            with self.assertRaises(manager.LaunchFailed) as raised:
+                manager.run_launch(launch, platform="darwin", environ=environ)
+        self.assertEqual(str(raised.exception), "the launch did not return within 1 s")
+        pid = int((self.tmp / "pid").read_text())
+        self.addCleanup(lambda: os.kill(pid, 9) if alive(pid) else None)
+        self.assertTrue(self.wait_dead(pid), "the client the wrapper waited for is still running")
 
     def test_the_identity_is_written_to_a_private_settings_file(self):
         self.run_fake()
@@ -264,9 +336,15 @@ class RunTest(Case):
             pass
 
     def test_claude_account_launches_with_only_the_declared_tools(self):
+        self.launches_with_only_the_declared_tools("linux")
+
+    def test_claude_account_launches_on_macos_with_only_the_declared_tools(self):
+        self.launches_with_only_the_declared_tools("darwin")
+
+    def launches_with_only_the_declared_tools(self, platform):
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name in manager.LAUNCH_TOOLS:
+        for name in manager.launch_tools(platform):
             if name == "systemd-run":
                 continue
             found = shutil.which(name)
@@ -274,9 +352,10 @@ class RunTest(Case):
                 self.skipTest(f"{name} is not installed")
             (bin_dir / name).symlink_to(found)
         bash = shutil.which("bash")
-        (bin_dir / "systemd-run").write_text(
-            f'#!{bash}\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
-        (bin_dir / "systemd-run").chmod(0o755)
+        if platform == "linux":
+            (bin_dir / "systemd-run").write_text(
+                f'#!{bash}\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
+            (bin_dir / "systemd-run").chmod(0o755)
         (bin_dir / "claude-account").symlink_to(
             REPO_ROOT / "home/common/claude-code/accounts/bin/claude-account")
         out = self.tmp / "out"
@@ -289,7 +368,7 @@ class RunTest(Case):
         home = self.tmp / "home"
         home.mkdir()
         (self.tmp / "accounts/profiles/work").mkdir(parents=True)
-        manager.run_launch(self.launch(root=str(self.root)), platform="linux", environ={
+        manager.run_launch(self.launch(root=str(self.root)), platform=platform, environ={
             "PATH": str(bin_dir), "HOME": str(home),
             "CLAUDE_ACCOUNTS_DIR": str(self.tmp / "accounts"), "CLAUDE_BIN": str(claude),
             "CLAUDE_CACHE_PROXY": "0"})
@@ -327,11 +406,11 @@ class RunTest(Case):
             text, run = self.reason()
             self.assertEqual(text, "the project root /nonexistent/x is not a directory")
             self.assertEqual(run.calls, [])
-        with self.subTest("macos"):
+        with self.subTest("unsupported"):
             self.root_for = str(self.root)
             run = self.fake()
             with self.assertRaises(manager.LaunchFailed) as caught:
-                manager.run_launch(self.launch(root=self.root_for), platform="darwin", run=run,
+                manager.run_launch(self.launch(root=self.root_for), platform="win32", run=run,
                                    environ=self.ENVIRON)
             self.assertEqual(str(caught.exception), manager.UNAVAILABLE_TEXT)
             self.assertEqual(run.calls, [])
@@ -569,7 +648,7 @@ class ProfileTest(unittest.TestCase):
     def test_the_binding_is_no_longer_an_input(self):
         self.assertFalse(hasattr(manager, "bound_profile"))
         self.assertEqual(list(inspect.signature(manager.choose_profile).parameters),
-                         ["capacity", "last_use"])
+                         ["capacity", "last_use", "starter", "waiting"])
 
     def test_quota_wait_reads_only_an_out_profile(self):
         until = "2026-11-13T00:00:00+00:00"
@@ -602,6 +681,39 @@ class StopTest(unittest.TestCase):
         self.assertNotIn("CONSOLE_SPRINT_SECRET", kwargs["env"])
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(kwargs["timeout"], 60)
+
+    def test_a_stop_in_flight_is_ended_with_its_group_when_the_console_closes(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        client = tmp / "claude-account"
+        client.write_text('#!/bin/sh\nsh -c \'echo $$ > "$PIDFILE"; exec sleep 60\' &\nwait\n')
+        client.chmod(0o755)
+        environ = {"PATH": f"{tmp}:/usr/bin:/bin", "HOME": str(tmp), "PIDFILE": str(tmp / "pid")}
+        outcome = []
+
+        def stop():
+            try:
+                manager.stop_session(self.FULL, "work", environ=environ)
+                outcome.append(None)
+            except manager.StopFailed as error:
+                outcome.append(error)
+
+        worker = threading.Thread(target=stop, daemon=True)
+        worker.start()
+        end = time.monotonic() + 5
+        while not (tmp / "pid").exists() and time.monotonic() < end:
+            time.sleep(0.02)
+        pid = int((tmp / "pid").read_text())
+        self.addCleanup(lambda: os.kill(pid, 9) if alive(pid) else None)
+        self.assertTrue(alive(pid))
+        manager.reap_stops()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertIsInstance(outcome[0], manager.StopFailed)
+        end = time.monotonic() + 5
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid))
 
     def test_a_failed_stop_raises_its_one_line_reason(self):
         def failing(argv, **kwargs):
@@ -996,5 +1108,138 @@ class PinTest(unittest.TestCase):
                 pin.parse_request(body)
 
 
+ALICE = "alice@example.invalid"
+BOB = "bob@example.invalid"
+
+
+class ColleagueAccountTest(unittest.TestCase):
+    """A colleague's account serves his own sprints first and anyone's when it has room (#1344, ADR-console-087 D1)."""
+
+    def test_his_own_sprint_takes_his_account_while_it_has_room_though_an_owner_account_has_more(self):
+        shown = cap(("work", "ok", 90, 90), ("colleague-1", "ok", 10, 10, None, False, False, ALICE))
+        self.assertEqual(manager.session_profile(shown, {}, ALICE), "colleague-1")
+        self.assertEqual(manager.choose_profile(shown, {}, ALICE), "colleague-1")
+        self.assertEqual(manager.session_profile(shown, {}), "work")
+
+    def test_his_own_sprint_chooses_among_his_accounts_by_the_usual_rule(self):
+        shown = cap(("work", "ok", 90, 90), ("c1", "ok", 10, 10, None, False, False, ALICE),
+                    ("c2", "ok", 40, 10, None, False, False, ALICE),
+                    ("b1", "ok", 99, 99, None, False, False, BOB))
+        self.assertEqual(manager.session_profile(shown, {}, ALICE), "c2")
+
+    def test_his_own_sprint_falls_to_the_usual_choice_when_his_account_has_no_room(self):
+        unknown = (None, None)
+        table = [
+            cap(("work", "ok", 20, 20), ("c1", "out", 0, 0, None, False, False, ALICE)),
+            cap(("work", "ok", 20, 20), ("c1", "ok", 90, 90, "signed_out", False, False, ALICE)),
+            cap(("work", "ok", 20, 20), ("c1", "ok", 90, 90, None, True, False, ALICE)),
+            cap(("work", "ok", 20, 20), ("c1", "unknown", *unknown, "signed_in", False, False, ALICE)),
+        ]
+        for shown in table:
+            with self.subTest(shown=shown["profiles"]):
+                self.assertEqual(manager.session_profile(shown, {}, ALICE), "work")
+
+    def test_another_sprint_takes_his_account_when_it_has_room_and_none_of_his_waits(self):
+        shown = cap(("work", "ok", 20, 20), ("c1", "ok", 90, 90, None, False, False, ALICE))
+        self.assertEqual(manager.session_profile(shown, {}), "c1")
+        self.assertEqual(manager.session_profile(shown, {}, BOB), "c1")
+        self.assertEqual(manager.session_profile(shown, {}, None, frozenset({BOB})), "c1")
+        self.assertEqual(manager.session_profile(shown, {}, BOB, frozenset({ALICE})), "work")
+        self.assertEqual(manager.session_profile(shown, {}, None, frozenset({ALICE})), "work")
+        self.assertEqual(manager.choose_profile(shown, {}, None, frozenset({ALICE})), "work")
+
+    def test_the_tight_pool_of_one_low_owner_account_and_two_out(self):
+        low = ("work", "ok", 5, 5)
+        out = ("home", "out", 0, 0)
+        colleague_out = ("c1", "out", 0, 0, None, False, False, ALICE)
+        shown = cap(low, out, colleague_out)
+        for starter in (None, ALICE, BOB):
+            self.assertEqual(manager.session_profile(shown, {}, starter), "work")
+        room = cap(low, out, ("c1", "ok", 50, 50, None, False, False, ALICE))
+        self.assertEqual(manager.session_profile(room, {}), "c1")
+        self.assertEqual(manager.session_profile(room, {}, None, frozenset({ALICE})), "work")
+        self.assertEqual(manager.session_profile(room, {}, ALICE, frozenset({ALICE})), "c1")
+
+    def test_a_barred_account_is_not_the_no_room_fallback_either(self):
+        unknown = (None, None)
+        shown = cap(("work", "out", 0, 0, "signed_in"),
+                    ("c1", "unknown", *unknown, "signed_in", False, False, ALICE))
+        self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, None), "work")
+        self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, ALICE), "c1")
+        self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, None, frozenset({ALICE})),
+                         "work")
+        only = cap(("c1", "ok", 90, 90, "signed_in", False, False, ALICE))
+        self.assertIsNone(manager.session_profile(only, {}, None, frozenset({ALICE})))
+        self.assertEqual(manager.choose_profile(only, {}, None, frozenset({ALICE})),
+                         manager.Wait(None))
+
+    def test_the_owners_pin_outranks_the_preference_and_the_reservation(self):
+        pinned = cap(("work", "ok", 20, 20, None, False, True),
+                     ("c1", "ok", 90, 90, None, False, False, ALICE))
+        self.assertEqual(manager.session_profile(pinned, {}, ALICE), "work")
+        theirs = cap(("work", "ok", 90, 90), ("c1", "ok", 20, 20, None, False, True, ALICE))
+        self.assertEqual(manager.session_profile(theirs, {}, None, frozenset({ALICE})), "c1")
+        self.assertEqual(manager.session_profile(theirs, {}, BOB, frozenset({ALICE})), "c1")
+
+    def test_the_owners_own_accounts_are_chosen_as_before_with_a_colleague_in_the_pool(self):
+        shown = cap(("a", "ok", 40, 90), ("b", "ok", 70, 10),
+                    ("c1", "out", 0, 0, None, False, False, ALICE))
+        for starter in (None, ALICE, BOB):
+            for waiting in (frozenset(), frozenset({ALICE})):
+                self.assertEqual(manager.session_profile(shown, {}, starter, waiting), "b")
+
+    def test_a_fold_with_one_owner_and_one_colleague_account(self):
+        def read(profile, used):
+            return reading_of(report(status="allowed", reset=T + 3600, binding="7d",
+                                     claim="seven_day",
+                                     windows={"7d": window("allowed", used, T + 3600)}), profile)
+        state = capacity.CapacityState({"work": read("work", 0.1),
+                                        "colleague-1": read("colleague-1", 0.7)}, {})
+        fold = capacity.capacity_view(["work", "colleague-1"], state, T,
+                                      owners={"colleague-1": ALICE})
+        self.assertEqual(manager.session_profile(fold, {}), "work")
+        self.assertEqual(manager.session_profile(fold, {}, ALICE), "colleague-1")
+        self.assertEqual(manager.choose_profile(fold, {}, ALICE), "colleague-1")
+
+    def test_a_colleagues_account_without_a_room_reading_is_only_his_own_fallback(self):
+        unknown = (None, None)
+        shown = cap(("work", "out", 0, 0, "signed_in"),
+                    ("c1", "unknown", *unknown, "signed_in", False, False, ALICE))
+        for starter, expected in ((None, "work"), (BOB, "work"), (ALICE, "c1")):
+            self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, starter), expected)
+
+    def test_the_wait_is_over_the_accounts_the_sprint_may_use(self):
+        soon, later = "2026-11-13T01:00:00+00:00", "2026-11-13T02:00:00+00:00"
+        shown = cap(("work", "out", 0, 0, "signed_in"), ("c1", "ok", 50, 50, None, False, False, ALICE))
+        shown["profiles"][0]["out_until"] = later
+        self.assertEqual(manager.choose_profile(shown, {}), "c1")
+        self.assertEqual(manager.choose_profile(shown, {}, None, frozenset({ALICE})), manager.Wait(later))
+        self.assertEqual(manager.choose_profile(shown, {}, ALICE, frozenset({ALICE})), "c1")
+        other = cap(("work", "out", 0, 0, "signed_in"), ("home", "out", 0, 0, "signed_in"),
+                    ("c1", "ok", 50, 50, None, False, False, ALICE))
+        other["profiles"][0]["out_until"] = later
+        other["profiles"][1]["out_until"] = soon
+        self.assertEqual(manager.choose_profile(other, {}, BOB, frozenset({ALICE})), manager.Wait(soon))
+
+    def test_a_pin_with_room_is_not_a_wait_whatever_else_reads(self):
+        shown = cap(("work", "out", 0, 0, "signed_in"),
+                    ("c1", "ok", 50, 50, None, False, True, ALICE))
+        self.assertEqual(manager.choose_profile(shown, {}, None, frozenset({ALICE})), "c1")
+
+    def test_an_alias_of_a_colleagues_profile_is_his_account_whichever_profile_keeps_it(self):
+        shown = cap(("a-work", "ok", 90, 90), ("c1", "ok", 90, 90, None, False, False, ALICE),
+                    ("other", "ok", 10, 10))
+        shown["profiles"][0]["same_account_as"] = ["c1"]
+        shown["profiles"][1]["same_account_as"] = ["a-work"]
+        shown["profiles"][1]["duplicate_of"] = "a-work"
+        self.assertEqual(manager.session_profile(shown, {}, ALICE), "a-work")
+        self.assertEqual(manager.session_profile(shown, {}, BOB, frozenset({ALICE})), "other")
+        self.assertEqual(manager.session_profile(shown, {}, None, frozenset({ALICE})), "other")
+        self.assertEqual(manager.session_profile(shown, {}), "a-work")
+        self.assertTrue(manager.colleague_account(shown, "a-work"))
+        self.assertFalse(manager.colleague_account(shown, "other"))
+
+
 if __name__ == "__main__":
     unittest.main()
+

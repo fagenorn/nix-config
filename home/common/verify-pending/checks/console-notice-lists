@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 1291: the owner's notice for each named project on this host's console names
+# every one of that project's issues. verify-pending runs it from the repository root at the commit the
+# block names. Exit 0 covered, 75 missing or unreachable, 2 usage.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks console-notice-lists "$@"

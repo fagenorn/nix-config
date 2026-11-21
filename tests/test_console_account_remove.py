@@ -13,10 +13,10 @@ import threading
 import unittest
 from pathlib import Path
 
-from agent_tools.console import event_log, probe
+from agent_tools.console import account_remove, event_log, probe
 from agent_tools.console.account_remove import (
-    REMOVAL, RemoveFailed, Remover, SignOutFailed, busy, parse_remove_request, remover_for,
-    removed, removing, sign_out, signer_out_for)
+    REMOVAL, RemoveFailed, Remover, SignOutFailed, busy, parse_guest_request, parse_remove_request,
+    parse_signout_request, remover_for, removed, removing, sign_out, signer_out_for)
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1030)
 from .test_console_account_add import LAUNCHER, launcher_env
 
@@ -53,6 +53,50 @@ class RequestTest(unittest.TestCase):
             with self.subTest(args=args):
                 with self.assertRaises(ValueError):
                     removed(*args)
+
+
+    def test_a_removal_row_names_who_removed_it(self):
+        self.assertEqual(
+            removed("colleague-1", "removed", None, by="colleague@example.invalid")[2]["by"],
+            "colleague@example.invalid")
+        self.assertEqual(removed("work", "removed", None)[2],
+                         {"by": "owner", "profile": "work", "outcome": "removed", "kind": None})
+        for by in ("Colleague@Example.invalid", "", "someone"):
+            with self.subTest(by=by):
+                with self.assertRaises(ValueError):
+                    removed("colleague-1", "removed", None, by=by)
+
+    def test_the_signout_request_is_exactly_a_profile(self):
+        self.assertEqual(parse_signout_request(b'{"profile": "colleague-1"}'), "colleague-1")
+        for body in (b"{}", b'{"profile": ""}', b'{"profile": 1}',
+                     b'{"profile": "a", "typed": "a"}', b"[]", b"\xff", b"not json"):
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    parse_signout_request(body)
+
+    def test_the_guest_request_is_exactly_a_positive_account_number_and_its_token(self):
+        self.assertEqual(parse_guest_request(b'{"account": 2, "ident": "t0k"}'), (2, "t0k"))
+        for body in (b"{}", b'{"account": 2}', b'{"ident": "t"}',
+                     b'{"account": 0, "ident": "t"}', b'{"account": -1, "ident": "t"}',
+                     b'{"account": true, "ident": "t"}', b'{"account": "2", "ident": "t"}',
+                     b'{"account": 2.0, "ident": "t"}', b'{"account": 2, "ident": ""}',
+                     b'{"account": 2, "ident": 5}', b'{"account": 2, "ident": null}',
+                     b'{"account": 2, "ident": "t", "profile": "work"}', b"not json"):
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    parse_guest_request(body)
+
+
+class ConstantsTest(unittest.TestCase):
+    def test_the_sign_out_texts_are_fixed(self):
+        self.assertEqual(account_remove.SIGNOUT_UNAVAILABLE,
+                         "signing an account out is not available on this host")
+        self.assertEqual(account_remove.NOT_COLLEAGUE,
+                         "only an account a colleague added is signed out here")
+        self.assertEqual(account_remove.NOT_MOVED,
+                         "the account was signed out but a manager on it was not moved")
+        self.assertIn("stop_failed", account_remove.REMOVE_KINDS)
+        self.assertEqual(account_remove.MoveFailed("stop_failed").kind, "stop_failed")
 
 
 class SignOutTest(unittest.TestCase):
@@ -144,11 +188,13 @@ class RemoverTest(unittest.TestCase):
 
 
 class PlatformTest(unittest.TestCase):
-    def test_only_linux_gets_a_signer_out_and_a_remover(self):
+    def test_only_linux_and_macos_get_a_signer_out_and_a_remover(self):
         self.assertIs(signer_out_for("linux"), sign_out)
         self.assertIsInstance(remover_for("linux"), Remover)
-        self.assertIsNone(signer_out_for("darwin"))
-        self.assertIsNone(remover_for("darwin"))
+        self.assertIs(signer_out_for("darwin"), sign_out)
+        self.assertIsInstance(remover_for("darwin"), Remover)
+        self.assertIsNone(signer_out_for("win32"))
+        self.assertIsNone(remover_for("win32"))
 
 
 if __name__ == "__main__":

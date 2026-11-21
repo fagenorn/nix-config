@@ -283,7 +283,8 @@ The verbs the guard adjudicates are validated against the live repository:
   below, issue 476), or, in a repository with a declared integration branch,
   the release arm: the same form without `--delete-branch`, only the
   integration branch merged into the default branch, gated on a fully green
-  check rollup instead of forge protection; and, for a pull request whose
+  check rollup (each check judged by its latest run, issue 1374) instead of
+  forge protection; and, for a pull request whose
   issues carry a look marker, the owner's look approval of its head (the look
   gate below, issue 1138).
 
@@ -533,7 +534,15 @@ the PR's check rollup`), and every entry naming it must be green (`unsafe
 merge: <base> cannot be protected on this repository's plan, and the declared
 required check <name> is not green (<observed>)`, the first non-green entry as
 `CheckRun <status>/<conclusion>` or `StatusContext <state>`, a fact that is not
-a string shown as `none`). Entries naming no declared check are ignored. Green
+a string shown as `none`). Entries naming no declared check are ignored. Each
+check is judged by its latest run only (issue 1374): an entry naming it is
+superseded, and not judged, when another entry naming it carries a strictly
+later `startedAt` (GitHub's `YYYY-MM-DDTHH:MM:SSZ`, a real calendar instant from
+1970 on) and its own `startedAt` is readable in that form, and both are the same
+type of entry published by the same `workflowName` (so two workflows' jobs of one
+name never supersede each other); a tie and an entry without a readable
+`startedAt` (absent, malformed, an impossible date, or the `0001-01-01` zero value
+gh exports for a run not yet started) are never superseded, so they are judged. Green
 has one home, from which the release arm's jq predicate is rendered: a
 `CheckRun` whose `status` is `COMPLETED` and whose `conclusion` is `SUCCESS`,
 `SKIPPED` or `NEUTRAL`, or a `StatusContext` whose `state` is `SUCCESS`. A forge
@@ -1039,6 +1048,7 @@ registry, and a look check fixture that runs `look-approval judge` from source a
 
 import argparse
 from collections import namedtuple
+from datetime import datetime
 import errno
 import fnmatch
 import json
@@ -1360,16 +1370,38 @@ PLAN_GATED_MESSAGE = (
 GREEN_CHECK_RUN_STATUS = "COMPLETED"
 GREEN_CHECK_RUN_CONCLUSIONS = ("SUCCESS", "SKIPPED", "NEUTRAL")
 GREEN_STATUS_CONTEXT_STATE = "SUCCESS"
+# The one home of "latest run" (issue 1374): a rollup entry is superseded when another
+# entry of the same run group (same `__typename`, same string `workflowName`, same check
+# name) carries a strictly later `startedAt`, both read as GitHub's UTC second-precision
+# timestamp that is a real calendar instant after 1970. An entry without a readable
+# `startedAt` (absent, malformed, an impossible date, or the 0001-01-01 zero value gh
+# exports for a run not yet started), a tie and an entry naming no check are never
+# superseded, so they are judged.
+ROLLUP_STARTED_AT_PATTERN = (
+    r"^(19[7-9][0-9]|[2-9][0-9]{3})-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+ROLLUP_STARTED_AT = re.compile(ROLLUP_STARTED_AT_PATTERN)
 RELEASE_ROLLUP_PREDICATE = (
+    "def check_name: if .__typename == \"CheckRun\" then .name "
+    "elif .__typename == \"StatusContext\" then .context else null end; "
+    "def run_group: [.__typename, (.workflowName | if type == \"string\" then . else null end)]; "
+    "def started: .startedAt | if type == \"string\" "
+    f'and test("{ROLLUP_STARTED_AT_PATTERN}") '
+    'and (try (fromdateiso8601 | todateiso8601) catch null) == . then . else null end; '
     '(.statusCheckRollup | type) == "array" '
     "and (.statusCheckRollup | length) > 0 "
-    "and all(.statusCheckRollup[]; "
+    "and (.statusCheckRollup as $rollup | all($rollup[]; . as $entry "
+    "| ($entry | check_name) as $name | ($entry | run_group) as $group "
+    "| ($entry | started) as $started "
+    "| ($name | type) == \"string\" and $started != null "
+    "and any($rollup[]; check_name == $name and run_group == $group "
+    "and started != null and started > $started) "
+    "or ("
     f'(.__typename == "CheckRun" and .status == "{GREEN_CHECK_RUN_STATUS}" and ('
     + " or ".join(
         f'.conclusion == "{conclusion}"' for conclusion in GREEN_CHECK_RUN_CONCLUSIONS
     )
     + ")) "
-    f'or (.__typename == "StatusContext" and .state == "{GREEN_STATUS_CONTEXT_STATE}"))'
+    f'or (.__typename == "StatusContext" and .state == "{GREEN_STATUS_CONTEXT_STATE}"))))'
 )
 
 Literal = namedtuple("Literal", "word")
@@ -6400,6 +6432,43 @@ def rollup_entry_green(entry):
     )
 
 
+def rollup_entry_started(entry):
+    """The entry's `startedAt` when it is a readable UTC timestamp, else None: the
+    format, a year from 1970 on (so gh's 0001-01-01 zero value for a run not yet started
+    is unreadable) and a real calendar instant. The fixed-width format makes the string
+    order the time order."""
+    started = entry.get("startedAt")
+    if isinstance(started, str) and ROLLUP_STARTED_AT.match(started):
+        try:
+            datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return None
+        return started
+    return None
+
+
+def rollup_entry_group(entry):
+    """What makes two entries runs of one check: the type and the workflow that
+    publishes it, so two workflows' jobs of one name never supersede each other."""
+    workflow = entry.get("workflowName")
+    return (entry.get("__typename"), workflow if isinstance(workflow, str) else None)
+
+
+def latest_runs(entries):
+    """The entries of one check that no later run of it supersedes (issue 1374): an
+    entry drops only when another of its run group (type and workflow) carries a
+    strictly later readable `startedAt` and its own is readable; a tie and an unstamped
+    entry stay."""
+    started = [rollup_entry_started(entry) for entry in entries]
+    groups = [rollup_entry_group(entry) for entry in entries]
+    latest = {}
+    for group, stamp in zip(groups, started):
+        if stamp is not None and (group not in latest or stamp > latest[group]):
+            latest[group] = stamp
+    return [entry for entry, group, stamp in zip(entries, groups, started)
+            if stamp is None or stamp == latest[group]]
+
+
 def observed_state(entry):
     """A non-green entry as a refusal shows it: CheckRun <status>/<conclusion> or
     StatusContext <state>, each fact escaped when a string and none otherwise (issue
@@ -6436,7 +6505,7 @@ def merge_floor_problem(pr_facts, base, head_commit, required_checks):
         if not naming:
             return (f"{unprotectable}, and the declared required check {shown_value(check)} "
                     "is missing from the PR's check rollup")
-        for entry in naming:
+        for entry in latest_runs(naming):
             if not rollup_entry_green(entry):
                 return (f"{unprotectable}, and the declared required check "
                         f"{shown_value(check)} is not green ({observed_state(entry)})")

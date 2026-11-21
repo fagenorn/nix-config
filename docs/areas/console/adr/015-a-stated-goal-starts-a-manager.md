@@ -1,6 +1,6 @@
 # ADR-console-015 — A stated goal starts a manager in its own scope
 
-- **Status:** accepted; amended by ADR-console-017, ADR-console-023, ADR-console-064
+- **Status:** accepted; amended by ADR-console-017, ADR-console-023, ADR-console-064, ADR-console-075
 - **Decided in:** #831, #835, #839, #888, #1016, #1182
 
 ## Context
@@ -23,9 +23,9 @@ ADR-console-011 turned a goal stated on the page into a sprint, and ADR-console-
 
 **Session name.** The session is named `<project id> sprint <sprint id>`. A listed session of the sprint's project with exactly that name is shown inside its sprint, with its manager state, and not in Outside sprints.
 
-**macOS.** There is no launcher on macOS: the sprint reads `unavailable` and nothing starts. Only Linux has `systemd-run`.
+**macOS.** A manager starts on macOS too, but not in a scope, because only Linux has `systemd-run`: the launch is the client's own argument list, started in its own session so that launchd's cleanup of the console job's process group does not end it (ADR-console-075). The sprint reads `unavailable` only on a platform that is neither Linux nor macOS.
 
-**The unit's PATH.** The console unit's PATH gains the user profile and the system profile on Linux, and the launch puts `~/.agents/bin` first, so `claude-account`, its coreutils, `systemd-run`, `sprint` and `resolve-project` are found. A systemd user unit does not read `home.sessionPath`.
+**The unit's PATH.** The console unit's PATH gains the user profile and the system profile on Linux, and the launch puts `~/.agents/bin` first, so `claude-account`, its coreutils, `systemd-run`, `sprint` and `resolve-project` are found. A systemd user unit does not read `home.sessionPath`. The macOS job's PATH carries the same two profiles (ADR-console-075).
 
 **The contract's home.** The manager's contract is a document of the console package, `agent_tools/console/manager-contract.md`, shipped as package data like the page and printed by `sprint contract`; the launch prompt tells the manager to run it first. It states one manager per sprint, only existing skills, never code, reversible matters decided and recorded in the brief, the owner reached only through `sprint`, the five parts of the brief and the refusal handling, and the pull request reviews that prose. Only a manager reads it, so it adds nothing to the instruction corpus other sessions load and the Instruction Budget ceilings are unchanged. Later slices extend this document.
 
@@ -37,5 +37,5 @@ ADR-console-011 turned a goal stated on the page into a sprint, and ADR-console-
 - A manager that never appears reads missing after two minutes and can be retried; a manager that died before its brief reads the same.
 - Every profile out leaves the sprint waiting until the earliest reset, and the owner retries after it.
 - The secret is on disk in two 0600 files of one sprint and in the manager's session environment, and in no argv, log row, view or stderr line.
-- On macOS no manager starts.
+- On macOS a manager starts in its own session, outside the console job's process group (ADR-console-075).
 - The Instruction Budget is unchanged: the contract is not a skill.

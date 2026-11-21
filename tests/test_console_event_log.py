@@ -322,7 +322,11 @@ class CancelledRegistrationTest(unittest.TestCase):
         self.assertEqual(event_log.cancelled_registration(event(**exact)), ("/x/r", "P"))
         self.assertEqual(event_log.cancelled_registration(event(**{**exact, "plan_id": None})),
                          ("/x/r", None))
+        self.assertEqual(event_log.cancelled_registration(event(**exact, restore=True)),
+                         ("/x/r", "P"))
         for name, bad in (
+                ("restore false", event(**exact, restore=False)),
+                ("restore a number", event(**exact, restore=1)),
                 ("no plan id", event(by="owner", root="/x/r")),
                 ("extra member", event(**exact, more=1)),
                 ("another by", event(**{**exact, "by": "page"})),
@@ -399,6 +403,23 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(self.retain_at(log, NOW), 3)
         self.assertEqual([(row[0], row[2]) for row in rows(self.store)],
                          [(3, "activation.started"), (4, "activation.finished")])
+
+    def test_the_registry_rows_that_start_and_end_a_roots_ownership_outlive_the_window(self):
+        # #1271: a kept activation row names a root, and who owned that root is told only by the
+        # registrations, so no registration of a project, nor the unregistration that ends one,
+        # is removed; an unregistration that ends no registration is.
+        log = self.open()
+        self.now = OLD
+        log.append([("project.registered", "o/a", {"root": "/srv/p"}),
+                    ("project.unregistered", "o/a", {}),
+                    ("project.registered", "o/b", {"root": "/srv/p"}),
+                    ("project.unregistered", "o/c", {}),
+                    ("old", "o/a", {})])
+        self.assertEqual(self.retain_at(log, NOW), 2)
+        self.assertEqual([(row[0], row[2], row[3]) for row in rows(self.store)],
+                         [(1, "project.registered", "o/a"), (2, "project.unregistered", "o/a"),
+                          (3, "project.registered", "o/b")])
+        self.assertEqual(self.retain_at(log, NOW), 0)
 
     def test_a_raw_delete_of_a_kept_row_is_refused_after_a_pass(self):
         log = self.three_rows()
@@ -477,7 +498,7 @@ class RetentionTest(unittest.TestCase):
             "brief.sent", "brief.approved", "brief.replied",
             "sprint.reported",
             "sprint.messaged", "sprint.read", "sprint.answered",
-            "questions.asked", "question.answered", "question.withdrawn",
+            "questions.asked", "question.answered", "question.withdrawn", "look.recorded",
             "notice.posted", "notice.withdrawn",
             "sprint.closed", "sprint.stop_requested", "manager.stopped",
             "project_question.deleted"}))
@@ -794,6 +815,30 @@ class RetentionTest(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.raw().execute("DELETE FROM events WHERE kind = 'notice.withdrawn'")
 
+    def test_a_version_10_store_is_migrated_and_protects_look_records(self):
+        self.store.parent.mkdir(parents=True)
+        connection = sqlite3.connect(self.store)
+        for statement in SCHEMA_2:
+            connection.execute(statement)
+        connection.execute("DROP TRIGGER events_no_delete")
+        connection.execute(
+            """CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+            WHEN OLD.kind IN ('brief.approved', 'brief.replied', 'brief.sent', 'goal.stated', 'goal.withdrawn', 'manager.stopped', 'notice.posted', 'notice.withdrawn', 'question.answered', 'question.withdrawn', 'questions.asked', 'sprint.answered', 'sprint.closed', 'sprint.messaged', 'sprint.read', 'sprint.reported', 'sprint.stop_requested')
+                OR NOT (OLD.at < coalesce((SELECT cutoff FROM retention WHERE id = 1), ''))
+            BEGIN SELECT RAISE(ABORT, 'the console event log is append-only'); END""")
+        connection.execute("PRAGMA user_version = 10")
+        for kind in ("look.recorded", "old"):
+            connection.execute(
+                "INSERT INTO events (at, kind, project, payload) VALUES (?, ?, ?, ?)",
+                (OLD, kind, "o/a", "{}"))
+        connection.commit()
+        connection.close()
+        log = self.open()
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.retain_at(log, NOW), 1)
+        self.assertEqual([row[2] for row in rows(self.store)], ["look.recorded"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.raw().execute("DELETE FROM events WHERE kind = 'look.recorded'")
 
     def test_a_pass_keeps_the_newest_sign_in_reading_of_each_profile(self):
         log = self.open()

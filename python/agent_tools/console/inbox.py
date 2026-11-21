@@ -61,6 +61,9 @@ any dash, whitespace, `measured:`, case-insensitive: ` \u2014 measured:` and ` -
 and `1440/480` stay; `heading_text`), and without a connecting word (`in`, `under`, `and`...) left
 dangling before one; `criterion_text` is the whole text, which is what `attach_pictures` reads the pictures
 from, so the card shows the pictures and never a bare path. A text left with no word reads `REVIEW_HEADING`; the whole text, tail included, stays in `criterion_text`.
+An issue whose `state` is `CLOSED` (a node with no `state` reads open, another value is `payload_invalid`) or whose
+held block is settled (`verify_answer.held_settled`, #1327) raises no review item, and the next reading's
+`inbox.gone` removes one raised before.
 
 An approved look answers a look marker (#1186 and #1211, ADR-console-054 D8). A review criterion whose body line is a
 look marker (`look_marker.marker_line`, issue 1138) raises no card when a pull request that a trusted (OWNER or MEMBER)
@@ -214,6 +217,7 @@ QUERY = """query($search: String!, $after: String) {
       __typename
       ... on Issue {
         number
+        state
         repository { defaultBranchRef { name } }
         authorAssociation
         body
@@ -486,6 +490,15 @@ def _labels(node: dict) -> list[str]:
     return [n["name"] for n in names]
 
 
+def _closed(node: dict) -> bool:
+    state = node.get("state", "OPEN")
+    if state == "OPEN":
+        return False
+    if state == "CLOSED":
+        return True
+    raise _invalid("issue state is not OPEN or CLOSED")
+
+
 def _body(node: dict) -> str:
     body = node.get("body")
     if body is None:
@@ -680,7 +693,8 @@ def items_from_node(project_id: str, slug: str, node: dict, clock: Callable[[], 
     prompts = [(m, _verify_item(project_id, slug, number, held_work, m, runner_markers, blocks)) for m in live]
     items += [item for _, item in prompts]
     if (node.get("__typename") == "Issue" and HELD_LABEL in _labels(node)
-            and node.get("authorAssociation") in verify_answer.TRUSTED and not live):
+            and node.get("authorAssociation") in verify_answer.TRUSTED and not live
+            and not _closed(node) and not verify_answer.held_settled(runner_comments)):
         reviews = review_criteria(acceptance_criteria(_body(node)), verify_answer.held_acs(runner_comments))
         lines = _body(node).split("\n")
         looks = [c for c in reviews if look_marker.marker_line(lines[c.line])]

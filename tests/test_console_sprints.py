@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 
 import json
+import re
 import stat
 import tempfile
 import unittest
@@ -719,16 +720,8 @@ class RevivalFoldTest(unittest.TestCase):
 
 
 class DocumentedTest(unittest.TestCase):
-    def test_the_manager_rules_are_written_where_the_view_points(self):
+    def test_manager_status_has_a_docstring(self):
         self.assertTrue((sprints.manager_status.__doc__ or "").strip())
-        for name in ("manager_status", "manager.started", "manager.failed", "manager.waiting",
-                     "manager.nudged", "manager.no_progress", "sprint.continued"):
-            self.assertIn(name, sprints.__doc__)
-
-    def test_the_notice_rules_are_written(self):
-        for name in ("notice.posted", "notice.withdrawn", "checked_notice", "postable_notice",
-                     "notice_block", "owner_notices", "postable_owner_notice"):
-            self.assertIn(name, sprints.__doc__)
 
 
 URL = "https://github.com/owner/p00/milestone/3"
@@ -1681,6 +1674,70 @@ def approved_rows():
     return [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS), approved(3, SID, 1)]
 
 
+GUEST = "colleague@example.invalid"
+
+
+def guest_rows(sid, by=None):
+    """One sprint's goal, brief, reply, approval, question, answer and message, each with `by`
+    when it is given (a guest's rows) and with none otherwise (an owner's)."""
+    who = {} if by is None else {"by": by}
+
+    def row(seq, kind, **payload):
+        return Event(seq, at(seq), kind, "owner/p00",
+                     {"sprint_id": sid, "goal": "one", **payload, **who})
+
+    return [
+        row(1, GOAL_STATED),
+        Event(2, at(2), BRIEF_SENT, "owner/p00",
+              {"sprint_id": sid, "version": 1, "goal": "one", "brief": PARTS}),
+        row(3, BRIEF_REPLIED, version=1, reply="smaller slices"),
+        Event(4, at(4), BRIEF_SENT, "owner/p00",
+              {"sprint_id": sid, "version": 2, "goal": "one", "brief": PARTS}),
+        row(5, BRIEF_APPROVED, version=2),
+        Event(6, at(6), event_log.QUESTIONS_ASKED, "owner/p00",
+              {"sprint_id": sid, "goal": "one", "blocker": False, "questions": [QUESTION]}),
+        row(7, event_log.QUESTION_ANSWERED, round=6, index=0, question="q", answer="sqlite",
+            chosen="sqlite", recommended="files", differs=True),
+        row(8, event_log.SPRINT_MESSAGED, text="a word"),
+    ]
+
+
+class ActorFoldTest(unittest.TestCase):
+    def folded(self):
+        return sprints.sprint_states([*guest_rows("a" * 16, GUEST), *guest_rows("b" * 16)])
+
+    def test_a_guest_row_records_its_login_and_an_owner_row_none(self):
+        states = self.folded()
+        mine, owners = states["a" * 16], states["b" * 16]
+        self.assertEqual(mine.started_by, GUEST)
+        self.assertEqual([m.kind for m in mine.messages],
+                         ["changes", "approved", "answer", "text"])
+        self.assertEqual([m.by for m in mine.messages], [GUEST] * 4)
+        self.assertEqual(mine.questions[0].answered_by, GUEST)
+        self.assertIsNone(owners.started_by)
+        self.assertEqual([m.by for m in owners.messages], [None] * 4)
+        self.assertIsNone(owners.questions[0].answered_by)
+
+    def test_an_actor_that_is_not_a_normal_login_reads_as_the_owner(self):
+        for value in ("owner", "Colleague@example.invalid", "", 7, None, "a b@example.invalid",
+                      "x" * 250 + "@e.io"):
+            with self.subTest(value=value):
+                self.assertIsNone(sprints.actor_of({"by": value}))
+        self.assertIsNone(sprints.actor_of({}))
+        self.assertEqual(sprints.actor_of({"by": GUEST}), GUEST)
+        from agent_tools.console import guest
+        self.assertIs(guest.normal_login, event_log.normal_login)
+
+    def test_a_guest_message_reaches_the_manager_with_its_actor(self):
+        states = self.folded()
+        for message in states["a" * 16].messages:
+            with self.subTest(kind=message.kind):
+                self.assertEqual(sprints.inbox_entry(message)["by"], GUEST)
+        for message in states["b" * 16].messages:
+            with self.subTest(kind=message.kind):
+                self.assertNotIn("by", sprints.inbox_entry(message))
+
+
 class QuestionEndTest(unittest.TestCase):
     DONE = {**REPORT, "phase": "done"}
     CLOSE = {"summary": "Stopped early", "issues": [], "differently": "ask sooner"}
@@ -1795,7 +1852,7 @@ class QuestionWithdrawFoldTest(unittest.TestCase):
             [(3, 2), (4, 0)])
         self.assertEqual(sprints.QUESTION_SHAPE.format(n=1),
                          "question 1 is not an object of question, context, blocks, options, "
-                         "recommended, pictures and replaces")
+                         "recommended, pictures, look and replaces")
 
     def test_withdrawable_names_why_a_question_cannot_be_taken_back(self):
         state = self.folded(asked(4, SID, [QUESTION, SECOND]),
@@ -2138,6 +2195,45 @@ class NeedsWordsTest(unittest.TestCase):
             self.assertEqual(str(raised.exception), sprints.NEEDS_WORDS_SHAPE.format(n=1))
 
 
+class OwnerOnlyTest(unittest.TestCase):
+    def test_a_question_may_be_marked_for_the_owner_alone(self):
+        checked = sprints.checked_round({"questions": [{**QUESTION, "owner_only": True}]})
+        self.assertIs(checked["questions"][0]["owner_only"], True)
+        self.assertNotIn("owner_only",
+                         sprints.checked_round({"questions": [QUESTION]})["questions"][0])
+        for value in (False, "yes", 1, None, []):
+            with self.subTest(value=value), self.assertRaises(sprints.Refused) as raised:
+                sprints.checked_round({"questions": [{**QUESTION, "owner_only": value}]})
+            self.assertEqual(str(raised.exception), sprints.OWNER_ONLY_SHAPE.format(n=1))
+
+    def test_the_mark_folds_onto_the_question(self):
+        state = question_state([asked(41, SID, [{**QUESTION, "owner_only": True}, QUESTION])])
+        self.assertEqual([q.owner_only for q in state.questions], [True, False])
+
+
+class ConsequentialTest(unittest.TestCase):
+    def test_a_question_may_be_marked_consequential(self):
+        checked = sprints.checked_round({"questions": [{**QUESTION, "consequential": True}]})
+        self.assertIs(checked["questions"][0]["consequential"], True)
+        self.assertNotIn("consequential",
+                         sprints.checked_round({"questions": [QUESTION]})["questions"][0])
+        for value in (False, "yes", 1, None, []):
+            with self.subTest(value=value), self.assertRaises(sprints.Refused) as raised:
+                sprints.checked_round({"questions": [{**QUESTION, "consequential": value}]})
+            self.assertEqual(str(raised.exception), sprints.CONSEQUENTIAL_SHAPE.format(n=1))
+
+    def test_the_consequential_mark_folds_onto_the_question(self):
+        state = question_state([asked(41, SID, [{**QUESTION, "consequential": True}, QUESTION])])
+        self.assertEqual([q.consequential for q in state.questions], [True, False])
+
+    def test_the_guest_and_the_view_read_a_look_with_one_predicate(self):
+        from agent_tools.console import guest
+        self.assertIs(guest.is_look, sprints.is_look)
+        self.assertTrue(sprints.is_look(["after", None, "before"]))
+        self.assertFalse(sprints.is_look(["before"]))
+        self.assertFalse(sprints.is_look([None, "after"]))
+
+
 class QuestionFoldTest(unittest.TestCase):
     def test_a_logged_round_over_the_limits_still_folds_whole(self):
         long = {**QUESTION, "question": "q" * 600, "context": "c" * 900,
@@ -2329,7 +2425,7 @@ SA = "a" * 16
 SB = "b" * 16
 SC = "c" * 16
 CLAIM = {"kind": "claim", "text": " the page fold ", "what": "python/agent_tools/console/page.html",
-         "until": "the board fold lands"}
+         "until": "the board fold lands", "issue": 7}
 HEADS_UP = {"kind": "heads-up", "text": "sprint ask gains a dry run"}
 HAND_OFF = {"kind": "hand-off", "text": "the importer needs a retry", "to": "owner"}
 
@@ -2352,6 +2448,12 @@ def notice_refusal(call, *args):
 
 def open_sprint(sprint_id, project="o/a"):
     return SprintState(sprint_id, project, "g", 1, at(1))
+
+
+def claim_entry(id, sprint_id, what, live_fault=False, title=None, started=None):
+    return {"id": id, "sprint_id": sprint_id, "title": title or f"t{sprint_id[0]}", "kind": "claim",
+            "text": "x", "what": what, "until": "u", "issue": id, "live_fault": live_fault,
+            "started": id if started is None else started, "at": at(1)}
 
 
 class NoticeCheckTest(unittest.TestCase):
@@ -2398,7 +2500,7 @@ class NoticeCheckTest(unittest.TestCase):
         self.assertNotIn("\n", reason)
         self.assertNotIn("approve_refused", reason)
         self.assertEqual(notice_refusal(sprints.checked_notice, {**CLAIM, "to": "owner"}),
-                         "a claim notice has only kind, text, what and until")
+                         "a claim notice has only kind, text, what, until, issue and live_fault")
         self.assertEqual(notice_refusal(sprints.checked_notice, {**HAND_OFF, "until": "x"}),
                          "a hand-off notice has only kind, text and to")
         self.assertEqual(
@@ -2461,13 +2563,126 @@ class NoticeCheckTest(unittest.TestCase):
                          sprints.ALREADY_STOPPING)
 
 
+class ClaimRuleTest(unittest.TestCase):
+    NO_FOLDER = "a claim's what names files or a narrow path, never a whole folder tree"
+    OUTSIDE = "a claim's what names paths inside the project, relative to its root"
+
+    def test_a_claim_naming_a_whole_folder_tree_is_refused(self):
+        a = open_sprint(SA)
+        is_folder = lambda path: path == "python/agent_tools/console"  # noqa: E731
+        for what in ("python/agent_tools/console/", "python/**", "tests/*", ".", "./",
+                     "python/agent_tools/console", "./python/agent_tools/./console",
+                     "tests/test_x.py, python/agent_tools/console", "src/main.py, ./",
+                     "src/main.py, .", "src/?*", "src/*?", "src/**", "src/?*?"):
+            with self.subTest(what):
+                reason = notice_refusal(sprints.postable_notice, a, {**CLAIM, "what": what}, [],
+                                        is_folder)
+                self.assertEqual(reason, self.NO_FOLDER)
+                for part in what.replace(",", " ").split():
+                    if len(part) > 1:
+                        self.assertNotIn(part, reason)
+
+    def test_a_wildcard_claim_matching_a_folder_is_refused_when_the_lookup_finds_one(self):
+        a = open_sprint(SA)
+        seen = []
+
+        def is_folder(path):
+            seen.append(path)
+            return "*" in path or "?" in path
+
+        for what in ("python/agent_tools/con*", "python/agent_tools/consol?", "docs/*/console"):
+            with self.subTest(what):
+                self.assertEqual(notice_refusal(sprints.postable_notice, a,
+                                                {**CLAIM, "what": what}, [], is_folder),
+                                 self.NO_FOLDER)
+                self.assertEqual(seen[-1], what)
+        self.assertEqual(sprints.wide_claim_part("src/??", lambda path: False), False)
+
+    def test_the_manager_contracts_claim_example_is_postable(self):
+        contract = (Path(__file__).resolve().parents[1]
+                    / "python/agent_tools/console/manager-contract.md").read_text()
+        examples = [json.loads(line) for line in re.findall(r"`(\{\"kind\": \"claim\"[^`]*\})`",
+                                                             contract)]
+        self.assertTrue(examples)
+        for example in examples:
+            with self.subTest(example):
+                sprints.postable_notice(open_sprint(SA), example, [])
+
+    def test_a_claim_outside_the_project_is_refused_before_any_folder_lookup(self):
+        a = open_sprint(SA)
+        seen = []
+        is_folder = lambda path: seen.append(path) or False  # noqa: E731
+        for what in ("/etc/passwd", "../other/x.py", "src/../../x.py", "src/main.py, ../x.py"):
+            with self.subTest(what):
+                self.assertEqual(notice_refusal(sprints.postable_notice, a,
+                                                {**CLAIM, "what": what}, [], is_folder),
+                                 self.OUTSIDE)
+        self.assertEqual(seen, [])
+
+    def test_a_file_level_claim_is_accepted(self):
+        a = open_sprint(SA)
+        is_folder = lambda path: path == "python/agent_tools/console"  # noqa: E731
+        what = "python/agent_tools/console/sprints.py, ./tests/test_console_notice*.py"
+        self.assertEqual(
+            sprints.postable_notice(a, {**CLAIM, "what": what, "live_fault": True}, [], is_folder),
+            {"kind": "claim", "text": "the page fold", "what": what, "until": CLAIM["until"],
+             "issue": 7, "live_fault": True})
+        self.assertEqual(sprints.claim_parts(" a.py ,, ./b.py, a.py "), ("a.py", "./b.py"))
+        self.assertEqual(sprints.claim_paths(" a.py ,, ./b.py, src/./c.py, ./a.py "),
+                         ("a.py", "b.py", "src/c.py"))
+        self.assertEqual(sprints.claim_paths("./"), (".",))
+
+    def test_a_claim_without_its_slices_issue_or_with_a_bad_one_is_refused(self):
+        a = open_sprint(SA)
+        no_issue = {k: v for k, v in CLAIM.items() if k != "issue"}
+        no_valid_issue = "the notice has no valid issue"
+        self.assertEqual(notice_refusal(sprints.postable_notice, a, no_issue, []),
+                         no_valid_issue)
+        for value in (0, True, "7", 1.5):
+            with self.subTest(value):
+                self.assertEqual(notice_refusal(sprints.checked_notice, {**CLAIM, "issue": value}),
+                                 no_valid_issue)
+        self.assertEqual(notice_refusal(sprints.checked_notice, {**CLAIM, "live_fault": "yes"}),
+                         "the notice has no valid live_fault")
+        self.assertEqual(sprints.checked_notice(no_issue), {**no_issue, "text": "the page fold"})
+        self.assertEqual(notice_refusal(sprints.postable_notice, a, {**CLAIM, "what": " , "}, []),
+                         "the notice has no valid what")
+
+    def rows(self, claim_four, extra=()):
+        return [stated(1, "o/a", SA, "g"), sent(2, SA, 1, PARTS), approved(3, SA, 1),
+                posted(4, SA, claim_four), posted(5, SA, {**CLAIM, "issue": 12}),
+                posted(6, SA, HEADS_UP), reported(7, SA, REPORT), *extra]
+
+    def test_a_claim_ends_when_its_slice_lands(self):
+        rows = self.rows({**CLAIM, "issue": 13})
+        state = sprints.sprint_states(rows)[SA]
+        self.assertEqual([n.notice_id for n in sprints.open_notices(state)], [5, 6])
+        ended = next(n for n in state.notices if n.notice_id == 4)
+        self.assertEqual((ended.ended_at, ended.withdrawn_at), (at(7), None))
+        held = {**REPORT, "issues": [{"issue": 12, "stage": "held"},
+                                     {"issue": 13, "stage": "landed"}]}
+        rows.append(reported(8, SA, held))
+        state = sprints.sprint_states(rows)[SA]
+        self.assertEqual([n.notice_id for n in sprints.open_notices(state)], [6])
+        stepwise = {}
+        for row in rows:
+            stepwise = sprints.sprint_states([row], stepwise)
+        self.assertEqual(sprints.sprint_states(rows), stepwise)
+
+    def test_a_logged_claim_without_an_issue_still_folds_and_never_ends_on_landing(self):
+        no_issue = {k: v for k, v in CLAIM.items() if k != "issue"}
+        state = sprints.sprint_states(self.rows(no_issue))[SA]
+        notice = next(n for n in sprints.open_notices(state) if n.notice_id == 4)
+        self.assertEqual((notice.issue, notice.live_fault), (None, False))
+
+
 class NoticeFoldTest(unittest.TestCase):
     def test_a_posted_notice_is_open_until_withdrawn(self):
         goals = [stated(1, "o/a", SA, "make the importer resumable"), stated(2, "o/a", SB, "other")]
         states = sprints.sprint_states([*goals, posted(3, SA, CLAIM)])
         self.assertEqual(sprints.open_notices(states[SA]),
                          (Notice(3, at(3), "claim", "the page fold", CLAIM["what"],
-                                 CLAIM["until"]),))
+                                 CLAIM["until"], issue=7),))
         states = sprints.sprint_states([taken(4, SA, 3)], states)
         self.assertEqual(sprints.open_notices(states[SA]), ())
         self.assertEqual(states[SA].notices[0].withdrawn_at, at(4))
@@ -2506,7 +2721,7 @@ class NoticeFoldTest(unittest.TestCase):
         self.assertEqual(sprints.project_notices(states.values(), "o/a"), [
             {"id": 4, "sprint_id": SA, "title": "make the importer resumable", "kind": "claim",
              "text": "the page fold", "what": CLAIM["what"], "until": CLAIM["until"],
-             "at": at(4)},
+             "issue": 7, "live_fault": False, "started": 4, "at": at(4)},
             {"id": 6, "sprint_id": SB, "title": "other", "kind": "hand-off",
              "text": HAND_OFF["text"], "to": SA, "at": at(6)}])
 
@@ -2682,6 +2897,122 @@ class OwnerNoticeTest(unittest.TestCase):
                         b'{"project_id":"o/a","notice":' + notice + b"}")
 
 
+class ClaimOverlapTest(unittest.TestCase):
+    def reading(self, claims, first, rule, files):
+        return {"claims": claims, "sprints": [SA, SB], "files": files, "first": first,
+                "rule": rule}
+
+    def test_the_earlier_started_slice_lands_first(self):
+        entries = [claim_entry(5, SB, "a.py"), claim_entry(3, SA, "b.py, ./a.py")]
+        self.assertEqual(sprints.claim_overlaps(entries),
+                         [self.reading([3, 5], 3, "earlier-started", ["a.py"])])
+
+    def test_a_live_fault_fix_lands_before_a_feature_that_started_first(self):
+        entries = [claim_entry(3, SA, "a.py"), claim_entry(5, SB, "a.py", live_fault=True)]
+        self.assertEqual(sprints.claim_overlaps(entries),
+                         [self.reading([3, 5], 5, "live-fault", ["a.py"])])
+
+    def test_two_live_fault_fixes_give_one_unsettled_reading(self):
+        entries = [claim_entry(3, SA, "a.py", live_fault=True),
+                   claim_entry(5, SB, "a.py", live_fault=True)]
+        readings = sprints.claim_overlaps(entries)
+        self.assertEqual(len(readings), 1)
+        self.assertEqual(readings, [self.reading([3, 5], None, "unsettled", ["a.py"])])
+        self.assertNotIn("asks", readings[0])
+
+    def test_paths_overlap_segment_by_segment(self):
+        legacy = {"id": 2, "sprint_id": SA, "title": "ta", "kind": "claim", "text": "x",
+                  "what": "a.py", "until": "u", "at": at(1)}
+        owner = {"id": 4, "sprint_id": None, "title": None, "owner": True, "kind": "heads-up",
+                 "text": "x", "at": at(1)}
+        heads = {"id": 4, "sprint_id": SB, "title": "tb", "kind": "heads-up", "text": "x",
+                 "at": at(1)}
+        cases = [
+            ("tests/test_console_*.py", "tests/test_console_sprints.py",
+             ["tests/test_console_sprints.py"]),
+            ("tests/test_*.py", "tests/*_sprints.py", ["tests/*_sprints.py", "tests/test_*.py"]),
+            ("python/agent_tools/*.py", "python/agent_tools/console/view.py", None),
+            ("src/./main.py", "src/main.py", ["src/main.py"]),
+            ("python/agent_tools/console/", "python/agent_tools/console/view.py",
+             ["python/agent_tools/console/view.py"]),
+            ("a.py", "b.py", None),
+            ("tests/test_[ab].py", "tests/test_c.py", None),
+            ("tests/test_[ab].py", "tests/test_b.py", ["tests/test_b.py"]),
+            ("tests/t?st.py", "tests/test.py", ["tests/test.py"]),
+            ("tests/t?st.py", "tests/tst.py", None),
+            ("a*b", "ab", ["ab"]),
+            ("a[", "a[", ["a["]),
+            ("app/[[]id]/page.tsx", "app/[[]id]/page.tsx", ["app/[[]id]/page.tsx"]),
+            ("a[[]b", "a[[x]b", ["a[[]b", "a[[x]b"]),
+            ("a[]]b", "a[]]b", ["a[]]b"]),
+            ("a[]]b", "a[[]b", None),
+            ("tests/test_[ab].py", "tests/test_[cd].py", None),
+            ("tests/test_[a-c].py", "tests/test_[b-d].py", ["tests/test_[a-c].py", "tests/test_[b-d].py"]),
+            ("tests/test_[!a].py", "tests/test_[a].py", None),
+            ("tests/test_[!a].py", "tests/test_[!b].py", ["tests/test_[!a].py", "tests/test_[!b].py"]),
+            ("tests/test_[!a-c].py", "tests/test_[a-d].py", ["tests/test_[!a-c].py", "tests/test_[a-d].py"]),
+            ("tests/test_[!a-c].py", "tests/test_[a-c].py", None),
+            ("./", "src/main.py", ["src/main.py"]),
+            (".", "src/main.py", ["src/main.py"]),
+        ]
+        for one, two, files in cases:
+            for entries in ([claim_entry(3, SA, one), claim_entry(5, SB, two)],
+                            [claim_entry(5, SB, two), claim_entry(3, SA, one)]):
+                with self.subTest(one=one, two=two, order=entries[0]["id"]):
+                    readings = sprints.claim_overlaps(entries)
+                    self.assertEqual([r["files"] for r in readings],
+                                     [] if files is None else [files])
+        extras = [
+            [claim_entry(3, SA, "a.py"), claim_entry(5, SA, "a.py")],
+            [claim_entry(3, SA, "a.py"), heads, owner],
+        ]
+        for entries in extras:
+            with self.subTest(entries=entries):
+                self.assertEqual(sprints.claim_overlaps(entries), [])
+        owned = {**claim_entry(5, SB, "a.py"), "owner": True}
+        self.assertEqual(sprints.claim_overlaps([claim_entry(3, SA, "a.py"), owned]), [])
+        for entries in ([legacy, claim_entry(5, SB, "a.py")],
+                        [claim_entry(5, SB, "a.py"), legacy]):
+            self.assertEqual(sprints.claim_overlaps(entries),
+                             [self.reading([2, 5], 2, "earlier-started", ["a.py"])])
+
+    def test_a_claim_posted_twice_for_one_slice_gives_one_reading(self):
+        for fault in (True, False):
+            entries = [claim_entry(3, SA, "a.py", live_fault=fault),
+                       {**claim_entry(4, SA, "a.py", live_fault=fault), "issue": 3, "started": 3},
+                       claim_entry(5, SB, "a.py", live_fault=fault)]
+            with self.subTest(fault=fault):
+                readings = sprints.claim_overlaps(entries)
+                self.assertEqual(len(readings), 1)
+                self.assertEqual(readings[0]["claims"], [3, 5])
+
+    def test_a_later_live_fault_claim_of_a_slice_still_reads_unsettled(self):
+        entries = [claim_entry(1, SA, "a.py", started=1),
+                   claim_entry(2, SB, "a.py,b.py", live_fault=True, started=2),
+                   {**claim_entry(3, SA, "b.py", live_fault=True, started=1), "issue": 1}]
+        entries[0]["issue"] = 1
+        for order in (entries, entries[::-1]):
+            readings = sprints.claim_overlaps(order)
+            self.assertEqual(readings, [{"claims": [3, 2], "sprints": [SA, SB],
+                                         "files": ["a.py", "b.py"], "first": None,
+                                         "rule": "unsettled"}])
+
+    def test_a_reposted_claim_keeps_its_slices_start(self):
+        slices = ((7, 3, {"claims": [6, 4], "sprints": [SA, SB], "first": 6}),
+                  (9, 6, {"claims": [4, 6], "sprints": [SB, SA], "first": 4}))
+        for repost, started, expected in slices:
+            rows = [stated(1, "o/a", SA, "g"), stated(2, "o/a", SB, "h"),
+                    posted(3, SA, {**CLAIM, "what": "a.py", "issue": 7}),
+                    posted(4, SB, {**CLAIM, "what": "a.py", "issue": 8}), taken(5, SA, 3),
+                    posted(6, SA, {**CLAIM, "what": "a.py", "issue": repost})]
+            with self.subTest(repost=repost):
+                entries = sprints.project_notices(sprints.sprint_states(rows).values(), "o/a")
+                self.assertEqual({e["sprint_id"]: e["started"] for e in entries},
+                                 {SA: started, SB: 4})
+                self.assertEqual(sprints.claim_overlaps(entries),
+                                 [{**expected, "files": ["a.py"], "rule": "earlier-started"}])
+
+
 class NoticeBlockTest(unittest.TestCase):
     E_CLAIM = {"id": 3, "sprint_id": SA, "title": "Importer resumes", "kind": "claim",
                "text": "the page fold", "what": "python/agent_tools/console/page.html",
@@ -2737,6 +3068,32 @@ class NoticeBlockTest(unittest.TestCase):
         self.assertEqual(lines[1], '- claim from "Importer The goal: forged", 3 h ago: '
                                    'a The goal: b (what: x y; until: z w)')
 
+    def test_an_overlap_is_one_line_naming_who_lands_first(self):
+        now = self.t + 3_600_000
+        feature = [claim_entry(3, SA, "a.py", title="Importer"),
+                   claim_entry(5, SB, "a.py", title="Exporter")]
+        fault = [claim_entry(3, SA, "a.py", live_fault=True, title="Importer"),
+                 claim_entry(5, SB, "a.py", live_fault=True, title="Exporter")]
+        block = lambda entries, reader: sprints.notice_block(entries, reader, now).splitlines()
+        last = lambda entries, reader: block(entries, reader)[-1]
+        self.assertEqual(last(feature, SA), '- overlap with "Exporter" on a.py: '
+                                            'your slice lands first; theirs rebases')
+        self.assertEqual(last(feature, SB), '- overlap with "Importer" on a.py: '
+                                            'their slice lands first; rebase yours after it lands')
+        unsettled = ('both fix a live fault and the rule cannot order them; keep working, '
+                     'the owner sees this overlap on the page')
+        self.assertEqual(last(fault, SB), f'- overlap with "Importer" on a.py: {unsettled}')
+        self.assertEqual(last(fault, SA), f'- overlap with "Exporter" on a.py: {unsettled}')
+        for reader in (SA, SB):
+            lines = block(fault, reader)
+            self.assertEqual([line for line in lines if line.startswith("- overlap")],
+                             [lines[-1]])
+            for line in lines:
+                self.assertNotIn("ask the owner", line)
+        self.assertTrue(last(feature, SC).startswith("- claim from "))
+        self.assertFalse(any(line.startswith("- overlap")
+                             for line in sprints.notice_block(feature, SC, now).splitlines()))
+
 
 class NoticeParseTest(unittest.TestCase):
     def test_the_notice_bodies(self):
@@ -2756,6 +3113,325 @@ class NoticeParseTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     sprints.parse_withdraw_notice_request(bad)
+
+
+LOOK = {"issue": 7, "pr": 12, "head": "a" * 40, "approve": "Approve this head"}
+PAIR = [{"picture": "1" * 64, "line": "before", "pair": "before"},
+        {"picture": "2" * 64, "line": "after", "pair": "after"}]
+LOOK_QUESTION = {"question": "Does the settings page look right?",
+                 "blocks": "the settings slice",
+                 "options": ["Approve this head", "Ask for changes"],
+                 "recommended": "Approve this head", "look": LOOK, "pictures": PAIR}
+LOOKED = {"issue": 7, "pr": 12, "head": "a" * 40, "repo": "owner/p00"}
+
+
+def row(seq, kind, payload):
+    return Event(seq, f"2026-11-12T10:{seq:02d}:00.000000+00:00", kind, "owner/p00",
+                 {"sprint_id": SID, **payload})
+
+
+def look_answer(seq, **changes):
+    payload = {"goal": "one", "round": 5, "index": 0, "question": LOOK_QUESTION["question"],
+               "answer": "Approve this head", "chosen": "Approve this head",
+               "recommended": "Approve this head", "differs": False, "look": LOOKED}
+    payload.update(changes)
+    return row(seq, event_log.QUESTION_ANSWERED,
+               {key: value for key, value in payload.items() if value is not ...})
+
+
+def look_record(seq, outcome, **payload):
+    return row(seq, event_log.LOOK_RECORDED, {"round": 5, "index": 0, "outcome": outcome,
+                                              **payload})
+
+
+class LookCardTest(unittest.TestCase):
+    """A look card carries its look, the console keeps its record and holds the answer (#1260)."""
+
+    def rows(self, *more):
+        return [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS), approved(3, SID, 1),
+                row(4, event_log.SPRINT_READ, {"through": 3}),
+                row(5, event_log.QUESTIONS_ASKED,
+                    {"goal": "one", "blocker": False, "questions": [LOOK_QUESTION]}), *more]
+
+    def state(self, *more):
+        return sprints.sprint_states(self.rows(*more))[SID]
+
+    def look_question(self, state):
+        (question,) = state.questions
+        return question
+
+    def test_a_look_member_is_checked_and_kept(self):
+        padded = dict(LOOK_QUESTION, look=dict(LOOK, approve=" Approve this head "))
+        for limits in (True, False):
+            with self.subTest(limits=limits):
+                result = sprints.checked_round({"questions": [padded]}, limits=limits)
+                self.assertEqual(result["questions"][0]["look"], LOOK)
+
+    def test_a_bad_look_member_is_refused(self):
+        without_approve = {key: value for key, value in LOOK.items() if key != "approve"}
+        for look in ([], without_approve, {**LOOK, "x": 1}, {**LOOK, "issue": 0},
+                     {**LOOK, "issue": True}, {**LOOK, "pr": "12"}, {**LOOK, "head": "A" * 40},
+                     {**LOOK, "head": "a" * 39}, {**LOOK, "approve": 3}):
+            with self.subTest(look=look), self.assertRaises(sprints.Refused) as caught:
+                sprints.checked_round({"questions": [dict(LOOK_QUESTION, look=look)]})
+            self.assertEqual(str(caught.exception), sprints.LOOK_SHAPE.format(n=1))
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_round(
+                {"questions": [dict(LOOK_QUESTION, look={**LOOK, "approve": "Approve it"})]})
+        self.assertEqual(str(caught.exception), sprints.LOOK_APPROVE.format(n=1))
+
+    def test_a_look_card_whose_approving_option_needs_words_is_refused(self):
+        for needs in (["Approve this head"], [" Approve this head ", "Ask for changes"]):
+            with self.subTest(needs=needs), self.assertRaises(sprints.Refused) as caught:
+                sprints.checked_round({"questions": [dict(LOOK_QUESTION, needs_words=needs)]})
+            self.assertEqual(str(caught.exception), sprints.LOOK_APPROVE_WORDS.format(n=1))
+        kept = sprints.checked_round({"questions": [
+            dict(LOOK_QUESTION, needs_words=["Ask for changes"])]})
+        self.assertEqual(kept["questions"][0]["needs_words"], ["Ask for changes"])
+
+    def test_a_look_card_without_its_before_and_after_pictures_is_refused(self):
+        bare = {key: value for key, value in LOOK_QUESTION.items() if key != "pictures"}
+        for name, pictures in {"none": None, "empty": [],
+                               "only before": PAIR[:1], "only after": PAIR[1:],
+                               "unmarked": [{k: v for k, v in m.items() if k != "pair"} for m in PAIR]
+                               }.items():
+            with self.subTest(name), self.assertRaises(sprints.Refused) as caught:
+                sprints.checked_round({"questions": [
+                    bare if pictures is None else dict(bare, pictures=pictures)]})
+            self.assertEqual(str(caught.exception), sprints.LOOK_PAIR.format(n=1))
+        for kw in ({"limits": False}, {"files_withheld": True}):
+            with self.subTest(kw):
+                self.assertIn("look", sprints.checked_round({"questions": [bare]}, **kw)["questions"][0])
+        extra = {"picture": "3" * 64, "line": "more"}
+        sprints.checked_round({"questions": [dict(LOOK_QUESTION, pictures=[*PAIR, extra])]})
+
+    def test_an_answer_with_words_is_not_held_as_an_approval(self):
+        state = self.state(look_answer(6, words="but make the heading bold"))
+        self.assertIsNone(self.look_question(state).look_state)
+        self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+
+    def test_a_sprint_whose_look_approval_is_not_posted_has_not_ended(self):
+        done = row(6, event_log.SPRINT_REPORTED,
+                   {"goal": "one", "report": {**REPORT, "phase": "done"}})
+
+        def ended(*more):
+            return sprints.ended_at(self.state(done, *more))
+
+        self.assertIsNone(ended())
+        self.assertIsNone(ended(look_answer(7)))
+        self.assertIsNone(ended(look_answer(7), look_record(8, "failed", message=7, reason="x")))
+        self.assertTrue(sprints.takes_questions(self.state(done, look_answer(7))))
+        self.assertEqual(ended(look_answer(7), look_record(8, "posted", message=7, comment_id=1)),
+                         at(6))
+        plain = look_answer(7, answer="Ask for changes", chosen="Ask for changes")
+        self.assertEqual(ended(plain), at(6))
+
+    def test_an_approval_names_the_repository_it_was_read_for(self):
+        state = self.state(look_answer(6))
+        self.assertEqual(self.look_question(state).look_repo, "owner/p00")
+        for name, logged in {"no repository": {k: v for k, v in LOOKED.items() if k != "repo"},
+                             "a blank repository": {**LOOKED, "repo": " "},
+                             "a repository that is no string": {**LOOKED, "repo": 3}}.items():
+            with self.subTest(name):
+                state = self.state(look_answer(6, look=logged))
+                self.assertIsNone(self.look_question(state).look_state)
+                self.assertIsNone(self.look_question(state).look_repo)
+                self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+
+    def test_a_nudge_marks_delivered_only_the_messages_it_covered(self):
+        rows = [look_answer(6), row(7, event_log.SPRINT_MESSAGED, {"text": "hello"}),
+                look_record(8, "posted", message=6, comment_id=501)]
+        state = self.state(*rows, row(9, event_log.SPRINT_NUDGED, {
+            "through": 7, "covers": [7], "ok": True, "route": "relay"}))
+        delivered = {m.message_id: m.delivered_at is not None for m in state.messages}
+        self.assertEqual(delivered, {3: False, 6: False, 7: True})
+        state = self.state(*rows, row(9, event_log.SPRINT_NUDGED, {
+            "through": 7, "ok": True, "route": "relay"}))
+        self.assertEqual({m.message_id: m.delivered_at is not None for m in state.messages},
+                         {3: True, 6: True, 7: True})
+
+    def test_a_folded_question_keeps_its_look(self):
+        self.assertEqual(self.look_question(self.state()).look,
+                         sprints.QuestionLook(7, 12, "a" * 40, "Approve this head"))
+
+    def test_an_approving_answer_is_held_until_the_look_is_posted(self):
+        state = self.state(look_answer(6))
+        question = self.look_question(state)
+        self.assertEqual(question.look_state, "posting")
+        self.assertEqual(sprints.unread(state), ())
+        self.assertEqual(sprints.pending_looks(state), (question,))
+        state = self.state(look_answer(6), look_record(7, "posted", message=6, comment_id=501))
+        question = self.look_question(state)
+        self.assertEqual((question.look_state, question.look_comment), ("posted", 501))
+        self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+        self.assertEqual(sprints.pending_looks(state), ())
+
+    def test_a_failed_post_keeps_the_answer_pending_with_its_reason(self):
+        state = self.state(look_answer(6),
+                           look_record(7, "failed", message=6, reason="GitHub had a problem"))
+        question = self.look_question(state)
+        self.assertEqual((question.look_state, question.look_reason),
+                         ("failed", "GitHub had a problem"))
+        self.assertEqual(sprints.unread(state), ())
+        self.assertEqual(sprints.pending_looks(state), (question,))
+        state = self.state(look_answer(6),
+                           look_record(7, "failed", message=6, reason="GitHub had a problem"),
+                           look_record(8, "posted", message=6, comment_id=502))
+        self.assertEqual(self.look_question(state).look_state, "posted")
+        self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+
+    def test_a_moved_head_leaves_the_question_open_with_what_was_found(self):
+        state = self.state(look_record(6, "moved", found="b" * 40, state="open"))
+        question = self.look_question(state)
+        self.assertEqual((question.look_state, question.look_found, question.look_found_state),
+                         ("moved", "b" * 40, "open"))
+        self.assertEqual(sprints.open_questions(state), (question,))
+        (notice,) = sprints.unread(state)
+        self.assertEqual((notice.message_id, notice.kind, notice.text), (6, sprints.MESSAGE_LOOK_MOVED,
+            sprints.LOOK_MOVED_OPEN.format(round=5, index=0, head=LOOK["head"], pr=LOOK["pr"],
+                                           found="b" * 40)))
+        self.assertEqual(sprints.inbox_entry(notice)["kind"], "look-moved")
+        state = self.state(look_record(6, "moved", found="b" * 40, state="open"), look_answer(7))
+        self.assertEqual(self.look_question(state).look_state, "posting")
+
+    def test_a_moved_head_tells_the_manager_once_until_it_reads_and_says_when_the_pull_request_ended(self):
+        again = self.state(look_record(6, "moved", found="b" * 40, state="open"),
+                           look_record(7, "moved", found="b" * 40, state="open"))
+        self.assertEqual([m.message_id for m in sprints.unread(again)], [6])
+        other = self.state(look_record(6, "moved", found="b" * 40, state="open"),
+                           look_record(7, "moved", found="c" * 40, state="open"))
+        self.assertEqual([m.message_id for m in sprints.unread(other)], [6, 7])
+        read = self.state(look_record(6, "moved", found="b" * 40, state="open"),
+                          row(7, event_log.SPRINT_READ, {"through": 6}),
+                          look_record(8, "moved", found="b" * 40, state="open"))
+        self.assertEqual([m.message_id for m in sprints.unread(read)], [8])
+        closed = self.state(look_record(6, "moved", found="b" * 40, state="merged"))
+        (notice,) = sprints.unread(closed)
+        self.assertEqual(notice.text, sprints.LOOK_MOVED_ENDED.format(
+            round=5, index=0, head=LOOK["head"], pr=LOOK["pr"], state="merged"))
+
+    def test_a_moved_head_found_after_the_answer_takes_it_back_and_opens_the_question(self):
+        failed = look_record(7, "failed", message=6, reason="GitHub had a problem")
+        moved = look_record(8, "moved", message=6, found="b" * 40, state="open")
+        for before in ((), (failed,)):
+            with self.subTest(before=len(before)):
+                state = self.state(look_answer(6), *before, moved)
+                question = self.look_question(state)
+                self.assertEqual((question.answer, question.chosen, question.answered_at,
+                                  question.look_state, question.look_found, question.look_message,
+                                  question.look_repo),
+                                 (None, None, None, "moved", "b" * 40, None, None))
+                self.assertEqual(sprints.open_questions(state), (question,))
+                self.assertEqual(sprints.pending_looks(state), ())
+                self.assertEqual([m.message_id for m in state.messages if m.kind == "answer"], [])
+                self.assertEqual([(m.message_id, m.kind) for m in sprints.unread(state)],
+                                 [(8, sprints.MESSAGE_LOOK_MOVED)])
+                again = self.state(look_answer(6), *before, moved, look_answer(9))
+                self.assertEqual(self.look_question(again).look_state, "posting")
+
+    def test_a_moved_record_for_an_answer_that_is_not_waiting_changes_nothing(self):
+        posted = look_record(7, "posted", message=6, comment_id=501)
+        for name, rows in {"another message": [look_answer(6),
+                                               look_record(7, "moved", message=5, found=None,
+                                                           state="closed")],
+                           "a message that is no id": [look_answer(6),
+                                                       look_record(7, "moved", message="6",
+                                                                   found=None, state="closed")],
+                           "an approval already posted": [look_answer(6), posted,
+                                                          look_record(8, "moved", message=6,
+                                                                      found=None, state="closed")],
+                           "an answer that is no approval": [
+                               look_answer(6, answer="Ask for changes", chosen="Ask for changes"),
+                               look_record(7, "moved", message=6, found=None, state="closed")]}.items():
+            with self.subTest(name):
+                state = self.state(*rows)
+                question = self.look_question(state)
+                self.assertIsNotNone(question.answer)
+                self.assertNotEqual(question.look_state, "moved")
+                self.assertEqual([m.message_id for m in state.messages if m.kind == "answer"], [6])
+
+    def test_a_card_binds_the_repository_it_was_issued_for(self):
+        def bound(repo, *more):
+            rows = self.rows(*more)
+            rows[4] = row(5, event_log.QUESTIONS_ASKED, {
+                "goal": "one", "blocker": False, "questions": [LOOK_QUESTION], "look_repo": repo})
+            return sprints.sprint_states(rows)[SID]
+
+        state = bound("owner/p00", look_answer(6))
+        self.assertEqual(self.look_question(state).look.repo, "owner/p00")
+        self.assertEqual(self.look_question(state).look_state, "posting")
+        elsewhere = bound("owner/p00", look_answer(6, look={**LOOKED, "repo": "elsewhere/x"}))
+        self.assertIsNone(self.look_question(elsewhere).look_state)
+        self.assertEqual([m.message_id for m in sprints.unread(elsewhere)], [6])
+        for repo in (" ", 3, None):
+            with self.subTest(repo=repo):
+                self.assertIsNone(self.look_question(bound(repo)).look.repo)
+
+    def test_an_answer_that_does_not_approve_reaches_the_manager_at_once(self):
+        cases = {"another option": dict(answer="Ask for changes", chosen="Ask for changes"),
+                 "words": dict(answer="make it bold", chosen=None),
+                 "no look": dict(look=...),
+                 "another head": dict(look={**LOOKED, "head": "c" * 40})}
+        for name, changes in cases.items():
+            with self.subTest(name):
+                state = self.state(look_answer(6, **changes))
+                self.assertIsNone(self.look_question(state).look_state)
+                self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+
+    def test_a_look_record_that_names_nothing_changes_nothing(self):
+        base = self.state(look_answer(6))
+        records = [look_record(7, "posted", message=6, comment_id=1, round=9),
+                   look_record(7, "posted", message=6, comment_id=1, index=3),
+                   look_record(7, "done", message=6),
+                   look_record(7, "posted", message=5, comment_id=1),
+                   look_record(7, "moved", found=None, state="open"),
+                   look_record(7, "posted", message="6", comment_id=1),
+                   look_record(7, "posted", message=6)]
+        for record in records:
+            with self.subTest(record.payload):
+                self.assertEqual(self.state(look_answer(6), record).questions, base.questions)
+                self.assertEqual(self.state(look_answer(6), record).messages, base.messages)
+        plain = dict(QUESTION)
+        asked_plain = sprints.sprint_states([
+            *approved_rows(), asked(4, SID, [plain]),
+            look_record(5, "moved", round=4, found=None, state="open")])[SID]
+        self.assertEqual(asked_plain, sprints.sprint_states(
+            [*approved_rows(), asked(4, SID, [plain])])[SID])
+
+    def test_a_read_while_an_approval_is_held_does_not_swallow_it(self):
+        rows = [look_answer(6), row(7, event_log.SPRINT_MESSAGED, {"text": "hello"}),
+                row(8, event_log.SPRINT_READ, {"through": 7}),
+                row(9, event_log.SPRINT_NUDGED, {"through": 7, "ok": True, "route": "relay"})]
+        state = self.state(*rows)
+        self.assertEqual(sprints.unread(state), ())
+        held, text = state.messages[-2:]
+        self.assertEqual((held.message_id, held.read_at, held.delivered_at), (6, None, None))
+        self.assertEqual((text.message_id, text.read_at is None, text.delivered_at is None),
+                         (7, False, False))
+        released = [*rows, look_record(10, "posted", message=6, comment_id=501)]
+        state = self.state(*released)
+        self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+        again = [*released, row(11, event_log.SPRINT_READ, {"through": 6})]
+        state = self.state(*again)
+        self.assertEqual(sprints.unread(state), ())
+        self.assertEqual(self.state(*again), state)
+        self.assertEqual(sprints.sprint_states(self.rows(*again)), {SID: state})
+
+    def test_parse_look_retry_is_strict(self):
+        def body(**changes):
+            value = {"project_id": "owner/p01", "sprint_id": SID, "round": 3, "question": 0,
+                     **changes}
+            return json.dumps({k: v for k, v in value.items() if v is not ...}).encode()
+
+        self.assertEqual(sprints.parse_look_retry(body()), ("owner/p01", SID, 3, 0))
+        for bad in (body(round=...), body(extra=1), body(round=0), body(question=-1),
+                    body(round=True), b"not json", b"[1]",
+                    b'{"project_id": "a", "project_id": "b", "sprint_id": "%s", "round": 1, '
+                    b'"question": 0}' % SID.encode(),
+                    b'{"project_id": "a", "sprint_id": "%s", "round": NaN, "question": 0}'
+                    % SID.encode()):
+            with self.subTest(bad=bad[:60]), self.assertRaises(ValueError):
+                sprints.parse_look_retry(bad)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,19 @@ profile used most recently (as an instant; a never-used one ranks below every us
 the smallest name) answers; with none signed in, None (P2). The entries are the accounts only (the
 service lists the named profiles, #1016), so the unprofiled client directory is never chosen. A
 name in `last_use` that is not an entry is ignored.
+A colleague's account (#1344, ADR-console-087 D1; an entry whose `owner` is the login that added it,
+which `capacity_view` carries) serves his own sprints first and anyone's when it has room.
+`starter` is the login that started the sprint (None for the owner's) and `waiting` the logins that
+have a sprint waiting for a profile. After the pin, which outranks both, an account is dropped from
+the room rule, the fallback below and `choose_profile`'s all-out wait while any login that owns a
+profile on it is in `waiting` and is not `starter` (ownership is read across every profile on the
+account, so an alias of a colleague's profile is his too); among the rest, the accounts `starter`
+owns that have room answer for him (by the rule above), and otherwise every account with room is a
+candidate. The no-room fallback names only an account no colleague owns or one `starter` owns: a
+colleague's account without a confirmed room reading is never another starter's. `choose_profile`
+waits (`Wait` of the earliest `out_until`) when every remaining signed-in account reads out, even
+when a kept account has room. `colleague_account(capacity, profile)` says whether the account is a
+colleague's. The owner's own accounts have no `owner` and are chosen as before.
 Last use is folded from the log's session rows by `profile_use(events, use)` (a new `ProfileUse`
 of `last`, profile to the `at` of its latest `session.seen`, `session.hook` or `session.profile`
 row, and `owner`, live session id to profile) and outlives the session: a `session.gone` row only
@@ -32,12 +45,17 @@ drops the owner (P3). `write_choice(path, profile)` writes `<name>\n` atomically
 `CHOICE_FILE` names (`chosen-profile`) and removes the file for None; `read_choice(path)` reads it
 back, None for a missing, empty or unreadable file.
 
-Command (Linux only; `launch_command` is None elsewhere and `launcher_for` gives None). The
-manager runs in its own transient systemd scope and in the background, so it outlives the console
-unit and a restart of it does not end it:
+Command (Linux and macOS; `launch_command` is None on any other host and `launcher_for` gives None).
+On Linux the manager runs in its own transient systemd scope and in the background, so it outlives
+the console unit and a restart of it does not end it:
 
     systemd-run --user --scope --quiet --collect --description=agent manager <name> --
         claude-account run --bg --name <name> --settings <file> "<prompt>"
+
+On macOS the command is the client argv alone, `claude-account run --bg --name <name> --settings
+<file> "<prompt>"`: `run_launch` starts it with `start_new_session`, so it is in its own session
+and outside the console job's process group, and the console's launchd job sets
+`AbandonProcessGroup`, so the job's group cleanup does not touch it (ADR-console-075).
 
 The name is `<project> sprint <sprint id>`. The prompt is one argv element, `PROMPT_LEAD` (`You
 are the manager of one sprint, started by the console. Run "sprint contract" first and follow
@@ -69,24 +87,29 @@ so `auto`. `settings_document(env, permission)` is that content and `write_setti
 permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a
 stopped or removed session (`service._refresh_settings`).
 
-Runner. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
+Runner. On macOS `run_launch` runs it with `run_in_own_group`, so a launch that times out ends the
+wrapper and the client it waits for together, not the wrapper alone. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
 device, stderr to a temporary file, never a pipe, so a detached child that keeps the descriptors
 open cannot hold the launch), in its own session, in the project root, within `LAUNCH_TIMEOUT`
 seconds. The client's environment (`client_environment(profile, environ)`, shared with the nudge
 commands) is the console's without `CLAUDE_CONFIG_DIR`, `CONSOLE_SPRINT_ID`
 and `CONSOLE_SPRINT_SECRET`, plus `CLAUDE_ACCOUNT=<profile>` and `$HOME/.agents/bin` first on
 `PATH` (where `sprint` and `resolve-project` are installed). `LAUNCH_TOOLS` names every program the
-launch runs by name on `PATH`.
+Linux launch runs by name on `PATH`; `launch_tools(platform)` is that tuple on Linux, without
+`systemd-run` on macOS and empty elsewhere.
 
 Failures are `LaunchFailed` with a one-line reason, the secret shown as `<secret>`: the host is
-not Linux (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
+neither Linux nor macOS (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
 manager's settings: <reason>`, `<program> is not installed`, `the launch did not return within
 <n> s`, the last non-empty stderr line of a launch that failed, or `the launch exited <n>`.
 The view never shows a reason as given: `plain_reason` maps it to one of `PLAIN_TEXTS` (a table of
 substrings, in order, first hit wins), while the `manager.failed` row and the `console:
 manager_failed` stderr line keep it as given.
 
-Stopping. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
+Stopping. A stop command runs with `run_stop` (`run_in_own_group` in its own session, registered), and
+`reap_stops()`, which the console calls as it closes, kills every one still in flight, so a hung stop
+does not outlive a console restart whose launchd job leaves process groups alone (ADR-console-075);
+managers are not touched. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
 session (ADR-console-018), so a check that states a real goal still stops its test manager first and
 the withdrawal's own stop finds nothing listed (ADR-console-016).
 `stop_session(session_id, profile)` runs `claude-account run stop <short id>` under the session's own
@@ -98,7 +121,7 @@ within <n> s`, the last non-empty stderr line, or `the stop exited <n>`. `stop_l
 registry, stop)` reads `registry()` fresh and calls `stop(session_id, profile)` for each listed
 session whose name is in `names` (profile `default` when the record has none), attempts every one
 even after a failure, then raises the first `StopFailed`; a name not listed needs no stop.
-`stopper_for(platform)` is `stop_session` where `supported(platform)`, else None: the owner's stop
+`stopper_for(platform)` is `stop_session` where `supported(platform)` (Linux and macOS), else None: the owner's stop
 of a sprint (#892) uses it through the console service.
 `remove_session(session_id, profile)` runs `claude-account run rm <short id>` under the session's
 own profile within `REMOVE_TIMEOUT` seconds, and its failures are `RemoveFailed` (a `StopFailed`)
@@ -134,7 +157,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -167,7 +190,7 @@ LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 OUT_OF_TIME_TEXT = "this run has no time left for the next stop or removal"
 REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
            "another way that needs no permission, or bring the choice to the owner with "
-           "`sprint ask`.")
+           "`sprint ask`, marking the question `owner_only`.")
 
 UNAVAILABLE_TEXT = "managers are not available on this host yet"
 FAILED_TEXT = "could not start a manager"
@@ -279,10 +302,17 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
         seen_after=seen_after, permission=permission)
 
 
-def choose_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | Wait:
+def choose_profile(capacity: Mapping, last_use: Mapping[str, str], starter: str | None = None,
+                   waiting: Collection[str] = frozenset()) -> str | Wait:
     if capacity["all_out"]:
         return Wait(capacity["resumes_at"])
-    chosen = session_profile(capacity, last_use)
+    eligible, _ = _eligible(capacity, starter, waiting)
+    considered = [entry for entry in eligible if _signin(entry) != "signed_out"]
+    if (considered and all(entry["state"] == "out" for entry in considered)
+            and not any(entry.get("pinned") and has_room(entry) for entry in capacity["profiles"])):
+        until = [entry["out_until"] for entry in considered if entry["out_until"] is not None]
+        return Wait(min(until) if until else None)
+    chosen = session_profile(capacity, last_use, starter, waiting)
     return Wait(None) if chosen is None else chosen
 
 
@@ -338,20 +368,56 @@ def has_room(entry: Mapping) -> bool:
             and not entry.get("excluded"))
 
 
-def session_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | None:
-    entries = [entry for entry in capacity["profiles"]
-               if not (entry.get("excluded") or entry.get("duplicate_of"))]
-    for entry in entries:
+def _account_owners(entry: Mapping, by_name: Mapping[str, Mapping]) -> frozenset[str]:
+    """The logins that own any profile on the entry's account (#1344): its own and its aliases'."""
+    names = [entry["profile"], *entry.get("same_account_as", ())]
+    return frozenset(owner for name in names
+                     if (owner := (by_name.get(name) or {}).get("owner")) is not None)
+
+
+def _eligible(capacity: Mapping, starter: str | None, waiting: Collection[str]
+              ) -> tuple[list[Mapping], Mapping[str, frozenset[str]]]:
+    """The entries not excluded, not a duplicate and not kept for another login, with each one's owners.
+
+    An account is a colleague's when any profile on it is (`_account_owners`); it is kept for
+    `waiting` logins other than `starter`.
+    """
+    by_name = {entry["profile"]: entry for entry in capacity["profiles"]}
+    live = [entry for entry in capacity["profiles"]
+            if not (entry.get("excluded") or entry.get("duplicate_of"))]
+    owners = {entry["profile"]: _account_owners(entry, by_name) for entry in live}
+    kept = [entry for entry in live
+            if not any(login in waiting and login != starter for login in owners[entry["profile"]])]
+    return kept, owners
+
+
+def colleague_account(capacity: Mapping, profile: str) -> bool:
+    """Whether `profile`'s account is a colleague's (#1344): any profile on it has an owner."""
+    by_name = {entry["profile"]: entry for entry in capacity["profiles"]}
+    entry = by_name.get(profile)
+    return entry is not None and bool(_account_owners(entry, by_name))
+
+
+def session_profile(capacity: Mapping, last_use: Mapping[str, str], starter: str | None = None,
+                    waiting: Collection[str] = frozenset()) -> str | None:
+    live = [entry for entry in capacity["profiles"]
+            if not (entry.get("excluded") or entry.get("duplicate_of"))]
+    for entry in live:
         if entry.get("pinned") and has_room(entry):
             return entry["profile"]
+    entries, owners = _eligible(capacity, starter, waiting)
     room = [entry for entry in entries if has_room(entry)]
     if room:
+        own = [entry for entry in room
+               if starter is not None and starter in owners[entry["profile"]]]
+        room = own or room
         def key(entry):
             return (entry["week_left"] if entry["week_left"] is not None else -1,
                     entry["five_hour_left"] if entry["five_hour_left"] is not None else -1)
         best = max(key(entry) for entry in room)
         return min(entry["profile"] for entry in room if key(entry) == best)
-    signed_in = [entry["profile"] for entry in entries if _signin(entry) == "signed_in"]
+    signed_in = [entry["profile"] for entry in entries if _signin(entry) == "signed_in"
+                 and (not owners[entry["profile"]] or starter in owners[entry["profile"]])]
     if signed_in:
         def rank(name):
             instant = _instant(last_use.get(name))
@@ -398,16 +464,26 @@ def quota_wait(capacity: Mapping, profile: str | None) -> Wait | None:
 
 
 def supported(platform: str) -> bool:
-    return platform.startswith("linux")
+    return platform.startswith("linux") or platform == "darwin"
+
+
+def launch_tools(platform: str) -> tuple[str, ...]:
+    if platform.startswith("linux"):
+        return LAUNCH_TOOLS
+    if platform == "darwin":
+        return tuple(tool for tool in LAUNCH_TOOLS if tool != "systemd-run")
+    return ()
 
 
 def launch_command(launch: Launch, platform: str) -> list[str] | None:
     if not supported(platform):
         return None
+    client = ["claude-account", "run", "--bg", "--name", launch.session_name,
+              "--settings", str(launch.settings), launch.prompt]
+    if not platform.startswith("linux"):
+        return client
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
-            f"--description=agent manager {launch.session_name}", "--",
-            "claude-account", "run", "--bg", "--name", launch.session_name,
-            "--settings", str(launch.settings), launch.prompt]
+            f"--description=agent manager {launch.session_name}", "--", *client]
 
 
 def stopper_for(platform: str) -> Callable[[str, str], None] | None:
@@ -504,7 +580,46 @@ def _kill_group(process: subprocess.Popen) -> None:
     process.wait()
 
 
-def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.run,
+_STOPS_LOCK = threading.Lock()
+_STOPS: set[threading.Event] = set()
+
+
+def run_stop(argv: list[str], *, timeout: float, check: bool = False, **kwargs) -> subprocess.CompletedProcess:
+    """`run_in_own_group` for a stop command, registered so `reap_stops` can end it.
+
+    A stop in the console's own process group would survive the console on macOS, where the
+    console's launchd job sets `AbandonProcessGroup` for the sake of its managers, and no timeout
+    would be left to end it; in its own group it is one the console can find and kill.
+    """
+    cancel = threading.Event()
+    with _STOPS_LOCK:
+        _STOPS.add(cancel)
+    try:
+        return run_in_own_group(argv, timeout=timeout, check=check, cancel=cancel,
+                                start_new_session=True, **kwargs)
+    finally:
+        with _STOPS_LOCK:
+            _STOPS.discard(cancel)
+
+
+def reap_stops(wait: float = 2.0) -> None:
+    """End every stop command in flight (its whole group), waiting up to `wait` seconds for each to be reaped.
+
+    The console calls it as it closes; the managers themselves are not touched.
+    """
+    with _STOPS_LOCK:
+        pending = set(_STOPS)
+    for cancel in pending:
+        cancel.set()
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        with _STOPS_LOCK:
+            if not pending & _STOPS:
+                return
+        time.sleep(0.02)
+
+
+def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
                environ: Mapping[str, str] = os.environ) -> None:
     secret = launch.env[SECRET_ENV]
 
@@ -521,6 +636,10 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.r
     except LaunchFailed as error:
         raise fail(str(error)) from error
     env = client_environment(launch.profile, environ)
+    if run is None:
+        # On macOS the account wrapper waits for its client; a timeout must end that whole group,
+        # or the client could still start a manager after the failure is recorded.
+        run = run_in_own_group if platform == "darwin" else subprocess.run
     with tempfile.TemporaryFile() as err:
         try:
             result = run(argv, cwd=launch.cwd, env=env, stdin=subprocess.DEVNULL,
@@ -541,7 +660,7 @@ def short_id(session_id: str) -> str:
     return session_id[:SHORT_ID_LENGTH]
 
 
-def stop_session(session_id: str, profile: str, *, run=subprocess.run,
+def stop_session(session_id: str, profile: str, *, run=run_stop,
                  environ: Mapping[str, str] = os.environ) -> None:
     argv = ["claude-account", "run", "stop", short_id(session_id)]
     with tempfile.TemporaryFile() as err:

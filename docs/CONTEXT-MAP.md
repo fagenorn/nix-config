@@ -19,6 +19,7 @@
 | Term | Area |
 |---|---|
 | Account binding | Hosts |
+| Account label | Console |
 | Account profile | Hosts |
 | Accounts panel | Console |
 | Activation line | Console |
@@ -106,6 +107,7 @@
 | Release profile | Release |
 | Removal | Project contract |
 | Report | Console |
+| Retired host | Verification |
 | ResolvedProject | Project contract |
 | Row check | Guard |
 | Session | Console |

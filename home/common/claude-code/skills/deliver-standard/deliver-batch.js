@@ -44,8 +44,12 @@ export const meta = {
 // holder and the child's cont (slimmed), the claim held and the row left stopped. The owner decides the approach and relaunches with that
 // cont in conts and the decision: the cont keeps the marker, the child's first fix wave and its re-review get the decision as binding,
 // and a relaunch that brings none stops in the child before any agent and is this owner action again. A stop also marked diverging is the not-converging row below instead.
+// #1370: so is a fix-wave-review stop that carries round_cap ({rounds, findings}: the delivery's review rounds, one full and two scoped, left findings open):
+// reported with reason round-cap, the rounds, the findings left open (bounded), the claim holder and the child's cont (slimmed), the claim held and the row
+// left stopped. The owner decides, then relaunches with that cont in conts and a decision or amend; a relaunch that brings neither stops in the child before
+// any agent and is this owner action again. A stop also marked oscillating is the fix-oscillating action instead, and one marked diverging the not-converging row.
 // #1139: an issue marked as needing the owner's look (its facts carry look {verdict}, read by look-approval marked) is never landed by the batch: its ready
-// child (look {verdict, covers}) is resumed once in mode ship with the ready cont, inside the same slot, and stops at awaiting-look. That row is
+// child (look {verdict, covers}) is resumed once in mode ship with the ready cont, after its slot is released (#1373: that resume waits for the pull request's checks, as a landing waits outside the slot), and stops at awaiting-look. That row is
 // {issue, outcome: awaiting-look, pr, head, reason}; it is reported in owner_actions with reason awaiting-look, the pr, the head, the pictures when
 // the child made any, the claim holder and the child's cont (slimmed), the claim held, and it is not relaunched: the owner's answer resumes it through
 // deliver-standard with that cont and this batch id. A re-adopted PR lands as it stands only when its facts read look unmarked; marked, or a marker
@@ -175,13 +179,14 @@ const SETUP_SCHEMA = {
     host: { type: 'string' }, slug: { type: 'string' }, integration_branch: { type: 'string' }, default_branch: { type: 'string' },
     merge_strategy: { type: 'string' }, delete_branch: { type: 'boolean' }, unset_env: STRS,
     max_parallel: { type: 'integer' }, required_checks: { anyOf: [STRS, { type: 'null' }] },
+    guards: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' } }, required: ['id', 'argv', 'cwd'] } },
     issues: { type: 'array', items: { type: 'integer' } },
   },
   required: ['ok'],
 }
 const setup = await agent(`You read the project contract of the git repository at ${REPO} for a batch delivery. Change nothing in this step.
 1. Run hostname -s and return it as host.
-2. Run resolve-project resolve --repo-root ${REPO}. If it refuses, return ok=false with the resolver's error.code, its repair_id and its ordered violations exactly as given. Otherwise return ok=true and these fields from the resolved snapshot: slug (bindings.tracker.repo_slug), unset_env (bindings.tracker.credential_env.unset_before_invocation), integration_branch and default_branch (bindings.vcs.integration_branch and bindings.vcs.default_branch), merge_strategy and delete_branch (bindings.vcs.merge.strategy and bindings.vcs.merge.delete_branch), max_parallel (bindings.workflow.orchestration.max_parallel), required_checks (bindings.vcs.merge.required_checks exactly as resolved, null when the contract declares none).
+2. Run resolve-project resolve --repo-root ${REPO}. If it refuses, return ok=false with the resolver's error.code, its repair_id and its ordered violations exactly as given. Otherwise return ok=true and these fields from the resolved snapshot: slug (bindings.tracker.repo_slug), unset_env (bindings.tracker.credential_env.unset_before_invocation), integration_branch and default_branch (bindings.vcs.integration_branch and bindings.vcs.default_branch), merge_strategy and delete_branch (bindings.vcs.merge.strategy and bindings.vcs.merge.delete_branch), max_parallel (bindings.workflow.orchestration.max_parallel), required_checks (bindings.vcs.merge.required_checks exactly as resolved, null when the contract declares none), guards (for each id in bindings.workflow.verification whose bindings.workflow.verification_conditions entry has pre_commit true: {id, argv: its bindings.commands argv, cwd: its cwd relative to project.root, . for the root}; [] when none).
 ${HAS_LABEL ? `3. Return issues: the numbers from gh issue list --repo <slug> --label ${args.label} --state open --json number --limit 500, run after unsetting exactly the names in bindings.tracker.credential_env.unset_before_invocation (prefix it with unset <those names> && when there are any, nothing else chained).` : '3. Do not list issues.'}
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: SETUP_SCHEMA })
 if (setup === null || setup === undefined) return { stage: 'setup', result: null }
@@ -198,6 +203,10 @@ const RC = setup.required_checks
 if (RC === undefined || (RC !== null && !(Array.isArray(RC) && RC.length && RC.every(nonEmpty) && new Set(RC).size === RC.length))) {
   return { stage: 'setup', result: setup, invalid: 'required_checks' }
 }
+// #1371: the declared cheap guards a landing fix runs before its commit is pushed; returned as a list, [] when the contract declares none, each with its argv and cwd.
+const GUARD_OK = e => !!e && typeof e === 'object' && !Array.isArray(e) && nonEmpty(e.id) && Array.isArray(e.argv) && e.argv.length > 0 && e.argv.every(nonEmpty) && nonEmpty(e.cwd)
+if (!Array.isArray(setup.guards) || !setup.guards.every(GUARD_OK)) return { stage: 'setup', result: setup, invalid: 'guards' }
+const GUARDS = setup.guards.map(e => ({ id: e.id, argv: e.argv, cwd: e.cwd }))
 const SETUP = setup
 const DECLARED = SETUP.required_checks || []
 const HOLDER = `${SETUP.host}/${BATCH}`
@@ -566,6 +575,7 @@ const enqueue = (branch, fn) => {
 }
 const LAND_OA = [] // owner-actions the landings posted
 const OSCILLATING = {} // #1000: by issue, what a fix-oscillating owner action carries
+const ROUND_CAPPED = {} // #1370: by issue, what a round-cap owner action carries
 const DIVERGING = {} // #940: by issue, what a not-converging row's owner action carries for whoever takes the work over
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
 // #992: incomplete is the verdict of a review that could not finish; readReview() in land() reads every reply of this schema.
@@ -590,6 +600,10 @@ const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { 
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 // #787: the same text as WHOLE in deliver-standard.js.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
+// #1371: the same text in deliver-standard.js; the push_tests payload is what a test reads, the sentence around it is for the agent.
+const PUSH_TESTS = (guards, onFailure = 'fix-and-rerun') => `If you made a commit, then before pushing, run in full every test file among or covering the files you changed (never a single test class), the test files of their direct callers and checkers, and the declared cheap guards (with none declared, any fast suite the project declares), not the declared verification, as this payload lists them: ${JSON.stringify({ push_tests: { when: 'committed', scopes: ['touched', 'callers', 'guards'], guards, on_failure: onFailure, report: 'tests' } })}. touched: every test file among or covering the files you changed; callers: for each function, constant, option, command or file name the commit changed, added or removed, git grep the tree and take the test files of every file that uses or checks it; guards: each entry's argv, run with <worktree>/<its cwd> as working directory. on_failure fix-and-rerun: fix a run that fails and run it again; report: change nothing and return status blocked with the failing command in notes; either way a failing or unrun commit is never pushed. Then return tests: each command and its result, one entry per command; a commit whose report records no test command is refused`
+const tested = f => !!f && Array.isArray(f.tests) && f.tests.some(t => typeof t === 'string' && t.trim() !== '')
+const UNTESTED = 'the fix report records no test command, so its commit is not pushed'
 // #941: what the resolution of a conflicted sync merge tests, the same text in deliver-standard.js: the files it resolved, not everything the merge brought in.
 const RESOLVE_SCOPE = 'the checks of the pull request cover everything else the merge brought in, so run no test for a file that merged cleanly'
 // The fix-commit scope, one line so deliver-standard.js carries it byte for byte: a fix agent once committed a lock file a tool had generated beside its fix.
@@ -779,8 +793,23 @@ const EMPTY_HEAD_WAIT = () => ` While no check is reported on head, do not answe
 const MERGE_REFUSED = 'Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base, else false.'
 // The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
 const MERGE_CMD = (pr, sha) => `${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${sha}${SETUP.delete_branch ? ' --delete-branch' : ''}`
+// #1371: a fix commit a landing made and has not pushed, or whose review or tests did not pass, stays in the worktree and is carried in the issue's cont as
+// untested: { stage, start_head, head } (the range deliver-standard.js retests and reviews on a relaunch, whose first retest is from the head the landing knew, never the start_head the reply names).
+// A range already pending keeps its start. Only an issue that holds a cont can carry it.
+const holdFix = (n, stage, known, fix) => {
+  if (!fix || !nonEmpty(fix.commit) || !nonEmpty(known) || sameSha(fix.commit, known) || !isObj(CONTS[n])) return
+  const kept = isObj(CONTS[n].untested) && nonEmpty(CONTS[n].untested.start_head) ? CONTS[n].untested.start_head : known
+  CONTS[n] = { ...CONTS[n], untested: { stage, start_head: String(kept), head: String(fix.commit) } }
+}
+// The fix commit reached the pull request and its review passed: it is no longer pending.
+const releaseFix = (n, head) => {
+  if (!isObj(CONTS[n]) || !isObj(CONTS[n].untested) || !sameSha(CONTS[n].untested.head, head)) return
+  const { untested, ...rest } = CONTS[n]
+  CONTS[n] = rest
+}
 // A merged landing must leave a cont naming its PR, or a re-adopted PR (which has none) could not be closed out.
 const markMerged = (n, ready, pr) => {
+  if (isObj(CONTS[n]) && CONTS[n].untested) releaseFix(n, CONTS[n].untested.head)
   CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: ready.branch, worktree: ready.worktree, worktree_path: ready.worktree }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
 }
 const land = async (n, ready, via = {}) => {
@@ -875,7 +904,8 @@ ${RULES}`, `land-ask-${n}`, { ...clerk, schema: ASK_SCHEMA })
   // #941: with early, the conflict was found by the probe before the lock was ever asked for: the same step, and the take is the landing's first.
   // #1001: with fixed, the lock was released (first), or never asked for (unasked), while a red check of the branch was fixed.
   // #1018: synced is unasked for a branch that was only brought up to date before the lock was asked for.
-  const advance = async (retake = false, early = false, fixed = null) => {
+  // #1371: publish is true for a fix commit the program has not pushed yet: its tests are recorded and its review passed, so the record step pushes it first.
+  const advance = async (retake = false, early = false, fixed = null, publish = false) => {
     c.record++
     const label = `land-record-${n}-${c.record}`
     const fresh = retake && !lockHeld
@@ -886,7 +916,7 @@ ${RULES}`, `land-ask-${n}`, { ...clerk, schema: ASK_SCHEMA })
     // The move may land and its answer be lost: the release then also tries expected (P10).
     } else if (expected !== lockSha) lockMaybe = expected
     const rec = await call(`The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
-1. Run gh pr view ${pr} --repo ${SLUG} --json body,headRefOid and confirm headRefOid is ${expected}. If it is not, change nothing and return ok false with the head it shows.
+${publish ? `First push that head, which is a reviewed fix commit not pushed yet: git -C ${W} fetch origin, confirm git -C ${W} rev-parse HEAD prints ${expected}, then run git -C ${W} push origin ${B}. When HEAD is another commit or the push fails, change nothing else and return ok false with the head you read.\n` : ''}1. Run gh pr view ${pr} --repo ${SLUG} --json body,headRefOid and confirm headRefOid is ${expected}. If it is not, change nothing and return ok false with the head it shows.
 2. Make a fresh directory with mktemp -d and write the body to a file in it, rewriting only the Accepted head line (the last line of the Evidence section) to exactly this text, everything else unchanged:
 Accepted head: ${expected}
 3. Run gh pr edit ${pr} --repo ${SLUG} --body-file <that file>. When the line already reads exactly so, change nothing.
@@ -897,6 +927,8 @@ Then, only when ok is true and lock's verdict is acquired, already_held or moved
 ${CHECKS_STEPS(pr)}
 Return those fields as checks; otherwise return checks null.
 ${RULES}`, label, { ...lifecycleClerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
+    // #1371: a record step that read the PR at the pushed head confirms the push of the reviewed fix commit.
+    if (publish && rec && rec.ok === true && sameSha(rec.head, expected)) releaseFix(n, expected)
     let lv = rec && rec.lock ? rec.lock.verdict : null
     if (rec) logWait(label, rec.lock)
     let reread = false
@@ -1044,6 +1076,8 @@ ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', s
     const followup = !sameSha(head, mc)
     // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A head that is not the
     // merge commit is reviewed too, even after a clean merge: nothing else would read the commits on top of it.
+    // #1371: true once a reviewed fix commit of the sync review is the head and no step has pushed it yet.
+    let unpushed = false
     if (aborted || merge.conflicted || followup) {
       const after = followup ? SYNC_AFTER(W, mc, head) : ''
       c.syncReview++
@@ -1052,7 +1086,7 @@ ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', s
 Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, head) : ''} Do not edit anything.
 ${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
       // #955: from here on the merge is resolved, so a landing that ends is a sync-review row, never a conflict one: what is left is the
-      // review of the resolution. Its reason leads with what ended it, then the pushed and unaccepted fix commit, then the finding left
+      // review of the resolution. Its reason leads with what ended it, then the unaccepted fix commit, then the finding left
       // open (its file and summary), so the cap of the table's reason cuts the summary last. Like every other open row it posts no owner
       // action, keeps the claim and the cont, and a relaunch sends the issue through its child's review (no code reads either outcome).
       const syncStop = (what, finding, fix, extra) => {
@@ -1069,27 +1103,39 @@ ${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(foll
         // resolution it runs outside the lock (#913). Only a fix the re-review passes is recorded: advance(true) below takes the lock at it
         // and waits for its checks.
         const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-${SYNC_FIX(W, mc, found, after)} Then push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. ${COMMIT_SCOPE} ${IMPL_RETURN}
+${SYNC_FIX(W, mc, found, after)} Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. ${COMMIT_SCOPE} ${IMPL_RETURN}
 ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
         // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a rebuttal with evidence, and a
-        // full reviewer re-reviews either. A sync-review row from here on names the fix reply: its commit is pushed and unaccepted.
+        // full reviewer re-reviews either. A sync-review row from here on names the fix reply: its commit is unaccepted and not pushed.
         const tried = fix ? { fix: { commit: fix.commit, notes: fix.notes } } : {}
         const moved = !!fix && !sameSha(fix.commit, head)
+        // #1371: a fix commit stays local until it is pushed: it is carried as untested from here, whatever stops the round.
+        holdFix(n, 'sync-fix', head, fix)
         if (!fix || fix.status !== 'done' || !fix.commit || !sameSha(fix.start_head, head) || (!moved && !nonEmpty(fix.notes))) {
           return syncStop('the sync fix round did not finish', found[0], fix, { review: rv, ...tried })
         }
+        // #1371: the commit is not pushed yet; with no test command recorded it is never pushed, reviewed, recorded, locked or merged in this run.
+        if (moved && !tested(fix)) return syncStop(UNTESTED, found[0], fix, { review: rv, ...tried })
         const rr = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_REREVIEW(W, mc, found, fix, moved, after)}
 ${RULES}`, rereviewLabel, { agentType: 'reviewer', schema: FINDINGS })
         if (!rr) return syncStop(`the sync re-review ${silence(rereviewLabel)}`, found[0], fix, { review: rv, ...tried })
         const leftOpen = findingsOf(rr)
         if (leftOpen.length) return syncStop(`${leftOpen.length === 1 ? 'a finding' : `${leftOpen.length} findings`} survived the fix round${moved ? '' : ' (a rebuttal, no fix commit)'}`, leftOpen[0], fix, { review: { ...rr, findings: leftOpen }, sync_review: rv, ...tried })
-        if (moved) head = fix.commit
+        if (moved) { head = fix.commit; unpushed = true }
       }
+    }
+    // #1371: with prelock no record step follows here, and body() polls the checks of the head on the remote, so a reviewed fix commit is pushed now.
+    if (unpushed && pr && prelock) {
+      const plabel = `land-push-${n}-${c.sync}`
+      const pu = await call(`A sync fix of issue #${n} of ${SLUG} passed its re-review at ${head} and is not pushed yet. Push it: git -C ${W} fetch origin, confirm git -C ${W} rev-parse HEAD prints ${head}, then run git -C ${W} push origin ${B}, then read git -C ${W} rev-parse origin/${B}. Return ok true and head (that sha) when the push succeeded. When HEAD is another commit or the push fails, change nothing else and return ok false with the head you read and the error in detail.
+${RULES}`, plabel, { ...lifecycleClerk, schema: RECORD_SCHEMA })
+      if (!pu || pu.ok !== true || !sameSha(pu.head, head)) return out('stopped', { stage: 'land-push', expected: head, head: pu ? pu.head : null, detail: pu && pu.detail ? pu.detail : `${plabel} did not push ${head}` })
+      releaseFix(n, head)
     }
     if (head !== expected || outside) {
       expected = head
-      if (pr && !prelock) return await advance(outside, !!early)
+      if (pr && !prelock) return await advance(outside, !!early, null, unpushed)
     }
     return null
   }
@@ -1316,9 +1362,11 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
         return out('ci-failed', { failing: failingNames, ...extra })
       }
       const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${details || 'none given'}.
-${mode === 'first' ? `${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `${FIX_NO_LOCK}\n` : ''}Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
+${mode === 'first' ? `${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `${FIX_NO_LOCK}\n` : ''}Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, and commit. Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
 When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: mode === 'first' ? { ...IMPL, properties: { ...IMPL.properties, lock_released: { type: 'boolean' } } } : IMPL })
+      // #1371: a fix commit stays local until it is pushed: it is carried as untested from here, whatever ends the round.
+      holdFix(n, 'checks-fix', expected, fix)
       if (!fix || fix.status !== 'done' || !fix.commit) return end({ detail: 'the fix round did not finish' })
       const letGo = mode === 'first' && fix.lock_released === true
       // #818: done at the unchanged head is a rerun of jobs that failed for no cause in the code. The loop polls again; ciFails still ends a second red poll as ci-failed.
@@ -1338,6 +1386,8 @@ ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema:
         carried = null
         return await waitAgain(mode === 'unasked' ? 'the failed jobs of a red check were rerun before it was asked for' : 'the step that reran the failed jobs of a red check released it')
       }
+      // #1371: the commit is not pushed yet; with no test command recorded it is never pushed, reviewed, recorded, locked or merged in this run.
+      if (!tested(fix)) return end({ detail: UNTESTED })
       if (mode === 'first') {
         log(`#${n}: ${failingNames.join(', ') || 'a check'} failed at the head the lock was taken at; its fix is reviewed outside the land lock`)
         if (!letGo) await unlock()
@@ -1347,7 +1397,7 @@ Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expecte
 ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
       if (!rv || findingsOf(rv).length) return end({ review: rv })
       expected = fix.commit
-      return await advance(offLock, false, offLock ? mode : null)
+      return await advance(offLock, false, offLock ? mode : null, true)
     }
     if (preRed) {
       log(`#${n}: ${preRed.failing.join(', ')} had already failed at the head; fixing before the land lock is asked for`)
@@ -2081,7 +2131,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
       // #1139: nor does a PR land as it stands unless its issue's look marker was read and found absent (fail closed): a marked issue, or one whose marker was not read, goes through its child.
       const lookPending = !(isObj(f.look) && f.look.verdict === 'unmarked')
-      if (ro.ok === true && !amendPending && !lookPending) {
+      // #1370: nor does a capped delivery: the review round cap is enforced in the child, so a cont holding round_cap goes through it, never to a landing with findings still open.
+      const capHeld = !!(CONTS[n] && isObj(CONTS[n].round_cap))
+      if (ro.ok === true && !amendPending && !lookPending && !capHeld) {
         if (!readoptUsable(ro)) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
           return
@@ -2093,7 +2145,10 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
         return
       }
       if (ro.ok === true && lookPending && !amendPending) log(`readopt-${n}: the issue needs the owner's look (or its marker was not read); it goes through its child`)
-      if (ro.ok !== true && ro.reason !== 'unaccepted') {
+      // #1371: a worktree ahead of its PR by the fix commit an earlier landing kept local and unpushed goes through the child, whose cont carries
+      // that range as untested: its final review reads the commit and its retest records the tests before anything is pushed.
+      const pendingFix = ro.ok !== true && ro.reason === 'worktree' && isObj(CONTS[n]) && isObj(CONTS[n].untested) && nonEmpty(ro.head) && sameSha(CONTS[n].untested.head, ro.head)
+      if (ro.ok !== true && ro.reason !== 'unaccepted' && !pendingFix) {
         rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: ro.reason || 'other', ...(ro.detail ? { note: ro.detail } : {}) }
         return
       }
@@ -2105,6 +2160,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     }
 
     let r = null
+    let lookShip = false
     let threw = ''
     // #912: a thrown call logs its error whole and keeps its reason for the row; it reads laneName when called.
     const child = async mode => {
@@ -2140,14 +2196,16 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           r = await child('ready')
         }
       }
-      // #1139: a marked issue's ready child is resumed once in ship mode, inside this slot: the push and the PR, then the stop at awaiting-look.
-      if (r && r.stage === 'ready' && !terminalChild(r) && isObj(r.look) && r.look.verdict === 'marked' && isObj(r.cont)) {
-        CONTS[n] = r.cont
-        r = await child('ship')
-      }
+      lookShip = !!(r && r.stage === 'ready' && !terminalChild(r) && isObj(r.look) && r.look.verdict === 'marked' && isObj(r.cont))
       if (terminalChild(r)) trip(`child-${n}`)
     } finally {
       release()
+    }
+    // #1139: a marked issue's ready child is resumed once in ship mode: the push and the PR, the wait for its checks (#1373) and the stop at awaiting-look, outside the slot, as a landing waits for CI outside it.
+    if (lookShip) {
+      CONTS[n] = r.cont
+      r = await child('ship')
+      if (terminalChild(r)) trip(`child-${n}`)
     }
 
     if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: threw || `child-${n} returned nothing` }; return }
@@ -2258,6 +2316,12 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           .map(x => ({ ...(Number.isInteger(x.round) ? { round: x.round } : {}), ...(Number.isInteger(x.wave) ? { wave: x.wave } : {}), ...(Array.isArray(x.findings) ? { findings: x.findings.filter(nonEmpty).slice(0, FINDINGS_MAX).map(oneLine) } : {}), ...(nonEmpty(x.notes) ? { notes: oneLine(x.notes) } : {}), ...(nonEmpty(x.range) ? { range: oneLine(x.range) } : {}) }))
         OSCILLATING[n] = { file: oneLine(r.oscillating.file), rounds: hist, claim: 'held', holder: HOLDER, cont: r.cont }
       }
+      if (!closedMeanwhile && r.stage === 'fix-wave-review' && isObj(r.round_cap) && isPosInt(r.round_cap.rounds) && isObj(r.cont)) {
+        // The child bounds the findings it carries; the same bounds are applied again here, in the entry and in its cont (as the not-converging row does).
+        const findings = (Array.isArray(r.cont.fix_findings) ? r.cont.fix_findings : []).filter(isObj).slice(0, FINDINGS_MAX)
+          .map(x => Object.fromEntries(['severity', 'file', 'summary', 'failing_input'].filter(k => nonEmpty(x[k])).map(k => [k, oneLine(x[k])])))
+        ROUND_CAPPED[n] = { rounds: r.round_cap.rounds, findings, claim: 'held', holder: HOLDER, cont: { ...r.cont, ...(findings.length ? { fix_findings: findings } : {}) } }
+      }
       if (!closedMeanwhile && r.stage === 'verify-unrelated' && isObj(r.unrelated) && nonEmpty(r.unrelated.test)) UNRELATED[n] = { test: oneLine(r.unrelated.test), ...(nonEmpty(r.unrelated.evidence) ? { evidence: oneLine(r.unrelated.evidence) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
       rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
       return
@@ -2307,9 +2371,11 @@ const parked = table.filter(r => r.outcome === 'stopped' && PARKED[r.issue] && r
 const conflicted = table.filter(r => r.outcome === 'stopped' && r.stage === 'plan-review' && RULES_CONFLICT[r.issue]).map(r => r.issue)
 // #1000: nor can a file two fixes in a row each drew a new finding in: the owner decides the approach.
 const oscillating = table.filter(r => r.outcome === 'stopped' && r.stage === 'fix-wave-review' && OSCILLATING[r.issue]).map(r => r.issue)
+// #1370: nor can a delivery whose review rounds are spent with findings still open: the owner decides.
+const capped = table.filter(r => r.outcome === 'stopped' && r.stage === 'fix-wave-review' && ROUND_CAPPED[r.issue] && !OSCILLATING[r.issue]).map(r => r.issue)
 // #1139: nor can a marked issue's delivery waiting for the owner's look: the owner's answer resumes it.
 const awaiting = table.filter(r => r.outcome === 'awaiting-look' && AWAITING[r.issue]).map(r => r.issue)
-const open = table.filter(r => !FINAL.includes(r.outcome) && !awaiting.includes(r.issue) && !cycle.includes(r.issue) && !oscillating.includes(r.issue) && !unrelated.includes(r.issue) && !conflicted.includes(r.issue) && !parked.includes(r.issue)).map(r => r.issue)
+const open = table.filter(r => !FINAL.includes(r.outcome) && !awaiting.includes(r.issue) && !cycle.includes(r.issue) && !oscillating.includes(r.issue) && !capped.includes(r.issue) && !unrelated.includes(r.issue) && !conflicted.includes(r.issue) && !parked.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
 // The lead copies the relaunch into the next run's args, so a forwarded cont carries only what a resume reads from it. A resumed child's setup
 // step reads every contract field fresh and takes from cont.setup only the members below (the claim holder, the delivery's location and
@@ -2351,7 +2417,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` 
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...awaiting.map(n => ({ issue: n, reason: 'awaiting-look', ...AWAITING[n], cont: slimCont(AWAITING[n].cont) })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...conflicted.map(n => ({ issue: n, reason: 'rules-conflict', ...RULES_CONFLICT[n], cont: slimCont(RULES_CONFLICT[n].cont) })), ...parked.map(n => ({ issue: n, ...PARKED[n], cont: slimCont(PARKED[n].cont) })), ...oscillating.map(n => ({ issue: n, reason: 'fix-oscillating', ...OSCILLATING[n], cont: slimCont(OSCILLATING[n].cont) })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...awaiting.map(n => ({ issue: n, reason: 'awaiting-look', ...AWAITING[n], cont: slimCont(AWAITING[n].cont) })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...conflicted.map(n => ({ issue: n, reason: 'rules-conflict', ...RULES_CONFLICT[n], cont: slimCont(RULES_CONFLICT[n].cont) })), ...parked.map(n => ({ issue: n, ...PARKED[n], cont: slimCont(PARKED[n].cont) })), ...oscillating.map(n => ({ issue: n, reason: 'fix-oscillating', ...OSCILLATING[n], cont: slimCont(OSCILLATING[n].cont) })), ...capped.map(n => ({ issue: n, reason: 'round-cap', ...ROUND_CAPPED[n], cont: slimCont(ROUND_CAPPED[n].cont) })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }

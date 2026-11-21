@@ -6,6 +6,8 @@ Run: just agent-workflow-tests
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import errno
 import io
 import json
 import os
@@ -23,8 +25,9 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    account_remove, event_log, project_question, project_question_hook as hook, service, signin, sprints,
-    view, write_guard)
+    account_remove, deliveries, event_log, project_question, project_question_hook as hook, question_records, service, sessions,
+    signin, spend, sprints, view,
+    write_guard)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -293,6 +296,454 @@ class HookTableTest(unittest.TestCase):
                     hook.parse_allowed(text)
 
 
+def normjoin(text, base):
+    """`hook._resolve` without symlink resolution: each alias spelling stays as written."""
+    return os.path.normpath(os.path.join(base, os.path.expanduser(text)))
+
+
+class HookConfinementTest(unittest.TestCase):
+    """The hook confines reads of the console's state to the question's own records (#1271)."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.t = t = Path(directory.name).resolve()
+        self.P = P = t / "state" / "console"
+        self.S = S = P / "project-question-settings"
+        S.mkdir(parents=True)
+        (P / "events.sqlite3").write_text("log")
+        (P / "page-token").write_text("token")
+        self.R = S / "a.records.json"
+        self.Q = S / "b.records.json"
+        self.R.write_text("{}")
+        self.Q.write_text("{}")
+        self.root = root = t / "srv" / "p01"
+        (root / "sub").mkdir(parents=True)
+        (root / "flake.nix").write_text("{}")
+        (root / "sub" / "a.nix").write_text("{}")
+        (root / "docs").symlink_to(root / "sub")
+        self.c = hook.parse_confinement(str(P), str(self.R))
+        self.denied = ("deny", hook.RECORDS_DENIED.format(records=self.c.records))
+        self.allowed = ("allow", hook.ALLOWED)
+
+    def doc(self, name, tool_input, cwd=None):
+        return {**tool(name, tool_input), "cwd": str(cwd or self.root)}
+
+    def command(self, text, cwd=None):
+        return {**bash(text), "cwd": str(cwd or self.root)}
+
+    def test_read_grep_and_glob_reach_only_the_own_records_file(self):
+        P, S, R, Q, t, root = self.P, self.S, self.R, self.Q, self.t, self.root
+        for name, tool_input, expected in (
+            ("Read", {"file_path": str(R)}, self.allowed),
+            ("Grep", {"pattern": "x", "path": str(R)}, self.allowed),
+            ("Read", {"file_path": str(root / "flake.nix")}, self.allowed),
+            ("Grep", {"pattern": "x"}, self.allowed),
+            ("Glob", {"pattern": "**/*.nix"}, self.allowed),
+            ("Grep", {"pattern": "x", "path": str(root / "docs")}, self.allowed),
+            ("Read", {"file_path": str(Q)}, self.denied),
+            ("Read", {"file_path": str(P / "events.sqlite3")}, self.denied),
+            ("Read", {"file_path": str(P / "page-token")}, self.denied),
+            ("Read", {"file_path": "../../state/console/events.sqlite3"}, self.denied),
+            ("Grep", {"pattern": "x", "path": str(S)}, self.denied),
+            ("Grep", {"pattern": "x", "path": str(t)}, self.denied),
+            ("Grep", {"pattern": "x", "path": "/"}, self.denied),
+            ("Glob", {"pattern": str(P) + "/**/*.json"}, self.denied),
+            ("Glob", {"path": str(root), "pattern": "../../state/console/**"}, self.denied),
+            ("Glob", {"path": str(t), "pattern": "**/*.records.json"}, self.denied),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), expected)
+
+    def test_writes_stay_write_denied_under_the_confinement(self):
+        for name in ("Write", "Edit", "NotebookEdit"):
+            for path in (self.R, self.Q):
+                with self.subTest(name=name, path=path):
+                    self.assertEqual(
+                        hook.decide(
+                            self.doc(name, {"file_path": str(path)}), DECLARED, None, self.c),
+                        ("deny", hook.WRITE_DENIED.format(tool=name)))
+
+    def test_an_admitted_command_naming_the_console_state_is_denied(self):
+        denied = self.command("git diff --no-index ../../state/console/events.sqlite3 flake.nix")
+        self.assertEqual(hook.decide(denied, DECLARED, None, self.c), self.denied)
+        for text in ("git show HEAD", "git log --format=%H -n5", "just build"):
+            with self.subTest(text):
+                self.assertEqual(
+                    hook.decide(self.command(text), DECLARED, None, self.c), self.allowed)
+
+    def test_a_file_named_as_an_attached_option_value_is_denied(self):
+        for text in (
+            "git blame --contents=" + str(self.P / "page-token") + " flake.nix",
+            "git blame --contents=../../state/console/events.sqlite3 flake.nix",
+            "git blame --contents=" + str(self.Q) + " flake.nix",
+            "git diff -O../../state/console/page-token",
+            "git diff -O@../../state/console/page-token",
+            "git blame -wS" + str(self.P / "page-token") + " flake.nix",
+            "git blame -wS" + str(self.Q) + " flake.nix",
+            "git log -wS../../state/console/events.sqlite3",
+            "git blame -wS@../../state/console/page-token flake.nix",
+        ):
+            with self.subTest(text):
+                self.assertEqual(
+                    hook.decide(self.command(text), DECLARED, None, self.c), self.denied)
+                self.assertEqual(hook.decide(self.command(text), DECLARED), self.allowed)
+
+    def test_a_transcript_store_is_confined_like_the_console_state(self):
+        home = self.t / "home"
+        shared = home / ".claude" / "projects" / "-srv-p00"
+        shared.mkdir(parents=True)
+        transcript = shared / "session.jsonl"
+        transcript.write_text("{}")
+        profile = self.t / "accounts" / "profiles" / "p1"
+        profile.mkdir(parents=True)
+        (profile / "projects").symlink_to(home / ".claude" / "projects")
+        environ = {"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(self.t / "accounts"),
+                   "CLAUDE_CONFIG_DIR": str(profile)}
+        c = hook.parse_confinement(str(self.P), str(self.R), environ)
+        for name, tool_input in (
+            ("Read", {"file_path": str(transcript)}),
+            ("Read", {"file_path": str(profile / "projects" / "-srv-p00" / "session.jsonl")}),
+            ("Grep", {"pattern": "x", "path": str(home / ".claude" / "projects")}),
+            ("Grep", {"pattern": "x", "path": str(profile)}),
+            ("Grep", {"pattern": "x", "path": str(home)}),
+            ("Glob", {"pattern": str(home / ".claude" / "projects" / "**" / "*.jsonl")}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(hook.decide(self.doc(name, tool_input), DECLARED, None, c),
+                                 ("deny", hook.RECORDS_DENIED.format(records=c.records)))
+        for text in ("git diff --no-index " + str(transcript) + " flake.nix",
+                     "git blame -wS" + str(transcript) + " flake.nix"):
+            with self.subTest(text):
+                self.assertEqual(hook.decide(self.command(text), DECLARED, None, c),
+                                 ("deny", hook.RECORDS_DENIED.format(records=c.records)))
+        self.assertEqual(
+            hook.decide(self.doc("Read", {"file_path": str(self.root / "flake.nix")}),
+                        DECLARED, None, c), self.allowed)
+        self.assertEqual(hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, c),
+                         self.allowed)
+
+    def test_a_second_spelling_of_the_console_state_is_confined_by_identity(self):
+        (self.t / "alias").symlink_to(self.t / "state")
+        A = self.t / "alias" / "console"
+        home = self.t / "home"
+        (home / ".claude" / "projects" / "-srv-p00").mkdir(parents=True)
+        (home / ".claude" / "projects" / "-srv-p00" / "session.jsonl").write_text("{}")
+        (self.t / "homealias").symlink_to(home)
+        c = hook.parse_confinement(str(self.P), str(self.R), {
+            "HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(self.t / "accounts"),
+            "CLAUDE_CONFIG_DIR": str(self.t / "absent")})
+        denied = ("deny", hook.RECORDS_DENIED.format(records=c.records))
+        records = A / "project-question-settings"
+        with mock.patch.object(hook, "_resolve", normjoin):
+            for name, tool_input, expected in (
+                ("Read", {"file_path": str(records / "a.records.json")}, self.allowed),
+                ("Read", {"file_path": str(self.root / "missing.nix")}, self.allowed),
+                ("Read", {"file_path": str(records / "b.records.json")}, denied),
+                ("Read", {"file_path": str(A / "page-token")}, denied),
+                ("Read", {"file_path": str(self.t / "homealias" / ".claude" / "projects"
+                                           / "-srv-p00" / "session.jsonl")}, denied),
+                ("Grep", {"pattern": "x", "path": str(self.t / "alias")}, denied),
+                ("Grep", {"pattern": "x", "path": str(self.t / "homealias")}, denied),
+                ("Grep", {"pattern": "x", "path": str(records)}, denied),
+                ("Glob", {"pattern": str(A) + "/**/*.json"}, denied),
+            ):
+                with self.subTest(name=name, tool_input=tool_input):
+                    self.assertEqual(
+                        hook.decide(self.doc(name, tool_input), DECLARED, None, c), expected)
+            with self.subTest("git blame"):
+                self.assertEqual(
+                    hook.decide(self.command("git blame -wS" + str(records / "b.records.json")
+                                             + " flake.nix"), DECLARED, None, c), denied)
+
+    def test_a_case_alias_of_the_console_state_is_confined_like_its_own_spelling(self):
+        def alias(p):
+            return Path(str(p).replace("/state/console", "/STATE/Console"))
+
+        if not (self.t / "STATE").exists():
+            self.skipTest("the temporary volume is case-sensitive")
+        for name, tool_input, expected in (
+            ("Read", {"file_path": str(alias(self.R))}, self.allowed),
+            ("Read", {"file_path": str(alias(self.Q))}, self.denied),
+            ("Read", {"file_path": str(alias(self.P / "page-token"))}, self.denied),
+            ("Grep", {"pattern": "x", "path": str(alias(self.S))}, self.denied),
+            ("Grep", {"pattern": "x", "path": str(self.t / "STATE")}, self.denied),
+            ("Glob", {"pattern": str(alias(self.P)) + "/**/*.json"}, self.denied),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), expected)
+        with self.subTest("git blame"):
+            self.assertEqual(
+                hook.decide(self.command("git blame -wS" + str(alias(self.Q)) + " flake.nix"),
+                            DECLARED, None, self.c), self.denied)
+        with self.subTest("parser"):
+            with self.assertRaises(ValueError):
+                hook.parse_confinement(str(self.P), str(alias(self.P)))
+        (self.root / "elsewhere").symlink_to(alias(self.S))
+        self.assertEqual(
+            hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c), self.denied)
+
+    def test_an_identity_that_cannot_be_read_is_a_denial(self):
+        (self.t / "alias").symlink_to(self.t / "state")
+        real_stat = os.stat
+
+        def broken(p, *args, **kwargs):
+            if os.fspath(p) == str(self.P):
+                raise OSError(errno.EIO, "Input/output error")
+            return real_stat(p, *args, **kwargs)
+
+        records = self.t / "alias" / "console" / "project-question-settings"
+        with mock.patch.object(hook, "_resolve", normjoin), \
+                mock.patch.object(hook.os, "stat", broken):
+            self.assertEqual(
+                hook.decide(self.doc("Read", {"file_path": str(records / "b.records.json")}),
+                            DECLARED, None, self.c), ("deny", hook.MALFORMED))
+        out = io.StringIO()
+        with mock.patch.object(hook.os.path, "realpath", os.path.normpath), \
+                mock.patch.object(hook.os, "stat", broken), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(
+                    self.doc("Read", {"file_path": str(self.root / "flake.nix")})))), \
+                contextlib.redirect_stdout(out):
+            status = hook.main([json.dumps([list(argv) for argv in DECLARED]), REPO,
+                                str(self.P), str(records / "a.records.json")])
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(out.getvalue()), hook.output("deny", hook.MALFORMED))
+
+    def test_a_path_the_filesystem_cannot_resolve_is_not_a_denial(self):
+        root = self.root
+        (root / "loop").symlink_to("loop")
+        (root / "sub" / "a").symlink_to("b")
+        (root / "sub" / "b").symlink_to("a")
+        long_name = root / ("x" * 5000)
+        for name, tool_input in (
+            ("Grep", {"pattern": "x"}),
+            ("Glob", {"pattern": "**/*.nix"}),
+            ("Read", {"file_path": str(root / "loop")}),
+            ("Read", {"file_path": str(root / "sub" / "a")}),
+            ("Read", {"file_path": str(long_name)}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.allowed)
+
+    def test_a_symlink_into_the_console_state_is_resolved(self):
+        (self.root / "link").symlink_to(self.P)
+        for name, tool_input in (
+            ("Read", {"file_path": str(self.root / "link" / "events.sqlite3")}),
+            ("Grep", {"pattern": "x", "path": str(self.root / "link")}),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.denied)
+
+    def test_a_search_that_would_meet_the_console_state_later_is_denied(self):
+        root = self.root
+        (root / "sub" / "deep").mkdir()
+        (root / "sub" / "deep" / "link").symlink_to(self.P)
+        for name, tool_input in (
+            ("Grep", {"pattern": "x"}),
+            ("Grep", {"pattern": "x", "path": str(root / "sub")}),
+            ("Glob", {"pattern": "*/*/link/*"}),
+            ("Glob", {"pattern": "**/*.json"}),
+            ("Glob", {"path": str(root), "pattern": "*/../../../state/console/*"}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.denied)
+        other = self.t / "other"
+        other.mkdir()
+        (other / "back").symlink_to(self.P)
+        second = self.t / "srv" / "p02"
+        second.mkdir()
+        (second / "ext").symlink_to(other)
+        for tool_input in ({"pattern": "x"}, {"pattern": "x", "glob": "../../state/**"}):
+            with self.subTest(second=tool_input):
+                self.assertEqual(
+                    hook.decide(
+                        self.doc("Grep", tool_input, cwd=second), DECLARED, None, self.c),
+                    self.denied)
+        clean = self.t / "srv" / "p03"
+        clean.mkdir()
+        for name, tool_input in (
+            ("Grep", {"pattern": "x", "glob": "../../state/**"}),
+            ("Glob", {"pattern": "*/../../../state/console/*"}),
+        ):
+            with self.subTest(clean=name):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input, cwd=clean), DECLARED, None, self.c),
+                    self.denied)
+
+    def test_a_brace_group_that_expands_to_a_parent_component_is_denied(self):
+        for name, tool_input in (
+            ("Glob", {"pattern": "{../..,x}/state/console/*"}),
+            ("Glob", {"pattern": "{..,x}/{..,x}/state/console/*"}),
+            ("Glob", {"pattern": "{.,x}{.,x}/{.,x}{.,x}/state/console/*"}),
+            ("Glob", {"pattern": "*/{..,x}/{..,x}/{..,x}/state/console/*"}),
+            ("Grep", {"pattern": "x", "glob": "{..,x}/{..,x}/state/**"}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.denied)
+        for name, tool_input in (
+            ("Glob", {"pattern": "**/*.{nix,md}"}),
+            ("Grep", {"pattern": "x", "glob": "*.{nix,md}"}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.allowed)
+
+    def test_a_search_walks_a_tree_reached_through_a_link_into_a_store(self):
+        store = self.t / "store"
+        (store / "closure").mkdir(parents=True)
+        (store / "closure" / "back").symlink_to(self.P)
+        (self.root / "result").symlink_to(store)
+        tool_input = {"pattern": "x"}
+        self.assertEqual(
+            hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.denied)
+        (store / "closure" / "back").unlink()
+        self.assertEqual(
+            hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.allowed)
+        with mock.patch.object(hook, "WALK_LIMIT", 1):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c),
+                ("deny", hook.SEARCH_UNCHECKED.format(limit=1)))
+
+    def test_a_search_denies_a_second_mount_of_the_console_state_by_identity(self):
+        (self.root / "mnt").mkdir()
+        real_stat = os.stat
+        private = real_stat(self.P)
+
+        def stat(path, *args, **kwargs):
+            return private if str(path) == str(self.root / "mnt") else real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(hook.os, "stat", stat):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c),
+                self.denied)
+        self.assertEqual(
+            hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c), self.allowed)
+
+    def test_a_separate_mount_of_the_records_directory_alone_is_confined_by_identity(self):
+        # The settings directory holds every question's records; a mount of it has neither the private
+        # directory nor a transcript store in its visible ancestry.
+        (self.root / "mnt").mkdir()
+        real_stat = os.stat
+        settings = real_stat(self.S)
+
+        def stat(path, *args, **kwargs):
+            return settings if str(path) == str(self.root / "mnt") else real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(hook.os, "stat", stat):
+            for name, tool_input in (
+                ("Read", {"file_path": str(self.root / "mnt" / "b.records.json")}),
+                ("Grep", {"pattern": "x"}),
+                ("Grep", {"pattern": "x", "path": str(self.root / "mnt")}),
+                ("Glob", {"pattern": "**/*.json"}),
+            ):
+                with self.subTest(name=name, tool_input=tool_input):
+                    self.assertEqual(
+                        hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.denied)
+            self.assertEqual(hook.decide(self.command("git blame -wS" + str(self.root / "mnt" / "b.records.json")
+                                                      + " flake.nix"), DECLARED, None, self.c), self.denied)
+        self.assertEqual(
+            hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c), self.allowed)
+
+    def test_a_search_with_a_directory_it_cannot_list_is_refused(self):
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if str(path) == str(self.root / "sub"):
+                raise PermissionError(errno.EACCES, "denied")
+            return real_scandir(path)
+
+        with mock.patch.object(hook.os, "scandir", scandir):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c),
+                ("deny", hook.SEARCH_UNCHECKED.format(limit=hook.WALK_LIMIT)))
+
+    def test_the_sessions_own_saved_tool_output_is_readable_and_no_other_sessions(self):
+        home = self.t / "home"
+        environ = {"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(self.t / "accounts"),
+                   "CLAUDE_CONFIG_DIR": str(self.t / "profile")}
+        mine = self.t / "profile" / "projects" / "-srv-p01" / "sess-1" / "tool-results"
+        theirs = self.t / "profile" / "projects" / "-srv-p01" / "sess-2" / "tool-results"
+        for results in (mine, theirs):
+            results.mkdir(parents=True)
+            (results / "b1.txt").write_text("out")
+        transcript = self.t / "profile" / "projects" / "-srv-p01" / "sess-1.jsonl"
+        transcript.write_text("{}")
+        c = hook.parse_confinement(str(self.P), str(self.R), environ)
+        denied = ("deny", hook.RECORDS_DENIED.format(records=c.records))
+
+        def decide(name, tool_input, session="sess-1"):
+            return hook.decide({**self.doc(name, tool_input), "session_id": session}, DECLARED, None, c)
+
+        for name, tool_input in (
+            ("Read", {"file_path": str(mine / "b1.txt")}),
+            ("Grep", {"pattern": "x", "path": str(mine)}),
+            ("Glob", {"pattern": str(mine / "*.txt")}),
+        ):
+            with self.subTest(allowed=name):
+                self.assertEqual(decide(name, tool_input), self.allowed)
+        for name, tool_input, session in (
+            ("Read", {"file_path": str(theirs / "b1.txt")}, "sess-1"),
+            ("Read", {"file_path": str(mine / "b1.txt")}, "sess-2"),
+            ("Read", {"file_path": str(mine / "b1.txt")}, "../sess-1"),
+            ("Read", {"file_path": str(transcript)}, "sess-1"),
+            ("Grep", {"pattern": "x", "path": str(mine.parent)}, "sess-1"),
+            ("Grep", {"pattern": "x", "path": str(self.t / "profile" / "projects")}, "sess-1"),
+        ):
+            with self.subTest(denied=name, tool_input=tool_input, session=session):
+                self.assertEqual(decide(name, tool_input, session), denied)
+        no_session = hook.decide(self.doc("Read", {"file_path": str(mine / "b1.txt")}), DECLARED, None, c)
+        self.assertEqual(no_session, denied)
+        self.assertEqual(
+            hook.decide({**self.command("git show HEAD"), "session_id": "sess-1"}, DECLARED, None, c),
+            self.allowed)
+        self.assertEqual(
+            hook.decide({**self.command("git diff --no-index " + str(mine / "b1.txt") + " flake.nix"),
+                         "session_id": "sess-1"}, DECLARED, None, c),
+            self.allowed)
+
+    def test_a_search_that_outruns_its_time_budget_is_refused(self):
+        with mock.patch.object(hook, "WALK_SECONDS", -1.0):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c),
+                ("deny", hook.SEARCH_UNCHECKED.format(limit=hook.WALK_LIMIT)))
+
+    def test_a_search_too_large_to_check_is_refused(self):
+        with mock.patch.object(hook, "WALK_LIMIT", 2):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c),
+                ("deny", hook.SEARCH_UNCHECKED.format(limit=2)))
+            self.assertEqual(
+                hook.decide(
+                    self.doc("Read", {"file_path": str(self.root / "flake.nix")}),
+                    DECLARED, None, self.c),
+                self.allowed)
+
+    def test_without_a_confinement_reads_are_admitted_as_before(self):
+        self.assertEqual(
+            hook.decide(self.doc("Read", {"file_path": str(self.Q)}), DECLARED), self.allowed)
+
+    def test_a_confinement_that_is_not_absolute_or_not_inside_is_refused(self):
+        for private, records in (
+            ("rel", str(self.R)),
+            (str(self.P), str(self.t / "x.records.json")),
+            (str(self.P), str(self.P)),
+        ):
+            with self.subTest(private=private, records=records):
+                with self.assertRaises(ValueError):
+                    hook.parse_confinement(private, records)
+        (self.t / "alias").symlink_to(self.t / "state")
+        with self.subTest("the directory itself under a second spelling"):
+            with mock.patch.object(hook.os.path, "realpath", os.path.normpath):
+                with self.assertRaises(ValueError):
+                    hook.parse_confinement(str(self.P), str(self.t / "alias" / "console"))
+
+
 class HookProcessTest(unittest.TestCase):
     def run_hook(self, args, stdin_text):
         return subprocess.run(
@@ -330,6 +781,47 @@ class HookProcessTest(unittest.TestCase):
             ['[["just","build"]]', ""], json.dumps(bash("gh pr list --repo owner/p01")))
         self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.reads_denied(None)))
 
+    def test_the_module_takes_the_confinement_as_two_more_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            P = Path(directory).resolve() / "state" / "console"
+            (P / "project-question-settings").mkdir(parents=True)
+            R = P / "project-question-settings" / "a.records.json"
+            Q = P / "project-question-settings" / "b.records.json"
+            for path in (R, Q):
+                path.write_text("{}")
+            args = ['[["just","build"]]', "owner/p01", str(P), str(R)]
+            done = self.run_hook(args, json.dumps(tool("Read", {"file_path": str(R)})))
+            self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
+            done = self.run_hook(args, json.dumps(tool("Read", {"file_path": str(Q)})))
+            self.assertEqual(
+                json.loads(done.stdout),
+                self.wire("deny", hook.RECORDS_DENIED.format(records=str(R))))
+            done = self.run_hook(
+                ['[["just","build"]]', "owner/p01", "rel", str(R)],
+                json.dumps(tool("Read", {"file_path": str(R)})))
+            self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.MALFORMED))
+
+    def test_the_module_confines_the_transcript_stores_of_its_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            t = Path(directory).resolve()
+            P = t / "state" / "console"
+            (P / "project-question-settings").mkdir(parents=True)
+            R = P / "project-question-settings" / "a.records.json"
+            R.write_text("{}")
+            transcript = t / "home" / ".claude" / "projects" / "-srv-p00" / "s.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text("{}")
+            done = subprocess.run(
+                [sys.executable, "-m", "agent_tools.console.project_question_hook",
+                 '[["just","build"]]', "owner/p01", str(P), str(R)],
+                input=json.dumps(tool("Read", {"file_path": str(transcript)})),
+                capture_output=True, text=True, timeout=30,
+                env={**os.environ, "HOME": str(t / "home"), "CLAUDE_CONFIG_DIR": str(t / "cfg"),
+                     "CLAUDE_ACCOUNTS_DIR": str(t / "accounts")})
+            self.assertEqual(
+                json.loads(done.stdout),
+                self.wire("deny", hook.RECORDS_DENIED.format(records=str(R))))
+
     def test_a_bad_argument_denies_everything(self):
         read = json.dumps(tool("Read", {"file_path": "/x"}))
         deep = "[" * 100000  # under the 128 KiB limit of one argv word
@@ -352,7 +844,7 @@ class HookProcessTest(unittest.TestCase):
         self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
 
 
-class LaunchTest(unittest.TestCase):
+class LaunchCase(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -392,6 +884,8 @@ class LaunchTest(unittest.TestCase):
         return project_question.run_question(
             ask or self.ask, cancel, platform=platform, run=run, environ=ENVIRON)
 
+
+class LaunchTest(LaunchCase):
     def test_a_session_with_a_repository_passes_it_to_its_hook_and_settings(self):
         ask = project_question.new_ask(
             "a" * 16, "owner/p01", str(self.root), "what shipped?", "work", self.routes,
@@ -495,10 +989,32 @@ class LaunchTest(unittest.TestCase):
             "timed_out", reason="the session did not answer within 300 s"))
         self.assertFalse(self.ask.settings.exists())
 
+    def test_a_darwin_question_launches_the_linux_argv(self):
+        outcome = self.start(self.fake(), platform="darwin")
+
+        self.assertEqual(self.calls[0][0], project_question.launch_command(self.ask, "linux"))
+        self.assertEqual(project_question.launch_command(self.ask, "darwin"),
+                         project_question.launch_command(self.ask, "linux"))
+        self.assertIsNone(project_question.launch_command(self.ask, "win32"))
+        self.assertEqual(outcome, project_question.Outcome(
+            "answered", answer="Answer: it builds the hosts."))
+
+    def test_a_darwin_question_runs_no_linux_tool(self):
+        forbidden = ("systemd-run", "systemctl", "/proc")
+        self.start(self.fake(), platform="darwin")
+
+        argv = self.calls[0][0]
+        self.assertEqual(argv[0], "claude-account")
+        self.assertFalse(any(word in element for word in forbidden for element in argv))
+        document = json.loads(self.settings["text"])
+        hook = shlex.split(document["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+        self.assertFalse(any(word in element for word in forbidden for element in hook))
+        self.assertIs(self.calls[0][3]["start_new_session"], True)
+
     def test_each_failure_is_a_failed_outcome_with_its_reason(self):
         cancel = threading.Event()
         cases = [
-            ("darwin", {"platform": "darwin", "run": self.fake()}, project_question.UNAVAILABLE_TEXT),
+            ("win32", {"platform": "win32", "run": self.fake()}, project_question.UNAVAILABLE_TEXT),
             ("root", {"run": self.fake(), "ask": self.make_ask(self.routes, self.root / "missing")},
              f"the project root {self.root / 'missing'} is not a directory"),
             ("missing binary", {"run": self.fake(error=FileNotFoundError())},
@@ -517,8 +1033,215 @@ class LaunchTest(unittest.TestCase):
                 outcome = self.start(**kwargs)
                 self.assertEqual(outcome, project_question.Outcome("failed", reason=reason))
                 self.assertFalse(self.ask.settings.exists())
-                if name in ("darwin", "root"):
+                if name in ("win32", "root"):
                     self.assertEqual(self.calls, [])
+
+
+class RecordsLaunchTest(LaunchCase):
+    def setUp(self):
+        super().setUp()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.t = Path(directory.name)
+        self.state = self.t / "state" / "console"
+        self.settings_dir = self.state / project_question.SETTINGS_DIR
+        self.root = self.t / "srv" / "p01"
+        self.root.mkdir(parents=True)
+        self.records = '{\n "project_id": "owner/p01"\n}\n'
+        self.routes = (project_question.Route("nix-build", ("just", "build"), str(self.root)),)
+        self.ask = project_question.new_ask(
+            "a" * 16, "owner/p01", str(self.root), "what costs the most?", "work", self.routes,
+            self.settings_dir, session_id=SESSION_ID, records=self.records)
+        self.seen = {}
+
+    def capture(self, kwargs):
+        path = project_question.records_path(self.ask)
+        self.seen = {"text": path.read_text(), "mode": path.stat().st_mode & 0o777}
+
+    def hook_words(self, document):
+        return shlex.split(document["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+
+    def test_the_prompt_names_the_records_file_and_what_it_holds(self):
+        self.start(self.fake(act=self.capture))
+        text = self.calls[0][0][-1]
+        path = str(project_question.records_path(self.ask))
+        self.assertIn(path, text)
+        for part in (
+            "spend over the last 30 days by day, delivery run, issue, phase and sprint",
+            "its delivery runs with each issue's stage",
+            "activation runs of it with how each ended and why",
+            "its held checks",
+            "Read it with Read, or Grep it",
+            "why a delivery or production run failed",
+            "name it under Read with the parts you read",
+        ):
+            with self.subTest(part):
+                self.assertIn(part, text)
+        self.assertNotIn(project_question.SECTIONS_TEXT.split("{")[0], text)
+        self.assertEqual(
+            text, project_question.prompt(self.ask.question, self.routes, records=path))
+        self.assertLess(text.index(path), text.index(project_question.QUESTION_MARK))
+
+    def test_the_prompt_gives_each_records_section_its_offset_and_limit(self):
+        doc = {"project_id": "owner/p01", "written_at": "2026-11-17T08:00:30+00:00",
+               "spend": None, "sprints": [], "deliveries": [], "activations": [],
+               "held_checks": []}
+        expected = set(doc) - {"project_id", "written_at"}
+        text = question_records.encode(doc)
+        self.ask = dataclasses.replace(self.ask, records=text)
+        prompt_text = project_question.launch_command(self.ask, "linux")[-1]
+        index = question_records.section_lines(text)
+        self.assertEqual(set(index), expected)
+        path = str(project_question.records_path(self.ask))
+        for name in sorted(expected):
+            offset, limit = index[name]
+            with self.subTest(name):
+                self.assertIn(f"{name} offset {offset} limit {limit}", prompt_text)
+        self.assertIn(path + " (spend)", prompt_text)
+        self.assertEqual(prompt_text, project_question.prompt(
+            self.ask.question, self.routes, records=path,
+            sections=question_records.section_lines(text)))
+
+    def test_the_records_file_is_private_kept_for_an_answer_and_only_the_hook_words_change(self):
+        self.start(self.fake(act=self.capture))
+        self.assertEqual(self.seen, {"text": self.records, "mode": 0o600})
+        self.assertEqual(project_question.records_path(self.ask).parent, self.ask.settings.parent)
+        self.assertEqual(project_question.private_dir(self.ask), self.state)
+        with_records = json.loads(self.settings["text"])
+        self.ask = dataclasses.replace(self.ask, records=None)
+        self.settings = {}
+        self.start(self.fake())
+        without = json.loads(self.settings["text"])
+        self.assertEqual(with_records["permissions"], without["permissions"])
+        self.assertEqual(
+            self.hook_words(with_records),
+            self.hook_words(without) + [
+                str(self.state), str(project_question.records_path(self.ask))])
+        self.assertFalse(project_question.records_path(self.ask).exists())
+        self.assertFalse(self.ask.settings.exists())
+
+    def test_the_records_file_of_an_answered_question_is_kept_private_and_any_other_outcome_removes_it(self):
+        path = project_question.records_path(self.ask)
+        self.assertEqual(self.start(self.fake()).outcome, project_question.ANSWERED)
+        self.assertEqual((path.read_text(), path.stat().st_mode & 0o777), (self.records, 0o600))
+        self.assertFalse(self.ask.settings.exists())
+        for name, run in (("timed out", self.fake(error=subprocess.TimeoutExpired("claude", 1))),
+                          ("failed exit", self.fake(code=1)), ("unreadable", self.fake(stdout=b"not json"))):
+            with self.subTest(name):
+                path.write_text("stale")
+                self.assertNotEqual(self.start(run).outcome, project_question.ANSWERED)
+                self.assertFalse(path.exists())
+                self.assertFalse(self.ask.settings.exists())
+
+    def test_writing_a_records_file_removes_the_kept_ones_older_than_ninety_days_only(self):
+        self.settings_dir.mkdir(parents=True)
+        now = time.time()
+        old, fresh, other = (self.settings_dir / name for name in (
+            "o" * 16 + project_question.RECORDS_SUFFIX, "f" * 16 + project_question.RECORDS_SUFFIX, "x.settings.json"))
+        for path, age in ((old, 91 * 86400), (fresh, 89 * 86400), (other, 365 * 86400)):
+            path.write_text("kept")
+            os.utime(path, (now - age, now - age))
+        self.start(self.fake())
+        self.assertEqual((old.exists(), fresh.exists(), other.exists()), (False, True, True))
+        self.assertTrue(project_question.records_path(self.ask).exists())
+
+    def test_two_overlapping_questions_each_read_only_their_own_records(self):
+        asks = {}
+        for number, letter in ((0, "a"), (1, "b")):
+            root = self.t / "srv" / f"p0{number}"
+            root.mkdir(parents=True, exist_ok=True)
+            asks[number] = project_question.new_ask(
+                letter * 16, f"owner/p0{number}", str(root), "what costs the most?", "work",
+                self.routes, self.settings_dir, session_id=SESSION_ID,
+                records='{"project_id": "owner/p0%d"}\n' % number)
+        first, second = asks[0], asks[1]
+        decisions = {}
+
+        def decide(own, other, name, tool_input):
+            command = self.hook_words(json.loads(own.settings.read_text()))
+            done = subprocess.run(
+                command, input=json.dumps(
+                    {"tool_name": name, "tool_input": tool_input, "cwd": own.root}),
+                capture_output=True, text=True, timeout=30)
+            result = json.loads(done.stdout)["hookSpecificOutput"]
+            return result["permissionDecision"], result["permissionDecisionReason"]
+
+        def inner(kwargs):
+            for own, other in ((first, second), (second, first)):
+                mine = str(project_question.records_path(own))
+                theirs = project_question.records_path(other)
+                self.assertEqual(Path(mine).read_text(), own.records)
+                self.assertEqual(theirs.read_text(), other.records)
+                refused = ("deny", hook.RECORDS_DENIED.format(records=os.path.realpath(mine)))
+                decisions[own.question_id] = {
+                    "own": decide(own, other, "Read", {"file_path": mine}),
+                    "search": decide(own, other, "Grep", {"pattern": "x"}),
+                    "other": decide(own, other, "Read", {"file_path": str(theirs)}),
+                    "settings": decide(own, other, "Read", {"file_path": str(other.settings)}),
+                    "glob": decide(
+                        own, other, "Glob", {"pattern": str(self.settings_dir) + "/*"}),
+                    "events": decide(
+                        own, other, "Read", {"file_path": str(self.state / "events.sqlite3")}),
+                    "write": decide(own, other, "Write", {"file_path": mine}),
+                    "edit": decide(own, other, "Edit", {"file_path": mine}),
+                    "refused": refused,
+                }
+
+        def outer(kwargs):
+            project_question.run_question(
+                second, None, platform="linux", run=self.fake_for(inner), environ=ENVIRON)
+
+        project_question.run_question(
+            first, None, platform="linux", run=self.fake_for(outer), environ=ENVIRON)
+        for own in (first, second):
+            seen = decisions[own.question_id]
+            with self.subTest(own.question_id):
+                self.assertEqual(seen["own"][0], "allow")
+                self.assertEqual(seen["search"][0], "allow")
+                for name in ("other", "settings", "glob", "events"):
+                    self.assertEqual(seen[name], seen["refused"], name)
+                for name in ("write", "edit"):
+                    self.assertEqual(
+                        seen[name],
+                        ("deny", hook.WRITE_DENIED.format(tool=name.capitalize())), name)
+            self.assertEqual(project_question.records_path(own).read_text(), own.records)
+            self.assertFalse(own.settings.exists())
+
+    def fake_for(self, act):
+        def run(argv, *, timeout, cancel=None, **kwargs):
+            act(kwargs)
+            return subprocess.CompletedProcess(argv, 0, stdout=SUCCESS, stderr=None)
+        return run
+
+    def test_a_records_write_that_fails_is_a_failed_outcome_with_no_session(self):
+        with mock.patch.object(
+                project_question, "_write_records", side_effect=OSError(13, "Permission denied")):
+            outcome = self.start(self.fake())
+        self.assertEqual(
+            outcome,
+            project_question.Outcome(
+                "failed", reason="cannot write the question's records: Permission denied"))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.ask.settings.exists())
+
+    def test_a_question_without_records_has_the_prompt_argv_and_hook_it_had(self):
+        text = project_question.prompt("q", self.routes)
+        self.assertEqual(text, project_question.prompt("q", self.routes, records=None))
+        self.assertNotIn("console's own records", text)
+        ask = self.make_ask(self.routes)
+        self.assertEqual(
+            project_question.launch_command(ask, "linux")[-1],
+            project_question.prompt(ask.question, self.routes))
+        self.assertEqual(
+            project_question.hook_command(self.routes),
+            project_question.hook_command(self.routes, None, None))
+
+
+class PlatformTest(unittest.TestCase):
+    def test_asker_for_each_platform(self):
+        self.assertIs(project_question.asker_for("linux"), project_question.run_question)
+        self.assertIs(project_question.asker_for("darwin"), project_question.run_question)
+        self.assertIsNone(project_question.asker_for("win32"))
 
 
 class DevenvRouteTest(unittest.TestCase):
@@ -1082,7 +1805,7 @@ def _project_entries(shown):
 
 QUESTION_KEYS = {"id", "question", "asked_at", "state", "state_text", "answered_at", "answer",
                  "read_text", "ran_text", "unknown_text", "back_text", "back_choices",
-                 "production_text"}
+                 "production_text", "request_key"}
 
 
 class QuestionViewTest(unittest.TestCase):
@@ -1590,6 +2313,325 @@ def question_threads():
     return [t for t in threading.enumerate() if t.name == service.PROJECT_QUESTION_THREAD]
 
 
+class QuestionRecordsServiceTest(QuestionCase):
+    """The job gathers the asked project's own records once per accepted question (ADR-console-089)."""
+
+    def seed(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(self.store)
+        run = {"session_id": "s-1", "run_id": "wf_a", "moved_ms": 1700000000000,
+               "issues": [{"issue": 7, "stage": "building", "task": 2, "tasks": 3, "locking": False}]}
+        other = {"session_id": "s-0", "run_id": "wf_b", "moved_ms": 1700000000000,
+                 "issues": [{"issue": 9, "stage": "queued", "task": None, "tasks": None,
+                             "locking": False}]}
+        entries = [("project.registered", "owner/p01", {"root": "/srv/p01"}),
+                   (deliveries.DELIVERY_SEEN, "owner/p01", run),
+                   (deliveries.DELIVERY_SEEN, "owner/p00", other)]
+        for root, commit in (("/srv/p01", "c" * 40), ("/srv/p00", "d" * 40)):
+            entries.append((event_log.ACTIVATION_STARTED, None,
+                            {"root": root, "commit": commit, "tree": "group:1"}))
+            entries.append((event_log.ACTIVATION_FINISHED, None,
+                            {"root": root, "commit": commit, "ok": False, "reason": "it exited 1",
+                             "next_step": None}))
+        log.append(entries)
+        log.close()
+
+    def arrange(self, with_spend=True, **kwargs):
+        self.seed()
+        svc = self.start(**kwargs)
+
+        def sprint(sprint_id, project, goal, seq):
+            return sprints.SprintState(sprint_id, project, goal, seq, f"2026-11-17T08:00:0{seq}+00:00")
+
+        def held(project, issue):
+            return view.InboxRecord(
+                {"key": f"{project}#{issue}/1", "issue": issue, "reason": "verify-ask", "kind": "ask",
+                 "question": "q", "detail": ""}, "2026-11-17T08:00:00+00:00", "2026-11-17T08:00:00+00:00")
+
+        svc._sprints = {"1111111111111111": sprint("1111111111111111", "owner/p01", "g1. More.", 1),
+                        "0000000000000000": sprint("0000000000000000", "owner/p00", "g0. More.", 2)}
+        svc._inbox = {("owner/p01", "owner/p01#7/1"): held("owner/p01", 7),
+                      ("owner/p00", "owner/p00#9/1"): held("owner/p00", 9)}
+        if with_spend:
+            tokens = lambda n: spend.Tokens(input=n).wire()
+            svc._spend_view = {"approximate": False, "days": [{
+                "day": "2026-11-17",
+                "project": {"owner/p01": tokens(13), "owner/p00": tokens(905)},
+                "project_items": {
+                    "owner/p01": {"run": {"wf_a": {"implement": tokens(10)}},
+                                  "sprint": {"1111111111111111": {"manager": tokens(3)}}},
+                    "owner/p00": {"run": {"wf_a": {"plan": tokens(900)}, "wf_b": {"plan": tokens(5)}}}}}]}
+        return svc
+
+    def records_of(self, svc):
+        before = len(self.asked)
+        svc.ask_project_question(WHY, "what costs the most tokens per issue?")
+        ask, _cancel = self.asked[before]
+        return ask, json.loads(ask.records)
+
+    def test_a_questions_session_reads_only_its_own_projects_records(self):
+        svc = self.arrange()
+        (rows_before) = len(self.question_rows())
+        ask, records = self.records_of(svc)
+        self.assertEqual(records["project_id"], WHY)
+        self.assertEqual([d["run_id"] for d in records["deliveries"]], ["wf_a"])
+        self.assertIs(records["deliveries"][0]["live"], False)
+        self.assertEqual([(r["run_id"], r["tokens"]) for r in records["spend"]["runs"]], [("wf_a", 10)])
+        self.assertEqual([i["issue"] for i in records["spend"]["issues"]], [7])
+        self.assertEqual([s["sprint_id"] for s in records["sprints"]], ["1111111111111111"])
+        self.assertEqual([s["sprint_id"] for s in records["spend"]["sprints"]], ["1111111111111111"])
+        self.assertEqual([a["commit"] for a in records["activations"]], ["c" * 40])
+        self.assertEqual([h["issue"] for h in records["held_checks"]], [7])
+        for other in ("owner/p00", "wf_b", "0000000000000000", "/srv/p00", "d" * 40, "s-0"):
+            self.assertNotIn(other, ask.records)
+        self.assertEqual([r[0] for r in self.question_rows()][rows_before:], [ASKED, ANSWERED_KIND])
+        self.assertEqual(len(self.question_rows()), rows_before + 2)
+
+    def test_the_events_are_read_under_the_lock_that_guards_the_folded_state(self):
+        svc = self.arrange()
+        real = svc.log.events
+        got = []
+
+        def events():
+            taken = []
+
+            def take():
+                taken.append(svc._ingest.acquire(timeout=0.3))
+                if taken[0]:
+                    svc._ingest.release()
+
+            worker = threading.Thread(target=take)
+            worker.start()
+            worker.join()
+            got.extend(taken)
+            return real()
+
+        with mock.patch.object(svc.log, "events", events):
+            self.records_of(svc)
+        self.assertTrue(got)
+        self.assertFalse(any(got))
+
+    def test_a_run_is_live_only_while_its_session_is_open_in_this_project(self):
+        svc = self.arrange()
+        open_session = sessions.SessionState(
+            "s-1", "/srv/p01", "/srv/p01", sessions.WORKING, None, 1, "2026-11-17T08:00:01+00:00", None)
+        svc._sessions = {"s-1": open_session}
+        _ask, records = self.records_of(svc)
+        self.assertIs(records["deliveries"][0]["live"], True)
+        for name, change in (("ended", {"state": sessions.ENDED}),
+                             ("moved to another project", {"repo": "/srv/p00"}),
+                             ("no repository", {"repo": None})):
+            with self.subTest(name):
+                svc._sessions = {"s-1": dataclasses.replace(open_session, **change)}
+                _ask, records = self.records_of(svc)
+                self.assertIs(records["deliveries"][0]["live"], False)
+
+    def test_a_question_before_the_first_spend_poll_gets_its_projects_spend(self):
+        now = datetime(2026, 11, 17, 12, tzinfo=timezone.utc).timestamp()
+        sessions = self.store.parent.parent / "sessions"
+        run = sessions.parent / "projects" / "-srv-p01" / "s-1" / "subagents" / "workflows" / "wf_a"
+        run.mkdir(parents=True)
+        journal = run / "journal.jsonl"
+        journal.write_text(json.dumps(
+            {"type": "started", "agentId": "a1", "label": "impl-1", "phase": "Tasks"}) + "\n")
+        agent = run / "agent-a1.jsonl"
+        agent.write_text(json.dumps(
+            {"type": "assistant", "sessionId": "s-1", "cwd": "/srv/p01",
+             "timestamp": "2026-11-17T10:00:00.000Z",
+             "message": {"id": "msg_r1", "model": "claude-sonnet-4-6",
+                         "usage": {"input_tokens": 40}}}) + "\n")
+        for path in (journal, agent):
+            os.utime(path, (now, now))
+        svc = self.arrange(with_spend=False, session_dirs=[sessions], clock=lambda: now)
+        _ask, records = self.records_of(svc)
+        held = records["spend"]
+        self.assertIsNotNone(held)
+        self.assertEqual(held["days"][-1]["day"], "2026-11-17")
+        self.assertEqual(held["days"][-1]["tokens"], 40)
+        self.assertEqual([(r["run_id"], r["tokens"]) for r in held["runs"]], [("wf_a", 40)])
+        self.assertEqual(held["runs"][0]["phases"]["implement"]["tokens"], 40)
+        self.assertEqual(list(held["runs"][0]["days"]), ["2026-11-17"])
+        self.assertEqual(held["runs"][0]["days"]["2026-11-17"]["tokens"], 40)
+        self.assertEqual([i["issue"] for i in held["issues"]], [7])
+
+    def test_the_jobs_spend_read_runs_under_the_spend_lock_and_only_without_a_view(self):
+        svc = self.arrange(with_spend=False)
+        held = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            held.append(svc._spend_lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            self.records_of(svc)
+            self.records_of(svc)
+        self.assertEqual(held, [True])
+
+    def test_a_direct_poll_spend_runs_under_the_spend_lock(self):
+        svc = self.arrange(with_spend=False)
+        held = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            held.append(svc._spend_lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            svc.poll_spend()
+        self.assertEqual(held, [True])
+
+    def test_questions_started_together_before_the_first_poll_share_one_spend_read(self):
+        threads = []
+
+        def dispatch(job):
+            thread = threading.Thread(target=job)
+            threads.append(thread)
+            thread.start()
+
+        svc = self.arrange(with_spend=False, project_question_dispatch=dispatch)
+
+        class Recording:
+            lock = svc._spend_lock
+            attempts = []
+            both = threading.Event()
+
+            def __enter__(self):
+                self.attempts.append(1)
+                if len(self.attempts) == 2:
+                    self.both.set()
+                self.lock.acquire()
+
+            def __exit__(self, *exc):
+                self.lock.release()
+
+            def locked(self):
+                return self.lock.locked()
+
+        svc._spend_lock = Recording()
+        entered, release = threading.Event(), threading.Event()
+        reads = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            reads.append(1)
+            if len(reads) == 1:
+                entered.set()
+                release.wait(5)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            svc.ask_project_question(WHY, "what costs the most tokens per issue?")
+            self.assertTrue(entered.wait(5))
+            svc.ask_project_question("owner/p00", "what costs the most tokens per issue?")
+            self.assertTrue(svc._spend_lock.both.wait(5))
+            release.set()
+            for thread in threads:
+                thread.join(timeout=5)
+        self.assertEqual(reads, [1])
+        self.assertEqual(len(self.asked), 2)
+        for ask, _cancel in self.asked:
+            self.assertIsNotNone(json.loads(ask.records)["spend"])
+
+    def test_a_spend_read_that_fails_leaves_null_spend_and_the_rest_written(self):
+        svc = self.arrange(with_spend=False)
+        stderr = io.StringIO()
+        with mock.patch.object(svc._spend, "read", side_effect=OSError(5, "boom")), \
+                contextlib.redirect_stderr(stderr):
+            ask, records = self.records_of(svc)
+        self.assertIsNone(records["spend"])
+        self.assertTrue(records["deliveries"])
+        self.assertTrue(any(line.startswith("console: spend_poll_failed OSError")
+                            for line in stderr.getvalue().splitlines()))
+        self.assertIs(ask, self.asked[-1][0])
+
+    def test_a_cold_start_whose_transcript_root_cannot_be_listed_leaves_null_spend_not_zero_days(self):
+        svc = self.arrange(with_spend=False)
+        root = Path("/accounts/profiles/work")
+
+        def denied(directory):
+            raise PermissionError(13, "denied")
+
+        svc._spend = spend.SpendReader(scandir=denied)
+        stderr = io.StringIO()
+        with mock.patch.object(svc, "_session_dirs", return_value=[root / "sessions"]), \
+                contextlib.redirect_stderr(stderr):
+            ask, records = self.records_of(svc)
+        self.assertIsNone(records["spend"])
+        self.assertIsNone(svc._spend_view)
+        self.assertTrue(any(line.startswith("console: spend_poll_failed OSError")
+                            for line in stderr.getvalue().splitlines()))
+        self.assertTrue(records["deliveries"])
+
+    def test_a_warm_service_whose_transcript_root_cannot_be_listed_keeps_its_spend_view(self):
+        svc = self.arrange()
+        before = svc._spend_view
+        root = Path("/accounts/profiles/work")
+
+        def denied(directory):
+            raise PermissionError(13, "denied")
+
+        svc._spend = spend.SpendReader(scandir=denied)
+        with mock.patch.object(svc, "_session_dirs", return_value=[root / "sessions"]):
+            svc.poll_spend()
+        self.assertIsNotNone(svc._spend_view)
+
+    def test_the_support_service_reads_no_host_ping_log(self):
+        svc = self.arrange(with_spend=False)
+        self.assertIsNot(svc._ping_log, spend.default_ping_log)
+        self.assertIsNone(svc._ping_log())
+
+    def test_records_that_cannot_be_gathered_answer_failed_without_a_session(self):
+        svc = self.arrange()
+        stderr = io.StringIO()
+        with mock.patch("agent_tools.console.question_records.project_records",
+                        side_effect=RuntimeError("boom")), contextlib.redirect_stderr(stderr):
+            qid = svc.ask_project_question(WHY, "why?")
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.question_rows()[-1][2], {
+            "question_id": qid, "outcome": "failed",
+            "reason": "the console's records could not be gathered: RuntimeError: boom"})
+        self.assertIn("console: project_question_records_failed " + qid, stderr.getvalue())
+        self.assertEqual(svc._project_questions_open, 0)
+
+    def test_a_checkout_taken_by_another_project_before_the_gathering_answers_failed(self):
+        svc = self.arrange()
+        gather = mock.Mock()
+        real = svc._project_reach
+
+        def reach(root):
+            found = real(root)
+            # Another project takes the root after the question was admitted and before its records are gathered.
+            svc._states = {**svc._states, WHY: dataclasses.replace(svc._states[WHY], root="/srv/elsewhere")}
+            return found
+
+        svc._project_reach = reach
+        stderr = io.StringIO()
+        with mock.patch("agent_tools.console.question_records.project_records", gather), \
+                contextlib.redirect_stderr(stderr):
+            qid = svc.ask_project_question(WHY, "why?")
+        gather.assert_not_called()
+        self.assertEqual(self.asked, [])
+        self.assertTrue(self.question_rows()[-1][2]["reason"].startswith(
+            "the console's records could not be gathered: RuntimeError:"))
+        self.assertIn("console: project_question_records_failed " + qid, stderr.getvalue())
+        self.assertEqual(svc._project_questions_open, 0)
+
+    def test_a_contract_that_cannot_be_resolved_gathers_no_records(self):
+        def unreadable(root):
+            raise ValueError("bad")
+
+        svc = self.arrange(project_reach=unreadable)
+        gather = mock.Mock()
+        with mock.patch("agent_tools.console.question_records.project_records", gather), \
+                contextlib.redirect_stderr(io.StringIO()):
+            svc.ask_project_question(WHY, "why?")
+        gather.assert_not_called()
+        self.assertEqual(self.asked, [])
+        self.assertTrue(self.question_rows()[-1][2]["reason"].startswith(
+            "the project's contract could not be resolved"))
+
+
 class QuestionLifecycleTest(QuestionCase):
     def test_an_orderly_stop_records_the_running_questions_answer_once(self):
         entered = threading.Event()
@@ -1783,7 +2825,9 @@ class QuestionThreadServiceTest(QuestionCase):
                             ("--setting-sources", "")):
             self.assertEqual(follow_argv[follow_argv.index(flag) + 1], value)
         self.assertEqual(follow_argv[-1], project_question.prompt(
-            "and which host is deployed?", ROUTES, follow_ask.thread, repo="owner/p01"))
+            "and which host is deployed?", ROUTES, follow_ask.thread, repo="owner/p01",
+            records=str(project_question.records_path(follow_ask)),
+            sections=question_records.section_lines(follow_ask.records)))
         self.assertIn("Earlier question: what does the build check?\n"
                       "Earlier answer: Answer: it builds.\n", follow_argv[-1])
         self.assertEqual(_thread_ids(svc), [[first, follow]])
@@ -1854,6 +2898,103 @@ class QuestionThreadServiceTest(QuestionCase):
         with self.assertRaises(project_question.Refused) as caught:
             again.ask_project_question(WHY, "more?", thread_id=first)
         self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
+
+
+class QuestionRequestKeyTest(QuestionCase):
+    """A request may carry a key the console asks once per project (ADR-console-089 D9)."""
+
+    KEY = "0123456789abcdef" * 2
+
+    def test_a_keyed_body_is_parsed_and_a_bad_key_is_refused(self):
+        def body(**extra):
+            return json.dumps({"project_id": "p", "question": "q", **extra}).encode()
+        self.assertEqual(project_question.parse_keyed_request(body(request_key=self.KEY)),
+                         ("p", "q", None, self.KEY))
+        self.assertEqual(project_question.parse_request(body(request_key=self.KEY)), ("p", "q", None))
+        for key in (self.KEY[:31], self.KEY.upper(), 12, None):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                project_question.parse_keyed_request(body(request_key=key))
+
+    def test_a_repeated_key_asks_once(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        second = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.asked), 1)
+        asked, keyed, answered = self.question_rows()
+        self.assertEqual((asked[0], asked[2]["request_key"], answered[0]),
+                         ("project_question.asked", self.KEY, "project_question.answered"))
+        self.assertEqual((keyed[0], keyed[1], keyed[2]), (
+            "project_question.keyed", WHY, {"request_key": self.KEY, "question_id": first}))
+        shown = {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
+        (question,) = [q for t in shown["questions"]["threads"] for q in t["questions"]
+                       if q["id"] == first]
+        self.assertEqual(question["request_key"], self.KEY)
+
+    def test_a_resent_keyed_follow_up_is_the_same_question(self):
+        held = []
+        svc = self.start(project_question_dispatch=held.append)
+        try:
+            first = svc.ask_project_question(WHY, "q?")
+            held.pop()()
+            follow = svc.ask_project_question(WHY, "and?", thread_id=first, request_key=self.KEY)
+            again = svc.ask_project_question(WHY, "and?", thread_id=first, request_key=self.KEY)
+            self.assertEqual(again, follow)
+            self.assertEqual((len(held), len(self.asked), svc._project_questions_open), (1, 1, 1))
+        finally:
+            while held:
+                held.pop()()
+        self.assertEqual((len(self.asked), svc._project_questions_open), (2, 0))
+
+    def test_the_same_key_on_another_project_is_its_own_question(self):
+        svc = self.start()
+        one = svc.ask_project_question("owner/p00", "q?", request_key=self.KEY)
+        two = svc.ask_project_question("owner/p01", "q?", request_key=self.KEY)
+        self.assertNotEqual(one, two)
+        self.assertEqual(len(self.asked), 2)
+
+    def test_a_key_still_finds_its_question_after_retention_removed_the_asked_row(self):
+        now = [T0]
+        svc = self.start(**_clocks(now))
+        first = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        now[0] = T0 + 91 * 86400
+        self.assertGreaterEqual(svc.retain(), 2)
+        self.assertEqual([row[0] for row in self.question_rows()], ["project_question.keyed"])
+        self.assertEqual(svc._project_questions, {})
+        again = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        self.assertEqual(again, first)
+        self.assertEqual(len(self.asked), 1)
+        svc.close()
+        restarted = self.start(**_clocks(now))
+        self.assertEqual(restarted.ask_project_question(WHY, "q?", request_key=self.KEY), first)
+        other = restarted.ask_project_question("owner/p00", "q?", request_key=self.KEY)
+        self.assertNotEqual(other, first)
+        self.assertEqual(len(self.asked), 2)
+
+    def test_the_receipt_does_not_move_its_project_in_the_desk(self):
+        svc = self.start()
+        before = svc._states[WHY].last_seq
+        svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        rows = support.log_rows(self.store)
+        keyed = [row for row in rows if row[2] == "project_question.keyed"]
+        self.assertEqual(len(keyed), 1)
+        self.assertEqual(svc._states[WHY].last_seq, before)
+
+    def test_the_route_passes_the_request_key(self):
+        svc = self.start()
+        payload = json.dumps(
+            {"project_id": WHY, "question": "why?", "request_key": self.KEY}).encode()
+        status, _, body = support.post_page(
+            svc.address, QUESTION_ROUTE, self.own(svc, **JSON), payload)
+        self.assertEqual((status, body), (204, b""))
+        asked = self.question_rows()[0]
+        self.assertEqual((asked[0], asked[2]["request_key"]), ("project_question.asked", self.KEY))
+
+    def test_a_question_without_a_key_has_the_row_it_had(self):
+        svc = self.start()
+        svc.ask_project_question(WHY, "q?")
+        self.assertEqual(set(self.question_rows()[0][2]),
+                         {"question_id", "question", "profile", "session_id"})
 
 
 class QuestionRouteTest(QuestionCase):

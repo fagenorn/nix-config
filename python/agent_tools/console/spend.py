@@ -20,7 +20,9 @@ a file whose size moved and reads only its new bytes. A file whose modification 
 `since` is not opened and its cursor is forgotten. A file the reader finds absent, or that this read
 did not list, loses its cursor; but a directory whose listing fails with an `OSError` other than
 `FileNotFoundError` or `NotADirectoryError` confirms nothing, so every cursor known under it is
-kept and only bytes appended since are read once it lists again. `read` never raises for a missing
+kept and only bytes appended since are read once it lists again. `roots_unreadable` is True after a `read` whose every
+`projects` directory failed to list that way (an absent one is empty, not a failure): the empty totals then say nothing
+about spend, and a caller with no view yet must not publish them as zero. `read` never raises for a missing
 or unreadable directory or file.
 
 The key: `Key(day, session, run, agent, source)`, `day` the UTC date of the message `timestamp`,
@@ -57,7 +59,9 @@ The view: `spend_view(snapshot, today, project_of, profiles, questions)` is the 
 `{"approximate": <bool>, "days": [<day>, ...]}`, `WINDOW_DAYS` days, `today` and the days before it
 (UTC), oldest first. A day is `{"day", "total", <dimension>: {<key>: <tokens>}}` for each of
 `DIMENSIONS`, every `<tokens>` a `Tokens.wire()`, plus `"sprint_phase": {<sprint id>: {<phase>:
-<tokens>}}` and `"run_phase": {<run id>: {<phase>: <tokens>}}`, always present; a day with nothing
+<tokens>}}`, `"run_phase": {<run id>: {<phase>: <tokens>}}` and `"project_items": {<project id>:
+{"run": {<run id>: {<phase>: <tokens>}}, "sprint": {<sprint id>: {<phase>: <tokens>}}}}` (#1271,
+ADR-console-089), always present; a day with nothing
 has a zero `total` and empty maps, and a key dated outside the days is ignored. Each message has
 one key in `session`, `project`, `account` and `aspect`, so the sums over each equal `total`.
 `approximate` is true when any message counted is, per day in `total` and for the view. The keys,
@@ -89,6 +93,14 @@ label) and, for a key with no `phase` (a session's own or subagent transcript, o
 `sprint_phase`), `MANAGER_PHASE`; an `UNATTRIBUTED` item has no entry. Per day and item the
 phase tokens sum to the item's entry in `sprint` or `run` (every count field; dollars to
 rounding, since each `Tokens.wire()` rounds on its own).
+
+`project_items` splits the same items by project, because a run id is unique only within a project
+(two projects' runs may share one, and `run_phase` sums them): an item is counted under
+`project_items[p][kind]` exactly when it is counted under `<kind>_phase` and the key's `project`
+is `p`, not `UNATTRIBUTED`, with the same phase rule (`MANAGER_PHASE` for a sprint item with no
+phase). So per kind, item and phase the sum over projects is at most the `<kind>_phase` figure,
+and equal when every key is attributed. A project or kind with no item has no entry, an
+`UNATTRIBUTED` project, run or sprint never has one, and a day with nothing has `{}`.
 
 The check (`python -m agent_tools.console.spend check-shares`): reads the transcripts under each
 `--projects` directory (default `~/.claude/projects`) from `--from` (default `2026-11-09`, the
@@ -172,7 +184,7 @@ PHASE_LABELS: tuple[tuple[str, str], ...] = (
     ("task review", r"review-\d+|rereview-\d+(?:-\d+)*|fix-\d+(?:-\d+)*|direct-review"
                     r"|direct-review-full|direct-codex|direct-rereview|direct-fix|fix-ci"
                     r"|fix-ci-review"),
-    ("final review", r"final-\d+|final-codex|final-integration|renew-final-review|diff-size"),
+    ("final review", r"final-\d+|final-codex|final-integration|final-scoped|follow-ups-\d+|renew-final-review|diff-size"),
     ("fix wave", r"fix-wave|fix-wave-\d+|fix-wave-review|fix-wave-review-\d+"),
     ("verify", r"verify|verify-\d+|verify-rerun-\d+|verify-fix-\d+|verify-fix-review-\d+"),
     ("close-out", r"close-out|close-out-\d+|hold|land-unlock(?:-\d+)*"),
@@ -334,6 +346,7 @@ class SpendReader:
         self._names: dict[str, str] = {}
         self._repos: dict[str, str | None] = {}
         self._known: set[Path] = set()
+        self.roots_unreadable = False
 
     def snapshot(self) -> Snapshot:
         return Snapshot(dict(self._totals),
@@ -349,6 +362,7 @@ class SpendReader:
                 continue
             walked.add(real)
             self._walk_projects(Path(real), since, walk)
+        self.roots_unreadable = bool(walked) and all(Path(real) in walk.failed for real in walked)
         if ping_log is not None:
             self._read_pings(Path(ping_log), since)
         for path in sorted(self._known - walk.listed):
@@ -532,6 +546,8 @@ def spend_view(
         day: {dimension: {} for dimension in DIMENSIONS} for day in days}
     items: dict[str, dict[str, dict[str, dict[str, Tokens]]]] = {
         day: {kind: {} for kind in ITEM_PHASES} for day in days}
+    by_project: dict[str, dict[str, dict[str, dict[str, dict[str, Tokens]]]]] = {
+        day: {} for day in days}
     for key, tokens in snapshot.totals.items():
         if key.day not in totals:
             continue
@@ -549,6 +565,11 @@ def spend_view(
                 continue
             bucket = items[key.day][kind].setdefault(item, {})
             bucket[phase] = bucket.get(phase, Tokens()) + tokens
+            project = named["project"]
+            if project != UNATTRIBUTED:
+                kinds = by_project[key.day].setdefault(project, {})
+                bucket = kinds.setdefault(kind, {}).setdefault(item, {})
+                bucket[phase] = bucket.get(phase, Tokens()) + tokens
     return {
         "approximate": any(total.approximate for total in totals.values()),
         "days": [{"day": day, "total": totals[day].wire(),
@@ -558,7 +579,13 @@ def spend_view(
                   **{kind + "_phase": {
                       item: {phase: tokens.wire() for phase, tokens in phases.items()}
                       for item, phases in items[day][kind].items()}
-                     for kind in ITEM_PHASES}}
+                     for kind in ITEM_PHASES},
+                  "project_items": {
+                      project: {kind: {item: {phase: tokens.wire()
+                                              for phase, tokens in phases.items()}
+                                       for item, phases in by_item.items()}
+                                for kind, by_item in kinds.items()}
+                      for project, kinds in by_project[day].items()}}
                  for day in days],
     }
 

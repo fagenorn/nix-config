@@ -51,6 +51,10 @@ in
     ./github-runners.nix
   ];
 
+  # Nobody is logged in at the screen as the owner and automatic login stays off, so launchd
+  # never loads login agents here: run the owner's services as boot daemons (issue 1290).
+  ownerServices.atBoot = true;
+
   # mkDarwin sets HostName and LocalHostName; Tailscale names the node after the Computer Name.
   networking.computerName = "eleven-m5";
 

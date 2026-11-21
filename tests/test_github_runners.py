@@ -1,9 +1,9 @@
 """Self-hosted GitHub runners as each darwin host's configuration evaluates them (issue 680).
 
-Evaluates the flake from this checkout's git tree, so new files must be `git add`-ed first.
+Reads the host evaluations from `tests/host_readings.py`, which evaluates the flake from this
+checkout's git tree, so new files must be `git add`-ed first. One recipe run evaluates for real.
 Run: just agent-workflow-tests
 """
-import json
 import os
 import re
 import shutil
@@ -12,26 +12,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
+try:
+    from . import host_readings
+except ImportError:  # run directly: no parent package, and tests/ is sys.path[0]
+    import host_readings
+
 ROOT = Path(__file__).resolve().parents[1]
 EVAL_TIMEOUT = 1200
 HOSTS = ("mbp", "eleven-m5")
 FAGENORN = ("arcwave", "argus", "nix-config")
 TOKENS = "/var/lib/github-runner-tokens"
 GUARD = ROOT / "hosts" / "common" / "github-runner-account-guard.sh"
-# pure: no import-from-derivation, so this evaluates on the Linux CI job.
-NIX = ["nix", "--extra-experimental-features", "nix-command flakes", "eval",
-       "--option", "allow-import-from-derivation", "false"]
-
-
-def nix(*args):
-    done = subprocess.run([*NIX, *args], cwd=ROOT, capture_output=True, text=True, timeout=EVAL_TIMEOUT)
-    if done.returncode != 0:
-        raise AssertionError(f"nix eval {' '.join(args)} failed:\n{done.stderr[-4000:]}")
-    return done.stdout
-
-
-def config(host, apply):
-    return json.loads(nix("--json", f"{ROOT}#darwinConfigurations.{host}.config", "--apply", apply))
+# pure: no import-from-derivation, so the real recipe run evaluates on the Linux CI job.
+NIX_FEATURES = ["--extra-experimental-features", "nix-command flakes"]
 
 
 def write_exe(path, text):
@@ -109,34 +102,6 @@ class AccountGuardTest(unittest.TestCase):
 JARBIRD_ACCOUNT = "_github-runner-jarbird"
 JARBIRD_TOKENS = "/var/lib/github-runner-tokens-jarbird"
 
-APPLY = """c: {
-  runners = builtins.mapAttrs (n: r: {
-    inherit (r) url tokenFile extraLabels ephemeral user group name enable;
-    daemon = let s = c.launchd.daemons."github-runner-${n}".serviceConfig; in {
-      inherit (s) UserName GroupName;
-      SoftResourceLimits = s.SoftResourceLimits or null;
-      HardResourceLimits = s.HardResourceLimits or null;
-    };
-  }) c.services.github-runners;
-  account =
-    let u = c.users.users."_github-runner-jarbird" or null; in
-    if u == null then null else { inherit (u) uid gid home createHome; };
-  accountGroup =
-    let g = c.users.groups."_github-runner-jarbird" or null; in
-    if g == null then null else { inherit (g) gid; };
-  knownUsers = c.users.knownUsers;
-  knownGroups = c.users.knownGroups;
-  activation = c.system.activationScripts.launchd.text;
-  checks = c.system.checks.text;
-  trustedSettings = c.nix.settings.trusted-users or [ ];
-  extraOptions = c.nix.extraOptions;
-  postgres =
-    if c.services ? postgresql then
-      { inherit (c.services.postgresql) enable port; }
-    else
-      null;
-}"""
-
 
 def token_dir_line(group, directory):
     return re.compile(rf"/bin/install -d -m 0750 -o root -g {re.escape(group)} {re.escape(directory)}$", re.M)
@@ -145,7 +110,7 @@ def token_dir_line(group, directory):
 class RunnersTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.got = {host: config(host, APPLY) for host in HOSTS}
+        cls.got = {host: host_readings.read(host, "runners") for host in HOSTS}
 
     def test_eleven_m5_has_one_repo_scoped_jarbird_runner(self):
         runners = self.got["eleven-m5"]["runners"]
@@ -291,19 +256,31 @@ def expected_triples(host):
 
 
 class RegisterRunnersTest(unittest.TestCase):
-    def run_recipe(self, host, local):
-        """Run the recipe body for `host` as if on `local`, with stub gh, sudo and ssh; nix is the
-        real one, in pure mode. The stub ssh runs the remote command as sshd would, joined with
+    @classmethod
+    def setUpClass(cls):
+        cls.triples = {host: host_readings.read(host, "runner-triples") for host in HOSTS}
+
+    def run_recipe(self, host, local, real=False):
+        """Run the recipe body for `host` as if on `local`, with stub gh, sudo and ssh. nix is a
+        stub that prints the cached triples of `host`, or with `real` the real one in pure mode.
+        Either records its argv. The stub ssh runs the remote command as sshd would, joined with
         spaces under /bin/sh -c, with the same stdin, so the remote half really runs."""
-        real_nix = shutil.which("nix")
-        self.assertIsNotNone(real_nix, "nix is not on PATH")
+        real_nix = shutil.which("nix") if real else None
+        if real:
+            self.assertIsNotNone(real_nix, "nix is not on PATH")
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             stubs, seen = tmp / "bin", tmp / "seen"
             stubs.mkdir()
             seen.mkdir()
-            write_exe(stubs / "nix", f'#!/bin/sh\nexec "{real_nix}" {" ".join(repr(a) for a in NIX[1:3])} '
-                                     '--option allow-import-from-derivation false "$@"\n')
+            if real:
+                write_exe(stubs / "nix", f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{seen}/real-nix-$$"\n'
+                                         f'exec "{real_nix}" {" ".join(repr(a) for a in NIX_FEATURES)} '
+                                         '--option allow-import-from-derivation false "$@"\n')
+            else:
+                (tmp / "triples").write_text(self.triples[host], encoding="utf-8")
+                write_exe(stubs / "nix", f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{seen}/nix-argv-$$"\n'
+                                         f'cat "{tmp}/triples"\n')
             write_exe(stubs / "gh", f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{seen}/gh"\nprintf "tok:%s\\n" "$4"\n')
             # [-n] install -m 0440 -o root -g GROUP SRC DST: record the call, refuse a source that
             # is not a regular file (as install does), and keep what SRC held.
@@ -328,12 +305,16 @@ class RegisterRunnersTest(unittest.TestCase):
                 path = seen / name
                 return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
+            def argvs(prefix):
+                return [p.read_text(encoding="utf-8").splitlines() for p in sorted(seen.glob(f"{prefix}-*"))]
+
             sudo = [line.split(" ") for line in lines("sudo")]
             tokens = {p.name[len("token-"):]: p.read_text(encoding="utf-8") for p in seen.glob("token-*")}
             left = [path for path in lines("staged") if Path(path).exists()]
             return {"gh": lines("gh"), "sudo": sudo, "tokens": tokens, "left": left,
                     "ssh_host": lines("ssh-host"), "ssh_opts": lines("ssh-opts"),
-                    "ssh_command": lines("ssh-command")}
+                    "ssh_command": lines("ssh-command"),
+                    "nix_argv": argvs("nix-argv"), "real_nix": argvs("real-nix")}
 
     def assert_tokens(self, host, seen, prefix):
         triples = expected_triples(host)
@@ -370,9 +351,32 @@ class RegisterRunnersTest(unittest.TestCase):
     def test_the_expression_prints_one_triple_per_runner(self):
         for host in HOSTS:
             with self.subTest(host=host):
-                out = nix("--raw", f"{ROOT}#darwinConfigurations.{host}.config.services.github-runners",
-                          "--apply", apply_expression())
+                out = self.triples[host]
                 self.assertEqual(sorted(tuple(t.split("=")) for t in out.split()), expected_triples(host))
+
+    def test_one_recipe_run_evaluates_the_real_configuration(self):
+        host = "eleven-m5"
+        seen = self.run_recipe(host, host, real=True)
+        self.assert_tokens(host, seen, [])
+        self.assertEqual(seen["ssh_host"], [])
+        self.assertEqual(seen["nix_argv"], [])
+        self.assertEqual(seen["real_nix"], [[
+            "eval", "--raw", f".#{host_readings.output(host)}.config.services.github-runners",
+            "--apply", apply_expression()]])
+
+    def test_a_cached_run_hands_the_recipe_the_reading_of_its_evaluation(self):
+        for host in HOSTS:
+            with self.subTest(host=host):
+                seen = self.run_recipe(host, host)
+                self.assertEqual(seen["nix_argv"], [[
+                    "eval", "--raw", f".#{host_readings.output(host)}.config.services.github-runners",
+                    "--apply", apply_expression()]])
+                self.assertEqual(seen["real_nix"], [])
+
+    def test_the_cached_triples_part_applies_the_recipes_expression(self):
+        part = host_readings.PARTS["runner-triples"]
+        self.assertEqual(host_readings.applied(part, ROOT), f"c: u: ({apply_expression()}) c.services.github-runners")
+        self.assertEqual(set(part.hosts), set(HOSTS))
 
     def test_the_recipe_names_no_owner_group_or_host(self):
         comment, _, body = recipe_block()

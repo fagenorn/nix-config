@@ -43,7 +43,7 @@
 // disabled element. The fake setTimeout/clearTimeout fire when a clock step
 // reaches their due time. Each step settles pending promises before the next. A snapshot holds the trees
 // of the inbox, statement, projects, unmanaged, register, digest, goal, capacity,
-// promoted and reading sections; every serialized node carries its title attribute (null
+// pool, promoted and reading sections; every serialized node carries its title attribute (null
 // when unset), which is where a time element keeps its exact local time, and
 // its placeholder attribute (null when unset) and its inline style.width (null
 // when unset; Elem.style is a plain object) and its aria-label attribute as
@@ -81,6 +81,11 @@
 // object_urls: {made, revoked}. A click, focus_on or key step's "on" takes an optional
 // nth (0-based, default 0) choosing among the matches in document order; fewer matches
 // throw.
+// {check: {cls, checked, nth?}} toggles a checkbox as a browser does: the nth (default 0) attached element with
+// the class, when it is not disabled, gets .checked set to the given boolean and its change listeners run with
+// {type: "change", target}; a disabled one is left alone; none throws. A click step stays a listener call with no
+// native activation, so it never toggles a checkbox. The snapshot adds own_account (#own-account, or null) beside
+// pool.
 // Elem.removeAttribute(name) deletes the attribute and, for disabled, sets .disabled to false.
 // A snapshot node adds busy (its aria-busy attribute, null when unset) and aria_disabled (its
 // aria-disabled attribute, null when unset); disabled stays the native flag only.
@@ -537,6 +542,12 @@ async function run() {
       if (target.disabled !== true) {
         for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
       }
+    } else if ("check" in step) {
+      const target = byClass(step.check.cls, scopeOf(step), step.check.nth);
+      if (target.disabled !== true) {
+        target.checked = step.check.checked === true;
+        for (const fn of target.listeners.change || []) fn({ type: "change", target });
+      }
     } else if ("type" in step) {
       typeInto(step.type, false, scopeOf(step));
     } else if ("append" in step) {
@@ -586,6 +597,8 @@ async function run() {
         digest: byId("digest") ? node(byId("digest")) : null,
         goal: byId("goal") ? node(byId("goal")) : null,
         capacity: byId("capacity") ? node(byId("capacity")) : null,
+        pool: byId("pool") ? node(byId("pool")) : null,
+        own_account: byId("own-account") ? node(byId("own-account")) : null,
         account_add: byId("account-add") ? node(byId("account-add")) : null,
         register: byId("register") ? node(byId("register")) : null,
         accounts: byId("accounts") ? node(byId("accounts")) : null,

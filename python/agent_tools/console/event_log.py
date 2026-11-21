@@ -24,10 +24,18 @@ Three kinds record what the owner says to a sprint and what comes of it (#889): 
 `KEPT_KINDS`; `SPRINT_NUDGED` (`sprint.nudged`, the record of an attempt to reach the manager) is
 not, and retention removes it like any other row.
 
+A guest's goal, approval, reply, message and answer rows carry `by`, the guest's normal login
+(#1263); an owner's row carries none.
+
 Two kinds record a manager's questions and the owner's answers (#891): `QUESTIONS_ASKED`
 (`questions.asked`) and `QUESTION_ANSWERED` (`question.answered`), both in `KEPT_KINDS`.
 `QUESTION_WITHDRAWN` (`question.withdrawn`, #1099, kept) records a manager taking back an
 open question.
+
+One kind records what the console did about a look card's approval (#1260): `LOOK_RECORDED`
+(`look.recorded`, kept, payload `sprint_id`, `round`, `index` and `outcome`, `moved`, `posted` or
+`failed`, with the head it found, the comment it posted or the reason it could not), so a restart
+never loses a posted approval or reopens a held answer.
 
 Two kinds record a manager's notices (#1117): `NOTICE_POSTED` (`notice.posted`) and
 `NOTICE_WITHDRAWN` (`notice.withdrawn`), both in `KEPT_KINDS`, so the retention pass never drops
@@ -63,6 +71,20 @@ exception to its two refusals: a row of the asked or answered kind may be delete
 record of the same project with a larger sequence number names its `question_id`, so a raw connection
 still cannot delete any other question row. The connection runs `PRAGMA secure_delete = ON`, so the
 freed pages of a deleted question or answer are zeroed instead of keeping its text.
+
+One kind is kept whole (#1271): `PROJECT_QUESTION_KEYED` (`project_question.keyed`, payload `request_key`
+and `question_id`, the project in its project column) is the receipt of a question asked under a request
+key, appended in the same transaction as its asked row (ADR-console-089 D9). It is not in `KEPT_KINDS`, but the
+retention pass never removes it, whatever its age, so a key the console has asked still finds its question
+after the asked row is gone and a retry of that key starts no second session. The question's own rows go
+at 90 days as before; the receipt is two short strings.
+
+Two kinds are kept in part for the ownership of a path (#1271): `PROJECT_REGISTERED` (`project.registered`,
+payload `root`) and `PROJECT_UNREGISTERED` (`project.unregistered`) are not in `KEPT_KINDS`, but the retention pass
+never removes a registered row, and removes an unregistered row only when no earlier registered row of its
+project remains. The activation rows above are kept past the window and name a root, not a project, so the
+registrations that say who held the root when one was written must outlive it too (ADR-console-089 D3);
+one pair of short rows per registration is all that is kept.
 
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
@@ -108,11 +130,22 @@ on an apply card) is not in `KEPT_KINDS` either.
 `REGISTRATION_CANCELLED` (`registration.cancelled`, #1088, `{"by": "owner", "root", "plan_id"}`, one per
 Cancel registration the owner chooses, plus one per other failed apply of the same root) is not in `KEPT_KINDS`; the registration, deferral, adoption and
 folder-trust folds each drop what it names. `cancelled_registration(event)` reads it: `(root, plan_id)`
-for exactly that payload (`plan_id` null for a registration with none, a failed plan), else None.
+for exactly that payload, or exactly it plus `"restore": true` (#1334; `plan_id` null for a registration
+with none, a failed plan), else None.
 
-`ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
-`KEPT_KINDS`. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
-#1030) is not in `KEPT_KINDS`.
+`ACCOUNT_ADDED` (`account.added`, one per account the owner or a listed colleague adds from the page,
+#1027, #1343) is not in `KEPT_KINDS` but is kept in part: the retention pass leaves, whatever its age,
+the `account.added` row whose `by` is a login (a JSON string other than `owner` with `normal_login(by) == by`), whose
+seq is the largest of the `account.added` rows of the same `profile` whose `by` the owner fold reads
+(`owner` or a login with `normal_login(by) == by`; a row with any other `by` is ignored by the fold and
+by this rule alike), and after which no
+`account.removal` row of that profile has an outcome in `ACCOUNT_GONE_OUTCOMES` (`removed`,
+`removed_signed_out_already`: the same two as `folder_trust.GONE_OUTCOMES`, which this module cannot
+import). A colleague's account must stay his after the window and end only with a completed removal,
+so the owner fold after a retention pass equals the fold before it; an owner-added row, an
+older row of a re-added profile and a row a completed removal ended all age out as before, and a
+failed removal leaves the row kept. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner or the colleague who added the profile confirms,
+#1030, #1345) is not in `KEPT_KINDS`.
 `TRUST_GRANTED` (`trust.granted`, one per folder-trust grant the owner approved or per registered project at the console's start, #1078, `folder_trust.granted_row`)
 is not in `KEPT_KINDS`.
 `PICTURE_STORED` (`picture.stored`, one per picture a manager sent that the console accepted, #1089)
@@ -135,7 +168,7 @@ window opens), so retained hooks keep their profile; once no hook of the session
 that row is removed like any other.
 
 Three kinds record the access list the owner keeps for the guest door (#1237): `SHARING_TAILNET`
-(`sharing.tailnet`, `{"tailnet"}`), `SHARING_COLLEAGUE` (`sharing.colleague`, `{"login", "projects"}`)
+(`sharing.tailnet`, `{"shared"}`; a legacy `{"tailnet"}` row still folds to on), `SHARING_COLLEAGUE` (`sharing.colleague`, `{"login", "projects"}`)
 and `SHARING_REMOVED` (`sharing.removed`, `{"login"}`). None is in `KEPT_KINDS`, but the retention
 pass leaves, whatever its age, the newest tailnet row and, for each login, the newest colleague or
 removed row when it is a colleague row, the rows `guest.access_list` folds by, so the folded list is
@@ -156,6 +189,7 @@ is shared across threads and every use of it holds one lock.
 """
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -164,6 +198,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 11
+LOGIN_MAX = 254
+_LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 RETENTION = timedelta(days=90)
 
 GOAL_STATED = "goal.stated"
@@ -187,10 +223,12 @@ SPRINT_NUDGED = "sprint.nudged"
 QUESTIONS_ASKED = "questions.asked"
 QUESTION_ANSWERED = "question.answered"
 QUESTION_WITHDRAWN = "question.withdrawn"
+LOOK_RECORDED = "look.recorded"
 NOTICE_POSTED = "notice.posted"
 NOTICE_WITHDRAWN = "notice.withdrawn"
 NOTICE_NUDGED = "notice.nudged"
 PROJECT_QUESTION_ASKED = "project_question.asked"
+PROJECT_QUESTION_KEYED = "project_question.keyed"
 PROJECT_QUESTION_ANSWERED = "project_question.answered"
 PROJECT_QUESTION_DELETED = "project_question.deleted"
 SPRINT_CLOSED = "sprint.closed"
@@ -204,6 +242,7 @@ SIGNIN_ACTED = "signin.acted"
 SIGNIN_ENDED = "signin.ended"
 ACCOUNT_ADDED = "account.added"
 ACCOUNT_REMOVAL = "account.removal"
+ACCOUNT_GONE_OUTCOMES = ("removed", "removed_signed_out_already")
 TRUST_GRANTED = "trust.granted"
 REGISTRATION_ENDED = "registration.ended"
 ADOPTION_STEP = "adoption.step"
@@ -214,6 +253,7 @@ REGISTRATION_CANCELLED = "registration.cancelled"
 INBOX_SEEN = "inbox.seen"
 INBOX_CHANGED = "inbox.changed"
 INBOX_GONE = "inbox.gone"
+PROJECT_REGISTERED = "project.registered"
 PROJECT_UNREGISTERED = "project.unregistered"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
@@ -226,8 +266,8 @@ SHARING_COLLEAGUE = "sharing.colleague"
 SHARING_REMOVED = "sharing.removed"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
-# kind, the three message kinds, the three question kinds, the two notice kinds, the
-# closing kind, the stop request and the stop's completion, and the record of a deleted
+# kind, the three message kinds, the three question kinds, the look record, the two notice kinds,
+# the closing kind, the stop request and the stop's completion, and the record of a deleted
 # question thread) are never removed: not by the retention pass, not by a raw connection (the
 # delete trigger of schema 3, 4, 5, 6, 7, 8, 9, 10 and 11).
 # `SPRINT_NUDGED` and `MANAGER_STOP_FAILED` are not among them, nor is any manager kind other
@@ -238,7 +278,7 @@ KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED,
                         SPRINT_REPORTED,
                         SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED,
-                        QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN,
+                        QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN, LOOK_RECORDED,
                         NOTICE_POSTED, NOTICE_WITHDRAWN,
                         SPRINT_CLOSED, SPRINT_STOP_REQUESTED, MANAGER_STOPPED,
                         PROJECT_QUESTION_DELETED})
@@ -286,7 +326,7 @@ _RETENTION = (
 # needs no hand-edited SQL, only a re-run on an existing store (schema 4 added the
 # brief kinds, schema 5 the report kind, schema 6 the message kinds, schema 7 the closing kinds
 # and the stop's completion, schema 8 the question kinds, schema 9 the question withdrawal,
-# schema 10 the notice kinds, schema 11 the deletion record and one exception: an asked or
+# schema 10 the notice kinds, schema 11 the look record and the deletion record, with one exception: an asked or
 # answered question row is deletable when a later deletion record of its project names it).
 _KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
                            for kind in sorted(KEPT_KINDS))
@@ -323,17 +363,33 @@ class Event:
 def cancelled_registration(event: Event) -> tuple[str, str] | None:
     """`(root, plan_id)` of a `REGISTRATION_CANCELLED` row with exactly the owner's payload, else None.
 
+    The payload may also carry `"restore": true` (a restoring Cancel, #1334) and no other member.
+
     The plan id is a non-empty string, or JSON null for a registration that has none (a failed plan).
     """
     payload = event.payload
     if event.kind != REGISTRATION_CANCELLED or not isinstance(payload, Mapping):
         return None
     root, plan_id = payload.get("root"), payload.get("plan_id")
-    if (payload != {"by": "owner", "root": root, "plan_id": plan_id}
+    owner = {"by": "owner", "root": root, "plan_id": plan_id}
+    if (payload not in (owner, {**owner, "restore": True})
+            or payload.get("restore", True) is not True
             or not isinstance(root, str) or not root
             or not (plan_id is None or (isinstance(plan_id, str) and plan_id))):
         return None
     return (root, plan_id)
+
+
+def normal_login(text: object) -> str | None:
+    if (not isinstance(text, str) or len(text) > LOGIN_MAX or not text.isascii()
+            or _LOGIN.fullmatch(text) is None):
+        return None
+    return text.lower()
+
+
+def _valid_added_by(by: object) -> int:
+    """1 for the `by` of an `account.added` row the owner fold reads: `owner` or a normalised login."""
+    return int(isinstance(by, str) and (by == "owner" or normal_login(by) == by))
 
 
 def utc_now() -> str:
@@ -353,6 +409,7 @@ class EventLog:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path, isolation_level=None,
                                            check_same_thread=False)
+        self._connection.create_function("valid_added_by", 1, _valid_added_by, deterministic=True)
         try:
             self._connection.execute("PRAGMA secure_delete = ON")
             self._prepare()
@@ -455,7 +512,7 @@ class EventLog:
             return self._transaction(remove)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force, and every question key receipt, and the registry rows that say who owned a root; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -517,13 +574,30 @@ class EventLog:
                     "WHERE newer.kind = events.kind)) "
                     "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
                     "WHERE newer.kind IN (?, ?) AND "
-                    "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login')))",
+                    "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login'))) "
+                    "AND NOT (kind = ? AND valid_added_by(json_extract(payload, '$.by')) "
+                    "AND json_extract(payload, '$.by') != 'owner' "
+                    "AND seq = (SELECT MAX(newer.seq) FROM events AS newer WHERE newer.kind = ? "
+                    "AND valid_added_by(json_extract(newer.payload, '$.by')) "
+                    "AND json_extract(newer.payload, '$.profile') "
+                    "IS json_extract(events.payload, '$.profile')) "
+                    "AND NOT EXISTS (SELECT 1 FROM events AS gone WHERE gone.kind = ? "
+                    "AND gone.seq > events.seq AND json_extract(gone.payload, '$.outcome') IN (?, ?) "
+                    "AND json_extract(gone.payload, '$.profile') "
+                    "IS json_extract(events.payload, '$.profile'))) "
+                    "AND kind NOT IN (?, ?) "
+                    "AND NOT (kind = ? AND EXISTS (SELECT 1 FROM events AS began "
+                    "WHERE began.kind = ? AND began.project IS events.project "
+                    "AND began.seq < events.seq))",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
                      PROFILE_PIN,
                      INBOX_SEEN, INBOX_CHANGED, INBOX_SEEN, INBOX_CHANGED, INBOX_GONE, PROJECT_UNREGISTERED,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff, ACTIVATION_STARTED, ACTIVATION_FINISHED, SHARING_TAILNET,
-                     SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED)).rowcount
+                     SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED,
+                     ACCOUNT_ADDED, ACCOUNT_ADDED, ACCOUNT_REMOVAL, *ACCOUNT_GONE_OUTCOMES,
+                     PROJECT_QUESTION_KEYED, PROJECT_REGISTERED, PROJECT_UNREGISTERED,
+                     PROJECT_REGISTERED)).rowcount
 
             return self._transaction(remove)
 

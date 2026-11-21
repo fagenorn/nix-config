@@ -217,9 +217,10 @@ class ReadStatusTest(unittest.TestCase):
 
         self.assertEqual(HITS, [])
 
-    def test_the_reader_is_linux_only(self):
+    def test_the_reader_is_linux_and_macos_only(self):
         self.assertIs(signin.reader_for("linux"), signin.read_status)
-        self.assertIsNone(signin.reader_for("darwin"))
+        self.assertIs(signin.reader_for("darwin"), signin.read_status)
+        self.assertIsNone(signin.reader_for("win32"))
 
 
 E = 1796000000

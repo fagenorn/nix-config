@@ -7,6 +7,8 @@ the desk page, `GET /api/state` and the `GET /api/stream` update stream
 `~/.agents/state/fleet/registry.json`. The page's write token is created once in
 `~/.agents/state/console/page-token` (mode 0600) and kept across restarts. Every two minutes it also reads the owner-action items of
 each active project from the tracker into the log (`agent_tools.console.service` holds the rules).
+The owner port answers only processes of the user the console runs as (`agent_tools.console.peer`,
+ADR-console-076).
 
 Once serving it prints exactly one stdout line, `console: serving http://127.0.0.1:<port>/`.
 SIGTERM or SIGINT closes the service and exits 0. A port that cannot be bound is stderr
@@ -15,43 +17,43 @@ used (a schema version this build does not read, a database error) is stderr
 `console: event log unusable: <error>` and exit 1; a page token that cannot be read or is malformed is
 stderr `console: page token unusable: <error>` and exit 1. A bad argument is exit 2.
 
-The service is given `manager.launcher_for(sys.platform)`: on Linux a stated goal starts that
+The service is given `manager.launcher_for(sys.platform)`: on Linux and macOS a stated goal starts that
 sprint's manager (`agent_tools.console.manager`), elsewhere there is no launcher and every sprint
 says managers are not available on this host yet.
 
-It is also given `nudge.nudger_for(sys.platform)`: on Linux a message the owner leaves a sprint with a
+It is also given `nudge.nudger_for(sys.platform)`: on Linux and macOS a message the owner leaves a sprint with a
 running manager is relayed to it (or its stopped session is woken in place) by one fixed sentence
 (`agent_tools.console.nudge`); elsewhere there is no nudger and no nudge is made. It is given
 `nudge.full_lister_for(sys.platform)` too (#949): before a wake the service reads the manager
 profile's full session listing, and a wake of a session it no longer shows passes the sprint's
 session name and settings file again; elsewhere every wake is bare.
 
-Last, it is given `manager.stopper_for(sys.platform)` (#892): on Linux the owner's stop of a sprint
+Last, it is given `manager.stopper_for(sys.platform)` (#892): on Linux and macOS the owner's stop of a sprint
 ends its manager's background session (`manager.stop_session`); elsewhere there is no stopper and a
 stop is recorded without a call.
 
-It is also given `probe.prober_for(sys.platform)` (#1009): on Linux every listed profile is read every
+It is also given `probe.prober_for(sys.platform)` (#1009): on Linux and macOS every listed profile is read every
 10 minutes by one small request under it (`agent_tools.console.probe`); elsewhere no probe is made.
 
-It is also given `signin.reader_for(sys.platform)` (#1010): on Linux each probe job first reads the
+It is also given `signin.reader_for(sys.platform)` (#1010): on Linux and macOS each probe job first reads the
 profile's sign-in from the client's status command (`agent_tools.console.signin`); elsewhere none is read.
 
-It is also given `signin_run.runs_for(sys.platform)` (#1026): on Linux the owner starts, passes
+It is also given `signin_run.runs_for(sys.platform)` (#1026): on Linux and macOS the owner starts, passes
 a code to and cancels a profile's own client login from the page (`agent_tools.console.signin_run`);
 elsewhere there are no runs and the sign-in routes refuse.
 
-It is also given `account_add.adder_for(sys.platform)` (#1027), so on Linux the owner adds an account
+It is also given `account_add.adder_for(sys.platform)` (#1027), so on Linux and macOS the owner adds an account
 from the page through `claude-account add` (`agent_tools.console.account_add`).
 
 It is also given `account_remove.signer_out_for(sys.platform)` and `account_remove.remover_for(sys.platform)`
-(#1030), so on Linux the owner removes an account from the page, signed out first
+(#1030), so on Linux and macOS the owner removes an account from the page, signed out first
 (`agent_tools.console.account_remove`).
 
-It is also given `register.adopter_for(sys.platform)` (#1052), so on Linux the owner names a
+It is also given `register.adopter_for(sys.platform)` (#1052), so on Linux and macOS the owner names a
 repository on the page and sees what adopting it would change, or registers it when it is adopted
 (`agent_tools.console.register`); elsewhere the route refuses.
 
-It is also given `project_question.asker_for(sys.platform)` (#1176): on Linux a question from the page
+It is also given `project_question.asker_for(sys.platform)` (#1176): on Linux and macOS a question from the page
 about a registered project starts one read-only session under a chosen account
 (`agent_tools.console.project_question`) and its answer is recorded in the log; elsewhere the route
 refuses.
@@ -61,15 +63,19 @@ client trust in `~/.claude.json` as well as in every profile (`agent_tools.conso
 It is given `trust_at_start` (#1183), so every registered project is granted its folder trust in every
 profile at start.
 
-`--guest-port N` (default 27185, loopback only; 0 picks a free one) binds the guest door's second port
-(#1237, `agent_tools.console.service`); a port that cannot be bound is `console: cannot listen on
-127.0.0.1:<that port>: <error>`, exit 1.
+`--guest-socket PATH` (absolute, no default) makes the guest door a Unix socket at PATH inside a
+mode-0700 folder the console creates (#1299, ADR-console-077); a socket that cannot be made, or one
+another console still listens on, is `console: cannot listen on unix:<PATH>: <error>`, exit 1. Without
+it there is no guest door.
 
-`--tailscale PATH` (no default) names the Windows Tailscale client (#1237): it is read with
-`serve status --json` every minute to show whether Serve proxies the tailnet name to the guest port
-(`agent_tools.console.guest`). Without it the console never reads Serve and shows the state as unchecked.
+`--tailscale PATH` (no default) names this host's Tailscale client (#1237): it is read with
+`serve status --json` every minute to show whether Serve proxies the tailnet name to the guest socket,
+and with `status --json` for this host's own tailnet name, the one name the guest door admits
+(#1305, ADR-console-078; `agent_tools.console.guest`), and for its own addresses (`Self.TailscaleIPs`),
+which tell its own requests from another device's (ADR-console-079). Without it the console never reads Serve, shows
+the state as unchecked and its guest door shares with nobody.
 
-It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owner approves a ready
+It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux and macOS the owner approves a ready
 plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
 refuses.
 
@@ -116,16 +122,25 @@ def port_number(text: str) -> int:
     return port
 
 
+def socket_path(text: str) -> Path:
+    path = Path(text)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError(f"{text!r} is not an absolute path")
+    return path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="console", description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=port_number, default=service.DEFAULT_PORT,
                         help="loopback port to listen on (0 picks a free one; default: %(default)s)")
-    parser.add_argument("--guest-port", type=port_number, default=service.DEFAULT_GUEST_PORT,
-                        help="loopback port of the guest door for Tailscale Serve (0 picks a free one; "
-                             "default: %(default)s)")
+    parser.add_argument("--guest-socket", type=socket_path, default=None, metavar="PATH",
+                        help="absolute path of the guest door, a Unix socket for Tailscale Serve "
+                             "(default: no guest door)")
     parser.add_argument("--tailscale", metavar="PATH", default=None,
-                        help="the Windows Tailscale client, read with `serve status --json` every minute "
-                             "to show whether Serve proxies the tailnet name to the guest port")
+                        help="this host's Tailscale client, read with `serve status --json` every minute "
+                             "to show whether Serve proxies the tailnet name to the guest socket, and "
+                             "with `status --json` for this host's tailnet name; without it the guest "
+                             "door shares with nobody")
     parser.add_argument("--screenshots", type=Path, action="append", default=[], metavar="DIR",
                         help="a folder whose PNGs a manual check may show (repeatable)")
     return parser
@@ -135,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         console = service.ConsoleService(
-            service.default_store(), service.default_registry(), port=args.port, guest_port=args.guest_port,
+            service.default_store(), service.default_registry(), port=args.port, guest_socket=args.guest_socket,
             tracker=inbox.read_items, pull_reader=movement.read_pulls, launcher=manager.launcher_for(sys.platform),
             nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform),
             full_listing=nudge.full_lister_for(sys.platform),
@@ -151,7 +166,8 @@ def main(argv: list[str] | None = None) -> int:
                 Path(agent_tools.__file__).resolve().parent.parent, revision=activation_run.host_revision),
             activator=activation_run.Activator(service.default_store().parent),
             choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots,
-            serve_reader=None if args.tailscale is None else guest.serve_reader(args.tailscale))
+            serve_reader=None if args.tailscale is None else guest.serve_reader(args.tailscale),
+            status_reader=None if args.tailscale is None else guest.status_reader(args.tailscale))
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1
@@ -159,8 +175,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console: event log unusable: {error}", file=sys.stderr)
         return 1
     except OSError as error:
-        port = error.port if isinstance(error, service.GuestPortError) else args.port
-        print(f"console: cannot listen on {service.HOST}:{port}: {error}", file=sys.stderr)
+        where = (f"unix:{error.path}" if isinstance(error, service.GuestSocketError)
+                 else f"{service.HOST}:{args.port}")
+        print(f"console: cannot listen on {where}: {error}", file=sys.stderr)
         return 1
     stop = threading.Event()
     for number in (signal.SIGTERM, signal.SIGINT):

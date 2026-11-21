@@ -41,6 +41,7 @@ from agent_tools.console.movement import (
     merged,
     pulls_from_answer,
 )
+from agent_tools.console import sprints as sprints_module
 from agent_tools.console.sprints import (
     APPROVED,
     CHANGES,
@@ -54,6 +55,7 @@ from agent_tools.console.sprints import (
     Observed,
     PendingStop,
     Question,
+    QuestionLook,
     QuestionPicture,
     Report,
     SprintState,
@@ -104,6 +106,7 @@ from agent_tools.console.view import (
     project_states,
     read_states,
     registry_changes,
+    sprint_ball,
 )
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_issues
@@ -248,8 +251,8 @@ class RegistryChangesTest(unittest.TestCase):
              [(REGISTERED, "a", {"root": "/new"})]),
             ({"c": c, "a": a}, [{"project_id": "b", "root": "/b"}],
              [(REGISTERED, "b", {"root": "/b"}),
-              (UNREGISTERED, "a", {}),
-              (UNREGISTERED, "c", {})]),
+              (UNREGISTERED, "a", {"root": "/srv/a"}),
+              (UNREGISTERED, "c", {"root": "/srv/c"})]),
         ]
         for states, entries, expected in table:
             with self.subTest(states=sorted(states), entries=entries):
@@ -421,7 +424,8 @@ class SpendViewWireTest(unittest.TestCase):
         self.assertEqual(len(shown["spend"]["days"]), 30)
         for day in shown["spend"]["days"]:
             self.assertEqual(set(day), {"day", "total", "session", "project", "sprint", "run",
-                                        "phase", "account", "aspect", "sprint_phase", "run_phase"})
+                                        "phase", "account", "aspect", "sprint_phase", "run_phase",
+                                        "project_items"})
         self.assertEqual(shown["spend"]["days"][-1]["project"]["p00"]["input"], 1330)
 
     def test_view_without_spend_is_null(self):
@@ -1114,7 +1118,7 @@ class BriefViewTest(unittest.TestCase):
             "type": "inbox_item", "reason": "brief", "key": "brief/" + sid,
             "project_id": "p00", "sprint_id": sid, "title": "Ship the importer",
             "version": 2, "brief": PARTS, "pictures": [], "answered": False,
-            "waiting_since": "t9"}])
+            "waiting_since": "t9", "started_by": None}])
         self.assertEqual(view["statement"]["inbox_items"], 1)
         self.assertEqual(view["statement"]["headline"], "1 thing needs you")
         self.assertEqual(view["statement"]["sentence"], BRIEF_SENTENCE)
@@ -1127,6 +1131,29 @@ class BriefViewTest(unittest.TestCase):
         self.assertEqual([e["key"] for e in view["inbox"]["open"]],
                          ["brief/" + b, "brief/" + a, "k1"])
         self.assertEqual(view["statement"]["inbox_items"], 3)
+
+    def test_a_brief_of_a_sprint_with_a_stop_requested_is_no_item(self):
+        sid = "a" * 16
+        stopping = dataclasses.replace(briefed(sprint(sid)), stop_at="t10")
+        view = derive_view([state("p00", 1)], sprints={sid: stopping})
+        self.assertEqual(view["inbox"]["open"], [])
+
+    def test_a_stopping_sprints_pending_brief_is_not_the_owners_ball_nor_a_task(self):
+        sid = "a" * 16
+        stopping = dataclasses.replace(briefed(sprint(sid)), stop_at="t10")
+        view = derive_view([state("p00", 1)], sprints={sid: stopping}, now_ms=T0_MS)
+        self.assertNotEqual(view["entries"][0]["sprints"][0]["ball"], "owner")
+        self.assertNotEqual(sprint_ball(stopping, T0_MS, 0, ()), "owner")
+        self.assertEqual(sprint_ball(briefed(sprint(sid)), T0_MS, 0, ()), "owner")
+        self.assertEqual(view["statement"]["inbox_items"], 0)
+        self.assertEqual(view["statement"]["headline"], "Nothing needs you")
+
+    def test_a_brief_of_a_closed_or_stopped_sprint_is_no_item(self):
+        a, b = "a" * 16, "b" * 16
+        view = derive_view([state("p00", 1)], sprints={
+            a: closed(briefed(sprint(a)), 5 * MIN, ((12, "landed"),)),
+            b: dataclasses.replace(briefed(sprint(b)), stopped_at="t10")})
+        self.assertEqual(view["inbox"]["open"], [])
 
     def test_a_decided_or_unregistered_brief_is_no_item(self):
         a, b, c = "a" * 16, "b" * 16, "c" * 16
@@ -1582,6 +1609,19 @@ class SprintReportViewTest(unittest.TestCase):
         self.assertEqual((shown["state"], shown["state_text"]), ("waiting", "waiting on you (2)"))
         self.assertEqual(shown["waiting"], 2)
 
+    def test_an_approval_the_console_holds_points_the_line_at_the_page_never_the_tracker(self):
+        for look_state, words in (("failed", "waiting for you to press Retry on your approval"),
+                                  ("posting", "recording your approval")):
+            with self.subTest(look_state=look_state):
+                base = reported(started(A), R, issues=((12, "building"),))
+                held = dataclasses.replace(
+                    Question(41, 0, T0, False, "Approve the card?", "the card", ("Approve", "Change"),
+                             "Approve"),
+                    answer="Approve", chosen="Approve", answered_at=T0, look_state=look_state)
+                shown = entry(line(dataclasses.replace(base, questions=(held,)), R + 4 * MIN))
+                self.assertEqual((shown["ball"], shown["waiting"]), ("owner", 1))
+                self.assertEqual(shown["now_text"], words)
+
     def test_a_held_check_that_blocks_no_open_issue_leaves_the_ball_with_the_manager(self):
         for blocking in ([], [99], [13], [30]):
             with self.subTest(blocking=blocking):
@@ -1762,8 +1802,9 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
                            "recommended": recommended,
                            "recommended_index": options.index(recommended),
                            "needs_words_index": []}],
-            "pictures": [],
-            "items": [], "answers": [], "answered": False, "waiting_since": T0}
+            "pictures": [], "look": None,
+            "items": [], "answers": [], "answered": False, "waiting_since": T0,
+            "started_by": None}
 
 
 FIRST = question_entry(0, "Which store keeps the checkpoints?", ["sqlite", "files"], "files",
@@ -1788,6 +1829,71 @@ class QuestionViewTest(unittest.TestCase):
             state_, questions=(dataclasses.replace(first, needs_words=("files",)), *rest))
         shown = derive_view([state("p00", 1)], sprints={A: state_})
         self.assertEqual(shown["inbox"]["open"][0]["questions"][0]["needs_words_index"], [1])
+
+    def test_an_owner_only_question_says_so_and_others_say_nothing(self):
+        state_ = asked(started(A))
+        first, *rest = state_.questions
+        state_ = dataclasses.replace(
+            state_, questions=(dataclasses.replace(first, owner_only=True), *rest))
+        entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+        self.assertIs(entries[0]["owner_only"], True)
+        self.assertNotIn("owner_only", entries[1])
+
+    def test_a_consequential_question_says_so_and_others_say_nothing(self):
+        state_ = asked(started(A))
+        first, second = state_.questions
+        state_ = dataclasses.replace(state_, questions=(
+            dataclasses.replace(first, consequential=True),
+            dataclasses.replace(second, owner_only=True)))
+        entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+        self.assertIs(entries[0]["consequential"], True)
+        self.assertIs(entries[1]["owner_only"], True)
+        self.assertNotIn("consequential", entries[1])
+
+    def test_a_look_or_a_before_and_after_pair_makes_a_question_consequential(self):
+        before = QuestionPicture("a" * 64, "the page before", "before")
+        after = QuestionPicture("b" * 64, "the page after", "after")
+        for name, change, consequential in (
+                ("look", {"look": QuestionLook(12, 34, "a" * 40, "files")}, True),
+                ("pair", {"pictures": (before, after)}, True),
+                ("one picture", {"pictures": (before,)}, False)):
+            with self.subTest(name):
+                state_ = asked(started(A))
+                first, *rest = state_.questions
+                state_ = dataclasses.replace(
+                    state_, questions=(dataclasses.replace(first, **change), *rest))
+                entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+                if consequential:
+                    self.assertIs(entries[0]["consequential"], True)
+                else:
+                    self.assertNotIn("consequential", entries[0])
+
+    def test_a_consequential_card_hides_its_recommendation_from_a_page_that_preselects_it(self):
+        # A page from before the mark preselects `recommended_index`, or `recommended` by text,
+        # so a consequential card names the badge only in `badge_index` (#1265).
+        before = QuestionPicture("a" * 64, "the page before", "before")
+        after = QuestionPicture("b" * 64, "the page after", "after")
+        for name, change in (("marked", {"consequential": True}),
+                             ("look", {"look": QuestionLook(12, 34, "a" * 40, "files")}),
+                             ("pair", {"pictures": (before, after)})):
+            with self.subTest(name):
+                state_ = asked(started(A))
+                first, *rest = state_.questions
+                state_ = dataclasses.replace(
+                    state_, questions=(dataclasses.replace(first, **change), *rest))
+                (found, *_) = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+                (shown,) = found["questions"]
+                self.assertIsNone(shown["recommended"])
+                self.assertIsNone(shown["recommended_index"])
+                self.assertEqual(shown["badge_index"], first.options.index(first.recommended))
+
+    def test_an_ordinary_card_keeps_its_recommendation_and_names_no_badge_field(self):
+        state_ = asked(started(A))
+        (found, *_) = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+        (shown,) = found["questions"]
+        self.assertIsNotNone(shown["recommended"])
+        self.assertIsNotNone(shown["recommended_index"])
+        self.assertNotIn("badge_index", shown)
 
     def test_questions_follow_briefs_and_lead_tracker_items(self):
         b = "b" * 16
@@ -2550,7 +2656,7 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(project["outside_sprints"]["sessions"], [])
         self.assertIs(project["quiet"], True)
         waiting = stopped(briefed(started(A)), C, C + MIN)
-        self.assertEqual(len(line(waiting, C + MIN + DAY - 1)["inbox"]["open"]), 1)
+        self.assertEqual(line(waiting, C + MIN + DAY - 1)["inbox"]["open"], [])
         gone = line(waiting, C + MIN + DAY)
         self.assertEqual(gone["inbox"]["open"], [])
         self.assertEqual(gone["statement"]["inbox_items"], 0)
@@ -2630,6 +2736,67 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(derive_view([state("p00", 1)])["unstopped"], [])
 
 
+class ActorViewTest(unittest.TestCase):
+    GUEST = "colleague@example.invalid"
+
+    def test_an_answer_message_carries_the_question_it_answers_and_others_carry_none(self):
+        sid = "d" * 16
+        when = at_row(9)
+
+        def row(seq, kind, **payload):
+            return Event(seq, when, kind, "owner/p00",
+                         {"sprint_id": sid, "goal": "one", **payload})
+
+        ask = {"question": "Which store?", "blocks": "b", "options": ["sqlite", "files"],
+               "recommended": "files"}
+        rows = [row(20, event_log.GOAL_STATED), row(21, event_log.BRIEF_SENT, version=1, brief=PARTS_ROW),
+                row(22, event_log.BRIEF_APPROVED, version=1),
+                row(23, event_log.QUESTIONS_ASKED, blocker=False, questions=[ask]),
+                row(24, event_log.QUESTION_ANSWERED, round=23, index=0, question="Which store?",
+                    answer="sqlite", chosen="sqlite", recommended="files", differs=True)]
+        shown = derive_view([state("owner/p00", 1)], sprints=sprint_states(rows), now_ms=T0_MS)
+        messages = shown["entries"][0]["sprints"][0]["messages"]
+        (answer,) = [m for m in messages if m["kind"] == "answer"]
+        self.assertEqual(answer["question"], "Which store?")
+        self.assertTrue(all(m["question"] is None for m in messages if m["kind"] != "answer"))
+
+    def test_the_sprint_its_cards_and_its_messages_carry_their_actor(self):
+        from .test_console_sprints import guest_rows
+        u, v = "d" * 16, "e" * 16
+        rows = [*guest_rows(A, self.GUEST), *guest_rows(B)]
+        when = at_row(9)
+
+        def row(seq, kind, sid, **payload):
+            return Event(seq, when, kind, "owner/p00",
+                         {"sprint_id": sid, "goal": "one", **payload})
+
+        ask = {"question": "Which store?", "blocks": "b", "options": ["sqlite", "files"],
+               "recommended": "files"}
+        rows += [
+            row(20, event_log.GOAL_STATED, u, by=self.GUEST),
+            row(21, event_log.BRIEF_SENT, u, version=1, brief=PARTS_ROW),
+            row(22, event_log.GOAL_STATED, v, by=self.GUEST),
+            row(23, event_log.BRIEF_SENT, v, version=1, brief=PARTS_ROW),
+            row(24, event_log.BRIEF_APPROVED, v, version=1),
+            row(25, event_log.QUESTIONS_ASKED, v, blocker=False, questions=[ask]),
+        ]
+        shown = derive_view([state("owner/p00", 1)], sprints=sprint_states(rows),
+                            now_ms=T0_MS)
+        by_id = {s["sprint_id"]: s for s in shown["entries"][0]["sprints"]}
+        mine, owners = by_id[A], by_id[B]
+        self.assertEqual(mine["started_by"], self.GUEST)
+        self.assertEqual([m["by"] for m in mine["messages"]], [self.GUEST] * len(mine["messages"]))
+        self.assertTrue(mine["messages"])
+        self.assertEqual(mine["approval"]["by"], self.GUEST)
+        self.assertIsNone(owners["started_by"])
+        self.assertTrue(owners["messages"])
+        self.assertEqual([m["by"] for m in owners["messages"]], [None] * len(owners["messages"]))
+        items = {i["key"]: i for i in shown["inbox"]["open"]}
+        self.assertEqual(items[f"brief/{u}"]["started_by"], self.GUEST)
+        question = next(i for k, i in items.items() if k.startswith(f"question/{v}/"))
+        self.assertEqual(question["started_by"], self.GUEST)
+
+
 class SprintViewTest(unittest.TestCase):
     def test_a_sprint_shows_its_goal_state_and_age(self):
         view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
@@ -2639,7 +2806,7 @@ class SprintViewTest(unittest.TestCase):
             "title": "make the importer resumable", "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief",
             "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
-            "stated_at": T0, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
+            "stated_at": T0, "started_by": None, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
@@ -2853,13 +3020,79 @@ class NoticeViewTest(unittest.TestCase):
         self.assertEqual({e["project_id"]: e["notice_post"] for e in view_["entries"]},
                          {"p00": True, "p01": False, "p02": False})
 
-    def test_the_notice_wire_is_written(self):
-        doc = view.__doc__
+    PATH = "python/agent_tools/console/page.html"
 
-        self.assertIn('"notices": [<notice entry>, ...]', doc)
-        self.assertIn("<notice entry> = ", doc)
-        self.assertIn("NOTICE_OTHER_TEXT", doc)
-        self.assertIn("#1119", doc)
+    def claim(self, sid, notice_id, minute, text, issue, live_fault=True, what=None):
+        return with_notices(started(sid), Notice(
+            notice_id, at_min(minute), "claim", text, what=what or self.PATH, until=text + " lands",
+            issue=issue, live_fault=live_fault))
+
+    def line(self, sa, sb):
+        return (sprint_title(sa) + " and " + sprint_title(sb) + " both fix a live fault in "
+                + self.PATH + "; the rule could not decide which lands first")
+
+    def overlaps(self, states, projects=(("p00", 1),)):
+        return {e["project_id"]: e["overlaps"] for e in derive_view(
+            [state(pid, seq) for pid, seq in projects], sprints=states,
+            now_ms=T0_MS + 10 * MIN)["entries"]}
+
+    def test_an_unsettled_overlap_is_one_line_and_raises_no_question(self):
+        sa = self.claim(A, 3, 3, "the form", 12)
+        sb = self.claim(B, 5, 5, "the upload row", 13)
+
+        v = derive_view([state("p00", 1)], sprints={A: sa, B: sb}, now_ms=T0_MS + 10 * MIN)
+
+        self.assertEqual(v["entries"][0]["overlaps"],
+                         [{"sprints": [A, B], "files": [self.PATH], "text": self.line(sa, sb)}])
+        self.assertEqual(v["statement"]["inbox_items"], 0)
+        self.assertEqual([i for i in v["inbox"]["open"] if i.get("reason") == "question"], [])
+
+    def test_the_overlap_line_goes_when_either_claim_ends(self):
+        sa = self.claim(A, 3, 3, "the form", 12)
+        sb = self.claim(B, 5, 5, "the upload row", 13)
+        before = {A: sa, B: sb}
+        self.assertTrue(sprints_module.takes_notices(sa))
+        self.assertTrue(sprints_module.takes_notices(sb))
+        self.assertEqual(sb.state, sprints_module.STARTING)
+        self.assertEqual(self.overlaps(before)["p00"],
+                         [{"sprints": [A, B], "files": [self.PATH], "text": self.line(sa, sb)}])
+        withdrawn = sprint_states([Event(
+            20, at_min(7), event_log.NOTICE_WITHDRAWN, "p00",
+            {"sprint_id": A, "goal": "Fix the settings page", "notice": 3})], before)
+        landed = sprint_states([Event(
+            21, at_min(7), event_log.SPRINT_REPORTED, "p00",
+            {"sprint_id": B, "goal": "Add resumable uploads",
+             "report": {**REPORT_ROW,
+                        "issues": [{"issue": 12, "stage": "building"},
+                                   {"issue": 13, "stage": "landed"}],
+                        "inbox": []}})], before)
+        for name, after, other in (("withdrawn", withdrawn, "the upload row"),
+                                   ("landed", landed, "the form")):
+            with self.subTest(name):
+                v = derive_view([state("p00", 1)], sprints=after, now_ms=T0_MS + 10 * MIN)
+                self.assertEqual(v["entries"][0]["overlaps"], [])
+                self.assertEqual([n["text"] for n in v["entries"][0]["notices"]], [other])
+
+    def test_two_claims_on_one_bracketed_file_draw_a_line(self):
+        path = "app/[[]id]/page.tsx"
+        sa = self.claim(A, 3, 3, "the form", 12, what=path)
+        sb = self.claim(B, 5, 5, "the upload row", 13, what=path)
+        self.assertEqual(self.overlaps({A: sa, B: sb})["p00"], [{
+            "sprints": [A, B], "files": [path],
+            "text": self.line(sa, sb).replace(self.PATH, path)}])
+
+    def test_a_settled_overlap_draws_no_line(self):
+        for name, fault_a, fault_b in (("one fault", False, True), ("none", False, False)):
+            with self.subTest(name):
+                sa = self.claim(A, 3, 3, "the form", 12, live_fault=fault_a)
+                sb = self.claim(B, 5, 5, "the upload row", 13, live_fault=fault_b)
+                self.assertEqual(self.overlaps({A: sa, B: sb})["p00"], [])
+        sa = self.claim(A, 3, 3, "the form", 12)
+        sb = self.claim(B, 5, 5, "the upload row", 13)
+        every = self.overlaps({A: sa, B: sb}, (("p00", 1), ("p01", 2)))
+        self.assertEqual(sorted(every), ["p00", "p01"])
+        self.assertEqual(every["p01"], [])
+        self.assertEqual(len(every["p00"]), 1)
 
 
 class SprintMessageViewTest(unittest.TestCase):
@@ -2872,7 +3105,7 @@ class SprintMessageViewTest(unittest.TestCase):
             "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
             "state": "sent", "state_text": "sent, the manager picks it up within a minute",
             "action_text": None, "read_at": None, "reply": None, "reply_at": None,
-            "words": None, "new": False}])
+            "words": None, "new": False, "by": None, "question": None}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
         self.assertEqual(entry["messages"][0]["state"], "sent")
@@ -3061,6 +3294,18 @@ class SigninViewTest(unittest.TestCase):
         self.assertEqual(shown["inbox"]["open"], [])
         self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
 
+    def test_a_signed_out_profile_a_colleague_added_raises_no_sign_in_item(self):
+        """#1361, ADR-console-087 D3: signing a colleague's account in is his, never the owner's."""
+        mine = signin_entry("work", "signed_out", True, since="t1", ever=True)
+        his = {**signin_entry("colleague-1", "signed_out", True, since="t2"), "owner": "ana@corp.invalid"}
+        plain = {**signin_entry("home", "signed_out", True, since="t3"), "owner": None}
+        shown = derive_view([state("p00", 1)], capacity=signin_capacity(mine, his, plain))
+        self.assertEqual([i["key"] for i in shown["inbox"]["open"]], ["signin/home", "signin/work"])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        alone = derive_view([state("p00", 1)], capacity=signin_capacity(his))
+        self.assertEqual(alone["inbox"]["open"], [])
+        self.assertEqual(alone["statement"]["headline"], "Nothing needs you")
+
     def test_a_never_signed_in_profile_is_offered_sign_in_not_sign_in_again(self):
         fresh = signin_entry("fresh", "signed_out", True, since="t1")
         work = signin_entry("work", "signed_out", True, since="t2", ever=True)
@@ -3149,7 +3394,7 @@ class SigninViewTest(unittest.TestCase):
         shown = derive_view([], adoption_items=[ADOPTION_ITEM])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"],
-                         "Open the pull request to merge the adoption.")
+                         "Merge the adoption from its card; when it cannot be merged there, the card says why.")
         self.assertEqual(shown["inbox"]["open"], [ADOPTION_ITEM])
         self.assertIsNot(shown["inbox"]["open"][0], ADOPTION_ITEM)
         asked_too = derive_view([state("p00", 1)], sprints={A: asked(started(A))},
@@ -3244,8 +3489,8 @@ class RegisterItemViewTest(unittest.TestCase):
                 self.assertNotIn(term, text.lower())
         self.assertEqual(
             shown["registration"]["draft_more"],
-            f"and {len(contract_draft.FIELDS) - len(contract_draft.MAIN)} more settings at "
-            "their usual values")
+            f"and {len([f for f in contract_draft.FIELDS if f not in contract_draft.MAIN])} more "
+            "settings at their usual values")
         self.assertEqual(shown["registration"]["draft_more"],
                          "and 22 more settings at their usual values")
 
@@ -3381,6 +3626,59 @@ class ApplyItemViewTest(unittest.TestCase):
         self.assertEqual(shown["inbox"]["open"], [APPLY_ITEM])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+
+
+class ProposedEnvironmentViewTest(unittest.TestCase):
+    """The view the owner sees for a ready plan whose checkout proposes a commit environment."""
+
+    LINE = "commits run in its development shell: devenv shell (found in its files)"
+    LATEST = {"root": "/srv/sample-app", "plan_id": PID, "state": "ready",
+              "at": "2026-11-15T08:00:00+00:00", "project_id": None, "result": "planned",
+              "outcome": "changes", "headline": "What adopting sample-app would change.",
+              "lines": ["moves 2 agent files under .agents/", "writes the project contract"],
+              "note": None, "questions": [], "remote": None}
+
+    def latest(self):
+        fields = contract_draft.draft("/srv/sample-app", {
+            **contract_draft.read("/nonexistent"), "hooks": ["pre-commit"],
+            "environments": ["devenv.nix"]})
+        return {**self.LATEST, "draft": fields}
+
+    def test_the_ready_apply_card_states_the_proposal_first_and_hides_the_draft(self):
+        latest = self.latest()
+        items = approve.apply_items(latest, None, None, "approve", deferred=set())
+        shown = derive_view([], registration=register.view_entry(None, latest),
+                            apply_items=items)
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["reason"], "register_apply")
+        self.assertEqual(card["lines"], [self.LINE, *latest["lines"]])
+        self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
+        entry = shown["registration"]
+        self.assertEqual((entry["line"], entry["lines"], entry["draft"], entry["draft_more"]),
+                         ("Register sample-app: needs you", [], None, None))
+
+    def test_a_reconcile_plan_s_apply_card_states_the_proposal_first(self):
+        latest = {**self.LATEST, "outcome": "reconcile", "draft": contract_draft.reconcile_fields(
+            "/srv/sample-app", {"hooks": ["pre-commit"], "stranded": ["pre-commit"],
+                                "environments": ["devenv.nix"]})}
+        items = approve.apply_items(latest, None, None, "approve", deferred=set())
+        shown = derive_view([], registration=register.view_entry(None, latest), apply_items=items)
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["lines"], [self.LINE, *latest["lines"]])
+        (row,) = register.view_entry(None, latest)["draft"]
+        self.assertEqual((row["field"], row["line"], row["more"]),
+                         ("commit-environment", self.LINE, False))
+        self.assertIsNone(register.view_entry(None, latest)["draft_more"])
+
+    def test_with_no_card_asking_the_draft_offers_the_proposal_as_a_changeable_line(self):
+        latest = self.latest()
+        shown = derive_view([], registration=register.view_entry(None, latest))
+        self.assertEqual(shown["inbox"]["open"], [])
+        rows = {row["field"]: row for row in shown["registration"]["draft"]}
+        self.assertEqual(rows["commit-environment"]["line"], self.LINE)
+        self.assertIs(rows["commit-environment"]["text"], True)
+        self.assertEqual(rows["commit-environment"]["placeholder"],
+                         "the development shell command")
 
 
 class RegisterConfirmTest(unittest.TestCase):
