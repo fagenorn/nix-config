@@ -998,7 +998,7 @@ class RowTest(unittest.TestCase):
         self.assertEqual((row["state"], row["plan_id"]), ("ready", PLAN_ID))
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
         self.assertEqual((found["result"], found["state"]), ("drafting", "drafting"))
-        self.assertNotEqual(found["plan_id"], PLAN_ID)
+        self.assertEqual(found["plan_id"], PLAN_ID)
         self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
         self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
         answered, refusal = contract_draft.set_value(
@@ -1006,6 +1006,17 @@ class RowTest(unittest.TestCase):
         self.assertIsNone(refusal)
         self.assertEqual(contract_draft.open_fields(answered), [])
         self.assertNotIn("light_lane", contract_draft.contract(answered)["bindings"]["workflow"])
+
+    def test_a_cancel_naming_the_saved_plan_still_ends_a_replanned_registration(self):
+        root, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        events = [Event(1, "t1", register.ENDED, None, row),
+                  Event(2, "t2", *register.cancelled_row(root, PLAN_ID))]
+        self.assertIsNone(register.fold(events).latest)
+
+    def test_a_replanned_registration_keeps_the_plan_id_adoptions_are_keyed_by(self):
+        _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual((found["plan_id"], found["state"]), (PLAN_ID, "drafting"))
 
     def test_a_ready_plan_whose_light_lane_was_none_keeps_its_plan(self):
         _, row = self.planned_with_light_lane("none", state="ready")
