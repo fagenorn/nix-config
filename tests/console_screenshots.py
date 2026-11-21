@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-two screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -22,7 +22,10 @@ Contract:
   `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
   has a transcript whose last peer-message record is one the client held and did not deliver
   (#1229), read once through the movement poll, so its line reads that the manager cannot hear
-  the console; `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
+  the console; `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
+  ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
+  report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console
+  ignores both and reads the stage phrase, which is the before picture); `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
   so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
@@ -118,7 +121,10 @@ Contract:
   lacks a control times out and fails instead of writing a picture without it; on the base commit's archive
   it is false and neither waits, so a base run still writes every file. With `--sheets` `capture` also writes
   `<state>-sheet.png` after each state's widths, the shots side by side in one PNG that must stay
-  under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. Each
+  under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. `--states a,b`
+  shoots only the named states (each a member of `STATES`; the default is every state), and `--composite NAME`
+  (only with `--sheets`) writes `NAME` after the last state: the named states' sheets side by side in one
+  PNG under the same 2 MiB, which `main` prints after the sheets. Each
   width waits for what the owner judges to be visible, which fails the run when it is not:
   `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
   `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
@@ -146,7 +152,7 @@ Contract:
   picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
   card opens on the plan's own first line and its draft shows nothing.
   `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 92 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 104 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -249,7 +255,8 @@ from .console_test_support import hook_body, write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
+          "nothing-running", "waiting-its-turn", "manager-cannot-hear", "waiting-until", "paused",
+          "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
@@ -266,6 +273,7 @@ HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
 GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
+PAUSE_REASON = "the lead freed its account for a release"
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
 LOOK_APPROVE = "Approve this head"
@@ -2003,8 +2011,10 @@ class _Seed:
     def sprint(self, project: str, title: str, *, started: float, report: float | None = None,
                landed: bool = False, asks: bool = False, close: float | None = None,
                stop: float | None = None, held: bool = False,
-               look: bool = False) -> tuple[str, str]:
-        """One approved sprint with a started manager; returns `(sprint_id, goal)`."""
+               look: bool = False, report_extra: Mapping | None = None) -> tuple[str, str]:
+        """One approved sprint with a started manager; returns `(sprint_id, goal)`.
+
+        `report_extra` is merged into the `sprint.reported` row's `report`."""
         self.count += 1
         sid = f"{self.count:016x}"
         goal = f"{title}."
@@ -2027,7 +2037,7 @@ class _Seed:
             self.put(report, "sprint.reported", project, {**base, "report": {
                 "status": "the first slice is in review", "phase": "running",
                 "milestone": MILESTONES[title], "tracker_url": TRACKER_URL, "issues": issues,
-                "inbox": [], "next": "merge the first slice"}})
+                "inbox": [], "next": "merge the first slice", **(report_extra or {})}})
         if asks:
             self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
                 "question": "Which store should the checkpoint use?",
@@ -2300,6 +2310,12 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.put(MINUTE, sessions.SEEN, web, {
             "session_id": DEAF_MANAGER, "cwd": web_root, "repo": web_root, "state": "working",
             "name": manager.session_name(web, sid)})
+    elif state == "waiting-until":
+        seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE,
+                    report_extra={"wait_until": _iso(seed.now_s + 2 * 3600)})
+    elif state == "paused":
+        seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE,
+                    report_extra={"paused": PAUSE_REASON})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state in (*SHARING_STATES, "owner-actors", "owner-accounts"):
@@ -2857,7 +2873,9 @@ class _Serve:
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
             read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False,
-            mutate: bool = False) -> list[Shot]:
+            mutate: bool = False, composite: str | None = None) -> list[Shot]:
+    if composite is not None and not sheets:
+        raise ValueError("a composite is made of the sheets: pass sheets with it")
     try:
         from playwright.sync_api import Error, sync_playwright
     except ImportError as error:
@@ -2905,6 +2923,8 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                             service.close()
                 if sheets:
                     sheet(browser, shot_paths, out / f"{state}-sheet.png")
+            if sheets and composite is not None:
+                composite_sheet(browser, out, states, composite)
         finally:
             browser.close()
     return taken
@@ -3288,6 +3308,12 @@ def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
     return out
 
 
+def composite_sheet(browser, out: Path, states: Sequence[str], name: str) -> Path:
+    """The named states' sheets side by side in `out / name`; refuses over `pictures.MAX_BYTES` as `sheet` does."""
+    out = Path(out)
+    return sheet(browser, [out / f"{state}-sheet.png" for state in states], out / name)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="console-screenshots",
@@ -3297,7 +3323,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--answer-file", help="the stored answer's text (UTF-8), shot with --question")
     parser.add_argument("--sheets", action="store_true",
                         help="also write <state>-sheet.png, the state's widths side by side")
+    parser.add_argument("--states", help="a comma list of the states to shoot (default every state)")
+    parser.add_argument("--composite", help="with --sheets, also write NAME, the shot states' sheets side by side")
     args = parser.parse_args(argv)
+    states = STATES
+    if args.states is not None:
+        states = tuple(args.states.split(","))
+        unknown = [state for state in states if state not in STATES]
+        if unknown:
+            parser.error(f"--states names {', '.join(unknown)}, which are not states")
+    if args.composite is not None and not args.sheets:
+        parser.error("--composite goes with --sheets")
     if (args.question is None) != (args.answer_file is None):
         parser.error("--question and --answer-file go together")
     real = args.question is not None
@@ -3309,7 +3345,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
                              sheets=args.sheets)
-                     if real else capture(Path(args.out), sheets=args.sheets))
+                     if real else capture(Path(args.out), states=states, sheets=args.sheets,
+                                          composite=args.composite))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
             return 2
@@ -3324,6 +3361,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.sheets:
         for state in dict.fromkeys(shot.state for shot in taken):
             print(Path(args.out) / f"{state}-sheet.png")
+        if args.composite is not None:
+            print(Path(args.out) / args.composite)
     wide = [shot for shot in taken if shot.scroll_width > shot.width]
     for shot in wide:
         print(f"console-screenshots: {shot.path.name} scrolls sideways "
