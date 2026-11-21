@@ -364,6 +364,15 @@ class LightLaneRetirementTest(unittest.TestCase):
         self.assertNotIn("tests/test_lane_triage.py", justfile)
         self.assertNotIn("tests/test_lane_triage.py", timings)
 
+    def test_the_launcher_floor_names_no_lane_triage(self):
+        # The launcher test runs only under the installed-skill gate; this suite reads its source.
+        tree = ast.parse((REPO_ROOT / "tests/test_agent_tools_launchers.py").read_text())
+        (floor,) = [node.value for node in tree.body
+                    if isinstance(node, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "LAUNCHER_FLOOR"
+                            for t in node.targets)]
+        self.assertNotIn("lane-triage", ast.literal_eval(floor))
+
     def test_only_the_resolver_names_the_light_lane_binding(self):
         named = []
         for path in PACKAGE.rglob("*"):

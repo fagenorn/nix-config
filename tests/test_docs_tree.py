@@ -548,6 +548,9 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual([line for line in context if re.match(r"^\*\*Light lane\*\*:", line)], [])
         context_map = (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text().splitlines()
         self.assertEqual([line for line in context_map if re.match(r"^\|\s*Light lane\s*\|", line)], [])
+        self.assertEqual([line for line in context if re.match(r"^\*\*Triage record\*\*:", line)], [])
+        self.assertEqual([line for line in context if "triage" in line.lower()], [])
+        self.assertEqual([line for line in context_map if re.match(r"^\|\s*Triage record\s*\|", line)], [])
         hits = [
             f"{path}:{number}"
             for path, lines in tracked_text((".agents/artifacts/", "docs/archive/"))

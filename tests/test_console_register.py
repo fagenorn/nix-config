@@ -972,6 +972,59 @@ class RowTest(unittest.TestCase):
         self.assertNotIn("light-lane", [e["field"] for e in entry["draft"]])
         self.assertEqual(found["plan_id"], row["plan_id"])
 
+    def planned_with_light_lane(self, light_value, *, state, refused=None):
+        """The row an earlier console saved: a full draft carrying the retired light-lane record."""
+        root = "/x/sample-app"
+        reading = {"remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
+                   "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"],
+                   "texts": {}}
+        fields = contract_draft.draft(root, reading)
+        for field in ("build-command", "test-command"):
+            fields, _ = contract_draft.set_value(fields, field, "none", entries=[], root=root)
+        light = {"field": "light-lane", "label": "light lane", "value": light_value,
+                 "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
+                 "text": True, "reason": refused, "ask": "What is the light lane of sample-app?"}
+        at = [f["field"] for f in fields].index("attempt-budget") + 1
+        saved = [*fields[:at], light, *fields[at:]]
+        if state is None:
+            return root, register.drafting(root, saved)
+        return root, register.summary(root, plan_doc(outcome="bootstrap", state=state),
+                                      draft=saved)
+
+    SHADOW = '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}'
+
+    def test_a_ready_plan_that_wrote_a_light_lane_is_planned_again_before_apply(self):
+        root, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        self.assertEqual((row["state"], row["plan_id"]), ("ready", PLAN_ID))
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual((found["result"], found["state"]), ("drafting", "drafting"))
+        self.assertNotEqual(found["plan_id"], PLAN_ID)
+        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
+        answered, refusal = contract_draft.set_value(
+            found["draft"], "project-id", "sample-owner/sample-app", entries=[], root=root)
+        self.assertIsNone(refusal)
+        self.assertEqual(contract_draft.open_fields(answered), [])
+        self.assertNotIn("light_lane", contract_draft.contract(answered)["bindings"]["workflow"])
+
+    def test_a_ready_plan_whose_light_lane_was_none_keeps_its_plan(self):
+        _, row = self.planned_with_light_lane("none", state="ready")
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual((found["result"], found["state"], found["plan_id"]),
+                         ("planned", "ready", PLAN_ID))
+        self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
+
+    def test_a_draft_whose_only_question_was_the_light_lane_still_has_a_card(self):
+        _, row = self.planned_with_light_lane(
+            self.SHADOW, state=None,
+            refused="The plan refused the light lane: not a light lane")
+        self.assertEqual([q["subject"] for q in row["questions"]], ["light-lane"])
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual((found["result"], found["state"]), ("drafting", "drafting"))
+        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        self.assertEqual(found["note"], "The draft has 1 open question.")
+        self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
+
     def test_ended_takes_thirteen_members_and_checks_the_draft(self):
         row = register.drafting("/x/sample-app", draft_fields())
         self.assertEqual(len(row), 13)

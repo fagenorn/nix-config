@@ -66,7 +66,9 @@ when it has no value and is one of `ASKED` (the project id, the default branch, 
 and test commands), or when it has a `reason`; `questions` words each open field as one card; `shown`
 gives every other field as one entry that can be changed. `refresh(root, fields)` gives a saved draft today's
 label, option labels and card question (ADR-console-033) without touching a value, a source or a reason,
-and drops a record of a retired field (`RETIRED_FIELDS`). `MAIN` lists the seven fields read from the
+and drops a record of a retired field (`RETIRED_FIELDS`); `retired_in_use(fields)` says a saved draft held one
+that a stored plan may rest on (a value other than `none`, or a refusal), and `replanned(fields)` opens the project
+id's card with `PLAN_AGAIN` so an answer plans again, unless a card is already open. `MAIN` lists the seven fields read from the
 repository or asked; each of them is one line `<label>: <display> (<source>)`. Every other field has
 the flag `more` in `shown`, and while its value is its start value its line is its start sentence
 (`REST_WORDS`, plain words with no source), so it reads as a settled default; once it is another value
@@ -229,6 +231,8 @@ _TABLE = (
 )
 # A field an earlier console drafted that no longer exists (#1445): `refresh` drops its saved record.
 RETIRED_FIELDS: tuple[str, ...] = ("light-lane",)
+PLAN_AGAIN = ("The console no longer drafts a light lane, so the plan is made again: "
+              "type the project id to go on.")
 # Fields `draft` adds only when proposed; they are not among the 28 `FIELDS`.
 _PROPOSED_TABLE = (
     (ENVIRONMENT_FIELD, "commits run in its development shell",
@@ -950,6 +954,18 @@ def refresh(root: str, fields: Iterable[Mapping]) -> list[dict]:
         field["options"] = [{**o, "label": current.get(o.get("value"), o.get("label"))}
                             if isinstance(o, dict) else o for o in field["options"]]
     return fields
+
+
+def retired_in_use(fields: Iterable[Mapping]) -> bool:
+    """Whether a saved draft holds a retired field whose value or refusal a stored plan may rest on."""
+    return any(f["field"] in RETIRED_FIELDS and (f["value"] not in (None, "none")
+                                                 or f["reason"] is not None) for f in fields)
+
+
+def replanned(fields: Iterable[Mapping]) -> list[dict]:
+    """The fields with the project id's card open to plan again, unless a card is already open."""
+    fields = list(fields)
+    return fields if open_fields(fields) else mark_refused(fields, "project-id", PLAN_AGAIN)
 
 
 def open_fields(fields: Iterable[Mapping]) -> list[dict]:

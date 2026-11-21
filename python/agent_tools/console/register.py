@@ -164,7 +164,8 @@ also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEY
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
 `contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
-never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service.
+never shows, ADR-console-033 D2; a row whose draft held a retired field its plan may rest on, or whose last
+card was that field, reads back as a `drafting` row whose project id card plans again, #1445), else `state`: the view's `registration` member, folded by the service.
 `fold(events, state=None)` is the `Fold` `(latest, before, roots)`: `before` the registrations shown
 before the current one, oldest first, one per root (an ended row naming another root pushes the
 current one and drops the new root's older entry), `roots` each registered project's root; a
@@ -646,8 +647,14 @@ def _row_of(event: event_log.Event) -> dict | None:
     if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
         found["note"] = LEGACY_NOTES[found["note"]]
     if isinstance(found["draft"], list) and isinstance(found["root"], str):
+        stale = contract_draft.retired_in_use(found["draft"])
         found["draft"] = contract_draft.refresh(found["root"], found["draft"])
-        if found["result"] == "drafting":
+        if stale and (found["result"] != "drafting" or not contract_draft.open_fields(found["draft"])):
+            # The plan stored under the row's id was made from the retired field, and a drafting row
+            # whose last card was that field has none: a drafting row with one card plans again (#1445).
+            found.update(drafting(found["root"], contract_draft.replanned(found["draft"]),
+                                  found["answered"]))
+        elif found["result"] == "drafting":
             found["questions"] = contract_draft.questions(found["draft"])
     return found
 

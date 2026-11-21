@@ -21,7 +21,7 @@ _Avoid_: context file, index
 The work of carrying one issue from claim to merge on its own branch and worktree. A delivery ends when the integration branch holds the change and its evidence criteria are met or handed to a Verify block.
 
 **Lane**:
-The route an issue takes to merge: the direct lane for a small concrete change, the standard lane for a specced and planned one. The triage record decides which applies.
+The route an issue takes to merge: the direct lane for a small concrete change, the standard lane for a specced and planned one.
 _Avoid_: track, tier
 
 **Look approval**:
@@ -36,6 +36,3 @@ An acceptance criterion of kind human written exactly `- [ ] [human] before merg
 **Suite member**:
 One test file or script named in the project's declared agent-workflow test recipe. The suite runner schedules the members by recorded duration, and the last member is pinned.
 _Avoid_: test target
-
-**Triage record**:
-The owner's structured input to lane triage, read from standard input. Lane triage turns it into a verdict of hits, lane and mode without writing anything.

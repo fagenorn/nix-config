@@ -119,7 +119,6 @@
 | Stale claim | Claims |
 | Suite member | Delivery |
 | Transaction | Release |
-| Triage record | Delivery |
 | Verification pass | Verification |
 | Verified tree | Verification |
 | Verify block | Verification |
