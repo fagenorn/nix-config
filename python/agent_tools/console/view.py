@@ -487,8 +487,9 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state": "drafting" | "starting" | "on_track" | "waiting" | "quota" | "quiet"
                                | "closing" | "done" | "stopping" | "stopped",
                       "state_text": "<text>",
-                      "ball": "manager" | "owner" | "nobody" | null,
+                      "ball": "manager" | "owner" | "nobody" | "waiting" | "paused" | null,
                       "ball_text": "<text>" | null, "now_text": "<sentence>" | null,
+                      "now_until": "<time>" | null,
                       "stated_at", "started_by": "<login>" | null, "age_text",
                       "manager_text": <text> | null,
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
@@ -641,7 +642,7 @@ unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on 
 is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
 set, its manager failed to start with no brief (`sprints.failed_start`), one of the sprint's listed sessions is waiting for an answer or a permission (the manager
 waits on the owner at its terminal), or its manager cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
-else `nobody` ("nothing running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
+else `nobody` ("nothing running, may be stuck"), except that a stated pause (`paused`, "paused") or a stated wait whose time is ahead (`waiting`, "waiting"; `sprints.stated_hold`, #1380) holds it, after the owner's rules and before the movement reading, until the stated time has passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
 that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, `NOW_ANSWER_TEXT`; a manager that cannot hear the console
 (#1229: the sprint's manager session has `SessionMovement.held`, its transcript's last peer message
 being one the client held and did not deliver), `NOW_DEAF_TEXT`; a listed session waiting for a
@@ -650,7 +651,7 @@ permission, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_S
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
-wait, `NOW_QUOTA_TEXT`; an unread message the console delivered (`sprints.unread`, `delivered_at` set,
+wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock), `NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); an unread message the console delivered (`sprints.unread`, `delivered_at` set,
 #1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
 (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
 whose signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
@@ -818,6 +819,8 @@ from agent_tools.console.sprints import (
     BALL_MANAGER,
     BALL_NOBODY,
     BALL_OWNER,
+    BALL_PAUSED,
+    BALL_WAITING,
     BALL_TEXT,
     CHECK_LINE_TEXT,
     CLOSED_OUT,
@@ -857,6 +860,7 @@ from agent_tools.console.sprints import (
     NOW_FAILED_START_TEXT,
     NOW_LOCK_TEXT,
     NOW_NO_PROGRESS_TEXT,
+    NOW_PAUSED_TEXT,
     NOW_PERMISSION_TEXT,
     NOW_QUESTION_TEXT,
     NOW_QUIET_TEXT,
@@ -868,9 +872,11 @@ from agent_tools.console.sprints import (
     NOW_STARTING_TEXT,
     NOW_UNREAD_TEXT,
     NOW_STOPPING_TEXT,
+    NOW_WAIT_TEXT,
     ON_TRACK,
     ON_TRACK_TEXT,
     OVERLAP_UNSETTLED,
+    PAUSED,
     PICKED_UP,
     PICKED_UP_TEXT,
     PICKUP_MINUTE_TEXT,
@@ -907,6 +913,7 @@ from agent_tools.console.sprints import (
     QuestionPicture,
     PendingStop,
     SprintState,
+    WAIT_UNTIL,
     age_text,
     claim_overlaps,
     closing_text,
@@ -925,6 +932,7 @@ from agent_tools.console.sprints import (
     open_owner_notices,
     progress_text,
     sprint_title,
+    stated_hold,
     takes_notices,
     takes_questions,
     unread,
@@ -1651,7 +1659,10 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     nobody; a `failed` manager with no listed session drops only the goal's stated time from the
     signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
     run, report, approval or wait signal inside the window keeps it manager whatever its order
-    against the failure. `waits` are the sprint's wait signals. A `deaf` manager (its transcript
+    against the failure. A stated pause or a stated wait whose time is ahead
+    (`sprints.stated_hold`, #1380) reads `paused` or `waiting`, not the manager's: nothing is
+    running, and the manager has said so, so the nothing-running line returns only once the stated
+    time has passed with nothing running. `waits` are the sprint's wait signals. A `deaf` manager (its transcript
     shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
@@ -1659,6 +1670,9 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
             or state.no_progress_at is not None or failed_start
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
+    hold = stated_hold(state, now_ms)
+    if hold is not None:
+        return BALL_PAUSED if hold[0] == PAUSED else BALL_WAITING
     quiet_for = sprint_quiet_for(state, now_ms, listed, waits)
     return BALL_MANAGER if quiet_for is None else BALL_NOBODY
 
@@ -1690,11 +1704,12 @@ def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
                stages: Sequence[tuple[int, str, str]], ball: str | None,
                wait: str | None = None, failed_start: bool = False,
-               deaf: bool = False) -> str | None:
+               deaf: bool = False, hold: tuple[str, str] | None = None) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
     ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
-    `ball`, `wait` (`sprint_wait`), `failed_start` and `deaf` (the manager holds the console's wake
-    behind a prompt no one at a terminal answers, #1229) are the entry's own."""
+    `ball`, `wait` (`sprint_wait`), `failed_start`, `deaf` (the manager holds the console's wake
+    behind a prompt no one at a terminal answers, #1229) and `hold` (`sprints.stated_hold`, #1380)
+    are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -1728,6 +1743,8 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_NO_PROGRESS_TEXT
     if quota is not None:
         return NOW_QUOTA_TEXT
+    if hold is not None:
+        return NOW_PAUSED_TEXT.format(reason=hold[1]) if hold[0] == PAUSED else NOW_WAIT_TEXT
     if any(message.delivered_at is not None for message in unread(state)):
         return NOW_UNREAD_TEXT
     reason = merge_refused(state)
@@ -1840,6 +1857,10 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   if m.sprint_id == state.sprint_id), key=lambda m: m.session_id)
     deaf = any(m.held and m.session_id in manager_ids for m in own)
     ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf)
+    hold = stated_hold(state, now_ms)
+    now_text = sprint_now(state, quota, listed, waiting, stages, ball,
+                          sprint_wait(state, now_ms, listed, waits), failed_start=failed,
+                          deaf=deaf, hold=hold)
     minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
@@ -1850,9 +1871,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "state_text": text,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
-        "now_text": sprint_now(state, quota, listed, waiting, stages, ball,
-                               sprint_wait(state, now_ms, listed, waits), failed_start=failed,
-                               deaf=deaf),
+        "now_text": now_text,
+        "now_until": (hold[1] if hold is not None and hold[0] == WAIT_UNTIL
+                      and now_text == NOW_WAIT_TEXT else None),
         "stated_at": state.stated_at,
         "started_by": state.started_by,
         "age_text": age_text(elapsed),

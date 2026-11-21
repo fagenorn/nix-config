@@ -1,7 +1,7 @@
 # ADR-console-020 — A manager idle while its sprint has work is told to go on, and waits out a quota
 
 - **Status:** accepted; amended by ADR-console-095
-- **Decided in:** #837, #839, #891, #893, #929, #974, #1278, #1279, #1381
+- **Decided in:** #837, #839, #891, #893, #929, #974, #1278, #1279, #1380, #1381
 
 ## Context
 
@@ -25,6 +25,8 @@ ADR-console-017's Consequences leave "a manager that is listed but idle while wo
 
 **Rows not kept.** `manager.nudged`, `manager.no_progress` and `sprint.continued` are observations like the manager rows of ADR-console-015: they are not kept kinds, the store stays at schema 8, and the `resumed` member rides on the existing `sprint.nudged` and `manager.woken` rows.
 
+**A stated wait.** A report may state a wait or a pause: `wait_until`, an ISO 8601 time in UTC at most 24 hours ahead, or `paused`, one line of reason with no issue number; never both. The console checks them when the report arrives, against its own clock at full precision, and refuses a time that is not ahead or is too far ahead with the reason, on the send and on a dry run. The fold checks the members without a clock, so a stored wait whose time has passed still folds and a restart changes nothing. A report without them lifts the wait or the pause: the stated hold belongs to the latest report only. The owner's messages and answers are never held; the idle nudge and the no-progress card are. While a stated hold stands the sprint's ball reads `waiting` or `paused`, in the neutral colour with the pause mark: never the manager working in green with the play mark, since nothing runs, and never the amber nothing running, may be stuck; that line returns only once the stated time has passed with nothing running.
+
 **The sentence.** The idle nudge is always a relay, on its own `continue` route: the manager is listed, and when a fresh listing no longer shows it nothing is sent or written, because the bring-back owns a gone manager. The sentence is fixed, as ADR-console-016 requires: `The console found you idle while your sprint has work. Run "sprint recap", then "sprint inbox", and go on with the next step.`
 
 ## Consequences
@@ -36,5 +38,6 @@ ADR-console-017's Consequences leave "a manager that is listed but idle while wo
 - Two profiles are one account to the move when their sign-ins name one account or the counted readings of either and of its sign-in aliases carry one account id (#1279); a profile known only by the id is not mistaken for another account with room, and a late reply from an account a profile left does not count, for the manager's own quota too. A duplicate of any profile is not a move.
 - The move is checked again at the launch (#1279). A takeover made because the manager's account is out starts only on the account it chose, and only while that account still reads as having room. The move is bound to the account it chose and to the pin in force when it was reserved, and the manager's account must still be out. If that account was removed, excluded, signed out, ran out or changed account meanwhile, or the pin moved, or the manager's quota reset, nothing starts and no other account is tried, and no later poll decides a move again until the manager's account has room. The sprint waits for the reset with its session kept to wake. Any other takeover during a quota wait is unchanged.
 - A takeover during a quota wait is unchanged: it starts a new session on the best profile.
+- A manager that states a wait spends no idle nudge until it, and one that states a pause spends none until it reports again (#1380).
 - A manager whose delivery waits two hours on CI or an hour in the land queue draws no nudge and raises no item for the owner; when the wait ends the run counts as still from its own last movement, so a run that then moves nothing is nudged after the five idle minutes and the ten-minute spacing, and the nudge count is not reset by the wait (#1381).
 - A stored message left during a quota wait is delivered after the reset, not at once; the owner sees the sprint waiting on quota until the reset meanwhile.

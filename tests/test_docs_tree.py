@@ -245,6 +245,16 @@ def base_text(source: str) -> str:
     ).stdout
 
 
+MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+REMOVED_ARCHITECTURE_RE = re.compile(
+    r"CLAUDE\.md#architecture"
+    r"|Architecture`?\s+(?:section|heading)\s+(?:of|in)\s+(?:the\s+)?`?CLAUDE\.md"
+    r"|CLAUDE\.md`?(?:['\u2019]s)?\s*(?:>|\u203a|\u00a7|->|\u2192)?\s*`?(?:##\s*)?Architecture\s+(?:section|heading)"
+    r"|CLAUDE\.md`?\s*(?:>|\u203a|\u00a7|->|\u2192)\s*Architecture",
+    re.IGNORECASE,
+)
+
+
 def tracked_text(exclude: tuple[str, ...]) -> list[tuple[str, list[str]]]:
     listing = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
@@ -448,6 +458,86 @@ class DocsTreeTest(unittest.TestCase):
             for path, lines in tracked_text((".agents/artifacts/", "docs/archive/", "docs/spikes/"))
             for number, line in enumerate(lines, start=1)
             if SECTION_CITE_RE.search(line)
+        ]
+        self.assertEqual(hits, [])
+
+    def test_the_architecture_guide_holds_the_flake_layout_and_the_helper_package(self):
+        text = (REPO_ROOT / "docs/guides/architecture.md").read_text(encoding="utf-8")
+        for name in (
+            "mkDarwin", "mkNixos", "scanPaths", "mergeFilesOrdered", "agent_tools",
+            "hosts/common/common-packages.nix", "hosts/common/{darwin,linux}-common.nix",
+            "home/default.nix", "home/{darwin,linux}-common.nix",
+        ):
+            self.assertIn(name, text)
+
+    def test_every_relative_link_in_the_architecture_guide_resolves(self):
+        guide = REPO_ROOT / "docs/guides/architecture.md"
+        targets = [t for t in MD_LINK_RE.findall(guide.read_text(encoding="utf-8")) if "://" not in t]
+        self.assertTrue(targets)
+        missing = [t for t in targets if not (guide.parent / t.split("#")[0]).exists()]
+        self.assertEqual(missing, [])
+
+    def test_claude_md_links_the_architecture_guide_once_and_has_no_architecture_section(self):
+        text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        guide = (REPO_ROOT / "docs/guides/architecture.md").resolve()
+        links = [
+            t for t in MD_LINK_RE.findall(text)
+            if "://" not in t and (REPO_ROOT / t.split("#")[0]).resolve() == guide
+        ]
+        self.assertEqual(len(links), 1, links)
+        self.assertEqual([line for line in text.splitlines() if re.match(r"#+\s+Architecture\b", line)], [])
+
+    def test_the_repository_contract_resolves_one_architecture_path_the_guide(self):
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, ignore_errors=True))
+        (home / ".agents" / "share").mkdir(parents=True)
+        manifest = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
+        (home / ".agents" / "share" / "platform-manifest.json").write_bytes(manifest.read_bytes())
+        env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(REPO_ROOT / "python")}
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
+             "--repo-root", str(REPO_ROOT)],
+            env=env, text=True, stdin=subprocess.DEVNULL, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        architecture = json.loads(done.stdout)["bindings"]["paths"]["architecture"]
+        self.assertEqual(architecture, [str(REPO_ROOT / "docs/guides/architecture.md")])
+
+    def test_the_docs_routing_table_routes_an_architecture_description_to_the_guide(self):
+        rows = [
+            line for line in (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith("| The architecture description")
+        ]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("(./guides/architecture.md)", rows[0])
+        guides_line = [
+            line for line in (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith("| [guides/]")
+        ]
+        self.assertEqual(len(guides_line), 1)
+        self.assertNotIn("procedures only", guides_line[0].lower())
+
+    def test_the_removed_section_pattern_matches_references_and_not_prose(self):
+        for reference in (
+            "see CLAUDE.md#architecture", "the Architecture section of CLAUDE.md",
+            "CLAUDE.md's Architecture section", "CLAUDE.md > Architecture", "CLAUDE.md § Architecture",
+            "the `## Architecture` section in `CLAUDE.md`",
+        ):
+            self.assertRegex(reference, REMOVED_ARCHITECTURE_RE)
+        for prose in (
+            "CLAUDE.md links to the Architecture guide", "the Architecture guide, linked from CLAUDE.md",
+        ):
+            self.assertNotRegex(prose, REMOVED_ARCHITECTURE_RE)
+
+    def test_no_living_file_links_the_removed_architecture_section(self):
+        hits = [
+            f"{path}:{number}"
+            for path, lines in tracked_text((
+                ".agents/artifacts/", "docs/archive/", "docs/spikes/",
+                ".agents/knowledge/archive/", ".agents/knowledge/rejections/",
+            ))
+            if path != "tests/test_docs_tree.py"  # holds the pattern's own examples
+            for number, line in enumerate(lines, start=1)
+            if REMOVED_ARCHITECTURE_RE.search(line)
         ]
         self.assertEqual(hits, [])
 

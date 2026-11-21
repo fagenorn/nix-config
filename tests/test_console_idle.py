@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from agent_tools.console import idle
 from agent_tools.console.sessions import SessionState
@@ -131,6 +132,29 @@ class IdleStepTest(unittest.TestCase):
                 self.assertIsNone(step(state, now=at_ms, waiting=waiting,
                                        sess=session(at_ms=IDLE_AT)))
         self.assertEqual(step(with_manager(started(A)), now=now), idle.NUDGE)
+
+    def test_a_wait_until_ahead_holds_the_nudge_and_the_give_up_until_its_time(self):
+        wait = IDLE_AT + 60 * MIN
+        waiting = replace(ON, report=replace(ON.report, wait_until=iso(wait)))
+        gave = replace(waiting, idle_nudges=idle.LIMIT)
+        deadline = datetime.fromtimestamp(wait / 1000, timezone.utc) + timedelta(microseconds=500)
+        frac = replace(ON, report=replace(ON.report, wait_until=deadline.isoformat()))
+        self.assertIsNone(step(state=waiting, now=wait - 1))
+        self.assertEqual(step(state=waiting, now=wait), idle.NUDGE)
+        self.assertIsNone(step(state=gave, now=wait - 1))
+        self.assertEqual(step(state=gave, now=wait), idle.GIVE_UP)
+        self.assertIsNone(idle.next_step(waiting, 0, session(), None, False, wait - 1, True))
+        self.assertIsNone(step(state=frac, now=wait))
+        self.assertEqual(step(state=frac, now=wait + 1), idle.NUDGE)
+
+    def test_a_pause_holds_the_nudge_and_the_give_up_at_any_time_forced_or_not(self):
+        paused = replace(ON, report=replace(ON.report, paused="the lead freed the account"))
+        late = IDLE_AT + 600 * MIN
+        self.assertIsNone(step(state=paused, now=late))
+        self.assertIsNone(step(state=replace(paused, idle_nudges=idle.LIMIT), now=late))
+        self.assertIsNone(step(state=paused, now=late, forced=True))
+        self.assertEqual(step(state=replace(paused, report=replace(paused.report, paused=None)),
+                              now=late), idle.NUDGE)
 
 
 class LastMovedTest(unittest.TestCase):
