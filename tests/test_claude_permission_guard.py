@@ -2276,23 +2276,79 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     self.assertIn(self.RERUN, result.stderr)
 
     def test_a_repository_flag_inside_an_option_value_names_no_repository(self):
-        """Issue 1375 I1: the word after a value-taking option is its value, so a comment
-        body that spells `--repo=...` never selects another project's rule."""
-        row = {**PROD_ROW, "production": {
-            "changes": [{"id": "deploy-comment", "argv": ["gh", "issue", "comment"]}],
-            "read_only": [], "release_profile": "forge-main"}}
-        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: row})
+        """Issue 1375 I1: the word after a value-taking option is its value, so a job value
+        that spells `--repo=...` never selects another project's rule."""
+        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
         own = self.make_repo(f"git@github.com:{self.OWN}.git")
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
         other = self.make_repo("git@github.com:fagenorn/tool.git")
-        for cwd in (own, other):
+        for cwd in (own, prod, other):
             for command in (
-                    f"gh issue comment 5 --repo {self.OWN} --body '--repo={PROD}'",
-                    f"gh issue comment 5 --repo {self.OWN} --body --repo={PROD}",
-                    f"gh issue comment 5 --repo {self.OWN} -b '-R{PROD}'",
-                    f"gh issue comment 5 --repo {self.OWN} --body='--repo={PROD}'"):
+                    f"gh run rerun 5 --repo {self.OWN} --job '--repo={PROD}'",
+                    f"gh run rerun 5 --repo {self.OWN} --job --repo={PROD}",
+                    f"gh run rerun 5 --repo {self.OWN} -j '-R{PROD}'",
+                    f"gh run rerun 5 --repo {self.OWN} --job='--repo={PROD}'",
+                    f"gh run rerun 5 --repo {self.OWN} -jR{PROD}",
+                    f"gh run rerun 123 -dR {self.OWN}",
+                    f"gh run rerun 123 -dR{self.OWN} --failed"):
                 with self.subTest(cwd=cwd.name, command=command):
                     result = self.run_guard(command, cwd=cwd, guard_args=guard_args)
                     self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_rerun_the_guard_cannot_read_exactly_is_judged_by_the_checkout_and_its_names(self):
+        """Issue 1375 review: an expansion or glob anywhere in the run, a command
+        substitution, a redirection glued to the flag, an unknown flag or a wildcard in the
+        value may hide a later repository flag, so the checkout is judged too and every
+        repository the words name is judged."""
+        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        for command in (
+                f"X='-R {PROD}'; gh run rerun 9 --repo {self.OWN} $X",
+                f"gh run rerun 9 --repo {self.OWN} $(echo -R) {PROD}",
+                f"gh run rerun 9 --repo {self.OWN} `echo -R {PROD}`",
+                f"gh run rerun 9 --repo {self.OWN} ./x*",
+                f"gh run rerun 9 --repo {self.OWN} --json -R {PROD}",
+                f"gh run rerun 9 --repo {self.OWN} --unknown -R {PROD}",
+                f"gh run rerun 9 --repo {self.OWN} -x -R {PROD}",
+                "gh run rerun 123 --repo acme/dep*",
+                "gh run rerun 123 --repo 'acme/dep*'",
+                f"gh run rerun 9 extra --repo {self.OWN} -R {PROD}"):
+            with self.subTest(cwd="deployer", command=command):
+                result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn(self.RERUN, result.stderr)
+        other = self.make_repo("git@github.com:fagenorn/tool.git")
+        for command in (
+                f"gh run rerun $(echo 9) --repo {PROD}", f"gh run rerun `echo 9` --repo {PROD}",
+                f"gh run rerun 123 --repo>/dev/null {PROD}",
+                f"gh run rerun 123 --repo>>/dev/null {PROD}",
+                f"gh run rerun 123 --repo{chr(60)}/dev/null {PROD}",
+                f"gh run rerun 9 --repo {self.OWN} $X --repo {PROD}"):
+            with self.subTest(cwd="other", command=command):
+                result = self.run_guard(command, cwd=other, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn(self.RERUN, result.stderr)
+
+    def test_a_verb_whose_flags_the_guard_does_not_model_is_judged_by_the_checkout(self):
+        """Issue 1375 review: only the rerun flag grammar is modelled, so a later `-R` that
+        gh reads in another verb's grammar (`--json` is boolean, `-e` takes a value, `--comment`
+        takes a value) is never narrowed away from the checkout's rules."""
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        for argv, command in (
+                (["gh", "workflow", "run"],
+                 f"echo '{{}}' | gh workflow run deploy.yml --repo {self.OWN} --json -R {PROD}"),
+                (["gh", "secret", "set"],
+                 f"gh secret set K -R {PROD} -e --repo={self.OWN}"),
+                (["gh", "issue", "close"],
+                 f"gh issue close 5 --comment '--repo={self.OWN}' --repo {PROD}")):
+            row = {**PROD_ROW, "production": {
+                "changes": [{"id": "deploy-verb", "argv": argv}], "read_only": [],
+                "release_profile": "forge-main"}}
+            guard_args = self.production_args({self.OWN: NODO_ROW, PROD: row})
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("(production rule deploy-verb)", result.stderr)
 
     def test_a_rerun_that_names_no_repository_keeps_the_checkout_judgement(self):
         """Issue 1375: only an explicit `--repo` on a parsed run narrows the rules; every
