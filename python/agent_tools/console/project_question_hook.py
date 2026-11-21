@@ -111,7 +111,7 @@ directory or an identity cannot be read (any `OSError` but a path that vanished)
 descendant of a directory that does not reach cannot lie inside the private directory unless it is
 a mount of it, which the identity check names, so only symlinks and directory identities are checked.
 
-The root (#1274, ADR-console-094 D1). With a root, after the checks above, a path is `OUTSIDE_ROOT` when it is
+The root (#1274, ADR-console-097 D1). With a root, after the checks above, a path is `OUTSIDE_ROOT` when it is
 none of the records file, the session's own `tool-results` and a path inside the root (`_outside`, by real
 path). It denies a `Read` whose `file_path` is outside, a `Grep` whose search root (`path`, else `cwd`) is
 outside, a `Glob` any of whose literal prefixes joined to the search root is outside, and a `Bash` command
