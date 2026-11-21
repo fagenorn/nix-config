@@ -166,7 +166,12 @@ def _contract(contract_source: Path, project_id: str) -> dict:
     contract["release"] = "unsupported"
     review = contract["bindings"]["workflow"]["review"]
     for role in ("plan", "code"):
-        contract["bindings"]["commands"][review[role]]["argv"] = ["true"]
+        if review[role] is None:
+            continue  # an unsupported role names no command id
+        # An authored entry under the platform id: the resolver reads it as authored
+        # (ADR-project-contract-010), and so does an older installed console.
+        contract["bindings"]["commands"][review[role]] = {
+            "argv": ["true"], "cwd": ".", "env": []}
     contract["bindings"]["tracker"]["cli"] = "gh"
     contract["bindings"]["vcs"]["integration_branch"] = "main"
     return contract

@@ -28,7 +28,8 @@ from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .test_console_register_service import (
     A1, DRAFT, PID_A, PID_B, READ_NO_BUILD, READY, ROOT, CancelChecks, Case, DraftCase, Fake, Held,
-    answer_of, assert_freed, assert_held, closing, git, git_repo, real_home_state, reconcile_repository)
+    answer_of, assert_freed, assert_held, closing, git, git_repo, real_home_state, reconcile_repository,
+    sample_repository)
 
 PATH = "/api/plan-approve"
 MERGE_PATH = "/api/adoption-merge"
@@ -36,6 +37,7 @@ RETRY_PATH = "/api/adoption-register"
 DEFER_PATH = "/api/plan-defer"
 OLD_PUSH_NOTE = ("Check that the repository's origin can be reached from this host and accepts the "
                  "push, then press Try again.")
+PID_C = "sha256:" + "c" * 64
 BRANCH = "adopt-bbbbbbbbbbbb"
 COMMIT = "c" * 40
 APPLIED = {"branch": BRANCH, "commit": COMMIT, "plan_id": PID_B, "migration_map": "m",
@@ -2570,6 +2572,53 @@ class MergedRegistrationTest(ApproveCase):
         self.assertEqual(len(self.register_calls()), 3)
         self.assertEqual(self.retry_items(), [])
         self.assertTrue(self.listed("o/r"))
+
+
+class DraftingFake(Fake):
+    """A `Fake` that keeps the contract file its plan was given, which is gone when the plan returns."""
+
+    def plan(self, root, cancel=None, answers=(), contract=None, environment=None):
+        self.drafted = None if contract is None else json.loads(Path(contract).read_text())
+        return super().plan(root, cancel=cancel, answers=answers, contract=contract,
+                            environment=environment)
+
+
+class RetiredCoAuthorPlanTest(ApproveCase):
+    """A ready plan saved before the console stopped drafting the co-author setting (#1449)."""
+
+    def test_approving_it_plans_again_from_the_refreshed_draft_and_applies_nothing(self):
+        repo = sample_repository(self.parent, remote=True)
+        fields = contract_draft.draft(str(repo), contract_draft.read(str(repo)))
+        for field in ("build-command", "test-command"):
+            fields, error = contract_draft.set_value(
+                fields, field, "none", entries=[], root=str(repo))
+            self.assertIsNone(error)
+        record = {"field": "co-authored-by", "label": "co-author lines in commits", "value": "yes",
+                  "source": "owner",
+                  "options": [{"value": "yes", "label": "yes"}, {"value": "no", "label": "no"}],
+                  "text": False, "reason": None, "ask": "Should its commits carry co-author lines?"}
+        row = register.summary(str(repo), READY, draft=[*fields[:8], record, *fields[8:]])
+        self.assertEqual((row["plan_id"], row["state"]), (PID_B, "ready"))
+        log = event_log.EventLog(self.store)
+        try:
+            log.append([register.ended(row)])
+        finally:
+            close = getattr(log, "close", None)
+            if close is not None:
+                close()
+        replanned = {**READY, "plan": {**READY["plan"], "plan_id": PID_C}}
+        fake = DraftingFake(plan=replanned, apply_result=APPLIED)
+        self.start(fake)
+        self.assertEqual(self.view()["registration"]["plan_id"], PID_B)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.approve_plan()[::2], (204, b""))
+            again = self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] != PID_B)
+        self.assertEqual((again["plan_id"], again["state"]), (PID_C, "ready"))
+        self.assertEqual(fake.applied, [])
+        self.assertEqual(fake.calls, [("plan", str(repo))])
+        self.assertIs(fake.drafted["bindings"]["vcs"]["commit"]["co_authored_by"], False)
+        self.refused(PID_B, approve.STALE)
 
 
 class MergedRealCase(ApproveCase):

@@ -258,15 +258,19 @@ def host_independent(contract: dict) -> dict:
 
     This repository's GitHub release profile derives a `blocked` release
     capability on any host without the forge adapter's executables on `PATH`,
-    and its plan and code review commands run `codex-companion`, which the
+    and the platform's review commands run `codex-companion`, which the
     hosted CI runner lacks. No fixture built on this is about release or
-    review, so release is opted out and both review commands become `true`,
-    which every host resolves: the verdicts are the same everywhere.
+    review, so release is opted out and each review command is replaced by an
+    authored `true` entry under its id, which every host resolves: the verdicts
+    are the same everywhere.
     """
     contract["release"] = "unsupported"
     review = contract["bindings"]["workflow"]["review"]
     for role in ("plan", "code"):
-        contract["bindings"]["commands"][review[role]]["argv"] = ["true"]
+        if review[role] is None:
+            continue  # an unsupported role names no command id
+        contract["bindings"]["commands"][review[role]] = {
+            "argv": ["true"], "cwd": ".", "env": []}
     return contract
 
 
@@ -3578,6 +3582,19 @@ class ProcessWiringTest(AdoptTestCase):
                 child = run_child(*args, home=self.home)
                 self.assertEqual(child[0], expected, child[2])
                 self.assertEqual(run(*args, home=self.home), child)
+
+
+class HostIndependentFixtureTest(unittest.TestCase):
+    def test_an_unsupported_review_role_adds_no_command(self):
+        contract = fixture_contract()
+        contract["bindings"]["workflow"]["review"]["plan"] = None
+        original = {"argv": ["make", "null"], "cwd": ".", "env": []}
+        contract["bindings"]["commands"]["null"] = original
+        host_independent(contract)
+        # The fixture is written as JSON, where a `None` key becomes the id "null".
+        commands = json.loads(json.dumps(contract))["bindings"]["commands"]
+        self.assertEqual(commands["null"], original)
+        self.assertIn(contract["bindings"]["workflow"]["review"]["code"], commands)
 
 
 class AdoptFailureWrapperTest(unittest.TestCase):
