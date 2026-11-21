@@ -238,7 +238,7 @@ const RULES_FOR = (W, B) => `${BASE_RULES}
 
 // --- Batch state ---
 // The D9 final outcomes: an issue ending in one of these is not relaunched.
-const FINAL = ['landed', 'landed-held', 'closed', 'duplicate', 'needs-verification', 'parked', 'human-required', 'needs-design', 'claimed-elsewhere', 'stale-claim', 'already-fixed', 'no-changes', 'not-converging']
+const FINAL = ['landed', 'landed-held', 'closed', 'duplicate', 'needs-verification', 'parked', 'human-required', 'needs-design', 'claimed-elsewhere', 'stale-claim', 'already-fixed', 'no-changes', 'not-converging', 'live-fault']
 const FACTS = {}
 const rows = {}
 let breaker = null
@@ -271,6 +271,7 @@ const FACTS_SCHEMA = {
     decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: {} } } },
     lane: { type: 'string', enum: LANES }, why: { type: 'string' },
     look: { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'] },
+    live_fault: { type: 'object', properties: { verdict: { type: 'string', enum: ['declared', 'none', 'no-sprint', 'error'] }, detail: { type: 'string' } }, required: ['verdict'] },
   },
   required: ['state', 'labels', 'claim', 'native', 'blockers', 'lane'],
 }
@@ -320,6 +321,7 @@ const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git 
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
 8. lane: invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is. Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
 9. look: run alone and exactly look-approval marked --repo ${SLUG} --issue ${n} and return its verdict (marked or unmarked) as look; on a non-zero exit return look with verdict error.
+10. live_fault: run alone and exactly sprint recap and read its one JSON line. When it exits 2 printing sprint: no sprint id, return live_fault with verdict no-sprint. On any other non-zero exit return verdict error and the stderr line as detail. Otherwise return verdict declared when its live_faults list holds an entry whose issue is ${n}, else none.
 ${RULES_FOR(REPO, '<branch>')}`
 const releaseClosedPrompt = n => `Issue #${n} of ${SLUG} (the git repository at ${REPO}) is closed and this batch still holds its claim. Release it.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed
@@ -2046,6 +2048,9 @@ const readoptPushPrompt = (n, ro) => {
 ${RULES_FOR(W, B)}`
 }
 
+// #1433: a declared live fault is delivered alone with lane live; one whose declaration cannot be read is left out the same way, never routed as an ordinary lane.
+const LIVE_ROW = 'a declared live fault is delivered alone: run deliver-standard for it with lane live'
+const LIVE_UNREAD = d => 'its live-fault declaration could not be read (' + d + '): deliver it alone once the declaration reads'
 const deliverOne = async n => {
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
   const f = FACTS[n]
@@ -2068,6 +2073,29 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
     }
     laneName = f.lane
     return true
+  }
+  // #1433: whatever else the issue holds (a saved continuation, an open PR on its branch), a declared or unreadable live fault is left out; only a landing already merged is closed out as before.
+  if (!mergedReadopt(n, f)) {
+    const lf = f.live_fault
+    const verdict = isObj(lf) ? lf.verdict : null
+    if (verdict !== 'none' && verdict !== 'no-sprint') {
+      const reason = verdict === 'declared' ? LIVE_ROW : LIVE_UNREAD((isObj(lf) && nonEmpty(lf.detail) && oneLine(lf.detail)) || 'no verdict')
+      // The row sends the issue to a run of its own, whose holder is not this batch's: a claim this batch still holds would stop that run, so it is given back first.
+      const cl = f.claim || {}
+      if ((cl.verdict === 'held_by' || cl.verdict === 'stale') && cl.by === HOLDER) {
+        const rel = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) is left out of this batch because it is a live fault, which is delivered alone. Release the batch claim.
+Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
+Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. ${FORGE_TIMEOUT} Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
+        // A release that failed leaves the claim held, which would stop the alone run: the row stays open for a relaunch instead of final.
+        if (!rel || (rel.verdict !== 'released' && rel.verdict !== 'not_held')) {
+          rows[n] = { issue: n, outcome: 'stopped', stage: 'release', detail: rel ? (rel.detail || rel.verdict) : `release-${n} returned nothing` }
+          return
+        }
+      }
+      rows[n] = { issue: n, outcome: 'live-fault', reason }
+      return
+    }
   }
   if (CONTS[n]) laneName = CONTS[n].lane || 'standard'
   else if (!readopt && !(await chooseLane())) return
