@@ -11,10 +11,12 @@ import errno
 import io
 import json
 import os
+import random
 import shlex
 import subprocess
 import sys
 import shutil
+import string
 import tempfile
 import threading
 import time
@@ -1982,6 +1984,16 @@ class CredentialShapeTest(unittest.TestCase):
         self.assertEqual([n for n, _ in project_question.CREDENTIAL_SHAPES], list(FAKE_CREDENTIALS))
         self.assertIsNotNone(write_guard._TOKEN.fullmatch(FAKE_CREDENTIALS["console_token"] + "\n"))
 
+    def test_a_console_token_of_any_character_mix_is_caught(self):
+        alphabet = string.ascii_letters + string.digits + "-_"
+        generator = random.Random(1272)
+        tokens = ["AbCd" * 10 + "EfG", "Ab" * 21 + "C"]
+        tokens += ["".join(generator.choices(alphabet, k=43)) for _ in range(500)]
+        for token in tokens:
+            with self.subTest(token=token):
+                self.assertIsNotNone(write_guard._TOKEN.fullmatch(token + "\n"))
+                self.assertIs(project_question.credential_shaped(f"is {token} right?"), True)
+
     def test_ordinary_text_with_similar_words_is_not_credential_shaped(self):
         texts = (
             "how do I rotate the GitHub token in HF_TOKEN?",
@@ -2203,7 +2215,7 @@ class QuestionServiceTest(QuestionCase):
         self.assertEqual(event_log.PROJECT_QUESTION_ANSWERED, ANSWERED_KIND)
         self.assertNotIn(ASKED, event_log.KEPT_KINDS)
         self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
-        self.assertEqual(event_log.SCHEMA_VERSION, 11)
+        self.assertEqual(event_log.SCHEMA_VERSION, 12)
 
     def shown(self, svc):
         return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
@@ -2914,6 +2926,18 @@ class QuestionRequestKeyTest(QuestionCase):
         for key in (self.KEY[:31], self.KEY.upper(), 12, None):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 project_question.parse_keyed_request(body(request_key=key))
+
+    def test_a_credential_under_a_known_request_key_is_refused(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        before = self.question_rows()
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, f"key {FAKE_CREDENTIALS['github']}",
+                                     request_key=self.KEY)
+        self.assertEqual(str(caught.exception), project_question.CREDENTIAL)
+        self.assertNotEqual(first, "")
+        self.assertEqual(self.question_rows(), before)
+        self.assertEqual(len(self.asked), 1)
 
     def test_a_repeated_key_asks_once(self):
         svc = self.start()
