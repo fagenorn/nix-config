@@ -17,7 +17,7 @@ _Avoid_: onboarding
 A platform-manifest entry naming a project file or key that a newer platform version no longer accepts, with its successor and the migration that converts it.
 
 **Fleet preflight**:
-The read-only check `just switch` runs between the build and the activation, judging every **Fleet registry** project with the tree's resolver against the tree's platform manifest; any project that cannot run on it stops the switch, and there is no force flag (ADR-project-contract-010).
+The read-only check `just switch` runs between the build and the activation, judging every **Fleet registry** project with the tree's resolver against the tree's platform manifest; any project that cannot run on it stops the switch, and there is no force flag (ADR-project-contract-011).
 
 **Fleet registry**:
 The per-host list of the projects the agent tooling manages. Verification passes and the guard's compiled policy both read it.

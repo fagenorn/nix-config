@@ -1,4 +1,4 @@
-# ADR-project-contract-010 — A switch refuses to activate a platform a registered project cannot run on
+# ADR-project-contract-011 — A switch refuses to activate a platform a registered project cannot run on
 
 - **Status:** accepted
 - **Decided in:** issue 1451, issue 1415, issue 66
