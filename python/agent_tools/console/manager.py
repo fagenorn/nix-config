@@ -79,8 +79,9 @@ per-sprint settings file (mode 0600, replaced on a retry) and passes `--settings
 Code applies a settings file's `env` to that session. Only the path is on argv. The file holds
 three more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}`, because a manager
 writes no code and every delivery makes its own worktree, and `hooks`, which hold three. One `PermissionRequest`
-command hook prints the client's deny decision with `REFUSAL`, one fixed sentence, because nobody
-watches a manager's session (a plain `printf`, no interpreter start). A `PreToolUse` and a
+command hook runs `PROMPT_COMMAND` (`sprint permit --prompt`, `timeout` `PROMPT_TIMEOUT`) and, should it
+crash, prints the client's deny decision with `REFUSAL`, one fixed sentence, through `|| printf`
+(#1424, ADR-console-021 as amended). A `PreToolUse` and a
 `PostToolUse` command hook, each with matcher `Bash` and no `if` filter, run `PERMIT_COMMAND`
 (`sprint permit`, `PERMIT_TIMEOUT` 60 seconds) and `LANDED_COMMAND` (`sprint permit --landed`,
 `LANDED_TIMEOUT` 30 seconds): the console judges each Bash call of the session and allows only the
@@ -203,6 +204,7 @@ PERMIT_COMMAND = "sprint permit"
 LANDED_COMMAND = "sprint permit --landed"
 PERMIT_TIMEOUT = 60
 LANDED_TIMEOUT = 30
+PROMPT_COMMAND = "sprint permit --prompt"
 PROMPT_HOLD_SECONDS = 600
 PROMPT_POLL_SECONDS = 2
 PROMPT_TIMEOUT = 660
@@ -517,7 +519,7 @@ def launcher_for(platform: str) -> Callable[[Launch], None] | None:
 
 
 def settings_document(env: Mapping[str, str], permission: permissions.Permission) -> dict:
-    """The settings a manager's session runs under: its environment, no isolation guard, no prompts, the mode, the permit hooks and the deny rule."""
+    """The settings a manager's session runs under: its environment, no isolation guard, a Bash prompt held for the owner, the mode, the permit hooks and the deny rule."""
     refusal = json.dumps({"hookSpecificOutput": {
         "hookEventName": "PermissionRequest",
         "decision": {"behavior": "deny", "message": REFUSAL}}})
@@ -525,7 +527,9 @@ def settings_document(env: Mapping[str, str], permission: permissions.Permission
             "worktree": {"bgIsolation": "none"},
             "hooks": {
                 "PermissionRequest": [{"hooks": [{
-                    "type": "command", "command": f"printf '%s\\n' {shlex.quote(refusal)}"}]}],
+                    "type": "command",
+                    "command": f"{PROMPT_COMMAND} || printf '%s\\n' {shlex.quote(refusal)}",
+                    "timeout": PROMPT_TIMEOUT}]}],
                 "PreToolUse": [{"matcher": "Bash", "hooks": [{
                     "type": "command", "command": PERMIT_COMMAND, "timeout": PERMIT_TIMEOUT}]}],
                 "PostToolUse": [{"matcher": "Bash", "hooks": [{

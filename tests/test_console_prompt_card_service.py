@@ -2,10 +2,15 @@
 
 Run: just agent-workflow-tests
 """
+import contextlib
+import io
 import json
+import os
+import sys
 import unittest
+from unittest import mock
 
-from agent_tools.console import event_log, guest, prompt_card, service
+from agent_tools.console import event_log, guest, manager, prompt_card, service, sprint
 from agent_tools.console.event_log import SPRINT_STOP_REQUESTED
 
 from . import console_test_support as support
@@ -208,6 +213,32 @@ class PromptRouteTest(PromptCase):
         self.assertEqual(self.items(svc), [])
         self.assertEqual(self.phase(svc, sid, "wait", n), (200, {"prompt": n, "state": "open"}))
         self.assertEqual([item["prompt"] for item in self.items(svc)], [n])
+
+
+class PromptHookWireTest(PromptCase):
+    def test_an_allow_between_the_last_wait_and_the_close_is_honored(self):
+        svc, sid = self.boot()
+        hook = {"session_id": "s-1", "tool_name": "Bash",
+                "tool_input": {"command": COMMAND, "description": WORDS}}
+        clock = [0]
+
+        def on_sleep(seconds):
+            (item,) = self.items(svc)
+            status, _, _ = self.answer(svc, item["prompt"], "allow")
+            self.assertEqual(status, 204)
+            clock[0] = prompt_card.HOLD_SECONDS + 1
+
+        out = io.StringIO()
+        args = sprint.build_parser().parse_args(
+            ["permit", "--prompt", "--port", str(svc.address[1])])
+        with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \
+                contextlib.redirect_stdout(out):
+            code = sprint.run_prompt(args, clock=lambda: clock[0], sleep=on_sleep)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), prompt_card.hook_output("allow") + "\n")
+        self.assertEqual(len(self.rows(event_log.PROMPT_ANSWERED)), 1)
+        self.assertEqual(self.rows(event_log.PROMPT_CLOSED), [])
 
 
 if __name__ == "__main__":

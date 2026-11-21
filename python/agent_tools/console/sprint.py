@@ -13,7 +13,7 @@
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint picture [--sprint <id>] [--secret-file <path>] --file <path> [--port N]
     sprint status [--sprint <id>] [--secret-file <path>] [--port N]
-    sprint permit [--landed] [--sprint <id>] [--secret-file <path>] [--port N]
+    sprint permit [--landed | --prompt] [--sprint <id>] [--secret-file <path>] [--port N]
     sprint contract
 
 `--sprint` is the sprint id (16 lowercase hex characters, `agent_tools.console.sprints.SPRINT_ID`),
@@ -221,6 +221,23 @@ that is unreachable or answers other than 200, a reply that is not `{"decision",
 same object with `deny` and the reason `the console could not judge this command: <why>`. With
 `--landed` the command tells the console the merge ran and prints nothing in every case.
 
+`sprint permit --prompt` is the manager's `PermissionRequest` hook (#1424, ADR-console-021 as amended): the
+client runs it when a tool call needs a permission and takes the one line it prints as the decision. It reads the
+hook input from stdin and holds only a Bash prompt, a JSON object with `tool_name` `Bash`, a string `session_id`
+and a `tool_input.command` of 1 to `prompt_card.MAX_COMMAND_CHARS` characters (the optional string
+`tool_input.description` goes along), resolving the sprint and secret as `sprint inbox` does. It sends `POST
+/api/permission-prompt` with phase `ask` and, when the reply is `{"prompt": <n>, "state": <str>}` with a number,
+repeats phase `wait` every `prompt_card.POLL_SECONDS` while the reply is `open` (a failed wait is polled again), up
+to `prompt_card.HOLD_SECONDS` after the ask: `allowed` prints the client's allow decision, `refused` its deny with
+`prompt_card.OWNER_REFUSED_TEXT` and `closed` its deny with `prompt_card.EXPIRED_TEXT`. When the hold runs out it
+sends phase `close` once and prints what that reply says, which the console decides together with the owner's
+answer: `allowed` allows, `refused` denies with the owner's refusal, and `closed`, any other reply or a failed
+request denies with the expiry. Everything else prints one deny line with `manager.REFUSAL` and sends nothing
+further: stdin that is not such an object, any other tool, a command that is missing, empty or too long, no
+session, sprint id or secret, a console that is unreachable or answers other than 200 to the ask, a reply that is
+not `{"prompt", "state"}` and a null `prompt`. It prints exactly one line, always exit 0. The allow carries no rule,
+so the deny rules and the `PreToolUse` hooks keep judging the call.
+
 `sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
 beside this module, to stdout exactly as packaged and exit 0. It takes no sprint id, secret or
 port, reads no environment and sends no request; the console's launch prompt tells the manager to
@@ -247,10 +264,11 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import manager, permit, service, sprints
+from agent_tools.console import manager, permit, prompt_card, service, sprints
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
@@ -392,8 +410,11 @@ def build_parser() -> argparse.ArgumentParser:
                 each.add_argument("--closing-file", required=True,
                                   help="the closing report as a JSON object; - reads stdin")
         if name == "permit":
-            each.add_argument("--landed", action="store_true",
+            mode = each.add_mutually_exclusive_group()
+            mode.add_argument("--landed", action="store_true",
                               help="report that the permitted merge ran; prints nothing")
+            mode.add_argument("--prompt", action="store_true",
+                              help="hold a Bash permission prompt for the owner's answer")
         if name == "picture":
             each.add_argument("--file", type=Path, required=True, help="the PNG file to send")
         if name == "withdraw-question":
@@ -548,6 +569,93 @@ def run_permit(args: argparse.Namespace) -> int:
         return 0
     if decision is not None:
         print(permit_line(decision, reason))
+    return 0
+
+
+def prompt_hook(text: str) -> tuple[str, str, str | None]:
+    """The session id, Bash command and description (None when absent) of a hook input, else `HookFailure`."""
+    try:
+        document = json.loads(text, object_pairs_hook=reject_duplicate_keys,
+                              parse_constant=reject_nonfinite_literal)
+    except (ValueError, RecursionError) as error:
+        raise HookFailure(f"the hook input is not JSON: {error}") from error
+    if not isinstance(document, dict) or document.get("tool_name") != "Bash":
+        raise HookFailure("the prompt is not for a Bash command")
+    tool = document.get("tool_input")
+    command = tool.get("command") if isinstance(tool, dict) else None
+    session = document.get("session_id")
+    if (not isinstance(command, str) or not 0 < len(command) <= prompt_card.MAX_COMMAND_CHARS
+            or not isinstance(session, str) or not session):
+        raise HookFailure("the hook input has no session_id and a usable tool_input.command")
+    description = tool.get("description")
+    return session, command, description if isinstance(description, str) else None
+
+
+def prompt_reply(text: str) -> tuple[int | None, str]:
+    """The prompt number and state of the console's reply, else `HookFailure`."""
+    try:
+        reply = json.loads(text)
+    except ValueError as error:
+        raise HookFailure(f"the console's answer is not JSON: {error}") from error
+    prompt = reply.get("prompt") if isinstance(reply, dict) else None
+    state = reply.get("state") if isinstance(reply, dict) else None
+    if (not isinstance(reply, dict) or set(reply) != {"prompt", "state"}
+            or not isinstance(state, str)
+            or not (prompt is None or (type(prompt) is int and prompt >= 1))):
+        raise HookFailure("the console's answer is not a prompt state")
+    return prompt, state
+
+
+def run_prompt(args: argparse.Namespace, *, clock: Callable[[], float] | None = None,
+               sleep: Callable[[float], None] | None = None) -> int:
+    """The `sprint permit --prompt` hook: one printed line, always exit 0."""
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    refused = prompt_card.hook_output("deny", manager.REFUSAL)
+    try:
+        session, command, description = prompt_hook(sys.stdin.read())
+        sprint, secret = resolve_sprint(args), resolve_secret(args)
+        body = {"sprint_id": sprint, "secret": secret, "phase": "ask",
+                "session_id": session, "command": command}
+        if description is not None:
+            body["description"] = description
+        prompt, _ = prompt_reply(ask(args.port, "POST", prompt_card.ASK_PATH,
+                                     json.dumps(body).encode()))
+        if prompt is None:
+            raise HookFailure("the console holds no card for this prompt")
+    except (HookFailure, Unreadable, Refused, UnicodeDecodeError):
+        print(refused)
+        return 0
+
+    def phase(name: str) -> str:
+        """The state of the prompt after one `wait` or `close` request, "failed" when it did not answer."""
+        try:
+            sent = {"sprint_id": sprint, "secret": secret, "phase": name,
+                    "session_id": session, "prompt": prompt}
+            return prompt_reply(ask(args.port, "POST", prompt_card.ASK_PATH,
+                                    json.dumps(sent).encode()))[1]
+        except (HookFailure, Refused):
+            return "failed"
+
+    def printed(state: str) -> str | None:
+        if state == prompt_card.ALLOWED:
+            return prompt_card.hook_output("allow")
+        if state == prompt_card.REFUSED:
+            return prompt_card.hook_output("deny", prompt_card.OWNER_REFUSED_TEXT)
+        if state == prompt_card.CLOSED:
+            return prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)
+        return None
+
+    deadline = clock() + prompt_card.HOLD_SECONDS
+    while clock() < deadline:
+        line = printed(phase("wait"))
+        if line is not None:
+            print(line)
+            return 0
+        sleep(prompt_card.POLL_SECONDS)
+    state = phase("close")
+    print(printed(state) if state in (prompt_card.ALLOWED, prompt_card.REFUSED)
+          else prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT))
     return 0
 
 
@@ -846,7 +954,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(CONTRACT.read_text(encoding="utf-8"))
         return 0
     if args.command == "permit":
-        return run_permit(args)
+        return run_prompt(args) if args.prompt else run_permit(args)
     try:
         sprint = resolve_sprint(args)
         if args.command == "brief":

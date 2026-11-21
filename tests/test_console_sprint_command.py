@@ -16,7 +16,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import manager, service, sprint, sprints
+from agent_tools.console import manager, prompt_card, service, sprint, sprints
 from agent_tools.delivery import look_marker
 
 from . import console_test_support as support
@@ -852,11 +852,13 @@ class SprintCommandTest(Case):
 
     SECTION = "## After a restart or a takeover\n\n1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first.\n2. `sprint recap` prints the goal, the latest brief with its decision and the owner's reply, the last report and how many of the owner's messages are unread. The console keeps this record; nothing was handed over to you.\n3. The latest brief's decision comes before the last report, because a newer brief does not remove an older report:\n   - No brief: draft one, as Drafting the brief says.\n   - Decision `changes`: revise the brief from the reply `sprint recap` printed and send the new version, even when `sprint inbox` printed nothing, because that change request was read before the restart.\n   - Decision `none`: the brief waits for the owner; end your turn.\n   - Decision `approved`: the last report may describe an earlier version of the brief, so check its next step against the approved brief's parts before following it. Continue only the work the approved brief still includes and drop what it removed; follow After approval when there is no report or nothing is left.\n"
 
-    def test_the_contract_says_a_permission_prompt_is_refused_and_a_worktree_is_never_entered(self):
+    def test_the_contract_says_a_bash_prompt_waits_for_the_owner_and_a_worktree_is_never_entered(self):
         section = run_sprint("contract").stdout.split("\n## ", 2)[1]
         self.assertTrue(section.startswith("Contract\n"), section)
-        self.assertIn("- A permission prompt in this session is refused automatically, so never "
-                      "wait for one.", section)
+        self.assertIn("- A permission prompt for a Bash command in this session waits up to ten "
+                      "minutes for the owner to allow it once or refuse it on the console; any "
+                      "other prompt is refused at once. Never wait for a prompt any other way.",
+                      section)
         self.assertIn("- Never enter or create a worktree yourself, because a delivery makes its "
                       "own.", section)
 
@@ -1472,6 +1474,141 @@ class PermitCommandTest(unittest.TestCase):
             with self.subTest(stdin=stdin[:20]):
                 code, out, _ = self.run_permit(stdin, reply, "--landed")
                 self.assertEqual((code, out), (0, ""))
+
+
+class PromptCommandTest(unittest.TestCase):
+    """`sprint permit --prompt` holds a manager's Bash prompt for the owner's answer on the console (#1424)."""
+
+    ENV = {manager.ID_ENV: "a" * 16, manager.SECRET_ENV: "secret"}
+    ASKED = {"prompt": 7, "state": "open"}
+
+    @staticmethod
+    def hook(**change):
+        document = {"session_id": "s-1", "tool_name": "Bash",
+                    "tool_input": {"command": "git worktree add ../w", "description": "Create it"}}
+        return json.dumps({**document, **change})
+
+    @staticmethod
+    def state(word, prompt=7):
+        return {"prompt": prompt, "state": word}
+
+    def run_prompt(self, stdin, replies, times=(0,), env=None):
+        """The exit code, the printed text, the requests `(path, body)` and the sleeps."""
+        sent, slept, out = [], [], StringIO()
+        queue, ticks = list(replies), list(times)
+
+        def fake(port, method, path, body=None, headers=None):
+            sent.append((path, json.loads(body)))
+            reply = queue.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return json.dumps(reply)
+
+        def clock():
+            return ticks.pop(0) if len(ticks) > 1 else ticks[0]
+
+        environment = dict(self.ENV if env is None else env)
+        with mock.patch.object(sprint, "ask", side_effect=fake), \
+                mock.patch.dict(os.environ, environment), \
+                mock.patch.object(sys, "stdin", StringIO(stdin)), redirect_stdout(out):
+            for name in (manager.ID_ENV, manager.SECRET_ENV):
+                if name not in environment:
+                    os.environ.pop(name, None)
+            args = sprint.build_parser().parse_args(["permit", "--prompt"])
+            code = sprint.run_prompt(args, clock=clock, sleep=slept.append)
+        return code, out.getvalue(), sent, slept
+
+    def test_an_allowed_prompt_prints_the_allow_decision(self):
+        code, out, sent, slept = self.run_prompt(
+            self.hook(), [self.ASKED, self.state("open"), self.state("allowed")])
+        self.assertEqual((code, out), (0, prompt_card.hook_output("allow") + "\n"))
+        self.assertEqual([path for path, _ in sent], [prompt_card.ASK_PATH] * 3)
+        self.assertEqual(sent[0][1], {
+            "sprint_id": "a" * 16, "secret": "secret", "phase": "ask", "session_id": "s-1",
+            "command": "git worktree add ../w", "description": "Create it"})
+        for _, body in sent[1:]:
+            self.assertEqual(body, {"sprint_id": "a" * 16, "secret": "secret", "phase": "wait",
+                                    "session_id": "s-1", "prompt": 7})
+        self.assertEqual(slept, [prompt_card.POLL_SECONDS])
+
+    def test_the_ask_carries_a_description_only_when_it_is_a_string(self):
+        stdin = self.hook(tool_input={"command": "ls", "description": 3})
+        _, _, sent, _ = self.run_prompt(stdin, [self.ASKED, self.state("allowed")])
+        self.assertNotIn("description", sent[0][1])
+
+    def test_a_refused_or_closed_prompt_prints_its_deny(self):
+        for word, text in (("refused", prompt_card.OWNER_REFUSED_TEXT),
+                           ("closed", prompt_card.EXPIRED_TEXT)):
+            with self.subTest(word):
+                code, out, sent, _ = self.run_prompt(self.hook(), [self.ASKED, self.state(word)])
+                self.assertEqual((code, out), (0, prompt_card.hook_output("deny", text) + "\n"))
+                self.assertEqual(len(sent), 2)
+
+    def test_a_failed_wait_is_polled_again(self):
+        code, out, _, slept = self.run_prompt(
+            self.hook(), [self.ASKED, sprint.Refused("sprint: console unreachable"),
+                          {"prompt": "x"}, self.state("allowed")])
+        self.assertEqual(out, prompt_card.hook_output("allow") + "\n")
+        self.assertEqual(slept, [prompt_card.POLL_SECONDS] * 2)
+
+    def test_the_hold_ends_with_a_close_and_its_answer(self):
+        over = prompt_card.HOLD_SECONDS
+        cases = ((self.state("closed"), prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)),
+                 (self.state("allowed"), prompt_card.hook_output("allow")),
+                 (self.state("refused"),
+                  prompt_card.hook_output("deny", prompt_card.OWNER_REFUSED_TEXT)),
+                 (self.state("open"), prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)),
+                 ({"nonsense": 1}, prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)),
+                 (sprint.Refused("sprint: console unreachable"),
+                  prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)))
+        for reply, expected in cases:
+            with self.subTest(reply=str(reply)):
+                code, out, sent, slept = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("open"), reply], times=[0, 0, over])
+                self.assertEqual((code, out), (0, expected + "\n"))
+                self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait", "close"])
+                self.assertEqual(sent[-1][1]["prompt"], 7)
+                self.assertEqual(slept, [prompt_card.POLL_SECONDS])
+
+    def test_anything_but_a_bash_command_is_refused_at_once(self):
+        refusal = prompt_card.hook_output("deny", manager.REFUSAL) + "\n"
+        for name, stdin in (
+                ("a question", self.hook(tool_name="AskUserQuestion")),
+                ("a write", self.hook(tool_name="Write")),
+                ("no command", self.hook(tool_input={})),
+                ("an empty command", self.hook(tool_input={"command": ""})),
+                ("a list command", self.hook(tool_input={"command": ["ls"]})),
+                ("too long", self.hook(tool_input={
+                    "command": "x" * (prompt_card.MAX_COMMAND_CHARS + 1)})),
+                ("no session", json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}})),
+                ("bad json", "not json"), ("an array", "[]")):
+            with self.subTest(name):
+                code, out, sent, _ = self.run_prompt(stdin, [])
+                self.assertEqual((code, out, sent), (0, refusal, []))
+        with self.subTest("no secret"):
+            code, out, sent, _ = self.run_prompt(
+                self.hook(), [], env={manager.ID_ENV: "a" * 16})
+            self.assertEqual((code, out, sent), (0, refusal, []))
+        with self.subTest("no sprint"):
+            code, out, sent, _ = self.run_prompt(self.hook(), [], env={})
+            self.assertEqual((code, out, sent), (0, refusal, []))
+        for name, reply in (("unreachable", sprint.Refused("sprint: console unreachable")),
+                            ("not a reply", {"nonsense": 1}),
+                            ("a bool prompt", {"prompt": True, "state": "open"}),
+                            ("no prompt", {"prompt": None, "state": "refused"})):
+            with self.subTest(name):
+                code, out, sent, slept = self.run_prompt(self.hook(), [reply])
+                self.assertEqual((code, out, len(sent), slept), (0, refusal, 1, []))
+
+    def test_the_command_starts_in_a_fresh_interpreter(self):
+        environment = {k: v for k, v in os.environ.items()
+                       if k not in (manager.ID_ENV, manager.SECRET_ENV)}
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.console.sprint", "permit", "--prompt"],
+            input='{"tool_name": "Write"}', capture_output=True, text=True, timeout=30,
+            env={**environment, "PYTHONPATH": str(REPO_ROOT / "python")})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout, prompt_card.hook_output("deny", manager.REFUSAL) + "\n")
 
 
 class CommandContractTest(unittest.TestCase):
