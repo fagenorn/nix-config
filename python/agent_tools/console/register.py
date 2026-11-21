@@ -174,7 +174,7 @@ with, else it names nothing; while another registered project still holds that r
 nothing, else it drops the root from `before` and, when it is the shown
 registration's, folds back to the last entry of `before`, so a registration whose project left the
 registry gives the page back what it replaced (ADR-console-084 D1); a matching cancel folds to none
-and clears `before`; `latest(events, state)` is `fold(events, Fold(state, (), {})).latest`. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
+and clears `before`; `held` is `(latest, the saved planned row it replaced)` when the latest row was replanned over a stored plan (the retired light-lane field, #1445) and None otherwise, and `shown(fold, adoptions)` is the saved row instead of `latest` when the plan id's adoption is past `plans_again`; `latest(events, state)` is `fold(events, Fold(state, (), {})).latest`. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
 approve=None)` is that member, always the same twenty-two keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
@@ -632,6 +632,7 @@ class Fold(NamedTuple):
     latest: dict | None
     before: tuple[dict, ...]
     roots: Mapping[str, str]
+    held: tuple[dict, dict] | None = None  # (latest, the saved planned row it replaced), #1445
 
 
 def _root_of(payload: object) -> str | None:
@@ -639,11 +640,13 @@ def _root_of(payload: object) -> str | None:
     return root if isinstance(root, str) and root else None
 
 
-def _row_of(event: event_log.Event) -> dict | None:
+def _row_of(event: event_log.Event) -> tuple[dict | None, dict | None]:
+    """The row an ended event folds to and, when it was replanned over a stored plan, that plan's row."""
     try:
         _, _, payload = ended(event.payload)
     except ValueError:
-        return None
+        return None, None
+    kept = None
     found = {**DEFAULTS, **payload, "at": event.at}
     if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
         found["note"] = LEGACY_NOTES[found["note"]]
@@ -655,16 +658,18 @@ def _row_of(event: event_log.Event) -> dict | None:
             # whose last card was that field has none: a drafting row with one card plans again (#1445).
             # The row keeps its plan id: a cancel, an adoption and a deferral name the registration by it.
             plan_id = found["plan_id"]
+            if found["result"] != "drafting":
+                kept = dict(found)
             found.update(drafting(found["root"], contract_draft.replanned(found["draft"]),
                                   found["answered"]))
             found["plan_id"] = plan_id
         elif found["result"] == "drafting":
             found["questions"] = contract_draft.questions(found["draft"])
-    return found
+    return found, kept
 
 
 def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
-    found, before, known = state or Fold(None, (), {})
+    found, before, known, held = state or Fold(None, (), {})
     roots = dict(known)
     for event in events:
         cancelled = event_log.cancelled_registration(event)
@@ -674,6 +679,7 @@ def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
                     found, before = before[-1], before[:-1]
                 else:
                     found, before = None, ()
+                held = None
             continue
         if event.kind == PROJECT_REGISTERED:
             root = _root_of(event.payload)
@@ -688,16 +694,36 @@ def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
             before = tuple(e for e in before if e["root"] != root)
             if found is not None and found["root"] == root:
                 found, before = (before[-1], before[:-1]) if before else (None, ())
+                held = None
             continue
         if event.kind != ENDED:
             continue
-        row = _row_of(event)
+        row, kept = _row_of(event)
         if row is None:
             continue
         if found is not None and found["root"] != row["root"]:
             before = tuple(e for e in before if e["root"] != row["root"]) + (found,)
         found = row
-    return Fold(found, before, roots)
+        held = None if kept is None else (row, kept)
+    return Fold(found, before, roots, held)
+
+
+def shown(state: Fold, adoptions: Mapping[str, Mapping]) -> dict | None:
+    """The registration the page shows: `state.latest`, or the saved plan an adoption already rests on.
+
+    A planned row saved with the retired light-lane field folds to a drafting row that plans again
+    (#1445). When the plan id's adoption is past the point that plans again (`plans_again` is false:
+    applied, pushed, opened or merged) that replanned row would leave the adoption without a Retry, a
+    cancel or an answer, so the saved row stands in its place and the adoption resumes as for any
+    planned row.
+    """
+    if state.held is None:
+        return state.latest
+    _, kept = state.held
+    adopted = adoptions.get(kept["plan_id"])
+    if adopted is not None and not plans_again(adopted["step"], adopted["pull_state"]):
+        return kept
+    return state.latest
 
 
 def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict | None:

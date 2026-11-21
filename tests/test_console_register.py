@@ -1040,6 +1040,24 @@ class RowTest(unittest.TestCase):
         self.assertEqual([q["subject"] for q in register.view_entry(None, found)["questions"]],
                          ["project-id"])
 
+    def test_the_saved_plan_stands_in_for_the_replanned_row_once_its_adoption_is_past_a_failed_apply(self):
+        _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        state = register.fold([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual(state.latest["state"], "drafting")
+        self.assertEqual(register.shown(state, {}), state.latest)
+        for step, pull in (("applied", None), ("push_failed", None), ("open_failed", None),
+                           ("opened", "open"), ("opened", "merged")):
+            with self.subTest(step=step, pull=pull):
+                found = register.shown(state, {PLAN_ID: {"step": step, "pull_state": pull}})
+                self.assertEqual((found["state"], found["plan_id"]), ("ready", PLAN_ID))
+        for step, pull in (("apply_failed", None), ("opened", "closed")):
+            with self.subTest(step=step, pull=pull):
+                found = register.shown(state, {PLAN_ID: {"step": step, "pull_state": pull}})
+                self.assertEqual(found["state"], "drafting")
+        _, plain = self.planned_with_light_lane(self.SHADOW, state=None)
+        drafting = register.fold([Event(1, "t1", register.ENDED, None, plain)])
+        self.assertIsNone(drafting.held)
+
     def test_a_ready_plan_whose_light_lane_was_none_keeps_its_plan(self):
         _, row = self.planned_with_light_lane("none", state="ready")
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])

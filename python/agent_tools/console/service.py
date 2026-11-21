@@ -4701,8 +4701,8 @@ class ConsoleService:
             self._account_identities = account_add.identities_state(events)
             self._trust_failures = folder_trust.failures(events)
             self._registration_fold = register.fold(events)
-            self._registration = self._registration_fold.latest
             self._adoptions = approve.adoptions(events)
+            self._registration = register.shown(self._registration_fold, self._adoptions)
             self._release_cards = release_card.cards(events)
             self._deferred = approve.deferrals(events)
             self._pin_launches = pin.pin_launches(events)
@@ -9947,8 +9947,8 @@ class ConsoleService:
         self._account_identities = account_add.identities_state(appended, self._account_identities)
         self._trust_failures = folder_trust.failures(appended, self._trust_failures)
         self._registration_fold = register.fold(appended, self._registration_fold)
-        self._registration = self._registration_fold.latest
         self._adoptions = approve.adoptions(appended, self._adoptions)
+        self._registration = register.shown(self._registration_fold, self._adoptions)
         self._release_cards = release_card.cards(appended, self._release_cards)
         self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
@@ -9993,8 +9993,8 @@ class ConsoleService:
                 self._account_identities = account_add.identities_state(events)
                 self._trust_failures = folder_trust.failures(events)
                 self._registration_fold = register.fold(events)
-                self._registration = self._registration_fold.latest
                 self._adoptions = approve.adoptions(events)
+                self._registration = register.shown(self._registration_fold, self._adoptions)
                 self._release_cards = release_card.cards(events)
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)

@@ -896,6 +896,35 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(shown["adoption"]["step"], "opened")
         self.assertEqual(len(self.opens()), 1)
 
+    def stale_row(self, plan_id):
+        """The ready row an earlier console saved: its draft carries the retired light-lane field."""
+        light = {"field": "light-lane", "label": "light lane",
+                 "value": '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
+                 "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
+                 "text": True, "reason": None, "ask": "What is the light lane of reconcile?"}
+        row = self.planned
+        self.assertEqual((row["state"], row["plan_id"]), ("ready", plan_id))
+        reading = {"remotes": [], "default_branch": "develop", "branches": ["develop"],
+                   "files": [], "texts": {}}
+        fields = contract_draft.draft(str(self.repo), reading)
+        at = [f["field"] for f in fields].index("attempt-budget") + 1
+        return {**row, "draft": [*fields[:at], light, *fields[at:]]}
+
+    def test_an_upgraded_ready_row_with_a_resumable_adoption_still_resumes_it(self):
+        self.pusher.raises = [approve.PushFailed("remote rejected the push", "stderr detail")]
+        fake = self.ready(apply_result=APPLIED)
+        self.run_approval("push_failed")
+        stale = self.stale_row(PID_B)
+        self.svc.log.append([(event_log.REGISTRATION_ENDED, None, stale)])
+        self.restart()
+        self.assertEqual(self.view()["registration"]["approve"], "retry")
+        self.assertEqual(self.svc._adoptions[PID_B]["step"], "push_failed")
+        self.assertEqual(self.svc._registration["state"], "ready")
+        shown, _ = self.run_approval("opened")
+        self.assertEqual(shown["adoption"]["step"], "opened")
+        self.assertEqual(len(fake.applied), 1)
+        self.assertEqual(len(self.opens()), 1)
+
     def test_a_refused_pull_request_is_shown_in_words_and_logged_in_full(self):
         self.forge.open_raises = [ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)")]
         fake = self.ready(apply_result=APPLIED)
