@@ -2965,9 +2965,9 @@ class NoticeViewTest(unittest.TestCase):
 
     PATH = "python/agent_tools/console/page.html"
 
-    def claim(self, sid, notice_id, minute, text, issue, live_fault=True):
+    def claim(self, sid, notice_id, minute, text, issue, live_fault=True, what=None):
         return with_notices(started(sid), Notice(
-            notice_id, at_min(minute), "claim", text, what=self.PATH, until=text + " lands",
+            notice_id, at_min(minute), "claim", text, what=what or self.PATH, until=text + " lands",
             issue=issue, live_fault=live_fault))
 
     def line(self, sa, sb):
@@ -3015,6 +3015,14 @@ class NoticeViewTest(unittest.TestCase):
                 v = derive_view([state("p00", 1)], sprints=after, now_ms=T0_MS + 10 * MIN)
                 self.assertEqual(v["entries"][0]["overlaps"], [])
                 self.assertEqual([n["text"] for n in v["entries"][0]["notices"]], [other])
+
+    def test_two_claims_on_one_bracketed_file_draw_a_line(self):
+        path = "app/[[]id]/page.tsx"
+        sa = self.claim(A, 3, 3, "the form", 12, what=path)
+        sb = self.claim(B, 5, 5, "the upload row", 13, what=path)
+        self.assertEqual(self.overlaps({A: sa, B: sb})["p00"], [{
+            "sprints": [A, B], "files": [path],
+            "text": self.line(sa, sb).replace(self.PATH, path)}])
 
     def test_a_settled_overlap_draws_no_line(self):
         for name, fault_a, fault_b in (("one fault", False, True), ("none", False, False)):

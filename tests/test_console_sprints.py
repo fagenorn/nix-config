@@ -2919,6 +2919,10 @@ class ClaimOverlapTest(unittest.TestCase):
             ("tests/t?st.py", "tests/tst.py", None),
             ("a*b", "ab", ["ab"]),
             ("a[", "a[", ["a["]),
+            ("app/[[]id]/page.tsx", "app/[[]id]/page.tsx", ["app/[[]id]/page.tsx"]),
+            ("a[[]b", "a[[x]b", ["a[[]b", "a[[x]b"]),
+            ("a[]]b", "a[]]b", ["a[]]b"]),
+            ("a[]]b", "a[[]b", None),
             ("tests/test_[ab].py", "tests/test_[cd].py", None),
             ("tests/test_[a-c].py", "tests/test_[b-d].py", ["tests/test_[a-c].py", "tests/test_[b-d].py"]),
             ("tests/test_[!a].py", "tests/test_[a].py", None),
@@ -3047,7 +3051,8 @@ class NoticeBlockTest(unittest.TestCase):
                    claim_entry(5, SB, "a.py", title="Exporter")]
         fault = [claim_entry(3, SA, "a.py", live_fault=True, title="Importer"),
                  claim_entry(5, SB, "a.py", live_fault=True, title="Exporter")]
-        last = lambda entries, reader: sprints.notice_block(entries, reader, now).splitlines()[-1]
+        block = lambda entries, reader: sprints.notice_block(entries, reader, now).splitlines()
+        last = lambda entries, reader: block(entries, reader)[-1]
         self.assertEqual(last(feature, SA), '- overlap with "Exporter" on a.py: '
                                             'your slice lands first; theirs rebases')
         self.assertEqual(last(feature, SB), '- overlap with "Importer" on a.py: '
@@ -3057,7 +3062,11 @@ class NoticeBlockTest(unittest.TestCase):
         self.assertEqual(last(fault, SB), f'- overlap with "Importer" on a.py: {unsettled}')
         self.assertEqual(last(fault, SA), f'- overlap with "Exporter" on a.py: {unsettled}')
         for reader in (SA, SB):
-            self.assertNotIn("ask the owner", last(fault, reader))
+            lines = block(fault, reader)
+            self.assertEqual([line for line in lines if line.startswith("- overlap")],
+                             [lines[-1]])
+            for line in lines:
+                self.assertNotIn("ask the owner", line)
         self.assertTrue(last(feature, SC).startswith("- claim from "))
         self.assertFalse(any(line.startswith("- overlap")
                              for line in sprints.notice_block(feature, SC, now).splitlines()))

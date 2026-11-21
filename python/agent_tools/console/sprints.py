@@ -2051,7 +2051,7 @@ def _is_class(token: str) -> bool:
 def _classes_meet(x: str, y: str) -> bool:
     """True when some character is in both bracket classes: an endpoint, a neighbour of one, or a
     character neither names (two negated classes) is tried."""
-    named = {c for c in x + y if c not in "[]!-"}
+    named = set(x[1:-1] + y[1:-1])
     tried = {chr(n) for c in named for n in (ord(c) - 1, ord(c), ord(c) + 1) if 0 <= n <= 0x10FFFF}
     outside = next(chr(n) for n in range(0x10FFFF, 0, -1) if chr(n) not in named | tried)
     return any(fnmatch.fnmatchcase(c, x) and fnmatch.fnmatchcase(c, y) for c in tried | {outside})
