@@ -6,7 +6,8 @@ It answers the GitHub calls a lifecycle owner makes about the fixture's seeded i
 (`issues/<nnn>-*.md`: open, no labels, no comments, no blockers) and refuses everything
 that would publish, so a run ends at the forge boundary. With `--pulls` it also answers
 reads of the pull requests in that JSON file (`pr list`, `pr view`), and `api` reads of an
-issue and its comments; `api` writes, `pr create`, `pr merge` and `pr checks` stay refused.
+issue and its comments. `pr checks` answers only for a pull request whose entry carries
+`checks`; `api` writes, `pr create` and `pr merge` stay refused.
 Every call appends `{"argv": [...], "exit": n}` to the log.
 """
 
@@ -118,6 +119,30 @@ def pr_view(pulls, args):
     emit(keep_fields(pull, fields), jq_expression)
 
 
+def pr_checks(pulls, args):
+    """Answer `pr checks <n>` from the `checks` of the pull request, as `gh` does."""
+    args = list(args)
+    flag_value(args, "--repo", "-R")
+    flag_present(args, "--watch")
+    if flag_present(args, "--required"):
+        raise ShimError("gh shim: pr checks --required is not available in this sandbox")
+    fields = flag_value(args, "--json")
+    jq_expression = flag_value(args, "--jq", "-q")
+    numbers = [argument for argument in args if not argument.startswith("-")]
+    found = [pull for pull in pulls if numbers[:1] == [str(pull["number"])] and "checks" in pull]
+    if not found:
+        raise ShimError("gh shim: pr checks is not available in this sandbox")
+    checks = found[0]["checks"]
+    if fields is not None:
+        emit([keep_fields(check, fields) for check in checks], jq_expression)
+    elif jq_expression is not None:
+        raise ShimError("gh shim: --jq needs --json")
+    else:
+        for check in checks:
+            print("%s\t%s" % (check["name"], check["bucket"]))
+    return 0 if all(check["bucket"] == "pass" for check in checks) else 1
+
+
 def api_read(repo, args):
     """Answer a read of one issue or its comments; refuse every write and any other path."""
     for index, argument in enumerate(args):
@@ -148,6 +173,10 @@ def api_read(repo, args):
               "state": "open", "labels": [], "user": {"login": "owner"}}, jq_expression)
     elif comments:
         emit([[]] if slurp else [], jq_expression)
+    elif re.fullmatch(r"repos/[^/]+/[^/]+/rules/branches/.+", path):
+        emit([], jq_expression)
+    elif re.fullmatch(r"repos/[^/]+/[^/]+/branches/.+/protection", path):
+        raise ShimError("gh shim: Branch not protected (HTTP 404)")
     else:
         raise ShimError("gh shim: api %s is not available in this sandbox" % (path or "this call"))
 
@@ -186,6 +215,8 @@ def run(repo, args, pulls=None):
         emit([], flag_value(list(args), "--jq", "-q"))
     elif verb == ["pr", "view"] and pulls is not None:
         pr_view(pulls, args[2:])
+    elif verb == ["pr", "checks"] and pulls is not None:
+        return pr_checks(pulls, args[2:])
     elif verb == ["pr", "view"]:
         raise ShimError("no pull requests found for branch")
     elif verb not in (["auth", "status"], ["issue", "comment"], ["issue", "edit"]):

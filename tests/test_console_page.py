@@ -11469,3 +11469,43 @@ class WaitingLinePageTest(unittest.TestCase):
         self.assertTrue(has_class(parent["children"][at - 1], "line"), kinds)
         self.assertEqual(full(parent["children"][at]),
                          "Waiting for the release to be seen: no release yet includes its merge #620")
+
+
+class PageOverlapTest(unittest.TestCase):
+    TEXT = ("Fix a and Fix b both fix a live fault in python/agent_tools/console/page.html; "
+            "the rule could not decide which lands first")
+
+    def ov(self, x: str, y: str) -> dict:
+        return {"sprints": [x * 16, y * 16], "files": ["python/agent_tools/console/page.html"],
+                "text": self.TEXT}
+
+    def frame(self, overlaps: list | None) -> dict:
+        entry = {**project(0, []), "sprints": [running_sprint("a"), running_sprint("b"),
+                                               running_sprint("c")]}
+        if overlaps is not None:
+            entry["overlaps"] = overlaps
+        return view([entry])
+
+    def test_an_overlap_is_one_line_right_after_the_later_of_its_two_blocks(self) -> None:
+        for overlaps, kinds in (
+            ([self.ov("a", "b")], ["sprint", "sprint", "overlap", "sprint"]),
+            ([self.ov("c", "a")], ["sprint", "sprint", "sprint", "overlap"]),
+        ):
+            with self.subTest(overlaps=overlaps):
+                (snap,) = render([START, {"frame": self.frame(overlaps)}, {"snapshot": True}])
+                (blocks,) = of_class(snap["projects"], "ul", "sprint-blocks")
+                self.assertEqual([c["cls"] for c in blocks["children"]], kinds)
+                (line,) = of_class(snap["projects"], "li", "overlap")
+                self.assertEqual(full(line), self.TEXT)
+                self.assertEqual([n for n in nodes(line) if n["tag"] == "button"], [])
+
+    def test_no_overlap_line_without_both_blocks_or_once_the_view_drops_it(self) -> None:
+        for overlaps in ([], [self.ov("a", "d")], [self.ov("d", "a")], None):
+            with self.subTest(overlaps=overlaps):
+                (snap,) = render([START, {"frame": self.frame(overlaps)}, {"snapshot": True}])
+                self.assertEqual(of_class(snap["projects"], "li", "overlap"), [])
+        (snap,) = render([
+            START, {"frame": self.frame([self.ov("a", "b")])}, {"frame": self.frame(None)},
+            {"snapshot": True},
+        ])
+        self.assertEqual(of_class(snap["projects"], "li", "overlap"), [])

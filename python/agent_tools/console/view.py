@@ -450,7 +450,8 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
 "sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
-"notices": [<notice entry>, ...], "notice_post": <bool>, "waits": [<wait entry>, ...],
+"notices": [<notice entry>, ...], "notice_post": <bool>,
+"overlaps": [<overlap entry>, ...], "waits": [<wait entry>, ...],
 "questions": null | {"label": "Questions", "count": <int>,
 "threads": [{"id", "questions": [<question entry>, ...], "follow_up": <bool>}, ...]},
 "tracker_read": {"ok": <bool>, "read_at": "<ISO time>" | null,
@@ -470,6 +471,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "kind": "claim" | "heads-up" | "hand-off", "kind_text": "<text>",
                       "text": "<text>", "what": "<text>" | null, "until_text": "<text>" | null,
                       "to_text": "<text>" | null, "at": "<time>", "owner": <bool>}
+    <overlap entry> = {"sprints": [<earlier-started sprint id>, <other sprint id>],
+                       "files": ["<path>", ...], "text": "<text>"}
     <sprint entry> = {"type": "sprint", "sprint_id", "title", "goal",
                       "state": "drafting" | "starting" | "on_track" | "waiting" | "quota" | "quiet"
                                | "closing" | "done" | "stopping" | "stopped",
@@ -712,6 +715,14 @@ is a hand-off: then `NOTICE_OWNER_TEXT` when it is to the owner, `NOTICE_FOR_TEX
 of the target when it is to a sprint in the given sprints, else `NOTICE_OTHER_TEXT`. `at` is the
 notice's own time, unchanged: the page ages it with its own clock. A notice is never an inbox item
 and changes no count, headline, sentence or `stale` (#1119).
+Every project entry, quiet ones and those inside a quiet group too, carries `overlaps` after
+`notice_post`: one entry for each reading of `claim_overlaps` over the project's open claims
+(`project_notices` of its drafted and finished sprints, so a withdrawn claim or one whose slice
+landed gives none) whose rule is `OVERLAP_UNSETTLED`, in `claim_overlaps` order, `[]` when none.
+`sprints` are the reading's two sprint ids, the earlier-started first, `files` its files and `text`
+is `OVERLAP_UNSETTLED_TEXT` over the two sprints' titles in that order and the files joined with
+`", "`. A settled overlap gives no entry. An overlap entry is never an inbox item and changes no
+`inbox`, count, headline, sentence or `stale` (#1347, ADR-console-091).
 Every entry carries `owner`, false for a sprint's notice. The project's open owner notices
 (`owner_notices`, a map from project id to its folded owner notices, default none; only
 `open_owner_notices` of them, so never a withdrawn one) join the same list, ordered by `id` with the
@@ -835,6 +846,7 @@ from agent_tools.console.sprints import (
     NOW_STOPPING_TEXT,
     ON_TRACK,
     ON_TRACK_TEXT,
+    OVERLAP_UNSETTLED,
     PICKED_UP,
     PICKED_UP_TEXT,
     PICKUP_MINUTE_TEXT,
@@ -872,6 +884,7 @@ from agent_tools.console.sprints import (
     PendingStop,
     SprintState,
     age_text,
+    claim_overlaps,
     closing_text,
     cut,
     ended_at,
@@ -883,6 +896,7 @@ from agent_tools.console.sprints import (
     message_state,
     open_questions,
     pending_looks,
+    project_notices,
     open_notices,
     open_owner_notices,
     progress_text,
@@ -910,6 +924,8 @@ NOTICE_OWNER_TEXT = "for you"
 NOTICE_FOR_TEXT = "for {title}"
 NOTICE_OTHER_TEXT = "for another sprint"
 NOTICE_YOU_TEXT = "You"
+OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a live fault in {files}; "
+                          "the rule could not decide which lands first")
 ASK_WORKING_TEXT = "Working on it"
 ASK_ANSWERED_TEXT = "Answered"
 ASK_TIMED_OUT_TEXT = "Timed out"
@@ -1870,6 +1886,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    nudges: bool = True, looked: str | None = None,
                    movement: ProjectMovement | None = None,
                    notices: Sequence[Mapping] = (), notice_post: bool = False,
+                   overlaps: Sequence[Mapping] = (),
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
                    waits: Sequence[Mapping] = (),
                    read: ReadState | None = None,
@@ -1908,6 +1925,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "outside_sprints": _line(sessions, deliveries, now_ms, waits_of),
         "notices": [dict(n) for n in notices],
         "notice_post": notice_post,
+        "overlaps": [dict(o) for o in overlaps],
         "waits": [dict(w) for w in waits],
         "questions": questions,
         "tracker_read": None if read is None else {"ok": read.ok, "read_at": read.read_at, "began_at": read.began_at},
@@ -1960,6 +1978,19 @@ def _notice_to_text(to: str | None, titles: Mapping[str, str]) -> str:
     if to in titles:
         return NOTICE_FOR_TEXT.format(title=titles[to])
     return NOTICE_OTHER_TEXT
+
+
+def _overlap_entries(group: Iterable[SprintState], titles: Mapping[str, str],
+                     project_id: str) -> list[dict]:
+    """One page line for each pair of open claims the default rule cannot order."""
+    return [{
+        "sprints": list(reading["sprints"]),
+        "files": list(reading["files"]),
+        "text": OVERLAP_UNSETTLED_TEXT.format(
+            first=titles[reading["sprints"][0]], second=titles[reading["sprints"][1]],
+            files=", ".join(reading["files"])),
+    } for reading in claim_overlaps(project_notices(group, project_id))
+        if reading["rule"] == OVERLAP_UNSETTLED]
 
 
 def _notice_entries(group: Iterable[SprintState], titles: Mapping[str, str],
@@ -2306,6 +2337,8 @@ def derive_view(
     notices = {pid: _notice_entries(drafted.get(pid, []) + finished.get(pid, []), titles,
                                     open_owner_notices(owner_notices or {}, pid))
                for pid in registered}
+    overlaps = {pid: _overlap_entries(drafted.get(pid, []) + finished.get(pid, []), titles, pid)
+                for pid in registered}
     notice_post = {pid: any(takes_notices(s) for s in drafted.get(pid, ())) for pid in registered}
     asks = {pid: _question_threads((project_questions or {}).get(pid, ())) for pid in registered}
 
@@ -2334,6 +2367,7 @@ def derive_view(
                               (movement or {}).get(s.project_id),
                               notices=notices[s.project_id],
                               notice_post=notice_post[s.project_id],
+                              overlaps=overlaps[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
                               read=health.get(s.project_id), questions=asks[s.project_id])
                for s in active]
@@ -2342,6 +2376,7 @@ def derive_view(
                                     nudges=nudges, looked=looked,
                                     notices=notices[s.project_id],
                                     notice_post=notice_post[s.project_id],
+                                    overlaps=overlaps[s.project_id],
                                     read=health.get(s.project_id), questions=asks[s.project_id])
                      for s in quiet]
     counted = {s.sprint_id for s in (*briefs, *stalls, *starts, *unprogressed)}

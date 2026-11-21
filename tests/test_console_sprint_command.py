@@ -1064,7 +1064,7 @@ class ManagerContractTest(unittest.TestCase):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
         (line,) = [part for part in text.split("- `") if part.startswith("owner_only`")]
         for action in ("run a release", "run a production step", "spend money",
-                       "escalate a permission", "proceed over another sprint's claim"):
+                       "escalate a permission"):
             with self.subTest(action):
                 self.assertIn(action, line)
         self.assertIn("required `true` on a question whose answer is itself the go-ahead for an "
@@ -1073,6 +1073,7 @@ class ManagerContractTest(unittest.TestCase):
                       "even when the thing built is for production", line)
         self.assertIn("a colleague who started the sprint cannot answer it", line)
         self.assertNotIn("asks for a release, paid or production decision", line)
+        self.assertNotIn("another sprint's claim", line)
 
     def test_the_contract_offers_consequential_as_an_optional_mark(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
@@ -1174,7 +1175,7 @@ class ManagerContractTest(unittest.TestCase):
             with self.subTest(needle):
                 self.assertIn(needle, section)
 
-    def test_the_contract_says_to_check_claims_ask_on_an_overlap_and_never_take_a_notice_as_permission(self):
+    def test_the_contract_says_to_check_claims_and_never_take_a_notice_as_permission(self):
         text = " ".join(CONTRACT.read_text().split())
 
         def section(name):
@@ -1189,7 +1190,8 @@ class ManagerContractTest(unittest.TestCase):
                         "`hand-off for you`", "Your own notices are left out",
                         "Open notices of the other sprints of this project"),
             "Every turn": ("open notices",),
-            "After approval": ("open claim",),
+            "After approval": ("open claim",
+                               "the owner's page shows that overlap as one line"),
             "Drafting the brief": ("the text after the first `The goal: ` in your first prompt "
                                    "that is not on a line beginning with `- `",),
         }
@@ -1198,6 +1200,8 @@ class ManagerContractTest(unittest.TestCase):
                 with self.subTest(name, needle=needle):
                     self.assertIn(needle, section(name))
         self.assertEqual(text.count("## Notices"), 1)
+        self.assertNotIn("for the owner's answer when this sprint asks",
+                         section("After approval"))
 
     def test_the_contract_states_the_four_claim_rules(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
@@ -1210,10 +1214,15 @@ class ManagerContractTest(unittest.TestCase):
                        "otherwise the earlier-started slice lands first",
                        "the slice that lands second rebases", "no question card",
                        "Only an overlap the rule cannot settle goes to the owner",
-                       "`issue`", "`live_fault`", "`overlaps`", "`asks`"):
+                       "as one line on the owner's page, never a card",
+                       "Neither sprint sends a `sprint ask` card about it",
+                       "`issue`", "`live_fault`", "`overlaps`"):
             with self.subTest(needle):
                 self.assertIn(needle, section)
         self.assertNotIn("the later slice rebases", section)
+        self.assertNotIn("`asks`", section)
+        self.assertNotIn("ask the owner which lands first", section)
+        self.assertNotIn('"owner_only": true', section)
 
     def test_contract_sends_no_request(self):
         out = StringIO()

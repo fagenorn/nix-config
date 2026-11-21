@@ -59,11 +59,15 @@
         "kind": "marked-pr"
       },
       "prompt": "Use the `deliver-direct` skill to deliver issue 3 of `fixture/tinytask` (`issues/003-mechanical.md`).\n\nResolve once into a retained ResolvedProject. A resolver refusal is fatal and values are never defaulted or inferred. Steps 1 to 5 are done. This sandbox holds no issue claim: skip step 1's issue claim, that is its `forge-claim acquire`, `forge-claim renew` and `forge-claim release`; every other step and command applies as the skill says. The change is implemented, reviewed and verified on branch `issue-3-rename-flag` in its worktree (`git worktree list`), the branch is pushed, and pull request 7 is open for it. Continue at step 6.\n\n**Stop where the skill tells you to stop, and report.** Never close the issue.",
-      "expected_output": "The session runs `look-approval status` for issue 3, pull request 7 and the branch head, gets `needed`, runs no `forge-claim land` command and merges nothing, and reports the stage awaiting look with issue 3, pull request 7, the head and `issue 3 needs the owner's look before merge`. Nothing is pushed, main is unmoved locally and at origin, the stand-in forge sees no write, and the worktree is kept and clean.",
+      "expected_output": "The session runs `look-approval status` for issue 3, pull request 7 and the branch head, gets `needed`, waits for the checks of pull request 7 (green in the stand-in forge), runs no `forge-claim land` command and merges nothing, and reports the stage awaiting look with issue 3, pull request 7, the head and `issue 3 needs the owner's look before merge`. Nothing is pushed, main is unmoved locally and at origin, the stand-in forge sees no write, and the worktree is kept and clean.",
       "asserts": [
         {
           "name": "the look was read from the forge",
           "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'def ok(p): any(.[]; .argv[0] == \"api\" and .exit == 0 and any(.argv[]; test(p))); ok(\"^repos/fixture/tinytask/issues/3$\") and ok(\"^repos/fixture/tinytask/issues/3/comments([?]|$)\")' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"issue 3 and its comments were not both read: look-approval status never completed\""
+        },
+        {
+          "name": "the checks of pull request 7 were waited for",
+          "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'any(.[]; .argv[0:2] == [\"pr\",\"checks\"] and .exit == 0 and any(.argv[]; . == \"7\"))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"the checks of pull request 7 were never read successfully: the session stopped for the look without waiting for them\""
         },
         {
           "name": "no land lock was sought",
@@ -107,11 +111,15 @@
         "kind": "marked-pr"
       },
       "prompt": "Use the `deliver-direct` skill to deliver issue 3 of `fixture/tinytask` (`issues/003-mechanical.md`).\n\nResolve once into a retained ResolvedProject. A resolver refusal is fatal and values are never defaulted or inferred. This sandbox holds no issue claim: skip the issue claim, that is `forge-claim acquire`, `forge-claim renew` and `forge-claim release`; every other step and command applies as the skill says. An earlier session implemented the issue on branch `issue-3-rename-flag` in its worktree (`git worktree list`), pushed it, opened pull request 7 and stopped at awaiting look. You are the new session. The owner's answer: approved, for head 1111111111111111111111111111111111111111.\n\n**Stop where the skill tells you to stop, and report.** Never close the issue.",
-      "expected_output": "The session is not refused by open pull request 7: it resumes, reads the pull request head with `gh pr view`, finds it is not the head the owner approved, posts nothing, runs no `forge-claim land` command and merges nothing, and reports the stage awaiting look with issue 3, pull request 7, the current head and `issue 3 needs the owner's look before merge`. Nothing is pushed, main is unmoved locally and at origin, the stand-in forge sees no write, and the worktree is kept and clean.",
+      "expected_output": "The session is not refused by open pull request 7: it resumes, reads the pull request head with `gh pr view`, finds it is not the head the owner approved, posts nothing, waits for the checks of pull request 7 at the current head (green in the stand-in forge), runs no `forge-claim land` command and merges nothing, and reports the stage awaiting look with issue 3, pull request 7, the current head and `issue 3 needs the owner's look before merge`. Nothing is pushed, main is unmoved locally and at origin, the stand-in forge sees no write, and the worktree is kept and clean.",
       "asserts": [
         {
           "name": "the resume read the pull request head from the forge",
           "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'any(.[]; .argv[0:2] == [\"pr\",\"view\"] and .exit == 0 and any(.argv[]; test(\"headRefOid\")))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"pull request 7's head was never read: the session refused the open pull request instead of resuming\""
+        },
+        {
+          "name": "the checks of pull request 7 were waited for",
+          "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'any(.[]; .argv[0:2] == [\"pr\",\"checks\"] and .exit == 0 and any(.argv[]; . == \"7\"))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"the checks of pull request 7 were never read successfully: the session stopped for the look without waiting for them\""
         },
         {
           "name": "no land lock was sought",

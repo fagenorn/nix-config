@@ -252,6 +252,13 @@ class RunFoldTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertEqual(deliveries.classify(label, batch=False).stage, deliveries.FINAL_REVIEW)
 
+    def test_the_follow_up_filing_reads_as_final_review(self):
+        for label in ("follow-ups-1", "follow-ups-2"):
+            with self.subTest(label=label):
+                step = deliveries.classify(label, batch=False)
+                self.assertIsNotNone(step)
+                self.assertEqual((step.stage, step.task), (deliveries.FINAL_REVIEW, None))
+
     def test_an_unknown_label_reads_working(self):
         single = journal("single")[:3]
         self.assertEqual(shown(single + [S("x1", "brand-new-step", "Tasks")]), {858: "working"})

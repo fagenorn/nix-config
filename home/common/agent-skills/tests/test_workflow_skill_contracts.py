@@ -1973,6 +1973,7 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
                 " --answer fix --message session-<id> --words-file <file>`")
     PUSH = "`git -C <dir> push origin <branch>`"
     HEAD_READ = "`gh pr view <pr> --repo <slug> --json headRefOid`"
+    CHECKS_WATCH = "`gh pr checks <pr> --repo <slug> --watch`"
     STATE_READ = "`gh pr view <pr> --repo <slug> --json state,headRefOid`"
     MERGE = "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy> --match-head-commit <head>`"
     LAND_RELEASE = "`forge-claim land release --repo <slug> --branch <int> --sha <lock sha>`"
@@ -2046,9 +2047,10 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
 
     def test_a_stop_takes_no_lock_and_merges_nothing(self):
         stop = self.section("Stop")
-        for form in ("`forge-claim renew`", self.PUSH, self.STATUS, "`forge-claim release`"):
+        for form in ("`forge-claim renew`", self.PUSH, self.STATUS, self.CHECKS_WATCH, "`forge-claim release`"):
             with self.subTest(form=form):
                 self.assertIn(form, stop)
+        self.assertLess(stop.index(self.CHECKS_WATCH), stop.index("`forge-claim release`"))
         for form in ("forge-claim land", "gh pr merge", "look-approval post"):
             with self.subTest(form=form):
                 self.assertNotIn(form, stop)

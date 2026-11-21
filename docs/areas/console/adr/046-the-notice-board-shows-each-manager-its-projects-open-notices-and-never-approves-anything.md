@@ -1,6 +1,6 @@
 # ADR-console-046 — The notice board shows each manager its project's open notices and never approves anything
 
-- **Status:** accepted; amended by ADR-console-053 and ADR-console-085
+- **Status:** accepted; amended by ADR-console-053, ADR-console-085 and ADR-console-091
 - **Decided in:** #1118
 
 ## Context

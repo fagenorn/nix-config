@@ -104,7 +104,7 @@ class NoticeRouteTest(Case):
         body = json.loads(body)
         self.assertEqual(body["overlaps"], [{
             "claims": [ida, idb], "sprints": [a, b], "files": ["src/a.py"], "first": ida,
-            "rule": "earlier-started", "asks": None}])
+            "rule": "earlier-started"}])
         self.assertEqual([n["id"] for n in body["notices"]], [ida, idb])
         self.assertEqual(self.rows("questions.asked"), [])
 

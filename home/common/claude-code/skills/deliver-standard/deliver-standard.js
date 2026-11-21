@@ -34,14 +34,14 @@ export const meta = {
 // #1019: every setup first puts a worktree back on its branch when its HEAD is detached at the branch tip and the tree is clean.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its round's review raises; #1370: a stop after any review verdict keeps them, a wave that answered and failed and a lost re-review included; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review; #1370: round_cap {rounds, findings}. A round's verdict that leaves findings open after ROUND_CAP rounds (one full and two scoped) stops at fix-wave-review before any fix wave, carrying round_cap beside cont and in it, and deliver-batch reports it to the owner. A resume of a cont holding round_cap and open findings, with no new decision and no amend, stops before any agent. One with a decision or an amend runs one more round, giving it as binding to its scoped reviewer, first fix wave and re-review. That round's fix waves ending open stop at the cap again), checks_fixes?, sync_fixes?, verified?, final_reviewed?, review_rounds? (#1370: the final-review rounds that reached a verdict, counted across runs; a cont with no such member counts 1 when its final_reviewed names a head), reviewed? ({head, branches?, amended?}: the commit the last review read, which a scoped round reviews from), fix_findings_dropped? (#1370: open findings the CARRY_MAX bound cut from fix_findings; the next round reviews the whole delivery), partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look_acs? (#1356: the AC ids the issue's look-marker lines had when the plan was made, kept so the plan's ids, never the issue's later checklist order, name the criterion a landing leaves out of its hold; a checklist reordered by hand while the delivery waits is a stated limit, not handled), look? (#1139: {pr, head, approved?}, the pull request and head an awaiting-look stop left for the owner's look, and the head the owner's approval was recorded for, once it was; a resume of such a cont lands without a second approval, and a head other than approved stops at awaiting-look again) }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its round's review raises; #1370: a stop after any review verdict keeps them, a wave that answered and failed and a lost re-review included; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review; #1370: round_cap {rounds, findings}. A round's verdict that leaves findings open after ROUND_CAP rounds (one full and two scoped) stops at fix-wave-review before any fix wave, carrying round_cap beside cont and in it, and deliver-batch reports it to the owner. A resume of a cont holding round_cap and open findings, with no new decision and no amend, stops before any agent. One with a decision or an amend runs one more round, giving it as binding to its scoped reviewer, first fix wave and re-review. That round's fix waves ending open stop at the cap again), checks_fixes?, sync_fixes?, verified?, final_reviewed?, review_rounds? (#1370: the final-review rounds that reached a verdict, counted across runs; a cont with no such member counts 1 when its final_reviewed names a head), reviewed? ({head, branches?, amended?}: the commit the last review read, which a scoped round reviews from), fix_findings_dropped? (#1370: open findings the CARRY_MAX bound cut from fix_findings; the next round reviews the whole delivery), follow_ups? (#1386: [{issue, file, summary, failing_input?, commit}], the follow-up issues filed for the findings of a scoped round, its fix-wave re-reviews included, that are not critical and name no unmet criterion; the done result carries them too), follow_ups_pending? (#1386: those whose filing was not confirmed; filed before verify, and a run that cannot file them stops at final-review), partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look_acs? (#1356: the AC ids the issue's look-marker lines had when the plan was made, kept so the plan's ids, never the issue's later checklist order, name the criterion a landing leaves out of its hold; a checklist reordered by hand while the delivery waits is a stated limit, not handled), look? (#1139: {pr, head, approved?}, the pull request and head an awaiting-look stop left for the owner's look, and the head the owner's approval was recorded for, once it was; a resume of such a cont lands without a second approval, and a head other than approved stops at awaiting-look again) }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two (#1019: the second of those two revises runs in the same run, with no stop between, when the first one's re-review leaves only findings on criteria that revise changed); any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). Every resume re-reads the facts of each branch cont.plan declares (a missing or wrong one stops setup with branch_heads.<name> missing, but only for a plan whose declarations are valid: an invalid one is dropped by the Plan section first); cont.verified and cont.final_reviewed carry branches { <name>: <head> }, and a resume reuses either only when every declared head the setup re-read is unchanged. When the PR
 // is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
-// sync merge and its acceptance drops the marker. #1370: a resume of a cont holding review_rounds and reviewed (and no fix_findings_dropped) that does not skip the review runs a scoped round (final-scoped): one reviewer over what changed since reviewed.head, plus the carried findings it re-checks at the head, with no whole-range, Codex or integration review. A result also carries dead_agents,
+// sync merge and its acceptance drops the marker. #1370: a resume of a cont holding review_rounds and reviewed (and no fix_findings_dropped) that does not skip the review runs a scoped round (final-scoped): one reviewer over what changed since reviewed.head, plus the carried findings it re-checks at the head, with no whole-range, Codex or integration review. #1386: a scoped round blocks only on a critical finding or one naming an unmet criterion (ac); every other finding it raises is filed as a follow-up issue (follow-ups-<m>), and a replay of a merged PR goes straight to close-out and files nothing (its follow_ups_pending is the record). A result also carries dead_agents,
 // the labels of agents that returned nothing or threw, when any did, and lost_reviews, the labels of reviews that answered twice with
 // no usable review (#992). A red check, and a sync-review
 // finding, each get one fix wave per delivery (an implementer with a regression test, then a fresh reviewer); a second one stops with cont.
@@ -62,6 +62,9 @@ export const meta = {
 // A marked delivery runs no land command before the owner answers: after verify it pushes the branch and opens or reuses the pull request in a look-pr call (the pr call's PR text and
 // probe, no lock), syncs a branch that is behind the integration branch outside any lock (a conflict resolved and reviewed first), pushes the synced head in a look-push call and stops at
 // awaiting-look { issue, pr, head, reason, covers, pictures? (the before/after pictures verify wrote), flaky?, outside_fixes?, ways, cont } with cont.look = {pr, head}; it holds no lock and merges nothing.
+// #1373: every awaiting-look stop, the look path's and an answer re-ask's, follows a look-checks-<k> wait (renew, no lock, no push, bound to the pull request head read after the watch, then the base's ancestry) that read every
+// check passed and every required name passing. The look path syncs and pushes on a behind answer (twice at most, then sync-contention), spends the one red-check fix on a failed one (fix-ci, fix-ci-review, look-push, so a second
+// red poll stops at checks), and verifies a moved head again (look-reverify) and waits on the forge once more before the stop; a re-ask only waits. An approve of the unmoved approved head reuses the pull request and pushes nothing.
 // A read with neither verdict stops at stage look after verify (in ship and ready mode alike), and ready mode reports look: {verdict, covers}.
 // A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place as the plan numbered it (cont.look_acs), never by the plan's wording), so no owner check is posted for it (#1356). A landing that leaves a criterion out first makes a read-only look-stale call: when a hold posted earlier still checks that criterion on a split child, or on the issue with nothing else left to hold, it stops at hold with look_checks, and a reply it cannot read stops at hold too; a check on the issue with another criterion still open is removed in place by the hold. A replay after the PR merged stops at look when the setup's look read failed, and always reads the merged head: the approval is always read again with look-approval status for the merged PR and head, never taken from a cont (which may hold another PR's), and anything but approved holds the look criterion and ticks nothing; the landing commit is resolved first (a PR merged indirectly has none on the pull) and both status and tick name it with --merge-commit. The look-stale read must say complete, and a hold of this issue with recorded results is never rewritten (its block version would change); a split child's returned fence naming an answered criterion stops the landing.
 //
@@ -254,6 +257,9 @@ const complete = (r, schema) => !!r && schema.required.every(k => r[k] !== undef
 const transientError = r => !!r && r.verdict === 'error' && r.transient === true
 const recall = async (make, pick = r => r) => { const r = await make(); return r && transientError(pick(r)) ? make() : r }
 const findingsOf = r => r.findings.filter(f => f.severity !== 'minor')
+// #1386: a finding naming an acceptance criterion blocks at any severity; the full round's filter is findingsOf plus a minor finding that names one.
+const namesAc = f => typeof f.ac === 'string' && f.ac.trim() !== ''
+const blockingOf = r => r.findings.filter(f => isEntry(f) && (f.severity !== 'minor' || namesAc(f)))
 const present = v => v !== undefined && v !== null && v !== ''
 // Extra branches a plan declares (#713): validated, then granted non-force pushes in the lifecycle rules.
 const own = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k)
@@ -430,9 +436,9 @@ if (BLOCKED && !RERUN && newDecision === null && AMEND === null && !(BLOCKED.ask
 // Bounded on the way out and on the way in (at most CARRY_MAX findings, each text capped), so a cont cannot grow from stop to stop.
 const CARRY_MAX = 10
 const clip = v => (v.length > REASON_MAX ? `${v.slice(0, REASON_MAX - 3)}...` : v)
-const carryable = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f) && typeof f.summary === 'string' && f.summary.trim() && f.severity !== 'minor')
+const carryable = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f) && typeof f.summary === 'string' && f.summary.trim() && (f.severity !== 'minor' || namesAc(f)))
 const carryOf = list => carryable(list).slice(0, CARRY_MAX)
-  .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}) }))
+  .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}), ...(namesAc(f) ? { ac: clip(f.ac) } : {}) }))
 // #1000: a cont stopped on a file its fix waves went back and forth on resumes only on something new from the owner, as a blocked task
 // does: a decision the cont does not hold (the first fix wave and its re-review get it as binding) or an amend of the plan.
 const OSC_KEPT = CONT && isEntry(CONT.oscillating) && typeof CONT.oscillating.file === 'string' && CONT.oscillating.file.trim() && Array.isArray(CONT.oscillating.rounds) && Array.isArray(CONT.fix_findings) && CONT.fix_findings.length ? CONT.oscillating : null
@@ -461,8 +467,21 @@ const AMEND_SCHEMA = { type: 'object', properties: { status: { type: 'string', e
 
 // #1370: a full round whose end commit the program does not know asks its reviewers for the head they read; a scoped round's reviewer also
 // returns closed, the numbers of the carried findings the head shows closed.
-const FINDINGS_HEAD = { ...FINDINGS, properties: { ...FINDINGS.properties, head: FULL_SHA }, required: [...FINDINGS.required, 'head'] }
-const SCOPED_FINDINGS = { ...FINDINGS, properties: { ...FINDINGS.properties, closed: { type: 'array', items: { type: 'integer' } }, head: { type: 'string' } } }
+// #1386: the final reviewers' findings may name the acceptance criterion they find unmet (ac); a scoped finding also names its file and the full sha it was read at.
+const withItems = (schema, item) => ({ ...schema, properties: { ...schema.properties, findings: { ...schema.properties.findings, items: item } } })
+const FINAL_ITEM = { ...FINDINGS.properties.findings.items, properties: { ...FINDINGS.properties.findings.items.properties, ac: { type: 'string' } } }
+const SCOPED_ITEM = { ...FINAL_ITEM, properties: { ...FINAL_ITEM.properties, commit: FULL_SHA }, required: ['severity', 'summary', 'file', 'commit'] }
+const FINAL_FINDINGS = withItems(FINDINGS, FINAL_ITEM)
+const FINDINGS_HEAD = { ...FINAL_FINDINGS, properties: { ...FINAL_FINDINGS.properties, head: FULL_SHA }, required: [...FINDINGS.required, 'head'] }
+const SCOPED_FINDINGS = withItems({ ...FINDINGS, properties: { ...FINDINGS.properties, closed: { type: 'array', items: { type: 'integer' } }, head: { type: 'string' } } }, SCOPED_ITEM)
+// final-codex reports unmet criteria by ac like the other final reviewers.
+const FINAL_CODEX = { ...CODEX, properties: { ...CODEX.properties, findings: FINAL_FINDINGS.properties.findings } }
+const FOLLOW_UPS = { type: 'object', properties: { filed: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer', minimum: 1 }, issue: { type: 'integer', minimum: 1 } }, required: ['n', 'issue'] } } }, required: ['filed'] }
+// #1386 (owner, 21 Nov): what critical means to every final reviewer, and what a scoped round blocks on.
+const CRITICAL_MEANS = 'A finding is critical only when it is a security defect, a data loss, or an acceptance criterion of the issue that is not met; every other blocking finding is important.'
+const SCOPED_BLOCKS = 'After the first full review only a critical finding, or one whose ac names the acceptance criterion it finds unmet, blocks the merge: every other finding you report is filed as a follow-up issue and the delivery goes on, so never mark a hardening point critical to make it block.'
+// The ask of a scoped reviewer: where each finding was read and which criterion it finds unmet.
+const COMMIT_ASK = at => `Set file and commit on each finding, commit being the full sha of the commit you read it at (for a file of a branch checked out in another worktree, that branch's head there; else ${at}), and set ac to the id of the acceptance criterion it finds unmet when it finds one.`
 // ---------------- Setup ----------------
 phase('Setup')
 const CONTRACT_READ = `Run: hostname -s and return its output as host. Run: resolve-project resolve --repo-root ${REPO}
@@ -717,6 +736,77 @@ let dropped = (CONT && Number.isInteger(CONT.fix_findings_dropped) && CONT.fix_f
 const keep = list => { carried = carryOf(list); dropped = carryable(list).length - carried.length }
 // The commit a review read becomes the commit the next scoped round reviews from; the declared branches' heads are recorded with it.
 const markReviewed = head => { if (head) reviewed = { head: normSha(head), ...branchSnap() } }
+// #1386: the follow-up issues filed for the findings of a scoped round that do not block (followUps), and those whose filing was not confirmed
+// (pending); both ride through every stop. An entry needs a file, a summary and the full sha its reviewer read it at.
+const fullSha = v => typeof v === 'string' && SHA_RE.test(normSha(v))
+const textOf = v => (typeof v === 'string' && v.trim() ? clip(v) : '')
+// A finding's identity is read from its full fields, before clip: one whose text a clip shortened carries key, a hash of the full file, summary and failing input,
+// so two findings that differ only past the clip stay two (an unclipped one is its own identity).
+const hashOf = s => {
+  let a = 0xdeadbeef
+  let b = 0x41c6ce57
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    a = Math.imul(a ^ c, 2654435761)
+    b = Math.imul(b ^ c, 1597334677)
+  }
+  a = Math.imul(a ^ (a >>> 16), 2246822507) ^ Math.imul(b ^ (b >>> 13), 3266489909)
+  b = Math.imul(b ^ (b >>> 16), 2246822507) ^ Math.imul(a ^ (a >>> 13), 3266489909)
+  return (4294967296 * (2097151 & b) + (a >>> 0)).toString(36)
+}
+const keyOf = f => {
+  if (typeof f.key === 'string' && f.key) return f.key
+  const full = [f.file, f.summary, f.failing_input].map(v => (typeof v === 'string' ? v.trim() : ''))
+  return full.some(v => v.length > REASON_MAX) ? hashOf(full.join('\n')) : ''
+}
+const followUpOf = (f, filed) => {
+  if (!isEntry(f) || !textOf(f.file) || !textOf(f.summary) || !fullSha(f.commit)) return null
+  const key = keyOf(f)
+  const rest = { file: textOf(f.file), summary: textOf(f.summary), ...(textOf(f.failing_input) ? { failing_input: textOf(f.failing_input) } : {}), commit: normSha(f.commit), ...(key ? { key } : {}) }
+  if (filed) return Number.isInteger(f.issue) && f.issue > 0 ? { issue: f.issue, ...rest } : null
+  return ['critical', 'important', 'minor'].includes(f.severity) ? { severity: f.severity, ...rest } : null
+}
+let followUps = (CONT && Array.isArray(CONT.follow_ups) ? CONT.follow_ups : []).map(f => followUpOf(f, true)).filter(Boolean)
+let pending = (CONT && Array.isArray(CONT.follow_ups_pending) ? CONT.follow_ups_pending : []).map(f => followUpOf(f, false)).filter(Boolean)
+let followUpCalls = 0
+const followUpKey = f => (f.key ? `${textOf(f.file)}\n${f.key}` : `${textOf(f.file)}\n${clip(String(f.summary))}\n${textOf(f.failing_input)}`)
+// #1386: the follow-up issues of the findings a scoped round does not block on: one clerk call files one issue per entry. The program builds each
+// title (no shell quote character in it) and body; an entry is confirmed only by exactly one issue number of its own, so a lost, partial or shared
+// reply leaves it pending, and the gate before Verify files it again.
+const titleOf = f => `Follow-up of #${ISSUE}: ${f.file}: ${f.summary}`.replace(/['"`$\\]/g, '').replace(/\s+/g, ' ').slice(0, 120)
+const bodyOf = f => [`Follow-up of #${ISSUE}: a scoped review round of its delivery raised this ${f.severity} finding, which does not block that delivery.`, '', `File: ${f.file}`, `Commit: ${f.commit}`, `Finding: ${f.summary}`, ...(f.failing_input ? [`Failing input: ${f.failing_input}`] : []), ...(f.key ? [`Identity: ${f.key}`] : [])].join('\n')
+const LOOKUP_LIMIT = 1000
+const fileFollowUps = async list => {
+  const m = ++followUpCalls
+  const entries = list.map((f, i) => ({ n: i + 1, title: titleOf(f), body: bodyOf(f) }))
+  let r = null
+  try {
+    r = await call(`Issue #${ISSUE} of ${SLUG}. A review round after the first full review raised the findings below, which do not block the merge: file one follow-up issue for each, changing nothing in any worktree.
+Follow-ups: ${JSON.stringify(entries)}
+First run once ${UNSET}gh issue list --repo ${SLUG} --state all --search "Follow-up of #${ISSUE} in:title" --limit ${LOOKUP_LIMIT} --json number,body
+When that list holds ${LOOKUP_LIMIT} issues it may be cut short: then, before creating any issue, look for each entry on its own with ${UNSET}gh issue list --repo ${SLUG} --state all --search "<the entry's title> in:title" --limit ${LOOKUP_LIMIT} --json number,body, and leave out an entry whose own list also holds ${LOOKUP_LIMIT} issues instead of creating it.
+Then, for each entry in order: when an issue of that list has a body equal to the entry's body (trailing whitespace aside), return that issue for the entry and file nothing. Otherwise write the entry's body exactly, as given (its \\n are line breaks), to a new file outside any work tree with a shell command (a heredoc whose delimiter is quoted), then run alone forge-issue create --repo ${SLUG} --title '<the entry's title>' --body-file <that file>, the title being one single-quoted argument exactly as given (it holds no quote, dollar sign, backtick or backslash) and no blocking-edge flag, since the body names the parent.
+Return filed: one {n, issue} per entry you filed or found, leaving out one you could not file or confirm.
+${RULES}`, { label: `follow-ups-${m}`, phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: FOLLOW_UPS })
+  } catch (e) {
+    r = null
+  }
+  const got = r && Array.isArray(r.filed) ? r.filed.filter(x => isEntry(x) && Number.isInteger(x.n) && Number.isInteger(x.issue) && x.issue > 0) : []
+  let left = 0
+  list.forEach((f, i) => {
+    const mine = got.filter(x => x.n === i + 1)
+    const issue = mine.length === 1 ? mine[0].issue : null
+    if (issue !== null && got.filter(x => x.issue === issue).length === 1 && !followUps.some(g => g.issue === issue)) {
+      const { severity, ...rest } = f
+      followUps.push({ issue, ...rest })
+    } else {
+      pending.push(f)
+      left++
+    }
+  })
+  log(`final review: ${list.length - left} follow-up issue(s) filed for findings that do not block`)
+  if (left) log(`final review: ${left} follow-up(s) not confirmed filed; they are kept and filed before verify`)
+}
 // #1000: the history of a file the fix waves went back and forth on, kept in cont.oscillating beside the findings that stop left open;
 // bounded on the way out and on the way in (the last ROUNDS_MAX entries, each round's findings and every text capped).
 const ROUNDS_MAX = 12
@@ -822,7 +912,7 @@ const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog
 let lookWhy = null
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(plan && !planReviewed && codexSkipped ? { codex_plan_skipped: true } : {}), ...(plan && !planReviewed && codexOwed ? { codex_plan_owed: true } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(carried.length && capMark ? { round_cap: capMark } : {}), ...(dropped > 0 && carried.length ? { fix_findings_dropped: dropped } : {}), ...(reviewRounds > 0 ? { review_rounds: reviewRounds } : {}), ...(reviewRounds > 0 && reviewed ? { reviewed } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(plan && !planReviewed && codexSkipped ? { codex_plan_skipped: true } : {}), ...(plan && !planReviewed && codexOwed ? { codex_plan_owed: true } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(carried.length && capMark ? { round_cap: capMark } : {}), ...(dropped > 0 && carried.length ? { fix_findings_dropped: dropped } : {}), ...(reviewRounds > 0 ? { review_rounds: reviewRounds } : {}), ...(reviewRounds > 0 && reviewed ? { reviewed } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), ...(pending.length ? { follow_ups_pending: pending } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 // A look marker the setup could not read is neither marked nor unmarked: a fix answer and a merged replay stop here, before any hold.
@@ -991,7 +1081,7 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType
   if (!co || co.issue_state !== want || co.decision_ended !== true || co.released !== true || (notes.length && co.notes_posted !== true)) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
   const lookTick = tickStep ? (co.look_tick || null) : null
   if (tickStep && !(lookTick && ['ticked', 'already', 'unmarked'].includes(lookTick.verdict))) log(`close-out: the look marker of issue ${ISSUE} was not ticked: ${lookTick ? lookTick.verdict : 'no reply'}`)
-  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, ...(tickStep ? { look_tick: lookTick } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: planned, fix_waves: fixWaves }
+  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, ...(tickStep ? { look_tick: lookTick } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), acceptance: planned, fix_waves: fixWaves }
 }
 
 if (CONT && setup.merged_pr) {
@@ -1889,7 +1979,7 @@ if (dropped > 0) log(`final review: ${dropped} open finding(s) were not kept in 
 const SCOPED = LANE === 'standard' && reviewRounds > 0 && reviewed !== null && dropped === 0
 // The round's end commit: the tip when the run knows one, else the head a reviewer of the round read.
 const endOf = replies => (isCommit(tip) ? normSha(tip) : ((replies.find(r => isEntry(r) && isCommit(r.head)) || {}).head || null))
-const FINAL_SCHEMA = isCommit(tip) ? FINDINGS : FINDINGS_HEAD
+const FINAL_SCHEMA = isCommit(tip) ? FINAL_FINDINGS : FINDINGS_HEAD
 const HEAD_ASK = ` Return head: the full sha git -C ${W} rev-parse HEAD prints, run before you read anything.`
 // #993: shared by the chunk, the integration and the scoped review.
 const VERIFY_OWNED = `The verify step runs the declared verification: run only the targeted tests a finding needs, never the whole suite.`
@@ -1913,9 +2003,9 @@ if (SCOPED) {
   const open = carried.length ? ` These findings were left open by the last round, numbered from 1: ${JSON.stringify(carried.map((f, i) => ({ n: i + 1, ...f })))}. Check each against the code at the head: report again each one the head still shows open, and return closed: the numbers of those it shows closed. One you neither report nor close stays open.` : ''
   const scoped = await readReview(`Issue #${ISSUE} of ${SLUG}. Worktree: ${W} (branch ${setup.branch}, base ${setup.base_sha}, integration branch ${INT}).
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Scoped review round ${reviewRounds + 1}: review only what changed since ${O}, the commit the last review read. Fetch origin first (git -C ${W} fetch origin). ${since(W, O, N, `origin/${INT}`)} Never read the delivery's whole range: earlier rounds reviewed it.${ranges}${N === 'HEAD' ? HEAD_ASK : ''}${open}${amendApplied || reviewed.amended === true ? AMENDED : ''}${SCOPED_BINDING ? `${SCOPED_BINDING} Report no finding that only disputes it.` : ''} ${KNOW} ${TWO_AXES} ${VERIFY_OWNED} Report Important or Critical findings only, each in those commits${amendApplied || reviewed.amended === true ? ', among the findings above or in a requirement of the amended plan the head does not meet' : ' or among the findings above'}. Do not edit anything.`, { label: 'final-scoped', phase: 'Final review', agentType: 'reviewer', schema: SCOPED_FINDINGS })
+Scoped review round ${reviewRounds + 1}: review only what changed since ${O}, the commit the last review read. Fetch origin first (git -C ${W} fetch origin). ${since(W, O, N, `origin/${INT}`)} Never read the delivery's whole range: earlier rounds reviewed it.${ranges}${N === 'HEAD' ? HEAD_ASK : ''}${open}${amendApplied || reviewed.amended === true ? AMENDED : ''}${SCOPED_BINDING ? `${SCOPED_BINDING} Report no finding that only disputes it.` : ''} ${KNOW} ${TWO_AXES} ${VERIFY_OWNED} ${CRITICAL_MEANS} ${SCOPED_BLOCKS} ${COMMIT_ASK(N === 'HEAD' ? 'the head you return' : N)} Report Important or Critical findings only, each in those commits${amendApplied || reviewed.amended === true ? ', among the findings above or in a requirement of the amended plan the head does not meet' : ' or among the findings above'}. Do not edit anything.`, { label: 'final-scoped', phase: 'Final review', agentType: 'reviewer', schema: SCOPED_FINDINGS })
   if (!scoped) return stop('final-review', { details: `the scoped reviewer ${silence('final-scoped')}` })
-  finalFindings = findingsOf(scoped)
+  finalFindings = scoped.findings.filter(isEntry)
   closedNums = Array.isArray(scoped.closed) ? scoped.closed.filter(Number.isInteger) : []
   reviewRounds++
   markReviewed(endOf([scoped]))
@@ -1944,12 +2034,12 @@ ${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', mode
   } else log(`final review: ${lines} changed lines, above ${SIZED_CHUNK_LINES}; keeping the task chunks`)
 }
 const codexP = REVIEW_CODE ? call(`${CTX}
-${PLAN_REF} Acceptance criteria: ${ACS}.
+${PLAN_REF} Acceptance criteria: ${ACS}. Pass this definition to Codex with those criteria, as the caller's input: ${CRITICAL_MEANS} Set ac on a finding that names an unmet criterion, at any severity.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE}
-${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
+${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: FINAL_CODEX }) : Promise.resolve(null)
 const finals = await parallel(groups.map((g, gi) => () => readReview(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it). ${VERIFY_OWNED} Report Important or Critical findings only. Do not edit anything.${isCommit(tip) ? '' : HEAD_ASK}`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINAL_SCHEMA })))
+Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it). ${VERIFY_OWNED} ${CRITICAL_MEANS} Report Important or Critical findings only. Do not edit anything.${isCommit(tip) ? '' : HEAD_ASK}`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINAL_SCHEMA })))
 if (finals.some(r => !r)) {
   await codexP
   return stop('final-review', { details: `a final reviewer ${silence(...groups.map((g, gi) => `final-${gi + 1}`))}`, finals })
@@ -1957,14 +2047,14 @@ if (finals.some(r => !r)) {
 // #967: the integration review reads only the chunk verdicts, so it runs beside Codex. It counts as dead only where its reply is read:
 // a Codex stop leaves it unused, and still running unread, on purpose: waiting for it would cost wall time for nothing.
 const integP = chunked ? readReview(`${CTX}
-${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. ${VERIFY_OWNED} Report Important or Critical findings only.${isCommit(tip) ? '' : HEAD_ASK}`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINAL_SCHEMA }, { optional: true }) : null
+${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. ${VERIFY_OWNED} ${CRITICAL_MEANS} Report Important or Critical findings only.${isCommit(tip) ? '' : HEAD_ASK}`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINAL_SCHEMA }, { optional: true }) : null
 if (integP) integP.catch(() => {})
 const codexR = await codexP
-finalFindings = finals.flatMap(findingsOf)
+finalFindings = finals.flatMap(blockingOf)
 if (REVIEW_CODE) {
   if (!codexR || !codexR.available) return codexStop('code', codexR)
-  finalFindings = finalFindings.concat(findingsOf(codexR).map(f => ({ ...f, source: 'codex' })))
-  log(`codex review: ${findingsOf(codexR).length} blocking findings`)
+  finalFindings = finalFindings.concat(blockingOf(codexR).map(f => ({ ...f, source: 'codex' })))
+  log(`codex review: ${blockingOf(codexR).length} blocking findings`)
 }
 let integ = null
 if (integP) {
@@ -1973,7 +2063,7 @@ if (integP) {
     if (!LOST.includes('final-integration')) DEAD.push('final-integration')
     return stop('final-review', { details: `the integration reviewer ${silence('final-integration')}` })
   }
-  finalFindings = finalFindings.concat(findingsOf(integ))
+  finalFindings = finalFindings.concat(blockingOf(integ))
 }
 // The round reached its verdict: it is counted, and a full one has found again whatever the bound once cut.
 reviewRounds++
@@ -1990,6 +2080,30 @@ const fromStop = carried.filter((c, i) => {
   return j < 0
 })
 if (fromStop.length) log(`final review: ${fromStop.length} finding(s) carried from the earlier fix-wave-review stop`)
+// #1386: a scoped round blocks only on a critical finding or one naming an unmet criterion. Closures are reconciled above, and a report that stands for
+// an open carried finding blocks; each other report is blocking or filed as a follow-up. This runs before any severity filter, so a minor one is filed too.
+// A finding that cannot be filed (no file or no full commit) is handled as before: non-minor blocks, minor is dropped. One already filed or pending is not filed again.
+const triage = async list => {
+  const blocking = []
+  const toFile = []
+  for (const f of list) {
+    if (f.severity === 'critical' || namesAc(f)) { blocking.push(f); continue }
+    const entry = followUpOf(f, false)
+    if (!entry) {
+      if (f.severity !== 'minor') blocking.push(f)
+      log(`final review: a ${f.severity} finding names no file or commit and cannot be filed; ${f.severity !== 'minor' ? 'it blocks' : 'it is dropped'}`)
+      continue
+    }
+    if (followUps.concat(pending, toFile).some(g => followUpKey(g) === followUpKey(entry))) {
+      log(`final review: a ${entry.severity} finding in ${entry.file} is already filed or pending; it is not filed again`)
+      continue
+    }
+    toFile.push(entry)
+  }
+  if (toFile.length) await fileFollowUps(toFile)
+  return blocking
+}
+if (SCOPED) finalFindings = finalFindings.filter((f, at) => taken.has(at)).concat(await triage(finalFindings.filter((f, at) => !taken.has(at))))
 finalFindings = finalFindings.concat(fromStop)
 // #1370: a round that leaves findings open at the cap stops here, before any fix wave, unless the owner brought something new to this resume.
 // Set once a fix wave starts away from the reviewed head: the passed marker then never records the tip, below which lie commits no review has read.
@@ -2039,6 +2153,37 @@ if (finalFindings.length) {
   const DECIDED = !RESUMED ? '' : oscDecision !== null ? ` The owner decided the approach for ${RESUMED.file}, and the decision is binding: ${JSON.stringify(oscDecision)}.` : amendApplied ? ` The owner amended the plan for ${RESUMED.file} (plan.md, Amendments): it is binding.` : ''
   const FOLLOW = oscDecision !== null ? 'follow that decision' : 'follow that amendment'
   let waveFindings = finalFindings
+  // #1386: a scoped round's re-review blocks on a report that stands for one of the wave's findings (one each: its exact repeat, else one in its file), a critical one and one
+  // naming an unmet criterion; the other reports are filed. The full round's re-review keeps its rule.
+  const rereviewed = async (rv, wave) => {
+    const reports = rv.findings.filter(isEntry)
+    // Each wave finding is stood for by at most one report, and each report stands for at most one: an exact repeat first, then, for a finding left without one,
+    // a report in its file (marked narrowing first), whatever its relation, since a reviewer may reword a finding it still holds. A minor report that names no
+    // criterion and is not marked narrowing is a note of its own, not a rewording of a blocker: it never stands for one, and triage files it.
+    const stands = new Map()
+    const open = []
+    wave.forEach((w, i) => {
+      const j = reports.findIndex((f, at) => !stands.has(at) && findingKey(f) === findingKey(w))
+      if (j >= 0) stands.set(j, w)
+      else open.push(i)
+    })
+    for (const i of open) {
+      const w = wave[i]
+      if (!fileOf(w)) continue
+      const same = reports.map((f, at) => at).filter(at => !stands.has(at) && fileOf(reports[at]) === fileOf(w) && (reports[at].severity !== 'minor' || namesAc(reports[at]) || reports[at].relation === 'narrowing'))
+      const j = same.find(at => reports[at].relation === 'narrowing')
+      if (j !== undefined || same.length) stands.set(j !== undefined ? j : same[0], w)
+    }
+    // A report that stands for a wave finding blocks, as an important or critical one always did. A minor repeat of a critical finding or one naming a criterion
+    // keeps the finding's severity and ac: it is still open until a review resolves it. A minor repeat of any other finding is dropped, as it was.
+    const held = [...stands.keys()].sort((x, y) => x - y).flatMap(at => {
+      const f = reports[at]
+      const w = stands.get(at)
+      if (f.severity !== 'minor' || namesAc(f)) return [f]
+      return w.severity === 'critical' || namesAc(w) ? [{ ...f, severity: w.severity, ...(namesAc(w) ? { ac: w.ac } : {}) }] : []
+    })
+    return held.concat(await triage(reports.filter((f, at) => !stands.has(at))))
+  }
   let afterFirst = 0
   let regressions = 0
   const hasBranches = declared(plan).length > 0
@@ -2082,7 +2227,7 @@ if (finalFindings.length) {
     // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
     const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
     if (!idle) carried = []
-    const rv = await readReview(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''}${k === 1 && CAP_BINDING ? `${CAP_BINDING} Report no finding that only disputes it.` : ''}${resumedHere ? `${DECIDED ? `${DECIDED} Report no finding that only disputes it.` : ''} ${RESUMED.file} was judged more than once in the same place before this fix; its history, oldest first: ${JSON.stringify(historyOf(RESUMED.file).slice(-ROUNDS_MAX))}.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(FINDINGS) })
+    const rv = await readReview(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''}${k === 1 && CAP_BINDING ? `${CAP_BINDING} Report no finding that only disputes it.` : ''}${resumedHere ? `${DECIDED ? `${DECIDED} Report no finding that only disputes it.` : ''} ${RESUMED.file} was judged more than once in the same place before this fix; its history, oldest first: ${JSON.stringify(historyOf(RESUMED.file).slice(-ROUNDS_MAX))}.` : ''} ${CRITICAL_MEANS}${SCOPED ? ` ${SCOPED_BLOCKS} ${COMMIT_ASK(fw.commit)}` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(SCOPED ? withItems(FINDINGS, SCOPED_ITEM) : FINAL_FINDINGS) })
     if (!rv) {
       keep(waveFindings)
       if (!idle) osc = null
@@ -2094,7 +2239,7 @@ if (finalFindings.length) {
       gapSeen = true
       log(`fix-wave-review: fix wave ${k} reports it started at ${fw.start_head}, not at ${waveBase}: the commits between were not re-reviewed, so the reviewed head stays`)
     }
-    const next = findingsOf(rv)
+    const next = SCOPED ? await rereviewed(rv, waveFindings) : blockingOf(rv)
     if (!next.length) break
     const inFix = changedBy(fw).filter(p => changedBy(rv).includes(p))
     const fresh = next.filter(f => f.relation !== 'narrowing')
@@ -2128,6 +2273,14 @@ if (finalFindings.length) {
 } else carried = []
 if (present(tip) && !gapSeen) finalReviewed = { head: tip, ...branchSnap(), ...(sizedWhole ? { whole: true } : {}) }
 }
+}
+
+// #1386: no delivery passes Verify while a follow-up filing is unconfirmed. A resume that skipped the final review passes this gate too.
+if (pending.length) {
+  const again = pending
+  pending = []
+  await fileFollowUps(again)
+  if (pending.length) return stop('final-review', { details: clip(`${pending.length} follow-up issue(s) for findings that do not block were not confirmed filed: ${pending.map(f => f.summary).join('; ')}`) })
 }
 
 // ---------------- Verify ----------------
@@ -2218,6 +2371,55 @@ const lookStop = (pr, sha) => {
   const shown = picturesOf(verify || verified)
   return { ...stop('awaiting-look', { issue: ISSUE, pr, head: sha, covers: COVERS, ...(shown.length ? { pictures: shown } : {}), ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ways: LOOK_WAYS }), reason: lookWhy ? `${lookWhy}; ${LOOK_REASON}` : LOOK_REASON }
 }
+// #1008: the minutes a checks poll waits for the first check to be reported on a head (gh pr checks --watch returns at once while
+// none is, so quick pending answers would spend the pending waits before the runs register); TRAIN_NO_CHECKS_MIN in deliver-batch.js,
+// and the wait sentence is the same text there.
+const NO_CHECKS_MIN = 5
+// The pending polls a wait spends before it stops at checks-pending: the landing's and the look's alike.
+const PENDING_WAITS = 3
+// #1373: the checks the owner's look waits for. behind is the base's ancestry of the head read after the watch (the base can move during it).
+const LOOK_CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending'] }, head: FULL_SHA, behind: { type: 'boolean' }, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head', 'behind'] }
+// The look's own wait, never CHECKS_WAIT: it pushes nothing (a head another writer pushed is read as it is), answers from one read of the pull request made after the watch, and reports the base's ancestry of that head after that read.
+const LOOK_CHECKS_WAIT = (pr, sha) => `for the checks of PR #${pr} at the head ${sha}, changing nothing. 1. Wait once with ${UNSET}gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes): that is this poll's one deadline, so never run it a second time here, whether it returned early, returned with a check still pending or timed out; this program polls again. Its list can be partial, so its output is never the answer. While no check is reported on the pull request at all, do not answer yet: read ${UNSET}gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link about once a minute, running alone timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and answer pending only when none is reported ${NO_CHECKS_MIN} minutes after your first read. 2. Then read the pull request once: ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid,statusCheckRollup. head is its headRefOid (the full sha), even when it is not ${sha}. Its rollup names no app, so read the app of each check run from the check runs of that same head, once: ${UNSET}gh api repos/${SLUG}/commits/<its headRefOid>/check-runs --paginate (each run's name, status, conclusion, started_at and app.id). Answer from these two reads alone and read nothing again. 3. Collect the required checks from both sources and never one in place of the other: the required_status_checks rules of ${UNSET}gh api repos/${SLUG}/rules/branches/${INT} (each with its integration_id when it names one) and the required_status_checks checks of classic branch protection, ${UNSET}gh api repos/${SLUG}/branches/${INT}/protection (each with its app_id when it names one). Return their union as required, always, even as an empty list (an empty list only when neither source lists any; a reply with no required is read as pending). 4. Classify from the reads of step 2: the check runs from the check-runs read (a run's app is its app.id), the commit statuses from the rollup (a status names no app, so it counts only for a required name that names none). Take the newest run (the latest started_at) of each pair of check name and app. A required check is judged by its runs of the app its rule or protection entry names (any app when it names none): a newer run of another app never replaces that app's run, so a green run of another app never hides a failed run of the required app and never counts as the required check passing. A check run whose status is not completed (COMPLETED in the rollup), or a status whose state is PENDING or EXPECTED, is pending; a check run whose conclusion is success, neutral or skipped (any case), or a status whose state is SUCCESS, has passed; any other conclusion, or a status whose state is FAILURE or ERROR, has failed. 5. Then run git -C ${W} fetch origin and return behind true when git -C ${W} merge-base --is-ancestor origin/${INT} <that headRefOid> fails (the base moved past the head, during the wait or before it), else false. Return state passed only when that read shows no check pending, failed or cancelled, with required and passed (every name passing at that head, of the required app for a required name); failed when any check failed, required or not, with failing (every failed name) and details (for each failed check, the last 60 lines of its failed log: ${UNSET}gh run view <run id> --repo ${SLUG} --log-failed); otherwise pending, with pending (the names still running) and the observed state when the wait ran out.`
+const namesOf = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string' && x !== '') : [])
+// The required names no passing run covers (a passed reply that leaves one out proves nothing for it).
+const missingOf = ck => namesOf(ck.required).filter(x => !namesOf(ck.passed).includes(x))
+// A required list the reply omits is a list nobody read: a required build that has not reported is invisible in it, so a passed reply without one proves nothing.
+const unproven = ck => !Array.isArray(ck.required) || missingOf(ck).length > 0
+const lookRead = ck => {
+  const failing = namesOf(ck.failing)
+  const pending = [...new Set([...namesOf(ck.pending), ...missingOf(ck)])]
+  const state = ck.state === 'failed' || failing.length ? 'failed' : ck.state !== 'passed' || pending.length || unproven(ck) || !namesOf(ck.passed).length ? 'pending' : 'passed'
+  return { state, failing, pending }
+}
+let lookPolls = 0
+let lookWaits = 0
+// One poll of the look wait: a stop row when the claim was lost, the reply is unusable or names another head, else null and the reply.
+const lookPoll = async (pr, sha, stale) => {
+  const label = `look-checks-${++lookPolls}`
+  const ck = await recall(() => call(`${CTX}
+${RENEW_FIRST}
+Then wait ${LOOK_CHECKS_WAIT(pr, sha)}${stale ? ` ${STALE_RERUN(UNSET, SLUG)}` : ''}
+Issue #${ISSUE} waits for the owner's look at the head ${sha} before it merges: run no lock command, push nothing and merge nothing.
+${RULES}`, { label, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(stale ? WITH_STALE(LOOK_CHECKS) : LOOK_CHECKS) }), r => r.renew)
+  const lost = ck ? renewed(ck.renew, label) : null
+  const row = lost || (!complete(ck, LOOK_CHECKS) ? stop('checks', { pr, checks: null }) : !sameSha(ck.head, sha) ? stop('head-moved', { pr, expected: sha, head: ck.head }) : null)
+  return { ck, row }
+}
+// #1373: an answer re-ask shows the pull request head as it is, so it only waits for that head's checks: no push, no sync, no fix.
+const lookWaitStop = async (pr, sha) => {
+  for (;;) {
+    const { ck, row } = await lookPoll(pr, sha, false)
+    if (row) return row
+    const rd = lookRead(ck)
+    if (rd.state === 'failed') return stop('checks', { pr, failing: rd.failing, checks: ck })
+    if (rd.state === 'pending') {
+      if (++lookWaits >= PENDING_WAITS) return stop('checks-pending', { pr, pending: rd.pending, checks: ck })
+      continue
+    }
+    return lookStop(pr, fuller(sha, ck.head))
+  }
+}
 const LOOK_HEAD_SCHEMA = { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] }
 // #1246: the verification of an approved head the verified record does not name: what the worktree reached, whether it is only clean merges of the integration branch past the verified head, and the verification.
 const LOOK_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' }, ahead: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only', 'ahead'] }
@@ -2237,7 +2439,7 @@ ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK
   if (lostLook) return lostLook
   if (!complete(hd, LOOK_HEAD_SCHEMA) || !SHA_RE.test(hd.head)) return stop('look-approve', { result: hd })
   if (hd.state !== 'OPEN') return stop('look-approve', { details: `PR #${lookAt.pr} is ${hd.state}, not open, so the approval of ${LOOK_ANSWER.head} was not recorded` })
-  if (!sameSha(hd.head, LOOK_ANSWER.head) || !sameSha(LOOK_ANSWER.head, lookAt.head)) return lookStop(lookAt.pr, hd.head)
+  if (!sameSha(hd.head, LOOK_ANSWER.head) || !sameSha(LOOK_ANSWER.head, lookAt.head)) return lookWaitStop(lookAt.pr, hd.head)
   const posted = await call(`${CTX}
 Record the owner's look approval of issue #${ISSUE} of ${SLUG} with one fix. First write the owner's words, the JSON string ${JSON.stringify(LOOK_ANSWER.words)} decoded, exactly as the whole content of ${FIX_WORDS_FILE} with the Write tool. Then run alone and exactly: look-approval post --repo ${SLUG} --issue ${ISSUE} --pr ${lookAt.pr} --head ${LOOK_ANSWER.head} --answer fix --message ${LOOK_ANSWER.message || String(setup.holder).split('/').pop()} --words-file ${FIX_WORDS_FILE}
 It prints one JSON line. Return its verdict, comment_id and any detail. Run nothing else.
@@ -2320,11 +2522,7 @@ const PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head:
 const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] }
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind'] }, head: FULL_SHA, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const PUSH_SCHEMA = { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] }
-// #1008: the minutes a checks poll waits for the first check to be reported on a head (gh pr checks --watch returns at once while
-// none is, so quick pending answers would spend the pending waits before the runs register); TRAIN_NO_CHECKS_MIN in deliver-batch.js,
-// and the wait sentence is the same text there.
-const NO_CHECKS_MIN = 5
-const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) and, whenever that reply lists no required status checks, from classic branch protection; none only when neither lists any. A head with no check reported at all is pending, never passed: runs can register minutes after a push. While no check is reported on head, do not answer yet: read the list again about once a minute, running alone timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and answer pending only when none is reported ${NO_CHECKS_MIN} minutes after your first read of the list. Return passed only when no check on head is pending, failing or cancelled, with required and passed (every name passing at head; a passed answer naming none is read as pending). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
+const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) and, whenever that reply lists no required status checks, from classic branch protection. Return required always, even as an empty list (an empty list only when neither lists any): a passed answer that leaves it out is not trusted. A head with no check reported at all is pending, never passed: runs can register minutes after a push. While no check is reported on head, do not answer yet: read the list again about once a minute, running alone timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and answer pending only when none is reported ${NO_CHECKS_MIN} minutes after your first read of the list. Return passed only when no check on head is pending, failing or cancelled, with required and passed (every name passing at head; a passed answer naming none is read as pending). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'conflicted', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, head: FULL_SHA, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
   type: 'object',
@@ -2374,7 +2572,6 @@ let expected = verify.head
 let head = expected
 let syncs = 0
 let round = 0
-const PENDING_WAITS = 3
 // #1008: a passed reply that names no passing check is a head no check has reported on yet (runs register up to minutes after a
 // push), so it is read as pending and counts against the pending waits. This program reads no required checks from the contract,
 // and the contract cannot declare an empty list anyway, so the rule has no opt-out.
@@ -2478,7 +2675,7 @@ const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal =
   return { fix, review, moved, ok: true }
 }
 // #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call. #1246: a function, so its Evidence names the results of verify as it is when the call is made (an approved head's verification replaces them).
-const prOpen = () => `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
+const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
 const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is read back
 // (look-approval status, #1260: the owner records it where they answered; this program never posts one) only for the head the owner saw, when that is the pull request head. #1246: a head that is not the verified head is verified first (a look-verify step), and recorded only when it
@@ -2503,7 +2700,7 @@ ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK
   if (hd.state !== 'OPEN') return stop('look-approve', { details: `${NOT_RECORDED}: PR #${P} is ${hd.state}, not open, at head ${hd.head}` })
   if (!sameSha(hd.head, A)) {
     lookWhy = `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head}`
-    return lookStop(P, hd.head)
+    return lookWaitStop(P, hd.head)
   }
   let recordable = sameSha(A, V0)
   if (!recordable) {
@@ -2556,7 +2753,7 @@ Then, ${PROBE(W, INT)}
 Then return behind: true when git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails (the head is behind ${INT}), else false. Issue #${ISSUE} waits for the owner's look before it merges: run no lock command, wait for no check and merge nothing.
 ${RULES}`, { label: 'look-pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), behind: { type: 'boolean' } }) }) : call(`${CTX}
 ${RENEW_FIRST}
-${prOpen()}
+${prOpen(MARKED && approvedHead && sameSha(approvedHead, expected) ? lookAt.pr : null)}
 Then, ${PROBE(W, INT)}
 ${OWN_RED(W, '<the PR number>', expected)}
 Otherwise take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
@@ -2712,7 +2909,7 @@ When the failure has no cause in the code (an infrastructure, cache or network e
   if (LOOK_STOP) {
     const stopped = early ? await syncRound(early) : prR.behind === true ? await syncRound(null, true) : null
     if (stopped) return stopped
-    if (!sameSha(expected, readyHead)) {
+    const lookPush = async () => {
       const pu = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then push the branch ${setup.branch} of PR #${PR} at the head ${expected}: run alone git -C ${W} push origin ${setup.branch}, then return head (git -C ${W} rev-parse HEAD, the full sha).
@@ -2722,6 +2919,68 @@ ${RULES}`, { label: 'look-push', phase: 'Ship', agentType: 'clerk', model: DEFAU
       if (lost) return lost
       if (!sameSha(pu.head, expected)) return stop('head-moved', { pr: PR, expected, head: pu.head })
       expected = fuller(expected, pu.head)
+      return null
+    }
+    if (!sameSha(expected, readyHead)) {
+      const pushed = await lookPush()
+      if (pushed) return pushed
+    }
+    // #1373: the stop waits for the checks of the head the owner will see, outside any lock. A red one gets the delivery's one fix; a base that moved
+    // during the wait is synced and pushed (twice at most); the wait then reads the new head again.
+    for (;;) {
+      const stalePoll = reran
+      const { ck, row } = await lookPoll(PR, expected, stalePoll)
+      if (row) return row
+      expected = fuller(expected, ck.head)
+      head = expected
+      const rd = lookRead(ck)
+      if (ck.behind !== true && rd.state === 'pending') {
+        if (++lookWaits >= PENDING_WAITS) return stop('checks-pending', { pr: PR, pending: rd.pending, checks: ck })
+        continue
+      }
+      reran = false
+      if (ck.behind === true) {
+        if (contended >= 2) return stop('sync-contention', { pr: PR, syncs })
+        contended++
+        const prior = expected
+        const s = await syncRound(null, true)
+        if (s) return s
+        if (!sameSha(expected, prior)) {
+          const pushed = await lookPush()
+          if (pushed) return pushed
+        }
+        continue
+      }
+      if (rd.state === 'failed') {
+        // #986: every failing check was a gate on an old result and the poll reran it: not a red poll, asked once after the one rerun.
+        if (stalePoll && staleOf(ck).length) {
+          log(`${'look-checks-' + lookPolls} reran ${staleOf(ck).length === 1 ? 'a stale gate run' : `${staleOf(ck).length} stale gate runs`} (${staleOf(ck).join(', ')}); polling once more`)
+          continue
+        }
+        if (checksFixes >= 1) return stop('checks', { pr: PR, failing: rd.failing, checks: ck })
+        checksFixes++
+        const w = await ciFix(ck, rd.failing, 'unasked')
+        if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
+        if (w.rerun) {
+          reran = true
+          continue
+        }
+        if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: ck, review: w.review })
+        expected = w.fix.commit
+        head = expected
+        const pushed = await lookPush()
+        if (pushed) return pushed
+        continue
+      }
+      // #1373: a head a fix or a sync moved is verified before the owner sees it, so the stop, its verified record and its pictures name one head. The verification runs after the poll's forge read, so the wait reads the forge again (the pull request head, its checks, the base's ancestry) before the stop.
+      if (!sameSha(verify.head, expected)) {
+        const rv = await call(`${CTX}\nThe branch of PR #${PR} moved to the head ${expected} after its verification at ${verify.head}; verify that head before the owner looks at it.\n${verifyBody}`, { label: 'look-reverify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+        if (!complete(rv, VERIFY) || !sameSha(rv.head, expected)) return stop('verify', { pr: PR, verify: rv, problems: [{ id: '?', summary: `the verification of ${expected} returned no usable reply for it` }] })
+        if (verifyProblems(rv).length) return stop('verify', { pr: PR, verify: rv, problems: verifyProblems(rv) })
+        verify = { head: fuller(expected, rv.head), clean: true, results: rv.results, ...(picturesOf(rv).length ? { pictures: picturesOf(rv) } : {}) }
+        continue
+      }
+      break
     }
     return lookStop(PR, expected)
   }
@@ -2874,7 +3133,7 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
     head = expected
     const failingNames = Array.isArray(ck.failing) ? ck.failing : []
     const pendingNames = Array.isArray(ck.pending) ? ck.pending : []
-    const state = ck.state === 'behind' ? 'behind' : ck.state === 'failed' || failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length || noCheckYet(ck) ? 'pending' : ck.state
+    const state = ck.state === 'behind' ? 'behind' : ck.state === 'failed' || failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length || noCheckYet(ck) || (MARKED && unproven(ck)) ? 'pending' : ck.state
     if (state === 'pending') {
       if (++pendingWaits >= PENDING_WAITS) return stop('checks-pending', { pr: PR, pending: pendingNames, checks: ck })
       continue

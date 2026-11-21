@@ -2898,9 +2898,9 @@ class OwnerNoticeTest(unittest.TestCase):
 
 
 class ClaimOverlapTest(unittest.TestCase):
-    def reading(self, claims, first, rule, files, asks=None):
+    def reading(self, claims, first, rule, files):
         return {"claims": claims, "sprints": [SA, SB], "files": files, "first": first,
-                "rule": rule, "asks": asks}
+                "rule": rule}
 
     def test_the_earlier_started_slice_lands_first(self):
         entries = [claim_entry(5, SB, "a.py"), claim_entry(3, SA, "b.py, ./a.py")]
@@ -2912,12 +2912,13 @@ class ClaimOverlapTest(unittest.TestCase):
         self.assertEqual(sprints.claim_overlaps(entries),
                          [self.reading([3, 5], 5, "live-fault", ["a.py"])])
 
-    def test_two_live_fault_fixes_give_one_unsettled_reading_and_one_asker(self):
+    def test_two_live_fault_fixes_give_one_unsettled_reading(self):
         entries = [claim_entry(3, SA, "a.py", live_fault=True),
                    claim_entry(5, SB, "a.py", live_fault=True)]
         readings = sprints.claim_overlaps(entries)
         self.assertEqual(len(readings), 1)
-        self.assertEqual(readings[0], self.reading([3, 5], None, "unsettled", ["a.py"], SB))
+        self.assertEqual(readings, [self.reading([3, 5], None, "unsettled", ["a.py"])])
+        self.assertNotIn("asks", readings[0])
 
     def test_paths_overlap_segment_by_segment(self):
         legacy = {"id": 2, "sprint_id": SA, "title": "ta", "kind": "claim", "text": "x",
@@ -2941,6 +2942,10 @@ class ClaimOverlapTest(unittest.TestCase):
             ("tests/t?st.py", "tests/tst.py", None),
             ("a*b", "ab", ["ab"]),
             ("a[", "a[", ["a["]),
+            ("app/[[]id]/page.tsx", "app/[[]id]/page.tsx", ["app/[[]id]/page.tsx"]),
+            ("a[[]b", "a[[x]b", ["a[[]b", "a[[x]b"]),
+            ("a[]]b", "a[]]b", ["a[]]b"]),
+            ("a[]]b", "a[[]b", None),
             ("tests/test_[ab].py", "tests/test_[cd].py", None),
             ("tests/test_[a-c].py", "tests/test_[b-d].py", ["tests/test_[a-c].py", "tests/test_[b-d].py"]),
             ("tests/test_[!a].py", "tests/test_[a].py", None),
@@ -2981,7 +2986,7 @@ class ClaimOverlapTest(unittest.TestCase):
                 self.assertEqual(len(readings), 1)
                 self.assertEqual(readings[0]["claims"], [3, 5])
 
-    def test_a_later_live_fault_claim_of_a_slice_still_asks_the_owner(self):
+    def test_a_later_live_fault_claim_of_a_slice_still_reads_unsettled(self):
         entries = [claim_entry(1, SA, "a.py", started=1),
                    claim_entry(2, SB, "a.py,b.py", live_fault=True, started=2),
                    {**claim_entry(3, SA, "b.py", live_fault=True, started=1), "issue": 1}]
@@ -2990,7 +2995,7 @@ class ClaimOverlapTest(unittest.TestCase):
             readings = sprints.claim_overlaps(order)
             self.assertEqual(readings, [{"claims": [3, 2], "sprints": [SA, SB],
                                          "files": ["a.py", "b.py"], "first": None,
-                                         "rule": "unsettled", "asks": SB}])
+                                         "rule": "unsettled"}])
 
     def test_a_reposted_claim_keeps_its_slices_start(self):
         slices = ((7, 3, {"claims": [6, 4], "sprints": [SA, SB], "first": 6}),
@@ -3005,8 +3010,7 @@ class ClaimOverlapTest(unittest.TestCase):
                 self.assertEqual({e["sprint_id"]: e["started"] for e in entries},
                                  {SA: started, SB: 4})
                 self.assertEqual(sprints.claim_overlaps(entries),
-                                 [{**expected, "files": ["a.py"], "rule": "earlier-started",
-                                   "asks": None}])
+                                 [{**expected, "files": ["a.py"], "rule": "earlier-started"}])
 
 
 class NoticeBlockTest(unittest.TestCase):
@@ -3070,15 +3074,22 @@ class NoticeBlockTest(unittest.TestCase):
                    claim_entry(5, SB, "a.py", title="Exporter")]
         fault = [claim_entry(3, SA, "a.py", live_fault=True, title="Importer"),
                  claim_entry(5, SB, "a.py", live_fault=True, title="Exporter")]
-        last = lambda entries, reader: sprints.notice_block(entries, reader, now).splitlines()[-1]
+        block = lambda entries, reader: sprints.notice_block(entries, reader, now).splitlines()
+        last = lambda entries, reader: block(entries, reader)[-1]
         self.assertEqual(last(feature, SA), '- overlap with "Exporter" on a.py: '
                                             'your slice lands first; theirs rebases')
         self.assertEqual(last(feature, SB), '- overlap with "Importer" on a.py: '
                                             'their slice lands first; rebase yours after it lands')
-        self.assertEqual(last(fault, SB), '- overlap with "Importer" on a.py: '
-                                          'both fix a live fault; ask the owner which lands first')
-        self.assertEqual(last(fault, SA), '- overlap with "Exporter" on a.py: both fix a live '
-                                          'fault; they ask the owner which lands first')
+        unsettled = ('both fix a live fault and the rule cannot order them; keep working, '
+                     'the owner sees this overlap on the page')
+        self.assertEqual(last(fault, SB), f'- overlap with "Importer" on a.py: {unsettled}')
+        self.assertEqual(last(fault, SA), f'- overlap with "Exporter" on a.py: {unsettled}')
+        for reader in (SA, SB):
+            lines = block(fault, reader)
+            self.assertEqual([line for line in lines if line.startswith("- overlap")],
+                             [lines[-1]])
+            for line in lines:
+                self.assertNotIn("ask the owner", line)
         self.assertTrue(last(feature, SC).startswith("- claim from "))
         self.assertFalse(any(line.startswith("- overlap")
                              for line in sprints.notice_block(feature, SC, now).splitlines()))

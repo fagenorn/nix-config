@@ -1,6 +1,6 @@
 # ADR-console-085 — A claim names files, ends when its slice lands, and a default rule orders overlaps
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-091
 - **Decided in:** #1337
 
 ## Context

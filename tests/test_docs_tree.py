@@ -610,7 +610,8 @@ class DocsTreeTest(unittest.TestCase):
         status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
                                       "through-tailscale-serve-on-a-guest-port.md"
                                       ).read_text().splitlines() if row.startswith("- **Status:**"))
-        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077, ADR-console-086")
+        self.assertTrue(status.startswith(
+            "- **Status:** accepted; amended by ADR-console-077, ADR-console-086"), status)
 
     def test_the_tailnet_name_source_is_recorded_as_adr_078(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"

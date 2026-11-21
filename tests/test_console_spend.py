@@ -111,6 +111,7 @@ class PhaseTest(unittest.TestCase):
             "direct-impl": "implement", "review-2": "task review",
             "rereview-2-1": "task review", "fix-2-1": "task review", "fix-ci": "task review",
             "final-1": "final review", "final-scoped": "final review", "final-scoped-again": "final review",
+            "follow-ups-1": "final review",
             "final-codex": "final review", "fix-wave": "fix wave",
             "fix-wave-review-2": "fix wave", "verify": "verify", "verify-rerun-1": "verify",
             "pr": "land", "merge": "land", "checks-3": "land", "land-pr-12": "land",
