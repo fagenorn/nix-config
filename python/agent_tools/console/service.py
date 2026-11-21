@@ -60,6 +60,7 @@ stream `Content-Length`):
     POST /api/notice 200 application/json, a manager posts one notice for its project (below)
     POST /api/notices 200 application/json, a manager lists its project's open notices (below)
     POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
+    POST /api/live-fault 200 application/json, a manager declares an issue a fault live in production (below)
     POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
@@ -73,7 +74,7 @@ stream `Content-Length`):
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/permit`,
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/live-fault`, `/api/permit`,
                     `/api/picture`, `/api/release-card`, `/api/release-answer` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
@@ -927,11 +928,13 @@ recap_failed <Type>: <message>` and 500 `recap failed`. `recap(sprint_id, secret
 ingest lock and is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`) and a read: it appends
 nothing, publishes nothing and marks nothing read. It answers 200 `application/json`,
 `json.dumps(recap, sort_keys=True, separators=(",", ":"))` of `{"sprint_id", "goal", "brief",
-"report", "unread"}`: `brief` is null until a brief is sent, else `{"version", "decision" ("none",
+"report", "live_faults", "unread"}`: `brief` is null until a brief is sent, else `{"version", "decision" ("none",
 "approved" or "changes"), "reply" (the owner's words, or null), "parts"}` of the latest version;
 `report` is null until a report is sent, else the last report `{"at", "status", "phase",
 "milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}`, which a newer
-brief does not remove; `unread` is the number of the owner's messages not yet read.
+brief does not remove; `live_faults` is `[sprints.fault_entry(f) for f in sprints.open_faults(sprint)]`,
+the sprint's standing live-fault declarations in id order; `unread` is the number of the owner's
+messages not yet read.
 
 Questions (#891): `POST /api/ask` is a manager write dispatched like `/api/brief`, before
 `PAGE_WRITES`: `_checked_length(MAX_ASK_BYTES)` (65536: any `Origin` 403 `origin refused`, 415, 411,
@@ -1029,6 +1032,21 @@ folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_spr
 `sprints.project_notices` over every folded sprint of the project, and appends and publishes
 nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
 writer; a refusal appends and publishes nothing.
+
+Live faults (#1432): `POST /api/live-fault` is a manager write dispatched like `/api/notice`, before
+`PAGE_WRITES`, through `_checked_length(MAX_LIVE_FAULT_BYTES)` (16384: any `Origin` 403 `origin
+refused`, 415, 411, 413 `too large`), so it is owner-only on the guest port. A body
+`sprints.parse_live_fault_request` (`sprint_id`, `secret`, `fault`) does not accept is 400 `bad live
+fault`; a `sprints.SecretRefused` is `console: live_fault_refused <sprint_id> secret refused` and 403
+`secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
+reason (a fixed `sprints.py` text: neither the secret nor the evidence text is printed); any other
+exception is `console: live_fault_failed <Type>: <message>` and 500 `live fault failed`. Success is
+200 `application/json` (sorted keys, compact) `{"fault":<id>}`, the new row's `seq`.
+`declare_live_fault(sprint_id, secret, fault)`, under the ingest lock, is `_manager_sprint`
+(`NOT_OPEN`, then `SecretRefused`), then `sprints.declarable_fault`; it appends exactly one
+`fault.declared` row (project the sprint's project) `{"sprint_id", "goal", "fault": <checked>}`,
+folds, publishes and returns the row's `seq`. It nudges nobody and calls no tracker writer; a
+refusal appends and publishes nothing.
 
 Owner notice nudges (#1120, ADR-console-053, D6): with a nudger, `post_owner_notice` records, still under the
 lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
@@ -1928,7 +1946,7 @@ from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
     folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     LOOK_RECORDED, PERMIT_JUDGED, PERMIT_LANDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
@@ -1999,6 +2017,7 @@ MESSAGE_REPLY_PATH = "/api/message-reply"
 ASK_PATH = "/api/ask"
 WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
 NOTICE_PATH = "/api/notice"
+LIVE_FAULT_PATH = "/api/live-fault"
 NOTICES_PATH = "/api/notices"
 PERMIT_PATH = "/api/permit"
 WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
@@ -2086,11 +2105,12 @@ MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
                                             MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, WITHDRAW_QUESTION_PATH,
                                             NOTICE_PATH, NOTICES_PATH, WITHDRAW_NOTICE_PATH,
-                                            PERMIT_PATH, PICTURE_PATH})
+                                            LIVE_FAULT_PATH, PERMIT_PATH, PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
 MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_NOTICE_BYTES = 16384
+MAX_LIVE_FAULT_BYTES = 16384
 MAX_NOTICES_BYTES = 4096
 MAX_PERMIT_BYTES = 16384
 PERMIT_LANDED_SECONDS = 30 * 60
@@ -2333,6 +2353,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._notice_request()
         if route == NOTICES_PATH:
             return self._notices_request()
+        if route == LIVE_FAULT_PATH:
+            return self._live_fault_request()
         if route == PERMIT_PATH:
             return self._permit_request()
         if route == WITHDRAW_NOTICE_PATH:
@@ -3155,6 +3177,31 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(500, "notice failed")
         self._send(200, "application/json", json.dumps(
             {"notice": notice_id}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _live_fault_request(self):
+        """The manager's route: one live fault declared for its sprint, with the sprint's secret."""
+        length = self._checked_length(MAX_LIVE_FAULT_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, fault = sprints.parse_live_fault_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad live fault")
+        try:
+            fault_id = self.server.console.declare_live_fault(sprint_id, secret, fault)
+        except sprints.SecretRefused:
+            print(f"console: live_fault_refused {sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: live_fault_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: live_fault_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "live fault failed")
+        self._send(200, "application/json", json.dumps(
+            {"fault": fault_id}, sort_keys=True, separators=(",", ":")).encode())
 
     def _notices_request(self):
         """The manager's route: the project's open notices, read with the sprint's secret."""
@@ -9002,6 +9049,7 @@ class ConsoleService:
                     "milestone": report.milestone, "tracker_url": report.tracker_url,
                     "issues": [{"issue": issue, "stage": stage} for issue, stage in report.issues],
                     "inbox": list(report.inbox), "next": report.next_step},
+                "live_faults": [sprints.fault_entry(fault) for fault in sprints.open_faults(sprint)],
                 "unread": len(sprints.unread(sprint))}
 
     def answer_message(self, sprint_id: str, secret: str, message_id: int, reply: str) -> str:
@@ -9109,6 +9157,16 @@ class ConsoleService:
             checked = sprints.postable_notice(sprint, notice, others, is_folder)
             appended = self.log.append([(NOTICE_POSTED, sprint.project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "notice": checked})])
+            self._apply(appended)
+            return appended[-1].seq
+
+    def declare_live_fault(self, sprint_id: str, secret: str, fault: dict) -> int:
+        """Append one `fault.declared` event for the sprint's project; its seq, the fault's id."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            checked = sprints.declarable_fault(sprint, fault)
+            appended = self.log.append([(FAULT_DECLARED, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "fault": checked})])
             self._apply(appended)
             return appended[-1].seq
 

@@ -95,7 +95,7 @@ TABLE = {
     "/api/brief": "owner", "/api/report": "owner", "/api/close": "owner", "/api/inbox": "owner",
     "/api/message-reply": "owner", "/api/recap": "owner", "/api/ask": "owner",
     "/api/withdraw-question": "owner", "/api/notice": "owner", "/api/notices": "owner",
-    "/api/withdraw-notice": "owner", "/api/picture": "owner", "/api/permit": "owner",
+    "/api/withdraw-notice": "owner", "/api/live-fault": "owner", "/api/picture": "owner", "/api/permit": "owner",
     "/api/hooks": "owner", "/api/readings": "owner",
     "/api/release-card": "owner", "/api/release-answer": "owner", "/spend": "owner",
     "/api/sprint-status": "owner", "/api/profile": "owner", "/api/excluded": "owner",
