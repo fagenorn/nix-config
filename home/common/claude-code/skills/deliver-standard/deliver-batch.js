@@ -1101,6 +1101,13 @@ ${RULES}`, rereviewLabel, { agentType: 'reviewer', schema: FINDINGS })
         if (moved) { head = fix.commit; unpushed = true }
       }
     }
+    // #1371: with prelock no record step follows here, and body() polls the checks of the head on the remote, so a reviewed fix commit is pushed now.
+    if (unpushed && pr && prelock) {
+      const plabel = `land-push-${n}-${c.sync}`
+      const pu = await call(`A sync fix of issue #${n} of ${SLUG} passed its re-review at ${head} and is not pushed yet. Push it: git -C ${W} fetch origin, confirm git -C ${W} rev-parse HEAD prints ${head}, then run git -C ${W} push origin ${B}, then read git -C ${W} rev-parse origin/${B}. Return ok true and head (that sha) when the push succeeded. When HEAD is another commit or the push fails, change nothing else and return ok false with the head you read and the error in detail.
+${RULES}`, plabel, { ...lifecycleClerk, schema: RECORD_SCHEMA })
+      if (!pu || pu.ok !== true || !sameSha(pu.head, head)) return out('stopped', { stage: 'land-push', expected: head, head: pu ? pu.head : null, detail: pu && pu.detail ? pu.detail : `${plabel} did not push ${head}` })
+    }
     if (head !== expected || outside) {
       expected = head
       if (pr && !prelock) return await advance(outside, !!early, null, unpushed)

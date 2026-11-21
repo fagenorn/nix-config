@@ -3747,7 +3747,7 @@ class SourceTest(unittest.TestCase):
 CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
     (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "readopt-push-", "recover-end-", "ask-", "settle-",
-             "land-unlock-", "land-ask-", "land-lock-", "land-relock-", "land-record-", "land-status-", "land-sync-prove-", "land-pr-", "land-open-", "land-checks-", "land-merge-", "close-out-",
+             "land-unlock-", "land-ask-", "land-lock-", "land-relock-", "land-record-", "land-status-", "land-sync-prove-", "land-push-", "land-pr-", "land-open-", "land-checks-", "land-merge-", "close-out-",
              "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-", "train-flip-")),
     (IMPL, ("land-sync-", "land-sync-resolve-", "land-sync-fix-", "land-fix-", "train-build-")),
     (REV, ("land-sync-review-", "land-sync-rereview-", "land-fix-review-")),
@@ -3779,6 +3779,11 @@ SCENARIOS = (
     {"patch": BEHIND,
      "replies": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
                  "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped", "failing_input": "x"}]}}},
+    # #1371: a sync fix that passed its re-review before the lock was asked for is pushed by its own land-push step.
+    {"patch": {"land-pr-1": {"own_red": {"head": SHA, "failing": ["shard-3"], "details": "d", "behind": True}, "lock": None, "checks": None}},
+     "replies": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
+                 "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped", "failing_input": "x"}]},
+                 "land-checks-1-1": {"state": "passed", "head": "f" * 40, "required": ["ci"], "passed": ["ci"]}}},
     {"patch": BEHIND,
      "replies": {"land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "merge_commit": B, "notes": "ok"},
                  "land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "lost_to", "lock_sha": SHA, "by": HOLDER}},
@@ -3848,7 +3853,7 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model is checked, sets the model of every clerk call except the setup and lifecycle steps, which stay on the default, and is passed to every child and the relaunch only when haiku."""
 
-    ON_DEFAULT = {"setup", "readopt-push-", "land-sync-prove-", "land-unlock-", "land-lock-", "land-relock-", "land-pr-", "land-open-", "land-merge-", "land-record-", "land-checks-", "close-out-",
+    ON_DEFAULT = {"setup", "readopt-push-", "land-sync-prove-", "land-unlock-", "land-lock-", "land-relock-", "land-pr-", "land-open-", "land-merge-", "land-record-", "land-push-", "land-checks-", "close-out-",
                   "train-sweep-", "train-pr-", "train-checks-", "train-merge-"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
@@ -7107,6 +7112,34 @@ class BehindRedBeforeLockTest(unittest.TestCase):
         self.assertIn(f"--match-head-commit {B}", prompt(calls, "land-merge-1"))
         self.assertIn("#1: shard-3 had failed at a head behind dev and the land lock is held; "
                       "bringing the branch up to date before the lock is asked for", out["logs"])
+
+    def test_a_sync_fix_that_passed_its_review_is_pushed_before_the_checks_of_its_head_are_polled(self):
+        """#1371: the fix agent no longer pushes, and with no lock step before the polls the program pushes the reviewed fix itself."""
+        fixed = SyncFixRoundTest.FIXED
+        resolved = dict(SyncFixRoundTest.CONFLICTED)
+        replies = {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": resolved, "land-sync-review-1-1": SyncFixRoundTest.FOUND,
+                   "land-checks-1-1": dict(self.GREEN, head=fixed)}
+        out = run_full(patch=self.PRE, replies=replies)
+        calls = out["calls"]
+        self.assertEqual(row(out["result"], 1), {"issue": 1, "outcome": "landed", "pr": 41})
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-sync-fix-1-1",
+                                             "land-sync-rereview-1-1", "land-push-1-1", "land-checks-1-1", "land-record-1-1", "land-merge-1",
+                                             "close-out-1"])
+        push = prompt(calls, "land-push-1-1")
+        self.assertIn(f"git -C /r/.wt/w-issue-1-x rev-parse HEAD prints {fixed}", push)
+        self.assertIn("git -C /r/.wt/w-issue-1-x push origin issue-1-x", push)
+        self.assertNotIn("forge-claim land", push)
+        self.assertNotIn("First push that head", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"Accepted head: {fixed}", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"--match-head-commit {fixed}", prompt(calls, "land-merge-1"))
+        # A push that did not reach the head ends the landing before any poll or lock: nothing records a head that was never pushed.
+        for bad in (None, {"ok": False, "head": B, "detail": "rejected"}, {"ok": True, "head": B}):
+            with self.subTest(bad=bad):
+                stopped = run_full(patch=self.PRE, replies=dict(replies, **{"land-push-1-1": bad}))
+                got = row(stopped["result"], 1)
+                self.assertEqual((got["outcome"], got["stage"]), ("stopped", "land-push"))
+                for gone in ("land-checks-1-1", "land-record-1-1", "land-merge-1"):
+                    self.assertNotIn(gone, labels(stopped["calls"]))
 
     def test_a_failure_that_survives_the_sync_is_fixed_before_the_lock(self):
         fixed = {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed the shard", "tests": ["t"]}
