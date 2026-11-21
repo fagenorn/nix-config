@@ -1052,6 +1052,30 @@ class OwnAccountTest(unittest.TestCase):
             if row["label"] != "yours":
                 self.assertEqual(row["label"], f"Account {row['number']}")
 
+    def test_only_his_own_rows_carry_a_token_that_follows_his_directories(self):
+        cap = self.cap(["colleague-1", "home", "work"],
+                       {"colleague-1": "same-zq@corp-zq.invalid", "work": "same-zq@corp-zq.invalid",
+                        "home": "home-zq@corp-zq.invalid"},
+                       {"colleague-1": self.A})
+        numbers = guest.account_numbers(cap, {})
+        tokens = guest.own_tokens(numbers, {"colleague-1": "ino:1:aaa", "work": "ino:2:bbb"},
+                                  {"colleague-1"})
+        self.assertEqual(set(tokens), {numbers["colleague-1"]})
+        mine = guest.pool_view(cap, numbers, {"colleague-1"}, tokens)
+        other = guest.pool_view(cap, numbers, (), {})
+        self.assertEqual([row["ident"] for row in mine["accounts"] if row["label"] == "yours"],
+                         [tokens[numbers["colleague-1"]]])
+        self.assertEqual([row["ident"] for row in mine["accounts"] if row["label"] != "yours"], [None])
+        self.assertEqual([row["ident"] for row in other["accounts"]], [None, None])
+        again = guest.own_tokens(numbers, {"colleague-1": "ino:1:ccc"}, {"colleague-1"})
+        self.assertNotEqual(again, tokens)
+        self.assertNotIn("ino", json.dumps(mine))
+        self.assertEqual(guest.own_tokens(numbers, {}, {"colleague-1"}), {})
+
+    def test_the_token_of_an_account_ignores_the_order_of_its_directories(self):
+        self.assertEqual(guest.account_token(["a", "b"]), guest.account_token(["b", "a"]))
+        self.assertNotEqual(guest.account_token(["a", "b"]), guest.account_token(["a"]))
+
     def test_the_change_texts_pass_to_a_guest_and_name_their_reason(self):
         for text in (guest.NOT_YOUR_ACCOUNT_TEXT, guest.CHANGE_UNAVAILABLE_TEXT):
             self.assertEqual(guest.account_text(text), text)

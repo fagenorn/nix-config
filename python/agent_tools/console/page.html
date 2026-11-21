@@ -1591,8 +1591,13 @@ async function signOutAccount(p) {
   redrawAccounts();
 }
 function signoutControls(acct, p) {
-  if (typeof p.owner !== "string" || p.owner === "" || signedOut(p)) return;
+  if (typeof p.owner !== "string" || p.owner === "") return;
   const state = signoutPosts.get(p.profile);
+  // A sign-out that was done but left a manager behind answers 502 after the account reads signed out: the failure stays shown with no button.
+  if (signedOut(p)) {
+    if (state !== undefined && state.phase === "failed") acct.appendChild(el("span", "fail", "Could not sign out: " + state.reason));
+    return;
+  }
   const sending = state !== undefined && state.phase === "sending";
   const button = actionButton("acct-signout btn-quiet", "Sign out", () => signOutAccount(p));
   // aria-disabled, not disabled, as the exclusion button: the focus must stay restorable.
@@ -6283,7 +6288,7 @@ function renderPool(view) {
         item.appendChild(poolWindow("pool-week", row.week_left, "week", row.week_reset));
         item.appendChild(poolWindow("pool-session", row.five_hour_left, "session", row.five_hour_reset));
       }
-      if (row.label === "yours" && Number.isInteger(row.number) && row.number > 0) poolChangeControls(item, row);
+      if (row.label === "yours" && Number.isInteger(row.number) && row.number > 0 && typeof row.ident === "string" && row.ident !== "") poolChangeControls(item, row);
       list.appendChild(item);
     }
     nodes.push(list);
@@ -6326,12 +6331,12 @@ async function poolPost(row, failure, send) {
 }
 function poolSignOut(row) {
   return poolPost(row, "Could not sign out: ", () => fetch("/api/guest-account-signout", {
-    method: "POST", headers: stallHeaders(), body: JSON.stringify({account: row.number}),
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({account: row.number, ident: row.ident}),
   }));
 }
 function poolRemove(row) {
   return poolPost(row, "Could not remove: ", () => fetch("/api/guest-account-remove", {
-    method: "POST", headers: stallHeaders(), body: JSON.stringify({account: row.number}),
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({account: row.number, ident: row.ident}),
   }));
 }
 const POOL_REMOVE_NOTE = "Remove your account from the pool? It is signed out first. Each manager on it moves to another account, or waits for one with room; any other session keeps running.";

@@ -81,7 +81,10 @@ builds it from the owner's capacity view: `POOL_MEMBERS` are `state`, `tight`, `
 `resumes_at`, `no_reading` and `accounts`; each account row carries exactly `ACCOUNT_MEMBERS`: a
 neutral `label` (`Account <n>`, or `yours` on the page of a colleague holding a profile of that
 account, ADR-console-087 D4), the account's `number` (an `int`, the `<n>` of `Account <n>`, and
-the number of a `yours` row's account too: how a guest names an account in a write, #1345), `state`, the percent left and reset of the week and the session,
+the number of a `yours` row's account too: how a guest names an account in a write, #1345), its
+`ident` (a `yours` row's token, `own_tokens` of the account's profiles' recorded directory identities through
+`account_token`, else None: a number is recycled, so a destructive write sends both and acts only when the token
+still names his account), `state`, the percent left and reset of the week and the session,
 `next_reset`, `out_until` and `in_use` (not signed out and not excluded). One row stands for one
 account: a profile whose `duplicate_of` is set (signed in to an address another profile counts) has
 no row and shares its account's label. `tight`, `all_out`, `resumes_at` and `no_reading` are the
@@ -212,6 +215,7 @@ the service, which raises `Refused` for a write refused on its merits.
 import ctypes
 import errno
 import ipaddress
+import hashlib
 import json
 import os
 import re
@@ -645,7 +649,7 @@ def scoped(inputs: Mapping[str, object], projects: frozenset[str]) -> dict:
     return result
 
 
-ACCOUNT_MEMBERS = ("label", "number", "state", "week_left", "five_hour_left", "week_reset",
+ACCOUNT_MEMBERS = ("label", "number", "ident", "state", "week_left", "five_hour_left", "week_reset",
                    "five_hour_reset", "next_reset", "out_until", "in_use")
 POOL_MEMBERS = ("state", "tight", "all_out", "resumes_at", "no_reading", "accounts")
 NUMBERS_FILE = "account-numbers.json"
@@ -736,13 +740,29 @@ def own_signin(signin_runs: Mapping[str, Mapping], owners: Mapping[str, str],
     return {key: latest[key] for key in ("state", "at", "attempt")}
 
 
+def account_token(identities: Iterable[str]) -> str:
+    """An opaque token of the directories behind one account of his (their recorded identities, in any order)."""
+    return hashlib.sha256("\n".join(sorted(identities)).encode()).hexdigest()[:32]
+
+
+def own_tokens(numbers: Mapping[str, int], identities: Mapping[str, str],
+               mine: Collection[str]) -> dict[int, str]:
+    """The token of each account of `mine`, by its number; a profile with no recorded identity gives none."""
+    held: dict[int, list[str]] = {}
+    for profile in mine:
+        if profile in numbers and identities.get(profile) is not None:
+            held.setdefault(numbers[profile], []).append(identities[profile])
+    return {number: account_token(found) for number, found in held.items()}
+
+
 def pool_view(capacity: Mapping, numbers: Mapping[str, int],
-              mine: Collection[str] = frozenset()) -> dict:
+              mine: Collection[str] = frozenset(),
+              tokens: Mapping[int, str] = MappingProxyType({})) -> dict:
     own = _own_numbers(numbers, mine)
     entries = sorted((entry for entry in capacity["profiles"] if entry["duplicate_of"] is None),
                      key=lambda entry: (numbers[entry["profile"]], entry["profile"]))
     rows = [{"label": _label(numbers[entry["profile"]], own), "number": numbers[entry["profile"]],
-             "state": entry["state"],
+             "ident": tokens.get(numbers[entry["profile"]]), "state": entry["state"],
              "week_left": entry["week_left"], "five_hour_left": entry["five_hour_left"],
              "week_reset": entry["week_reset"], "five_hour_reset": entry["five_hour_reset"],
              "next_reset": entry["next_reset"], "out_until": entry["out_until"],

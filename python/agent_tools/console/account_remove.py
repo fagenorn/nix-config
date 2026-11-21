@@ -7,8 +7,10 @@ launcher's `valid_name` and `sessions.account_name` bound none); `typed` is any 
 one included, because the service judges whether it matches. It raises `ValueError` otherwise.
 `parse_signout_request(body)` takes a UTF-8 JSON object whose members are exactly `profile`, a
 non-empty string, and returns it, else `ValueError` (#1345). `parse_guest_request(body)` takes one
-whose members are exactly `account`, an `int` that is not a `bool` and is at least 1, and returns
-it, else `ValueError`: a colleague names his account by its pool number, never by a profile.
+whose members are exactly `account`, an `int` that is not a `bool` and is at least 1, and `ident`, a
+non-empty string, and returns `(account, ident)`, else `ValueError`: a colleague names his account by
+its pool number and the token his pool row carried (`guest.account_token`), never by a profile; the
+number is recycled, so the token binds the request to the account he saw.
 
 Texts. `UNAVAILABLE` is `removing an account is not available on this host`, `MISMATCH` is `the
 typed name does not match`, `UNKNOWN` is `no such profile`, `running(profile)` is `a sign-in is
@@ -115,11 +117,13 @@ def parse_signout_request(body: bytes) -> str:
     return profile
 
 
-def parse_guest_request(body: bytes) -> int:
-    account = _object(body, {"account"})["account"]
-    if not isinstance(account, int) or isinstance(account, bool) or account < 1:
+def parse_guest_request(body: bytes) -> tuple[int, str]:
+    value = _object(body, {"account", "ident"})
+    account, ident = value["account"], value["ident"]
+    if (not isinstance(account, int) or isinstance(account, bool) or account < 1
+            or not isinstance(ident, str) or not ident):
         raise ValueError("wrong members")
-    return account
+    return account, ident
 
 
 def parse_remove_request(body: bytes) -> tuple[str, str]:

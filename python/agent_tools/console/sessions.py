@@ -327,18 +327,31 @@ def _observation(document: object,
 def read_session_registry(
     directories: Iterable[Path],
     alive: Callable[[int, str | None, str | None], bool] = process_matches,
+    strict: bool = False,
 ) -> dict[str, Observation]:
+    """The live sessions each registry directory shows.
+
+    A directory or a file that cannot be read is skipped. With `strict` it raises instead (`OSError`,
+    or `ValueError` for a file that is not JSON; a directory or a file that is not there is no
+    session), so a caller that must know a session is gone is never told so by a failed read.
+    """
     result: dict[str, Observation] = {}
     for directory in directories:
         profile = profile_of(Path(directory))
         try:
             names = sorted(Path(directory).glob("*.json"))
         except OSError:
+            if strict:
+                raise
             continue
         for path in names:
             try:
                 document = json.loads(path.read_text())
+            except FileNotFoundError:
+                continue
             except (OSError, ValueError):
+                if strict:
+                    raise
                 continue
             found = _observation(document, alive, profile)
             if found is not None and found.session_id not in result:

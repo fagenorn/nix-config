@@ -74,11 +74,14 @@ class RequestTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     parse_signout_request(body)
 
-    def test_the_guest_request_is_exactly_a_positive_account_number(self):
-        self.assertEqual(parse_guest_request(b'{"account": 2}'), 2)
-        for body in (b"{}", b'{"account": 0}', b'{"account": -1}', b'{"account": true}',
-                     b'{"account": "2"}', b'{"account": 2.0}',
-                     b'{"account": 2, "profile": "work"}', b"not json"):
+    def test_the_guest_request_is_exactly_a_positive_account_number_and_its_token(self):
+        self.assertEqual(parse_guest_request(b'{"account": 2, "ident": "t0k"}'), (2, "t0k"))
+        for body in (b"{}", b'{"account": 2}', b'{"ident": "t"}',
+                     b'{"account": 0, "ident": "t"}', b'{"account": -1, "ident": "t"}',
+                     b'{"account": true, "ident": "t"}', b'{"account": "2", "ident": "t"}',
+                     b'{"account": 2.0, "ident": "t"}', b'{"account": 2, "ident": ""}',
+                     b'{"account": 2, "ident": 5}', b'{"account": 2, "ident": null}',
+                     b'{"account": 2, "ident": "t", "profile": "work"}', b"not json"):
             with self.subTest(body=body):
                 with self.assertRaises(ValueError):
                     parse_guest_request(body)

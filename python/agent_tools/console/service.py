@@ -204,15 +204,18 @@ start 502 `the sign-in could not start: <kind>`, anything else 500. Stderr lines
 `console: guest_signin_refused <reason>` (reason one of `consent`, `access`, `no_run`, `busy`, `unavailable`), `console:
 guest_account_failed <kind or Type>` and `console: guest_signin_failed <Type>`; the status read and the trust grant of his profile
 print no profile name. No line names a login, a profile, a link or a code.
-The sign-out and the removal (#1345) read `{"account": <number>}` (`MAX_ACCOUNT_BYTES`, `account_remove.parse_guest_request`,
-400 `bad account`), the number his pool row carries. Without a signer-out (and, for a removal, an account remover and a
+The sign-out and the removal (#1345) read `{"account": <number>, "ident": <token>}` (`MAX_ACCOUNT_BYTES`,
+`account_remove.parse_guest_request`, 400 `bad account`), the number and the `ident` his pool row carries: a number is recycled,
+so the request acts only while `guest.account_token` over the recorded directories of his profiles holding it is that token. Without a signer-out (and, for a removal, an account remover and a
 sign-in reader) the refusal is `guest.CHANGE_UNAVAILABLE_TEXT` before any lock is taken. In one ingest block, with no `_adding`,
 the access and epoch are checked and the targets are the profiles of his own (`_owned_now`, over a listing read afresh) that hold
-that number; none (another colleague's account, the owner's, an unknown number, an unreadable listing) is 409
-`guest.NOT_YOUR_ACCOUNT_TEXT` with nothing run or appended. Each target, by name and with the ingest lock released, goes to
-`_sign_out_profile` or `_remove_profile` with `by.login` and a check, `_still_his`, that the core runs in the ingest block that
-marks the profile, under `_adding`: access and epoch, then the profile still his, listed now and still holding the number, so a
-directory the owner replaced while the request waited is refused there and left untouched. The moves of managers on his profile
+that number; none (another colleague's account, the owner's, an unknown number, an unreadable listing, a token that no longer
+names his account) is 409 `guest.NOT_YOUR_ACCOUNT_TEXT` with nothing run or appended. The targets, by name and with the ingest
+lock released, go together to `_sign_out_profiles` or `_remove_profiles` with `by.login` and a check, `_still_his`, that the core
+runs in the ingest block that marks each profile and again once the drain of that profile has ended (the drain releases the lock),
+under `_adding`: access and epoch, then the profile still his, listed now and the token still his, so a directory the owner
+replaced while the request waited, in either wait, is refused there and left untouched. Every target is checked, marked and
+reserved before any is changed, so a busy second profile of one account leaves the first as it was. The moves of managers on his profile
 are those of the owner's sign-out and removal. A refusal is 409 with `guest.account_text`; `SignOutFailed` is 502 `the account
 could not be signed out: <kind>`, `RemoveFailed` 502 `the account could not be removed: <kind>`, `MoveFailed` 502
 `account_remove.NOT_MOVED`, anything else 500 `changing the account failed`; success is an empty `204`. Stderr lines are `console:
@@ -451,15 +454,24 @@ session of the owner's own profile is not stopped. For a colleague's profile (on
 at the first block, #1345, ADR-console-087 D5) the same block also reserves, as a `_MoveReservation`,
 every started manager on it with no stop and no end, and refuses `<profile> is still being read; try
 again in a moment` (nothing marked, signed out, stopped or launched) when such a sprint is launching,
-nudged or stopping. With such moves one listing is read off the lock before the sign-out: a manager's
-session it does not show whose `_settled` is under `sprints.STOP_SETTLE_MS` old refuses the same way, a
-listing that fails prints `console: manager_move_failed <Type>` and refuses the same way. After the
+nudged or stopping, and for a removal also when a started manager on it has a stop pending or a closing
+report to give, or a withdrawn sprint's stop is pending (`_pending`: its profile is not recorded), because
+deleting the profile would delete the session registry that stop reads. With such moves
+one conclusive listing (`sessions.read_session_registry(..., strict=True)`: a session file it cannot read
+is a failure, never a manager gone) is read off the lock before the sign-out, and only the sessions on
+that profile count: a manager's session it does not show on the profile whose `_settled` is under
+`sprints.STOP_SETTLE_MS` old refuses the same way, as does one it shows only on another profile or a
+session of another sprint's manager (recorded on another profile) shown on this one, and a listing that
+fails prints `console: manager_move_failed <Type>` and refuses the same way. After the
 sign-out (recorded `signed_out`, so no relaunch chooses the profile) each moved session shown is
 stopped directly through the stopper, and only then does the launcher's rm run; a stop that fails
 keeps that manager (`console: manager_move_failed <sprint_id> <Type>`), skips the rm and appends the
 row of outcome `remove_failed`, kind `stop_failed` (502 `the account was signed out but not removed:
 stop_failed`). Every other moved manager is started again as a takeover on the pool's choice, or
-waits, once the mark is dropped, on every way out after the stops; a sprint is never launched twice.
+waits, once the mark is dropped, on every way out after the stops; a sprint is never launched twice. A launch
+that cannot be dispatched appends `manager.failed` (takeover, reason `MOVE_NOT_STARTED`, which the retry offers
+again) and the call ends with `account_remove.MoveFailed("launch_failed")` (502 `account_remove.NOT_MOVED`) when
+nothing else failed. The owner's route prints no profile on stderr when it is a colleague's (`profile_named`).
 `ConsoleService.sign_out_account(profile)` (the owner's entry, with a signer-out and a colleague's
 profile, else `account_remove.SIGNOUT_UNAVAILABLE` or `NOT_COLLEAGUE`) runs the same moves around the
 sign-out alone and appends one `signin.acted` row of action `signout`, outcome `signed_out` or
@@ -2398,20 +2410,27 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except ValueError:
             self._refuse(400, "bad removal")
             return False
+        named = console.profile_named(profile)
+        shown = f" {profile}" if named else ""
         try:
             console.remove_account(profile, typed)
         except sprints.Refused as error:
-            print(f"console: account_remove_refused {error}", file=sys.stderr)
+            print(f"console: account_remove_refused{' ' + str(error) if named else ''}",
+                  file=sys.stderr)
             self._refuse(409, str(error))
             return False
         except account_remove.SignOutFailed as error:
-            print(f"console: account_remove_signout_failed {profile} {error.kind}",
+            print(f"console: account_remove_signout_failed{shown} {error.kind}",
                   file=sys.stderr)
             self._refuse(502, f"the account was not removed: its sign-out failed: {error.kind}")
             return False
         except account_remove.RemoveFailed as error:
-            print(f"console: account_remove_failed {profile} {error.kind}", file=sys.stderr)
+            print(f"console: account_remove_failed{shown} {error.kind}", file=sys.stderr)
             self._refuse(502, f"the account was signed out but not removed: {error.kind}")
+            return False
+        except account_remove.MoveFailed as error:
+            print(f"console: account_remove_move_failed {error.kind}", file=sys.stderr)
+            self._refuse(502, account_remove.NOT_MOVED)
             return False
         except Exception as error:
             print(f"console: account_remove_failed {type(error).__name__}", file=sys.stderr)
@@ -3703,15 +3722,15 @@ class GuestHandler(ConsoleHandler):
         if body is None:
             return False
         try:
-            number = account_remove.parse_guest_request(body)
+            number, ident = account_remove.parse_guest_request(body)
         except ValueError:
             self._refuse(400, "bad account")
             return False
         try:
             if route == GUEST_ACCOUNT_SIGNOUT_PATH:
-                console.guest_sign_out(by, number)
+                console.guest_sign_out(by, number, ident)
             else:
-                console.guest_remove(by, number)
+                console.guest_remove(by, number, ident)
         except sprints.Refused as error:
             print(f"console: guest_account_change_refused {guest.account_reason(str(error))}",
                   file=sys.stderr)
@@ -3980,6 +3999,9 @@ class _TakeoverReservation:
     """A launch reservation made by the bring-back: it runs only while the takeover is still decided."""
 
 
+MOVE_NOT_STARTED = "the manager could not be started again after its account was signed out or removed"
+
+
 class _MoveReservation:
     """A launch reservation made by a move: the manager's account was signed out or removed, so it starts again (#1345)."""
 
@@ -4155,6 +4177,9 @@ class ConsoleService:
         self._moved: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
+            if listing is None else listing)
+        self._conclusive_listing = (
+            (lambda: sessions.read_session_registry(self._session_dirs(), strict=True))
             if listing is None else listing)
         self._nudging: set[str] = set()
         self._nudge_again: set[str] = set()
@@ -4702,7 +4727,9 @@ class ConsoleService:
             owners = self._owners_now()
             for login, projects in access.colleagues.items():
                 mine = {profile for profile, owner in owners.items() if owner == login}
-                pool = guest.pool_view(inputs["capacity"], self._account_numbers, mine)
+                pool = guest.pool_view(
+                    inputs["capacity"], self._account_numbers, mine,
+                    guest.own_tokens(self._account_numbers, self._account_identities, mine))
                 running = guest.sprint_labels(
                     self._sprints, guest.profile_labels(self._account_numbers, mine),
                     guest.retired_labels(self._retired_numbers, self._account_numbers, mine))
@@ -6398,13 +6425,18 @@ class ConsoleService:
             raise sprints.Refused(account_remove.UNAVAILABLE)
         if typed != profile:
             raise sprints.Refused(account_remove.MISMATCH)
-        self._remove_profile(profile, "owner", lambda: None)
+        self._remove_profiles([profile], "owner", lambda _: None)
 
     def sign_out_account(self, profile: str) -> None:
         """The owner signs a colleague's account out and keeps it his; refusals are `sprints.Refused`."""
         if self._signer_out is None:
             raise sprints.Refused(account_remove.SIGNOUT_UNAVAILABLE)
-        self._sign_out_profile(profile, "owner", lambda: self._colleague_only(profile))
+        self._sign_out_profiles([profile], "owner", self._colleague_only)
+
+    def profile_named(self, profile: str) -> bool:
+        """Whether a stderr line may name `profile`: never a colleague's (#1343, #1345)."""
+        with self._ingest:
+            return profile not in self._account_owners
 
     def _colleague_only(self, profile: str) -> None:
         """Under the ingest lock: refuse a profile that is not listed or that no colleague added."""
@@ -6413,14 +6445,18 @@ class ConsoleService:
         if profile not in self._owners_now():
             raise sprints.Refused(account_remove.NOT_COLLEAGUE)
 
-    def _begin_change(self, profile: str, check: Callable[[], None]
+    def _begin_change(self, profile: str, check: Callable[[], None], removal: bool = False
                       ) -> tuple[bool, list[_Move]]:
         """Under `_adding`: check, mark the profile as being removed, drain, reserve the moves.
 
         One block of the ingest lock holds `check()`, the listed and sign-in checks, the mark and
-        the reservations. For a colleague's profile each started manager on it is reserved (a
-        `_MoveReservation`) and the colleague flag is True; a manager whose launch, nudge or stop
-        is reserved refuses the change as busy.
+        the reservations; the drain releases the lock, so `check()` and the listed check run again
+        once it ends (the owner may have replaced the directory meanwhile). For a colleague's
+        profile each started manager on it is reserved (a `_MoveReservation`) and the colleague
+        flag is True; a manager whose launch, nudge or stop is reserved refuses the change as busy,
+        and so does a removal while a started manager on it has a stop pending or a closing report
+        to give, or a withdrawn sprint's stop is pending (its profile is not recorded): deleting the
+        profile would delete the session registry that stop reads.
         """
         with self._ingest:
             check()
@@ -6428,22 +6464,28 @@ class ConsoleService:
                 raise sprints.Refused(account_remove.UNKNOWN)
             if self._signin_runs is not None and profile in self._signin_runs.running():
                 raise sprints.Refused(account_remove.running(profile))
-            colleague = profile in self._owners_now()
             self._removing.add(profile)
             self._note_choice(self._session_choice(self._read_profiles()))
             if not self._idle.wait_for(
                     lambda: profile not in self._probing and self._client_live[profile] == 0,
                     timeout=account_remove.DRAIN_TIMEOUT):
                 raise sprints.Refused(account_remove.busy(profile))
+            check()
+            if profile not in self._read_profiles():
+                raise sprints.Refused(account_remove.UNKNOWN)
+            colleague = profile in self._owners_now()
             if not colleague or self._stopper is None:
                 return colleague, []
-            found = [
+            on_profile = [
                 sprint for sprint in self._sprints.values()
                 if sprint.manager is not None and sprint.manager.state == sprints.STARTED
-                and sprint.manager.profile == profile and sprint.stop_at is None
-                and sprints.ended_at(sprint) is None]
+                and sprint.manager.profile == profile]
+            found = [sprint for sprint in on_profile
+                     if sprint.stop_at is None and sprints.ended_at(sprint) is None]
             if any(sprint.sprint_id in self._launching or sprint.sprint_id in self._nudging
-                   or sprint.sprint_id in self._stopping for sprint in found):
+                   or sprint.sprint_id in self._stopping for sprint in found) or (
+                    removal and (self._pending or any(
+                        self._stoppable(sprint.sprint_id) is not None for sprint in on_profile))):
                 raise sprints.Refused(account_remove.busy(profile))
             moves = [_Move(sprint.sprint_id,
                            manager.session_name(sprint.project_id, sprint.sprint_id))
@@ -6454,24 +6496,43 @@ class ConsoleService:
 
     def _read_moved(self, profile: str, moves: list[_Move]
                     ) -> Mapping[str, sessions.Observation]:
-        """Off the lock: the listing the moves are stopped from; a manager not yet listed refuses the change as busy."""
+        """Off the lock: the sessions on `profile` the moves are stopped from.
+
+        The listing is conclusive (a session file it cannot read refuses the change as busy, so a
+        manager it merely failed to read is never taken for gone). A manager not yet listed on the
+        profile refuses the change as busy; so does one whose session is listed on another profile,
+        and so does a session of another sprint's manager listed on this profile: the record and the
+        listing disagree, so nothing is stopped or launched on a guess.
+        """
         if not moves:
             return {}
         try:
-            listed = self._listing()
+            listed = self._conclusive_listing()
         except Exception as error:
             print(f"console: manager_move_failed {type(error).__name__}", file=sys.stderr)
             raise sprints.Refused(account_remove.busy(profile)) from None
-        names = {one.name for one in listed.values()}
+        here = {key: one for key, one in listed.items()
+                if (one.profile or sessions.DEFAULT_PROFILE) == profile}
+        names = {one.name for one in here.values()}
+        elsewhere = {one.name for key, one in listed.items() if key not in here}
         now = int(self._clock() * 1000)
+        moved = {move.name for move in moves}
         with self._ingest:
             settled = {move.sprint_id: self._settled.get(move.sprint_id) for move in moves}
+            strays = {manager.session_name(sprint.project_id, sprint.sprint_id)
+                      for sprint in self._sprints.values()
+                      if sprint.manager is not None and sprint.manager.state == sprints.STARTED
+                      and sprint.manager.profile != profile}
+        if strays & names - moved:
+            raise sprints.Refused(account_remove.busy(profile))
         for move in moves:
             move.shown = move.name in names
+            if not move.shown and move.name in elsewhere:
+                raise sprints.Refused(account_remove.busy(profile))
             if (not move.shown and settled[move.sprint_id] is not None
                     and now - settled[move.sprint_id] < sprints.STOP_SETTLE_MS):
                 raise sprints.Refused(account_remove.busy(profile))
-        return listed
+        return here
 
     def _stop_moved(self, moves: list[_Move], listed: Mapping[str, sessions.Observation]) -> bool:
         """Off the lock: stop each moved session the listing shows; whether any stop failed.
@@ -6492,8 +6553,12 @@ class ConsoleService:
             move.launch = True
         return failed
 
-    def _end_change(self, profile: str, moves: list[_Move]) -> None:
-        """Drop the mark, release the reservations not to be launched, then dispatch the others."""
+    def _end_change(self, profile: str, moves: list[_Move]) -> bool:
+        """Drop the mark, release the reservations not to be launched, then dispatch the others.
+
+        Whether a launch could not be dispatched: that manager's state is then recorded as failed
+        (retryable) and the caller says so.
+        """
         with self._ingest:
             if profile in self._removing:
                 self._removing.discard(profile)
@@ -6502,80 +6567,117 @@ class ConsoleService:
             for move in moves:
                 if not move.launch:
                     self._release(move.sprint_id, move.token)
+        failed = False
         for move in moves:
             if move.launch:
                 try:
                     self._dispatch_launch(move.sprint_id)
                 except Exception as error:
+                    failed = True
                     print(f"console: manager_move_failed {move.sprint_id} "
                           f"{type(error).__name__}", file=sys.stderr)
+                    self._record_move_failed(move)
+        return failed
 
-    def _remove_profile(self, profile: str, by_login: str, check: Callable[[], None]) -> None:
-        """Sign the profile out, move a colleague's managers off it, then remove it (`check` runs first, under the lock).
+    def _record_move_failed(self, move: _Move) -> None:
+        """A moved manager whose relaunch could not be dispatched is a failed takeover, which the retry offers again."""
+        with self._ingest:
+            sprint = self._sprints.get(move.sprint_id)
+            if sprint is None or self._stop.is_set():
+                return
+            self._append_manager(MANAGER_FAILED, sprint.project_id, {
+                "sprint_id": move.sprint_id, "reason": MOVE_NOT_STARTED, "takeover": True,
+                "goal": sprint.goal}, move.token)
+
+    def _change_profiles(self, profiles: Sequence[str], check: Callable[[str], None], removal: bool,
+                         act: Callable[[str, bool, list[_Move], Mapping[str, sessions.Observation]],
+                                       None]) -> None:
+        """Under `_adding`: check, mark and reserve every profile before changing any, then `act` on each.
+
+        Refusals are raised before anything is changed, so a busy second profile leaves the first
+        as it was. `check(profile)` runs first in the ingest block that marks that profile. Each
+        mark is dropped, each reservation ended and each relaunch dispatched on every way out; a
+        relaunch that could not be dispatched is `MoveFailed("launch_failed")` when nothing else
+        raised.
+        """
+        with self._adding:
+            held: list[tuple[str, list[_Move]]] = []
+            failed: list[bool] = []
+            try:
+                plan = []
+                for profile in profiles:
+                    entry: tuple[str, list[_Move]] = (profile, [])
+                    held.append(entry)
+                    colleague, moves = self._begin_change(
+                        profile, lambda one=profile: check(one), removal)
+                    entry[1].extend(moves)
+                    plan.append((profile, colleague, moves))
+                reads = [self._read_moved(profile, moves) for profile, _, moves in plan]
+                for (profile, colleague, moves), listed in zip(plan, reads):
+                    act(profile, colleague, moves, listed)
+            finally:
+                failed = [self._end_change(profile, moves) for profile, moves in held]
+        if any(failed):
+            raise account_remove.MoveFailed("launch_failed")
+
+    def _remove_profiles(self, profiles: Sequence[str], by_login: str,
+                         check: Callable[[str], None]) -> None:
+        """Sign each profile out, move a colleague's managers off it, then remove it (`check` runs first, under the lock).
 
         The caller holds neither `_adding` nor the ingest lock; the rows carry `by_login`.
         """
-        with self._adding:
-            moves: list[_Move] = []
+        def act(profile, colleague, moves, listed):
+            outcome, kind = self._sign_out_first(profile, by_login)
+            if colleague:
+                self._record_signin(profile, signin.Status("signed_out", None),
+                                    self._signin_ticket(profile))
+            if self._stop_moved(moves, listed):
+                self._record_removal(profile, "remove_failed", "stop_failed", by_login)
+                raise account_remove.RemoveFailed("stop_failed")
             try:
-                colleague, moves = self._begin_change(profile, check)
-                listed = self._read_moved(profile, moves)
-                outcome, kind = self._sign_out_first(profile, by_login)
-                if colleague:
-                    self._record_signin(profile, signin.Status("signed_out", None),
-                                        self._signin_ticket(profile))
-                if self._stop_moved(moves, listed):
-                    self._record_removal(profile, "remove_failed", "stop_failed", by_login)
-                    raise account_remove.RemoveFailed("stop_failed")
-                try:
-                    self._account_remover(profile)
-                except account_remove.RemoveFailed as error:
-                    self._record_removal(profile, "remove_failed", error.kind, by_login)
-                    raise
-                scanned = self._scan_profiles()
-                if scanned is None or profile in scanned:
-                    self._record_removal(profile, "remove_failed", "still_listed", by_login)
-                    raise account_remove.RemoveFailed("still_listed")
-                with self._ingest:
-                    self._profiles = scanned
-                    self._profiles_read = True
-                    rows = []
-                    if profile in self._excluded:
-                        rows.append(exclusion.entry(profile, False))
-                    if profile == self._pinned:
-                        rows.append(pin.entry(profile, False))
-                    rows.append(account_remove.removed(profile, outcome, kind, by=by_login))
-                    self._fold(self.log.append(rows))
-                    self._removing.discard(profile)
-                    self._publish()
-                    self._note_choice(self._session_choice(scanned))
-            finally:
-                self._end_change(profile, moves)
+                self._account_remover(profile)
+            except account_remove.RemoveFailed as error:
+                self._record_removal(profile, "remove_failed", error.kind, by_login)
+                raise
+            scanned = self._scan_profiles()
+            if scanned is None or profile in scanned:
+                self._record_removal(profile, "remove_failed", "still_listed", by_login)
+                raise account_remove.RemoveFailed("still_listed")
+            with self._ingest:
+                self._profiles = scanned
+                self._profiles_read = True
+                rows = []
+                if profile in self._excluded:
+                    rows.append(exclusion.entry(profile, False))
+                if profile == self._pinned:
+                    rows.append(pin.entry(profile, False))
+                rows.append(account_remove.removed(profile, outcome, kind, by=by_login))
+                self._fold(self.log.append(rows))
+                self._removing.discard(profile)
+                self._publish()
+                self._note_choice(self._session_choice(scanned))
+        self._change_profiles(profiles, check, True, act)
 
-    def _sign_out_profile(self, profile: str, by_login: str, check: Callable[[], None]) -> None:
-        """Sign one listed profile out, and move the managers off it when it is a colleague's.
+    def _sign_out_profiles(self, profiles: Sequence[str], by_login: str,
+                           check: Callable[[str], None]) -> None:
+        """Sign each listed profile out, and move the managers off it when it is a colleague's.
 
         Refusals are `sprints.Refused`; a failed sign-out is `SignOutFailed` after its `failed`
         row, a manager whose stop failed is `MoveFailed` after the `signed_out` row.
         """
-        with self._adding:
-            moves: list[_Move] = []
+        def act(profile, colleague, moves, listed):
             try:
-                colleague, moves = self._begin_change(profile, check)
-                listed = self._read_moved(profile, moves)
-                try:
-                    self._signer_out(probe.Probe(profile, str(uuid.uuid4()), self._stop))
-                except account_remove.SignOutFailed:
-                    self._record_signout(profile, "failed", by_login)
-                    raise
-                self._record_signout(profile, "signed_out", by_login)
-                if colleague:
-                    self._record_signin(profile, signin.Status("signed_out", None),
-                                        self._signin_ticket(profile))
-                if self._stop_moved(moves, listed):
-                    raise account_remove.MoveFailed("stop_failed")
-            finally:
-                self._end_change(profile, moves)
+                self._signer_out(probe.Probe(profile, str(uuid.uuid4()), self._stop))
+            except account_remove.SignOutFailed:
+                self._record_signout(profile, "failed", by_login)
+                raise
+            self._record_signout(profile, "signed_out", by_login)
+            if colleague:
+                self._record_signin(profile, signin.Status("signed_out", None),
+                                    self._signin_ticket(profile))
+            if self._stop_moved(moves, listed):
+                raise account_remove.MoveFailed("stop_failed")
+        self._change_profiles(profiles, check, False, act)
 
     def _record_signout(self, profile: str, outcome: str, by_login: str) -> None:
         with self._ingest:
@@ -6669,40 +6771,47 @@ class ConsoleService:
             except signin_run.NotRunning:
                 raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT) from None
 
-    def _still_his(self, by: "guest.GuestActor", profile: str, number: int) -> None:
-        """Under the ingest lock: refuse unless `profile` is still his, listed now, and still holds `number`."""
+    def _his_account(self, by: "guest.GuestActor", number: int, ident: str) -> list[str]:
+        """Under the ingest lock: the profiles of his own holding account `number` when `ident` still names it.
+
+        `ident` is the token his pool row carried (`guest.account_token` over the directories of
+        his profiles holding the number): a number is the account's, and it is recycled, so the
+        number alone could name an account made after the page was drawn.
+        """
         self._guest_account_refusal(by)
         accounts = self._scan_accounts()
-        if (accounts is None or profile not in self._owned_now(by, accounts)
-                or self._account_numbers.get(profile) != number):
-            raise sprints.Refused(guest.NOT_YOUR_ACCOUNT_TEXT)
-
-    def _his_targets(self, by: "guest.GuestActor", number: int) -> list[str]:
-        """The profiles of his own account `number`, by name; empty refuses with the fixed text."""
-        with self._ingest:
-            self._guest_account_refusal(by)
-            accounts = self._scan_accounts()
-            targets = [] if accounts is None else [
-                profile for profile in self._owned_now(by, accounts)
-                if self._account_numbers.get(profile) == number]
-        if not targets:
+        targets = [] if accounts is None else [
+            profile for profile in self._owned_now(by, accounts)
+            if self._account_numbers.get(profile) == number]
+        if not targets or guest.account_token(
+                self._account_identities[profile] for profile in targets) != ident:
             raise sprints.Refused(guest.NOT_YOUR_ACCOUNT_TEXT)
         return targets
 
-    def guest_sign_out(self, by: "guest.GuestActor", number: int) -> None:
+    def _still_his(self, by: "guest.GuestActor", profile: str, number: int, ident: str) -> None:
+        """Under the ingest lock: refuse unless `profile` is still his, listed now, and still the account `ident` names."""
+        if profile not in self._his_account(by, number, ident):
+            raise sprints.Refused(guest.NOT_YOUR_ACCOUNT_TEXT)
+
+    def _his_targets(self, by: "guest.GuestActor", number: int, ident: str) -> list[str]:
+        """The profiles of his own account `number` that `ident` names, by name; none refuses with the fixed text."""
+        with self._ingest:
+            return self._his_account(by, number, ident)
+
+    def guest_sign_out(self, by: "guest.GuestActor", number: int, ident: str) -> None:
         """Sign out his own account `number` (and move the managers on it); refusals carry only fixed texts."""
         if self._signer_out is None:
             raise sprints.Refused(guest.CHANGE_UNAVAILABLE_TEXT)
-        for profile in self._his_targets(by, number):
-            self._sign_out_profile(profile, by.login, lambda p=profile: self._still_his(by, p, number))
+        self._sign_out_profiles(self._his_targets(by, number, ident), by.login,
+                                lambda profile: self._still_his(by, profile, number, ident))
 
-    def guest_remove(self, by: "guest.GuestActor", number: int) -> None:
+    def guest_remove(self, by: "guest.GuestActor", number: int, ident: str) -> None:
         """Remove his own account `number` (and move the managers on it); refusals carry only fixed texts."""
         if (self._signer_out is None or self._account_remover is None
                 or self._signin_reader is None):
             raise sprints.Refused(guest.CHANGE_UNAVAILABLE_TEXT)
-        for profile in self._his_targets(by, number):
-            self._remove_profile(profile, by.login, lambda p=profile: self._still_his(by, p, number))
+        self._remove_profiles(self._his_targets(by, number, ident), by.login,
+                              lambda profile: self._still_his(by, profile, number, ident))
 
     def expire_signins(self) -> list[str]:
         """End every sign-in run past its deadline; the profiles ended."""

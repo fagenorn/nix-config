@@ -292,6 +292,25 @@ class RegistryTest(unittest.TestCase):
             with self.subTest(status=obs.status, waiting_for=obs.waiting_for):
                 self.assertEqual(registry_state(obs), expect)
 
+    def test_a_strict_reading_raises_on_a_file_it_cannot_read_and_ignores_a_vanished_one(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "sessions"
+            directory.mkdir()
+            (directory / "10.json").write_text(json.dumps(
+                {"pid": 10, "sessionId": "s-ok", "cwd": "/srv/p00", "status": "idle"}))
+            self.assertEqual(set(read_session_registry([directory], alive=lambda *_: True,
+                                                       strict=True)), {"s-ok"})
+            self.assertEqual(set(read_session_registry([Path(raw) / "missing"], strict=True)), set())
+            (directory / "11.json").write_text("{not json")
+            self.assertEqual(set(read_session_registry([directory], alive=lambda *_: True)), {"s-ok"})
+            with self.assertRaises(ValueError):
+                read_session_registry([directory], alive=lambda *_: True, strict=True)
+            (directory / "11.json").unlink()
+            (directory / "12.json").mkdir()
+            with self.assertRaises(OSError):
+                read_session_registry([directory], alive=lambda *_: True, strict=True)
+            self.assertEqual(set(read_session_registry([directory], alive=lambda *_: True)), {"s-ok"})
+
     def test_a_reused_pid_is_not_the_session(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)

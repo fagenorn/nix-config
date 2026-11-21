@@ -928,6 +928,170 @@ class ColleagueAccountMoveTest(StopServiceTest):
         self.assertEqual({entry[1] for entry in self.stops_in()}, {self.SECOND})
         self.assertEqual([call.profile for call in self.launched()], ["zeta"] * 2)
 
+    def test_a_manager_missing_from_an_unreadable_listing_is_never_taken_for_gone(self):
+        registry = self.store.parent / "registry-sessions"
+        registry.mkdir(parents=True)
+        unreadable = registry / "1.json"
+        unreadable.write_text("{not json")
+        svc = self.begin_pool(listing=None, session_dirs=[registry])
+        self.now[0] += sprints.STOP_SETTLE_MS // 1000 + 1
+        err = io.StringIO()
+        for act in (lambda: svc.remove_account("colleague-1", "colleague-1"),
+                    lambda: svc.sign_out_account("colleague-1")):
+            with contextlib.redirect_stderr(err), self.assertRaises(sprints.Refused) as raised:
+                act()
+            self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        self.assertEqual(svc._launching, {})
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.assertIn("console: manager_move_failed JSONDecodeError", err.getvalue())
+        self.assertNotIn("colleague-1", err.getvalue())
+        unreadable.unlink()
+        svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(self.stops_in(), [])
+        self.assertEqual([call.profile for call in self.launched()], ["zeta"] * 2)
+
+    def test_a_removal_waits_for_a_manager_whose_stop_is_pending_and_a_sign_out_does_not(self):
+        svc = self.begin_pool()
+        self.assertEqual(self.stop(svc, self.sids[0])[::2], (204, b""))
+        rows = support.log_rows(self.store)
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        self.assertEqual(svc._launching, {})
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.now[0] = T0 + 600
+        svc.finish_stops()
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": self.sids[0]}])
+        svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual({entry[1] for entry in self.stops_in()[1:]}, {self.SECOND})
+        self.assertEqual([call.profile for call in self.launched()], ["zeta"])
+        self.assertEqual(self.order[-1], ("rm", "colleague-1"))
+
+    def test_a_sign_out_does_not_wait_for_a_pending_stop(self):
+        svc = self.begin_pool()
+        self.assertEqual(self.stop(svc, self.sids[0])[::2], (204, b""))
+        svc.sign_out_account("colleague-1")
+        self.assertEqual([call.profile for call in self.launched()], ["zeta"])
+
+    def test_a_removal_waits_for_a_withdrawn_sprints_pending_stop(self):
+        svc = self.begin_pool()
+        self.failures = ["boom"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            svc.withdraw_goal("owner/p01", self.sids[0])
+        self.assertTrue(svc._pending)
+        tried = list(self.order)
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, tried)
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+
+    def test_only_the_sessions_on_the_profile_are_stopped_and_a_session_elsewhere_refuses(self):
+        svc = self.begin_pool(count=1)
+        name = self.listed[FIRST].name
+        self.listed["s-elsewhere"] = sessions.Observation(
+            "s-elsewhere", "/srv/p01", 2, "idle", None, name, None, "zeta")
+        svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(self.stops_in(), [("stop", FIRST, "colleague-1")])
+        elsewhere = self.begin_pool(count=1)
+        self.listed.clear()
+        self.listed["s-elsewhere"] = sessions.Observation(
+            "s-elsewhere", "/srv/p01", 2, "idle", None,
+            manager.session_name("owner/p01", self.sids[0]), None, "zeta")
+        with self.assertRaises(sprints.Refused) as raised:
+            elsewhere.sign_out_account("colleague-1")
+        self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+
+    def test_a_session_of_a_manager_recorded_on_another_account_refuses_the_change(self):
+        svc = self.begin_pool(count=1)
+        svc.set_exclusion("colleague-1", True)
+        other = self.running_on(svc, self.SECOND, "zeta")
+        svc.set_exclusion("colleague-1", False)
+        self.assertEqual(self.manager_of(svc, other).profile, "zeta")
+        self.listed[self.SECOND] = sessions.Observation(
+            self.SECOND, "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", other),
+            None, "colleague-1")
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.sign_out_account("colleague-1")
+        self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.manager_of(svc, self.sids[0]).profile, "colleague-1")
+
+    def dispatching(self):
+        def dispatch(job):
+            if self.refusing:
+                raise OSError("no thread")
+            job()
+        self.refusing = False
+        return dispatch
+
+    def test_a_relaunch_that_cannot_be_dispatched_is_recorded_failed_and_said(self):
+        svc = self.begin_pool(count=1, dispatch=self.dispatching())
+        self.refusing = True
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(account_remove.MoveFailed) as raised:
+            svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(raised.exception.kind, "launch_failed")
+        self.assertFalse(self.profile_path("colleague-1").exists())
+        (sid,) = self.sids
+        moved = self.manager_of(svc, sid)
+        self.assertEqual((moved.state, moved.reason, moved.takeover),
+                         (sprints.FAILED, service.MOVE_NOT_STARTED, True))
+        self.assertEqual(self.rows("manager.failed")[-1], {
+            "sprint_id": sid, "reason": service.MOVE_NOT_STARTED, "takeover": True,
+            "goal": svc._sprints[sid].goal})
+        self.assertEqual(svc._launching, {})
+        self.assertIn(f"console: manager_move_failed {sid} OSError", err.getvalue())
+        self.assertNotIn("colleague-1", err.getvalue())
+
+    def test_the_owners_routes_say_a_relaunch_was_not_dispatched_and_name_no_profile(self):
+        svc = self.begin_pool(count=1, dispatch=self.dispatching())
+        self.refusing = True
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status, _, body = support.post_page(
+                svc.address, "/api/account-signout", self.own(svc, **JSON),
+                json.dumps({"profile": "colleague-1"}).encode())
+        self.assertEqual((status, body), (502, account_remove.NOT_MOVED.encode() + b"\n"))
+        self.assertIn("console: account_signout_failed launch_failed", err.getvalue())
+        again = self.begin_pool(count=1, dispatch=self.dispatching())
+        self.refusing = True
+        with contextlib.redirect_stderr(err):
+            status, _, body = support.post_page(
+                again.address, "/api/account-remove", self.own(again, **JSON),
+                json.dumps({"profile": "colleague-1", "typed": "colleague-1"}).encode())
+        self.assertEqual((status, body), (502, account_remove.NOT_MOVED.encode() + b"\n"))
+        self.assertIn("console: account_remove_move_failed launch_failed", err.getvalue())
+        self.assertNotIn("colleague-1", err.getvalue())
+
+    def test_the_owners_removal_route_prints_no_colleague_profile_and_keeps_his_own(self):
+        svc = self.begin_pool()
+        self.failures = ["boom"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status, _, body = support.post_page(
+                svc.address, "/api/account-remove", self.own(svc, **JSON),
+                json.dumps({"profile": "colleague-1", "typed": "colleague-1"}).encode())
+        self.assertEqual((status, body), (
+            502, b"the account was signed out but not removed: stop_failed\n"))
+        self.assertIn("console: account_remove_failed stop_failed", err.getvalue())
+        self.assertNotIn("colleague-1", err.getvalue())
+        with contextlib.redirect_stderr(err):
+            status, _, _ = support.post_page(
+                svc.address, "/api/account-remove", self.own(svc, **JSON),
+                json.dumps({"profile": "work", "typed": "work"}).encode())
+        self.assertEqual(status, 204)
+        again = support.post_page(
+            svc.address, "/api/account-remove", self.own(svc, **JSON),
+            json.dumps({"profile": "colleague-1", "typed": "x"}).encode())
+        self.assertEqual(again[0], 409)
+
     def test_a_colleagues_failed_sign_out_and_status_read_name_no_profile(self):
         svc = self.begin_pool()
         self.signout_error = account_remove.SignOutFailed("exited")

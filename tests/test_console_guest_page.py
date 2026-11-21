@@ -1181,6 +1181,16 @@ class OwnAccountPageTest(unittest.TestCase):
         self.assertIn("Could not sign out: a sign-in is running for colleague-1; cancel it first",
                       full(self.account_row(snap, "colleague-1")))
 
+    def test_a_failed_move_stays_shown_once_the_account_reads_signed_out(self) -> None:
+        signed_in, signed_out = self.colleague_capacity(), self.colleague_capacity(("signed_out", None))
+        (snap,) = harness([
+            START, {"frame": {**view([]), "capacity": signed_in}}, {"click": "cap"},
+            {"respond": {"status": 502, "text": "the account was signed out but a manager on it was not moved"}},
+            {"click": "acct-signout"}, {"frame": {**view([]), "capacity": signed_out}}, SNAP], PAGE.read_bytes())
+        row = self.account_row(snap, "colleague-1")
+        self.assertEqual(named(row, "acct-signout"), [])
+        self.assertIn("Could not sign out: the account was signed out but a manager on it was not moved", full(row))
+
     def test_a_second_click_while_a_sign_out_is_in_flight_posts_nothing(self) -> None:
         cap = self.colleague_capacity()
         (snap,) = harness([
@@ -1355,7 +1365,7 @@ class OwnAccountPageTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(snap["page"]) if has_class(n, "pool-add")], [])
 
 
-MINE = {**A1, "label": "yours", "number": 1}
+MINE = {**A1, "label": "yours", "number": 1, "ident": "tok-1"}
 A2N = {**A2, "number": 2}
 A3N = {**A3, "number": 3}
 CHANGE_FRAME = {**OWN_FRAME, "pool": {**POOL_TIGHT, "accounts": [MINE, A2N, A3N]}}
@@ -1379,13 +1389,14 @@ class OwnAccountChangePageTest(unittest.TestCase):
         self.assertEqual(full(named(snap["pool"], "pool-remove")[0]), "Remove")
 
     def test_a_row_without_a_positive_number_offers_neither(self) -> None:
-        frame = {**OWN_FRAME, "pool": {**POOL_TIGHT, "accounts": [{**MINE, "number": 0}, {**MINE, "number": None}]}}
+        frame = {**OWN_FRAME, "pool": {**POOL_TIGHT, "accounts": [
+            {**MINE, "number": 0}, {**MINE, "number": None}, {**MINE, "ident": None}, {**MINE, "ident": ""}]}}
         (snap,) = harness([START, {"frame": frame}, SNAP], GUEST)
         self.assertEqual(named(snap["pool"], "pool-signout") + named(snap["pool"], "pool-remove"), [])
 
     def test_sign_out_posts_his_account_number(self) -> None:
         (snap,) = harness([START, {"frame": CHANGE_FRAME}, {"respond": NO_REPLY}, {"click": "pool-signout"}, SNAP], GUEST)
-        self.assertEqual(own_writes(snap), [("/api/guest-account-signout", {"account": 1})])
+        self.assertEqual(own_writes(snap), [("/api/guest-account-signout", {"account": 1, "ident": "tok-1"})])
 
     def test_remove_asks_first_and_posts_only_on_remove_it(self) -> None:
         asked, cancelled, sent = harness([
@@ -1395,7 +1406,7 @@ class OwnAccountChangePageTest(unittest.TestCase):
         self.assertEqual(own_writes(asked), [])
         self.assertEqual(named(cancelled["pool"], "pool-remove-note"), [])
         self.assertEqual(own_writes(cancelled), [])
-        self.assertEqual(own_writes(sent), [("/api/guest-account-remove", {"account": 1})])
+        self.assertEqual(own_writes(sent), [("/api/guest-account-remove", {"account": 1, "ident": "tok-1"})])
 
     def test_a_refused_change_says_why_on_his_row(self) -> None:
         refused = {"respond": {"status": 409, "text": "That account is not yours."}}
@@ -1408,6 +1419,6 @@ class OwnAccountChangePageTest(unittest.TestCase):
     def test_a_second_click_while_a_change_is_in_flight_posts_nothing(self) -> None:
         (snap,) = harness([
             START, {"frame": CHANGE_FRAME}, {"hold": True}, {"click": "pool-signout"}, {"click": "pool-signout"}, SNAP], GUEST)
-        self.assertEqual(own_writes(snap), [("/api/guest-account-signout", {"account": 1})])
+        self.assertEqual(own_writes(snap), [("/api/guest-account-signout", {"account": 1, "ident": "tok-1"})])
         (button,) = named(snap["pool"], "pool-signout")
         self.assertEqual((button["aria_disabled"], button["busy"]), ("true", "true"))
