@@ -31,6 +31,9 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = REPO_ROOT / "python/agent_tools/console/manager-contract.md"
+FAULT = {"issue": 12, "observed": "saving the settings form drops the billing address",
+         "when": "12:10 UTC today",
+         "proven": "a saved form read back from the production database"}
 
 
 def run_sprint(*args, stdin=None, env=None):
@@ -476,6 +479,104 @@ class SprintCommandTest(Case):
     def notice_rows(self):
         return [row for row in support.log_rows(self.store) if row[2] == "notice.posted"]
 
+    def live_fault(self, svc, sid, fault):
+        return run_sprint("live-fault", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--fault-file", "-", "--port", self.port(svc), stdin=json.dumps(fault))
+
+    def fault_rows(self):
+        return [row for row in support.log_rows(self.store) if row[2] == "fault.declared"]
+
+    def reported_sprint(self, svc, goal="make the importer resumable", report=REPORT):
+        sid = svc.state_goal("owner/p01", goal)
+        secret = self.secret_file(sid).read_text().strip()
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        svc.send_report(sid, secret, report)
+        return sid
+
+    def test_live_fault_declares_an_issue_of_the_latest_report_and_prints_its_id(self):
+        svc = self.open()
+        sid = self.reported_sprint(svc)
+        got = self.live_fault(svc, sid, FAULT)
+        rows = self.fault_rows()
+        self.assertEqual(len(rows), 1)
+        seq, at = rows[0][0], rows[0][1]
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, f"sprint: live fault {seq} declared\n", ""))
+        self.assertEqual(json.loads(rows[0][4]), {
+            "sprint_id": sid, "goal": "make the importer resumable", "fault": FAULT})
+        secret = self.secret_file(sid).read_text().strip()
+        self.assertEqual(svc.recap(sid, secret)["live_faults"], [{"id": seq, **FAULT, "at": at}])
+
+    def test_live_fault_refuses_missing_evidence_and_an_issue_outside_the_sprint(self):
+        svc = self.open()
+        sid = self.reported_sprint(svc)
+        unreported = svc.state_goal("owner/p01", "make the exporter resumable")
+        secret_b = self.secret_file(unreported).read_text().strip()
+        svc.send_brief(unreported, secret_b, PARTS)
+        svc.approve_brief("owner/p01", unreported, 1)
+        latest = self.reported_sprint(svc, "make the reader resumable")
+        svc.send_report(latest, self.secret_file(latest).read_text().strip(), {
+            **REPORT, "issues": [{"issue": 13, "stage": "landed"}], "inbox": []})
+        ours = "the live fault's issue is not an issue of this sprint's latest report"
+        cases = [
+            (sid, {k: v for k, v in FAULT.items() if k != "observed"},
+             "the live fault has no valid observed"),
+            (sid, {k: v for k, v in FAULT.items() if k != "when"},
+             "the live fault has no valid when"),
+            (sid, {k: v for k, v in FAULT.items() if k != "proven"},
+             "the live fault has no valid proven"),
+            (sid, {**FAULT, "proven": "  "}, "the live fault has no valid proven"),
+            (sid, {**FAULT, "observed": "\u200b\u200b", "when": "\u200b", "proven": "\u200b \u200b"},
+             "the live fault has no valid observed"),
+            (sid, {**FAULT, "when": "\u200b"}, "the live fault has no valid when"),
+            (sid, {**FAULT, "proven": "\u200b"}, "the live fault has no valid proven"),
+            (sid, {**FAULT, "observed": "\u3164", "when": "\u115f\u1160", "proven": "\u2800"},
+             "the live fault has no valid observed"),
+            (sid, {**FAULT, "when": "\u034f\ufe0f"}, "the live fault has no valid when"),
+            (sid, {**FAULT, "proven": "\u2800"}, "the live fault has no valid proven"),
+            (sid, {**FAULT, "observed": "saved form \ud800 dropped"},
+             "the live fault has no valid observed"),
+            (sid, {**FAULT, "issue": 99}, ours),
+            (unreported, FAULT, ours),
+            (latest, FAULT, ours),
+        ]
+        for target, value, reason in cases:
+            with self.subTest(reason=reason, value=value):
+                got = self.assert_unchanged(svc, lambda: self.live_fault(svc, target, value))
+                self.assertEqual((got.returncode, got.stdout, got.stderr),
+                                 (1, "", "sprint: refused 409: " + reason + "\n"))
+        wrong = self.store.parent / "wrong-secret"
+        wrong.write_text("A" * 43 + "\n")
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "live-fault", "--sprint", sid, "--secret-file", wrong, "--fault-file", "-",
+            "--port", self.port(svc), stdin=json.dumps(FAULT)))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 403: secret refused\n"))
+        self.assertEqual(self.live_fault(svc, sid, FAULT).returncode, 0)
+        got = self.assert_unchanged(svc, lambda: self.live_fault(svc, sid, FAULT))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused 409: this issue is already declared a live fault\n"))
+        got = self.assert_unchanged(svc, lambda: self.live_fault(svc, sid, []))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertTrue(got.stderr.startswith(
+            "sprint: cannot read -: the live fault is not a JSON object"), got.stderr)
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "live-fault", "--sprint", sid, "--fault-file", "-", "--port", self.port(svc),
+            stdin=json.dumps(FAULT)))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (2, "", (
+            "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n")))
+
+    def test_live_fault_exits_two_for_a_fault_file_nested_too_deeply(self):
+        svc = self.open()
+        sid = self.reported_sprint(svc)
+        deep = "[" * 100000 + "]" * 100000
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "live-fault", "--sprint", sid, "--secret-file", self.secret_file(sid),
+            "--fault-file", "-", "--port", self.port(svc), stdin=deep))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertEqual(got.stderr, "sprint: cannot read -: the live fault is nested too deeply\n")
+
     def test_notice_posts_and_another_sprint_of_the_project_lists_it(self):
         svc = self.open()
         a = self.goal(svc)
@@ -913,7 +1014,7 @@ class RecapTest(Case):
                        "milestone": REPORT["milestone"], "tracker_url": REPORT["tracker_url"],
                        "issues": CHECKED["issues"], "inbox": REPORT["inbox"],
                        "next": REPORT["next"]},
-            "unread": 2})
+            "live_faults": [], "unread": 2})
 
     def test_recap_shows_the_wait_or_the_pause_the_report_states_beside_its_next_step(self):
         svc = self.open()
@@ -936,7 +1037,7 @@ class RecapTest(Case):
         sid = self.goal(svc)
         self.assertEqual(svc.recap(sid, self.secret(sid)), {
             "sprint_id": sid, "goal": "make the importer resumable", "brief": None,
-            "report": None, "unread": 0})
+            "report": None, "live_faults": [], "unread": 0})
 
     def test_recap_of_a_changed_newer_brief_shows_the_reply_beside_the_old_report(self):
         svc = self.open()
@@ -1038,6 +1139,27 @@ class ManagerContractTest(unittest.TestCase):
         item = " ".join(item.split())
         self.assertIn("`to-issues`", item)
         self.assertIn("changes how something looks", item)
+
+    def test_the_contract_says_how_to_declare_a_live_fault_and_where_scope_changes_go(self):
+        text = run_sprint("contract").stdout
+        flat = " ".join(text.split())
+        section = flat.partition("## A live fault ")[2].partition(" ## ")[0]
+        after = flat.partition("## After approval ")[2].partition(" ## ")[0]
+        self.assertEqual(text.count("\n## A live fault\n"), 1)
+        self.assertLess(text.index("## Questions"), text.index("## A live fault"))
+        self.assertLess(text.index("## A live fault"), text.index("## Notices"))
+        for needle in (
+                "`sprint live-fault --fault-file -`", "`issue`", "`observed`", "`when`",
+                "`proven`", "your latest report names", "needs no go-ahead",
+                "never ask the owner about it", "`sprint: live fault <id> declared`",
+                sprints.FAULT_MEMBER.format(member="<member>"), sprints.FAULT_NOT_OURS,
+                sprints.FAULT_TWICE, "the owner may withdraw it there", "`sprint recap`",
+                "`live_faults`",
+                "scope changes go to the follow-up issue, never into the fix",
+                '`"live_fault": true`'):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        self.assertIn("it goes to the follow-up issue, as A live fault says", after)
 
     def test_the_contract_says_what_to_do_on_an_awaiting_look_stop(self):
         text = run_sprint("contract").stdout

@@ -2845,7 +2845,7 @@ class SprintViewTest(unittest.TestCase):
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "checks": [], "waits": [],
+            "checks": [], "waits": [], "live_faults": [],
             "sessions": [], "messages": [], "approval": None, "reach_text": None,
             "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,

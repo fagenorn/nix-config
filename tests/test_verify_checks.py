@@ -1966,6 +1966,30 @@ class GuardPolicyFleetTest(unittest.TestCase):
             Path("/c/home"), Path("/c/python"))
         self.assertEqual((kept["GH_CONFIG_DIR"], kept["GIT_CONFIG_GLOBAL"]), ("/gh", "/dev/null"))
 
+    def test_the_candidate_never_inherits_the_installed_platform_root(self):
+        repo = Path(__file__).resolve().parents[1]
+        committed = json.loads(
+            (repo / "home/common/agent-skills/platform-manifest.json").read_text("utf-8"))
+        installed = self.world.tmp / "installed-root"
+        installed.mkdir()
+        (installed / "platform-manifest.json").write_text(
+            json.dumps({**committed, "platform_version": "9.0.0"}), encoding="utf-8")
+        candidate_home = self.world.tmp / "candidate-home"
+        staged = candidate_home / ".agents/share/platform-manifest.json"
+        staged.parent.mkdir(parents=True)
+        staged.write_text(json.dumps(committed), encoding="utf-8")
+        env = verify_checks._candidate_env(
+            {**os.environ, "HOME": str(self.world.tmp), "AGENT_PLATFORM_ROOT": str(installed)},
+            candidate_home, repo / "python")
+        self.assertNotIn("AGENT_PLATFORM_ROOT", env)
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project",
+             "platform-status"], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        platform = json.loads(done.stdout)["platform"]
+        self.assertEqual(platform["manifest_path"], str(staged.resolve()))
+        self.assertEqual(platform["platform_version"], committed["platform_version"])
+
     def test_a_pre_move_candidate_with_the_flat_guard_policy_is_derived_by_its_own_layout(self):
         # The recorded cutover candidate predates the domain layout: `agent_tools/guard_policy.py`.
         self.world.project("fixture/one", "fagenorn/one")

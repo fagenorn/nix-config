@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shlex
 import subprocess
@@ -5343,6 +5344,20 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         "an extra member": {"derived_repositories": {NODO: NODO_ROW}, "grants": []},
     }
 
+    @staticmethod
+    def installed_launcher(command):
+        """The launcher of this checkout's flake output `packages.<system>.agent-platform`, the package every host installs, so a hook pinned to an older package revision differs."""
+        system = {("Darwin", "arm64"): "aarch64-darwin", ("Linux", "x86_64"): "x86_64-linux"}[
+            (platform.system(), platform.machine())]
+        root = Path(__file__).resolve().parents[1]
+        done = subprocess.run(
+            ["nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
+             f"{root}#packages.{system}.agent-platform.launchers.{command}"],
+            capture_output=True, text=True, timeout=600, check=False)
+        if done.returncode != 0:
+            raise AssertionError(f"nix eval of the {command} launcher failed:\n{done.stderr[-4000:]}")
+        return done.stdout
+
     def test_built_base_policy_holds_exactly_the_five_trusted_members(self):
         """Issue 377 R1, R5; issue 384 D3: the store file holds the trusted members and no
         literal integration row, since every repository with one is a registered project."""
@@ -5368,7 +5383,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         script = row_check.read_text(encoding="utf-8")
         self.assertRegex(script, r'\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n')
         self.assertRegex(script, r'export PATH="/nix/store/\S+-git-[^:"]+/bin:')
-        self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-guard-policy derive "\$@"\n')
+        self.assertIn(f'exec {self.installed_launcher("guard-policy")} derive "$@"\n', script)
         launcher = Path(script.split("exec ", 1)[1].split(" ", 1)[0])
         self.assertRegex(launcher.read_text(encoding="utf-8"), r'\A#!/nix/store/\S+/bin/\S+ -p\n')
 
@@ -6708,7 +6723,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         look_check = Path(wrapper.split("--look-bin ", 1)[1].split(" ", 1)[0])
         script = look_check.read_text(encoding="utf-8")
         self.assertRegex(script, r"\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n")
-        self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-look-approval judge "\$@"\n')
+        self.assertIn(f'exec {self.installed_launcher("look-approval")} judge "$@"\n', script)
 
     def test_the_merge_commit_text_reaches_the_look_gate_on_the_release_arm(self):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")

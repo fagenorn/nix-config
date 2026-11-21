@@ -1514,8 +1514,11 @@ def _entry_slug(entry: dict, environ: Mapping[str, str]) -> str | None:
 def _candidate_env(environ: Mapping[str, str], candidate_home: Path,
                    candidate_python: Path) -> dict[str, str]:
     """`environ` with the candidate's `HOME` and `PYTHONPATH`. The temporary `HOME` must not
-    strand the forge and git configuration the host reads from its real one."""
+    strand the forge and git configuration the host reads from its real one. The candidate reads
+    the manifest staged under its own `HOME`, never an installed package's root, so
+    `AGENT_PLATFORM_ROOT` is dropped (ADR-system-005)."""
     env = {**environ, "HOME": str(candidate_home), "PYTHONPATH": str(candidate_python)}
+    env.pop("AGENT_PLATFORM_ROOT", None)
     home = environ.get("HOME")
     if home and "GH_CONFIG_DIR" not in env:
         env["GH_CONFIG_DIR"] = str(Path(home) / ".config/gh")
