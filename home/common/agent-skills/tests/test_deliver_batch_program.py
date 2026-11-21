@@ -448,6 +448,7 @@ class LiveFaultIntakeTest(unittest.TestCase):
         result, calls, _ = run(patch={"facts-1": {"live_fault": {"verdict": "declared"}}})
         self.assertEqual(row(result, 1)["reason"], LIVE_ROW)
         self.assertLeftOut(result, calls)
+        self.assertNotIn("release-1", labels(calls))
 
     def test_an_unreadable_declaration_leaves_the_issue_out(self):
         for fault in ({"verdict": "error", "detail": "console down\nagain"}, None, "yes"):
@@ -482,6 +483,7 @@ class LiveFaultIntakeTest(unittest.TestCase):
         result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts)
         self.assertEqual(row(result, 1)["reason"], LIVE_ROW)
         self.assertLeftOut(result, calls)
+        self.assertIn(f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason skipped", prompt(calls, "release-1"))
 
     def test_a_declared_issue_with_an_open_pull_request_on_its_branch_is_left_out(self):
         own = {"claim": {"verdict": "held_by", "by": HOLDER}, "open_pr": OPEN_PR}
@@ -491,6 +493,7 @@ class LiveFaultIntakeTest(unittest.TestCase):
                     result, calls, _ = run(args=dict(ARGS, conts=conts), patch={"facts-1": dict(own, live_fault=fault)},
                                            replies={"readopt-1": UNACCEPTED})
                     self.assertLeftOut(result, calls)
+                    self.assertIn(f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason skipped", prompt(calls, "release-1"))
                     self.assertNotIn("readopt-1", labels(calls))
                     self.assertNotIn("land-pr-1", labels(calls))
 

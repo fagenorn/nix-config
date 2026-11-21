@@ -2080,6 +2080,14 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
     const verdict = isObj(lf) ? lf.verdict : null
     if (verdict !== 'none' && verdict !== 'no-sprint') {
       const reason = verdict === 'declared' ? LIVE_ROW : LIVE_UNREAD((isObj(lf) && nonEmpty(lf.detail) && oneLine(lf.detail)) || 'no verdict')
+      // The row sends the issue to a run of its own, whose holder is not this batch's: a claim this batch still holds would stop that run, so it is given back first.
+      const cl = f.claim || {}
+      if ((cl.verdict === 'held_by' || cl.verdict === 'stale') && cl.by === HOLDER) {
+        await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) is left out of this batch because it is a live fault, which is delivered alone. Release the batch claim.
+Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
+Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
+      }
       rows[n] = { issue: n, outcome: 'live-fault', reason }
       return
     }
