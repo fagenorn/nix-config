@@ -50,8 +50,29 @@ class IdleStepTest(unittest.TestCase):
                                    (now - idle.RUN_STILL_MS, idle.NUDGE)):
             with self.subTest(moved_at=moved_at):
                 self.assertEqual(idle.next_step(ON, 0, session(), None, False, now,
-                                                run_ms=moved_at), expected)
+                                                run_ms=moved_at, run_wait=False), expected)
         self.assertEqual(idle.next_step(ON, 0, session(), None, False, now), idle.NUDGE)
+
+    def test_a_run_that_reads_a_wait_holds_the_nudge_and_the_give_up_however_long_it_has_been_still(
+            self):
+        now = IDLE_AT + 180 * MIN
+        run_ms = now - 120 * MIN
+        three = replace(ON, idle_nudges=3)
+        for sprint, run_wait, expected in ((ON, True, None), (three, True, None),
+                                           (ON, False, idle.NUDGE), (three, False, idle.GIVE_UP)):
+            with self.subTest(idle_nudges=sprint.idle_nudges, run_wait=run_wait):
+                self.assertEqual(idle.next_step(sprint, 0, session(), None, False, now,
+                                                run_ms=run_ms, run_wait=run_wait), expected)
+
+    def test_a_wait_without_a_run_in_progress_holds_nothing(self):
+        now = IDLE_AT + 40 * MIN
+        self.assertEqual(idle.next_step(ON, 0, session(), None, False, now, run_wait=True),
+                         idle.NUDGE)
+
+    def test_a_forced_nudge_ignores_a_run_that_reads_a_wait(self):
+        now = IDLE_AT + 10 * MIN
+        self.assertEqual(idle.next_step(ON, 0, session(), None, False, now, True,
+                                        run_ms=now - 120 * MIN, run_wait=True), idle.NUDGE)
 
     def test_a_forced_nudge_ignores_a_run_in_progress(self):
         now = IDLE_AT + 10 * MIN

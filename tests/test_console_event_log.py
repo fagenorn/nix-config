@@ -534,6 +534,12 @@ class RetentionTest(unittest.TestCase):
         self.assertNotIn("manager.woken", event_log.KEPT_KINDS)
         self.assertNotIn("manager.stalled", event_log.KEPT_KINDS)
 
+    def test_the_permit_kinds_are_not_kept(self):
+        self.assertEqual((event_log.PERMIT_JUDGED, event_log.PERMIT_LANDED),
+                         ("permit.judged", "permit.landed"))
+        self.assertNotIn(event_log.PERMIT_JUDGED, event_log.KEPT_KINDS)
+        self.assertNotIn(event_log.PERMIT_LANDED, event_log.KEPT_KINDS)
+
     def test_a_raw_delete_of_a_goal_row_is_refused_after_a_pass(self):
         log = self.goal_rows()
         self.retain_at(log, NOW)

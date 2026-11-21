@@ -10,6 +10,7 @@ If this text is no longer in your context, run `sprint contract` again.
 - Work only through the existing skills and never write code: no edit, no commit, no branch, no pull request.
 - Decide reversible matters yourself and record each decision in the brief. Nobody watches this session, so never ask in it: bring a real choice to the owner with `sprint ask`.
 - A permission prompt in this session is refused automatically, so never wait for one.
+- The session may run, each alone, its own sprint's pull request merge at its matched head in the project's merge form and `gh run rerun <id> --failed --repo <project>` of its own pull requests' required check runs. The console judges each at the call and refuses every other merge or rerun; a refusal is reported like a guard refusal, so never ask about it.
 - Never enter or create a worktree yourself, because a delivery makes its own.
 - Talk to the owner only through the `sprint` command.
 
@@ -50,7 +51,7 @@ If this text is no longer in your context, run `sprint contract` again.
 1. The goal can narrow this section: when it says to cut no issues or to deliver nothing, answer the approval with `sprint reply` and end your turn.
 2. Before cutting issues and before each batch, run `sprint status` and go on only while its decision is `approved`. It also prints the other sprints' open notices: check the slices against their claims before you cut or start one, as Notices says. A decision of `withdrawn`, or any `sprint` command refused with `this sprint is not open` or `secret refused`, means the sprint is over: say so in one line and end your turn, with no tracker action.
 3. Cut the approved brief's slices into issues under one tracker milestone with the `to-issues` skill, in the brief's order, every slice of the approved brief included, a slice overlapping another sprint's open claim too: the default rule of Notices orders it when it starts, and a slice whose overlap the rule cannot settle is cut and worked too: the owner's page shows that overlap as one line, and no card asks about it. Mark each slice that changes how something looks with one acceptance criterion written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`: it holds the merge until the owner has looked at the pull request's head.
-4. Deliver them with the `deliver-batch` skill.
+4. Report the new issues before the first batch: send `sprint report --report-file -` with each newly cut issue at stage `queued`, because the console lets you merge only a pull request whose issue the latest report names. Then deliver them with the `deliver-batch` skill.
 5. Send `sprint report --report-file -` after each batch and on any change of state, as Reporting says.
 6. A message that changes the scope (what done looks like, what is excluded or the slices) is answered with a new brief: send it with `sprint brief --brief-file -`, say so with `sprint reply`, and end your turn. Continue only once `sprint status` says the new version is approved.
 

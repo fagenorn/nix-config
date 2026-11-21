@@ -1251,6 +1251,23 @@ def listing(seq):
                   "name": "owner/p00 sprint " + SID})
 
 
+class DeliveredFoldTest(unittest.TestCase):
+    ROWS = BASE[:3] + [listing(4), reported(5, SID, REPORT)]
+
+    def test_the_issues_of_the_managers_runs_stay_delivered_after_the_run_is_gone(self):
+        rows = [*self.ROWS, seen(6, "wf_a", ms(5), ((12, "building"), (40, "queued"))),
+                seen(7, "wf_b", ms(5), ((13, "landing"),), session_id="s-other"), gone(8, "wf_a")]
+        self.assertEqual(sprints.sprint_states(rows[:5])[SID].delivered, frozenset())
+        self.assertEqual(sprints.sprint_states(rows[:6])[SID].delivered, frozenset({12, 40}))
+        self.assertEqual(sprints.sprint_states(rows)[SID].delivered, frozenset({12, 40}))
+        later = [*rows, seen(9, "wf_c", ms(5), ((14, "building"),))]
+        self.assertEqual(sprints.sprint_states(later)[SID].delivered, frozenset({12, 14, 40}))
+        for cut in range(len(later) + 1):
+            with self.subTest(cut=cut):
+                self.assertEqual(sprints.sprint_states(later[cut:], sprints.sprint_states(later[:cut])),
+                                 sprints.sprint_states(later))
+
+
 class SprintMovementFoldTest(unittest.TestCase):
     def test_a_run_that_moved_before_the_report_still_moves_the_sprint(self):
         rows = BASE + [seen(5, "wf_a", ms(4) - 60_000, ((12, "building"),))]
