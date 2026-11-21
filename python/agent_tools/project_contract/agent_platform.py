@@ -680,11 +680,16 @@ def read_registry() -> list[dict]:
     read-only caller a writer. A registry that exists but will not read, will
     not parse, or does not match the schema raises instead — reporting an
     empty fleet for a corrupt file would hide exactly the projects an operator
-    registered.
+    registered. A dangling link at the registry or at one of its directories is
+    a registry that exists but will not read.
     """
+    path = registry_path()
     try:
-        raw = registry_path().read_bytes()
+        raw = path.read_bytes()
     except FileNotFoundError:
+        if any(p.is_symlink() and not p.exists() for p in (path, *path.parents)):
+            raise _refuse([_registry_violation(
+                "", "the fleet registry could not be read", "unreadable")]) from None
         return []
     except (OSError, RuntimeError):
         raise _refuse([_registry_violation(
