@@ -97,6 +97,20 @@ def with_criteria(*extra, **top):
     return dict(PLAN, acceptance=PLAN["acceptance"] + list(extra), **top)
 
 
+# #1281: an evidence criterion whose verify member runs a committed script; the plan commits the script, so its lint is the one a plan-time check gives.
+SCRIPTED = criterion(EVIDENCE, text="after the first switch that includes the merge, the host holds the generated files",
+                     verify_run={"script": "scripts/count-generated"},
+                     lint=refused(("checks[0].run.script", "not_committed")))
+SCRIPTED_PLAN = with_criteria(SCRIPTED, scripts=["scripts/count-generated"])
+MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
+FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
+HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+SCRUBBED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+            "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES")
+
+
 def tasks(count, risk="standard"):
     return [{"n": n, "title": f"t{n}", "file": f"/g/task-{n}.md", "risk": risk}
             for n in range(1, count + 1)]
@@ -5827,6 +5841,112 @@ class HoldTest(unittest.TestCase):
         scripted = json.loads(json.dumps(criterion(EVIDENCE)["verify"]).replace(SHA, self.MERGE))
         self.assertIn(scripted, checks)
         self.assertEqual(prompt(calls, "hold").count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+
+    def scripted(self, checks, posted=None):
+        patch = {"merge": {"merge_commit": self.MERGE}, "close-out": {"issue_state": "OPEN"}}
+        if posted is not None:
+            patch["hold-draft"] = {"posted": posted}
+        return run(replies={"plan": SCRIPTED_PLAN,
+                            "hold": dict(self.HOLD, block={"v": 1, "merge": self.MERGE, "checks": checks})}, patch=patch)
+
+    def test_an_evidence_criterion_is_held_with_its_committed_script(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = Path(scratch).resolve()
+            home = scratch / "home"
+            (home / ".agents" / "share").mkdir(parents=True)
+            shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
+            repo = scratch / "repo"
+            shutil.copytree(FIXTURE, repo)
+            (repo / "scripts").mkdir()
+            script = repo / "scripts" / "count-generated"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+            env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(REPO_ROOT / "python"), **HERMETIC_GIT}
+            for name in SCRUBBED:
+                env.pop(name, None)
+
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], env=env, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            def lint(payload, head):
+                path = scratch / "block.json"
+                path.write_text(json.dumps({"v": 1, "merge": head, "checks": payload}), encoding="utf-8")
+                done = subprocess.run([sys.executable, "-m", "agent_tools.verification.verify_pending", "lint",
+                                       "--input", str(path), "--repo-root", str(repo)],
+                                      env=env, capture_output=True, text=True, timeout=60)
+                return done, json.loads(done.stdout)
+
+            git("init", "-q", "-b", "main")
+            git("config", "commit.gpgsign", "false")
+            git("add", "-A")
+            git("commit", "-q", "-m", "fixture")
+            head = git("rev-parse", "HEAD")
+            result, calls = run(replies={"plan": SCRIPTED_PLAN},
+                                patch={"merge": {"merge_commit": head}, "close-out": {"issue_state": "OPEN"}})
+            self.assertEqual(result["stage"], "done")
+            payload = checks_of(calls)
+            self.assertEqual([c["ac"] for c in payload], ["AC2"])
+            self.assertEqual(payload[0]["kind"], "evidence")
+            self.assertEqual(payload[0]["run"], {"script": "scripts/count-generated"})
+            self.assertFalse([c for c in payload if c["kind"] == "human"])
+            done, verdict = lint(payload, head)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertEqual(verdict["errors"], [])
+            script.chmod(0o644)
+            git("add", "-A")
+            git("commit", "-q", "-m", "drop the executable bit")
+            done, verdict = lint(payload, git("rev-parse", "HEAD"))
+            self.assertIn(("checks[0].run.script", "not_committed"),
+                          [(e["field"], e["code"]) for e in verdict["errors"]])
+
+    def test_a_scripted_evidence_criterion_held_without_its_script_is_refused(self):
+        script_check = dict(SCRIPTED["verify"], when={"deployed_includes": self.MERGE})
+        probe = {"probe": "deployed_includes", "sha": self.MERGE}
+        cases = {
+            "a": [dict(EVIDENCE["verify"], when={"deployed_includes": self.MERGE}, run=probe)],
+            "b": [dict(script_check, run={"script": "scripts/other"})],
+            "c": [dict(script_check, run={"script": "scripts/count-generated", "at": "e" * 40})],
+            "d": [dict(script_check, run={"script": "scripts/count-generated", "args": ["--all"]})],
+            "e": [script_check, dict(script_check, run=probe)],
+        }
+        for name, checks in cases.items():
+            with self.subTest(case=name):
+                result, calls = self.scripted(checks)
+                self.assertEqual((result["stage"], result["script_checks"], result["posted_holds"]),
+                                 ("hold", ["AC2"], [9]))
+                self.assertNotIn("close-out", labels(calls))
+        with self.subTest(case="f"):
+            posted = [{"issue": 9, "merge": self.MERGE,
+                       "checks": [dict(script_check, run={"script": "scripts/other"})]}]
+            result, calls = self.scripted([script_check], posted=posted)
+            self.assertEqual((result["stage"], result["script_checks"], result["posted_holds"]),
+                             ("hold", ["AC2"], [9]))
+            self.assertNotIn("hold", labels(calls))
+
+    def test_a_scripted_evidence_criterion_held_with_the_same_invocation_is_accepted(self):
+        script_check = dict(SCRIPTED["verify"], when={"deployed_includes": self.MERGE})
+        with self.subTest(case="a"):
+            result, _ = self.scripted([dict(script_check, run={"script": "scripts/count-generated", "at": self.MERGE})])
+            self.assertEqual(result["stage"], "done")
+        with self.subTest(case="b"):
+            pinned = criterion(SCRIPTED, verify_run={"script": "scripts/count-generated", "at": SHA})
+            result, _ = run(replies={"plan": with_criteria(pinned, scripts=["scripts/count-generated"]),
+                                     "hold": dict(self.HOLD, block={"v": 1, "merge": self.MERGE,
+                                                                    "checks": [script_check]})},
+                            patch={"merge": {"merge_commit": self.MERGE}, "close-out": {"issue_state": "OPEN"}})
+            self.assertEqual(result["stage"], "done")
+
+    def test_a_split_child_of_a_scripted_evidence_criterion_is_refused(self):
+        probe = dict(EVIDENCE["verify"], when={"deployed_includes": self.MERGE},
+                     run={"probe": "deployed_includes", "sha": self.MERGE})
+        child = dict(self.CHILD, ac="AC2", issue=51, block={"v": 1, "merge": self.MERGE, "checks": [probe]})
+        result, calls = run(replies={"plan": with_criteria(HUMAN, SCRIPTED, scripts=["scripts/count-generated"]),
+                                     "hold": dict(self.HOLD, blocks=[12], split=[self.CHILD, child],
+                                                  block={"v": 1, "merge": self.MERGE, "checks": []})},
+                            patch={"merge": {"merge_commit": self.MERGE}, "close-out": {"issue_state": "OPEN"}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC2"]))
+        self.assertNotIn("close-out", labels(calls))
 
 
 class NoteCloseOutTest(unittest.TestCase):

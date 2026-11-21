@@ -110,7 +110,7 @@ const DEFAULTS = [
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'], passed: ['ci'], renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
   [/^hold-draft$/, prompt => ({ complete: true, merge: SHA, posted: [], written: unverified(prompt) })],
-  [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held', release: { verdict: 'released' } })],
+  [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: (/Merge commit: ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held', release: { verdict: 'released' } })],
   // #1186: an approved marked delivery's close-out call also carries the look tick, which answers ticked.
   [/^close-out$/, prompt => ({ issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok', ...(prompt.includes('look-approval tick') ? { look_tick: { verdict: 'ticked', ticked: 1 } } : {}) })],
 ]
