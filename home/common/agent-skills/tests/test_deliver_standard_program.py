@@ -29,10 +29,11 @@ SHA = "a" * 40
 ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\b")
 ARGS = {"repo_root": "/r", "issue": 9, "session_id": "s1"}
 HOLDER = "h1/session-s1"
+# #1372: a security task keeps the Codex plan review in every default run; a small plan of no security task skips it.
 PLAN = {
     "status": "planned", "plan_root": "/g/plan.md",
     "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
-    "tasks": [{"n": 1, "title": "one", "file": "/g/task-1.md", "risk": "standard"}],
+    "tasks": [{"n": 1, "title": "one", "file": "/g/task-1.md", "risk": "security"}],
 }
 
 
@@ -1480,6 +1481,215 @@ class ReviewSizingPlanTest(unittest.TestCase):
         text = prompt(calls, "plan-review")
         self.assertIn(FULL_RUBRIC, text)
         self.assertNotIn(CODEX_OWNS, text)
+
+
+class SmallPlanCodexSkipTest(unittest.TestCase):
+    """#1372: a small plan (at most three tasks, none of risk security) skips the Codex plan review."""
+
+    SKIP = "codex plan review: skipped, a small plan ({} of at most 3 tasks, none of risk security)"
+    MIXED = [tasks(2)[0], dict(tasks(2)[1], risk="security")]
+    UNAVAILABLE = {"available": False, "verdict": "pass", "findings": []}
+
+    def small(self, n=2):
+        return dict(PLAN, tasks=tasks(n))
+
+    def test_a_small_plan_runs_no_codex_plan_review_and_logs_why(self):
+        mixed_risks = [dict(task, risk=risk) for task, risk in zip(tasks(3), ("mechanical", "low", "standard"))]
+        for task_list in (tasks(1), tasks(2), tasks(3, "low"), mixed_risks):
+            with self.subTest(tasks=[t["risk"] for t in task_list]):
+                out = run_out(replies={"plan": dict(PLAN, tasks=task_list)})
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertNotIn("plan-codex", labels(out["calls"]))
+                self.assertIn("plan-review", labels(out["calls"]))
+                self.assertEqual([l for l in out["logs"] if l.startswith("codex plan review: ")],
+                                 [self.SKIP.format(len(task_list))])
+
+    def test_a_small_plan_never_stops_for_an_unavailable_codex(self):
+        result, calls = run(replies={"plan": self.small(2), "plan-codex": self.UNAVAILABLE})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("plan-codex", labels(calls))
+
+    def test_a_fourth_task_or_a_security_task_keeps_the_codex_plan_review(self):
+        for task_list in (tasks(4), tasks(5, "low"), tasks(1, "security"), self.MIXED):
+            with self.subTest(tasks=[t["risk"] for t in task_list]):
+                out = run_out(replies={"plan": dict(PLAN, tasks=task_list)})
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertEqual(labels(out["calls"]).count("plan-codex"), 1)
+                self.assertIn("codex plan review: 0 blocking findings", out["logs"])
+                self.assertFalse([l for l in out["logs"] if "codex plan review: skipped" in l])
+
+    def test_sizing_on_with_a_skipped_codex_plan_review_keeps_the_full_rubric(self):
+        _, calls = run(args=SIZED, replies={"plan": self.small(2)})
+        text = prompt(calls, "plan-review")
+        self.assertNotIn("plan-codex", labels(calls))
+        self.assertIn(FULL_RUBRIC, text)
+        self.assertNotIn(CODEX_OWNS, text)
+
+    def test_a_resumed_unreviewed_small_plan_skips_too(self):
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": self.small(2), "plan_reviewed": False, "done": []}
+        result, calls = run(args=dict(ARGS, cont=cont))
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("plan-review", labels(calls))
+        self.assertNotIn("plan-codex", labels(calls))
+
+    def test_no_skip_line_without_a_configured_codex_plan_review(self):
+        out = run_out(replies={"plan": self.small(2)},
+                      patch={"setup": {"review_state": {"code": "available", "plan": "unsupported"}}})
+        self.assertNotIn("plan-codex", labels(out["calls"]))
+        self.assertFalse([l for l in out["logs"] if l.startswith("codex plan review: ")])
+
+    def test_a_small_plan_keeps_the_codex_diff_review(self):
+        _, calls = run(replies={"plan": self.small(2)})
+        stopped, _ = run(replies={"plan": self.small(2), "final-codex": self.UNAVAILABLE})
+        self.assertEqual(labels(calls).count("final-codex"), 1)
+        self.assertNotIn("plan-codex", labels(calls))
+        call = next(c for c in calls if c["label"] == "final-codex")
+        self.assertEqual((call["agentType"], call["effort"]), ("clerk", "high"))
+        self.assertEqual(set(schema_of(calls, "final-codex")["properties"]), {"available", "verdict", "findings", "raw_summary"})
+        self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "code"))
+
+    FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+
+    def grown(self, task_list):
+        return dict(PLAN, tasks=task_list, criteria_edited=[])
+
+    def test_an_amended_unreviewed_small_plan_keeps_the_codex_plan_review(self):
+        cont = dict(AMEND_CONT, plan=self.small(2), plan_reviewed=False, done=[])
+        out = run_out(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]))
+        names = labels(out["calls"])
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertLess(names.index("amend"), names.index("plan-codex"))
+        self.assertFalse([l for l in out["logs"] if "codex plan review: skipped" in l])
+
+    OPEN = {"close-out": {"issue_state": "OPEN"}}
+
+    def kept_small(self, revised_tasks):
+        """A two-task plan skips Codex, the rules revise gives it revised_tasks, and the rules re-review stops the run on a rule finding."""
+        rule = PlanRulesTest.RULE_FINDING
+        plan = with_criteria(HUMAN, tasks=tasks(2))
+        first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": with_criteria(HUMAN, tasks=revised_tasks),
+                                "plan-review": rule, "plan-rules-review": rule})
+        self.assertEqual(first["stage"], "plan-review")
+        self.assertTrue(first["cont"]["codex_plan_skipped"])
+        return first["cont"]
+
+    def test_a_rules_only_resume_runs_the_codex_plan_review_a_revise_made_due(self):
+        grown = with_criteria(HUMAN, tasks=tasks(2) + [dict(tasks(3)[2], risk="security")])
+        for name, revised in (("fourth", tasks(4)), ("security", grown["tasks"])):
+            with self.subTest(name):
+                cont = self.kept_small(revised)
+                result, calls = run(args=dict(ARGS, cont=cont), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=revised)}, patch=self.OPEN)
+                names = labels(calls)
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertLess(names.index("plan-rules-review"), names.index("plan-codex"))
+                self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_a_rules_only_resume_of_a_plan_that_stays_small_runs_no_codex_plan_review(self):
+        cont = self.kept_small(tasks(3))
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(3))}, patch=self.OPEN)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("plan-codex", labels(calls))
+
+    def test_a_rules_only_resume_with_an_amend_runs_the_codex_plan_review_it_skipped(self):
+        cont = self.kept_small(tasks(2))
+        cont = dict(cont, setup=dict(cont["setup"], plan_dir="/g"))
+        replies = {"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2))}
+        stopped, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]),
+                             replies=dict(replies, **{"plan-codex": self.UNAVAILABLE}))
+        names = labels(calls)
+        self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "plan"))
+        self.assertLess(names.index("amend"), names.index("plan-codex"))
+        self.assertNotIn("impl-1", names)
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        # The stop keeps the review owed: a resume without the amend, on a plan that reads small again, still runs it.
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=self.OPEN)
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(names.count("plan-codex"), 1)
+        self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_an_amend_keeps_the_codex_plan_review_owed_through_a_stop_before_it_passes(self):
+        # (a) A kept plan with no rules revise spent: the amend resume leaves a rule finding and stops at plan-review, with the plan kept and
+        # before any Codex call; the next resume has no amend.
+        cont = self.kept_small(tasks(2))
+        cont = dict(cont, setup=dict(cont["setup"], plan_dir="/g"), plan_findings=dict(cont["plan_findings"], rounds=0))
+        stopped, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]),
+                             replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2)), "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertEqual(stopped["stage"], "plan-review")
+        self.assertTrue(stopped["amended"])
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        self.assertNotIn("plan-codex", labels(calls))
+        self.assertTrue(stopped["cont"]["codex_plan_owed"])
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2))}, patch=self.OPEN)
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(names.count("plan-codex"), 1)
+        self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_an_amend_on_an_unreviewed_plan_keeps_the_codex_plan_review_owed_through_each_stop(self):
+        kept = self.kept_small(tasks(2))
+        base = {k: v for k, v in kept.items() if k not in ("plan_findings", "codex_plan_skipped")}
+        base = dict(base, setup=dict(base["setup"], plan_dir="/g"))
+        silent_reviewer = {"plan-review": None}
+        for name, replies, stage in (("codex unavailable", {"plan-codex": self.UNAVAILABLE}, "codex-unavailable"),
+                                     ("silent claude reviewer", silent_reviewer, "plan-review")):
+            with self.subTest(name):
+                stopped, calls = run(args=dict(ARGS, cont=base, amend=[AMEND_EDIT]), replies=replies)
+                self.assertEqual(stopped["stage"], stage)
+                self.assertFalse(stopped["cont"]["plan_reviewed"])
+                self.assertTrue(stopped["cont"]["codex_plan_owed"])
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=self.OPEN)
+                names = labels(calls)
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+        # A passed review clears the mark: the cont of a run that reaches the tasks no longer carries it.
+        out = run_out(args=dict(ARGS, cont=base, amend=[AMEND_EDIT]), patch=self.OPEN)
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("codex_plan_owed", out["result"].get("cont", {}))
+
+    def test_a_late_codex_finding_on_a_rules_only_resume_stops_at_plan_review(self):
+        cont = self.kept_small(tasks(4))
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "bad"}]}
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(4)), "plan-codex": codex})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([f["summary"] for f in result["findings"]], ["bad"])
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_revise_that_leaves_the_plan_small_runs_no_codex_plan_review(self):
+        out = run_out(replies={"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": self.grown(tasks(3))})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("plan-codex", labels(out["calls"]))
+
+    def test_a_revise_that_leaves_the_plan_not_small_runs_the_codex_plan_review_on_it(self):
+        added = tasks(2) + [dict(tasks(3)[2], risk="security")]
+        for name, task_list in (("security", added), ("fourth", tasks(4))):
+            with self.subTest(name):
+                out = run_out(replies={"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": self.grown(task_list)})
+                names = labels(out["calls"])
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertGreater(names.index("plan-codex"), names.index("plan-revise"))
+                self.assertIn("codex plan review: 0 blocking findings", out["logs"])
+                self.assertEqual(names.count("impl-%d" % len(task_list)), 1)
+
+    def test_the_codex_plan_review_of_a_grown_plan_stops_on_unavailable_and_on_findings(self):
+        grown = self.grown(tasks(4))
+        base = {"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": grown}
+        stopped, calls = run(replies=dict(base, **{"plan-codex": self.UNAVAILABLE}))
+        self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "plan"))
+        self.assertNotIn("impl-1", labels(calls))
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "bad"}]}
+        stopped, calls = run(replies=dict(base, **{"plan-codex": codex}))
+        self.assertEqual(stopped["stage"], "plan-review")
+        self.assertEqual([f["summary"] for f in stopped["findings"]], ["bad"])
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        self.assertNotIn("impl-1", labels(calls))
 
 
 class PlanRulesTest(unittest.TestCase):
@@ -3238,9 +3448,10 @@ class ReviewAndVerifyTest(unittest.TestCase):
     def test_codex_finding_drives_the_fix_wave(self):
         codex = {"available": True, "verdict": "findings",
                  "findings": [{"severity": "important", "summary": "edge", "failing_input": "x"}]}
-        _, calls = run(replies={"final-codex": codex})
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(2)), "final-codex": codex})
         self.assertIn("edge", prompt(calls, "fix-wave"))
         self.assertIn("fix-wave-review", labels(calls))
+        self.assertNotIn("plan-codex", labels(calls))
 
     def test_missing_or_unearned_results_and_dirty_tree_fail_verification(self):
         for reply in ({"head": SHA, "clean": True, "results": []},
@@ -8166,7 +8377,7 @@ LOOK_CONT = {
     "lane": "standard",
     "plan": {"status": "planned", "plan_root": "/r/.git/worktrees/w/deliver-standard/plan.md",
              "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
-             "tasks": [{"n": 1, "title": "one", "file": "task-1.md", "risk": "standard"}]},
+             "tasks": [{"n": 1, "title": "one", "file": "task-1.md", "risk": "security"}]},
     "plan_reviewed": True,
     "done": [{"n": 1, "commit": "c0ffee", "review_rounds": 0, "reviewer": "reviewer"}],
     "fix_waves": 0,

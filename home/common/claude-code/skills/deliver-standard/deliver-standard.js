@@ -683,6 +683,11 @@ let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
 // A plan-review stop keeps the revised plan and the findings left on it; a resume runs one rules-only revise on it.
 const KEPT = CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules) ? CONT.plan_findings : null
 let planFindingsKept = KEPT ? { rules: KEPT.rules, findings: Array.isArray(KEPT.findings) ? KEPT.findings : [], rounds: Number.isInteger(KEPT.rounds) ? KEPT.rounds : 0, ...(Array.isArray(KEPT.noted) && KEPT.noted.length ? { noted: KEPT.noted } : {}) } : null
+// #1372: the Codex plan review was skipped for this unreviewed plan's size (codexSkipped), or is owed on it (codexOwed): an applied amend, a late
+// review a revise made due, or a review that stopped before it passed. Both are kept in cont while the plan is unreviewed, and codexOwed stays
+// set until a Codex plan review comes back available, so no stop and resume can mark the plan reviewed without it.
+let codexSkipped = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.codex_plan_skipped === true)
+let codexOwed = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.codex_plan_owed === true)
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete) || CLAIM_TAKEN
 // A partial task's edits stay claimed through any stop until that task is done.
@@ -737,6 +742,8 @@ const dropPlan = (left = []) => {
   priorFindings = priorOf(left.concat(planFindingsKept ? planFindingsKept.rules.concat(planFindingsKept.findings) : [], priorFindings))
   plan = null
   planFindingsKept = null
+  codexSkipped = false
+  codexOwed = false
 }
 const CARRIED_AT_START = carried
 // #940: fix waves that do not converge. A fix-wave-review stop that leaves findings open once the waves spent across runs (cont.fix_waves
@@ -815,7 +822,7 @@ const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog
 let lookWhy = null
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(carried.length && capMark ? { round_cap: capMark } : {}), ...(dropped > 0 && carried.length ? { fix_findings_dropped: dropped } : {}), ...(reviewRounds > 0 ? { review_rounds: reviewRounds } : {}), ...(reviewRounds > 0 && reviewed ? { reviewed } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(plan && !planReviewed && codexSkipped ? { codex_plan_skipped: true } : {}), ...(plan && !planReviewed && codexOwed ? { codex_plan_owed: true } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(carried.length && capMark ? { round_cap: capMark } : {}), ...(dropped > 0 && carried.length ? { fix_findings_dropped: dropped } : {}), ...(reviewRounds > 0 ? { review_rounds: reviewRounds } : {}), ...(reviewRounds > 0 && reviewed ? { reviewed } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 // A look marker the setup could not read is neither marked nor unmarked: a fix answer and a merged replay stop here, before any hold.
@@ -1170,6 +1177,11 @@ const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test can
 // #747: the narrowed Claude plan review when the Codex plan review runs; the acceptance-planning clause stays the shared one in the prompt, and the Codex sentence is a separate suffix after it.
 const PLAN_RUBRIC_SIZED = `an acceptance criterion with no task, a design choice that breaks the project's documented conventions, standards or docs (name the document it breaks), a project-specific literal written into global skills or agents, or an internal inconsistency (a task, interface, file or decision that the plan root or another task contradicts, or that no task defines)`
 const PLAN_CODEX_OWNS = `The Codex plan review running beside you owns code correctness (whether a task's code, tests and interfaces will work): do not sweep for it.`
+// #1372: a plan of at most this many tasks, none of risk security, skips the Codex plan review; the Claude plan review still runs. An applied amend
+// makes the planner's risk labels stale, so it marks the Codex review owed (codexOwed) until one passes; a revise that leaves the plan no longer
+// small runs the review on the revised plan.
+const SMALL_PLAN_TASKS = 3
+const smallPlan = p => p.tasks.length <= SMALL_PLAN_TASKS && !p.tasks.some(t => t.risk === 'security')
 // #819: the planner's own half of that check, the finding classes a planner can settle itself; never part of the reviewer's rubric.
 const PLAN_SELF_CHECK = `Also before you return: run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text; for each invariant, threshold and decision a task states, name the test case that fails when that one rule is removed; one with no such case needs a test; and list for each new test or doc the CI workflow test list, the generated index and the project gate that must also change.`
 // The plan step's turn structure (#737, #819), first in the prompt: at least four lookups a message and writing by the twelfth, then one message of writes.
@@ -1456,6 +1468,8 @@ ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MOD
   if (!graded) return why({ stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: am.status === 'refused' ? CONT : STALE })
   log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
   amendApplied = true
+  // #1372: the amended plan's risk labels may be stale, so an unreviewed plan owes the Codex plan review, however small it reads, until one comes back.
+  if (!planReviewed) codexOwed = true
   // #1370: the amendment is graded by the next round's verdict only; a stop before it (a lost scoped reviewer, a blocked task) hands the mark back, and markReviewed drops it.
   if (reviewed) reviewed = { ...reviewed, amended: true }
   // #996: the amended task file is the owner's answer to a blocked task, unless a decision is still to be worked in below.
@@ -1659,6 +1673,24 @@ if (BLOCKED_TASK && newDecision !== null) {
   verified = null
   finalReviewed = null
 }
+const codexPlanCall = () => call(`${CTX}
+Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${JSON.stringify(plan.acceptance)}.${SPEC}
+Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. ${CX_USE} plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; ${CX_WAIT} Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. ${CX_NONE}
+${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX })
+// #1372: the skip was decided on the plan before a revise or an amend; a plan that is no longer small gets the Codex plan review it skipped,
+// before it is marked reviewed. Owed from the first call, so a stop of it keeps the review due on a resume. null = nothing owed or it passed.
+const lateCodexPlan = async () => {
+  if (!(REVIEW_PLAN && (codexOwed || (codexSkipped && !smallPlan(plan))))) return null
+  log('codex plan review: owed (the plan is no longer small or was amended), running it on the plan as it stands')
+  codexOwed = true
+  const late = await codexPlanCall()
+  if (!late || !late.available) return codexStop('plan', late)
+  codexSkipped = false
+  codexOwed = false
+  const lateFindings = findingsOf(late).map(f => ({ ...f, source: 'codex' }))
+  log(`codex plan review: ${lateFindings.length} blocking findings`)
+  return lateFindings.length ? reviewStop([], lateFindings, 1) : null
+}
 if (RESUME_RULES) {
   const { rules, findings, rounds } = planFindingsKept
   const noted = notedOn(planFindingsKept.noted, rules)
@@ -1667,23 +1699,27 @@ if (RESUME_RULES) {
   if (r.silent) return reviewStop(r.before, findings, r.rounds, SILENT(), r.was)
   if (r.rules.length) return reviewStop(r.rules, findings, r.rounds, r.extra, r.noted)
   planFindingsKept = null
+  const lateStop = await lateCodexPlan()
+  if (lateStop) return lateStop
   planReviewed = true
 }
 if (!planReviewed) {
-  const ACS0 = JSON.stringify(plan.acceptance)
-  const planCodexP = REVIEW_PLAN ? call(`${CTX}
-Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${ACS0}.${SPEC}
-Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. ${CX_USE} plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; ${CX_WAIT} Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. ${CX_NONE}
-${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
+  const PLAN_CODEX = REVIEW_PLAN && (!smallPlan(plan) || codexOwed) ? REVIEW_PLAN : null
+  // Owed stays set through every stop below until the review comes back available; with none configured nothing is owed.
+  if (!PLAN_CODEX) codexOwed = false
+  codexSkipped = !!REVIEW_PLAN && !PLAN_CODEX
+  if (REVIEW_PLAN && !PLAN_CODEX) log(`codex plan review: skipped, a small plan (${plan.tasks.length} of at most ${SMALL_PLAN_TASKS} tasks, none of risk security)`)
+  const planCodexP = PLAN_CODEX ? codexPlanCall() : Promise.resolve(null)
   const ruleFindings = planRules(plan)
-  const narrow = REVIEW_SIZING && !!REVIEW_PLAN
+  const narrow = REVIEW_SIZING && !!PLAN_CODEX
   const planReviewClaude = await readReview(`${CTX}
 Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments).${SPEC} ${KNOW} ${MAP_FIRST} Report only Important or Critical defects: ${narrow ? PLAN_RUBRIC_SIZED : PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule).${narrow ? ` ${PLAN_CODEX_OWNS}` : ''} No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { ruled: true })
   const planCodexR = await planCodexP
   if (!planReviewClaude) return stop('plan-review', { details: `the plan reviewer ${silence('plan-review')}` })
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
-  if (REVIEW_PLAN) {
+  if (PLAN_CODEX) {
     if (!planCodexR || !planCodexR.available) return codexStop('plan', planCodexR)
+    codexOwed = false
     planFindings = planFindings.concat(findingsOf(planCodexR).map(f => ({ ...f, source: 'codex' })))
     log(`codex plan review: ${findingsOf(planCodexR).length} blocking findings`)
   }
@@ -1693,6 +1729,8 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion again in other words is not a change; an empty list when you changed none): ${JSON.stringify(planFindings)}`, REVISE_PACE), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const unsettled = await settleRevise(revised, planFindings, reviewedFacts, reviewedCriteria)
     if (unsettled) return unsettled
+    const lateStop = await lateCodexPlan()
+    if (lateStop) return lateStop
   }
   planFindingsKept = null
   planReviewed = true

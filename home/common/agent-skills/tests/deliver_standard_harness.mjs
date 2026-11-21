@@ -31,10 +31,11 @@ const FOLDED_SETUP = {
   renew: { verdict: 'renewed' },
 }
 const holderOf = (host, prompt) => (typeof host === 'string' && host ? { holder: `${host}/${HOLDER_ID(prompt)}` } : {})
+// #1372: a security task keeps the Codex plan review in every default run; a small plan of no security task skips it.
 const PLAN = {
   status: 'planned', plan_root: '/r/.git/worktrees/w/deliver-standard/plan.md',
   acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }],
-  tasks: [{ n: 1, title: 'one', file: 'task-1.md', risk: 'standard' }],
+  tasks: [{ n: 1, title: 'one', file: 'task-1.md', risk: 'security' }],
 }
 // A hold reply covers every non-code criterion the prompt lists, as a real hold block does.
 const openChecks = prompt => {
