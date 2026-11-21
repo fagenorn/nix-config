@@ -6456,6 +6456,26 @@ class ReviewRoundFindingsTest(unittest.TestCase):
         _, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": "f" * 40}})
         self.assertIn(f"{R}..{'f' * 40}", prompt(calls, "final-scoped"))
 
+    def test_a_later_wave_never_moves_the_reviewed_head_past_a_gap_an_earlier_wave_left(self):
+        # Wave 1 started at b..., not at the reviewed head: R..b... was never re-reviewed. Wave 2 starts at wave 1's commit, which is no reason to move the head.
+        gap = {"fix-wave": {"start_head": "b" * 40, "commit": H}, "fix-wave-2": {"start_head": H, "commit": "a" * 40}, "impl-1": {"commit": R}}
+        narrow = dict(self.NARROW, changed_files=["tools/grader.json"])
+        stopped = run_out(replies={"final-1": SCOPED_FIRST, "fix-wave-review": narrow, "fix-wave-review-2": SCOPED_NEW}, patch=gap)["result"]
+        self.assertEqual(stopped["stage"], "fix-wave-review")
+        self.assertEqual(stopped["cont"]["reviewed"], {"head": R})
+        passed = run_out(replies={"final-1": SCOPED_FIRST, "fix-wave-review": narrow, "fix-wave-review-2": {"verdict": "pass", "findings": []}, "verify": None}, patch=gap)["result"]
+        self.assertEqual(passed["stage"], "verify")
+        self.assertEqual(passed["cont"]["reviewed"], {"head": R})
+        # The pass records no head as reviewed, so a resume at that head reads the gap in a scoped round instead of skipping the review.
+        self.assertNotIn("final_reviewed", passed["cont"])
+        _, calls = run(args=dict(ARGS, cont=passed["cont"]), patch={"setup": {"head": "a" * 40}})
+        self.assertIn(f"{R}..{'a' * 40}", prompt(calls, "final-scoped"))
+        # Without a gap the same two waves move the head and record the pass.
+        clean = dict(gap, **{"fix-wave": {"start_head": R, "commit": H}})
+        ok = run_out(replies={"final-1": SCOPED_FIRST, "fix-wave-review": narrow, "fix-wave-review-2": {"verdict": "pass", "findings": []}, "verify": None}, patch=clean)["result"]
+        self.assertEqual(ok["cont"]["reviewed"], {"head": "a" * 40})
+        self.assertEqual(ok["cont"]["final_reviewed"]["head"], "a" * 40)
+
     def test_a_round_without_a_known_tip_requires_the_head_its_reviewers_read(self):
         only = dict(PLAN, branches=[dict(BR)], tasks=[dict(PLAN["tasks"][0], file="/g/task-1.md", branch="cand")])
         _, calls = run(replies={"plan": only, "verify": None})

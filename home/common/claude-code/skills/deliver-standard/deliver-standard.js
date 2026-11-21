@@ -1954,6 +1954,8 @@ const fromStop = carried.filter((c, i) => {
 if (fromStop.length) log(`final review: ${fromStop.length} finding(s) carried from the earlier fix-wave-review stop`)
 finalFindings = finalFindings.concat(fromStop)
 // #1370: a round that leaves findings open at the cap stops here, before any fix wave, unless the owner brought something new to this resume.
+// Set once a fix wave starts away from the reviewed head: the passed marker then never records the tip, below which lie commits no review has read.
+let gapSeen = false
 const ownerNew = capDecision !== null || oscDecision !== null || amendApplied
 if (!finalFindings.length) capMark = null
 if (finalFindings.length && reviewRounds >= ROUND_CAP && !ownerNew) {
@@ -2035,8 +2037,9 @@ if (finalFindings.length) {
       if (!sameSha(h, branchTips[b.name])) collected.push(`git -C ${b.worktree} diff ${branchTips[b.name]}..${h}`)
       branchTips[b.name] = h
     }
-    // The head the wave started from, as this run knows it: its re-review reads only start_head..commit, so it may advance the reviewed head only from there.
-    const waveBase = isCommit(tip) ? normSha(tip) : reviewed ? reviewed.head : null
+    // The head the last review read: a wave's re-review reads only start_head..commit, so it may advance the reviewed head only from there. A wave that
+    // started elsewhere leaves a gap, and the reviewed head stays below it: the next wave starts at that wave's commit, never at the reviewed head.
+    const waveBase = reviewed ? reviewed.head : null
     tip = fw.commit
     // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
     const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
@@ -2049,7 +2052,10 @@ if (finalFindings.length) {
     }
     carried = []
     if (waveBase === null || sameSha(fw.start_head, waveBase)) markReviewed(isCommit(tip) ? tip : null)
-    else log(`fix-wave-review: fix wave ${k} reports it started at ${fw.start_head}, not at ${waveBase}: the commits between were not re-reviewed, so the reviewed head stays`)
+    else {
+      gapSeen = true
+      log(`fix-wave-review: fix wave ${k} reports it started at ${fw.start_head}, not at ${waveBase}: the commits between were not re-reviewed, so the reviewed head stays`)
+    }
     const next = findingsOf(rv)
     if (!next.length) break
     const inFix = changedBy(fw).filter(p => changedBy(rv).includes(p))
@@ -2082,7 +2088,7 @@ if (finalFindings.length) {
     waveFindings = next
   }
 } else carried = []
-if (present(tip)) finalReviewed = { head: tip, ...branchSnap(), ...(sizedWhole ? { whole: true } : {}) }
+if (present(tip) && !gapSeen) finalReviewed = { head: tip, ...branchSnap(), ...(sizedWhole ? { whole: true } : {}) }
 }
 }
 
