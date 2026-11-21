@@ -1611,6 +1611,46 @@ class SmallPlanCodexSkipTest(unittest.TestCase):
         self.assertEqual(names.count("plan-codex"), 1)
         self.assertLess(names.index("plan-codex"), names.index("impl-1"))
 
+    def test_an_amend_keeps_the_codex_plan_review_owed_through_a_stop_before_it_passes(self):
+        # (a) A kept plan with no rules revise spent: the amend resume leaves a rule finding and stops at plan-review, with the plan kept and
+        # before any Codex call; the next resume has no amend.
+        cont = self.kept_small(tasks(2))
+        cont = dict(cont, setup=dict(cont["setup"], plan_dir="/g"), plan_findings=dict(cont["plan_findings"], rounds=0))
+        stopped, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]),
+                             replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2)), "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertEqual(stopped["stage"], "plan-review")
+        self.assertTrue(stopped["amended"])
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        self.assertNotIn("plan-codex", labels(calls))
+        self.assertTrue(stopped["cont"]["codex_plan_owed"])
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2))}, patch=self.OPEN)
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(names.count("plan-codex"), 1)
+        self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_an_amend_on_an_unreviewed_plan_keeps_the_codex_plan_review_owed_through_each_stop(self):
+        kept = self.kept_small(tasks(2))
+        base = {k: v for k, v in kept.items() if k not in ("plan_findings", "codex_plan_skipped")}
+        base = dict(base, setup=dict(base["setup"], plan_dir="/g"))
+        silent_reviewer = {"plan-review": None}
+        for name, replies, stage in (("codex unavailable", {"plan-codex": self.UNAVAILABLE}, "codex-unavailable"),
+                                     ("silent claude reviewer", silent_reviewer, "plan-review")):
+            with self.subTest(name):
+                stopped, calls = run(args=dict(ARGS, cont=base, amend=[AMEND_EDIT]), replies=replies)
+                self.assertEqual(stopped["stage"], stage)
+                self.assertFalse(stopped["cont"]["plan_reviewed"])
+                self.assertTrue(stopped["cont"]["codex_plan_owed"])
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=self.OPEN)
+                names = labels(calls)
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+        # A passed review clears the mark: the cont of a run that reaches the tasks no longer carries it.
+        out = run_out(args=dict(ARGS, cont=base, amend=[AMEND_EDIT]), patch=self.OPEN)
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("codex_plan_owed", out["result"].get("cont", {}))
+
     def test_a_late_codex_finding_on_a_rules_only_resume_stops_at_plan_review(self):
         cont = self.kept_small(tasks(4))
         codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "bad"}]}

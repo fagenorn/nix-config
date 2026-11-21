@@ -656,8 +656,9 @@ let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
 // A plan-review stop keeps the revised plan and the findings left on it; a resume runs one rules-only revise on it.
 const KEPT = CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules) ? CONT.plan_findings : null
 let planFindingsKept = KEPT ? { rules: KEPT.rules, findings: Array.isArray(KEPT.findings) ? KEPT.findings : [], rounds: Number.isInteger(KEPT.rounds) ? KEPT.rounds : 0, ...(Array.isArray(KEPT.noted) && KEPT.noted.length ? { noted: KEPT.noted } : {}) } : null
-// #1372: the Codex plan review was skipped for this unreviewed plan's size (codexSkipped), or is owed on it after a stop (codexOwed); both are
-// kept in cont while the plan is unreviewed, so a resume that marks it reviewed without the full plan review still checks the skip.
+// #1372: the Codex plan review was skipped for this unreviewed plan's size (codexSkipped), or is owed on it (codexOwed): an applied amend, a late
+// review a revise made due, or a review that stopped before it passed. Both are kept in cont while the plan is unreviewed, and codexOwed stays
+// set until a Codex plan review comes back available, so no stop and resume can mark the plan reviewed without it.
 let codexSkipped = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.codex_plan_skipped === true)
 let codexOwed = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.codex_plan_owed === true)
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
@@ -1135,10 +1136,10 @@ const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test can
 const PLAN_RUBRIC_SIZED = `an acceptance criterion with no task, a design choice that breaks the project's documented conventions, standards or docs (name the document it breaks), a project-specific literal written into global skills or agents, or an internal inconsistency (a task, interface, file or decision that the plan root or another task contradicts, or that no task defines)`
 const PLAN_CODEX_OWNS = `The Codex plan review running beside you owns code correctness (whether a task's code, tests and interfaces will work): do not sweep for it.`
 // #1372: a plan of at most this many tasks, none of risk security, skips the Codex plan review; the Claude plan review still runs. An applied amend
-// makes the planner's risk labels stale, so an amended plan never skips; a revise that leaves the plan no longer small runs the review on the revised plan.
+// makes the planner's risk labels stale, so it marks the Codex review owed (codexOwed) until one passes; a revise that leaves the plan no longer
+// small runs the review on the revised plan.
 const SMALL_PLAN_TASKS = 3
 const smallPlan = p => p.tasks.length <= SMALL_PLAN_TASKS && !p.tasks.some(t => t.risk === 'security')
-const codexSkippable = p => smallPlan(p) && !amendApplied
 // #819: the planner's own half of that check, the finding classes a planner can settle itself; never part of the reviewer's rubric.
 const PLAN_SELF_CHECK = `Also before you return: run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text; for each invariant, threshold and decision a task states, name the test case that fails when that one rule is removed; one with no such case needs a test; and list for each new test or doc the CI workflow test list, the generated index and the project gate that must also change.`
 // The plan step's turn structure (#737, #819), first in the prompt: at least four lookups a message and writing by the twelfth, then one message of writes.
@@ -1425,6 +1426,8 @@ ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MOD
   if (!graded) return why({ stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: am.status === 'refused' ? CONT : STALE })
   log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
   amendApplied = true
+  // #1372: the amended plan's risk labels may be stale, so an unreviewed plan owes the Codex plan review, however small it reads, until one comes back.
+  if (!planReviewed) codexOwed = true
   // #996: the amended task file is the owner's answer to a blocked task, unless a decision is still to be worked in below.
   if (newDecision === null && !(BLOCKED && BLOCKED.asked)) blocked = null
   // An applied amend makes every cached result stale, even when every edit was recorded already: an earlier run may have died after the clerk
@@ -1633,8 +1636,8 @@ ${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLER
 // #1372: the skip was decided on the plan before a revise or an amend; a plan that is no longer small gets the Codex plan review it skipped,
 // before it is marked reviewed. Owed from the first call, so a stop of it keeps the review due on a resume. null = nothing owed or it passed.
 const lateCodexPlan = async () => {
-  if (!(REVIEW_PLAN && codexSkipped && !codexSkippable(plan))) return null
-  log('codex plan review: the plan is no longer small, running it on the plan as it stands')
+  if (!(REVIEW_PLAN && (codexOwed || (codexSkipped && !smallPlan(plan))))) return null
+  log('codex plan review: owed (the plan is no longer small or was amended), running it on the plan as it stands')
   codexOwed = true
   const late = await codexPlanCall()
   if (!late || !late.available) return codexStop('plan', late)
@@ -1657,8 +1660,9 @@ if (RESUME_RULES) {
   planReviewed = true
 }
 if (!planReviewed) {
-  const PLAN_CODEX = REVIEW_PLAN && (!codexSkippable(plan) || codexOwed) ? REVIEW_PLAN : null
-  codexOwed = false
+  const PLAN_CODEX = REVIEW_PLAN && (!smallPlan(plan) || codexOwed) ? REVIEW_PLAN : null
+  // Owed stays set through every stop below until the review comes back available; with none configured nothing is owed.
+  if (!PLAN_CODEX) codexOwed = false
   codexSkipped = !!REVIEW_PLAN && !PLAN_CODEX
   if (REVIEW_PLAN && !PLAN_CODEX) log(`codex plan review: skipped, a small plan (${plan.tasks.length} of at most ${SMALL_PLAN_TASKS} tasks, none of risk security)`)
   const planCodexP = PLAN_CODEX ? codexPlanCall() : Promise.resolve(null)
@@ -1671,6 +1675,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
   if (PLAN_CODEX) {
     if (!planCodexR || !planCodexR.available) return codexStop('plan', planCodexR)
+    codexOwed = false
     planFindings = planFindings.concat(findingsOf(planCodexR).map(f => ({ ...f, source: 'codex' })))
     log(`codex plan review: ${findingsOf(planCodexR).length} blocking findings`)
   }
