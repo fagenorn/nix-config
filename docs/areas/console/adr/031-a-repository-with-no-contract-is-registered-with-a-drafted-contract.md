@@ -1,6 +1,6 @@
 # ADR-console-031 — A repository with no contract is registered with a drafted contract
 
-- **Status:** accepted; amended by ADR-console-033, ADR-console-070, ADR-console-082
+- **Status:** accepted; amended by ADR-console-033, ADR-console-070, ADR-console-082; D2 amended in #1445
 - **Decided in:** #1067
 
 ## Context
@@ -11,7 +11,7 @@ ADR-console-028 plans a repository's adoption from the page, and ADR-console-029
 
 **D1. When drafting starts.** A registration of a checkout with no `.agents/project.json` drafts a contract instead of planning at once. The console reads, never writing, the remote's authored URL (before `insteadOf`), the remote's default branch (`git ls-remote --symref`, only when the repository has exactly one remote, bounded at 10 seconds, with no prompt) and the tracked files.
 
-**D2. The fields.** The draft is a closed table of 29 fields: every contract member the console sets is a field. Each is shown with a Change control, or asked as a card when it is open. The release profile, the review commands, the generated agent files, the light lane and every path list are fields like the rest. A value the console read carries its source (`read from its remote`, `found in its files`, `taken from its folder name`, `set by you`); every other value reads `the console's starting value`. A structured value (a release profile, a projection list, a light lane) is typed as JSON, and the resolver judges it.
+**D2. The fields.** The draft is a closed table of 28 fields: every contract member the console sets is a field. Each is shown with a Change control, or asked as a card when it is open. The release profile, the review commands, the generated agent files and every path list are fields like the rest. A value the console read carries its source (`read from its remote`, `found in its files`, `taken from its folder name`, `set by you`); every other value reads `the console's starting value`. A structured value (a release profile, a projection list) is typed as JSON, and the resolver judges it. A draft saved with the retired light-lane field reads back without it.
 
 **D3. The cards.** An open field is a question card titled `Register <name>` with the question id `contract-draft` and the field as its subject. It counts in what needs the owner (ADR-console-029 D10), and has a text field where a value is typed. Each card's question is fixed when the draft is read, so it reads the same in every later row.
 

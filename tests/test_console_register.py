@@ -921,12 +921,12 @@ class RowTest(unittest.TestCase):
                    "texts": {}}
         now = contract_draft.draft("/x/sample-app", reading)
         # The same draft as an earlier console saved it: internal labels, old option and card words.
-        old_label = {"light-lane": "light lane", "worktree-prefix": "worktree name prefix"}
+        old_label = {"projections": "projections", "worktree-prefix": "worktree name prefix"}
         saved = []
         for f in now:
             f = {**f, "label": old_label.get(f["field"], f["label"])}
-            if f["field"] == "light-lane":
-                f["options"] = [{"value": "none", "label": "It has no light lane"}]
+            if f["field"] == "projections":
+                f["options"] = [{"value": "none", "label": "It has no projections"}]
             if f["field"] == "default-branch":
                 f["ask"] = ("Which branch is the default branch of sample-app?\n"
                             "Its remote did not say: choose a branch or type its name.")
@@ -936,9 +936,9 @@ class RowTest(unittest.TestCase):
         row = register.drafting("/x/sample-app", saved)
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
         draft = {f["field"]: f for f in found["draft"]}
-        self.assertEqual(draft["light-lane"]["label"], "short route for light changes")
-        self.assertEqual(draft["light-lane"]["options"],
-                         [{"value": "none", "label": "Every change takes the full delivery route"}])
+        self.assertEqual(draft["projections"]["label"], "generated agent files")
+        self.assertEqual(draft["projections"]["options"],
+                         [{"value": "none", "label": "It generates no agent instruction files"}])
         self.assertEqual(draft["worktree-prefix"]["label"], "start of each work copy's name")
         self.assertEqual((draft["worktree-prefix"]["value"], draft["worktree-prefix"]["source"]),
                          ("mine-", "owner"))
@@ -949,7 +949,28 @@ class RowTest(unittest.TestCase):
         self.assertNotIn("Its remote", "".join(q["ask"] for q in found["questions"]))
         self.assertEqual(found["plan_id"], row["plan_id"])
         shown = {e["field"]: e["line"] for e in register.view_entry(None, found)["draft"]}
-        self.assertNotIn("light lane", shown["light-lane"])
+        self.assertNotIn("projections", shown["projections"].lower())
+
+    def test_a_row_saved_with_the_light_lane_field_reads_back_without_it(self):
+        reading = {"remotes": [], "default_branch": None, "branches": ["trunk"], "files": [],
+                   "texts": {}}
+        now = contract_draft.draft("/x/sample-app", reading)
+        light = {"field": "light-lane", "label": "light lane",
+                 "value": '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
+                 "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
+                 "text": True, "reason": None, "ask": "What is the light lane of sample-app?"}
+        kept = [f for f in now if f["field"] != "light-lane"]
+        saved = []
+        for f in kept:
+            saved.append(f)
+            if f["field"] == "attempt-budget":
+                saved.append(light)
+        row = register.drafting("/x/sample-app", saved)
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        entry = register.view_entry(None, found)
+        self.assertEqual([f["field"] for f in found["draft"]], [f["field"] for f in kept])
+        self.assertNotIn("light-lane", [e["field"] for e in entry["draft"]])
+        self.assertEqual(found["plan_id"], row["plan_id"])
 
     def test_ended_takes_thirteen_members_and_checks_the_draft(self):
         row = register.drafting("/x/sample-app", draft_fields())
@@ -982,7 +1003,7 @@ class RowTest(unittest.TestCase):
             "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
             "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
         shown = register.view_entry(None, {**register.drafting("/x/sample-app", full), "at": "t"})
-        self.assertEqual(shown["draft_more"], "and 22 more settings at their usual values")
+        self.assertEqual(shown["draft_more"], "and 21 more settings at their usual values")
 
     def test_the_draft_id_follows_the_values(self):
         one = draft_fields()

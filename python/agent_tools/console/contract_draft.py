@@ -3,7 +3,7 @@
 Decided in ADR-console-031. The plain words and the main/more split are ADR-console-033. The proposed
 commit environment is ADR-console-082. A repository with no `.agents/project.json` is registered with a contract
 the console drafts from what the repository says and what the owner answers. This module reads the
-repository, drafts the 29 fields of the contract, words the open ones as cards, takes the owner's
+repository, drafts the 28 fields of the contract, words the open ones as cards, takes the owner's
 answers, and renders the wire-format contract that `adopt-project plan --contract-draft` takes. It
 judges only what it must to stay total (the project id's shape, the registry, a command that
 `shlex` can read, JSON that parses): every other value is the resolver's to judge (plan D2).
@@ -54,7 +54,7 @@ A runner that is unassigned, empty, relative, an option, or carries `$`, a backt
 unjudged too. Reading a hook never fetches a missing blob (`GIT_NO_LAZY_FETCH=1`), and reads a tracked hook by the
 blob id it first resolved, so the size bound and the content are one blob.
 
-Fields. `FIELDS` lists the 29 field ids in order; each is a record with exactly the keys
+Fields. `FIELDS` lists the 28 field ids in order; each is a record with exactly the keys
 `FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES` or None),
 `options` (`{"value", "label"}` rows), `text` (a typed value is accepted), `reason` (why its card is
 open though it has a value) and `ask` (its card's question, fixed by `draft` so it never changes
@@ -65,7 +65,8 @@ build and test commands) or the console's starting value, and opens the project 
 when it has no value and is one of `ASKED` (the project id, the default branch, the tracker, the build
 and test commands), or when it has a `reason`; `questions` words each open field as one card; `shown`
 gives every other field as one entry that can be changed. `refresh(root, fields)` gives a saved draft today's
-label, option labels and card question (ADR-console-033) without touching a value, a source or a reason. `MAIN` lists the seven fields read from the
+label, option labels and card question (ADR-console-033) without touching a value, a source or a reason,
+and drops a record of a retired field (`RETIRED_FIELDS`). `MAIN` lists the seven fields read from the
 repository or asked; each of them is one line `<label>: <display> (<source>)`. Every other field has
 the flag `more` in `shown`, and while its value is its start value its line is its start sentence
 (`REST_WORDS`, plain words with no source), so it reads as a settled default; once it is another value
@@ -74,10 +75,10 @@ it reads `<label>: <value> (<source>)`. `more_line` counts those shown `more` en
 `placeholder` gives a typed field the words its empty box shows (`PLACEHOLDERS`), None for a choice.
 Every label is plain words, never a contract term.
 
-Proposed field. `PROPOSED` lists the fields `draft` adds after the 29 only when proposed: today the
+Proposed field. `PROPOSED` lists the fields `draft` adds after the 28 only when proposed: today the
 `commit-environment` field (`commits run in its development shell`), drafted with the command of the first
 `ENVIRONMENTS` file in `reading["environments"]` (source `files`) when `reading["hooks"]` is not empty,
-and never otherwise, so a draft without it is exactly the 29 records. It is a main field, a typed
+and never otherwise, so a draft without it is exactly the 28 records. It is a main field, a typed
 choice with the one option `none`, never open. Its shown line leaves a trailing `--` off the command
 (`devenv shell`); the value and the command the contract names keep it. `proposed_lines(fields)` gives
 the `shown` line of each `PROPOSED` field present in a draft list, in `PROPOSED` order, `[]` for a
@@ -100,7 +101,7 @@ of the root and the fields, so two different drafts never share a plan.
 Contract. `contract(fields)` is total on every list `draft` and `set_value` produced. It has
 `schema_version` 2, `project`, `bindings` (`vcs`, `tracker`, `paths`, `commands`, `workflow`),
 `capabilities` (each `{"support": "supported" | "unsupported"}`), `projections` and `release`; a
-`none` command is left out, `light_lane` is left out when it is `none`, `yes`/`no` are booleans, a
+`none` command is left out, `yes`/`no` are booleans, a
 path list splits on commas, and a count that is all digits is an int. It has no `platform` member:
 the adoption plan adds it. A `commit-environment` value other than None or `none` adds the command
 `bindings.commands["commit-environment"]` and names it in `bindings.vcs.commit.environment`; it never
@@ -221,14 +222,14 @@ _TABLE = (
      ("/bindings/workflow/orchestration/max_parallel",), [], True),
     ("attempt-budget", "minutes per delivery attempt",
      ("/bindings/workflow/orchestration/attempt_budget_minutes",), [], True),
-    ("light-lane", "short route for light changes", ("/bindings/workflow/light_lane",),
-     _none("Every change takes the full delivery route"), True),
     ("projections", "generated agent files", ("/projections",),
      _none("It generates no agent instruction files"), True),
     ("release", "how it is released", ("/release",),
      [{"value": "unsupported", "label": "It makes no releases"}], True),
 )
-# Fields `draft` adds only when proposed; they are not among the 29 `FIELDS`.
+# A field an earlier console drafted that no longer exists (#1445): `refresh` drops its saved record.
+RETIRED_FIELDS: tuple[str, ...] = ("light-lane",)
+# Fields `draft` adds only when proposed; they are not among the 28 `FIELDS`.
 _PROPOSED_TABLE = (
     (ENVIRONMENT_FIELD, "commits run in its development shell",
      ("/bindings/vcs/commit/environment", "/bindings/commands/commit-environment"),
@@ -238,7 +239,7 @@ FIELDS: tuple[str, ...] = tuple(row[0] for row in _TABLE)
 ASKED = frozenset({"project-id", "default-branch", "tracker", "build-command", "test-command"})
 COMMAND_FIELDS = ("build-command", "test-command", "review-plan-command", "review-code-command",
                   ENVIRONMENT_FIELD)
-JSON_FIELDS = ("light-lane", "projections", "release")
+JSON_FIELDS = ("projections", "release")
 LABELS = {row[0]: row[1] for row in (*_TABLE, *_PROPOSED_TABLE)}
 POINTERS = {row[0]: row[2] for row in (*_TABLE, *_PROPOSED_TABLE)}
 OPTIONS = {row[0]: row[3] for row in (*_TABLE, *_PROPOSED_TABLE)}
@@ -265,7 +266,6 @@ STARTS = {
     "review-code-command": "none",
     "max-parallel": "1",
     "attempt-budget": "240",
-    "light-lane": "none",
     "projections": "none",
     "release": "unsupported",
 }
@@ -290,7 +290,6 @@ REST_WORDS = {
     "review-code-command": "no command reviews its code",
     "max-parallel": "one delivery runs at a time",
     "attempt-budget": "a delivery attempt may take up to 240 minutes",
-    "light-lane": "every change takes the full delivery route",
     "projections": "it generates no agent instruction files",
     "release": "it makes no releases",
 }
@@ -322,7 +321,6 @@ PLACEHOLDERS = {
     "review-code-command": "the review command",
     "max-parallel": "a number",
     "attempt-budget": "a number of minutes",
-    "light-lane": _JSON,
     "projections": _JSON,
     "release": _JSON,
 }
@@ -860,7 +858,7 @@ def _environment_record(command: str, name: str, remotes: int) -> dict:
 
 
 def draft(root: str, reading: Mapping, *, entries: Iterable[Mapping] = ()) -> list[dict]:
-    """The 29 fields, filled from the reading and the console's starting values."""
+    """The 28 fields, filled from the reading and the console's starting values."""
     remotes = list(reading.get("remotes") or ())
     name = Path(root).name
     read_id = None
@@ -936,8 +934,11 @@ def _remote_count(fields: list[Mapping]) -> int:
 
 
 def refresh(root: str, fields: Iterable[Mapping]) -> list[dict]:
-    """A saved draft with today's wording: label, option labels and card question, values untouched."""
-    fields = [dict(f) for f in fields]
+    """A saved draft with today's wording: label, option labels and card question, values untouched.
+
+    A record of a retired field (`RETIRED_FIELDS`) is dropped.
+    """
+    fields = [dict(f) for f in fields if f["field"] not in RETIRED_FIELDS]
     remotes, name = _remote_count(fields), Path(root).name
     for field in fields:
         known = field["field"]
@@ -1122,8 +1123,6 @@ def contract(fields: Iterable[Mapping]) -> dict:
         "review": {"plan": "review-plan" if "review-plan" in commands else None,
                    "code": "review-code" if "review-code" in commands else None},
     }
-    if v["light-lane"] not in (None, "none"):
-        workflow["light_lane"] = _json(v["light-lane"])
 
     def support(on: bool) -> dict:
         return {"support": "supported" if on else "unsupported"}

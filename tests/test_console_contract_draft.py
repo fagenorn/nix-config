@@ -122,7 +122,7 @@ class ContractDraftTest(unittest.TestCase):
     def test_a_github_remote_is_read_for_id_name_branch_and_tracker(self):
         root, fields = self.remote_fields()
         self.assertEqual([f["field"] for f in fields], list(cd.FIELDS))
-        self.assertEqual(len(cd.FIELDS), 29)
+        self.assertEqual(len(cd.FIELDS), 28)
         for record in fields:
             self.assertEqual(set(record), cd.FIELD_KEYS)
         self.assertEqual(pair(fields, "project-id"), (ID, "remote"))
@@ -224,16 +224,48 @@ class ContractDraftTest(unittest.TestCase):
         root, fields = self.remote_fields()
         fields = self.settled(fields, root, build_command="none", test_command="none")
         self.assertEqual(cd.contract(fields), self.expected_contract())
-        fields = self.settled(
-            fields, root, review_plan_command="true",
-            light_lane='{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}')
+        fields = self.settled(fields, root, review_plan_command="true")
         drafted = cd.contract(fields)
         self.assertEqual(drafted["bindings"]["commands"]["review-plan"],
                          {"argv": ["true"], "cwd": ".", "env": []})
         self.assertEqual(drafted["bindings"]["workflow"]["review"]["plan"], "review-plan")
         self.assertEqual(drafted["capabilities"]["review.plan"], {"support": "supported"})
-        self.assertEqual(drafted["bindings"]["workflow"]["light_lane"],
-                         {"mode": "shadow", "budget_minutes": 90, "risk_paths": []})
+        self.assertNotIn("light_lane", drafted["bindings"]["workflow"])
+
+    def test_the_drafted_contract_asks_no_light_lane(self):
+        root, fields = self.remote_fields()
+        fields = self.settled(fields, root, build_command="none", test_command="none")
+        drafted = cd.contract(fields)
+        refused = cd.set_value(
+            fields, "light-lane", '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
+            entries=[], root=root)
+        for table in (cd.FIELDS, cd.LABELS, cd.STARTS, cd.REST_WORDS, cd.PLACEHOLDERS,
+                      cd.JSON_FIELDS):
+            self.assertNotIn("light-lane", table)
+        for pointers in cd.POINTERS.values():
+            self.assertNotIn("/bindings/workflow/light_lane", pointers)
+        self.assertEqual(refused, (None, cd.UNKNOWN_FIELD))
+        self.assertEqual(sorted(drafted["bindings"]["workflow"]),
+                         ["orchestration", "review", "verification"])
+
+    def test_a_saved_draft_drops_the_retired_light_lane_field(self):
+        root, fields = self.remote_fields()
+        kept = [f for f in fields if f["field"] != "light-lane"]
+        light = {"field": "light-lane", "label": "light lane",
+                 "value": '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
+                 "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
+                 "text": True, "reason": None, "ask": "What is the light lane of sample-app?"}
+        self.assertEqual(set(light), cd.FIELD_KEYS)
+        at = [f["field"] for f in kept].index("attempt-budget") + 1
+        saved = [*kept[:at], light, *kept[at:]]
+        refreshed = cd.refresh(root, saved)
+        self.assertEqual([f["field"] for f in refreshed], [f["field"] for f in kept])
+        for new, old in zip(refreshed, kept):
+            self.assertEqual((new["value"], new["source"], new["reason"]),
+                             (old["value"], old["source"], old["reason"]))
+        cd.shown(refreshed)
+        cd.more_line(refreshed)
+        self.assertNotIn("light_lane", cd.contract(refreshed)["bindings"]["workflow"])
 
     def test_the_drafted_contract_resolves(self):
         root, fields = self.remote_fields()
@@ -283,7 +315,7 @@ class ContractDraftTest(unittest.TestCase):
             by_field(fields)["commit-environment"]["ask"],
             f"Which command opens the development shell the commits of {root.name} run in?\n"
             "Its commit hooks need its development shell: type the command, or say they need none.")
-        self.assertEqual(cd.more_line(fields), "and 22 more settings at their usual values")
+        self.assertEqual(cd.more_line(fields), "and 21 more settings at their usual values")
         fields = self.settled(fields, str(root), build_command="none", test_command="none")
         drafted = cd.contract(fields)
         self.assertEqual(drafted["bindings"]["commands"]["commit-environment"],
@@ -710,7 +742,7 @@ class ContractDraftTest(unittest.TestCase):
     def test_every_settled_value_is_shown_with_its_source(self):
         root, fields = self.remote_fields()
         lines = cd.shown(fields)
-        self.assertEqual(len(lines), 27)
+        self.assertEqual(len(lines), 26)
         self.assertTrue(all(entry["field"] for entry in lines))
         order = [entry["field"] for entry in lines]
         self.assertEqual(order, [f for f in cd.FIELDS if f not in ("build-command", "test-command")])
@@ -740,14 +772,14 @@ class ContractDraftTest(unittest.TestCase):
             for term in ("<num>", "<slug>", "light lane", "hint", "operations path",
                          "rejection path", "the console's starting value"):
                 self.assertNotIn(term, text.lower())
-        (light,) = [e for e in shown if e["field"] == "light-lane"]
-        self.assertEqual([o["label"] for o in light["options"]],
-                         ["Every change takes the full delivery route"])
+        (projections,) = [e for e in shown if e["field"] == "projections"]
+        self.assertEqual([o["label"] for o in projections["options"]],
+                         ["It generates no agent instruction files"])
 
     def test_the_counted_line_says_how_many_and_whether_you_changed_any(self):
         root, fields = self.remote_fields()
         count = len([f for f in cd.FIELDS if f not in cd.MAIN])
-        self.assertEqual(count, 22)
+        self.assertEqual(count, 21)
         self.assertEqual(cd.more_line(fields), f"and {count} more settings at their usual values")
         new, _ = cd.set_value(fields, "max-parallel", "2", entries=[], root=root)
         self.assertEqual(cd.more_line(new), f"and {count} more settings, 1 of them set by you")

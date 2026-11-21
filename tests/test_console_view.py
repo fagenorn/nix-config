@@ -3531,7 +3531,7 @@ class RegisterItemViewTest(unittest.TestCase):
         entries = shown["registration"]["draft"]
         texts = ([e["line"] for e in entries] + [o["label"] for e in entries for o in e["options"]]
                  + [shown["registration"]["draft_more"]])
-        self.assertEqual(len(entries), 29)
+        self.assertEqual(len(entries), 28)
         for text in texts:
             for term in ("<num>", "<slug>", "light lane", "hint", "operations path",
                          "rejection path"):
@@ -3541,7 +3541,7 @@ class RegisterItemViewTest(unittest.TestCase):
             f"and {len([f for f in contract_draft.FIELDS if f not in contract_draft.MAIN])} more "
             "settings at their usual values")
         self.assertEqual(shown["registration"]["draft_more"],
-                         "and 22 more settings at their usual values")
+                         "and 21 more settings at their usual values")
 
     def test_a_text_card_carries_the_placeholder_of_its_field(self):
         ask = {"id": "contract-draft", "subject": "project-id",
