@@ -22,15 +22,18 @@ reads a clock.
 
 The dedupe rule is spend's: one assistant message id counts once across every file of one read,
 under the run, agent and phase of its first counted record, its usage the per-field maximum
-(`spend.larger_usage`) of every counted repeat.
+(`spend.larger_usage`) of every counted repeat. A tool call counts once the same way: a `tool_use` id
+read again in another file of one read is counted only under the agent that read it first.
 
 Closed vocabulary: every `script` is one of `spend.BATCH`, `spend.STANDARD`, `spend.OTHER`; every
 phase key one of `spend.PHASES`, `spend.OTHER`, `spend.UNATTRIBUTED`; `issues` are the ints of
 `run_issues`. No string of the result comes from transcript text.
 
-Unreadable roots (spend's rule): an absent root is empty; when every given root fails to list with
-an `OSError` other than `FileNotFoundError` or `NotADirectoryError`, `TranscriptsUnreadable` is
-raised rather than an empty digest returned. A lower directory that cannot be listed is skipped.
+Unreadable roots: an absent root is empty. `TranscriptsUnreadable` is raised, rather than an empty
+digest returned, when at least one given root fails to list with an `OSError` other than
+`FileNotFoundError` or `NotADirectoryError` and no given root listed (an absent root is not a
+listing, so one absent root and one denied root raise). A lower directory that cannot be listed is
+skipped.
 
 Imports: the standard library, `canonical`, `spend`, `deliveries` and `sessions` only. Never
 `view`, `project_question`, `question_records` or `service`: `view` imports `project_question`,
@@ -140,6 +143,8 @@ class _Reader:
         self.project_id, self.project_of, self.since = project_id, project_of, since
         self.repo_of, self.scandir = repo_of, scandir
         self.failed: list[str] = []
+        self.listed: set[str] = set()
+        self.tool_ids: set[str] = set()
         self.projects: dict[str, str | None] = {}
         self.seen: dict[str, _Seen] = {}
         self.runs: list[_Run] = []
@@ -147,7 +152,9 @@ class _Reader:
     def children(self, directory: str) -> list[os.DirEntry]:
         try:
             with self.scandir(directory) as entries:
-                return sorted(entries, key=lambda entry: entry.name)
+                found = sorted(entries, key=lambda entry: entry.name)
+            self.listed.add(directory)
+            return found
         except _ABSENT:
             return []
         except OSError:
@@ -239,7 +246,8 @@ class _Reader:
             if isinstance(content, list):
                 for item in content:
                     if (isinstance(item, dict) and item.get("type") == "tool_use"
-                            and isinstance(item.get("id"), str)):
+                            and isinstance(item.get("id"), str) and item["id"] not in self.tool_ids):
+                        self.tool_ids.add(item["id"])
                         agent.tool_ids.add(item["id"])
             mid = message.get("id")
             if record.get("type") != "assistant" or not isinstance(mid, str):
@@ -279,7 +287,7 @@ def project_runs(
         if real not in walked:
             walked.append(real)
             reader.walk(real)
-    if walked and all(real in reader.failed for real in walked):
+    if any(real in reader.failed for real in walked) and not any(real in reader.listed for real in walked):
         raise TranscriptsUnreadable("no transcript root could be listed")
     reader.settle()
     digests = []

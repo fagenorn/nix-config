@@ -122,6 +122,15 @@ class DigestTest(Tree):
         self.assertEqual(summed(result, "messages"), 1)
         self.assertEqual(result[0].phases["implement"].tokens.output, 12)
 
+    def test_a_tool_call_in_a_message_repeated_in_two_files_counts_once(self):
+        self.write("wf_a", "a1", message("m1", "2026-11-17T08:00:00Z", P01, input=5, tool="t1"),
+                   journal=[started("a1", "impl-1"), started("a2", "review-1")])
+        self.write("wf_a", "a2", message("m1", "2026-11-17T08:00:01Z", P01, input=5, tool="t1"),
+                   message("m2", "2026-11-17T08:00:02Z", P01, input=1, tool="t2"))
+        result = self.read()
+        self.assertEqual(summed(result, "messages"), 2)
+        self.assertEqual(summed(result, "tool_calls"), 2)
+
     def test_records_before_since_count_nothing(self):
         self.write("wf_a", "a1",
                    message("m1", "2026-10-01T08:00:00Z", P01, input=100),
@@ -187,6 +196,22 @@ class DigestTest(Tree):
         result = project_runs([other, self.tree], "owner/p01", PROJECTS.get, SINCE, {},
                               repo_of=repo_of, scandir=one_failing)
         self.assertEqual(len(result), 1)
+
+
+    def test_an_absent_root_beside_a_denied_one_raises(self):
+        self.write("wf_a", "a1", message("m1", "2026-11-17T08:00:00Z", P01, input=1))
+        absent = self.tmp / "none"
+
+        def denied(path):
+            if os.fspath(path) == os.path.realpath(self.tree):
+                raise PermissionError("denied")
+            return os.scandir(path)
+
+        with self.assertRaises(TranscriptsUnreadable):
+            project_runs([absent, self.tree], "owner/p01", PROJECTS.get, SINCE, {}, repo_of=repo_of,
+                         scandir=denied)
+        self.assertEqual(len(project_runs([absent, self.tree], "owner/p01", PROJECTS.get, SINCE, {},
+                                          repo_of=repo_of)), 1)
 
 
 class DigestCredentialTest(Tree):

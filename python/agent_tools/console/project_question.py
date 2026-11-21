@@ -64,7 +64,10 @@ reason names that figure) instead of `MODEL` and `TIMEOUT_SECONDS`. With records
 records text and before the thread: analyse before answering, answer where time or tokens go from the
 `transcripts` part (counts, times and token sums by script, phase and issue; no transcript itself is
 readable), quote each figure exactly and cite it as `<path> (transcripts)`. A light ask's argv, prompt and
-settings are byte-identical to before. A deeper session's settings differ from a light one's only by the
+settings are byte-identical to before. A deeper ask without records is refused: `new_ask(..., deep=True)`
+raises `ValueError(DEEP_NEEDS_RECORDS)` and `run_question` of such an `Ask` is a failed outcome with that
+reason before any file is written or session started, because only records give the hook its confinement.
+A deeper session's settings differ from a light one's only by the
 hook's fifth argument, the ask's checkout root: the permission rules are the same, and the hook confines
 Read, Grep, Glob and the admitted commands to the root and the records file (`OUTSIDE_ROOT`,
 `project_question_hook`); a symlink the checkout itself holds is part of its declared content, a stated
@@ -271,6 +274,8 @@ DEEP_TEXT = (
     "part, quote each figure exactly as it is printed, and name it under Read as {path} "
     "(transcripts).\n\n")
 RECORDS_FAILED = "the console's records could not be gathered: {detail}"
+CHECKOUT_MOVED = "the project no longer holds the checkout the question was asked in"
+DEEP_NEEDS_RECORDS = "a deeper question needs the console's records: it carries the checkout confinement"
 CONTRACT_UNREADABLE = "the project's contract could not be resolved, so no session was started: {detail}"
 UNAVAILABLE_TEXT = "questions are not available on this host yet"
 UNREGISTERED = "this project is not registered"
@@ -497,6 +502,8 @@ def new_ask(question_id: str, project_id: str, root: str, question: str, profile
             routes: Sequence[Route], settings_dir: Path, *, session_id: str,
             thread: Sequence[Turn] = (), repo: str | None = None,
             unset: Sequence[str] = (), records: str | None = None, deep: bool = False) -> Ask:
+    if deep and records is None:
+        raise ValueError(DEEP_NEEDS_RECORDS)
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
                Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread), repo,
                tuple(unset), records, deep)
@@ -735,6 +742,8 @@ def _last_line(stderr) -> str | None:
 def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: str = sys.platform,
                  run=manager.run_in_own_group,
                  environ: Mapping[str, str] = os.environ) -> Outcome:
+    if ask.deep and ask.records is None:
+        return Outcome(FAILED, reason=DEEP_NEEDS_RECORDS)
     argv = launch_command(ask, platform)
     if argv is None:
         return Outcome(FAILED, reason=UNAVAILABLE_TEXT)

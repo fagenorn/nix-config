@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.console import (
-    deliveries, event_log, project_question, question_records, sprints, transcript_digest, view)
+    deliveries, event_log, project_question, question_records, spend, sprints, transcript_digest, view)
 from agent_tools.console.event_log import Event
 from agent_tools.console.spend import Tokens
 from agent_tools.console.transcript_digest import PhaseFigures, RunDigest
@@ -434,6 +434,49 @@ class TranscriptsPartTest(unittest.TestCase):
                 self.assertEqual(question_records.owner_since(
                     sorted(events, key=lambda e: e.seq), P, P_ROOT), DAY2)
         self.assertIsNone(question_records.owner_since(EVENTS, P, P_ROOT))
+
+    def test_a_predecessors_work_after_it_left_and_before_the_project_registered_is_not_counted(self):
+        def registry(seq, kind, project, payload, when):
+            return Event(seq, f"{when}T12:00:00+00:00", kind, project, payload)
+
+        friday = "2026-11-20"
+        events = sorted(EVENTS + [
+            registry(100, "project.registered", "owner/old", {"root": P_ROOT}, DAY1),
+            registry(101, event_log.PROJECT_UNREGISTERED, "owner/old", {}, DAY1),
+            registry(102, "project.registered", P, {"root": P_ROOT}, friday)], key=lambda e: e.seq)
+        self.assertEqual(question_records.owner_since(events, P, P_ROOT), friday)
+        r = records(events=events)
+        self.assertEqual([d["tokens"] for d in r["spend"]["days"]], [0, 0])
+        self.assertEqual(r["spend"]["runs"], [])
+
+    def test_a_token_shaped_run_name_reaches_neither_reader_nor_the_records(self):
+        token = "ghp_" + "A1b2" * 9
+        run = f"wf_{token}"
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        tree = Path(os.path.realpath(directory)) / "projects"
+        run_dir = tree / "-srv-p01" / "sid-1" / "subagents" / "workflows" / run
+        run_dir.mkdir(parents=True)
+        (run_dir / "journal.jsonl").write_text(json.dumps(
+            {"type": "started", "agentId": "a1", "label": "impl", "phase": "Tasks"}) + "\n")
+        line = {"type": "assistant", "sessionId": "sid-1", "timestamp": "2026-11-17T08:00:00Z",
+                "cwd": P_ROOT,
+                "message": {"id": "m1", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 3},
+                            "content": []}}
+        (run_dir / "agent-a1.jsonl").write_text(json.dumps(line) + "\n")
+        reader = spend.SpendReader(repo_of=lambda cwd: P_ROOT)
+        reader.read([tree], "2026-11-01")
+        view_of = spend.spend_view(reader.snapshot(), today="2026-11-17", project_of={P_ROOT: P}.get,
+                                   profiles={})
+        runs = transcript_digest.project_runs(
+            [tree], P, {P_ROOT: P}.get, "2026-11-01", {run: [7]}, repo_of=lambda cwd: P_ROOT)
+        self.assertEqual(len(runs), 1)
+        r = records(spend=view_of, transcripts=runs)
+        self.assertEqual([x["run_id"] for x in r["spend"]["runs"]], [question_records.RUN_WITHHELD])
+        self.assertEqual(r["spend"]["runs"][0]["tokens"], 3)
+        text = question_records.encode(r)
+        self.assertNotIn(token, text)
+        self.assertFalse(project_question.credential_shaped(text))
 
     def test_a_token_in_a_transcript_never_reaches_the_records(self):
         token = "ghp_" + "A1b2" * 9

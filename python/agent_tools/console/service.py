@@ -5237,6 +5237,10 @@ class ConsoleService:
                                     outcome = project_question.Outcome(
                                         project_question.FAILED,
                                         reason=project_question.PROFILE_GONE.format(profile=profile))
+                                elif not self._holds_checkout(project_id, root):
+                                    outcome = project_question.Outcome(
+                                        project_question.FAILED,
+                                        reason=project_question.CHECKOUT_MOVED)
                                 else:
                                     ask = project_question.new_ask(
                                         question_id, project_id, root, text, profile, reach.routes,
@@ -5265,6 +5269,12 @@ class ConsoleService:
             if deep:
                 self._spend_step()  # the deeper session's own spend shows now, not at the next poll
 
+    def _holds_checkout(self, project_id: str, root: str) -> bool:
+        """Whether, now and under the ingest lock, `project_id` is registered with `root` as its checkout."""
+        with self._ingest:
+            held = self._states.get(project_id)
+            return held is not None and held.root == root
+
     def _question_records(self, project_id: str, root: str, deep: bool = False) -> str:
         """The encoded document of the console's own records of one project (ADR-console-089).
 
@@ -5278,14 +5288,18 @@ class ConsoleService:
         delivery transcripts, aggregated (`transcript_digest.project_runs`, #1274, ADR-console-094), from the
         later of the spend window's first day and the day the project began to hold `root`, outside the lock,
         mapped by a copy of the states taken in the section; a read that raises (every root unreadable
-        included) fails the question like any other gathering.
+        included) fails the question like any other gathering. After that read the ownership of every
+        checkout is compared once more under the lock with the copy: a registry that changed meanwhile (a
+        checkout taken by another project included) fails the question, so no later owner's records enter the
+        answer of an earlier one. `_run_project_question` checks once more, just before the session starts,
+        that the project still holds `root` (`project_question.CHECKOUT_MOVED`).
         """
         if self._spend_view is None:
             self._spend_step(only_without_view=True)
         with self._ingest:
             held_state = self._states.get(project_id)
             if held_state is None or held_state.root != root:
-                raise RuntimeError("the project no longer holds the checkout the question was asked in")
+                raise RuntimeError(project_question.CHECKOUT_MOVED)
             events = self.log.events()
             spend_view, sprint_states, inbox = self._spend_view, self._sprints, self._inbox
             states = dict(self._states) if deep else None
@@ -5302,6 +5316,11 @@ class ConsoleService:
                 self._projects_dirs(), project_id, lambda repo: project_for(repo, states),
                 max(window, owned) if owned else window,
                 question_records.run_issues(events, project_id))
+            with self._ingest:
+                if {pid: state.root for pid, state in self._states.items()} != {
+                        pid: state.root for pid, state in states.items()}:
+                    raise RuntimeError(
+                        "the projects' checkouts changed while the transcripts were read")
         return question_records.encode(question_records.project_records(
             project_id, root=root, events=events, spend=spend_view, live_runs=live_runs,
             sprint_states=sprint_states, inbox=inbox, transcripts=runs,

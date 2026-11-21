@@ -1262,6 +1262,18 @@ class DeepLaunchTest(RecordsLaunchTest):
         self.start(self.fake())
         self.assertEqual(self.calls[-1][1], 300)
 
+    def test_a_deeper_ask_without_records_is_refused_before_any_launch(self):
+        with self.assertRaises(ValueError):
+            project_question.new_ask(
+                "a" * 16, "owner/p01", self.ask.root, "q", "work", (), self.ask.settings.parent,
+                session_id=SESSION_ID, deep=True)
+        bare = dataclasses.replace(self.ask, deep=True, records=None)
+        outcome = self.start(self.fake(), ask=bare)
+        self.assertEqual(outcome, project_question.Outcome(
+            project_question.FAILED, reason=project_question.DEEP_NEEDS_RECORDS))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.settings, {})
+
     def test_a_deeper_session_adds_only_its_root_to_the_hook(self):
         self.start(self.fake(), ask=self.deep)
         deep = json.loads(self.settings["text"])
@@ -1301,9 +1313,11 @@ class DeepHookTest(unittest.TestCase):
         for path in (self.transcript, self.root / "README.md", self.other / "secret.txt"):
             path.write_text("x\n")
         self.route = ("sqlite3", str(self.other / "console.db"), ".tables")
+        self.own_route = ("sqlite3", str(self.root / "console.db"), ".tables")
         self.ask = project_question.new_ask(
             "a" * 16, "owner/p01", str(self.root), "where does the time go?", "work",
-            (project_question.Route("db", self.route, str(self.root)),), settings_dir,
+            (project_question.Route("db", self.route, str(self.root)),
+             project_question.Route("own", self.own_route, str(self.root))), settings_dir,
             session_id=SESSION_ID, records="{}\n", deep=True)
         self.sibling = settings_dir / ("b" * 16 + project_question.RECORDS_SUFFIX)
         self.own = project_question.records_path(self.ask)
@@ -1352,7 +1366,10 @@ class DeepHookTest(unittest.TestCase):
             ("a git read naming a file of another checkout", "Bash",
              {"command": f"git log {self.other}/secret.txt"}, ("deny", self.outside())),
             ("a git read inside", "Bash", {"command": "git log --oneline"}, ("allow", hook.ALLOWED)),
-            ("the declared route", "Bash", {"command": " ".join(self.route)}, ("allow", hook.ALLOWED)),
+            ("a declared route naming a database of another checkout", "Bash",
+             {"command": " ".join(self.route)}, ("deny", self.outside())),
+            ("a declared route inside the checkout", "Bash",
+             {"command": " ".join(self.own_route)}, ("allow", hook.ALLOWED)),
         )
         for label, name, tool_input, expected in rows:
             with self.subTest(label):
@@ -3172,6 +3189,59 @@ class QuestionDeepServiceTest(QuestionRecordsServiceTest):
             svc.ask_project_question(WHY, "where does time go?", deep=True)
         ask, _cancel = self.asked[-1]
         self.assertEqual(json.loads(ask.records)["transcripts"]["runs"], 0)
+
+    def test_a_checkout_taken_while_the_transcripts_are_read_fails_the_question(self):
+        svc = self.deep_service()
+
+        def read(*args, **kwargs):
+            # Another project takes the checkout while the scan runs; the project is still registered.
+            svc._states = {**svc._states, "owner/p02": dataclasses.replace(
+                svc._states[WHY], root="/srv/p01")}
+            svc._states[WHY] = dataclasses.replace(svc._states[WHY], root="/srv/elsewhere")
+            return ()
+
+        with mock.patch.object(transcript_digest, "project_runs", side_effect=read), \
+                contextlib.redirect_stderr(io.StringIO()):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertEqual(self.asked, [])
+        answered = self.question_rows()[-1][2]
+        self.assertEqual(answered["outcome"], "failed")
+        self.assertTrue(answered["reason"].startswith(
+            project_question.RECORDS_FAILED.split("{detail}")[0]))
+
+    def test_a_registry_that_changed_while_the_transcripts_were_read_fails_the_question(self):
+        svc = self.deep_service()
+
+        def read(*args, **kwargs):
+            svc._states = {**svc._states, "owner/p02": dataclasses.replace(
+                svc._states[WHY], root="/srv/p01")}
+            return ()
+
+        with mock.patch.object(transcript_digest, "project_runs", side_effect=read), \
+                contextlib.redirect_stderr(io.StringIO()):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.question_rows()[-1][2]["outcome"], "failed")
+
+    def test_a_checkout_taken_after_the_records_and_before_the_launch_starts_no_session(self):
+        for deep in (False, True):
+            with self.subTest(deep=deep):
+                svc = self.deep_service()
+                real = svc._question_records
+                before = len(self.asked)
+
+                def records(*args, **kwargs):
+                    found = real(*args, **kwargs)
+                    svc._states = {**svc._states, WHY: dataclasses.replace(
+                        svc._states[WHY], root="/srv/elsewhere")}
+                    return found
+
+                svc._question_records = records
+                svc.ask_project_question(WHY, "where does time go?", deep=deep)
+                self.assertEqual(len(self.asked), before)
+                self.assertEqual(self.question_rows()[-1][2], {
+                    "question_id": self.question_rows()[-1][2]["question_id"], "outcome": "failed",
+                    "reason": project_question.CHECKOUT_MOVED})
 
     def test_a_stale_dig_deeper_confirmation_asks_nothing(self):
         svc = self.arrange()

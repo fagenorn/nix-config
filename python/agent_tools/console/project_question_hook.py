@@ -115,8 +115,8 @@ The root (#1274, ADR-console-094 D1). With a root, after the checks above, a pat
 none of the records file, the session's own `tool-results` and a path inside the root (`_outside`, by real
 path). It denies a `Read` whose `file_path` is outside, a `Grep` whose search root (`path`, else `cwd`) is
 outside, a `Glob` any of whose literal prefixes joined to the search root is outside, and a `Bash` command
-any word target of which is outside (`_word_targets`), except a command whose words equal a declared
-command's argv, which runs as declared; a denied command with such a target (a `git -C <other>` that
+any word target of which is outside (`_word_targets`), a declared command included: a declared read
+that names a path outside the checkout (a database of another checkout) is refused like any other; a denied command with such a target (a `git -C <other>` that
 `reads_denied` would refuse) is given `OUTSIDE_ROOT` in place of that sentence, except a lifecycle verb,
 which keeps `LIFECYCLE_DENIED`. The protected checks run first, so a transcript or another question's
 records keep `RECORDS_DENIED`. A search walk inside the checkout keeps the symlink rule above (protected
@@ -673,10 +673,10 @@ def _command_outside(command: str, base: str, c: Confinement) -> bool:
                for target in _word_targets(word))
 
 
-def _confined_command(command: str, base: str, c: Confinement, declared: bool = False) -> str | None:
+def _confined_command(command: str, base: str, c: Confinement) -> str | None:
     """The deny sentence of an admitted command whose words reach the console's state, else None.
 
-    Under a root, a command whose words are not a declared read is also denied for a word outside it.
+    Under a root, a declared read included, a command is also denied for a word outside it.
     """
     for word in [word for word in command.split(" ") if word][1:]:
         for target in _word_targets(word):
@@ -686,7 +686,7 @@ def _confined_command(command: str, base: str, c: Confinement, declared: bool = 
                 found = _tree_reaches(_resolve(target, base), c)
                 if found:
                     return found
-    if not declared and _command_outside(command, base, c):
+    if _command_outside(command, base, c):
         return _outside_root(c)
     return None
 
@@ -740,10 +740,8 @@ def decide(
         except (OSError, ValueError):
             return "deny", MALFORMED
         return ("deny", _outside_root(confinement)) if outside else decision
-    words = tuple(word for word in tool_input["command"].split(" ") if word)
     try:
-        found = _confined_command(tool_input["command"], base, confinement,
-                                  declared=any(words == tuple(argv) for argv in allowed))
+        found = _confined_command(tool_input["command"], base, confinement)
     except (OSError, ValueError):
         return "deny", MALFORMED
     return ("deny", found) if found else decision

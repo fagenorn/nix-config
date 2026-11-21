@@ -848,7 +848,7 @@ const followDrafts = new Map();
 const followPosts = new Map();
 const followSent = new Map();
 const followLatest = new Map();
-// Follow keys whose Dig deeper confirmation is open (#1274).
+// Follow keys, each with the id of the answer it was opened on, whose Dig deeper confirmation is open (#1274).
 const deepOpen = new Set();
 const askReveal = new Set();
 const deleteOpen = new Set();
@@ -2579,17 +2579,18 @@ function askRow(projectId, question, first, last, thread) {
 }
 // Dig deeper: the button, then its estimate with Start and Cancel; nothing is posted until Start.
 function deepControl(projectId, question, thread, key) {
-  if (!deepOpen.has(key)) {
-    return actionButton("ask-deep btn-quiet", "Dig deeper", () => { deepOpen.add(key); redrawNotices(); });
+  const open = key + "\n" + question.id;
+  if (!deepOpen.has(open)) {
+    return actionButton("ask-deep btn-quiet", "Dig deeper", () => { deepOpen.add(open); redrawNotices(); });
   }
   const confirm = el("div", "ask-deep-confirm");
   confirm.setAttribute("role", "group");
   confirm.setAttribute("aria-label", "Dig deeper");
   confirm.appendChild(el("p", "ask-deep-estimate", question.deep_text));
   const state = followPosts.get(key);
-  confirm.appendChild(actionButton("ask-deep-start btn-quiet", "Start", () => postFollowUp(projectId, thread, question.question, true)));
+  confirm.appendChild(actionButton("ask-deep-start btn-quiet", "Start", () => postFollowUp(projectId, thread, question.question, true, question.id)));
   confirm.appendChild(actionButton("ask-deep-cancel btn-quiet", "Cancel", () => {
-    deepOpen.delete(key);
+    deepOpen.delete(open);
     const shown = followPosts.get(key);
     if (shown !== undefined && shown.phase === "failed" && shown.deep === true) followPosts.delete(key);
     redrawNotices();
@@ -2683,7 +2684,7 @@ function followReconcile(key, thread) {
   sent.list = sent.list.filter((submission) => !taken.has(submission));
 }
 // `chosen` is the text to send as it stands (a choice of a question back, or with `deep` the question asked again deeper): the follow-up draft and box are left as they are.
-async function postFollowUp(projectId, thread, chosen, deep = false) {
+async function postFollowUp(projectId, thread, chosen, deep = false, deepAnswer = "") {
   const key = followKey(projectId, thread.id);
   const current = followPosts.get(key);
   if (current !== undefined && current.phase === "sending") return;
@@ -2710,7 +2711,7 @@ async function postFollowUp(projectId, thread, chosen, deep = false) {
   if (reason === null) {
     // Text typed while the send was in flight is a new draft: the editor stays open on it, as the Ask box does.
     const typed = followDrafts.get(key);
-    if (deep) deepOpen.delete(key);
+    if (deep) deepOpen.delete(key + "\n" + deepAnswer);
     if (!direct && (typed === undefined || typed.value === text)) {
       followOpen.delete(key);
       followDrafts.delete(key);

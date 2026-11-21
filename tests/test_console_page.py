@@ -2258,6 +2258,16 @@ class PageDigDeeperTest(unittest.TestCase):
         self.assertEqual(self.found(sent["reading"], "ask-deep"), [])
         self.assertEqual(self.found(sent["reading"], "ask-deep-confirm"), [])
 
+    def test_an_open_confirmation_belongs_to_its_answer_and_not_to_the_thread(self) -> None:
+        later = {**ASK_DEEP_OFFER, "id": "q8", "question": "and then?"}
+        moved = {"frame": view([asking(project(0, []), thread(ASK_DEEP_OFFER, later))])}
+        (snap,) = render([*self.opened(), {"click": "ask-deep"}, moved, {"snapshot": True}])
+        self.assertEqual(self.found(snap["reading"], "ask-deep-confirm"), [])
+        self.assertEqual(self.found(snap["reading"], "ask-deep-start"), [])
+        (offer,) = self.found(snap["reading"], "ask-deep")
+        self.assertEqual(full(offer), "Dig deeper")
+        self.assertEqual(snap["posts"], [])
+
     def test_cancel_closes_the_confirm(self) -> None:
         (snap,) = render([*self.opened(), {"click": "ask-deep"}, {"click": "ask-deep-cancel"}, {"snapshot": True}])
         self.assertEqual(self.found(snap["reading"], "ask-deep-confirm"), [])

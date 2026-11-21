@@ -44,8 +44,10 @@ agent-seconds, and an issue's `runs` and figures count only the runs that delive
 `shared_runs` the runs that named it with others (the rule of the spend part).
 
 Transcript window. `owner_since(events, project_id, root)` is None when no earlier owner of `root` left
-it, else the ISO date of the day after that row's UTC date (the same rule the spend part applies: a
-predecessor's last day is never counted); the caller starts the transcript read at the later of that
+it, else the ISO date of the day after the last day not counted: the UTC date of the row at which that
+owner left, or the day before the project's own next registration of `root` after that row when it is
+later (a predecessor who kept working there between the two is never counted); the spend part excludes
+the same days. The caller starts the transcript read at the later of that
 date and 30 days ago. `run_issues(events, project_id)` is the run id to sorted issues mapping of the
 project's own delivery rows, the one the spend part and the transcript join share.
 
@@ -55,7 +57,9 @@ says who owned the path when it was observed. The rows' registrations are folded
 (`project.registered` carries the root, `project.unregistered` ends it): the newest row at which a
 project other than `project_id` stopped owning `root` is its predecessor's end. Activation rows at or
 before that `seq` are not counted, and neither are spend days up to and including that row's UTC date
-(a day shared with a predecessor is not counted, so a figure is never the predecessor's); `days` still
+(a day shared with a predecessor is not counted, so a figure is never the predecessor's), and, when `project_id`
+registered `root` after that row, up to and including the day before that registration if later
+(`_excluded_through`, shared with `owner_since`); `days` still
 lists those days, with zero figures. Retention keeps the newest activation rows whatever their age, so it
 keeps every registration row (`event_log`, #1271) and the unregistration that ends one: the evidence
 of who owned a path lasts as long as the activation rows that name it. A registration row from before that
@@ -71,7 +75,10 @@ counts only when its payload's `root` equals `root`. A sprint counts only when i
 within a project; a run id another project also uses never adds to these figures. An issue's tokens
 sum only the runs whose issues are exactly that one issue; the runs that named it with others are its
 `shared_runs`. A run's `issues` are the sorted union of the issues the project's delivery rows name
-for that run id under any session, `[]` when none is retained. `spend` is None when the view is None,
+for that run id under any session, `[]` when none is retained. A run id that is credential-shaped
+(`project_question.credential_shaped`, #1272) is shown as `RUN_WITHHELD` in `runs` and in an issue's
+`runs` and `shared_runs`, and in a delivery's `run_id` and `session_id`, its figures kept, because the id is the
+name of a directory in the transcript tree. `spend` is None when the view is None,
 and the rest is still written. The `transcripts` part holds only what the
 `RunDigest`s it is given hold, which `transcript_digest` read for `project_id` alone.
 
@@ -118,6 +125,7 @@ if TYPE_CHECKING:
     from agent_tools.console.view import InboxRecord
 
 HELD_PREFIX = "verify-"
+RUN_WITHHELD = "(run id withheld)"
 SPEND_NOTE = (
     "Tokens sum input, cache writes, cache reads and output; dollars are estimates at API list "
     "prices. A run's spend counts once, under that run; an issue's tokens count only the runs that "
@@ -188,10 +196,30 @@ def run_issues(events: Iterable[Event], project_id: str) -> dict[str, tuple[int,
     return {run: tuple(sorted(issues)) for run, issues in found.items()}
 
 
+def _excluded_through(rows: Sequence[Event], project_id: str, root: str) -> str | None:
+    """The last UTC date, `YYYY-MM-DD`, whose days are not counted for `project_id` at `root`, else None.
+
+    That is the date of the row at which an earlier owner left `root`, or, when `project_id` registered
+    `root` after that row, the day before that registration if later: the days between the two are
+    nobody's known days at `root`, so a predecessor's later work there is never counted. The day of the
+    registration itself counts for `project_id`.
+    """
+    left = _earlier_owner_left(rows, project_id, root)
+    if left is None:
+        return None
+    through = left.at[:10]
+    for event in rows:
+        if (event.seq > left.seq and event.kind == REGISTERED and event.project == project_id
+                and isinstance(event.payload, dict) and event.payload.get("root") == root):
+            before = (date.fromisoformat(event.at[:10]) - timedelta(days=1)).isoformat()
+            return max(through, before)
+    return through
+
+
 def owner_since(events: Iterable[Event], project_id: str, root: str) -> str | None:
-    """The ISO date the project began to hold `root`, when an earlier owner left it, else None."""
-    left = _earlier_owner_left(sorted(events, key=lambda event: event.seq), project_id, root)
-    return None if left is None else (date.fromisoformat(left.at[:10]) + timedelta(days=1)).isoformat()
+    """The ISO date after the last day not counted for `project_id` at `root`, when an earlier owner left it."""
+    through = _excluded_through(sorted(events, key=lambda event: event.seq), project_id, root)
+    return None if through is None else (date.fromisoformat(through) + timedelta(days=1)).isoformat()
 
 
 def figure(tokens: spend_module.Tokens) -> dict:
@@ -240,6 +268,12 @@ def _item_phases(day: Mapping, project_id: str, kind: str) -> dict:
             for item, phases in items.items()}
 
 
+def _shown_run(run: str) -> str:
+    """A run or session id as the document shows it: a credential-shaped one, a directory's name, is withheld."""
+    from agent_tools.console.project_question import credential_shaped  # a cycle at import time only
+    return RUN_WITHHELD if credential_shaped(run) else run
+
+
 def _spend(project_id: str, view: Mapping, run_issues: Mapping[str, list[int]],
            sprint_states: Mapping[str, sprints.SprintState], after_day: str | None = None) -> dict:
     days = view["days"]
@@ -263,7 +297,7 @@ def _spend(project_id: str, view: Mapping, run_issues: Mapping[str, list[int]],
         if figure(total)["tokens"] <= 0:
             continue
         runs.append({
-            "run_id": run, "issues": run_issues.get(run, []), **figure(total),
+            "run_id": _shown_run(run), "issues": run_issues.get(run, []), **figure(total),
             "phases": {phase: figure(_total(parts)) for phase, parts in sorted(phases.items())},
             "days": {name: figure(_total(parts)) for name, parts in sorted(run_days[run].items())}})
     runs = _ranked(runs, "run_id")
@@ -381,7 +415,7 @@ def _deliveries(rows: list[Event], live_runs: Collection[tuple[str, str]]) -> li
         (key, state), = parsed.items()
         entry = runs.get(key)
         runs[key] = {
-            "run_id": state.run_id, "session_id": state.session_id,
+            "run_id": _shown_run(state.run_id), "session_id": _shown_run(state.session_id),
             "first_seen_at": event.at if entry is None else entry["first_seen_at"],
             "last_seen_at": event.at, "moved_at": _moved_at(state.moved_ms), "live": key in live_runs,
             "issues": [{"issue": i.issue, "stage": deliveries.stage_text(i)} for i in state.issues],
@@ -456,7 +490,7 @@ def project_records(
         "project_id": project_id, "written_at": written_at,
         "spend": None if spend is None else _spend(
             project_id, spend, {run: list(issues) for run, issues in run_issues(rows, project_id).items()},
-            sprint_states, None if left is None else left.at[:10]),
+            sprint_states, _excluded_through(rows, project_id, root)),
         "sprints": [_sprint_entry(state) for state in own_sprints],
         "deliveries": _deliveries(seen_rows, live_runs),
         "activations": _activations(
