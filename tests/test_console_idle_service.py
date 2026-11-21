@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import capacity, manager, nudge, permission, service, sessions, signin, sprints
+from agent_tools.console import capacity, manager, movement, nudge, permission, service, sessions, signin, sprints
 
 from . import console_test_support as support
 from .test_console_messages import PARTS
@@ -115,6 +115,123 @@ class IdleServiceTest(IdleCase):
 
     RUN_SEEN = {"session_id": "s-1", "run_id": "wf_1", "moved_ms": int((T0 + 200) * 1000),
                 "issues": [{"issue": 12, "stage": "building", "task": None, "tasks": None}]}
+
+    def waits_on(self, svc, kind, issue=12):
+        """Set the project's movement reading to a wait of `kind` for `issue`, seen now."""
+        ms = int(self.now[0] * 1000)
+        reading = {
+            "ci": movement.ProjectMovement(
+                pulls=(movement.PullMovement(40, frozenset({issue}), ms, None),), read_ms=ms),
+            "lock": movement.ProjectMovement(locks=((issue, ms),)),
+            "release": movement.ProjectMovement(release_ms=ms),
+            "commit": movement.ProjectMovement(branches=((issue, ms),)),
+        }[kind]
+        with svc._ingest:
+            svc._movement["owner/p01"] = reading
+
+    def poll_waiting(self, svc, seconds, kind, issue=12):
+        """Poll at `seconds` with the wait of `kind` last seen at that moment."""
+        self.now[0] = T0 + seconds
+        self.waits_on(svc, kind, issue)
+        self.poll(svc, seconds)
+
+    def test_a_run_waiting_on_ci_for_two_hours_draws_no_nudge_and_no_card(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 200
+        self.append(svc, [("delivery.seen", "owner/p01", self.RUN_SEEN)])
+        for seconds in range(300, 7501, 300):
+            self.poll_waiting(svc, seconds, "ci")
+            self.assertEqual(self.continues(), [], seconds)
+        self.assertEqual(self.rows("manager.nudged"), [])
+        self.assertEqual(self.rows("manager.no_progress"), [])
+
+    def test_a_run_waiting_on_the_land_lock_a_release_step_or_a_commit_draws_no_nudge(self):
+        for kind in ("lock", "release", "commit"):
+            with self.subTest(kind):
+                self.setUp()
+                svc, sid = self.idle_service()
+                self.now[0] = T0 + 200
+                self.append(svc, [("delivery.seen", "owner/p01", self.RUN_SEEN)])
+                for seconds in (300, 2100, 3600):
+                    self.poll_waiting(svc, seconds, kind)
+                self.assertEqual(self.continues(), [])
+
+    def test_three_nudges_then_a_run_waiting_on_ci_raise_no_card(self):
+        svc, sid = self.idle_service()
+        for seconds in (300, 900, 1500):
+            self.poll(svc, seconds)
+        self.assertEqual(len(self.continues()), 3)
+        self.now[0] = T0 + 1600
+        self.append(svc, [("delivery.seen", "owner/p01",
+                           {**self.RUN_SEEN, "moved_ms": int((T0 + 1600) * 1000)})])
+        for seconds in range(2100, 7501, 600):
+            self.poll_waiting(svc, seconds, "ci")
+        self.assertEqual(len(self.continues()), 3)
+        self.assertEqual(self.rows("manager.no_progress"), [])
+        # The last CI reading is at T0+7500; it ages out fifteen minutes later, at T0+8400.
+        self.poll(svc, 8399.999)
+        self.assertEqual(self.rows("manager.no_progress"), [])
+        self.assertEqual(len(self.continues()), 3)
+        self.poll(svc, 8400)
+        self.assertEqual(len(self.continues()), 3)
+        self.assertEqual(len(self.rows("manager.no_progress")), 1)
+
+    def test_a_nudge_is_judged_on_the_session_the_fresh_listing_selects(self):
+        svc, sid = self.idle_service()
+        self.listed.clear()
+        self.listed["s-2"] = sessions.Observation(
+            "s-2", "/srv/p01", 1, "idle", None, self.name(sid), None)
+        self.now[0] = T0 + 200
+        self.append(svc, [("session.seen", "owner/p01", {
+            "session_id": "s-2", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+            "name": self.name(sid)}),
+            ("delivery.seen", "owner/p01", {**self.RUN_SEEN, "session_id": "s-2"})])
+        self.poll_waiting(svc, 2000, "ci")
+        self.assertEqual(self.continues(), [])
+        self.assertEqual(self.rows("manager.nudged"), [])
+        self.assertEqual(svc._nudging, set())
+
+    def test_a_wait_that_appears_before_the_dispatched_nudge_runs_sends_nothing(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 200
+        self.append(svc, [("delivery.seen", "owner/p01", self.RUN_SEEN)])
+        self.now[0] = T0 + 2000
+        svc.renudge()
+        svc.finish_stops()
+        svc.revive()
+        svc.nudge_idle()
+        self.waits_on(svc, "ci")
+        self.drain()
+        self.assertEqual(self.continues(), [])
+        self.assertEqual(self.rows("manager.nudged"), [])
+
+    def test_a_still_run_whose_wait_aged_out_or_belongs_to_another_issue_is_nudged_after_thirty_minutes(self):
+        for name in ("aged out", "another issue"):
+            with self.subTest(name):
+                self.setUp()
+                svc, sid = self.idle_service()
+                self.now[0] = T0 + 200
+                self.append(svc, [("delivery.seen", "owner/p01", self.RUN_SEEN)])
+                if name == "aged out":
+                    self.poll_waiting(svc, 300, "ci")
+                    self.poll(svc, 1999.999)
+                    self.assertEqual(self.continues(), [])
+                    self.poll(svc, 2000)
+                else:
+                    self.poll_waiting(svc, 1999.999, "ci", issue=13)
+                    self.assertEqual(self.continues(), [])
+                    self.poll_waiting(svc, 2000, "ci", issue=13)
+                self.assertEqual(len(self.continues()), 1)
+
+    def test_an_ended_run_holds_nothing_whatever_ci_reads(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 200
+        self.append(svc, [("delivery.seen", "owner/p01", self.RUN_SEEN),
+                          ("delivery.gone", "owner/p01", {"session_id": "s-1", "run_id": "wf_1"})])
+        self.poll_waiting(svc, 499.999, "ci")
+        self.assertEqual(self.continues(), [])
+        self.poll_waiting(svc, 500, "ci")
+        self.assertEqual(len(self.continues()), 1)
 
     def test_a_working_manager_or_a_finished_delivery_gets_no_early_nudge(self):
         for name in ("working", "finished"):

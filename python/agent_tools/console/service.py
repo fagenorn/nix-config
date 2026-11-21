@@ -1680,14 +1680,19 @@ movement and the sprint's `_settled`, the last launch, nudge or wake), `run_ms` 
 latest movement of a run of that session that has not ended: the larger `moved_ms` of its
 `_deliveries` rows and of `_run_moves`, which `poll_deliveries` rebuilds each poll with the journal
 mtime of every unended run it read, whether or not the run names an issue; a manager with such a
-run is not nudged until it has been still for `idle.RUN_STILL_MS`, 30 minutes, #974), the sprint's
+run is not nudged until it has been still for `idle.RUN_STILL_MS`, 30 minutes, #974) and `run_wait`
+(`_run_wait`: whether such a run reads a wait the movement reading shows, `view.fresh_wait` of
+`view.wait_signals` of the sprint over the project's `_movement` narrowed to the issues of the
+session's runs in `_deliveries`: CI on its pull request, a committing delivery, a release step or
+the land lock seen within the quiet window; a manager whose run reads one is neither nudged nor
+given up on, however long the run has been still, #1381), the sprint's
 waiting count and its quota; a sprint not out whose manager row is not `started` or whose manager is seen
 `working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides:
 `GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
 null), `NUDGE` reserves the sprint in `_nudging` and dispatches `_idle_nudge` after the lock.
 `_idle_nudge(sprint_id, forced)` decides again under the lock (`_idle_due`), reads the listing off
 the lock (a manager not listed sends nothing and appends nothing: the bring-back owns a gone
-manager), decides once more under the lock (the quota recheck) and sends nothing when the fresh listing's reading of the manager shows it `working` (`_working_now`: a reading not newer than the session's newest hook does not count), calls the nudger off the lock with a
+manager), decides once more under the lock (the quota recheck, bound to the listed session: a folded manager session with another id sends nothing, #1381) and sends nothing when the fresh listing's reading of the manager shows it `working` (`_working_now`: a reading not newer than the session's newest hook does not count), calls the nudger off the lock with a
 `continue` route `nudge.Nudge` to the lowest listed session, and appends one `manager.nudged
 {sprint_id, goal, session_id, ok[, reason][, resumed]}` while the sprint is open and the service not
 stopping (a failure also prints `console: idle_nudge_failed <sprint_id> <reason>`). A dispatch
@@ -1873,9 +1878,10 @@ from agent_tools.console.event_log import (
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
 from agent_tools.console.view import (
-    INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    is_waiting, offers_activate, project_for, project_states, read_states, registry_changes,
-    sprint_absent_managers, sprint_nudge_replies, sprint_sessions_of, sprint_waiting)
+    INBOX_CHANGED, ReadState, derive_view, encode_view, fresh_wait, health_change, inbox_changes,
+    inbox_records, is_waiting, offers_activate, project_for, project_states, read_states,
+    registry_changes, sprint_absent_managers, sprint_nudge_replies, sprint_sessions_of,
+    sprint_waiting, wait_signals)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -8546,6 +8552,17 @@ class ConsoleService:
         moved += [ms for (sid, _), ms in self._run_moves.items() if sid == session.session_id]
         return max(moved) if moved else None
 
+    def _run_wait(self, sprint: sprints.SprintState, session: sessions.SessionState | None,
+                  now_ms: int) -> bool:
+        """Under the ingest lock: whether a run of the session still in progress reads a wait of
+        ADR-console-050 or ADR-console-061 inside the quiet window (#1381)."""
+        if session is None or self._run_moved(session) is None:
+            return False
+        issues = {issue.issue for (sid, _), state in self._deliveries.items()
+                  if sid == session.session_id for issue in state.issues}
+        waits = wait_signals(sprint, self._movement.get(sprint.project_id), issues=issues)
+        return fresh_wait(waits, now_ms) is not None
+
     def nudge_idle(self) -> None:
         """Tell each idle manager whose sprint has work to go on, and give up after too many tries (#929)."""
         if self._nudger is None:
@@ -8568,7 +8585,8 @@ class ConsoleService:
                         or (session is not None and session.state == sessions.WORKING)):
                     self._quota_held.discard(sprint_id)
                 step = idle.next_step(sprint, waiting, session, self._active_ms(sprint, session),
-                                      quota is not None, now, run_ms=self._run_moved(session))
+                                      quota is not None, now, run_ms=self._run_moved(session),
+                                      run_wait=self._run_wait(sprint, session, now))
                 if step == idle.GIVE_UP:
                     status = sprint.report.status if sprint.report is not None else None
                     self._apply(self.log.append([(MANAGER_NO_PROGRESS, sprint.project_id, {
@@ -8609,17 +8627,25 @@ class ConsoleService:
                 self._record_idle(
                     sprint_id, "" if sprint is None else sprint.manager_session or "", reason)
 
-    def _idle_due(self, sprint_id: str, forced: bool) -> tuple[sprints.SprintState, str] | None:
-        """Under the ingest lock: the open sprint and its project's root while an idle nudge is still the step."""
+    def _idle_due(self, sprint_id: str, forced: bool,
+                  selected: str | None = None) -> tuple[sprints.SprintState, str] | None:
+        """Under the ingest lock: the open sprint and its project's root while an idle nudge is still the step.
+
+        `selected` is the session the fresh listing chose to nudge: a folded manager session that is a
+        different one is not the one being sent to, so nothing is due (the next poll decides again).
+        """
         sprint = self._sprints.get(sprint_id)
         project = None if sprint is None else self._states.get(sprint.project_id)
         if sprint is None or project is None:
             return None
         session = self._manager_session(sprint)
+        if selected is not None and session is not None and session.session_id != selected:
+            return None
+        now = int(self._clock() * 1000)
         step = idle.next_step(
             sprint, self._waiting(sprint), session, self._active_ms(sprint, session),
-            self._quota_wait(sprint) is not None, int(self._clock() * 1000), forced,
-            self._run_moved(session))
+            self._quota_wait(sprint) is not None, now, forced, self._run_moved(session),
+            run_wait=self._run_wait(sprint, session, now))
         return (sprint, project.root) if step == idle.NUDGE else None
 
     def _working_now(self, observed: sessions.Observation) -> bool:
@@ -8653,7 +8679,7 @@ class ConsoleService:
                 return
             session_id = listed[0].session_id
             with self._ingest:
-                if (self._idle_due(sprint_id, forced) is None
+                if (self._idle_due(sprint_id, forced, session_id) is None
                         or self._working_now(listed[0])):
                     self._nudging.discard(sprint_id)
                     return
