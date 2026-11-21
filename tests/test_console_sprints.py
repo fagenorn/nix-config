@@ -2211,6 +2211,29 @@ class OwnerOnlyTest(unittest.TestCase):
         self.assertEqual([q.owner_only for q in state.questions], [True, False])
 
 
+class ConsequentialTest(unittest.TestCase):
+    def test_a_question_may_be_marked_consequential(self):
+        checked = sprints.checked_round({"questions": [{**QUESTION, "consequential": True}]})
+        self.assertIs(checked["questions"][0]["consequential"], True)
+        self.assertNotIn("consequential",
+                         sprints.checked_round({"questions": [QUESTION]})["questions"][0])
+        for value in (False, "yes", 1, None, []):
+            with self.subTest(value=value), self.assertRaises(sprints.Refused) as raised:
+                sprints.checked_round({"questions": [{**QUESTION, "consequential": value}]})
+            self.assertEqual(str(raised.exception), sprints.CONSEQUENTIAL_SHAPE.format(n=1))
+
+    def test_the_consequential_mark_folds_onto_the_question(self):
+        state = question_state([asked(41, SID, [{**QUESTION, "consequential": True}, QUESTION])])
+        self.assertEqual([q.consequential for q in state.questions], [True, False])
+
+    def test_the_guest_and_the_view_read_a_look_with_one_predicate(self):
+        from agent_tools.console import guest
+        self.assertIs(guest.is_look, sprints.is_look)
+        self.assertTrue(sprints.is_look(["after", None, "before"]))
+        self.assertFalse(sprints.is_look(["before"]))
+        self.assertFalse(sprints.is_look([None, "after"]))
+
+
 class QuestionFoldTest(unittest.TestCase):
     def test_a_logged_round_over_the_limits_still_folds_whole(self):
         long = {**QUESTION, "question": "q" * 600, "context": "c" * 900,

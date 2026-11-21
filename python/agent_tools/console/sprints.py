@@ -304,7 +304,7 @@ console did about a look card's approval:
                        "look_repo"?: <str> (the project's repository when a question has a look),
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "needs_words"?: [<option text>],
-                                      "owner_only"?: true,
+                                      "owner_only"?: true, "consequential"?: true,
                                       "pictures"?: [{"picture": <id>,
                                       "line": <str>, "pair"?: "before" | "after"}],
                                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>,
@@ -345,7 +345,7 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
 a key outside `question, context, blocks, options, recommended, needs_words, owner_only,
-pictures, look, replaces`),
+consequential, pictures, look, replaces`),
 `QUESTION_MEMBER` for
 `question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
@@ -360,7 +360,7 @@ whose strip equals no stripped option), then `NEEDS_WORDS_SHAPE`
 (`needs_words` present and not a non-empty list of strings whose strips are each one stripped
 option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in `needs_words`: choosing it
 records the approval and takes no words, so the owner could never approve), then `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`),
-then `REPLACES_SHAPE`
+then `CONSEQUENTIAL_SHAPE` (`consequential` present and not `true`), then `REPLACES_SHAPE`
 (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
 and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
@@ -393,7 +393,7 @@ picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a 
 `{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
 text stripped, a question carrying `"context"` only when the round gave one, `"needs_words"` (the
 stripped option texts, in the given order) only when it gave one, `"owner_only"` (`true`) only when it
-gave it, `"look"` (`{"issue",
+gave it, `"consequential"` (`true`) only when it gave it, `"look"` (`{"issue",
 "pr", "head", "approve"}`, `approve` stripped) only when it gave one, and `"pictures"`
 (`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
 (`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each
@@ -418,7 +418,8 @@ checked question is then added with `round_id` the row's `seq`, its `index` and 
 `look` kept as a `QuestionLook`, its `needs_words` (`Question.needs_words`, `()` when the round
 gave none) and `owner_only`
 (`Question.owner_only`, false unless the round marked it: a question only the console's owner
-answers, #1263). Each checked
+answers, #1263) and `consequential` (`Question.consequential`, false unless the round marked it: the
+page opens its card with nothing picked, #1265). Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
 matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
@@ -763,6 +764,13 @@ MAX_OPTION_CHARS = 80
 MAX_PICTURES = 8
 MAX_PICTURE_LINE_CHARS = 140
 PAIRS = ("before", "after")
+
+
+def is_look(pairs: Iterable[str | None]) -> bool:
+    """A look is a question carrying both a before and an after picture; one alone is a plain picture."""
+    return set(PAIRS) <= set(pairs)
+
+
 MAX_REPORT_ISSUES = 200
 ON_TRACK = "on_track"
 ON_TRACK_TEXT = "on track"
@@ -883,6 +891,7 @@ OPTION_TWICE = "question {n} offers one option twice"
 NO_RECOMMENDATION = "question {n} recommends none of its options"
 NEEDS_WORDS_SHAPE = "question {n}'s needs_words must list some of its options, each once"
 OWNER_ONLY_SHAPE = "question {n}'s owner_only must be true when given"
+CONSEQUENTIAL_SHAPE = "question {n}'s consequential must be true when given"
 WORDS_NEEDED = "say what to change"
 ROUND_OPEN = "a round of questions is already open"
 UNKNOWN_QUESTION = "this question is not known"
@@ -1112,6 +1121,7 @@ class Question:
     words: str | None = None
     answered_by: str | None = None
     owner_only: bool = False
+    consequential: bool = False
 
 
 @dataclass(frozen=True)
@@ -1511,7 +1521,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
                                                                 "options", "recommended",
                                                                 "needs_words", "owner_only",
-                                                                "pictures", "look", "replaces"}:
+                                                                "consequential", "pictures",
+                                                                "look", "replaces"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1563,12 +1574,14 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
             raise Refused(LOOK_APPROVE_WORDS.format(n=n))
     if "owner_only" in question and question["owner_only"] is not True:
         raise Refused(OWNER_ONLY_SHAPE.format(n=n))
+    if "consequential" in question and question["consequential"] is not True:
+        raise Refused(CONSEQUENTIAL_SHAPE.format(n=n))
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
     pictures = _checked_pictures(n, question["pictures"], limits) if "pictures" in question else []
     if (limits and not files_withheld and "look" in question
-            and not set(PAIRS) <= {member.get("pair") for member in pictures}):
+            and not is_look(member.get("pair") for member in pictures)):
         raise Refused(LOOK_PAIR.format(n=n))
     if (limits and not files_withheld and not pictures
             and any(LOOK_WORDS.search(part) for part in (text, context) if part)):
@@ -1581,6 +1594,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
         checked["needs_words"] = kept
     if "owner_only" in question:
         checked["owner_only"] = True
+    if "consequential" in question:
+        checked["consequential"] = True
     if pictures:
         checked["pictures"] = pictures
     if "look" in question:
@@ -2422,6 +2437,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                look=QuestionLook(**row["look"], repo=bound) if "look" in row else None,
                                needs_words=tuple(row.get("needs_words", ())),
                                owner_only=row.get("owner_only", False) is True,
+                               consequential=row.get("consequential", False) is True,
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
