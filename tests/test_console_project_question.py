@@ -2065,7 +2065,7 @@ def _project_entries(shown):
 
 QUESTION_KEYS = {"id", "question", "asked_at", "state", "state_text", "answered_at", "answer",
                  "read_text", "ran_text", "unknown_text", "back_text", "back_choices",
-                 "production_text", "request_key"}
+                 "production_text", "request_key", "deep", "spend_text", "deep_offer", "deep_text"}
 
 
 class QuestionViewTest(unittest.TestCase):
@@ -2245,6 +2245,101 @@ class QuestionThreadViewTest(unittest.TestCase):
             for question in thread["questions"]:
                 self.assertEqual(set(question), QUESTION_KEYS)
         self.assertIsNone(bare["entries"][0]["questions"])
+
+
+class QuestionDeepViewTest(unittest.TestCase):
+    """Dig deeper is offered on a light answer, with an estimate; a finished question shows its spend (#1274)."""
+
+    P1 = "owner/p01"
+    SPENT = "Spent 1,200 tokens, about $0.42"
+
+    @staticmethod
+    def spend_of(**sessions_):
+        return {"approximate": False, "days": [{"day": "2026-11-17", "session": {
+            sid: spend.Tokens(input=tokens, dollars=dollars).wire()
+            for sid, (tokens, dollars) in sessions_.items()}}]}
+
+    def entries(self, events, spend_view=None):
+        events = [_registered(1, self.P1), *events]
+        shown = view.derive_view(view.project_states(events).values(), spend=spend_view,
+                                 project_questions=project_question.asked_questions(events))
+        threads = shown["entries"][0]["questions"]["threads"]
+        return {q["id"]: q for t in threads for q in t["questions"]}
+
+    def test_dig_deeper_is_offered_only_on_a_threads_last_light_answer(self):
+        events = [
+            _asked(2, self.P1, "q1"),
+            _answered(3, self.P1, "q1", outcome="answered", answer="Answer: a"),
+            _asked(4, self.P1, "q2", thread_id="q1", deep=True),
+            _answered(5, self.P1, "q2", outcome="answered", answer="Answer: b"),
+            _asked(6, self.P1, "q3"),
+            _answered(7, self.P1, "q3", outcome="answered", answer="Answer: c"),
+            _asked(8, self.P1, "q4"),
+            _answered(9, self.P1, "q4", outcome="answered", answer="Answer: "),
+            _asked(10, self.P1, "q5"),
+            _answered(11, self.P1, "q5", outcome="failed", reason="boom"),
+            _asked(12, self.P1, "q6"),
+            _asked(13, self.P1, "q7"),
+            _answered(14, self.P1, "q7", outcome="answered", answer="Answer: d"),
+            _asked(15, self.P1, "q8", thread_id="q7"),
+        ]
+        found = self.entries(events)
+        self.assertIs(found["q3"]["deep_offer"], True)
+        self.assertIsInstance(found["q3"]["deep_text"], str)
+        for name in ("q1", "q2", "q4", "q5", "q6", "q7", "q8"):
+            self.assertIs(found[name]["deep_offer"], False, name)
+            self.assertIsNone(found[name]["deep_text"], name)
+        self.assertEqual((found["q1"]["deep"], found["q2"]["deep"]), (False, True))
+
+    def test_spend_shows_only_after_a_question_ends(self):
+        events = [_asked(2, self.P1, "q1", session_id="s-1")]
+        spent = self.spend_of(**{"s-1": (1200, 0.42)})
+        self.assertIsNone(self.entries(events, spent)["q1"]["spend_text"])
+        events.append(_answered(3, self.P1, "q1", outcome="answered", answer="Answer: a"))
+        self.assertEqual(self.entries(events, spent)["q1"]["spend_text"], self.SPENT)
+        self.assertIsNone(self.entries(events, None)["q1"]["spend_text"])
+        self.assertIsNone(self.entries(events, self.spend_of(**{"s-2": (5, 0.01)}))["q1"]["spend_text"])
+        self.assertIsNone(self.entries(events, self.spend_of(**{"s-1": (0, 0.0)}))["q1"]["spend_text"])
+
+    def test_the_estimate_is_the_mean_of_the_newest_five_deeper_answers(self):
+        events, sessions_ = [], {}
+        for number in range(1, 7):
+            events += [_asked(2 * number, self.P1, f"d{number}", deep=True, session_id=f"s-{number}"),
+                       _answered(2 * number + 1, self.P1, f"d{number}", outcome="answered",
+                                 answer="Answer: x")]
+            sessions_[f"s-{number}"] = (100 * number, number / 10)
+        events += [_asked(18, self.P1, "dz", deep=True, session_id="s-z"),
+                   _answered(19, self.P1, "dz", outcome="failed", reason="boom"),
+                   _asked(20, self.P1, "dw", deep=True, session_id="s-w"),
+                   _asked(21, self.P1, "l1"),
+                   _answered(22, self.P1, "l1", outcome="answered", answer="Answer: y")]
+        sessions_["s-w"] = (9000, 9.0)
+        sessions_["s-z"] = (0, 0.0)
+        found = self.entries(events, self.spend_of(**sessions_))
+        self.assertIs(found["l1"]["deep_offer"], True)
+        self.assertEqual(
+            found["l1"]["deep_text"],
+            "Dig deeper asks again on a stronger model for up to 20 minutes. "
+            "Earlier deeper answers here spent about 400 tokens, $0.40 each.")
+        bare = self.entries(events[-2:])
+        self.assertEqual(
+            bare["l1"]["deep_text"],
+            "Dig deeper asks again on a stronger model for up to 20 minutes. "
+            "No earlier deeper answer here to estimate its spend from.")
+
+    def test_a_working_deeper_question_says_digging_deeper(self):
+        found = self.entries([_asked(2, self.P1, "q1", deep=True), _asked(3, self.P1, "q2")])
+        self.assertEqual(found["q1"]["state_text"], "Digging deeper")
+        self.assertEqual(found["q2"]["state_text"], "Working on it")
+
+    def test_a_question_that_timed_out_still_shows_its_spend(self):
+        events = [_asked(2, self.P1, "q1", deep=True, session_id="s-1"),
+                  _answered(3, self.P1, "q1", outcome="timed_out", reason="too slow"),
+                  _asked(4, self.P1, "q2", session_id="s-1"),
+                  _answered(5, self.P1, "q2", outcome="failed", reason="boom")]
+        found = self.entries(events, self.spend_of(**{"s-1": (1200, 0.42)}))
+        self.assertEqual(found["q1"]["spend_text"], self.SPENT)
+        self.assertEqual(found["q2"]["spend_text"], self.SPENT)
 
 
 class CredentialShapeTest(unittest.TestCase):
@@ -3132,6 +3227,32 @@ class QuestionDeepServiceTest(QuestionRecordsServiceTest):
         status, _, body = post({"project_id": WHY, "question": "q", "deep": True})
         self.assertEqual((status, body), (204, b""))
         self.assertIs(self.question_rows()[-2][2]["deep"], True)
+
+
+class QuestionDeepSpendServiceTest(QuestionCase):
+    """A deeper answer's spend reaches the published view when it ends (#1274)."""
+
+    NOW = 1_800_000_000.0
+
+    def test_a_deeper_answers_spend_text_is_published_when_it_ends(self):
+        sessions_dir = self.store.parent.parent / "sessions"
+        path = sessions_dir.parent / "projects" / "-srv-p01" / f"{SESSION_ID}.jsonl"
+        today = datetime.fromtimestamp(self.NOW, timezone.utc).date().isoformat()
+
+        def writer(ask, cancel):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "type": "assistant", "sessionId": SESSION_ID, "cwd": "/srv/p01",
+                "timestamp": f"{today}T10:00:00.000Z",
+                "message": {"id": "msg_q1", "model": "claude-sonnet-4-6", "content": [],
+                            "usage": {"input_tokens": 40}}}) + "\n")
+            os.utime(path, (self.NOW, self.NOW))
+            return self.outcome
+
+        svc = self.start(session_dirs=[sessions_dir], clock=lambda: self.NOW, project_asker=writer)
+        svc.ask_project_question(WHY, "where does time go?", deep=True)
+        question = self.shown(svc)["questions"]["threads"][0]["questions"][0]
+        self.assertTrue(question["spend_text"].startswith("Spent 40 tokens"), question["spend_text"])
 
 
 class QuestionLifecycleTest(QuestionCase):
