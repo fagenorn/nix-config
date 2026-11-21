@@ -4,12 +4,13 @@ Run: just agent-workflow-tests
 """
 import json
 import os
+import shutil
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import capacity, nudge, permission, service, sprints
+from agent_tools.console import capacity, nudge, permission, service, signin, sprints
 
 from . import console_test_support as support
 from .test_console_messages import PARTS
@@ -406,6 +407,258 @@ class IdleQuotaTest(IdleCase):
                 self.assertEqual([call.profile for call in self.launches.calls], ["work"])
                 self.assertEqual(self.revives(), [])
                 self.assertEqual(self.rows("manager.waiting"), [])
+
+    def test_two_profiles_whose_readings_carry_one_account_id_are_one_account_to_the_move(self):
+        def reading(account):
+            return (capacity.READING, None,
+                    {"profile": "home", "account": account, **self.weekly(0.1)})
+
+        def left(account):
+            return (signin.READING, None, {
+                "profile": "home", "state": "signed_in", "ends_at": None,
+                "account": "b@example.invalid", "account_seq": 0,
+                "left_account": "a@example.invalid", "left_reading": account})
+
+        cases = {
+            "same id": ([reading("acct-1")], False),
+            "other id": ([reading("acct-2")], True),
+            "late reply of the account it left, now on another": (
+                [reading("acct-2"), left("acct-1"), reading("acct-1")], True),
+            "late reply of the account it left, now on work's": (
+                [reading("acct-1"), left("acct-2"), reading("acct-2")], False),
+        }
+        for name, (home, moves) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                svc, sid = self.start_out(listed=False, readings=False)
+                self.append(svc, [(capacity.READING, None, {
+                    "profile": "work", "account": "acct-1", **self.exhausted(RESET)}), *home])
+                svc.poll_sessions()
+                self.gone(svc)
+                self.now[0] = T0 + 600
+                svc.revive()
+                self.assertEqual(len(self.queued.jobs), 1 if moves else 0)
+                if not moves:
+                    self.assertNotIn(sid, svc._launching)
+                self.drain()
+                if moves:
+                    self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+                    self.assertIs(self.launches.calls[-1].takeover, True)
+                else:
+                    self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+                    self.assertEqual(self.revives(), [])
+                    self.assertEqual(self.rows("manager.waiting"), [])
+
+    def reserved_move(self, spare=True, setup=None, **names):
+        """A quota move reserved on `home` (with `spare` also having room) and not yet launched."""
+        names = names or ({"work": None, "home": None, "spare": None} if spare
+                          else {"work": None, "home": None})
+        dirs = self.profiles(**names)
+        svc = self.begin(profile_dirs=list(dirs.values()))
+        sid = self.arrive(svc)
+        self.assertEqual(self.launches.calls[0].profile, "work")
+        self.out_readings(svc)
+        if spare:
+            self.append(svc, [(capacity.READING, None, {"profile": "spare", **self.weekly(0.5)})])
+        if setup is not None:
+            setup(svc)
+        svc.poll_sessions()
+        self.gone(svc)
+        self.now[0] = T0 + 600
+        svc.revive()
+        self.assertEqual(len(self.queued.jobs), 1)
+        self.assertIsInstance(svc._launching[sid], service._TakeoverReservation)
+        self.assertEqual(svc._launching[sid].target, "home")
+        return svc, sid, dirs
+
+    def during_permission_read(self, svc, change):
+        reader, acted = svc._permission_reader, []
+
+        def acting(project_id, root):
+            if not acted:
+                acted.append(True)
+                change()
+            return reader(project_id, root)
+
+        svc._permission_reader = acting
+
+    def assert_move_cancelled(self, svc, sid):
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+        self.assertEqual(self.revives(), [])
+        self.assertEqual(self.rows("manager.waiting"), [])
+        self.assertEqual(len(self.rows("manager.started")), 1)
+        self.assertNotIn(sid, svc._launching)
+
+    def assert_waits_to_wake(self, svc, sid):
+        self.poll(svc, 700)
+        self.assert_move_cancelled(svc, sid)
+        self.poll(svc, 3600)
+        self.assertEqual(self.revives(), [
+            nudge.Nudge(sid, "revive", self.name(sid), "s-1", "work", "/srv/p01")])
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+
+    @staticmethod
+    def signed(profile, account):
+        return (signin.READING, None, {"profile": profile, "state": "signed_in",
+                                       "ends_at": None, "account": account, "account_seq": 0})
+
+    def test_a_quota_move_whose_account_stops_having_room_before_the_launch_starts_nothing_and_waits_to_wake(self):
+        def remove(svc, dirs):
+            shutil.rmtree(dirs["home"])
+
+        def exclude(svc, dirs):
+            svc.set_exclusion("home", True)
+
+        def out(svc, dirs):
+            self.append(svc, [(capacity.READING, None,
+                               {"profile": "home", **self.exhausted(RESET)})])
+
+        def signed_out(svc, dirs):
+            self.append(svc, [signin.entry("home", signin.Status("signed_out", None))])
+
+        cases = [
+            ("removed before the launch", True, remove, "drain"),
+            ("excluded during the permission read", True, exclude, "read"),
+            ("out during the permission read", True, out, "read"),
+            ("signed out during the permission read", True, signed_out, "read"),
+            ("removed before the launch, nothing else has room", False, remove, "drain"),
+            ("excluded during the permission read, nothing else has room", False, exclude,
+             "read"),
+        ]
+        for name, spare, change, when in cases:
+            with self.subTest(name):
+                self.setUp()
+                svc, sid, dirs = self.reserved_move(spare)
+                if when == "drain":
+                    change(svc, dirs)
+                else:
+                    self.during_permission_read(svc, lambda: change(svc, dirs))
+                self.drain()
+                self.assert_move_cancelled(svc, sid)
+                self.assert_waits_to_wake(svc, sid)
+
+    def test_a_quota_move_cancelled_with_no_other_room_is_not_decided_again_when_an_account_gains_room(self):
+        def setup(svc):
+            self.append(svc, [(capacity.READING, None, {"profile": "extra", **self.weekly(0.5)})])
+            svc.set_exclusion("extra", True)
+
+        svc, sid, dirs = self.reserved_move(
+            spare=False, setup=setup, work=None, home=None, extra=None)
+        svc.set_exclusion("home", True)
+        self.drain()
+        self.assert_move_cancelled(svc, sid)
+        svc.set_exclusion("extra", False)
+        self.poll(svc, 700)
+        self.assert_move_cancelled(svc, sid)
+        self.assertIn(sid, svc._move_cancelled)
+        self.poll(svc, 3600)
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+        self.assertEqual(len(self.revives()), 1)
+
+    def test_a_quota_move_on_another_account_than_the_one_it_chose_starts_nothing(self):
+        def reading(profile, account):
+            return (capacity.READING, None,
+                    {"profile": profile, "account": account, **self.weekly(0.1)})
+
+        cases = {
+            "the reading account id changes": (
+                lambda svc: self.append(svc, [reading("home", "acct-2")]),
+                lambda svc: self.append(svc, [reading("home", "acct-3")])),
+            "the sign-in account changes": (
+                lambda svc: self.append(svc, [self.signed("home", "a@example.invalid")]),
+                lambda svc: self.append(svc, [self.signed("home", "b@example.invalid")])),
+        }
+        for name, (setup, change) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                svc, sid, _ = self.reserved_move(setup=setup)
+                self.during_permission_read(svc, lambda: change(svc))
+                self.drain()
+                self.assert_move_cancelled(svc, sid)
+                self.assert_waits_to_wake(svc, sid)
+
+    def test_a_quota_move_whose_target_gained_an_alias_reading_of_the_managers_account_is_not_a_move(self):
+        cases = {"same id": ("acct-1", False), "other id": ("acct-2", True)}
+        for name, (alias_id, moves) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                dirs = self.profiles(work=None, home=None, spare=None)
+                svc = self.begin(profile_dirs=list(dirs.values()))
+                sid = self.arrive(svc)
+                self.append(svc, [
+                    (capacity.READING, None, {
+                        "profile": "work", "account": "acct-1", **self.exhausted(RESET)}),
+                    self.signed("home", "a@example.invalid"),
+                    self.signed("spare", "a@example.invalid"),
+                    (capacity.READING, None, {
+                        "profile": "spare", "account": alias_id, **self.weekly(0.1)})])
+                svc.poll_sessions()
+                self.gone(svc)
+                self.now[0] = T0 + 600
+                svc.revive()
+                self.assertEqual(len(self.queued.jobs), 1 if moves else 0)
+                self.drain()
+                self.assertEqual([c.profile for c in self.launches.calls],
+                                 ["work", "home"] if moves else ["work"])
+
+    def test_a_quota_move_to_a_colleagues_account_for_the_colleagues_own_sprint_starts(self):
+        svc, sid = self.start_out(listed=False)
+        with svc._ingest:
+            svc._account_owners = {"home": "colleague"}
+            svc._sprints[sid] = replace(svc._sprints[sid], started_by="colleague")
+        self.gone(svc)
+        self.poll(svc, 600)
+        self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+        self.assertIs(self.launches.calls[-1].takeover, True)
+
+    def test_a_quota_move_is_cancelled_when_the_owner_pins_another_profile_while_it_is_queued(self):
+        svc, sid, _ = self.reserved_move()
+        svc.set_pin("spare", True)
+        self.drain()
+        self.assert_move_cancelled(svc, sid)
+        self.assert_waits_to_wake(svc, sid)
+
+    def test_a_quota_move_is_cancelled_when_the_managers_quota_resets_during_the_permission_read(self):
+        svc, sid, _ = self.reserved_move()
+        self.during_permission_read(svc, lambda: self.append(svc, [(
+            capacity.READING, None, {"profile": "work", **self.weekly(0.1)})]))
+        self.drain()
+        self.assert_move_cancelled(svc, sid)
+        self.poll(svc, 700)
+        self.assertEqual(len(self.revives()), 1)
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+
+    def test_a_late_refusal_from_an_account_the_manager_left_is_no_reason_to_move(self):
+        svc, sid = self.start_out(listed=False, readings=False)
+        self.append(svc, [
+            (capacity.READING, None, {
+                "profile": "work", "account": "acct-2", **self.weekly(0.1)}),
+            (signin.READING, None, {
+                "profile": "work", "state": "signed_in", "ends_at": None,
+                "account": "b@example.invalid", "account_seq": 0,
+                "left_account": "a@example.invalid", "left_reading": "acct-1"}),
+            (capacity.READING, None, {
+                "profile": "work", "account": "acct-1", **self.exhausted(RESET)}),
+            (capacity.READING, None, {"profile": "home", "account": "acct-3", **self.weekly(0.1)})])
+        svc.poll_sessions()
+        self.gone(svc)
+        self.poll(svc, 600)
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+        self.assertEqual(len(self.revives()), 1)
+
+    def test_a_quota_move_is_cancelled_when_its_target_becomes_a_duplicate_of_a_third_profile(self):
+        def setup(svc):
+            self.append(svc, [
+                (capacity.READING, None, {"profile": "abba", **self.weekly(0.5)}),
+                self.signed("abba", "a@example.invalid"),
+                self.signed("home", "b@example.invalid")])
+
+        svc, sid, _ = self.reserved_move(
+            spare=False, setup=setup, work=None, home=None, abba=None)
+        self.append(svc, [self.signed("abba", "b@example.invalid")])
+        self.drain()
+        self.assert_move_cancelled(svc, sid)
+        self.assert_waits_to_wake(svc, sid)
 
     def test_a_withdrawn_sprint_leaves_the_quota_mark(self):
         svc, sid = self.start_out()
