@@ -8,6 +8,8 @@ import http.client
 import json
 import os
 import pwd
+import re
+import shutil
 import sys
 import tempfile
 import time
@@ -56,6 +58,34 @@ def fake_browser(present):
             self.reads = 0
             self.card = ()
             self.fills = []
+            self.style = []
+            self.placed = []
+            self.order = []
+            self.mutations = []
+            self.unbreakable = set()
+            self.media = []
+            self.viewports = []
+            self.cdp = []
+            self.fresh_mutation = False
+            page = self
+
+            class Session:
+                def send(self, method, params=None):
+                    page.cdp.append((method, params))
+                    page.order.append(method)
+                    if method == "DOM.getDocument":
+                        return {"root": {"nodeId": 1}}
+                    if method == "DOM.querySelectorAll":
+                        return {"nodeIds": [2]}
+                    return {}
+
+            self.context = SimpleNamespace(new_cdp_session=lambda _page: Session())
+
+        def emulate_media(self, **kw):
+            self.media.append(kw)
+
+        def set_viewport_size(self, size):
+            self.viewports.append(size)
 
         def goto(self, url):
             pass
@@ -73,6 +103,29 @@ def fake_browser(present):
             self.fills.append((selector, text))
 
         def evaluate(self, expression, arg=None):
+            if expression == shots.STYLE_PLACE:
+                self.order.append("STYLE_PLACE")
+                self.placed.append(arg)
+                return 0
+            if expression == shots.STYLE_CLEAR:
+                self.order.append("STYLE_CLEAR")
+                self.fresh_mutation = False
+                return None
+            if expression == shots.STYLE_SETTLE:
+                self.order.append("STYLE_SETTLE")
+                return None
+            if expression == shots.STYLE_MUTATE:
+                self.order.append("STYLE_MUTATE")
+                self.mutations.append(arg)
+                self.fresh_mutation = True
+                return None
+            if expression == shots.STYLE_READING:
+                self.order.append("STYLE_READING")
+                found = list(self.style)
+                if (self.fresh_mutation and len(arg) == 1
+                        and arg[0]["name"] not in self.unbreakable):
+                    found.append(f"{arg[0]['name']}: x is y")
+                return found
             if expression == shots.ASK_READING:
                 self.reads += 1
                 return list(shots.HEAD_ASK if shots.READING_PANEL in present else shots.OPEN_ASK)
@@ -106,7 +159,7 @@ def fake_browser(present):
             return 0
 
         def screenshot(self, path, full_page):
-            pass
+            self.order.append("screenshot")
 
         def close(self):
             pass
@@ -118,6 +171,866 @@ def fake_browser(present):
             return page
 
     return Browser(), page
+
+
+def style_row(name="held-nowrap", **kw):
+    fields = dict(name=name, states=("live-several",), widths=(1440,), selector=".held.blocks",
+                  prop="white-space", want="equals", value="nowrap",
+                  broken=".held.blocks { white-space: normal !important }")
+    fields.update(kw)
+    return shots.StyleCheck(**fields)
+
+
+@dataclasses.dataclass(frozen=True)
+class Moved:
+    """One property a removed source-reading test asserted, and the style rows that now read it."""
+    test: str
+    selector: str
+    prop: str
+    widths: tuple[int, ...]
+    rows: tuple[str, ...]
+    via: str = ""
+
+
+PAGE = "tests/test_console_page.py"
+BOTH = (1440, 480)
+PEACH_VIA = "the rendered page is read for peach on every element"
+MOVED: tuple[Moved, ...] = (
+    Moved(f"{PAGE}::PageTest::test_the_spend_link_is_quiet", ".nav", "color", BOTH,
+          ("nav-quiet",)),
+    Moved(f"{PAGE}::PageTest::test_the_spend_link_is_quiet", ".nav", "white-space", BOTH,
+          ("nav-nowrap",)),
+    Moved(f"{PAGE}::PageTest::test_the_spend_link_is_quiet", ".nav", "width", BOTH,
+          ("nav-width",)),
+    Moved(f"{PAGE}::PageTest::test_the_spend_link_is_quiet", ".nav", "min-width", BOTH,
+          ("nav-min-width",)),
+    Moved(f"{PAGE}::PageTest::test_peach_marks_only_needs_you", ".btn-primary", "color", BOTH,
+          ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageTest::test_peach_marks_only_needs_you", ".needs", "color", BOTH,
+          ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ".s-working", "color",
+          (1440,), ("state-working",)),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ".s-waiting_answer",
+          "color", (1440,), ("state-waiting-answer",)),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ".s-waiting_permission",
+          "color", (1440,), ("state-waiting-permission",)),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ".s-limit", "color",
+          (1440,), ("state-limit",)),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ":root", "--*", (1440,),
+          ("tokens-desk",), via="the :root token list is read from the rendered page"),
+    Moved(f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled", ".run", "color",
+          (1440,), ("runs-not-red",)),
+    Moved(f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled", ".run", "color",
+          BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
+          ".cap-out", "color", (1440,), ("cap-out-red",)),
+    Moved(f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
+          ".cap", "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_notices_fold_uses_no_peach_and_no_new_colour",
+          ".notice", "color", BOTH, ("palette-notices",),
+          via="fold_colour_faults is the painted colours of the notices fold on the rendered page"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_notices_fold_uses_no_peach_and_no_new_colour",
+          ":root", "--*", (1440,), ("tokens-desk",),
+          via="the :root token list is read from the rendered page"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
+          ".notice", "color", BOTH, ("palette-notices",),
+          via="a colour written as rgb(), hex, a token, a name, a color-mix() or hsl() is one "
+              "painted colour that palette-notices refuses after normalisation"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
+          ".notice", "background-image", BOTH, ("palette-notices-gradient",),
+          via="a colour painted by a gradient's stops is one painted colour that the palette "
+              "refuses after normalisation"),
+    Moved(f"{PAGE}::PageTest::test_peach_marks_only_needs_you", "body", "background-image", BOTH,
+          ("peach-only-needs-gradient",),
+          via="the rendered page is read for peach in the stops of every element's gradient"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
+          ".notice-long", "color", BOTH, ("palette-notices",),
+          via="a painted colour that palette-notices refuses after normalisation"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
+          ".notice", "color", BOTH, ("palette-notices",),
+          via="a custom property is checked where it paints"),
+    Moved(f"{PAGE}::PageOptionTest::test_option_rows_fill_the_width_and_mark_the_pick_beyond_colour",
+          ".btn-option", "width", BOTH, ("option-fills",)),
+    Moved(f"{PAGE}::PageOptionTest::test_option_rows_fill_the_width_and_mark_the_pick_beyond_colour",
+          '.btn-option[aria-pressed="true"] kbd', "background-color", BOTH, ("option-pick-key",)),
+    Moved(f"{PAGE}::PageOptionTest::test_option_rows_fill_the_width_and_mark_the_pick_beyond_colour",
+          ".btn-option", "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageMessageLifeTest::test_the_new_marks_are_never_peach", ".new-replies",
+          "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageMessageLifeTest::test_the_new_marks_are_never_peach", ".message-new",
+          "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageMessageLifeTest::test_the_owners_words_read_you_in_lavender",
+          ".message-text", "color", BOTH, ("message-you-lav",)),
+    Moved(f"{PAGE}::PageManagerTest::test_the_quiet_withdraw_buttons_share_the_page_button_rules",
+          ".card .reason", "color", (1440,), ("reason-quiet",)),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_pip_marks_differ_beyond_colour", ".pip",
+          "border-top-style", (1440,), ("pips-differ",),
+          via="the four marks are compared on border, radius, shadow, image and width"),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_pip_marks_differ_beyond_colour", ".pip", "color",
+          BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you",
+          ".sprint-ball.needs", "color", (1440,), ("ball-needs",)),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you", ".st-go",
+          "color", (1440,), ("tone-go",)),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you", ".st-wait",
+          "color", (1440,), ("tone-wait",)),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you", ".st-dim",
+          "color", (1440,), ("tone-dim",)),
+    Moved(f"{PAGE}::AccountsPanelPageTest::test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden",
+          ".acct-panel[hidden]", "display", (1440,), ("accounts-hidden",)),
+    Moved(f"{PAGE}::AccountsPanelPageTest::test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden",
+          "#accounts", "color", BOTH, ("palette-accounts",)),
+    Moved(f"{PAGE}::AccountsPanelPageTest::test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden",
+          "#accounts", "font-size", (1440,), ("sizes-accounts",)),
+    Moved(f"{PAGE}::AccountsPanelPageTest::test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden",
+          ":root", "--*", (1440,), ("tokens-desk",),
+          via="the :root token list is read from the rendered page"),
+    Moved(f"{PAGE}::PanelSigninPageTest::test_the_panel_never_draws_peach", ".acct-", "color", BOTH,
+          ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
+          ".spend", "color", BOTH, ("spend-quiet",)),
+    Moved(f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
+          ".sp-spend", "color", BOTH, ("sp-spend-quiet",)),
+    Moved(f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
+          ".spend", "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved("tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
+          ".btn-primary", "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved("tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
+          "body", "color", BOTH, ("palette-spend",)),
+    Moved("tests/test_console_spend_page.py::SpendStaticTest::"
+          "test_the_spend_page_uses_no_peach_and_only_the_desk_palette",
+          "body", "color", BOTH, ("palette-spend",)),
+    Moved("tests/test_console_spend_page.py::SpendStaticTest::"
+          "test_the_spend_page_uses_no_peach_and_only_the_desk_palette",
+          ":root", "--*", (1440,), ("tokens-spend",)),
+)
+GOAL = "tests/test_console_goal_box.py"
+NARROW = (480,)
+WIDE = (1440,)
+
+
+def moved(test, selector, prop, widths, *rows, via=""):
+    return Moved(test, selector, prop, widths, rows, via)
+
+
+def _each(test, selector, widths, reads, via=""):
+    """One entry per `(prop, rows...)` read of a selector."""
+    return tuple(moved(test, selector, prop, widths, *rows, via=via) for prop, *rows in reads)
+
+
+SEC_H_FONT = ("font-style", "font-weight", "font-size", "line-height", "font-family")
+
+
+def _sec_h(test, selector, group, via=""):
+    names = [f"{group}-{prop}" for prop in SEC_H_FONT]
+    return (moved(test, selector, "font", BOTH, *names, via=via),
+            moved(test, selector, "font-size", BOTH, f"{group}-font-size", via=via),
+            moved(test, selector, "font-weight", BOTH, f"{group}-font-weight", via=via),
+            moved(test, selector, "color", BOTH, f"{group}-color", via=via))
+
+
+_NARROW_RULE = f"{PAGE}::PageTest::test_the_page_has_a_narrow_rule_for_480_wide"
+_CHOOSER = f"{PAGE}::PageTest::test_the_open_chooser_stays_inside_the_viewport_and_the_panel"
+_LEAD_TYPE = f"{PAGE}::PageTest::test_the_lead_headline_is_the_largest_type_after_the_statement"
+_TOP_BAR = f"{PAGE}::PageTest::test_the_top_bar_fits_480_wide"
+_NOTICE_BLOCKS = (f"{PAGE}::PageNoticeTest::"
+                  "test_notice_blocks_stand_apart_with_the_age_at_the_end_of_the_first_line")
+_NOTICE_GAP = f"{PAGE}::PageNoticeTest::test_the_post_control_stands_a_notice_gap_below_the_last_notice"
+_CUT_WORD = f"{PAGE}::PageNoticeTest::test_a_cut_word_stays_on_one_line_with_an_ellipsis"
+_NOTICE_WRAP = f"{PAGE}::PageNoticeTest::test_notice_words_wrap_within_the_column"
+_ARROW = (f"{PAGE}::PageNoticeTest::"
+          "test_the_closed_notices_fold_shows_the_reports_disclosure_arrow")
+_THREAD = (f"{PAGE}::PageAskTest::"
+           "test_a_thread_line_is_a_flex_row_with_an_ellipsised_first_question")
+_READING_BOLD = (f"{PAGE}::PageReadingTest::"
+                 "test_the_decision_readings_bold_rule_does_not_reach_the_reading_panel")
+_ANSWER_SIZE = (f"{PAGE}::PageReadingFormatTest::"
+                "test_the_answer_reads_at_the_size_of_a_cards_option_text")
+_BREAKS = f"{PAGE}::PageReadingFormatTest::test_a_paragraph_keeps_its_line_breaks"
+_BLOCKS = f"{PAGE}::PageQuestionTest::test_the_blocks_line_stays_one_line"
+_HEADINGS = f"{PAGE}::PageDigestTest::test_section_headings_share_one_style"
+_DIGEST = f"{PAGE}::PageDigestTest::test_each_digest_line_is_its_age_then_its_sentence"
+_STRIP_NEVER = (f"{PAGE}::StripPageTest::"
+                "test_at_1440_the_strip_never_shrinks_and_the_goal_placeholder_stays_one_line")
+_STRIP_THREE = f"{PAGE}::StripPageTest::test_three_accounts_fit_one_line_at_1440"
+_STRIP_480 = (f"{PAGE}::StripPageTest::"
+              "test_at_480_only_the_summary_word_and_the_tightest_account_show")
+_STRIP_DIM = f"{PAGE}::StripPageTest::test_an_excluded_accounts_bar_is_dimmed"
+_FOCUS = f"{PAGE}::PageStandingRulesTest::test_the_goal_field_shows_one_border_in_focus"
+_LEAD_CARD = f"{PAGE}::PageStandingRulesTest::test_the_lead_card_narrows_under_900"
+_REG = f"{PAGE}::RegisterCardKeysPageTest::test_register_asks_are_set_small_enough_to_read_at_480"
+_SEG = f"{PAGE}::PathWrapPageTest::test_a_segment_is_an_atomic_inline_block"
+_FULL = f"{PAGE}::PathWrapPageTest::test_every_card_ask_uses_the_full_width"
+_COUNT = f"{GOAL}::GoalCountTest::test_the_count_is_a_quiet_corner_label_that_takes_no_room"
+_REFUSAL = (f"{GOAL}::GoalRefusalStyleTest::"
+            "test_no_rule_hides_a_refusal_the_page_has_put_in_the_status_line")
+PLACEHOLDER_VIA = "the placeholder is read through its ::placeholder pseudo-element"
+INLINE_BLOCK_PROPS = ("display", "max-width", "overflow", "text-overflow", "white-space",
+                      "vertical-align")
+_FIT = "top-fit-width", "top-fit-min-width", "top-fit-flex-basis"
+
+MOVED += (
+    # The 480 rule of the top bar and the statement.
+    *_each(_NARROW_RULE, ".top-in", NARROW, (("flex-wrap", "top-wrap-flex-wrap"),)),
+    moved(_NARROW_RULE, ".statement h1", "font-size", NARROW, "statement-narrow-font-size"),
+    # The open chooser.
+    *_each(_CHOOSER, ".goal-box", BOTH, (("max-height", "goal-box-max-height"),
+                                         ("overflow-y", "goal-box-overflow-y"))),
+    *_each(_CHOOSER, ".goal-projects", BOTH, (
+        ("min-width", "goal-projects-min-width"), ("max-width", "goal-projects-max-width"),
+        ("overflow-y", "goal-projects-overflow-y"), ("flex", "goal-projects-flex"),
+        ("min-height", "goal-projects-min-height"))),
+    *_each(_CHOOSER, ".goal-projects li", BOTH, (
+        ("min-width", "goal-projects-li-min-width"), ("max-width", "goal-projects-li-max-width"))),
+    *_each(_CHOOSER, ".goal-project", BOTH, (
+        ("min-width", "goal-project-min-width"), ("max-width", "goal-project-max-width"),
+        ("overflow-wrap", "goal-project-overflow-wrap"))),
+    moved(_CHOOSER, ".goal-filter", "min-width", BOTH, "goal-filter-min-width"),
+    moved(_CHOOSER, ".goal-act", "flex", BOTH, "goal-act-flex"),
+    # The lead type.
+    moved(_LEAD_TYPE, ".card .q", "font-size", BOTH, "lead-type-card-font-size"),
+    moved(_LEAD_TYPE, ".card .q", "font", BOTH, "lead-type-card-font"),
+    moved(_LEAD_TYPE, ".reading-question", "font-size", BOTH, "lead-type-reading-font-size"),
+    moved(_LEAD_TYPE, ".reading-question", "font", BOTH, "lead-type-reading-font"),
+    moved(_LEAD_TYPE, ".statement h1", "font-size", BOTH, "lead-type-font-size",
+          via="every rendered element's font-size is read against the lead question's 24px"),
+    # The top bar at 480.
+    moved(_TOP_BAR, ".top-in", "flex-wrap", NARROW, "top-wrap-flex-wrap"),
+    moved(_TOP_BAR, ".goal-bar", "flex", NARROW, "goal-bar-flex-480"),
+    moved(_TOP_BAR, ".goal-box", "width", BOTH, "goal-box-width-1440", "goal-box-width-480"),
+    moved(_TOP_BAR, ".cap-acct b", "overflow", BOTH, "cap-acct-name-overflow"),
+    moved(_TOP_BAR, ".cap-acct b", "text-overflow", BOTH, "cap-acct-name-text-overflow"),
+    moved(_TOP_BAR, ".cap-acct b", "white-space", BOTH, "cap-acct-name-white-space"),
+    moved(_TOP_BAR, ".cap-acct b", "max-width", BOTH, "cap-acct-name-max-width"),
+    moved(_TOP_BAR, ".cap", "min-width", BOTH, "cap-min-width"),
+    moved(_TOP_BAR, ".cap", "max-width", BOTH, "cap-max-width"),
+    moved(_TOP_BAR, ".cap", "white-space", BOTH, "cap-white-space"),
+    moved(_TOP_BAR, ".cap-acct", "max-width", BOTH, "cap-acct-max-width"),
+    moved(_TOP_BAR, ".cap-acct", "white-space", BOTH, "cap-acct-white-space"),
+    moved(_TOP_BAR, ".brand", "white-space", BOTH, "brand-white-space"),
+    moved(_TOP_BAR, ".goal-in .goal-text::placeholder", "white-space", BOTH,
+          "placeholder-white-space", via=PLACEHOLDER_VIA),
+    moved(_TOP_BAR, ".nav", "white-space", BOTH, "nav-nowrap"),
+    *(moved(_TOP_BAR, selector, prop, NARROW, *_FIT,
+            via="no top bar rule asks for more than the 480 column: its widths are read rendered")
+      for selector in (".top", ".conn", ".cap", ".goal-bar", ".nav", ".brand")
+      for prop in ("width", "min-width", "flex-basis")),
+    # The meter sits inside the clipped `.cap`, so no row above reads it: its own rows do.
+    *(moved(_TOP_BAR, ".meter", prop, NARROW, f"top-fit-meter-{prop}",
+            via="the meter sits inside the clipped `.cap`, so its own rendered value is read")
+      for prop in ("width", "min-width", "flex-basis")),
+    # The notices.
+    moved(_NOTICE_BLOCKS, ".notice + .notice", "margin-top", BOTH, "notice-margin-top"),
+    moved(_NOTICE_BLOCKS, ".notice-head", "display", BOTH, "notice-head-display"),
+    moved(_NOTICE_BLOCKS, ".notice-head", "flex-wrap", BOTH, "notice-head-flex-wrap"),
+    moved(_NOTICE_BLOCKS, ".notice-who", "flex", BOTH, "notice-who-flex"),
+    moved(_NOTICE_BLOCKS, ".notice-who", "min-width", BOTH, "notice-who-min-width"),
+    moved(_NOTICE_BLOCKS, ".notice-who", "display", BOTH, "notice-who-display"),
+    moved(_NOTICE_BLOCKS, ".notice-label", "display", BOTH, "notice-label-display"),
+    moved(_NOTICE_BLOCKS, ".notice-from", "display", BOTH, "notice-from-display"),
+    moved(_NOTICE_BLOCKS, ".notice-head .notice-age", "margin-left", BOTH,
+          "notice-age-margin-left", "notice-age-right"),
+    moved(_NOTICE_BLOCKS, ".notice-head .notice-age", "flex", BOTH, "notice-age-flex"),
+    moved(_NOTICE_BLOCKS, ".notice-head .notice-age", "color", BOTH, "notice-age-color"),
+    moved(_NOTICE_BLOCKS, ".notice-words", "color", BOTH, "notice-words-color"),
+    moved(_NOTICE_BLOCKS, ".notice code", "background", BOTH, "notice-code-background-color",
+          "notice-code-background-image"),
+    moved(_NOTICE_BLOCKS, ".notice code", "white-space", BOTH, "notice-code-white-space"),
+    moved(_NOTICE_GAP, ".notice-open", "margin-top", BOTH, "notice-gap-open",
+          via="the control is read where the page draws it, beside the last notice"),
+    moved(_NOTICE_GAP, ".notice-post", "margin-top", BOTH, "notice-gap-post",
+          via="the control is read where the page draws it, beside the last notice"),
+    moved(_NOTICE_GAP, ".notice", "margin-top", BOTH, "notice-margin-top",
+          via="the gap above the post control is read as at least the 12px between notices"),
+    moved(_NOTICE_GAP, ".notice + .notice", "margin-top", BOTH, "notice-margin-top"),
+    *(moved(_CUT_WORD, selector, prop, BOTH, f"{group}-{prop}")
+      for selector, group in ((".notice .notice-long", "notice-long"), (".notice code", "notice-code"))
+      for prop in INLINE_BLOCK_PROPS),
+    moved(_NOTICE_WRAP, ".notice > *", "overflow-wrap", BOTH, "notice-child-overflow-wrap"),
+    moved(_NOTICE_WRAP, ".notice > *", "min-width", BOTH, "notice-child-min-width"),
+    moved(_NOTICE_WRAP, ".notices-project", "overflow-wrap", BOTH, "notices-project-overflow-wrap"),
+    # The disclosure arrows, the threads and the readings.
+    *(moved(_ARROW, selector, prop, BOTH, f"disclosure-{name}-{read}")
+      for name, selector in (("notices", ".line.notices summary"),
+                             ("finished", ".finished-list > summary"),
+                             ("sprint", ".sprint-detail summary"))
+      for prop, read in (("display", "display"), ("list-style", "list-style-type"),
+                         ("list-style-type", "list-style-type"))),
+    moved(_ARROW, ".line.notices summary::-webkit-details-marker", "display", BOTH,
+          "disclosure-notices-marker-display",
+          via="the marker's own display is read from the cascade, no engine resolves its style"),
+    moved(_ARROW, ".notices-project", "margin-left", BOTH, "notices-project-margin-left"),
+    moved(_THREAD, ".thread-open", "display", BOTH, "thread-open-display"),
+    moved(_THREAD, ".thread-first", "flex", BOTH, "thread-first-flex"),
+    moved(_THREAD, ".line.questions > details > summary", "display", BOTH,
+          "thread-summary-display"),
+    moved(_THREAD, ".line.questions > details > summary", "list-style", BOTH,
+          "thread-summary-list-style-type"),
+    moved(_THREAD, ".thread-first", "text-overflow", BOTH, "thread-first-text-overflow"),
+    moved(_THREAD, ".thread-first", "white-space", BOTH, "thread-first-white-space"),
+    moved(_READING_BOLD, "p.reading", "font-weight", BOTH, "reading-weight-call-out"),
+    moved(_READING_BOLD, ".reading", "font-weight", BOTH, "reading-weight-panel",
+          via="the reading panel's own weight is read, not the shared class"),
+    # The answer's type and line breaks.
+    moved(_ANSWER_SIZE, ".opt .ot", "font-size", BOTH, "answer-type-font-size",
+          via="the answer is read against a probe wearing the card's option text"),
+    moved(_ANSWER_SIZE, ".ask-answer", "font-size", BOTH, "answer-type-font-size"),
+    moved(_ANSWER_SIZE, ".ask-answer p", "font-size", BOTH, "answer-type-p-font-size"),
+    moved(_ANSWER_SIZE, ".ask-answer p", "font", BOTH, "answer-type-font"),
+    moved(_ANSWER_SIZE, ".ask-answer li", "font-size", BOTH, "answer-type-li-font-size"),
+    moved(_ANSWER_SIZE, ".ask-answer li", "font", BOTH, "answer-type-li-font"),
+    *(moved(_ANSWER_SIZE, ".ask-answer .md-list", prop, BOTH, row)
+      for prop, row in (("font-size", "answer-type-list-font-size"),
+                        ("font", "answer-type-list-font"))),
+    *(moved(_ANSWER_SIZE, f".ask-answer {kind}.md-list", prop, BOTH, f"answer-type-{kind}-{key}")
+      for kind in ("ul", "ol") for prop, key in (("font-size", "font-size"), ("font", "font"))),
+    moved(_BREAKS, ".ask-answer p", "white-space", BOTH, "answer-type-white-space"),
+    moved(_BLOCKS, ".held.blocks", "white-space", BOTH, "held-blocks-white-space"),
+    moved(_BLOCKS, ".held.blocks", "overflow", BOTH, "held-blocks-overflow"),
+    moved(_BLOCKS, ".held.blocks", "text-overflow", BOTH, "held-blocks-text-overflow"),
+    # The digest and the headings.
+    *(moved(_DIGEST, f"{list_} li", prop, BOTH, f"digest-lines-{name}-{prop}")
+      for list_, name in ((".digest", "digest"), (".earlier-list", "earlier"))
+      for prop in ("display", "grid-template-columns", "flex-wrap")),
+    moved(_DIGEST, ".earlier-list .more-n", "display", BOTH, "digest-lines-more-display"),
+    moved(_DIGEST, ".earlier-list .more-n", "grid-column", BOTH, "digest-lines-more-grid-column"),
+    *_sec_h(_HEADINGS, ".sec-h", "sec-h-work",
+            via="the Work, digest and Capacity headings are each read against the one style"),
+    *_sec_h(_HEADINGS, ".digest-head", "sec-h-digest"),
+    *_sec_h(_HEADINGS, ".side h2", "sec-h-work", via="the Work heading is the side column's"),
+    *_sec_h(_HEADINGS, "#promoted h2", "sec-h-promoted"),
+    # The goal field, the lead card, the asks and the segment.
+    moved(_FOCUS, ".goal-in:focus-within", "border-color", BOTH, "goal-focus-border-color",
+          via="focus is forced on the goal field and its border read"),
+    moved(_FOCUS, ".field-bare:focus-visible", "outline", BOTH, "goal-focus-outline",
+          via="keyboard focus is forced on the goal field's text and its outline read"),
+    moved(_LEAD_CARD, ".card.lead", "padding", NARROW, "lead-narrow-padding"),
+    moved(_LEAD_CARD, ".card.lead", "padding-left", NARROW, "lead-narrow-padding-left"),
+    moved(_LEAD_CARD, ".card.lead", "padding-right", NARROW, "lead-narrow-padding-right"),
+    moved(_REG, ".card .q.reg", "font-size", NARROW, "reg-ask-font-size-480"),
+    moved(_REG, ".card .q.reg", "font-size", WIDE, "reg-ask-font-size-1440"),
+    moved(_REG, ".rest .q.reg", "font", BOTH, "reg-ask-rest-font", "reg-ask-rest-font-weight",
+          "reg-ask-rest-font-size", "reg-ask-rest-line-height"),
+    moved(_SEG, ".seg", "display", BOTH, "seg-display"),
+    moved(_SEG, ".seg", "max-width", BOTH, "seg-max-width"),
+    moved(_SEG, ".seg", "overflow-wrap", BOTH, "seg-overflow-wrap"),
+    moved(_FULL, ".card .q", "text-wrap", BOTH, "q-full-width-text-wrap"),
+    moved(_FULL, ".card .q.reg", "text-wrap", BOTH, "q-full-width-reg-text-wrap"),
+    moved(_FULL, ".rest .q.reg", "text-wrap", BOTH, "q-full-width-rest-text-wrap"),
+    # The goal count and the status line.
+    moved(_COUNT, ".goal-count", "display", BOTH, "goal-count-closed-display"),
+    moved(_COUNT, ".goal-bar.open .goal-count", "display", BOTH, "goal-count-display"),
+    moved(_COUNT, ".goal-count", "position", BOTH, "goal-count-position",
+          via="the count is read where it is drawn, in the open box"),
+    moved(_COUNT, ".goal-count", "color", BOTH, "goal-count-color",
+          via="the count is read where it is drawn, in the open box"),
+    moved(_COUNT, ".goal-count.over", "color", BOTH, "goal-count-over-color"),
+    moved(_COUNT, ".goal-count.near", "color", BOTH, "goal-count-near-color",
+          via="there is no near colour: the near count reads the quiet one"),
+    *(moved(_COUNT, selector, prop, BOTH, *rows, via=via)
+      for selector, rows_for, via in (
+          (".goal-count", "goal-count", "the count is read where it is drawn, in the open box"),
+          (".goal-bar.open .goal-count", "goal-count", ""),
+          (".goal-count.over", "goal-count-over", ""))
+      for prop, rows in (("width", (f"{rows_for}-width",)),
+                         ("min-width", (f"{rows_for}-min-width",)),
+                         ("flex-basis", (f"{rows_for}-flex-basis",)),
+                         ("white-space", (f"{rows_for}-white-space",)))),
+    moved(_REFUSAL, ".goal-status:empty", "display", BOTH, "goal-status-empty-display"),
+    moved(_REFUSAL, ".goal-status", "display", BOTH, "goal-status-display"),
+    moved(_REFUSAL, ".goal-status", "visibility", BOTH, "goal-status-visibility"),
+    moved(_REFUSAL, ".fail", "display", BOTH, "fail-shown-display"),
+    moved(_REFUSAL, ".fail", "visibility", BOTH, "fail-shown-visibility"),
+    # The strip.
+    *(moved(_STRIP_NEVER, selector, prop, WIDE, row,
+            via=PLACEHOLDER_VIA if "::" in selector else "")
+      for selector, prop, row in (
+          (".cap", "flex", "cap-flex"), (".cap", "overflow", "cap-overflow"),
+          (".cap", "min-width", "cap-min-width"), (".cap", "max-width", "cap-max-width"),
+          (".cap", "white-space", "cap-white-space"), (".cap", "flex-wrap", "cap-flex-wrap"),
+          (".goal-bar", "flex", "goal-bar-flex-1440"),
+          (".goal-bar", "min-width", "goal-bar-min-width-1440"),
+          (".goal-bar", "max-width", "goal-bar-max-width-1440"),
+          (".top-in", "flex-wrap", "top-wrap-flex-wrap"), (".top-in", "gap", "top-wrap-gap"),
+          (".goal-in .goal-text::placeholder", "white-space", "placeholder-white-space"),
+          (".goal-in .goal-text::placeholder", "overflow", "placeholder-overflow"),
+          (".goal-in .goal-text::placeholder", "text-overflow", "placeholder-text-overflow"),
+          (".goal-in .goal-text", "text-overflow", "placeholder-host-text-overflow"))),
+    moved(_STRIP_NEVER, ".top-in", "gap", WIDE, "top-wrap-gap", "top-wrap-row-gap",
+          "top-wrap-column-gap"),
+    moved(_STRIP_NEVER, ".goal-bar", "flex", NARROW, "goal-bar-flex-480"),
+    moved(_STRIP_NEVER, ".goal-bar", "max-width", NARROW, "goal-bar-max-width-480"),
+    *(moved(_STRIP_THREE, ".cap", prop, WIDE, *rows)
+      for prop, rows in (
+          ("flex-wrap", ("cap-flex-wrap",)), ("white-space", ("cap-white-space",)),
+          ("overflow", ("cap-overflow",)), ("min-width", ("cap-min-width",)),
+          ("max-width", ("cap-max-width",)), ("padding", ("cap-padding",)),
+          ("text-align", ("cap-text-align",)), ("cursor", ("cap-cursor",)),
+          ("font-size", ("cap-font-size",)), ("color", ("cap-color",)),
+          ("font", ("cap-font-style", "cap-font-weight", "cap-font-size", "cap-line-height",
+                    "cap-font-family")),
+          ("background", ("cap-background-color", "cap-background-image")))),
+    moved(_STRIP_THREE, ".cap > *", "flex", WIDE, "cap-child-flex"),
+    moved(_STRIP_THREE, ".cap-excl", "color", WIDE, "cap-excl-color"),
+    moved(_STRIP_THREE, ".cap-pin-mark", "color", WIDE, "cap-pin-mark-color"),
+    moved(_STRIP_480, ".cap-extra", "display", NARROW, "cap-extra-display"),
+    moved(_STRIP_DIM, ".cap-excluded .meter i", "background", BOTH, "meter-excluded-background-color",
+          "meter-excluded-background-image"),
+    moved(_STRIP_DIM, ".meter i", "background", BOTH, "meter-fill-background-color",
+          "meter-fill-background-image"),
+)
+_NEW_MARK = f"{PAGE}::PageMessageLifeTest::test_a_new_reply_mark_in_a_summary_is_set_off_from_the_words_before_it"
+_CHECK_LINE = (f"{PAGE}::PageSprintBlockTest::"
+               "test_the_check_line_wears_the_sprint_openers_look_and_keeps_a_touch_target")
+_NOW_SPAN = f"{PAGE}::PageSprintGlanceTest::test_the_now_sentence_spans_the_text_columns_of_the_head_grid"
+_NOW_CLAMP = f"{PAGE}::PageSprintBlockTest::test_the_now_sentence_is_clamped_to_two_lines"
+_PIPS = f"{PAGE}::PageSprintGlanceTest::test_a_full_report_keeps_every_pip_and_wraps_them"
+_WAIT = (f"{PAGE}::WaitingLinePageTest::"
+         "test_a_sprints_wait_sits_in_the_check_list_with_the_check_lines_indent_and_gap")
+_PROJECT = f"{PAGE}::PageSideColumnTest::test_a_project_is_a_block_headed_by_its_name"
+_ANSWERED = f"{PAGE}::PageAnsweredRowTest::test_an_answered_row_clips_its_question_to_one_line"
+_ROW_HEAD = f"{PAGE}::PageBriefRowTest::test_the_brief_row_head_keeps_the_shared_flex_layout"
+_REST_HEAD = f"{PAGE}::PageBriefRowTest::test_a_register_row_head_keeps_the_flex_layout_of_a_card_head"
+_ROW_TITLE = f"{PAGE}::PageBriefRowTest::test_a_collapsed_row_title_wraps_a_long_unbroken_goal"
+_ROW_GAP = f"{PAGE}::PageBriefRowTest::test_the_first_row_sits_one_row_gap_below_the_card"
+_DRAFT = f"{PAGE}::DraftedContractPageTest::test_change_controls_never_wrap_under_their_row"
+_GALLERY = f"{PAGE}::PagePictureTest::test_the_gallery_wraps_and_the_pair_stacks_at_480"
+_SHAPE = f"{PAGE}::PagePictureTest::test_a_thumbnail_follows_its_pictures_shape_up_to_a_bound"
+_TINT = f"{PAGE}::PagePictureTest::test_a_thumbnails_letterbox_is_a_light_tint_of_the_card"
+_PAIR_ROW = f"{PAGE}::PagePictureTest::test_the_pair_sits_in_one_row_on_a_desktop"
+_VIEWER_PAIR = f"{PAGE}::PageViewerTest::test_the_viewer_pair_is_a_row_and_stacks_at_480"
+_VIEWER_TOP = f"{PAGE}::PageViewerTest::test_the_viewer_shows_its_pictures_at_the_top_of_the_stage"
+_VIEWER_OPAQUE = (f"{PAGE}::PageViewerTest::"
+                  "test_the_viewer_is_opaque_and_the_page_behind_it_does_not_scroll")
+_VIEWER_ARROWS = f"{PAGE}::PageViewerTest::test_arrows_move_the_picture_and_leave_focus_where_it_is"
+_VIEWER_BAR = f"{PAGE}::PageViewerTest::test_the_viewer_controls_share_one_bar_that_stays_in_view"
+
+MOVED += (
+    # The new-reply mark, the check line and the wait line.
+    moved(_NEW_MARK, ".finished-list > summary .message-new", "margin-left", WIDE,
+          "new-mark-gap-finished"),
+    moved(_NEW_MARK, ".sprint-earlier summary .message-new", "margin-left", WIDE,
+          "new-mark-gap-earlier"),
+    moved(_CHECK_LINE, ".sprint-check", "color", BOTH, "check-line-color"),
+    moved(_CHECK_LINE, ".sprint-detail summary", "color", BOTH, "check-line-color",
+          via="the opener's colour is what the check line is read against"),
+    moved(_CHECK_LINE, ".sprint-check", "cursor", BOTH, "check-line-cursor"),
+    moved(_CHECK_LINE, ".sprint-detail summary", "cursor", BOTH, "check-line-cursor",
+          via="the opener's cursor is what the check line is read against"),
+    moved(_CHECK_LINE, ".sprint-check", "font-size", BOTH, "check-line-font-size"),
+    moved(_CHECK_LINE, ".sprint-detail", "font-size", BOTH, "check-line-font-size",
+          via="the sprint block's size is what the check line is read against"),
+    moved(_CHECK_LINE, ".sprint-check", "text-decoration", BOTH, "check-line-text-decoration-line"),
+    moved(_CHECK_LINE, ".sprint-check", "min-height", WIDE, "check-line-min-height-1440"),
+    moved(_CHECK_LINE, ".sprint-check", "min-height", NARROW, "check-line-min-height-480"),
+    moved(_CHECK_LINE, ".sprint-check", "display", NARROW, "check-line-display-480"),
+    moved(_CHECK_LINE, ".sprint-check", "align-items", NARROW, "check-line-align-items-480"),
+    moved(_CHECK_LINE, ".sprint-check", "flex", NARROW, "check-line-display-480",
+          via="the literal flex is the display value the row wants"),
+    moved(_CHECK_LINE, ".sprint-checks", "padding", BOTH, "check-line-list-padding"),
+    moved(_WAIT, ".sprint-checks", "padding", BOTH, "check-line-list-padding"),
+    moved(_WAIT, ".sprint-checks .wait", "margin", BOTH, "wait-line-margin"),
+    moved(_WAIT, ".sprint-checks .wait", "padding", BOTH, "wait-line-padding"),
+    moved(_WAIT, ".sprint-check", "padding", BOTH, "wait-line-padding",
+          via="the check line's padding is what the wait line is read against"),
+    moved(_WAIT, ".sprint-checks .wait", "font-size", BOTH, "wait-line-font-size"),
+    moved(_WAIT, ".sprint-check", "font-size", BOTH, "wait-line-font-size",
+          via="the check line's size is what the wait line is read against"),
+    moved(_WAIT, ".sprint-checks .wait", "min-height", NARROW, "wait-line-min-height-480",
+          "wait-line-min-height-same-480"),
+    moved(_WAIT, ".sprint-check", "min-height", NARROW, "wait-line-min-height-same-480",
+          via="the check line's height is what the wait line is read against"),
+    # The now sentence and the head grid.
+    moved(_NOW_SPAN, ".sp-now", "grid-column", BOTH, "now-sentence-column-start",
+          "now-sentence-column-end"),
+    moved(_NOW_CLAMP, ".sp-now", "grid-column", BOTH, "now-sentence-column-start",
+          "now-sentence-column-end"),
+    moved(_NOW_CLAMP, ".sp-now", "display", BOTH, "now-sentence-display"),
+    moved(_NOW_CLAMP, ".sp-now", "-webkit-box-orient", BOTH, "now-sentence-box-orient"),
+    moved(_NOW_CLAMP, ".sp-now", "-webkit-line-clamp", BOTH, "now-sentence-line-clamp"),
+    moved(_NOW_CLAMP, ".sp-now", "overflow", BOTH, "now-sentence-overflow-y"),
+    moved(_PIPS, ".pips", "flex-wrap", BOTH, "pips-wrap-flex-wrap"),
+    moved(_PIPS, ".pips", "white-space", BOTH, "pips-wrap-pips-white-space"),
+    moved(_PIPS, ".sp-prog", "white-space", BOTH, "pips-wrap-prog-white-space"),
+    moved(_PIPS, ".sp-head", "grid-template-columns", BOTH, "pips-wrap-columns",
+          "pips-wrap-columns-max"),
+    moved(_PROJECT, "#list > li.line + li.line", "border-top", BOTH, "project-block-border-color",
+          "project-block-border-width",
+          via="the blocks the rule draws are read, not the after-line ones it removes it from"),
+    moved(_PROJECT, ".pname", "font-weight", BOTH, "project-block-pname-weight"),
+    # The brief rows, the register head and the answered rows.
+    moved(_ROW_HEAD, ".row-head", "display", WIDE, "row-head-display"),
+    moved(_ROW_HEAD, ".brief-row > summary", "display", WIDE, "row-head-summary-display"),
+    moved(_ROW_HEAD, ".row-head", "flex", WIDE, "row-head-display", "row-head-summary-display",
+          via="the literal flex is the display value the row wants"),
+    moved(_REST_HEAD, ".rest .head", "display", WIDE, "rest-head-display"),
+    moved(_REST_HEAD, ".card .head", "display", WIDE, "rest-head-display",
+          via="the card head is what the register head is read against"),
+    moved(_REST_HEAD, ".rest .head", "column-gap", WIDE, "rest-head-column-gap"),
+    moved(_REST_HEAD, ".rest .head", "align-items", WIDE, "rest-head-align-items"),
+    moved(_REST_HEAD, ".rest .head", "flex", WIDE, "rest-head-display",
+          via="the literal flex is the display value the row wants"),
+    moved(_REST_HEAD, ".head .wait", "margin-left", WIDE, "rest-head-wait-margin-left",
+          "rest-head-wait-right"),
+    moved(_ROW_TITLE, ".row-head b", "overflow-wrap", WIDE, "row-head-b-overflow-wrap"),
+    moved(_ROW_GAP, ".brief-row", "padding-top", WIDE, "row-gap-padding-top",
+          "row-gap-padding-top-same"),
+    moved(_ROW_GAP, ".brief-row", "padding-bottom", WIDE, "row-gap-padding-bottom",
+          "row-gap-padding-bottom-same"),
+    moved(_ROW_GAP, ".brief-row", "padding-left", WIDE, "row-gap-padding-left",
+          "row-gap-padding-left-same"),
+    moved(_ROW_GAP, ".brief-row", "padding-right", WIDE, "row-gap-padding-right",
+          "row-gap-padding-right-same"),
+    moved(_ROW_GAP, ".rest > li.row", "padding", WIDE, "row-gap-padding-top-same",
+          "row-gap-padding-bottom-same", "row-gap-padding-left-same", "row-gap-padding-right-same",
+          via="the registration row's padding is what the brief row is read against"),
+    moved(_ROW_GAP, ".card.lead + .brief-row", "margin-top", WIDE, "row-gap-lead-brief-margin-top"),
+    moved(_ROW_GAP, ".card.lead + .rest", "margin-top", WIDE, "row-gap-lead-rest-margin-top"),
+    moved(_ROW_GAP, ".brief-row + .brief-row", "border-top", WIDE, "row-gap-brief-border-color"),
+    *(moved(_ANSWERED, selector, prop, BOTH, f"answered-row-{name}-{key}")
+      for selector, name in ((".done-item summary > b", "b"), (".done-item summary > span", "span"))
+      for prop, key in (("white-space", "white-space"), ("overflow", "overflow"),
+                        ("text-overflow", "text-overflow"), ("min-width", "min-width"))),
+    moved(_ANSWERED, ".done-item summary > b", "flex", BOTH, "answered-row-b-flex-grow",
+          "answered-row-b-flex-shrink"),
+    moved(_ANSWERED, ".done-item summary > span", "flex", BOTH, "answered-row-span-flex-grow",
+          "answered-row-span-flex-shrink"),
+    moved(_ANSWERED, ".done-item summary", "flex-wrap", BOTH, "answered-row-summary-flex-wrap"),
+    moved(_ANSWERED, ".done-item", "min-width", BOTH, "answered-row-item-min-width"),
+    moved(_DRAFT, ".register-draft li", "display", WIDE, "draft-row-display"),
+    moved(_DRAFT, ".register-draft li", "grid-template-columns", WIDE, "draft-row-columns"),
+    moved(_DRAFT, ".draft-change", "white-space", WIDE, "draft-row-change-white-space"),
+    # The pictures and the viewer.
+    moved(_GALLERY, ".pics", "flex-wrap", BOTH, "pics-flex-wrap"),
+    moved(_GALLERY, ".pic", "min-width", BOTH, "pics-pic-min-width"),
+    moved(_GALLERY, ".pic", "max-width", BOTH, "pics-pic-max-width"),
+    moved(_GALLERY, ".pic-pair", "min-width", BOTH, "pics-pair-min-width"),
+    moved(_GALLERY, ".pic-pair", "max-width", BOTH, "pics-pair-max-width"),
+    moved(_GALLERY, ".pic-line", "overflow-wrap", BOTH, "pics-line-overflow-wrap"),
+    moved(_GALLERY, ".pic-pair", "flex-direction", NARROW, "pics-pair-direction-480"),
+    moved(_SHAPE, ".pic-thumb img", "width", BOTH, "thumb-width"),
+    moved(_SHAPE, ".pic-thumb img", "height", BOTH, "thumb-height"),
+    moved(_SHAPE, ".pic-thumb img", "object-fit", BOTH, "thumb-object-fit"),
+    moved(_SHAPE, ".pic-thumb img", "max-height", WIDE, "thumb-max-height-1440"),
+    moved(_SHAPE, ".pic-thumb img", "max-height", NARROW, "thumb-max-height-480"),
+    moved(_SHAPE, ".pic-pair", "align-items", WIDE, "pics-pair-align-items-1440"),
+    moved(_SHAPE, ".pic-pair", "align-items", NARROW, "pics-pair-align-items-480"),
+    *(moved(_TINT, selector, "background", BOTH, *names)
+      for selector, names in ((".pic-thumb", ("thumb-background-color", "thumb-background-image")),
+                              (".pic-thumb img", ("thumb-img-background-color",
+                                                  "thumb-img-background-image")))),
+    moved(_PAIR_ROW, ".pic-pair", "display", WIDE, "pics-pair-display-1440"),
+    moved(_PAIR_ROW, ".pic-pair", "flex-direction", (1440, 1180, 900), "pics-pair-direction-1440",
+          "pics-pair-direction-1180", "pics-pair-direction-900"),
+    moved(_PAIR_ROW, ".pic-pair .pic", "flex", WIDE, "pics-pair-pic-flex-1440"),
+    moved(_VIEWER_PAIR, ".viewer-pair", "display", BOTH, "viewer-pair-display"),
+    moved(_VIEWER_PAIR, ".viewer-pair", "flex", BOTH, "viewer-pair-display",
+          via="the literal flex is the display value the row wants"),
+    moved(_VIEWER_PAIR, ".viewer-pair", "flex-direction", WIDE, "viewer-pair-direction-1440"),
+    moved(_VIEWER_PAIR, ".viewer-pair", "flex-direction", NARROW, "viewer-pair-direction-480"),
+    moved(_VIEWER_PAIR, ".viewer img", "max-width", BOTH, "viewer-img-max-width"),
+    moved(_VIEWER_PAIR, ".viewer img", "object-fit", BOTH, "viewer-img-object-fit"),
+    moved(_VIEWER_TOP, ".viewer-stage", "align-items", BOTH, "viewer-stage-align-items"),
+    moved(_VIEWER_TOP, ".viewer-stage > *", "margin", BOTH, "viewer-stage-child-margin-top"),
+    *(moved(_VIEWER_OPAQUE, selector, "background", BOTH, *names)
+      for selector, names in ((".viewer", ("viewer-background-color", "viewer-background-image")),
+                              (".viewer-bar", ("viewer-bar-background-color",
+                                               "viewer-bar-background-image")))),
+    moved(_VIEWER_OPAQUE, ":root", "--*", WIDE, "tokens-desk",
+          via="the viewer's fills are read as the page's palette colours"),
+    moved(_VIEWER_OPAQUE, "html:has(#viewer:not([hidden]))", "overflow", BOTH,
+          "viewer-html-overflow-y", via="the page behind the open viewer is read on html"),
+    moved(_VIEWER_ARROWS, ".viewer:focus-visible", "outline", BOTH, "viewer-focus-outline",
+          "viewer-focus-outline-style", via="keyboard focus is forced on the viewer and its outline read"),
+    moved(_VIEWER_BAR, ".viewer-bar", "display", BOTH, "viewer-bar-display"),
+    moved(_VIEWER_BAR, ".viewer-bar", "flex-direction", BOTH, "viewer-bar-direction"),
+    moved(_VIEWER_BAR, ".viewer-bar", "flex-wrap", BOTH, "viewer-bar-wrap"),
+    moved(_VIEWER_BAR, ".viewer-bar", "flex", BOTH, "viewer-bar-flex"),
+    moved(_VIEWER_BAR, ".viewer", "display", BOTH, "viewer-display"),
+    moved(_VIEWER_BAR, ".viewer", "flex-direction", BOTH, "viewer-direction"),
+    moved(_VIEWER_BAR, ".viewer", "overflow", BOTH, "viewer-overflow-y"),
+    moved(_VIEWER_BAR, ".viewer", "overflow-y", BOTH, "viewer-overflow-y"),
+    moved(_VIEWER_BAR, ".viewer-stage", "overflow", BOTH, "viewer-stage-overflow-y"),
+    moved(_VIEWER_BAR, ".viewer-bar button", "min-height", NARROW, "viewer-bar-button-min-height-480"),
+)
+CONTROLS = "tests/test_console_controls.py"
+SPEND_PAGE = "tests/test_console_spend_page.py"
+_DECLARED = f"{CONTROLS}::ControlStyleTest::test_the_kinds_are_declared_once_in_the_controls_block"
+_SHARED = f"{CONTROLS}::ControlStyleTest::test_both_pages_share_one_controls_block"
+_REDUCED = f"{CONTROLS}::ControlStyleTest::test_both_pages_turn_motion_off_under_reduced_motion"
+_OWNS = f"{CONTROLS}::ControlStyleTest::test_kind_rules_own_the_control_look"
+_FLOOR = f"{CONTROLS}::ControlStyleTest::test_no_rule_shrinks_a_control_below_32_px"
+_FLOOR_SPEND = f"{CONTROLS}::ControlStyleTest::test_the_height_floor_gate_sees_a_later_spend_rule"
+_DISABLED = (f"{CONTROLS}::ControlStateTest::"
+             "test_disabled_and_busy_carry_an_attribute_and_a_non_colour_cue")
+_HOVER = f"{CONTROLS}::ControlStateTest::test_hover_is_shared_by_both_pages"
+_RING = f"{CONTROLS}::ControlStateTest::test_every_kind_shows_the_lavender_ring_on_keyboard_focus"
+_PRESSED = f"{CONTROLS}::ControlStateTest::test_pressed_is_an_attribute_with_a_non_colour_cue"
+_PLACEHOLDERS = (f"{CONTROLS}::ControlLabelTest::"
+                 "test_placeholders_meet_4_5_to_1_against_their_field")
+_WCAG = f"{CONTROLS}::ControlLabelTest::test_contrast_matches_the_wcag_formula"
+_PRIMARY = f"{PAGE}::PageCardTest::test_the_primary_style_outranks_the_button_base_rules"
+_PAGE_MOTION = f"{PAGE}::PageStandingRulesTest::test_motion_is_off_under_reduced_motion"
+_SPEND_FIT = f"{SPEND_PAGE}::SpendStaticTest::test_the_spend_page_fits_480_wide"
+_BTNS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option")
+_FIELDS = ("field-line", "field-area", "field-code")
+_SPLIT = {("btn-primary", "background-color"), ("btn-primary", "border-color"),
+          ("btn-primary", "color"), ("btn-danger", "color")}
+_LOOK_GROUPS = {
+    "font": ("font-style", "font-weight", "font-size", "line-height", "font-family"),
+    "background": ("background-color", "background-image"),
+    "border": ("border-width", "border-style", "border-color"),
+    "transition": ("transition-property", "transition-duration"),
+    "text-decoration": ("text-decoration-line",),
+}
+
+
+def kind_rows(kind, *props):
+    """The kind rows reading `props` of `kind`; a prop the desk page holds differently has two."""
+    names = []
+    for prop in props:
+        if (kind, prop) in _SPLIT:
+            names += [f"kind-{kind}-{prop}-desk", f"kind-{kind}-{prop}-spend"]
+        else:
+            names.append(f"kind-{kind}-{prop}")
+    return tuple(names)
+
+
+def kind_entries(test, kind, props):
+    """One entry per declared property of a kind, a group read by its longhands."""
+    return tuple(
+        moved(test, f".{kind}", prop, BOTH, *kind_rows(kind, *_LOOK_GROUPS.get(prop, (prop,))))
+        for prop in props)
+
+
+_BUTTON_PROPS = ("display", "align-items", "gap", "min-height", "padding", "font", "text-align",
+                 "text-decoration", "color", "background", "border", "border-radius", "cursor",
+                 "transition")
+_FIELD_PROPS = ("min-height", "padding", "font", "color", "background", "border", "border-radius")
+_HOVER_ROWS = tuple(f"hover-{kind}-{prop}" for kind in ("btn-quiet", "btn-danger", "btn-option")
+                    for prop in ("background-color", "border-color", "background-image"))
+_RING_PROPS = ("outline-style", "outline-width", "outline-color", "outline-offset", "border-radius")
+_MOTION_ROWS = {prop: tuple(f"motion-{mode}-{prop}{where}" for mode in ("reduced", "normal")
+                            for where in ("", "-before", "-after"))
+                for prop in ("transition-duration", "animation-duration")}
+_FORCED_FOCUS = "keyboard focus is forced on a specimen of the kind and its ring read"
+_PLACEHOLDER_VIA = "the placeholder is read through its ::placeholder pseudo-element"
+
+MOVED += (
+    # The kinds, each declared once in the shared controls block.
+    *kind_entries(_DECLARED, "btn-primary", _BUTTON_PROPS + ("font-weight",)),
+    *kind_entries(_DECLARED, "btn-quiet", _BUTTON_PROPS),
+    *kind_entries(_DECLARED, "btn-danger", _BUTTON_PROPS),
+    *kind_entries(_DECLARED, "btn-option", _BUTTON_PROPS + ("column-gap", "width", "border-color")),
+    moved(_DECLARED, ".btn-option", "grid-template-columns", BOTH, "kind-btn-option-grid",
+          "kind-btn-option-grid-tracks"),
+    moved(_DECLARED, ".btn-option", "transition", BOTH, *kind_rows("btn-option",
+                                                              "transition-property",
+                                                              "transition-duration")),
+    *kind_entries(_DECLARED, "field-line", _FIELD_PROPS),
+    *kind_entries(_DECLARED, "field-area", _FIELD_PROPS + ("display", "width", "resize")),
+    *kind_entries(_DECLARED, "field-code", _FIELD_PROPS + ("letter-spacing", "font-family")),
+    moved(_DECLARED, ".btn-bare", "padding", BOTH, "bare-btn-quiet-padding",
+          via="the bare modifier is read on a bare quiet button"),
+    moved(_DECLARED, ".field-bare", "padding-left", BOTH, "bare-field-line-padding-left",
+          via="the bare modifier is read on a bare line field"),
+    *(moved(_DECLARED, ".btn-bare", prop, BOTH, f"bare-btn-quiet-{prop}",
+            via="the bare modifier is read on a bare quiet button")
+      for prop in ("border-color", "background-color")),
+    *(moved(_DECLARED, ".field-bare", prop, BOTH, f"bare-field-line-{prop}",
+            via="the bare modifier is read on a bare line field")
+      for prop in ("padding-right", "background-color", "border-color")),
+    moved(_DECLARED, ":root", "--*", WIDE, "tokens-desk",
+          via="the --hover token is read by the page tokens check"),
+    moved(_DECLARED, ".btn-primary", "min-height", BOTH, "kind-look",
+          via="every control on the page is compared with a bare element of its kind"),
+    # The two pages share one controls block, and the spend page has no desk addendum.
+    *(moved(_SHARED, f".{kind}", prop, BOTH, *kind_rows(kind, prop))
+      for kind in _BTNS + _FIELDS for prop in ("min-height", "padding", "border-radius")),
+    *(moved(_SHARED, ".btn-primary", prop, BOTH, f"kind-btn-primary-{prop}-spend")
+      for prop in ("background-color", "border-color", "color")),
+    moved(_SHARED, ":root", "--*", WIDE, "tokens-spend",
+          via="the spend page's --hover token is read by the page tokens check"),
+    # Motion is off under reduced motion on both pages.
+    *(moved(_REDUCED, selector, prop, WIDE, *_MOTION_ROWS[prop],
+            via="the rules are read on a specimen that moves without them")
+      for selector in ("*", "*::before", "*::after")
+      for prop in ("transition-duration", "animation-duration")),
+    *(moved(_PAGE_MOTION, "*", prop, WIDE, *_MOTION_ROWS[prop],
+            via="the rules are read on a specimen that moves without them")
+      for prop in ("transition-duration", "animation-duration")),
+    # A kind rule owns the control look: every control is read against a bare element of its kind.
+    moved(_OWNS, ".picked", "min-height", BOTH, "kind-look",
+          via="a control in the picked state is skipped, and the pressed rows read it"),
+    moved(_OWNS, ".btn-primary", "min-height", BOTH, "kind-look",
+          via="every control on the page is compared with a bare element of its kind"),
+    moved(_OWNS, ".btn-primary", "height", BOTH, "kind-height-floor",
+          via="a control under 32px is read on the page, not in a rule"),
+    # No rule shrinks a control below 32px.
+    *(moved(_FLOOR, f".{kind}", "min-height", BOTH, *kind_rows(kind, "min-height"), "kind-look")
+      for kind in _BTNS + _FIELDS),
+    moved(_FLOOR, ".btn-quiet", "height", BOTH, "kind-height-floor",
+          via="every control of every state is read for a height under 32px"),
+    moved(_FLOOR_SPEND, ".span", "min-height", BOTH, "kind-btn-quiet-min-height", "kind-look",
+          via="the kind rows read the spend page, and the desk controls are read for 32px"),
+    # Disabled and busy.
+    *(moved(_DISABLED, f".{kind}", prop, BOTH, *(
+        f"disabled-{kind}-{prop}-desk", f"disabled-{kind}-{prop}-spend")
+              if kind == "btn-primary" and prop == "border-color" else (f"disabled-{kind}-{prop}",))
+      for kind in _BTNS + _FIELDS for prop in ("border-width", "border-style", "border-color",
+                                                "cursor", "opacity")),
+    *(moved(_DISABLED, f".{kind}", prop, BOTH, f"busy-{kind}-{prop}")
+      for kind in _BTNS + _FIELDS for prop in ("border-width", "border-style", "cursor")),
+    *(moved(_DISABLED, f".{kind}", "content", BOTH, f"busy-{kind}-content",
+            via="the ::after of a busy control is read through its pseudo-element")
+      for kind in ("btn-primary", "btn-quiet", "btn-danger")),
+    *(moved(_DISABLED, ".btn-primary", prop, WIDE + NARROW, f"disabled-btn-primary-{prop}-desk",
+            via="the desk addendum's disabled primary is read on a disabled primary")
+      for prop in ("background-color", "color")),
+    # Hover is shared by both pages.
+    *(moved(_HOVER, f".{kind}", "background", BOTH, f"hover-{kind}-background-color",
+            f"hover-{kind}-background-image") for kind in ("btn-quiet", "btn-danger", "btn-option")),
+    *(moved(_HOVER, f".{kind}", "border-color", BOTH, f"hover-{kind}-border-color")
+      for kind in ("btn-quiet", "btn-danger", "btn-option")),
+    moved(_HOVER, ".btn-quiet.btn-bare", "border-color", BOTH, "hover-btn-quiet-bare-border-color"),
+    moved(_HOVER, ".btn-primary", "background", BOTH, "hover-btn-primary-background-color-desk",
+          "kind-btn-primary-background-image", via="the desk addendum's primary hover is forced"),
+    moved(_HOVER, ".btn-primary", "border-color", BOTH, "hover-btn-primary-border-color-desk",
+          via="the desk addendum's primary hover is forced"),
+    moved(_HOVER, ":root", "--*", WIDE, "tokens-desk", "tokens-spend",
+          via="the --hover token is read by the page tokens check"),
+    *(moved(_HOVER, ".btn-quiet", prop, BOTH, f"hover-disabled-btn-quiet-{prop}",
+            via=f"a disabled control is forced to hover and its {prop} read")
+      for prop in ("background-color", "border-style")),
+    # The lavender ring on keyboard focus.
+    *(moved(_RING, f".{kind}:focus-visible", "outline", BOTH,
+            *(f"ring-{kind}-{prop}" for prop in _RING_PROPS[:3]), via=_FORCED_FOCUS)
+      for kind in _BTNS + _FIELDS),
+    *(moved(_RING, f".{kind}:focus-visible", prop, BOTH, f"ring-{kind}-{prop}", via=_FORCED_FOCUS)
+      for kind in _BTNS + _FIELDS for prop in _RING_PROPS[3:]),
+    moved(_RING, ".field-bare:focus-visible", "outline-style", BOTH, "ring-field-bare-outline-style",
+          via=_FORCED_FOCUS),
+    moved(_RING, ":focus-visible", "outline-style", BOTH, "ring-every-outline-style",
+          via="every control is forced to keyboard focus and its outline read"),
+    moved(_RING, ".viewer", "outline-style", BOTH, "ring-every-outline-style",
+          via="every control but a bare field and the viewer is forced to keyboard focus"),
+    # Pressed is an attribute with a non-colour cue.
+    *(moved(_PRESSED, f".{kind}:active", "transform", BOTH, f"pressed-{kind}-transform",
+            via="the press is forced on a specimen of the kind and its transform read")
+      for kind in _BTNS),
+    moved(_PRESSED, ".btn-option", "background-color", BOTH, "pressed-btn-option-background-color-desk",
+          via="the desk addendum's pressed option tint is read on a pressed option"),
+    *(moved(_PRESSED, f".{kind}", prop, BOTH, f"pressed-{kind}-{prop}")
+      for kind in _BTNS for prop in ("border-color", "font-weight")),
+    # The placeholder meets 4.5 to 1, and the formula.
+    *(moved(_PLACEHOLDERS, f".{kind}::placeholder", prop, BOTH,
+            f"placeholder-{kind}-{'color' if prop == 'color' else prop}", via=_PLACEHOLDER_VIA)
+      for kind in _FIELDS for prop in ("opacity", "color")),
+    *(moved(_PLACEHOLDERS, f".{kind}", "background", BOTH, f"placeholder-{kind}-contrast",
+            *kind_rows(kind, "background-color", "background-image"),
+            via="the contrast is read against the field's painted background")
+      for kind in _FIELDS),
+    moved(_PLACEHOLDERS, ".goal-bar.open .goal-in", "background", BOTH, "placeholder-goal-contrast",
+          "placeholder-goal-background-color", "placeholder-goal-background-image",
+          via="the contrast is read against the goal field's painted background"),
+    moved(_WCAG, ".field-line::placeholder", "color", BOTH, "placeholder-field-line-contrast",
+          via="the formula is pinned by the contrast want kind's Chromium test"),
+    # The primary style outranks the button base rules.
+    moved(_PRIMARY, ".btn-primary", "color", BOTH, "kind-btn-primary-color-desk",
+          "primary-real-color", via="the primary is read as painted on the card"),
+    moved(_PRIMARY, ".btn-primary", "background", BOTH, "kind-btn-primary-background-color-desk",
+          "kind-btn-primary-background-image", "primary-real-background-color",
+          via="the primary is read as painted on the card"),
+    moved(_PRIMARY, ".btn-primary", "border-color", BOTH, "kind-btn-primary-border-color-desk",
+          "primary-real-border-color", via="the primary is read as painted on the card"),
+    # The spend page fits 480 wide.
+    moved(_SPEND_FIT, ".top-in", "flex-wrap", NARROW, "spend-fit-top-wrap"),
+    moved(_SPEND_FIT, ".trend-day", "min-width", NARROW, "spend-fit-trend-min-width"),
+    moved(_SPEND_FIT, ".row-name", "overflow-wrap", NARROW, "spend-fit-row-name-wrap"),
+    moved(_SPEND_FIT, "#summary", "width", NARROW, "spend-fit-width",
+          via="every width the page declares is read as drawn at 480"),
+    moved(_SPEND_FIT, ".figure", "min-width", NARROW, "spend-fit-min-width",
+          via="every min-width the page declares is read as drawn at 480"),
+    moved(_SPEND_FIT, ".trend-day", "flex-basis", NARROW, "spend-fit-flex-basis",
+          via="every flex-basis the page declares is read as drawn at 480"),
+)
+_TICK = f"{CONTROLS}::ControlStyleTest::test_the_consent_tick_is_at_least_32_px_in_both_directions"
+MOVED += (
+    moved(_TICK, ".guest-tick", "width", BOTH, "guest-tick-width"),
+    moved(_TICK, ".guest-tick", "height", BOTH, "guest-tick-height"),
+)
+GUEST_PAGE = "tests/test_console_guest_page.py"
+_GUEST_HIDE = (f"{GUEST_PAGE}::GuestPageTest::"
+               "test_the_guest_bytes_hide_the_owner_header_before_the_script")
+MOVED += (moved(_GUEST_HIDE, ".top-in > [hidden]", "display", BOTH, "guest-top-hidden-display"),)
+STRIPPED: frozenset[str] = frozenset({
+    f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled",
+    f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
+    f"{PAGE}::PageNoticeTest::test_the_notices_fold_uses_no_peach_and_no_new_colour",
+    f"{PAGE}::PageMessageLifeTest::test_the_owners_words_read_you_in_lavender",
+    f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you",
+    f"{PAGE}::PanelSigninPageTest::test_the_panel_never_draws_peach",
+    f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
+    "tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
+    _TOP_BAR, _ARROW, _BREAKS, _BLOCKS, _HEADINGS, _DIGEST, _STRIP_THREE, _STRIP_480, _STRIP_DIM,
+    _NOW_CLAMP, _PIPS, _WAIT, _PROJECT, _ANSWERED, _VIEWER_ARROWS, _VIEWER_BAR, _PRESSED,
+    _GUEST_HIDE,
+})
+RENAMED: dict[str, str] = {
+    f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled":
+        "test_the_page_never_says_stalled",
+}
+LONGHANDS = {
+    "font": ("font-style", "font-weight", "font-size", "line-height", "font-family"),
+    "background": ("background-color", "background-image"),
+    "border-top": ("border-top-color",),
+    "flex": ("flex-grow", "flex-shrink"),
+    "grid-column": ("grid-column-start", "grid-column-end"),
+    "line-clamp": ("-webkit-line-clamp",),
+    "margin": ("margin-top",),
+    "overflow": ("overflow-y",),
+    "padding": ("padding-top", "padding-bottom"),
+    "transition": ("transition-property", "transition-duration"),
+    "text-decoration": ("text-decoration-line",),
+    "list-style": ("list-style-type",),
+    "border": ("border-width", "border-style", "border-color"),
+    "outline": ("outline-style", "outline-width", "outline-color"),
+}
+SOURCE_READING = re.compile(
+    r"style_rules|css_rules|css_decls|css_declared|page_css|media_block|margin_top_at|"
+    r"fold_colour_faults|PAGE_TEXT|PAGE\.read_text|SPEND\.read_text|<style>|base_rules|rules_of|"
+    r"controls_block|desk_block|outside_blocks|page_style|spend_style|short_rules|decls_of|"
+    r"kind_owned|self\.style\b|"
+    r"\{ ?-?[a-z]+(?:-[a-z]+)*: [^{};]+; ?\}")
+
+
+def uncovered(moved, rows) -> list[str]:
+    """Name each moved property, at each width, that no style row reads."""
+    by_name = {row.name: row for row in rows}
+    misses = []
+    for entry in moved:
+        absent = [f"{entry.test}: no row {name}" for name in entry.rows if name not in by_name]
+        if absent:
+            misses += absent
+            continue
+        counting = [
+            by_name[name] for name in entry.rows
+            if entry.via or entry.selector == by_name[name].selector
+            or entry.selector in [part.strip() for part in by_name[name].selector.split(",")]]
+        required = ((entry.prop,) if entry.prop not in LONGHANDS
+                    or any(row.prop == entry.prop for row in counting) else LONGHANDS[entry.prop])
+        # A literal that is the value a listed row wants (`"flex"` for a `display`) is read there.
+        valued = {width for row in counting if entry.via and row.want == "equals"
+                  and row.value == entry.prop for width in row.widths}
+        if valued:
+            required = (entry.prop,)
+        for prop in required:
+            seen = {width for row in counting if row.prop == prop for width in row.widths} | valued
+            if not set(entry.widths) <= seen:
+                misses.append(f"{entry.test} {entry.selector} {entry.prop} @{entry.widths}: "
+                              "no row reads it")
+                break
+    return misses
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
@@ -878,6 +1791,123 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertIn("has a control under 32 px", out.getvalue())
         self.assertIn("button.undo 24px", out.getvalue())
 
+    def shoot_main(self, page_state, browser, width=1440):
+        """Run `main` with `capture` shooting one state on the fake browser; return (code, stdout)."""
+        out = StringIO()
+
+        def fake_capture(path, *args, **kw):
+            return [shots._shoot(browser, "http://console.test/", page_state, width, Path(path))]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(shots, "capture", side_effect=fake_capture), redirect_stdout(out):
+            code = shots.main(["--out", tmp])
+        return code, out.getvalue()
+
+    def test_a_shot_with_a_broken_page_style_fails_the_command(self) -> None:
+        browser, page = fake_browser(set())
+        page.style = ["held-nowrap: .held.blocks white-space is normal"]
+        with mock.patch.object(shots, "STYLE_CHECKS", (style_row(),)):
+            code, text = self.shoot_main("live-several", browser)
+        self.assertEqual(code, 1)
+        self.assertIn("console-screenshots: live-several-1440.png breaks a page style "
+                      "(held-nowrap: .held.blocks white-space is normal)", text)
+
+    def test_the_style_reading_runs_after_the_capture_and_clicks_only_a_present_step(self) -> None:
+        row = style_row("look-row", states=("look-card",))
+        for present, clicked in (({"button.pic-thumb"}, True), (set(), False)):
+            with self.subTest(clicked=clicked), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(present)
+                with mock.patch.object(shots, "STYLE_CHECKS", (row,)), \
+                        mock.patch.object(shots, "STYLE_STEPS",
+                                          {"look-card": ("button.pic-thumb",)}):
+                    shot = shots._shoot(browser, "http://console.test/", "look-card", 1440,
+                                        Path(tmp))
+                self.assertEqual(page.order[:1], ["screenshot"])
+                reading = ["STYLE_CLEAR", "STYLE_PLACE", "STYLE_SETTLE", "STYLE_READING",
+                           "STYLE_CLEAR"]
+                styled = [name for name in page.order if name.startswith("STYLE_")]
+                self.assertEqual(styled, (["STYLE_SETTLE"] if clicked else []) + reading)
+                self.assertEqual("button.pic-thumb" in page.clicks, clicked)
+                if clicked:
+                    self.assertEqual(page.clicks[-1], "button.pic-thumb")
+                else:
+                    self.assertNotIn("button.pic-thumb", page.waits)
+                self.assertEqual(shot.style, ())
+                self.assertEqual(shot.checked, (row.name,))
+
+    def test_a_forced_row_forces_its_pseudo_class_settles_and_releases_it(self) -> None:
+        browser, page = fake_browser(set())
+        forced = ("CSS.forcePseudoState", {"nodeId": 2, "forcedPseudoClasses": ["hover"]})
+        released = ("CSS.forcePseudoState", {"nodeId": 2, "forcedPseudoClasses": []})
+        self.assertEqual(shots.read_style(page, [style_row(forced=("hover",))]), ())
+        self.assertEqual([call for call in page.cdp if call[0] == "CSS.forcePseudoState"],
+                         [forced, released])
+        at = page.order.index("CSS.forcePseudoState")
+        self.assertEqual(page.order[at:at + 4],
+                         ["CSS.forcePseudoState", "STYLE_SETTLE", "STYLE_READING",
+                          "CSS.forcePseudoState"])
+        select = next(params for method, params in page.cdp if method == "DOM.querySelectorAll")
+        self.assertEqual(select["nodeId"], 1)
+        self.assertEqual(select["selector"],
+                         ":is(.held.blocks):not([data-style-probe], [data-style-probe] *)")
+
+    def test_a_shot_of_another_page_reads_no_style(self) -> None:
+        browser, page = fake_browser({"button.pic-thumb"})
+        page.style = ["r: .a b is c"]
+        with mock.patch.object(shots, "style_applies", return_value=False), \
+                mock.patch.object(shots, "STYLE_CHECKS", (style_row("r", states=("look-card",)),)), \
+                mock.patch.object(shots, "STYLE_STEPS", {"look-card": ("button.pic-thumb",)}):
+            code, text = self.shoot_main("look-card", browser)
+            with tempfile.TemporaryDirectory() as tmp:
+                shot = shots._shoot(browser, "http://console.test/", "look-card", 1440, Path(tmp),
+                                    mutate=True)
+        self.assertEqual(code, 0)
+        self.assertEqual([name for name in page.order if name.startswith("STYLE_")], [])
+        self.assertNotIn("button.pic-thumb", page.clicks)
+        self.assertEqual((shot.style, shot.checked, shot.broke), ((), (), ()))
+
+    def test_a_between_width_row_is_read_in_the_widest_shot_after_resizing_to_it(self) -> None:
+        rows = tuple(style_row(name, states=("live-several",), widths=widths)
+                     for name, widths in (("wide", (1440,)), ("mid", (900,)), ("high", (1180,)),
+                                          ("narrow", (480,))))
+        for width, checked, sizes in ((1440, ("wide", "high", "mid"), [1180, 900]),
+                                      (480, ("narrow",), [])):
+            with self.subTest(width=width), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(set())
+                with mock.patch.object(shots, "STYLE_CHECKS", rows):
+                    shot = shots._shoot(browser, "http://console.test/", "live-several", width,
+                                        Path(tmp))
+                self.assertEqual(shot.checked, checked)
+                self.assertEqual([size["width"] for size in page.viewports], sizes)
+        self.assertEqual(shots.BETWEEN_WIDTHS, (1180, 900))
+        self.assertFalse(set(shots.BETWEEN_WIDTHS) & set(shots.WIDTHS))
+
+    def test_a_real_answer_shot_skips_the_fixture_rows(self) -> None:
+        rows = (style_row("a", states=("question-read",)),
+                style_row("b", states=("question-read",), fixture=True))
+        for canonical, expected in ((False, ("a",)), (True, ("a", "b"))):
+            with self.subTest(canonical=canonical), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(set())
+                with mock.patch.object(shots, "STYLE_CHECKS", rows):
+                    shot = shots._shoot(browser, "http://console.test/", "question-read", 1440,
+                                        Path(tmp), canonical=canonical)
+                self.assertEqual(shot.checked, expected)
+                self.assertEqual([[row["name"] for row in placed] for placed in page.placed],
+                                 [list(expected)])
+
+    def test_a_mutated_shot_records_each_row_its_rule_broke(self) -> None:
+        rows = (style_row("a", broken="a { x: y }"), style_row("b", broken="b { x: y }"))
+        browser, page = fake_browser(set())
+        page.unbreakable = {"b"}
+        with mock.patch.object(shots, "STYLE_CHECKS", rows), tempfile.TemporaryDirectory() as tmp:
+            shot = shots._shoot(browser, "http://console.test/", "live-several", 1440, Path(tmp),
+                                mutate=True)
+            self.assertEqual((shot.checked, shot.broke, shot.style), (("a", "b"), ("a",), ()))
+            self.assertEqual(page.mutations, ["a { x: y }", "b { x: y }"])
+            browser, page = fake_browser(set())
+            shot = shots._shoot(browser, "http://console.test/", "live-several", 1440, Path(tmp))
+            self.assertEqual((shot.broke, page.mutations), ((), []))
+
     def test_a_shot_not_taken_from_the_top_fails_the_command(self) -> None:
         def run(shot):
             out = StringIO()
@@ -896,6 +1926,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("not taken from the top", text)
 
+    @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_a_shot_scrolls_back_to_the_top_before_its_capture(self) -> None:
         def fake(reset_to):
             class Page:
@@ -948,6 +1979,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(shot.scroll_y, reset_to)
                 self.assertEqual(shot.scroll_y, page.captured[0][0])
 
+    @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_the_goal_states_type_into_the_box_before_the_capture(self) -> None:
         calls: list[tuple[str, tuple]] = []
 
@@ -1129,6 +2161,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
             shots.guest_door(SimpleNamespace(guest_socket="/tmp/g.sock", guest_address=None)),
             "/tmp/g.sock")
 
+    @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
         for state in ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached"):
             for present, opens in (({"#sharing-open"}, True), (set(), False)):
@@ -1600,6 +2633,750 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(days[-1]["total"]["dollars"], 0)
 
 
+class ScreenshotStyleTableTest(unittest.TestCase):
+    def test_only_the_guest_rows_read_the_guest_pages(self) -> None:
+        named = sorted(row.name for row in shots.STYLE_CHECKS
+                       if set(row.states) & {"guest-page", "guest-steer"})
+        self.assertEqual([name for name in named if not name.startswith("guest-")], [])
+
+    def test_each_guest_row_reads_both_guest_pages_at_both_widths(self) -> None:
+        guest = {row.name: row for row in shots.STYLE_CHECKS if row.name.startswith("guest-")}
+        self.assertEqual(sorted(guest), ["guest-tick-height", "guest-tick-width",
+                                         "guest-top-hidden-display"])
+        for name, row in guest.items():
+            with self.subTest(name):
+                self.assertEqual(set(row.states), {"guest-page", "guest-steer"})
+                self.assertEqual(set(row.widths), set(shots.WIDTHS))
+
+    def test_every_style_check_is_well_formed(self) -> None:
+        names = [row.name for row in shots.STYLE_CHECKS]
+        self.assertEqual(len(names), len(set(names)))
+        mapped = {name for entry in MOVED for name in entry.rows}
+        for row in shots.STYLE_CHECKS:
+            with self.subTest(row.name):
+                self.assertRegex(row.name, r"^[a-z0-9-]+$")
+                self.assertTrue(row.states and set(row.states) <= set(shots.STATES))
+                self.assertTrue(row.widths and set(row.widths) <= set(shots.STYLE_WIDTHS))
+                self.assertIn(row.want, shots.WANTS)
+                self.assertTrue("{" in row.broken and "}" in row.broken)
+                if row.probe:
+                    self.assertIn("data-style-probe", row.probe)
+                if row.compare_probe:
+                    self.assertIn("data-style-probe", row.compare_probe)
+                self.assertLessEqual(
+                    set(row.forced), {"hover", "active", "focus", "focus-visible", "focus-within"})
+                if row.fixture:
+                    self.assertIn("question-read", row.states)
+                self.assertIn(row.name, mapped)
+
+    def test_every_moved_property_has_a_checking_row(self) -> None:
+        missing = uncovered(MOVED, shots.STYLE_CHECKS)
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_the_coverage_check_names_a_property_or_width_no_row_reads(self) -> None:
+        entry = Moved("t", ".held.blocks", "white-space", (1440, 480), ("h",))
+        both = style_row("h", prop="text-overflow", widths=(1440, 480))
+        self.assertEqual(uncovered([entry], [both]),
+                         ["t .held.blocks white-space @(1440, 480): no row reads it"])
+        narrow = style_row("h", prop="white-space", widths=(1440,))
+        self.assertEqual(uncovered([entry], [narrow]),
+                         ["t .held.blocks white-space @(1440, 480): no row reads it"])
+        small = style_row("h2", prop="white-space", widths=(480,))
+        entry = Moved("t", ".held.blocks", "white-space", (1440, 480), ("h", "h2"))
+        self.assertEqual(uncovered([entry], [narrow, small]), [])
+        longhands = [style_row(f"f{n}", prop=prop, widths=(1440, 480))
+                     for n, prop in enumerate(LONGHANDS["font"])]
+        entry = Moved("t", ".held.blocks", "font", (1440,), tuple(row.name for row in longhands))
+        self.assertEqual(uncovered([entry], longhands), [])
+        entry = Moved("t", ".held.blocks", "font", (1440,), tuple(row.name for row in longhands[:4]))
+        self.assertEqual(uncovered([entry], longhands),
+                         ["t .held.blocks font @(1440,): no row reads it"])
+        entry = Moved("t", ".held.blocks", "white-space", (1440,), ("x",))
+        self.assertEqual(uncovered([entry], [narrow]), ["t: no row x"])
+        other = Moved("t", ".other", "white-space", (1440,), ("h",))
+        self.assertEqual(uncovered([other], [narrow]),
+                         ["t .other white-space @(1440,): no row reads it"])
+        self.assertEqual(uncovered([dataclasses.replace(other, via="hand")], [narrow]), [])
+        listed = style_row("h", selector=".a, .held.blocks", widths=(1440,))
+        self.assertEqual(
+            uncovered([dataclasses.replace(other, selector=".held.blocks")], [listed]), [])
+
+    def test_a_value_a_removed_line_named_is_read_by_the_row_that_wants_it(self) -> None:
+        # `"flex"` in `.get("display", "flex")` is a value of `display`, not the property `flex`;
+        # an entry with a `via` is read by a listed row whose `equals` value is that literal.
+        entry = Moved("t", ".row-head", "flex", (1440,), ("d",), via="the value display equals")
+        display = style_row("d", selector=".row-head", prop="display", value="flex")
+        self.assertEqual(uncovered([entry], [display]), [])
+        for name, row, wanted in (
+                ("another value", dataclasses.replace(display, value="block"), entry),
+                ("another width", dataclasses.replace(display, widths=(480,)), entry),
+                ("another want", dataclasses.replace(display, want="starts"), entry),
+                ("no via", display, dataclasses.replace(entry, via=""))):
+            with self.subTest(name):
+                self.assertEqual(uncovered([wanted], [row]),
+                                 ["t .row-head flex @(1440,): no row reads it"])
+
+    def test_every_moved_test_is_gone_or_stripped(self) -> None:
+        import ast
+        ids = {entry.test for entry in MOVED}
+        self.assertLessEqual(STRIPPED | set(RENAMED), ids)
+        root = Path(__file__).resolve().parents[1]
+
+        def body(test_id):
+            path, cls, method = test_id.split("::")
+            file = root / path
+            if not file.is_file():
+                return None
+            text = file.read_text(encoding="utf-8")
+            for node in ast.parse(text).body:
+                if isinstance(node, ast.ClassDef) and node.name == cls:
+                    for item in node.body:
+                        if (isinstance(item, ast.FunctionDef)
+                                and item.name == RENAMED.get(test_id, method)):
+                            return ast.get_source_segment(text, item)
+            return None
+
+        for test_id in sorted(ids):
+            with self.subTest(test_id):
+                found = body(test_id)
+                if test_id in STRIPPED:
+                    self.assertIsNotNone(found)
+                    self.assertIsNone(SOURCE_READING.search(found))
+                else:
+                    self.assertIsNone(found)
+
+    def test_no_chromium_run_opens_a_browser_inside_another_or_waits_without_a_bound(self) -> None:
+        import ast
+        sources = {"module": Path(shots.__file__).read_text(encoding="utf-8"),
+                   "tests": Path(__file__).read_text(encoding="utf-8")}
+        trees = {label: ast.parse(text) for label, text in sources.items()}
+        opens = {"capture", "main", "sandboxed_capture", "styled", "read_pages", "sync_playwright"}
+
+        def name_of(call):
+            if isinstance(call.func, ast.Name):
+                return call.func.id
+            return call.func.attr if isinstance(call.func, ast.Attribute) else None
+
+        def calls_in(nodes):
+            return [c for node in nodes for c in ast.walk(node) if isinstance(c, ast.Call)]
+
+        def unbounded(value):
+            return isinstance(value, ast.Constant) and value.value in (0, None)
+
+        bad = []
+        for label, tree in trees.items():
+            for node in ast.walk(tree):
+                if isinstance(node, ast.With) and any(
+                        isinstance(item.context_expr, ast.Call)
+                        and name_of(item.context_expr) == "sync_playwright" for item in node.items):
+                    bad += [f"{label}:{c.lineno} opens a browser inside one ({name_of(c)})"
+                            for c in calls_in(node.body) if name_of(c) in opens]
+            for call in calls_in([tree]):
+                if (any(k.arg == "timeout" and unbounded(k.value) for k in call.keywords)
+                        or (name_of(call) in ("set_default_timeout", "set_default_navigation_timeout")
+                            and call.args and isinstance(call.args[0], ast.Constant)
+                            and call.args[0].value == 0)):
+                    bad.append(f"{label}:{call.lineno} waits without a bound")
+        opening = sorted(f.name for f in ast.walk(trees["module"]) if isinstance(f, ast.FunctionDef)
+                         and any(name_of(c) == "sync_playwright" for c in calls_in([f])))
+        if opening != ["capture"]:
+            bad.append(f"the module opens a browser in {opening}")
+        awaiting = sorted(name for name, value in vars(shots).items()
+                          if isinstance(value, str) and "await " in value)
+        if awaiting != ["STYLE_SETTLE"]:
+            bad.append(f"page scripts that await: {awaiting}")
+        if re.search(r"for \(let tries = 0; tries < \d+; tries\+\+\)", shots.STYLE_SETTLE) is None:
+            bad.append("STYLE_SETTLE waits without a bound")
+        self.assertEqual(bad, [])
+
+    def test_the_look_card_opens_the_viewer_before_its_style_reading(self) -> None:
+        self.assertEqual(shots.STYLE_STEPS["look-card"], ("button.pic-thumb",))
+
+    def test_style_applies_only_to_the_page_beside_the_module(self) -> None:
+        source = Path(shots.__file__).resolve().parents[1] / "python/agent_tools/console"
+        with tempfile.TemporaryDirectory() as tmp:
+            served = Path(tmp)
+            for name in ("page.html", "spend.html"):
+                shutil.copy(source / name, served / name)
+            self.assertTrue(shots.style_applies(served))
+            with (served / "page.html").open("ab") as handle:
+                handle.write(b" ")
+            self.assertFalse(shots.style_applies(served))
+            shutil.copy(source / "page.html", served / "page.html")
+            (served / "spend.html").unlink()
+            self.assertFalse(shots.style_applies(served))
+
+
+class ScreenshotStyleTest(unittest.TestCase):
+    def styled(self, html, rows, mutation=None, only=None, width=1440):
+        """Load `html` alone in one `width`x900 Chromium page and return the style misses."""
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": width, "height": 900})
+                page.set_content(html)
+                found = shots.read_style(page, rows, mutation=mutation, only=only)
+                self.last_leftover = page.evaluate(
+                    "document.querySelectorAll('[data-style-probe], #style-mutation').length")
+                return found
+            finally:
+                browser.close()
+
+    def test_each_want_kind_passes_its_value_and_names_a_miss(self) -> None:
+        html = ("<style>.a{white-space:nowrap;margin-top:12px;color:color-mix(in srgb, "
+                "rgb(245, 169, 127) 100%, white 0%)} .b{margin-top:8px}</style>"
+                '<p class="a">x</p><p class="b">y</p>')
+        white = "white-space"
+        margin = "margin-top"
+        rows = [
+            ("equals-ok", style_row("equals-ok", selector=".a", prop=white, value="nowrap"), None),
+            ("equals-bad", style_row("equals-bad", selector=".a", prop=white, value="normal"),
+             ".a white-space is nowrap"),
+            ("colour", style_row("colour", selector=".a", prop="color",
+                                 value="rgb(245, 169, 127)"), None),
+            ("in-ok", style_row("in-ok", selector=".a", prop=white, want="in", value="nowrap|pre"),
+             None),
+            ("in-bad", style_row("in-bad", selector=".a", prop=white, want="in",
+                                 value="normal|pre"), ".a white-space is nowrap"),
+            ("not-ok", style_row("not-ok", selector=".a", prop=white, want="not",
+                                 value="normal"), None),
+            ("not-bad", style_row("not-bad", selector=".a", prop=white, want="not",
+                                  value="nowrap"), ".a white-space is nowrap"),
+            ("starts-ok", style_row("starts-ok", selector=".a", prop=white, want="starts",
+                                    value="now"), None),
+            ("starts-bad", style_row("starts-bad", selector=".a", prop=white, want="starts",
+                                     value="pre"), ".a white-space is nowrap"),
+            ("min-ok", style_row("min-ok", selector=".a", prop=margin, want="min", value="12"),
+             None),
+            ("min-bad", style_row("min-bad", selector=".a", prop=margin, want="min", value="13"),
+             ".a margin-top is 12px"),
+            ("max-ok", style_row("max-ok", selector=".a", prop=margin, want="max", value="12"),
+             None),
+            ("max-bad", style_row("max-bad", selector=".a", prop=margin, want="max", value="11"),
+             ".a margin-top is 12px"),
+            ("same-bad", style_row("same-bad", selector=".a", prop=margin, want="same_as",
+                                   value=".b"), ".a margin-top is 12px"),
+            ("same-white", style_row("same-white", selector=".a", prop=white, want="same_as",
+                                  value=".b"), ".a white-space is nowrap"),
+            ("gt-ok", style_row("gt-ok", selector=".a", prop=margin, want="gt", value=".b"),
+             None),
+            ("gt-bad", style_row("gt-bad", selector=".b", prop=margin, want="gt", value=".a"),
+             ".b margin-top is 8px"),
+        ]
+        misses = self.styled(html, [row for _, row, _ in rows])
+        self.assertEqual(
+            list(misses), [f"{name}: {text}" for name, _, text in rows if text is not None])
+        absent = style_row("gone", selector=".missing")
+        self.assertEqual(self.styled(html, [absent]), ("gone: .missing is absent",))
+        hidden = style_row("hidden", selector=".h", prop="color", every=True)
+        self.assertEqual(self.styled('<p class="h" style="display:none">x</p>', [hidden]),
+                         ("hidden: .h is absent",))
+        loose = style_row("loose", selector=".a", prop=white, want="same_as", value=".nowhere")
+        self.assertEqual(self.styled(html, [loose]), ("loose: .nowhere is absent",))
+        every = style_row("every", selector="p", prop=margin, want="max", value="10", every=True)
+        self.assertEqual(self.styled(html, [every]), ("every: p.a margin-top is 12px",))
+
+    def test_each_row_reads_its_own_probe_and_leaves_nothing_behind(self) -> None:
+        html = ('<style>#h .p{color:rgb(1, 2, 3)} #h .p.q{color:rgb(4, 5, 6)}</style>'
+                '<div id="h"></div>')
+        rows = [
+            style_row("one", selector=".p", prop="color", value="rgb(1, 2, 3)", host="#h",
+                      probe='<span class="p" data-style-probe></span>'),
+            style_row("two", selector=".p", prop="color", value="rgb(4, 5, 6)", host="#h",
+                      probe='<span class="p q" data-style-probe></span>'),
+            style_row("root", selector=".p", prop="color", value="rgb(1, 2, 3)", host="#h",
+                      probe='<span class="p" data-style-probe><span class="p q"></span></span>'),
+        ]
+        self.assertEqual(self.styled(html, rows), ())
+        self.assertEqual(self.last_leftover, 0)
+        for row in rows:
+            with self.subTest(row.name):
+                self.assertEqual(self.styled(html, rows, only=row.name), ())
+        page_row = style_row("plain", selector=".p", prop="color", value="rgb(1, 2, 3)")
+        self.assertEqual(self.styled(html, [*rows, page_row]), ("plain: .p is absent",))
+        self.assertEqual(self.last_leftover, 0)
+
+    def test_a_comparison_probe_is_read_beside_a_page_subject(self) -> None:
+        html = '<style>.s{font-size:17px} #h .c{font-size:17px}</style><p class="s">x</p><div id="h"></div>'
+        row = style_row("beside", selector=".s", prop="font-size", want="same_as", value=".c",
+                        compare_probe='<span class="c" data-style-probe></span>',
+                        compare_host="#h")
+        self.assertEqual(self.styled(html, [row]), ())
+        changed = html.replace("#h .c{font-size:17px}", "#h .c{font-size:16px}")
+        self.assertEqual(self.styled(changed, [row]), ("beside: .s font-size is 17px",))
+        bare = style_row("bare", selector=".s", prop="font-size", want="same_as", value=".c")
+        self.assertEqual(self.styled(html.replace("#h .c{", "#h .z{"), [bare]),
+                         ("bare: .c is absent",))
+
+    def test_a_forced_pseudo_class_is_read_after_its_transition_settles(self) -> None:
+        html = ("<style>button{color:rgb(9, 9, 9);transition:color 10s} "
+                "button:hover{color:rgb(1, 2, 3)}</style><button>x</button>")
+        forced = style_row("hovered", selector="button", prop="color", value="rgb(1, 2, 3)",
+                           forced=("hover",))
+        self.assertEqual(self.styled(html, [forced]), ())
+        plain = style_row("plain", selector="button", prop="color", value="rgb(1, 2, 3)")
+        self.assertEqual(self.styled(html, [plain]), ("plain: button color is rgb(9, 9, 9)",))
+
+    def test_reduced_motion_is_read_from_a_specimen_that_moves_without_it(self) -> None:
+        motion = ("@media (prefers-reduced-motion: reduce) { *, *::before, *::after { "
+                  "animation-duration: .001ms !important; animation-delay: 0s !important; "
+                  "transition-duration: .001ms !important } }")
+        base = ('<style>.m i, .m i::before, .m i::after { content: ""; transition: opacity 1s; '
+                'animation: none 1s } %s</style><span class="m"><i></i></span>')
+        for pseudo in ("", "::before", "::after"):
+            for prop in ("transition-duration", "animation-duration"):
+                def row(name, **kw):
+                    return style_row(name, selector=".m i", prop=prop, pseudo=pseudo, **kw)
+                reduced = row("reduced", want="max", value="0.000001", reduced_motion=True)
+                moving = row("moving", want="max", value="0.000001")
+                free = row("free", want="min", value="0.5")
+                with self.subTest(pseudo=pseudo, prop=prop):
+                    self.assertEqual(self.styled(base % motion, [reduced, free]), ())
+                    self.assertEqual(self.styled(base % motion, [moving]),
+                                     (f"moving: .m i{pseudo} {prop} is 1s",))
+                    self.assertEqual(
+                        [m.split(":")[0] for m in self.styled(base % "", [reduced, free])],
+                        ["reduced"])
+
+    def test_a_mutation_breaks_the_row_it_names(self) -> None:
+        html = ("<style>.a{white-space:nowrap}.b{margin-top:8px}</style>"
+                '<p class="a">x</p><p class="b">y</p>')
+        rows = [style_row("a", selector=".a"),
+                style_row("b", selector=".b", prop="margin-top", value="8px")]
+        mutation = ".a { white-space: normal !important }"
+        self.assertEqual(self.styled(html, rows, mutation=mutation, only="a"),
+                         ("a: .a white-space is normal",))
+        self.assertEqual(self.last_leftover, 0)
+        self.assertEqual(self.styled(html, rows, mutation=mutation, only="b"), ())
+
+    def test_none_peach_names_a_peach_element_outside_the_allowed(self) -> None:
+        row = style_row("r", selector="body", prop="color", want="none_peach",
+                        value=".needs, .needs *")
+        peach = "rgb(245, 169, 127)"
+        mixed = f"color-mix(in srgb, {peach} 100%, white 0%)"
+
+        def page(inner):
+            return self.styled(f"<body>{inner}</body>", [row])
+
+        found = page(f'<p class="x" style="color: {peach}">x</p>')
+        self.assertIn(f"r: p.x color is {peach}", found)
+        self.assertTrue(all(miss.startswith("r: p.x ") for miss in found), found)
+        self.assertEqual(page(f'<div class="needs"><p class="x" style="color: {peach}">x</p></div>'), ())
+        self.assertEqual(page('<p class="x">x</p>'), ())
+        (mix, *_rest) = page(f'<p class="x" style="color: {mixed}">x</p>')
+        self.assertTrue(mix.startswith("r: p.x color is color(srgb "), mix)
+        self.assertEqual(page(f'<p class="x" style="box-shadow: 0 0 0 1px {peach}">x</p>'),
+                         (f"r: p.x box-shadow is {peach}",))
+        gone = style_row("g", selector=".missing", want="none_peach", value=".needs")
+        self.assertEqual(self.styled("<p>x</p>", [gone]), ("g: .missing is absent",))
+
+    def test_palette_takes_its_list_and_names_a_stray_colour(self) -> None:
+        def row(name, value):
+            return style_row(name, selector=".s", prop="color", want="palette", value=value)
+
+        rows = [row("notices", "notices"), row("desk", "desk"), row("spend", "spend")]
+
+        def page(colour):
+            return self.styled(f'<div class="s" style="color: {colour}"></div>', rows)
+
+        self.assertEqual(page("rgb(202, 211, 245)"), ())
+        self.assertEqual(page("rgba(202, 211, 245, .09)"), ())
+        lavender = "rgb(183, 189, 248)"
+        red = "rgb(237, 135, 150)"
+
+        def refused(colour, name):
+            return tuple(f"{name}: div.s {prop} is {colour}"
+                         for prop in ("color", "text-decoration-color", "caret-color"))
+
+        self.assertEqual(page(lavender), refused(lavender, "notices"))
+        self.assertEqual(page(red), refused(red, "notices") + refused(red, "spend"))
+        stray = "rgba(1, 2, 3, 0.5)"
+        self.assertEqual(page(stray), refused(stray, "notices") + refused(stray, "desk")
+                         + refused(stray, "spend"))
+        shape = style_row("p", selector=".s", prop="color", want="palette", value="desk")
+        svg = ('<div class="s" style="color: rgb(202, 211, 245)"><svg width="20" height="20">'
+               '<path d="M0 0h10v10z" style="fill: rgb(1, 2, 3)"/></svg></div>')
+        self.assertEqual(self.styled(svg, [shape]), ("p: path. fill is rgb(1, 2, 3)",))
+        shadow = style_row("s", selector=".s", prop="color", want="palette", value="desk")
+        lit = ('<div class="s" style="color: rgb(202, 211, 245); box-shadow: 0 0 0 1px rgb(1, 2, 3)">'
+               "x</div>")
+        self.assertEqual(self.styled(lit, [shadow]), ("s: div.s box-shadow is rgb(1, 2, 3)",))
+
+    def test_palette_names_a_shadow_colour_written_in_a_perceptual_space(self) -> None:
+        row = style_row("s", selector=".s", prop="color", want="palette", value="desk")
+        for prop in ("box-shadow", "text-shadow"):
+            for colour in ("oklch(0.8 0.1 50)", "oklab(0.8 0.05 0.05)",
+                           "lch(70 40 50)", "lab(70 20 30)"):
+                with self.subTest(prop=prop, colour=colour):
+                    spread = " 1px" if prop == "box-shadow" else ""
+                    html = (f'<div class="s" style="color: rgb(202, 211, 245); '
+                            f'{prop}: 0 0 0{spread} {colour}">x</div>')
+                    (miss,) = self.styled(html, [row])
+                    self.assertTrue(miss.startswith(f"s: div.s {prop} is "), miss)
+
+    def test_tokens_read_each_token_and_name_a_wrong_one(self) -> None:
+        lists = shots.STYLE_LISTS["tokens"]["desk"]
+        values = {**lists["colours"], "--ui": "sans-serif", "--display": "serif"}
+        declared = lambda **extra: "<style>:root{" + "".join(
+            f"{name}:{value};" for name, value in {**values, **extra}.items()) + "}</style>"
+        row = style_row("r", selector=":root", prop="--*", want="tokens", value="desk")
+        self.assertEqual(self.styled(declared(), [row]), ())
+        self.assertEqual(self.styled(declared(**{"--x": "1"}), [row]), ("r: :root declares --x",))
+        self.assertEqual(self.styled(declared(**{"--green": "rgb(0, 255, 0)"}), [row]),
+                         ("r: --green is rgb(0, 255, 0)",))
+        thin = declared().replace("--peach:rgb(245, 169, 127);", "")
+        self.assertEqual(self.styled(thin, [row]), ("r: :root lacks --peach",))
+        spend = style_row("s", selector=":root", prop="--*", want="tokens", value="spend")
+        self.assertEqual(self.styled(declared(), [spend]),
+                         tuple(f"s: :root declares {n}" for n in sorted(
+                             ("--green", "--peach", "--red", "--yellow"))))
+
+    def test_distinct_names_two_marks_that_differ_only_in_colour(self) -> None:
+        html = ("<style>i{display:block;width:9px;height:9px}"
+                ".a{border:1px solid rgb(1, 2, 3)} .b{border:1px solid rgb(4, 5, 6)}"
+                ".c{border:1px dashed rgb(1, 2, 3)}</style>"
+                '<i class="a"></i><i class="b"></i><i class="c"></i>')
+
+        def row(selector):
+            return style_row("r", selector=selector, prop="border-top-style", want="distinct")
+
+        self.assertEqual(self.styled(html, [row(".a | .c")]), ())
+        self.assertEqual(self.styled(html, [row(".a | .b")]), ("r: .a and .b differ only in colour",))
+        self.assertEqual(self.styled(html, [row(".a | .b | .c")]),
+                         ("r: .a and .b differ only in colour",))
+        self.assertEqual(self.styled(html, [row(".a | .z")]), ("r: .z is absent",))
+        probed = style_row("r", selector=".a | .b", prop="border-top-style", want="distinct",
+                           probe="<span data-style-probe><i class='a'></i><i class='b'></i></span>")
+        self.assertEqual(self.styled(html, [probed]), ("r: .a and .b differ only in colour",))
+
+    def test_sizes_shared_names_a_size_used_only_in_scope(self) -> None:
+        row = style_row("r", selector=".s", prop="font-size", want="sizes_shared")
+        page = ('<p>x</p><p style="font-size: 14px">y</p>'
+                '<div class="s"><b style="font-size: 14px">a</b>%s</div>')
+        self.assertEqual(self.styled(page % "", [row]), ())
+        self.assertEqual(self.styled(page % '<i style="font-size: 17px">b</i>', [row]),
+                         ("r: i. font-size is 17px",))
+
+    def test_fills_names_an_element_narrower_than_its_parent(self) -> None:
+        row = style_row("r", selector=".o", prop="width", want="fills", every=True)
+        page = ('<div style="width: 300px; padding: 0 10px; box-sizing: content-box">'
+                '<p class="o" style="margin: 0; %s">x</p></div>')
+        self.assertEqual(self.styled(page % "", [row]), ())
+        self.assertEqual(self.styled(page % "width: 200px", [row]), ("r: p.o width is 200px",))
+
+    def test_largest_type_names_a_large_element_outside_the_allowed(self) -> None:
+        row = style_row("r", selector="body", prop="font-size", want="largest_type",
+                        value="24|.card .q, .card .q *")
+        self.assertEqual(self.styled('<h2 class="x" style="font-size: 30px">t</h2>', [row]),
+                         ("r: h2.x font-size is 30px",))
+        self.assertEqual(self.styled(
+            '<div class="card"><p class="q" style="font-size: 30px">t<b>u</b></p></div>', [row]), ())
+        self.assertEqual(self.styled('<h2 class="x" style="font-size: 23px">t</h2>', [row]), ())
+
+    def test_right_edge_names_an_element_short_of_its_line_end(self) -> None:
+        row = style_row("r", selector=".last", prop="right", want="right_edge")
+        page = ('<div style="display: flex; width: 400px; padding: 0 20px; box-sizing: content-box">'
+                '<span style="display: block; width: 50px">a</span>'
+                '<span class="last" style="display: block; width: 50px; %s">b</span></div>')
+        self.assertEqual(self.styled(page % "margin-left: auto", [row]), ())
+        self.assertEqual(self.styled(page % "", [row]), ("r: .last right is 128px",))
+
+    def test_the_reading_waits_for_a_picture_that_is_still_being_fetched(self) -> None:
+        import base64
+        wide = "data:image/png;base64," + base64.b64encode(shots._solid_png((9, 8, 7), 200, 100)).decode()
+        page = ('<div style="width: 300px"><img class="pic-img i" style="display: block; width: 100%; '
+                'height: auto"></div><script>setTimeout(() => '
+                f'document.querySelector(".i").src = "{wide}", 400)</script>')
+        row = style_row("r", selector=".i", prop="height", want="follows_shape")
+        self.assertEqual(self.styled(page, [row]), ())
+
+    def test_hugs_names_a_label_wider_than_its_text(self) -> None:
+        row = style_row("r", selector=".l", prop="width", want="hugs")
+        page = '<span class="l" style="position: absolute; %s">a label</span>'
+        self.assertEqual(self.styled(page % "", [row]), ())
+        self.assertEqual(self.styled(page % "width: 300px", [row]), ("r: .l width is 300px",))
+
+    def test_track_max_names_a_track_past_its_fraction(self) -> None:
+        page = '<div class="g" style="display: grid; grid-template-columns: 16px 1fr 400px; width: 800px"><i></i></div>'
+        for fraction, found in (("0.4", ("r: .g grid-template-columns is 16px 384px 400px",)),
+                                ("0.5", ())):
+            row = style_row("r", selector=".g", prop="grid-template-columns", want="track_max",
+                            value=f"3:{fraction}")
+            self.assertEqual(self.styled(page, [row]), found, fraction)
+
+    def test_tracks_counts_the_top_level_tracks(self) -> None:
+        page = ('<div class="g" style="display: grid; grid-template-columns: minmax(0, 1fr) auto">'
+                '<i></i></div><div class="h" style="display: none; '
+                'grid-template-columns: minmax(0, 1fr) auto"></div>'
+                '<div class="one" style="display: grid; grid-template-columns: 1fr"><i></i></div>')
+        for selector, count, misses in ((".g", "2", False), (".h", "2", False), (".g", "3", True),
+                                        (".h", "3", True), (".one", "2", True)):
+            row = style_row("r", selector=selector, prop="grid-template-columns", want="tracks",
+                            value=count)
+            with self.subTest(selector=selector, count=count):
+                got = self.styled(page, [row])
+                self.assertEqual(len(got), int(misses))
+                if misses:
+                    self.assertRegex(got[0], rf"^r: {selector} grid-template-columns is ")
+
+    def test_alpha_max_takes_a_light_tint_and_names_a_dark_or_opaque_fill(self) -> None:
+        page = ('<p class="a" style="background: rgba(24, 25, 38, .22)">x</p>'
+                '<p class="b" style="background: rgba(0, 0, 0, .5)">x</p>'
+                '<p class="c" style="background: rgb(24, 25, 38)">x</p>'
+                '<p class="d" style="background: transparent">x</p>')
+        rows = [style_row(name, selector=f".{name}", prop="background-color", want="alpha_max",
+                          value="0.35") for name in "abcd"]
+        self.assertEqual(self.styled(page, rows), (
+            "b: .b background-color is rgba(0, 0, 0, 0.5)",
+            "c: .c background-color is rgb(24, 25, 38)"))
+
+    def test_opaque_takes_a_palette_colour_and_names_a_tint(self) -> None:
+        page = ('<p class="a" style="background: rgb(30, 32, 48)">x</p>'
+                '<p class="b" style="background: rgba(30, 32, 48, .9)">x</p>'
+                '<p class="c" style="background: rgb(1, 2, 3)">x</p>')
+        rows = [style_row(name, selector=f".{name}", prop="background-color", want="opaque",
+                          value="") for name in "abc"]
+        self.assertEqual(self.styled(page, rows), (
+            "b: .b background-color is rgba(30, 32, 48, 0.9)",
+            "c: .c background-color is rgb(1, 2, 3)"))
+
+    def test_follows_shape_names_an_image_off_its_shape(self) -> None:
+        import base64
+        wide = "data:image/png;base64," + base64.b64encode(shots._solid_png((9, 8, 7), 200, 100)).decode()
+        page = ('<div style="width: %spx"><img class="i" src="' + wide + '" style="display: block; '
+                'width: 100%%; %s"></div>')
+        row = style_row("r", selector=".i", prop="height", want="follows_shape")
+        self.assertEqual(self.styled(page % (300, "height: auto; max-height: 180px"), [row]), ())
+        self.assertEqual(self.styled(page % (400, "height: auto; max-height: 180px"), [row]), ())
+        self.assertEqual(self.styled(page % (300, "height: 50px; max-height: 180px"), [row]),
+                         ("r: .i height is 50px",))
+        broken = '<img class="i" src="data:image/png;base64,AAAA" style="width: 100px; height: 20px">'
+        self.assertEqual(self.styled(broken, [row]), ("r: .i height is 20px (not loaded)",))
+
+    @staticmethod
+    def controls_page(body):
+        """The page's own controls block, with its tokens, around `body`."""
+        text = (Path(shots.__file__).resolve().parents[1]
+                / "python/agent_tools/console/page.html").read_text(encoding="utf-8")
+        style = re.search(r"(?s)<style>(.*?)</style>", text).group(1)
+        root = re.search(r"(?s):root \{.*?\n\}|:root \{[^}]*\}", style).group(0)
+        block = re.search(r"(?s)/\* controls \*/\n(.*?)/\* end controls \*/", style).group(1)
+        return f"<style>{root}\n{block}\n.x .btn-quiet {{ border-radius: 2px }}</style>{body}"
+
+    def test_kind_look_names_a_control_whose_kind_property_was_overridden(self) -> None:
+        row = style_row("r", selector="body", prop="min-height", want="kind_look",
+                        value=",".join(shots.LOOK))
+        page = self.controls_page('<div class="x"><button class="btn-quiet">x</button></div>')
+        self.assertEqual(self.styled(page, [row]), tuple(
+            f"r: button.btn-quiet border-{corner}-radius is 2px"
+            for corner in ("top-left", "top-right", "bottom-right", "bottom-left")))
+        self.assertEqual(self.last_leftover, 0)
+        short = self.controls_page('<button class="btn-quiet" style="min-height: 20px">x</button>')
+        self.assertEqual(self.styled(short, [row]), ("r: button.btn-quiet min-height is 20px",))
+        self.assertEqual(self.styled(self.controls_page("<p>x</p>"), [row]), ("r: body is absent",))
+
+    def test_kind_look_skips_a_control_in_a_state(self) -> None:
+        row = style_row("r", selector="body", prop="min-height", want="kind_look",
+                        value=",".join(shots.LOOK))
+        states = ('<button class="btn-quiet" disabled>x</button>'
+                  '<button class="btn-option" aria-pressed="true">x</button>'
+                  '<button class="btn-quiet" aria-busy="true">x</button>'
+                  '<button class="btn-option picked">x</button>'
+                  '<button class="btn-quiet btn-bare" style="padding: 0; color: rgb(1, 2, 3)">x</button>'
+                  '<button class="cap btn-quiet" style="padding: 0">x</button>'
+                  '<div data-style-probe><button class="btn-quiet" style="border-radius: 2px">x'
+                  '</button></div>')
+        # The states are the controls block's own rules, so each is given a look the kind refuses.
+        refused = "".join(
+            f'<button class="{cls}" {attrs} style="border-radius: 2px; padding: 1px">x</button>'
+            for cls, attrs in (("btn-quiet", "disabled"), ("btn-option", 'aria-pressed="true"'),
+                               ("btn-quiet", 'aria-busy="true"'), ("btn-option picked", "")))
+        self.assertEqual(self.styled(self.controls_page(states + refused), [row]), ())
+        bare = '<button class="btn-quiet btn-bare" style="border-color: rgb(1, 2, 3)">x</button>'
+        self.assertEqual(self.styled(self.controls_page(bare), [row]), tuple(
+            f"r: button.btn-quiet border-{side}-color is rgb(1, 2, 3)"
+            for side in ("top", "right", "bottom", "left")))
+
+    def test_contrast_keeps_the_wcag_pins_and_names_a_faint_placeholder(self) -> None:
+        def page(fg, bg):
+            return f'<p class="t" style="color: {fg}; background: {bg}">x</p>'
+
+        def row(value, **kw):
+            return style_row("c", **{"selector": ".t", "prop": "color", "want": "contrast",
+                                     "value": value, **kw})
+
+        self.assertEqual(self.styled(page("#939ab7", "#1e2030"), [row("4.5")]), ())
+        self.assertEqual(self.styled(page("#939ab7", "#1e2030"), [row("99")]),
+                         ("c: .t contrast is 5.79",))
+        self.assertEqual(self.styled(page("#181926", "#f5a97f"), [row("99")]),
+                         ("c: .t contrast is 9.01",))
+        self.assertEqual(self.styled(page("#494d64", "#1e2030"), [row("4.5")]),
+                         ("c: .t contrast is 1.94",))
+        faint = ('<style>.f::placeholder { color: #494d64; opacity: 1 }</style><div style="background:'
+                 ' #1e2030"><input class="f" placeholder="x" style="background: none"></div>')
+        self.assertEqual(self.styled(faint, [row("4.5", selector=".f", pseudo="::placeholder")]),
+                         ("c: .f::placeholder contrast is 1.94",))
+
+    def on_the_page(self, body, names, *, width=1440, change=(), extra="", mutation=None):
+        """The misses of the table's rows `names` on `body` under the page's own style block, with
+        each `(old, new)` of `change` replaced in it and `extra` rules after it."""
+        text = (Path(shots.__file__).resolve().parents[1]
+                / "python/agent_tools/console/page.html").read_text(encoding="utf-8")
+        style = re.search(r"(?s)<style>(.*?)</style>", text).group(1)
+        for old, new in change:
+            self.assertIn(old, style)
+            style = style.replace(old, new)
+        rows = [row for name in names for row in shots.STYLE_CHECKS if row.name == name]
+        self.assertEqual([row.name for row in rows], list(names))
+        return self.styled(f"<style>{style}\n{extra}</style>{body}", rows, width=width,
+                           mutation=mutation)
+
+    def test_the_gallery_pair_is_read_at_both_widths_between_the_two_it_is_shot_at(self) -> None:
+        body = ('<div class="pics"><div class="pic-pair"><div class="pic">a</div>'
+                '<div class="pic">b</div></div></div>')
+        for at in shots.BETWEEN_WIDTHS:
+            name = f"pics-pair-direction-{at}"
+            with self.subTest(at=at):
+                self.assertEqual(self.on_the_page(body, [name], width=at), ())
+                self.assertEqual(
+                    self.on_the_page(body, [name], width=at, change=((
+                        "@media (max-width: 480px) {\n  .pic-pair {",
+                        "@media (max-width: 1180px) {\n  .pic-pair {"),)),
+                    (f"{name}: .pic-pair flex-direction is column",))
+
+    def test_the_brief_row_is_read_on_all_four_sides_of_its_padding(self) -> None:
+        names = [f"row-gap-padding-{side}{kind}" for kind in ("", "-same")
+                 for side in ("top", "bottom", "left", "right")]
+        body = '<div id="inbox"></div>'
+        self.assertEqual(self.on_the_page(body, names), ())
+        self.assertEqual(
+            self.on_the_page(body, names, extra=".brief-row { padding: 12px 24px }"),
+            tuple(f"row-gap-padding-{side}{kind}: .brief-row padding-{side} is 24px"
+                  for kind in ("", "-same") for side in ("left", "right")))
+
+    def test_each_answer_list_kind_is_read_on_a_rendered_list_of_its_kind(self) -> None:
+        body = '<div id="reading"><div class="ask-answer"><p>x</p></div></div>'
+        names = [f"answer-type-{kind}-{key}" for kind in ("ul", "ol") for key in ("font-size", "font")]
+        self.assertEqual(self.on_the_page(body, names), ())
+        for kind in ("ul", "ol"):
+            with self.subTest(kind=kind):
+                misses = self.on_the_page(body, names, extra=f".ask-answer {kind}.md-list "
+                                                             "{ font: 20px serif }")
+                self.assertEqual(
+                    sorted(miss.split(":")[0] for miss in misses),
+                    [f"answer-type-{kind}-font", f"answer-type-{kind}-font-size"])
+
+    def test_the_notices_marker_is_read_on_its_own_declared_display(self) -> None:
+        body = ('<ul id="list"><li class="line notices"><details><summary>Notices</summary>'
+                '</details></li></ul>')
+        name = "disclosure-notices-marker-display"
+        marker = ".line.notices summary::-webkit-details-marker { display: revert; }"
+        self.assertEqual(self.on_the_page(body, [name]), ())
+        self.assertEqual(
+            self.on_the_page(body, [name], change=((marker, ""),)),
+            (f"{name}: .line.notices summary::-webkit-details-marker display is none",))
+        row = next(row for row in shots.STYLE_CHECKS if row.name == name)
+        self.assertEqual(self.on_the_page(body, [name], mutation=row.broken),
+                         (f"{name}: .line.notices summary::-webkit-details-marker display is none",))
+        # the summary's own list-item display is the other row's, and it is not enough
+        self.assertEqual(self.on_the_page(body, ["disclosure-notices-display"],
+                                          change=((marker, ""),)), ())
+
+    def test_declared_takes_the_winning_rule_of_a_pseudo_element(self) -> None:
+        def read(css, width=1440):
+            row = style_row("d", selector=".a", prop="display", want="declared", value="revert",
+                            pseudo="::-webkit-details-marker")
+            return self.styled(f'<style>{css}</style><p class="a">x</p>', [row], width=width)
+
+        marker = "::-webkit-details-marker"
+        self.assertEqual(read(f".a{marker} {{ display: revert }}"), ())
+        self.assertEqual(read(f"p.a{marker}, .b{marker} {{ display: none }}"
+                              f".a{marker} {{ display: revert }}"),
+                         ("d: .a::-webkit-details-marker display is none",))
+        self.assertEqual(read(f".a{marker} {{ display: revert }} p{marker} {{ display: none }}"), ())
+        self.assertEqual(read(f".a{marker} {{ display: revert }} .a{marker} {{ display: none }}"),
+                         ("d: .a::-webkit-details-marker display is none",))
+        self.assertEqual(read(f".a{marker} {{ display: revert }} p{marker} {{ display: none }}"
+                              f".a{marker} {{ color: red }} #x{marker} {{ display: none }}"), ())
+        self.assertEqual(read(f"p{marker} {{ display: none !important }}"
+                              f".a{marker} {{ display: revert }}"),
+                         ("d: .a::-webkit-details-marker display is none",))
+        wide = f"@media (min-width: 1000px) {{ .a{marker} {{ display: none }} }}"
+        self.assertEqual(read(f".a{marker} {{ display: revert }}{wide}"),
+                         ("d: .a::-webkit-details-marker display is none",))
+        self.assertEqual(read(f".a{marker} {{ display: revert }}{wide}", width=900), ())
+        self.assertEqual(read(""), ("d: .a::-webkit-details-marker display is (none)",))
+
+    def test_a_colour_painted_by_a_gradient_is_a_painted_colour(self) -> None:
+        for name, body, mutation_target in (
+                ("palette-notices-gradient",
+                 '<ul id="list"><li class="line notices"><p class="notice">x</p></li></ul>',
+                 "p.notice"),
+                ("peach-only-needs-gradient", '<div class="top-in">x</div>', "div.top-in")):
+            with self.subTest(name):
+                row = next(row for row in shots.STYLE_CHECKS if row.name == name)
+                self.assertEqual(self.on_the_page(body, [name]), ())
+                (miss,) = self.on_the_page(body, [name], mutation=row.broken)
+                self.assertRegex(miss, rf"^{name}: {mutation_target} background-image is "
+                                       r"rgb\(245, 169, 127\)$")
+
+    def test_a_colour_the_page_cannot_read_as_rgb_is_a_named_miss(self) -> None:
+        def row(name, value, **kw):
+            return style_row(name, **{"selector": ".t", "prop": "color", "want": "contrast",
+                                      "value": value, **kw})
+
+        html = ('<style>.f::placeholder { color: oklch(0.5 0.1 200); opacity: 1 }</style>'
+                '<input class="f" placeholder="x" style="background: none">'
+                '<p class="t" style="color: #939ab7; background: #1e2030">x</p>')
+        misses = self.styled(html, [row("c", "4.5", selector=".f", pseudo="::placeholder"),
+                                    row("d", "99")])
+        self.assertEqual(len(misses), 2)
+        self.assertRegex(misses[0], r"^c: \.f::placeholder contrast is unreadable oklch\(")
+        self.assertEqual(misses[1], "d: .t contrast is 5.79")
+
+    def sandboxed_capture(self, **kw):
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        with sync_playwright() as pw:
+            try:
+                pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"]).close()
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+        with tempfile.TemporaryDirectory() as tmp:
+            return shots.capture(Path(tmp) / "out", **kw)
+
+    def test_every_style_check_passes_and_fails_when_broken(self) -> None:
+        taken = self.sandboxed_capture(mutate=True)
+        self.assertEqual([(s.path.name, s.style) for s in taken if s.style], [])
+        for shot in taken:
+            read_at = (shot.width, *(shots.BETWEEN_WIDTHS if shot.width == shots.WIDTHS[0] else ()))
+            expected = {r.name for r in shots.STYLE_CHECKS
+                        if shot.state in r.states and set(read_at) & set(r.widths)}
+            with self.subTest(shot.path.name):
+                self.assertEqual(set(shot.checked), expected)
+                self.assertEqual(set(shot.broke), set(shot.checked))
+        self.assertEqual(set().union(*(set(s.checked) for s in taken)),
+                         {r.name for r in shots.STYLE_CHECKS})
+
+    def test_a_plain_answer_run_reads_only_the_rows_it_can_have(self) -> None:
+        taken = self.sandboxed_capture(
+            states=("question-read",), read=("Q?", "Answer: plain\nQuestion for you: none"))
+        fixture = {r.name for r in shots.STYLE_CHECKS if r.fixture}
+        self.assertEqual([s for s in taken if s.style], [])
+        read = {name for s in taken for name in s.checked}
+        self.assertEqual(read & fixture, set())
+        self.assertLessEqual({"reading-weight-panel", "reading-weight-call-out"}, read)
+
+
 class ScreenshotCaptureTest(unittest.TestCase):
     def test_the_command_writes_a_png_per_state_and_width_and_nothing_scrolls_sideways(self) -> None:
         try:
@@ -1624,7 +3401,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             self.assertEqual(
                 [s for s in taken if s.state != "tell-box-open" and s.tell is not None], [])
             self.assertEqual(
-                [s.width for s in taken if s.state == "ask-box" and s.ask == shots.OPEN_ASK],
+                [s.width for s in taken if s.state == "ask-box" and s.ask == shots.HEAD_ASK],
                 list(shots.WIDTHS))
             self.assertEqual([s for s in taken if s.state != "ask-box" and s.ask is not None], [])
             self.assertEqual(

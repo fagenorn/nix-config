@@ -15,11 +15,9 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .test_console_page import media_block, style_rules
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEND = REPO_ROOT / "python/agent_tools/console/spend.html"
-DESK = REPO_ROOT / "python/agent_tools/console/page.html"
 PYPROJECT = REPO_ROOT / "python/pyproject.toml"
 
 
@@ -572,67 +570,6 @@ class SpendStaticTest(unittest.TestCase):
 
     def test_the_spend_page_is_small(self) -> None:
         self.assertLess(len(gzip.compress(self.data, 9)), 20480)
-
-
-    def test_the_spend_page_uses_no_peach_and_only_the_desk_palette(self) -> None:
-        self.assertNotIn("peach", self.text.lower())
-        self.assertNotIn("#f5a97f", self.text.lower())
-
-        def root_of(text: str) -> dict:
-            (block,) = re.findall(r"(?s):root\s*\{(.*?)\}", text)
-            pairs = (decl.partition(":") for decl in block.split(";"))
-            return {n.strip(): v.strip() for n, _, v in pairs if n.strip().startswith("--")}
-
-        mine, desk = root_of(self.text), root_of(DESK.read_text(encoding="utf-8"))
-        self.assertTrue(mine)
-        for name, value in mine.items():
-            self.assertEqual(desk.get(name), value, name)
-        for name in ("--peach", "--green", "--yellow", "--red"):
-            self.assertNotIn(name, mine)
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", self.text)
-        outside = re.sub(r"(?s):root\s*\{.*?\}", "", style)
-        for pattern in (r"#[0-9a-fA-F]{3,8}\b", r"rgba?\(", r"hsla?\("):
-            self.assertEqual(re.findall(pattern, outside), [], pattern)
-        for _, decls in style_rules(outside):
-            for prop, value in decls.items():
-                if not re.fullmatch(
-                        r"color|background|background-color|border.*|outline.*|fill|stroke", prop):
-                    continue
-                rest = re.sub(r"var\(--([a-z0-9-]+)\)",
-                              lambda m: "" if "--" + m.group(1) in mine else m.group(0), value)
-                rest = re.sub(r"-?\d*\.?\d+(?:px|rem|em|%)?", "", rest)
-                rest = re.sub(r"\b(?:none|transparent|currentColor|inherit|solid|dashed|dotted)\b", "", rest)
-                self.assertEqual(rest.strip(), "", f"{prop}: {value}")
-        script = self.text[self.text.index("<script>"):]
-        self.assertEqual(re.findall(r"#[0-9a-fA-F]{6}", script), [])
-
-    def test_the_spend_page_fits_480_wide(self) -> None:
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", self.text)
-        narrow = media_block(style, "(max-width: 480px)")
-        base = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
-        narrow_rules = style_rules(narrow)
-        self.assertEqual(
-            [d.get("flex-wrap") for s, d in narrow_rules if s == ".top-in"], ["wrap"])
-        rules = style_rules(base) + narrow_rules
-        measured = 0
-        for selector, decls in rules:
-            for prop in ("width", "min-width", "flex-basis"):
-                if prop not in decls:
-                    continue
-                measured += 1
-                value = decls[prop]
-                px = re.fullmatch(r"(\d+(?:\.\d+)?)px", value)
-                self.assertTrue(
-                    value in ("auto", "0") or re.fullmatch(r"\d+(?:\.\d+)?%", value)
-                    or "100vw" in value or (px and float(px.group(1)) <= 448),
-                    f"{selector} {prop}: {value}")
-        self.assertGreater(measured, 0)
-        merged = {}
-        for selector, decls in rules:
-            merged.setdefault(selector, {}).update(decls)
-        self.assertEqual(
-            merged.get(".trend-day", merged.get(".trend li", {})).get("min-width"), "0")
-        self.assertEqual(merged.get(".row-name", {}).get("overflow-wrap"), "anywhere")
 
 
 if __name__ == "__main__":
