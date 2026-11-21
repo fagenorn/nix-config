@@ -12,8 +12,8 @@ from agent_tools.console import service, sprints
 from agent_tools.console.deliveries import QUIET_AFTER_MS, IssueStage
 from agent_tools.console.sprints import (
     BALL_TEXT, CHANGES, NOW_ANSWER_TEXT, NOW_BRIEF_TEXT, NOW_DECISION_TEXT, NOW_DRAFTING_TEXT,
-    NOW_NO_PROGRESS_TEXT, NOW_PERMISSION_TEXT, NOW_QUOTA_TEXT, NOW_REFUSED_TEXT, NOW_STALLED_TEXT,
-    NOW_STARTING_TEXT, NOW_STOPPING_TEXT, Question, refused_reason)
+    NOW_NO_PROGRESS_TEXT, NOW_PAUSED_TEXT, NOW_PERMISSION_TEXT, NOW_QUOTA_TEXT, NOW_REFUSED_TEXT,
+    NOW_STALLED_TEXT, NOW_STARTING_TEXT, NOW_STOPPING_TEXT, NOW_WAIT_TEXT, Question, refused_reason)
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -428,6 +428,41 @@ class SprintBallViewTest(unittest.TestCase):
         self.assertEqual((permission["ball"], permission["now_text"]),
                          ("owner", NOW_PERMISSION_TEXT))
         self.assertEqual(self.shown(s, PAST, manager_session("waiting_answer"))["ball"], "owner")
+
+    def test_a_stated_wait_reads_waiting_until_its_time_and_a_pause_reads_its_reason(self):
+        s = reported(with_manager(started(A)), T0_MS)
+        until = iso(T0_MS + 120 * MIN)
+        waiting = dataclasses.replace(s, report=dataclasses.replace(s.report, wait_until=until))
+        paused = dataclasses.replace(
+            s, report=dataclasses.replace(s.report, paused="the lead freed the account"))
+        idle = manager_session("idle")
+        got = self.shown(waiting, PAST, idle)
+        self.assertEqual((got["now_text"], got["now_until"]), ("waiting until", until))
+        self.assertEqual(NOW_WAIT_TEXT, "waiting until")
+        got = self.shown(waiting, T0_MS + 120 * MIN, idle)
+        self.assertEqual((got["now_text"], got["now_until"]),
+                         ("last seen building 1 of 7: Importer resumes", None))
+        got = self.shown(paused, PAST, idle)
+        self.assertEqual((got["now_text"], got["now_until"]),
+                         ("paused: the lead freed the account", None))
+        self.assertEqual(NOW_PAUSED_TEXT.format(reason="x"), "paused: x")
+        self.assertIsNone(self.shown(s, PAST, idle)["now_until"])
+
+    def test_an_owner_wait_and_a_quota_beat_a_stated_wait_and_a_stated_wait_beats_a_merge_refusal(self):
+        until = iso(T0_MS + 120 * MIN)
+        base = reported(with_manager(started(A)), T0_MS)
+        waiting = dataclasses.replace(base, report=dataclasses.replace(base.report, wait_until=until))
+        asked = reported(with_manager(started(A)), T0_MS, inbox=(9,))
+        asked = dataclasses.replace(asked, report=dataclasses.replace(asked.report, wait_until=until))
+        refused = dataclasses.replace(waiting, report=dataclasses.replace(
+            waiting.report, status="merge refused: required checks are not green"))
+        now = T0_MS + MIN
+        got = self.shown(asked, now, records={("p00", "k9"): open_item("p00", "k9", 9)})
+        self.assertEqual((got["now_text"], got["now_until"]), (NOW_DECISION_TEXT, None))
+        got = self.shown(waiting, now, capacity=out())
+        self.assertEqual((got["now_text"], got["now_until"]), (NOW_QUOTA_TEXT, None))
+        got = self.shown(refused, now)
+        self.assertEqual((got["now_text"], got["now_until"]), ("waiting until", until))
 
     def test_each_now_sentence_rule(self):
         now = T0_MS + MIN
