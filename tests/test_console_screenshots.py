@@ -2530,11 +2530,15 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         "the manager cannot hear the console: bring it back or drop the sprint")
                 elif state == "waiting-until":
                     self.assertEqual(running[0]["now_text"], "waiting until")
+                    self.assertEqual((running[0]["ball"], running[0]["ball_text"]),
+                                     ("waiting", "waiting"))
                     self.assertLess(
                         abs(datetime.fromisoformat(running[0]["now_until"]).timestamp()
                             - (now_s + 2 * 3600)), 1)
                 elif state == "paused":
                     self.assertEqual(running[0]["now_text"], "paused: " + shots.PAUSE_REASON)
+                    self.assertEqual((running[0]["ball"], running[0]["ball_text"]),
+                                     ("paused", "paused"))
                     self.assertIsNone(running[0]["now_until"])
                 elif state == "tell-box-open":
                     self.assertEqual(len(running), 1)

@@ -477,7 +477,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state": "drafting" | "starting" | "on_track" | "waiting" | "quota" | "quiet"
                                | "closing" | "done" | "stopping" | "stopped",
                       "state_text": "<text>",
-                      "ball": "manager" | "owner" | "nobody" | null,
+                      "ball": "manager" | "owner" | "nobody" | "waiting" | "paused" | null,
                       "ball_text": "<text>" | null, "now_text": "<sentence>" | null,
                       "now_until": "<time>" | null,
                       "stated_at", "started_by": "<login>" | null, "age_text",
@@ -632,7 +632,7 @@ unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on 
 is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
 set, its manager failed to start with no brief (`sprints.failed_start`), one of the sprint's listed sessions is waiting for an answer or a permission (the manager
 waits on the owner at its terminal), or its manager cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
-else `nobody` ("nothing running, may be stuck"), except that a stated pause or a stated wait whose time is ahead (`sprints.stated_hold`, #1380) keeps it `manager` until the stated time has passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
+else `nobody` ("nothing running, may be stuck"), except that a stated pause (`paused`, "paused") or a stated wait whose time is ahead (`waiting`, "waiting"; `sprints.stated_hold`, #1380) holds it, after the owner's rules and before the movement reading, until the stated time has passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
 that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, `NOW_ANSWER_TEXT`; a manager that cannot hear the console
 (#1229: the sprint's manager session has `SessionMovement.held`, its transcript's last peer message
 being one the client held and did not deliver), `NOW_DEAF_TEXT`; a listed session waiting for a
@@ -798,6 +798,8 @@ from agent_tools.console.sprints import (
     BALL_MANAGER,
     BALL_NOBODY,
     BALL_OWNER,
+    BALL_PAUSED,
+    BALL_WAITING,
     BALL_TEXT,
     CHECK_LINE_TEXT,
     CLOSED_OUT,
@@ -1630,8 +1632,9 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
     run, report, approval or wait signal inside the window keeps it manager whatever its order
     against the failure. A stated pause or a stated wait whose time is ahead
-    (`sprints.stated_hold`, #1380) keeps it manager too: the manager has said it is waiting, so the
-    nothing-running line returns only once the stated time has passed with nothing running. `waits` are the sprint's wait signals. A `deaf` manager (its transcript
+    (`sprints.stated_hold`, #1380) reads `paused` or `waiting`, not the manager's: nothing is
+    running, and the manager has said so, so the nothing-running line returns only once the stated
+    time has passed with nothing running. `waits` are the sprint's wait signals. A `deaf` manager (its transcript
     shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
@@ -1639,8 +1642,9 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
             or state.no_progress_at is not None or failed_start
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
-    if stated_hold(state, now_ms) is not None:
-        return BALL_MANAGER
+    hold = stated_hold(state, now_ms)
+    if hold is not None:
+        return BALL_PAUSED if hold[0] == PAUSED else BALL_WAITING
     quiet_for = sprint_quiet_for(state, now_ms, listed, waits)
     return BALL_MANAGER if quiet_for is None else BALL_NOBODY
 

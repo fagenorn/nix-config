@@ -494,7 +494,7 @@ class SprintBallViewTest(unittest.TestCase):
         self.assertEqual(NOW_PAUSED_TEXT.format(reason="x"), "paused: x")
         self.assertIsNone(self.shown(s, PAST, idle)["now_until"])
 
-    def test_the_nothing_running_ball_waits_out_a_stated_wait_and_a_pause_and_returns_after_the_time(self):
+    def test_a_stated_wait_and_a_pause_never_read_manager_working_nor_nothing_running(self):
         s = reported(with_manager(started(A)), T0_MS)
         until = iso(T0_MS + 120 * MIN)
         waiting = dataclasses.replace(s, report=dataclasses.replace(s.report, wait_until=until))
@@ -502,10 +502,12 @@ class SprintBallViewTest(unittest.TestCase):
             s, report=dataclasses.replace(s.report, paused="the lead freed the account"))
         idle = manager_session("idle")
         self.assertEqual(self.shown(s, PAST, idle)["ball"], "nobody")
-        for held in (waiting, paused):
+        for held, ball in ((waiting, "waiting"), (paused, "paused")):
             with self.subTest(held=held.report):
                 got = self.shown(held, PAST, idle)
-                self.assertEqual((got["ball"], got["ball_text"]), ("manager", "manager working"))
+                self.assertEqual((got["ball"], got["ball_text"]), (ball, ball))
+                got = self.shown(held, PAST, manager_session("working"))
+                self.assertEqual((got["ball"], got["ball_text"]), (ball, ball))
         got = self.shown(waiting, T0_MS + 120 * MIN, idle)
         self.assertEqual((got["ball"], got["ball_text"]), ("nobody", "nothing running, may be stuck"))
 

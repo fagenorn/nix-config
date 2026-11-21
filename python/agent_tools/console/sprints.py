@@ -258,7 +258,8 @@ plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
-A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
+A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER`, `BALL_NOBODY`, or, while its report
+states a wait or a pause that holds (#1380), `BALL_WAITING` or `BALL_PAUSED`, worded by
 `BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants (among them the wait sentences
 `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` (#1110) and `NOW_LOCK_TEXT` (#1184)) or
 the stage phrase (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
@@ -831,8 +832,11 @@ STOPPED_TEXT = "stopped by you"
 BALL_MANAGER = "manager"
 BALL_OWNER = "owner"
 BALL_NOBODY = "nobody"
+BALL_WAITING = "waiting"
+BALL_PAUSED = "paused"
 BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
-             BALL_NOBODY: "nothing running, may be stuck"}
+             BALL_NOBODY: "nothing running, may be stuck",
+             BALL_WAITING: "waiting", BALL_PAUSED: "paused"}
 NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
 NOW_ANSWER_TEXT = "waiting for your answer in the manager's terminal"
 NOW_PERMISSION_TEXT = "waiting for your permission in the manager's terminal"

@@ -813,6 +813,8 @@ const BALL_LOOKS = new Map([
   ["manager", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
   ["owner", { icon: "pause-icon", mark: "sic-pause", tone: "needs" }],
   ["nobody", { icon: "dashed-icon", mark: "sic-dashed", tone: "st-wait" }],
+  ["waiting", { icon: "pause-icon", mark: "sic-pause", tone: "st-dim" }],
+  ["paused", { icon: "pause-icon", mark: "sic-pause", tone: "st-dim" }],
 ]);
 function ballLook(sprint) {
   const look = BALL_LOOKS.get(sprint.ball);

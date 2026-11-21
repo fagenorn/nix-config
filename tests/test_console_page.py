@@ -6544,6 +6544,8 @@ class PageSprintGlanceTest(unittest.TestCase):
             ("manager", "manager working", "sic-play", "st-go"),
             ("owner", "waiting on you", "sic-pause", "needs"),
             ("nobody", "nothing running, may be stuck", "sic-dashed", "st-wait"),
+            ("waiting", "waiting", "sic-pause", "st-dim"),
+            ("paused", "paused", "sic-pause", "st-dim"),
         ]
         steps = [START]
         for ball, words, _, _ in cases:
@@ -6558,6 +6560,9 @@ class PageSprintGlanceTest(unittest.TestCase):
                 self.assertTrue(has_class(said, tone))
                 (mark,) = [n for n in top(line) if has_class(n, "sic")]
                 self.assertTrue(has_class(mark, icon_class))
+                if ball in ("waiting", "paused"):
+                    self.assertFalse(has_class(said, "st-go"))
+                    self.assertFalse(has_class(mark, "sic-play"))
                 self.assertTrue(has_class(mark, tone))
                 self.assertIs(has_class(mark, "needs"), ball == "owner")
 
