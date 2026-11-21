@@ -8691,6 +8691,108 @@ class LiveLaneTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+def sized(*rows, sensitive=()):
+    """A live-size patch from (path, added, deleted) rows."""
+    return {"live-size": {"measured": True, "head": SHA, "sensitive": [dict(s) for s in sensitive],
+                          "files": [{"path": p, "added": a, "deleted": d} for p, a, d in rows]}}
+
+
+def refused_with(what):
+    return f"live-refused: {what}; deliver the fault in an ordinary delivery: rerun with lane standard and no cont"
+
+
+class LiveSizeTest(unittest.TestCase):
+    """#1433: the size and sensitivity of the diff are read before the one review, and a refusal calls no reviewer."""
+
+    def refusal(self, patch, reason):
+        result, calls = run(args=ARGS, patch=dict(LIVE_PATCH, **patch))
+        self.assertEqual(result["stage"], "live-refused")
+        self.assertEqual(result["reason"], reason)
+        self.assertNotIn("\n", result["reason"])
+        self.assertEqual(result["cont"]["live_fault"]["final"], "live-refused")
+        self.assertNotIn("live-review", labels(calls))
+        self.assertNotIn("verify", labels(calls))
+
+    def test_a_diff_over_80_lines_outside_tests_is_refused_in_one_line(self):
+        self.refusal(sized(("src/a.py", 60, 30), ("tests/test_a.py", 40, 0)),
+                     refused_with("the diff changes 90 lines outside tests, over the live lane's 80"))
+
+    def test_a_fourth_file_is_refused(self):
+        self.refusal(sized(("src/a.py", 1, 0), ("src/b.py", 1, 0), ("src/c.py", 1, 0), ("tests/test_a.py", 1, 0)),
+                     refused_with("the diff changes 4 files, over the live lane's 3"))
+
+    def test_a_sensitive_change_is_refused(self):
+        patch = sized(("src/fix.py", 5, 2), ("tests/test_harm.py", 20, 0),
+                      sensitive=[{"path": "src/auth.py", "why": "authentication"}])
+        self.refusal(patch, refused_with("the diff touches authentication in src/auth.py"))
+
+    def test_80_lines_outside_tests_in_3_files_pass(self):
+        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **sized(("src/a.py", 50, 30), ("tests/test_a.py", 300, 0), ("src/b.py", 0, 0))))
+        self.assertEqual(result["stage"], "done")
+
+    def test_test_lines_do_not_count(self):
+        for path in ("tests/x.py", "pkg/__tests__/x.js", "spec/x_spec.rb", "test_x.py", "x_test.go", "src/x.test.ts", "src/x.spec.js"):
+            with self.subTest(path=path):
+                result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **sized((path, 500, 0), ("src/fix.py", 10, 0))))
+                self.assertEqual(result["stage"], "done")
+        self.refusal(sized(("src/testing.py", 500, 0), ("src/fix.py", 10, 0)),
+                     refused_with("the diff changes 510 lines outside tests, over the live lane's 80"))
+
+    def test_an_unmeasured_diff_stops_before_the_review(self):
+        for reply in ({"measured": False}, None):
+            with self.subTest(reply=reply):
+                result, calls = run(args=ARGS, patch=LIVE_PATCH, replies={"live-size": reply})
+                self.assertEqual(result["stage"], "live-size")
+                self.assertIn("the live-fault diff could not be measured", result["reason"])
+                self.assertNotIn("live-review", labels(calls))
+                self.assertNotIn("final", result["cont"]["live_fault"])
+        resumed, calls = run(args=dict(ARGS, cont=result["cont"]), patch={"setup": {"head": SHA, "live_fault": DECLARED}})
+        self.assertEqual(resumed["stage"], "done")
+        self.assertIn("live-size", labels(calls))
+        self.assertNotIn("live-impl", labels(calls))
+
+    def test_a_malformed_measurement_is_unmeasured(self):
+        good = {"measured": True, "head": SHA, "files": [{"path": "src/a.py", "added": 1, "deleted": 0}], "sensitive": []}
+        for bad in (dict(good, files="src/a.py"), dict(good, files=[{"path": "src/a.py", "added": "1", "deleted": 0}]),
+                    dict(good, files=[{"added": 1, "deleted": 0}]), dict(good, sensitive=None), {"measured": True, "head": SHA}):
+            with self.subTest(bad=bad):
+                result, calls = run(args=ARGS, patch=LIVE_PATCH, replies={"live-size": bad})
+                self.assertEqual(result["stage"], "live-size")
+                self.assertNotIn("live-review", labels(calls))
+
+    def test_the_size_step_runs_before_the_review(self):
+        _, calls = run(args=ARGS, patch=LIVE_PATCH)
+        names = labels(calls)
+        self.assertLess(names.index("renew-final-review"), names.index("live-size"))
+        self.assertLess(names.index("live-size"), names.index("live-review"))
+        props = schema_of(calls, "live-size")["properties"]
+        for key in ("files", "sensitive", "head"):
+            self.assertIn(key, props)
+        text = prompt(calls, "live-size")
+        self.assertIn("git -C /r/.wt/w-issue-9-x diff --numstat --no-renames origin/dev...HEAD", text)
+        self.assertIn("git -C /r/.wt/w-issue-9-x diff --no-renames origin/dev...HEAD", text)
+        for piece in ("authentication", "secrets", "permission or command guard"):
+            self.assertIn(piece, text)
+
+    def test_a_rename_counts_both_paths(self):
+        self.refusal(sized(("tests/test_a.py", 0, 40), ("src/a.py", 40, 0), ("src/b.py", 1, 0), ("src/c.py", 1, 0)),
+                     refused_with("the diff changes 4 files, over the live lane's 3"))
+        self.refusal(sized(("tests/helper.py", 0, 50), ("src/helper.py", 50, 0), ("src/fix.py", 31, 0)),
+                     refused_with("the diff changes 81 lines outside tests, over the live lane's 80"))
+
+    def test_a_path_listed_twice_counts_once(self):
+        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **sized(("src/a.py", 30, 0), ("src/a.py", 30, 0), ("tests/test_a.py", 5, 0), ("src/b.py", 1, 0))))
+        self.assertEqual(result["stage"], "done")
+        self.refusal(sized(("src/a.py", 41, 0), ("src/a.py", 40, 0)),
+                     refused_with("the diff changes 81 lines outside tests, over the live lane's 80"))
+
+    def test_a_measurement_at_another_head_stops(self):
+        result, calls = run(args=ARGS, patch=dict(LIVE_PATCH, **{"live-size": {"head": "e" * 40}}))
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertIn(f"the diff was measured at {'e' * 40}, not the delivered commit {SHA}", result["reason"])
+        self.assertNotIn("live-review", labels(calls))
+
+
 class DeadAgentTest(unittest.TestCase):
     """deliver-batch (#636 D12) reads dead_agents to tell an agent that returned nothing from a stop."""
 

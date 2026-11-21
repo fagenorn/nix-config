@@ -96,6 +96,7 @@ const DEFAULTS = [
     const input = m ? JSON.parse(m[1]) : { edits: [] }
     return { status: 'applied', edits: input.edits.map(e => ({ file: e.file, exists: true, occurrences: 1, already: false })), refused: [] }
   }],
+  [/^live-size$/, { measured: true, head: SHA, files: [{ path: 'src/fix.py', added: 5, deleted: 2 }, { path: 'tests/test_harm.py', added: 20, deleted: 0 }], sensitive: [] }],
   [/^live-review$/, { ...PASS, head: SHA, acceptance: [{ id: 'AC1', met: true, evidence: 'tests/test_harm.py:3 test_harm' }] }],
   [/^direct-review/, { ...PASS, acceptance: [{ id: 'AC1', met: true, evidence: 'test_a.py:10 test_works' }] }],
   // #1386: the follow-up filing step files each entry it is given as the next issue number of its call.

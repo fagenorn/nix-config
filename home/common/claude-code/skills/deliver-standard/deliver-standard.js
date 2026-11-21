@@ -1617,6 +1617,27 @@ const LIVE_IMPL = {
   },
 }
 const LIVE_FINDINGS = withItems({ ...GRADED_FINDINGS, properties: { ...GRADED_FINDINGS.properties, head: FULL_SHA }, required: [...GRADED_FINDINGS.required, 'head'] }, SCOPED_ITEM)
+// #1433: the diff the one live-fault review reads is bounded and read for sensitivity first; the rows are those of git diff --numstat --no-renames, so a rename is a deletion row for its old path and an addition row for its new one.
+const LIVE_MAX_LINES = 80
+const LIVE_MAX_FILES = 3
+const TEST_PATH = /(^|\/)(tests?|__tests__|specs?)\/|(^|\/)test_[^/]*$|[^/]*(_test\.|\.test\.|\.spec\.)[^/]*$/
+const isTestPath = path => TEST_PATH.test(path)
+const LIVE_SIZE = { type: 'object', properties: { measured: { type: 'boolean' }, head: FULL_SHA, files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, added: { type: 'integer', minimum: 0 }, deleted: { type: 'integer', minimum: 0 } }, required: ['path', 'added', 'deleted'] } }, sensitive: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, why: { type: 'string' } }, required: ['path', 'why'] } } }, required: ['measured'] }
+const countOf = v => Number.isInteger(v) && v >= 0
+const liveMeasured = size => isEntry(size) && size.measured === true && Array.isArray(size.files) && Array.isArray(size.sensitive)
+  && size.files.every(f => isEntry(f) && typeof f.path === 'string' && f.path.trim() !== '' && countOf(f.added) && countOf(f.deleted))
+  && size.sensitive.every(f => isEntry(f) && typeof f.path === 'string' && typeof f.why === 'string')
+// null, or the one reason a measured diff is refused; the first check that fails wins.
+const liveRefusal = size => {
+  const rows = new Map()
+  for (const f of size.files) { const k = f.path.trim(); rows.set(k, (rows.get(k) || 0) + f.added + f.deleted) }
+  let lines = 0
+  for (const [k, n] of rows) if (!isTestPath(k)) lines += n
+  if (lines > LIVE_MAX_LINES) return `the diff changes ${lines} lines outside tests, over the live lane's ${LIVE_MAX_LINES}`
+  if (rows.size > LIVE_MAX_FILES) return `the diff changes ${rows.size} files, over the live lane's ${LIVE_MAX_FILES}`
+  if (size.sensitive.length) return `the diff touches ${size.sensitive[0].why} in ${size.sensitive[0].path}`
+  return null
+}
 // The evidence is structural: one command runs at start_head and fails (not 126 or 127: it ran), the runner names the test failed and gives its failure line; the same command at the commit passes and the runner names the test passed.
 // null, or a short text naming the first missing piece.
 const faultTestProblem = impl => {
@@ -1744,6 +1765,16 @@ ${RULES}`, { label: 'live-impl', phase: 'Tasks', agentType: 'implementer', model
     phase('Final review')
     const lost = await renew('final-review', 'Final review')
     if (lost) return lost
+    const size = await call(`${CTX}
+Measure the live-fault diff before its review. Run git -C ${W} fetch origin, then return head (git -C ${W} rev-parse HEAD).
+Run git -C ${W} diff --numstat --no-renames ${RANGE} and return measured true and files: one {path, added, deleted} per line it prints, where a binary file's - counts are 0, and a rename appears as two lines, its old path and its new path.
+Read git -C ${W} diff --no-renames ${RANGE} and return sensitive: one {path, why} per changed path whose change touches authentication or authorization, secrets or credentials, or a permission or command guard (a hook, policy or rule that allows or refuses commands or actions), or [] when none.
+On a non-zero exit, return measured false. Run nothing else and change nothing.
+${RULES}`, { label: 'live-size', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'medium', schema: LIVE_SIZE })
+    if (!liveMeasured(size)) return stop('live-size', { details: 'the live-fault diff could not be measured' })
+    if (!sameSha(size.head, d1.commit)) return stop('live-bound', { details: `the diff was measured at ${typeof size.head === 'string' ? size.head : 'no head'}, not the delivered commit ${d1.commit}` })
+    const refusal = liveRefusal(size)
+    if (refusal !== null) return stop('live-refused', { details: `${refusal}; ${LIVE_WAY}` })
     const review = await readReview(`${CTX}
 lane: live. Review git -C ${W} diff ${RANGE} for issue #${ISSUE}, the fix of the live fault ${JSON.stringify({ observed: LIVE.observed, when: LIVE.when, proven: LIVE.proven })}: it must stop the harm and nothing more. Acceptance criteria: ${ACS}. The implementer's failing-then-passing test: ${JSON.stringify(d1.fault_test)}. Confirm the test is in the diff and that the failure line of its first run is the observed harm. Return head (git -C ${W} rev-parse HEAD). ${KNOW} ${CRITICAL_MEANS} ${COMMIT_ASK(d1.commit)} Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a code criterion that is not met, or has no evidence, is an Important finding, and criteria of other kinds are not findings (grade them and give what you observed). Do not edit anything.`, { label: 'live-review', phase: 'Final review', agentType: 'reviewer', schema: LIVE_FINDINGS }, { once: true })
     if (!review) return stop('live-review', { review: null })
