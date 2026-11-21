@@ -6795,11 +6795,34 @@ class ConsoleService:
                 if found["pull_state"] == "merged":
                     raise sprints.Refused(approve.MERGED)
             root = latest["root"]
-            shown = dict(latest)
-            adoption = None if found is None else dict(found)
-            self._admit_run(root)
-            self._approving = True
-            self._announce_run()
+            again = latest.get("replan") is True and (found is None or found["step"] == "apply_failed")
+            if again:
+                answers, draft = list(latest["answered"]), latest["draft"]
+                remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
+                self._admit_run(root)
+                self._answering = True
+                self._answer_refusal = None
+                self._announce_run()
+            else:
+                shown = dict(latest)
+                adoption = None if found is None else dict(found)
+                self._admit_run(root)
+                self._approving = True
+                self._announce_run()
+        if again:
+            # A plan made from a draft that held a retired record (#1449) is never applied: approving
+            # it plans again from the refreshed draft, and the owner approves the new plan shown.
+            try:
+                self._dispatch(lambda: self._run_answer(
+                    root, plan_id, answers, {"id": "plan-approve", "subject": plan_id}, draft,
+                    None, remote))
+            except BaseException:
+                with self._ingest:
+                    self._end_run()
+                    self._answering = False
+                    self._publish()
+                raise
+            return
         try:
             self._approval_dispatch(lambda: self._run_approval(root, shown, adoption))
         except BaseException:
