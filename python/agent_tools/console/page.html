@@ -406,6 +406,9 @@ code.md-code { padding: 0 4px; font-size: .875em; background: var(--mantle); bor
 .reading-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: .8125rem; color: var(--ov2); }
 .reading-project { min-width: 0; overflow-wrap: anywhere; font-weight: 600; color: var(--sub0); }
 .reading-head .reading-close { margin-left: auto; }
+.reading-head .reading-delete { margin-left: auto; }
+.reading-head .reading-delete + .reading-close { margin-left: 0; }
+.reading-delete-box { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 10px; }
 .reading-question { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: pretty; overflow-wrap: anywhere; white-space: pre-line; }
 #reading .ask-list { margin-top: 20px; }
 #reading .ask + .ask { margin-top: 28px; }
@@ -841,6 +844,10 @@ const followPosts = new Map();
 const followSent = new Map();
 const followLatest = new Map();
 const askReveal = new Set();
+const deleteOpen = new Set();
+const deletePosts = new Map();
+// The console's refusal of a credential-shaped question, compared whole with the refusal text; the page judges no shape.
+const CREDENTIAL_REFUSAL = "this looks like a password, token or key, so it was not kept or sent: take it out and ask again";
 let reading = null;
 let readingReveal = null;
 let sprintRedraw = 0;
@@ -2387,6 +2394,11 @@ async function postAsk(projectId, entry) {
     askSent.get(projectId).list.push({ text, at: state.at, phase: "sent", revealed: state.revealed === true });
     askReconcile(projectId, askLatest.get(projectId));
   } else {
+    if (reason === CREDENTIAL_REFUSAL) {
+      const typed = askDrafts.get(projectId);
+      if (typed !== undefined && typed.value === text) askDrafts.delete(projectId);
+      state.text = "";
+    }
     state.phase = "failed";
     state.reason = reason;
   }
@@ -2772,6 +2784,61 @@ function panelNode(section, path) {
   }
   return node;
 }
+async function postDelete(projectId, thread) {
+  const key = followKey(projectId, thread.id);
+  const current = deletePosts.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  deletePosts.set(key, state);
+  redrawNotices();
+  let reason;
+  try {
+    reason = await ownerAnswer(await fetch("/api/project-question-delete", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ project_id: projectId, thread_id: thread.id }),
+    }));
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (deletePosts.get(key) !== state) return;
+  if (reason === null) {
+    deleteOpen.delete(key);
+    deletePosts.delete(key);
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawNotices();
+}
+// The Delete button for the reading head and, while its confirmation is open, the confirmation box (D10).
+function deleteControls(projectId, thread) {
+  const key = followKey(projectId, thread.id);
+  const open = actionButton("reading-delete btn-quiet", "Delete", () => {
+    deleteOpen.add(key);
+    redrawNotices();
+    const keep = document.querySelector("button.reading-delete-keep");
+    if (keep !== null) keep.focus();
+  });
+  if (!deleteOpen.has(key)) return { button: open, box: null };
+  const state = deletePosts.get(key);
+  const sending = state !== undefined && state.phase === "sending";
+  const box = el("div", "reading-delete-box");
+  box.appendChild(el("span", "reading-delete-note", "Delete this thread? Its questions and answers leave the page and the console's log."));
+  const send = actionButton("reading-delete-send btn-danger", "Delete thread", () => postDelete(projectId, thread));
+  markBusy(send, sending);
+  box.appendChild(send);
+  box.appendChild(actionButton("reading-delete-keep btn-quiet", "Keep", () => {
+    const now = deletePosts.get(key);
+    if (now !== undefined && now.phase === "sending") return;
+    deleteOpen.delete(key);
+    deletePosts.delete(key);
+    redrawNotices();
+    const back = document.querySelector("button.reading-delete");
+    if (back !== null) back.focus();
+  }));
+  if (state !== undefined && state.phase === "failed") box.appendChild(el("span", "fail reading-delete-reason", "Could not delete: " + state.reason));
+  return { button: open, box };
+}
 function closeReading() {
   const was = reading;
   reading = null;
@@ -2802,6 +2869,8 @@ function renderReading(view) {
   const head = el("div", "reading-head");
   head.appendChild(el("span", "reading-project", projectId));
   head.appendChild(timeEl("ago", thread.questions[0].asked_at, "ask-age"));
+  const deletion = deleteControls(projectId, thread);
+  head.appendChild(deletion.button);
   head.appendChild(actionButton("reading-close btn-quiet", "Close", closeReading));
   const heading = el("h2", "reading-question", thread.questions[0].question);
   heading.setAttribute("tabindex", "-1");
@@ -2811,7 +2880,7 @@ function renderReading(view) {
   });
   const pending = followOutstanding(key, thread);
   for (const post of pending) list.appendChild(pendingRow(post));
-  const nodes = [head, heading, list];
+  const nodes = deletion.box === null ? [head, heading, list] : [head, deletion.box, heading, list];
   const follow = followBlock(projectId, thread, pending.length);
   if (follow !== null) nodes.push(follow);
   section.replaceChildren(...nodes);
@@ -5287,6 +5356,12 @@ function drawProjects(view) {
   }
   for (const key of [...followPosts.keys()]) {
     if (!followLatest.has(key)) followPosts.delete(key);
+  }
+  for (const key of [...deleteOpen]) {
+    if (!followLatest.has(key)) deleteOpen.delete(key);
+  }
+  for (const key of [...deletePosts.keys()]) {
+    if (!followLatest.has(key)) deletePosts.delete(key);
   }
   for (const key of [...followSent.keys()]) {
     if (followLatest.has(key)) followReconcile(key, followLatest.get(key));
