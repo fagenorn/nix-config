@@ -8552,6 +8552,10 @@ class ConsoleService:
         today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
         since = (today - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
         self._spend.read(projects_dirs, since, self._ping_log())
+        if self._spend.roots_unreadable and self._spend_view is None:
+            # A cold start whose only transcript roots cannot be listed knows no spend: publishing the empty totals
+            # would show 30 zero days, so the view stays absent and the records' spend stays null.
+            raise OSError("the transcript directories cannot be listed")
         snapshot = self._spend.snapshot()
         with self._ingest:
             self._spend_view = spend.spend_view(

@@ -31,6 +31,21 @@ KEYS = ("a" * 32, "b" * 32, "c" * 32)
 START = datetime.fromisoformat("2026-11-20T10:00:00+00:00")
 
 
+# The records' spend section as the console writes it (`question_records.encode`), with a figure outside the spend
+# section (a sprint's tokens) that no answer may be grounded on.
+RECORDS = json.dumps({
+    "project_id": PROJECT,
+    "sprints": [{"sprint_id": "s1", "tokens": 99999, "dollars": 7.77}],
+    "spend": {
+        "note": "Tokens are counted 1357 times at 0.99 dollars.", "first_day": "2026-10-22", "last_day": "2026-11-20",
+        "days": [{"day": "2026-11-19", "tokens": 1500, "dollars": 0.15, "approximate": False}],
+        "runs": [{"run_id": "r1", "issues": [1357], "tokens": 4200, "dollars": 0.42, "approximate": False,
+                  "phases": {"plan": {"tokens": 1200, "dollars": 0.1, "approximate": False}}}],
+        "issues": [{"issue": 1357, "tokens": 1200000, "dollars": 38.1, "approximate": True,
+                    "runs": ["r1"], "shared_runs": []}],
+        "sprints": []}}, indent=1, sort_keys=True) + "\n"
+
+
 def grounded(qid):
     return "Answer: figures, 4,200 tokens ($0.42)\nRead: " + READ.format(qid) + " (spend)"
 
@@ -59,6 +74,7 @@ class Harness:
         self.rev = REV
         self.after_post = None
         self.view_hook = None
+        self.record_texts = {}
 
     def row(self, kind, project, payload):
         self.seq += 1
@@ -126,11 +142,14 @@ class Harness:
     def revision(self):
         return self.rev
 
+    def records(self, question_id):
+        return self.record_texts.get(question_id, RECORDS)
+
     def run(self, *extra, **seams):
         argv = ["--project", PROJECT, "--token-file", str(self.token_file),
                 "--state-file", str(self.state_file), "--result-file", str(self.result_file), *extra]
         wired = dict(state=self.state, post=self.post, now=self.now, sleep=self.sleep,
-                     new_key=self.new_key, revision=self.revision)
+                     new_key=self.new_key, revision=self.revision, records=self.records)
         wired.update(seams)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -303,53 +322,80 @@ class QuestionCheckTest(unittest.TestCase):
         self.assertEqual((code, line["status"], line["verdicts"]),
                          (1, "not_met", ["grounded", "ungrounded", "grounded"]))
 
-    def test_a_cost_answer_whose_figure_is_an_issue_number_or_whose_spend_part_is_another_files_is_not_met(self):
-        own = READ.format("q2")
-        for text in ("Answer: For issue #7, tokens were unavailable.\nRead: " + own + " (spend)",
-                     "Answer: For issue 7, tokens were unavailable.\nRead: " + own + " (spend)",
-                     "Answer: #7 cost 4,200 tokens.\nRead: " + own + " (deliveries), old-profile.md (spend)",
-                     "Answer: #7 cost 4,200 tokens ($0.42).\nRead: " + own,
-                     "Answer: For issues 1357 and 1364 tokens were unavailable.\nRead: " + own + " (spend)",
-                     "Answer: In PR 1364 tokens were not recorded.\nRead: " + own + " (spend)",
-                     "Answer: Issue  1357 tokens unavailable\nRead: " + own + " (spend)",
-                     "Answer: Issues 1357 tokens unavailable\nRead: " + own + " (spend)",
-                     "Answer: For issue `1357` tokens were unavailable.\nRead: " + own + " (spend)",
-                     "Answer: For issue **1357** tokens were unavailable.\nRead: " + own + " (spend)",
-                     "Answer: For #1357 and 1364 tokens were unavailable.\nRead: " + own + " (spend)",
-                     "Answer: For issues 1357-1364 tokens were unavailable.\nRead: " + own + " (spend)",
-                     "Answer: For issue-1357 tokens were unavailable.\nRead: " + own + " (spend)"):
-            with self.subTest(text=text):
-                h = Harness(self)
-                h.seed([grounded("q1"), text, grounded("q3")])
-                code, line = h.run()
-                self.assertEqual((code, line["status"], line["verdicts"][1]),
-                                 (1, "not_met", "ungrounded"))
+    def cost(self, answer, read=None, records=None):
+        """Run the check over a cost answer (QUESTIONS[1]) and give its verdict."""
+        h = Harness(self)
+        if records is not None:
+            h.record_texts["q2"] = records
+        h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + (read or READ.format("q2") + " (spend)"),
+                grounded("q3")])
+        code, line = h.run()
+        return line["verdicts"][1]
 
-    def test_a_cost_answer_whose_only_dollar_figure_is_not_a_complete_amount_is_not_met(self):
-        own = READ.format("q2")
-        for answer in ("The script takes $1 as its argument.", "Planning cost $12,34 per issue.",
-                       "The script takes `$1` as its argument.", "Issue 1357 token usage is unavailable."):
+    def test_a_cost_answer_quoting_no_figure_of_its_records_spend_is_not_met(self):
+        for answer in ("For issues 1357, 1364, and 1370 tokens were unavailable.",
+                       "The cost command failed with: $1: unbound variable",
+                       "For issue #7, tokens were unavailable.",
+                       "Issues 1357 to 1364 and 1370 used none.",
+                       "Planning dominated, about 1.2M tokens or $38.", "Sprint s1 used 99,999 tokens ($7.77).",
+                       "Planning cost $0.43.", "Planning cost $0.4.", "Planning cost 0.42.", "Planning cost $0.425.",
+                       "Planning used 4,20 tokens.", "Planning used 42000 tokens.", "Planning used 4,200.5 tokens.",
+                       "Planning cost $38.", "Planning cost $4,200.", "Planning cost $0.42abc.",
+                       "The note says 1357 and 0.99."):
             with self.subTest(answer=answer):
-                h = Harness(self)
-                h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + own + " (spend)", grounded("q3")])
-                code, line = h.run()
-                self.assertEqual((code, line["status"], line["verdicts"][1]),
-                                 (1, "not_met", "ungrounded"))
+                self.assertEqual(self.cost(answer), "ungrounded")
 
-    def test_a_cost_answer_with_a_whole_dollar_amount_is_grounded(self):
-        for answer in ("Planning cost about $38 across the month.", "Planning cost $12 per issue.",
-                       "Planning cost ~$12 per issue.", "Planning cost $12 in total.",
-                       "Planning cost $5 per issue.", "$5 is the average cost per issue.",
-                       "Planning costs the most per issue; its $5 is about half of each issue's spend.",
-                       "Planning led with $5.", "Planning was the costliest, using $5.",
-                       "$5 is the total for planning.", "Planning's $5 is the most of any phase.",
-                       "Planning cost `$5` per issue.", "Planning cost **`$5`** per issue.", "**`$5`**"):
+    def test_a_cost_answer_is_ungrounded_when_its_records_hold_no_spend_figure_to_read(self):
+        h = Harness(self)
+        h.seed([grounded("q1"), grounded("q2"), grounded("q3")])
+        code, line = h.run(records=lambda question_id: None)
+        self.assertEqual((code, line["verdicts"]), (1, ["grounded", "ungrounded", "grounded"]))
+        for records in ('{"spend": null}', "{}", "[]", "not json", '{"spend": []}'):
+            with self.subTest(records=records):
+                self.assertEqual(self.cost("Planning used 4,200 tokens ($0.42).", records=records), "ungrounded")
+
+    def test_the_default_records_reader_reads_the_retained_file_of_the_question(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        settings = directory / "console" / project_question.SETTINGS_DIR
+        settings.mkdir(parents=True)
+        (settings / ("q2" + project_question.RECORDS_SUFFIX)).write_text(RECORDS, encoding="utf-8")
+        for answer, verdict in (("Planning used 4,200 tokens.", "grounded"), ("Planning used 4,201 tokens.", "ungrounded")):
             with self.subTest(answer=answer):
                 h = Harness(self)
                 h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + READ.format("q2") + " (spend)",
                         grounded("q3")])
-                code, line = h.run()
-                self.assertEqual((code, line["status"], line["verdicts"][1]), (0, "met", "grounded"))
+                with mock.patch.object(manager_check, "_state_dir", return_value=directory / "console"):
+                    code, line = h.run(records=None)
+                self.assertEqual(line["verdicts"][1], verdict)
+        with self.subTest("no retained file"):
+            h = Harness(self)
+            h.seed([grounded("q1"), grounded("q2"), grounded("q3")])
+            with mock.patch.object(manager_check, "_state_dir", return_value=directory / "none"):
+                code, line = h.run(records=None)
+            self.assertEqual(line["verdicts"][1], "ungrounded")
+
+    def test_a_cost_answer_quoting_a_figure_of_its_records_spend_is_grounded_in_any_phrasing(self):
+        for answer in ("#7 cost 4,200 tokens.", "#7 cost 4200 tokens.", "#7 cost $0.42.",
+                       "Cost $38.10 over 1,200,000 tokens.",
+                       "Per issue: 4,200 tokens on average.", "Average per run: 4,200 tokens.",
+                       "Issue #1357 \u2014 4,200 tokens.", "#1357 \u2013 1,200,000 tokens", "#1357 - 4,200 tokens",
+                       "- **#1357** \u2014 1,200,000 tokens",
+                       "- #1357 \u2014 1,200,000 tokens, the most of any issue",
+                       "Issue 1357 - 4,200 tokens.", "#1357 4,200 tokens", "top run 4,200 tokens",
+                       "by run: 4,200 tokens", "4,200 output tokens", "1,200,000 cache-read tokens",
+                       "tokens: 1,200,000", "$0.42 per run",
+                       "For issues 1357, 1364, and 1370 it was 4,200 tokens.", "**4,200** tokens", "**$0.42**",
+                       "`4,200` tokens", "`$0.42`", "Planning used 1,500 tokens on 2026-11-19.",
+                       "1200 tokens in plan", "$ 0.42", "(4,200)", "$38.10, 4,200"):
+            with self.subTest(answer=answer):
+                self.assertEqual(self.cost(answer), "grounded")
+
+    def test_a_cost_answer_whose_spend_part_is_not_its_own_files_is_not_met(self):
+        own = READ.format("q2")
+        for read in (own + " (deliveries), old-profile.md (spend)", own,
+                     "old-profile.md (spend), " + own + " (deliveries)"):
+            with self.subTest(read=read):
+                self.assertEqual(self.cost("#7 cost 4,200 tokens ($0.42).", read=read), "ungrounded")
 
     def test_a_cost_answer_citing_the_records_with_spend_excluded_is_not_met(self):
         for read in (READ.format("q2") + " (deliveries only, excluding spend)",
@@ -367,25 +413,14 @@ class QuestionCheckTest(unittest.TestCase):
                 self.assertEqual((code, line["status"], line["verdicts"][1]),
                                  (1, "not_met", "ungrounded"))
 
-    def test_a_cost_answer_with_the_bold_the_prompt_permits_is_grounded(self):
-        for answer in ("Planning used **4,200** tokens per issue.", "Planning used **4,200 tokens** per issue.",
-                       "Planning cost **$0.42** per issue.", "Planning used **4.2M** tokens.",
-                       "Planning used `4,200` tokens.", "Planning cost **12** dollars."):
-            with self.subTest(answer=answer):
-                h = Harness(self)
-                h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + READ.format("q2") + " (spend)",
-                        grounded("q3")])
-                code, line = h.run()
-                self.assertEqual((code, line["verdicts"]), (0, ["grounded"] * 3))
-
     def test_a_cost_answer_with_a_spend_figure_from_its_spend_part_is_grounded(self):
         own = READ.format("q2")
-        for answer in ("#7 cost 4,200 tokens.", "#7 cost 4.2M tokens.", "#7 cost $0.42.",
-                       "#7 cost 1.5 million tokens."):
+        for answer in ("#7 cost 4,200 tokens.", "#7 cost $0.42."):
             for read in (own + " (spend)", "`" + own + "` (spend)", own + ":120-400 (spend, deliveries)",
                          own + " (deliveries, spend)", own + " (spend offset 3 limit 40)", own + " (spend part)",
                          own + " (spend section)", own + " (spend: offset 3 limit 40)",
-                         "**" + own + "** (spend)", "**" + own + "**:1-40 (spend)"):
+                         "**" + own + "** (spend)", "**" + own + "**:1-40 (spend)", '"' + own + '" (spend)',
+                         "'" + own + "' (spend)", '"' + own + '":1-40 (spend)'):
                 with self.subTest(answer=answer, read=read):
                     h = Harness(self)
                     h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + read, grounded("q3")])
@@ -399,41 +434,33 @@ class QuestionCheckTest(unittest.TestCase):
         code, line = h.run()
         self.assertEqual((code, line["status"]), (0, "met"))
 
-    def test_spend_figure_and_cites_part(self):
-        for text in ("4,200 tokens", "$38.10", "40k tokens", "12 USD", "4.2M tokens", "1.5 million tokens", "$1,200", "$3k", "$12", "$38", "$12 per issue", "~$12", "cost $12 in total", "$5 per issue", "$1.5 million",
-                     "**4,200** tokens", "**$0.42**", "`4,200` tokens",
-                     "Planning cost about $5.", "$5 a month", "$5/issue", "$5 for the month", "$5 on planning",
-                     "Planning: $5", "$5, the most", "the $5 spent", "($5)", "**$5**",
-                     "$5 is the average cost per issue", "Planning led with $5.", "Planning was the costliest, using $5.",
-                     "$5 is the total for planning.", "Planning's $5 is the most of any phase.",
-                     "its $5 is about half of each issue's spend", "with $5 spent", "use $5 a month",
-                     "Planning cost `$5` per issue.", "Planning cost **`$5`** per issue.", "`$5`",
-                     "Issue 1357 used 4,200 tokens.", "Issues 1357 and 1364 used 4,200 tokens.",
-                     "Issue `1357` used `4,200` tokens.", "Issue-1357 used 4,200 tokens.",
-                     "Issues 1357-1364 used 4,200 tokens."):
+    def test_spend_figures_are_the_token_counts_and_two_place_dollars_of_the_spend_section_only(self):
+        self.assertEqual(question_check.spend_figures(RECORDS), frozenset({
+            "1500", "$0.15", "4200", "$0.42", "1200", "$0.10", "1200000", "$38.10"}))
+        for records in (None, "", "not json", "[]", "{}", '{"spend": null}', '{"spend": 7}', '{"spend": []}'):
+            with self.subTest(records=records):
+                self.assertEqual(question_check.spend_figures(records), frozenset())
+        self.assertEqual(question_check.spend_figures(
+            '{"spend": {"days": [{"tokens": true, "dollars": false}, {"tokens": 1.5, "dollars": 3}]}}'),
+            frozenset({"$3.00"}))
+
+    def test_spend_figure_is_membership_of_a_quoted_number(self):
+        figures = frozenset({"4200", "$0.42", "$1200.50"})
+        for text in ("4200", "4,200 tokens", "$0.42", "$ 0.42", "**$0.42**", "($0.42)", "$1,200.50", "x 4,200."):
             with self.subTest(text=text):
-                self.assertIs(question_check.spend_figure(text), True)
-        for text in (None, "Planning costs the most per issue.", "#1271 took 3 runs over 7 days",
-                     "For issue #7, tokens were unavailable.", "For issue 7, tokens were unavailable.",
-                     "#7 tokens", "12,34 tokens", "$1 is a script argument", "costs $12,34", "the $1.", "$123,4",
-                     "the $1", "script argument $1.", "For issues 1357 and 1364 tokens were unavailable.",
-                     "In PR 1364 tokens were not recorded.", "Issue  1357 tokens unavailable",
-                     "Issues 1357 tokens unavailable", "For issues 1357, 1364 tokens were unavailable.",
-                     "Pull request 1364 tokens unavailable", "Ticket 12 dollars unavailable", "$1 as an argument", "$1abc", "Issue 1357 token usage is unavailable",
-                     "`$1` as its argument", "takes `$1` as its argument", "$1 is the first argument",
-                     "For issue `1357` tokens were unavailable.", "For issue **1357** tokens were unavailable.",
-                     "For #1357 and 1364 tokens were unavailable.", "For issues 1357-1364 tokens were unavailable.",
-                     "For issue-1357 tokens were unavailable.", "For issues `1357` and `1364` tokens unavailable.",
-                     "For issues #1357, 1364 and 1370 tokens unavailable.", "For issue no. 1357 tokens unavailable.",
-                     "For issue: 1357 tokens unavailable.", "Issues 1357 to 1364 tokens unavailable.",
-                     "For **issue 1357** tokens were unavailable.", "For issue `1357` dollars unavailable."):
+                self.assertIs(question_check.spend_figure(text, figures), True)
+        for text in (None, "", "42", "4,20", "42000", "4,200.5", "0.42", "$0.4", "$0.425", "$4,200", "$1200",
+                     "x4200", "4200abc", "v4.200", "1.2M tokens"):
             with self.subTest(text=text):
-                self.assertIs(question_check.spend_figure(text), False)
+                self.assertIs(question_check.spend_figure(text, figures), False)
+
+    def test_cites_part_reads_the_part_of_the_questions_own_file(self):
         own = READ.format("q2")
         for read in ("Read: " + own + " (spend)", "Read: " + own + " (Spend, deliveries)",
                      "Read: " + own + ":1-40 (spend)", "Read: " + own + " (spend offset 3 limit 40)",
                      "Read: " + own + " (spend part)", "Read: " + own + " (spend: offset 3 limit 40)",
-                     "Read: **" + own + "** (spend)", "Read: " + own + " (deliveries and spend)",
+                     "Read: **" + own + "** (spend)", 'Read: "' + own + '" (spend)', "Read: '" + own + "' (spend)",
+                     "Read: " + own + " (deliveries and spend)",
                      "Read: " + own + " (deliveries/spend)"):
             with self.subTest(read=read):
                 self.assertIs(question_check.cites_part(read, "q2.records.json", "spend"), True)

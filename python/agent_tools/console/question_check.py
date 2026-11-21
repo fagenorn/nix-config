@@ -65,9 +65,12 @@ Order of one run:
 7. Verdicts: not found or `working` is `pending` (`refused` when its post was refused); `failed` and
    `timed_out` are `failed`; `answered` is `grounded` or `ungrounded`. An answer is grounded iff its
    `answer` is a non-blank string and `cites(read_text, question_id + RECORDS_SUFFIX)` holds (P5); the
-   cost question's (`QUESTIONS[1]`) answer is also grounded only when `spend_figure(answer)` holds and
-   `cites_part(read_text, question_id + RECORDS_SUFFIX, SPEND_PART)` holds, so a cost answer that names
-   no spend figure, or does not cite the spend part of its own file, is `ungrounded` (ADR-console-090).
+   cost question's (`QUESTIONS[1]`) answer is also grounded only when `spend_figure(answer, spend_figures(records
+   text))` holds and `cites_part(read_text, question_id + RECORDS_SUFFIX, SPEND_PART)` holds, so a cost answer
+   that quotes no figure of its own records' spend section, or does not cite the spend part of its own file, is
+   `ungrounded` (ADR-console-090). The records text is the question's own retained file,
+   `<state dir>/project-question-settings/<question id>.records.json` (the console keeps it for an answered
+   question, `project_question.RECORDS_KEPT_SECONDS`); a file that cannot be read leaves the answer `ungrounded`.
 8. Status, first match wins: any `failed` or `ungrounded` is `not_met`, exit 1; any `pending` or
    `refused` is `waiting`, 75; else `met`, 0. A usage or setup error is 2.
 9. The result file is written whenever step 3 found the project. Stdout is exactly one JSON line with
@@ -92,20 +95,22 @@ failure or error next to `activation`, `run`, `build`, `deploy`, `production`, `
 `step`, `test`, `switch`, `delivery`, `release`, `commit` or `merge`, unless `to` follows, as in `run failed
 to open`) is removed first (`_FAILED_RUN`), so `q.records.json (failed activation)` is a citation.
 
-`spend_figure(text)` is False for None, else whether the text holds a spend figure: a dollar amount
-(`$0.42`, `$1,200`, `$3k`, `$12`, `$5 a month`: a complete amount, not followed by a digit, `,` or `.` and a
-digit, so `$12,34` is no figure; a lone digit is a figure unless a word character follows it, it is said to
-be an argument (`$1 is a script argument`, also in a code span), an argument noun leads into it
-(`argument $1`) or `the` leads into it at the end of a sentence (`the $1.`), since `$1` is also a shell
-argument; a code span alone is no cue, so `` `$5` `` is a figure), a number followed by `tokens`
-(with an optional `k`, `m`, `b`, `thousand`, `million` or `billion`) or a number followed by `dollars` or
-`usd` (not when it follows an identifier word, `issue`, `PR`, `pull request`, `ticket`, `run` or `id`, alone
-or in a list of numbers, also with `no.`, a colon, a hyphen, a `#` or the marks between the word and the number and a `-`, `..`, `to` or `and` between numbers, or in a list that leads with a `#` number, so `issue 1357 tokens`, `issue-1357 tokens`, `issues 1357-1364 tokens`, `#1357 and 1364 tokens` and `PR 1364 tokens` hold none), with the `**bold**` or `inline code` marks the answer rules permit around the number or the unit
-(`**4,200** tokens`). A number is digits with commas only between three-digit groups and an optional fraction, and one right after `#`, a word character, `.` or `,` is
-not a figure, so `issue #7, tokens` and `issue 7, tokens` hold none. `cites_part(read_text, name, part)`
+`spend_figures(records)` is the set of spend values the records text prints: parsed as JSON, every number under
+a `tokens` key (an int) of its `spend` member, at any depth, as its digits, and every number under a `dollars`
+key as `$` and two decimals (`$0.42`, `$38.10`); text that is no JSON, or has no `spend` object, gives the empty
+set. `spend_figure(text, figures)` is False for None, else whether the text quotes one of them: it finds each
+number in the text (digits with commas only between three-digit groups, an optional fraction, not inside a longer
+word or number, an optional `$` before it) and holds a token count when a number with no `$` and no fraction,
+commas dropped, is in `figures`, and a dollar amount when a number with `$` and a fraction, commas dropped, is.
+The shape of the prose around a figure is never judged (ADR-console-090: the session is told to quote each
+figure exactly as the records print it). Stated limits, not defects: a number of the answer that is no spend
+figure but equals a spend value passes, and a figure the session reformats (rounded, `1.2M`, converted or
+reworded) is no figure.
+
+`cites_part(read_text, name, part)`
 is True iff `cites(read_text, name)` holds and some occurrence of `name` in the Read text, at the start
 of a line or after whitespace, `/`, a backquote, a quote, `(`, `[`, `<` or `*`, is followed by optional
-closing backquotes or asterisks, an optional line range (`:120-400`) and optional whitespace and then a
+closing backquotes, quotes or asterisks, an optional line range (`:120-400`) and optional whitespace and then a
 parenthesized group one of whose words equals `part` (case-insensitively; the group is split at whitespace and
 at `,`, `;`, `:`, `/`, `&` and the brackets and marks around a word, and every word must be a section name of
 `question_records.SECTIONS`, `held`, `checks`, `offset`, `limit`, `part`, `parts`, `section`, `sections`, `only`,
@@ -113,7 +118,8 @@ at `,`, `;`, `:`, `/`, `&` and the brackets and marks around a word, and every w
 other word, `excluding`, `not`, `skipped`, `but` or `unread`, marks none, as in `deliveries only, spend skipped`), so the part is bound to the citation of the
 question's own file: `<path> (deliveries), old-profile.md (spend)` does not cite the spend part.
 
-The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key` and `revision`.
+The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key`, `revision` and `records` (a question id to its
+records text, None when unreadable).
 """
 
 import argparse
@@ -155,36 +161,9 @@ _FAILED_RUN = re.compile(
     r"|test|switch|delivery|release|commit|merge)s?)\b", re.IGNORECASE)
 _LINE_SUFFIX = re.compile(r":[0-9][0-9,-]*$")
 SPEND_PART = "spend"
-_NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
-_MAGNITUDE = r"(?:[kmb]|thousand|million|billion)"
-_MARK = r"[*`]{0,2}\s?[*`]{0,2}"
-_END = r"(?![\d]|[.,]\d)"
-_DOLLAR_AMOUNT = re.compile(
-    r"\$\s?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+|\d{1,3}(?:,\d{3})+|\d+\s?" + _MAGNITUDE + r"\b|\d{2,})" + _END)
-_COUNT_FIGURE = re.compile(
-    r"(?<![#\w.,])" + _NUMBER + _MARK + r"(?:" + _MAGNITUDE + _MARK + r")?tokens\b"
-    + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:dollars|usd)\b", re.IGNORECASE)
-# A number right after an identifier word, alone or in a list of numbers (`issues 1357 and 1364`, `PR 1364`), is
-# that identifier and no count, so `issues 1357 and 1364 tokens` holds no figure. The identifier word may be followed
-# by `no.`/`number`, a colon, a hyphen, a `#` or the `**bold**`/`inline code` marks; the numbers may be marked, joined
-# by `,`, `&`, `/`, a hyphen or dots (a range), `and`, `or` or `to`, and a list may lead with a `#` number alone.
-_ID_ITEM = r"[*`]*#?\d+[*`]*"
-_ID_SEP = r"(?:\s*(?:-|\u2013|\u2014|\.\.|,|&|/)\s*|\s+(?:and|or|to)\s+|\s+)"
-_IDENTIFIER_BEFORE = re.compile(
-    r"(?:\b(?:issues?|prs?|pull\s+requests?|tickets?|runs?|ids?)(?:\s+(?:no\.?|number))?[\s:#*`-]*"
-    r"|(?<!\w)[*`]*#\d+[*`]*" + _ID_SEP + r")(?:" + _ID_ITEM + _ID_SEP + r")*[*`]*\Z", re.IGNORECASE)
-# A lone digit after `$` is a dollar amount unless a cue marks it as a shell positional argument ($1): a word that
-# names an argument leads into it or an argument is what it is said to be, or the article `the` leads into it at the
-# end of a sentence. A code span around it is no cue: the prompt permits `inline code` around a figure.
-_LONE_DOLLAR = re.compile(r"\$\s?\d(?![\w]|[.,]\d)")
-_ARGUMENT = r"(?:arg|args|argument|arguments|param|parameter|parameters|variable|var|positional)"
-_SHELL_AFTER = re.compile(
-    r"`?\s+(?:as|is|are|holds|expands|refers\s+to|means)\s+(?:(?:the|its|an?|his|their|that)\s+)?"
-    r"(?:(?:first|second|script|shell|positional|command|function|cli|input|only)\s+)*" + _ARGUMENT + r"\b",
-    re.IGNORECASE)
-_SHELL_BEFORE = re.compile(r"\b" + _ARGUMENT + r"\s+`?\Z", re.IGNORECASE)
-_ARTICLE_BEFORE = re.compile(r"\bthe\s+\Z", re.IGNORECASE)
-_SENTENCE_END = re.compile(r"\.?\s*\Z|\.(?!\d)")
+# A figure in an answer: a number (commas only between three-digit groups, an optional fraction), not part of a
+# longer word or number, with an optional `$` before it. Judged only by membership in the records' spend values.
+_AMOUNT = re.compile(r"(?<![\w.,])(\$\s?)?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?!\w)")
 # The words a parenthesized group may hold besides the part it marks: the records' section names, the prompt's
 # `offset`/`limit` pair and numbers. Any other word (`excluding`, `skipped`, `but`, `unread`) can say the part
 # was not read, so a group that holds one marks no part.
@@ -211,19 +190,43 @@ def cites(read_text: str | None, name: str) -> bool:
         _FAILED_READ.search(_FAILED_RUN.sub(" ", clause)) for clause in clauses[named[0]:])
 
 
-def spend_figure(text: str | None) -> bool:
-    """Whether `text` holds a spend figure: a dollar amount or a number of tokens or dollars."""
-    return text is not None and (
-        _DOLLAR_AMOUNT.search(text) is not None
-        or any(not _shell_argument(text, found) for found in _LONE_DOLLAR.finditer(text))
-        or any(_IDENTIFIER_BEFORE.search(text[:found.start()]) is None for found in _COUNT_FIGURE.finditer(text)))
+def spend_figures(records: str | None) -> frozenset[str]:
+    """The spend values the records print: each token count as its digits, each dollar amount as `$` and two places."""
+    try:
+        spend = json.loads(records)["spend"] if records is not None else None
+    except (ValueError, TypeError, KeyError, RecursionError):
+        return frozenset()
+    found: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for name, value in node.items():
+                number = isinstance(value, (int, float)) and not isinstance(value, bool)
+                if number and name == "tokens" and isinstance(value, int):
+                    found.add(str(value))
+                elif number and name == "dollars":
+                    found.add(f"${value:.2f}")
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(spend)
+    return frozenset(found)
 
 
-def _shell_argument(text: str, found: re.Match) -> bool:
-    before, after = text[:found.start()], text[found.end():]
-    return (_SHELL_AFTER.match(after) is not None
-            or _SHELL_BEFORE.search(before) is not None
-            or (_ARTICLE_BEFORE.search(before) is not None and _SENTENCE_END.match(after) is not None))
+def spend_figure(text: str | None, figures: frozenset[str]) -> bool:
+    """Whether `text` quotes a figure of `figures`, a token count or a two-place dollar amount as the records print it."""
+    if text is None:
+        return False
+    for found in _AMOUNT.finditer(text):
+        number = found.group(2).replace(",", "")
+        if found.group(1) is None and found.group(3) is None and number in figures:
+            return True
+        if found.group(1) is not None and found.group(3) is not None and f"${number}{found.group(3)}" in figures:
+            return True
+    return False
 
 
 def cites_part(read_text: str | None, name: str, part: str) -> bool:
@@ -232,7 +235,7 @@ def cites_part(read_text: str | None, name: str, part: str) -> bool:
         return False
     body = read_text.removeprefix(view.ASK_READ_TEXT.format(text=""))
     pattern = re.compile(r"(?:^|(?<=[\s/`'\"(\[<*]))" + re.escape(name)
-                         + r"[*`]*(?::[0-9][0-9,-]*)?[*`]*\s*\(([^)]*)\)", re.MULTILINE)
+                         + r"[*`'\"]*(?::[0-9][0-9,-]*)?[*`'\"]*\s*\(([^)]*)\)", re.MULTILINE)
     return any(_marks(found.group(1), part) for found in pattern.finditer(body))
 
 
@@ -248,6 +251,17 @@ def _names(clause: str, name: str) -> bool:
         if token.rsplit("/", 1)[-1] == name:
             return True
     return False
+
+
+def _records_reader(state_dir: Path):
+    """The reader of a question's retained records text under the console's settings directory, None when unreadable."""
+    def read(question_id: str) -> str | None:
+        try:
+            return (state_dir / project_question.SETTINGS_DIR / (question_id + project_question.RECORDS_SUFFIX)
+                    ).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+    return read
 
 
 def _git_revision() -> str | None:
@@ -330,7 +344,8 @@ def _locked(state_file: Path):
         os.close(descriptor)
 
 
-def _verdict(shown: dict | None, refused: bool, cost: bool = False) -> str:
+def _verdict(shown: dict | None, refused: bool, records=None) -> str:
+    """`records` is the cost question's reader of a question's records text (None: any answer needs no spend figure)."""
     state = shown.get("state") if shown else None
     if state in ("failed", "timed_out"):
         return "failed"
@@ -338,8 +353,8 @@ def _verdict(shown: dict | None, refused: bool, cost: bool = False) -> str:
         answer = shown.get("answer")
         name = str(shown.get("id")) + project_question.RECORDS_SUFFIX
         if (isinstance(answer, str) and answer.strip() and cites(shown.get("read_text"), name)
-                and (not cost or (spend_figure(answer)
-                                  and cites_part(shown.get("read_text"), name, SPEND_PART)))):
+                and (records is None or (spend_figure(answer, spend_figures(records(str(shown.get("id")))))
+                                         and cites_part(shown.get("read_text"), name, SPEND_PART)))):
             return "grounded"
         return "ungrounded"
     return "refused" if refused else "pending"
@@ -354,7 +369,7 @@ def _status(verdicts: list[str]) -> str:
 
 
 def main(argv: list[str] | None = None, *, state=None, post=None, now=None, sleep=None,
-         new_key=None, revision=None) -> int:
+         new_key=None, revision=None, records=None) -> int:
     args = build_parser().parse_args(argv)
     state_dir = manager_check._state_dir()
     token_file = args.token_file or state_dir / "page-token"
@@ -367,6 +382,7 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
     sleep = sleep or time.sleep
     new_key = new_key or (lambda: secrets.token_hex(16))
     revision = revision or _git_revision
+    records = records or _records_reader(state_dir)
     started = now()
 
     def finish(status: str, code: int | None = None, **more) -> int:
@@ -453,7 +469,7 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
             current, entry, stale = fresh, _project_entry(fresh, args.project), False
 
     verdicts = [_verdict(_shown(entry, keys[text]), posts.get(text, "").startswith("refused"),
-                         cost=(text == QUESTIONS[1]))
+                         records=records if text == QUESTIONS[1] else None)
                 for text in texts]
     return _finish_result(finish, result_file, args.project, rev, now, _status(verdicts), texts, keys,
                           verdicts, posts, entry)

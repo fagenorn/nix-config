@@ -20,7 +20,9 @@ a file whose size moved and reads only its new bytes. A file whose modification 
 `since` is not opened and its cursor is forgotten. A file the reader finds absent, or that this read
 did not list, loses its cursor; but a directory whose listing fails with an `OSError` other than
 `FileNotFoundError` or `NotADirectoryError` confirms nothing, so every cursor known under it is
-kept and only bytes appended since are read once it lists again. `read` never raises for a missing
+kept and only bytes appended since are read once it lists again. `roots_unreadable` is True after a `read` whose every
+`projects` directory failed to list that way (an absent one is empty, not a failure): the empty totals then say nothing
+about spend, and a caller with no view yet must not publish them as zero. `read` never raises for a missing
 or unreadable directory or file.
 
 The key: `Key(day, session, run, agent, source)`, `day` the UTC date of the message `timestamp`,
@@ -344,6 +346,7 @@ class SpendReader:
         self._names: dict[str, str] = {}
         self._repos: dict[str, str | None] = {}
         self._known: set[Path] = set()
+        self.roots_unreadable = False
 
     def snapshot(self) -> Snapshot:
         return Snapshot(dict(self._totals),
@@ -359,6 +362,7 @@ class SpendReader:
                 continue
             walked.add(real)
             self._walk_projects(Path(real), since, walk)
+        self.roots_unreadable = bool(walked) and all(Path(real) in walk.failed for real in walked)
         if ping_log is not None:
             self._read_pings(Path(ping_log), since)
         for path in sorted(self._known - walk.listed):

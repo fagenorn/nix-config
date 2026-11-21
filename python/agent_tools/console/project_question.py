@@ -44,8 +44,10 @@ thread text, then `QUESTION_MARK` and the question (ADR-console-065).
 Records (ADR-console-089). An `Ask` may carry `records`, the encoded document of the console's own
 records for the project (None: none). The session's file is `records_path(ask)`: `SETTINGS_DIR`'s
 directory (0700), the question's id plus `RECORDS_SUFFIX`, mode 0600, written atomically after the
-settings file with exactly `ask.records`, and removed with the settings file on every path once the
-run ends. `prompt` puts `RECORDS_TEXT` with that path after the reads paragraph and before the
+settings file with exactly `ask.records`. The settings file is removed on every path once the run ends;
+the records file is removed then too unless the outcome is `ANSWERED`, when it is kept so the verify check
+can read its spend section (`question_check`, ADR-console-090 D3), and a write of any records file first removes
+the kept files older than `RECORDS_KEPT_SECONDS` (90 days, the question's own retention). `prompt` puts `RECORDS_TEXT` with that path after the reads paragraph and before the
 thread text, only with records. With records it also gives each part of `question_records.SECTIONS`
 that the document holds as `<name> offset <n> limit <m>` (`SECTIONS_TEXT`, from `section_lines`), so
 the session reads one part alone, and it asks the session to cite the file with the parts it read in
@@ -147,6 +149,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -169,6 +172,7 @@ MAX_QUESTION_CHARS = 2000
 SETTINGS_DIR = "project-question-settings"
 SETTINGS_SUFFIX = ".settings.json"
 RECORDS_SUFFIX = ".records.json"
+RECORDS_KEPT_SECONDS = 90 * 24 * 3600
 HOOK_MODULE = "console.project_question_hook"
 GIT_REPOSITORY_ENV = (
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
@@ -211,7 +215,9 @@ RECORDS_TEXT = (
     "delivered or is live, sprints, checks, or why a delivery or production run failed, and name "
     "it under Read with the parts you read, in parentheses right after the file name, for "
     "example {path} (spend). Answer a cost question with figures from the spend part, in tokens "
-    "or dollars. {sections}The console wrote it for this project when this question started; "
+    "or dollars, and quote each figure exactly as the records print it: a token count as its "
+    "whole number (commas between thousands are fine) and a dollar amount as $ with two "
+    "decimals, never rounded, converted or reworded. {sections}The console wrote it for this project when this question started; "
     "its spend is null only when the console could not read its spend. The console's other "
     "files are not readable from this session.\n\n")
 RECORDS_FAILED = "the console's records could not be gathered: {detail}"
@@ -561,10 +567,22 @@ def _write_settings(ask: Ask) -> None:
         raise
 
 
+def _prune_records(directory: Path, *, clock=time.time) -> None:
+    """Remove the retained records files older than `RECORDS_KEPT_SECONDS` (the question's own 90 days)."""
+    cutoff = clock() - RECORDS_KEPT_SECONDS
+    for path in directory.glob("*" + RECORDS_SUFFIX):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _write_records(ask: Ask) -> None:
     directory = ask.settings.parent
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
+    _prune_records(directory)
     descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -595,6 +613,7 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
         _write_settings(ask)
     except OSError as error:
         return Outcome(FAILED, reason=f"cannot write the question's settings: {error.strerror or error}")
+    kept = False
     try:
         if ask.records is not None:
             try:
@@ -617,10 +636,13 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
             if done.returncode != 0:
                 return Outcome(FAILED, reason=_last_line(stderr)
                                or f"the session exited {done.returncode}")
-        return _outcome_of(done.stdout, ask.routes)
+        outcome = _outcome_of(done.stdout, ask.routes)
+        kept = outcome.outcome == ANSWERED and ask.records is not None
+        return outcome
     finally:
         ask.settings.unlink(missing_ok=True)
-        records_path(ask).unlink(missing_ok=True)
+        if not kept:
+            records_path(ask).unlink(missing_ok=True)
 
 
 def _outcome_of(stdout: bytes | None, routes: Sequence[Route]) -> Outcome:

@@ -324,6 +324,27 @@ class ReaderTest(unittest.TestCase):
         reader.read([self.projects], SINCE)
         self.assertEqual(self.totals(reader)[Key(DAY, "s1", None, None, SESSION)].input, 1)
 
+    def test_a_read_whose_every_root_fails_to_list_says_so_and_a_missing_root_does_not(self):
+        self.transcript("s1", assistant("A", DAY, input=1))
+        failing = [True]
+
+        def scandir(directory):
+            if failing[0] and os.path.realpath(directory) == os.path.realpath(self.projects):
+                raise PermissionError(13, "denied")
+            return os.scandir(directory)
+
+        reader = self.reader(scandir=scandir)
+        self.assertIs(reader.roots_unreadable, False)
+        reader.read([self.projects], SINCE)
+        self.assertEqual((reader.roots_unreadable, self.totals(reader)), (True, {}))
+        reader.read([self.projects, self.projects.parent / "other"], SINCE)
+        self.assertIs(reader.roots_unreadable, False)
+        failing[0] = False
+        reader.read([self.projects], SINCE)
+        self.assertEqual(reader.roots_unreadable, False)
+        reader.read([self.projects.parent / "absent"], SINCE)
+        self.assertIs(reader.roots_unreadable, False)
+
     def test_failed_listing_keeps_cursors(self):
         path = self.transcript("s1", assistant("A", DAY, input=1), assistant("B", DAY, input=2))
         failing = [False]

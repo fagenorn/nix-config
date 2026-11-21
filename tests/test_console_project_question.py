@@ -1101,7 +1101,7 @@ class RecordsLaunchTest(LaunchCase):
             self.ask.question, self.routes, records=path,
             sections=question_records.section_lines(text)))
 
-    def test_the_records_file_is_private_and_removed_and_only_the_hook_words_change(self):
+    def test_the_records_file_is_private_kept_for_an_answer_and_only_the_hook_words_change(self):
         self.start(self.fake(act=self.capture))
         self.assertEqual(self.seen, {"text": self.records, "mode": 0o600})
         self.assertEqual(project_question.records_path(self.ask).parent, self.ask.settings.parent)
@@ -1118,6 +1118,31 @@ class RecordsLaunchTest(LaunchCase):
                 str(self.state), str(project_question.records_path(self.ask))])
         self.assertFalse(project_question.records_path(self.ask).exists())
         self.assertFalse(self.ask.settings.exists())
+
+    def test_the_records_file_of_an_answered_question_is_kept_private_and_any_other_outcome_removes_it(self):
+        path = project_question.records_path(self.ask)
+        self.assertEqual(self.start(self.fake()).outcome, project_question.ANSWERED)
+        self.assertEqual((path.read_text(), path.stat().st_mode & 0o777), (self.records, 0o600))
+        self.assertFalse(self.ask.settings.exists())
+        for name, run in (("timed out", self.fake(error=subprocess.TimeoutExpired("claude", 1))),
+                          ("failed exit", self.fake(code=1)), ("unreadable", self.fake(stdout=b"not json"))):
+            with self.subTest(name):
+                path.write_text("stale")
+                self.assertNotEqual(self.start(run).outcome, project_question.ANSWERED)
+                self.assertFalse(path.exists())
+                self.assertFalse(self.ask.settings.exists())
+
+    def test_writing_a_records_file_removes_the_kept_ones_older_than_ninety_days_only(self):
+        self.settings_dir.mkdir(parents=True)
+        now = time.time()
+        old, fresh, other = (self.settings_dir / name for name in (
+            "o" * 16 + project_question.RECORDS_SUFFIX, "f" * 16 + project_question.RECORDS_SUFFIX, "x.settings.json"))
+        for path, age in ((old, 91 * 86400), (fresh, 89 * 86400), (other, 365 * 86400)):
+            path.write_text("kept")
+            os.utime(path, (now - age, now - age))
+        self.start(self.fake())
+        self.assertEqual((old.exists(), fresh.exists(), other.exists()), (False, True, True))
+        self.assertTrue(project_question.records_path(self.ask).exists())
 
     def test_two_overlapping_questions_each_read_only_their_own_records(self):
         asks = {}
@@ -1178,7 +1203,7 @@ class RecordsLaunchTest(LaunchCase):
                     self.assertEqual(
                         seen[name],
                         ("deny", hook.WRITE_DENIED.format(tool=name.capitalize())), name)
-            self.assertFalse(project_question.records_path(own).exists())
+            self.assertEqual(project_question.records_path(own).read_text(), own.records)
             self.assertFalse(own.settings.exists())
 
     def fake_for(self, act):
@@ -2390,6 +2415,37 @@ class QuestionRecordsServiceTest(QuestionCase):
         self.assertTrue(any(line.startswith("console: spend_poll_failed OSError")
                             for line in stderr.getvalue().splitlines()))
         self.assertIs(ask, self.asked[-1][0])
+
+    def test_a_cold_start_whose_transcript_root_cannot_be_listed_leaves_null_spend_not_zero_days(self):
+        svc = self.arrange(with_spend=False)
+        root = Path("/accounts/profiles/work")
+
+        def denied(directory):
+            raise PermissionError(13, "denied")
+
+        svc._spend = spend.SpendReader(scandir=denied)
+        stderr = io.StringIO()
+        with mock.patch.object(svc, "_session_dirs", return_value=[root / "sessions"]), \
+                contextlib.redirect_stderr(stderr):
+            ask, records = self.records_of(svc)
+        self.assertIsNone(records["spend"])
+        self.assertIsNone(svc._spend_view)
+        self.assertTrue(any(line.startswith("console: spend_poll_failed OSError")
+                            for line in stderr.getvalue().splitlines()))
+        self.assertTrue(records["deliveries"])
+
+    def test_a_warm_service_whose_transcript_root_cannot_be_listed_keeps_its_spend_view(self):
+        svc = self.arrange()
+        before = svc._spend_view
+        root = Path("/accounts/profiles/work")
+
+        def denied(directory):
+            raise PermissionError(13, "denied")
+
+        svc._spend = spend.SpendReader(scandir=denied)
+        with mock.patch.object(svc, "_session_dirs", return_value=[root / "sessions"]):
+            svc.poll_spend()
+        self.assertIsNotNone(svc._spend_view)
 
     def test_the_support_service_reads_no_host_ping_log(self):
         svc = self.arrange(with_spend=False)
