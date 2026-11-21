@@ -6287,6 +6287,141 @@ class ScopedReviewRoundTest(unittest.TestCase):
         self.assertIn(AMENDED, prompt(calls, "final-scoped"))
 
 
+def open_(summary, file="claim.py"):
+    return {"verdict": "findings", "findings": [{"severity": "important", "file": file, "summary": summary, "relation": "new"}]}
+
+
+class ReviewRoundCapTest(unittest.TestCase):
+    """#1370: a round's verdict that leaves findings open after one full and two scoped rounds stops before any fix wave; only the owner reopens it."""
+
+    DECISION = "Accept the renew race; fix only the leak."
+    DECIDED = ' The owner decided how to settle the findings left open at the review round cap, and the decision is binding: "Accept the renew race; fix only the leak."'
+    REASON = ("fix-wave-review: the review round cap is reached after 3 rounds (one full and two scoped); an owner decision is needed "
+              "on the 1 finding(s) still open: race in renew")
+    EIGHT = {"setup": {"head": "8" * 40}}
+
+    def second(self):
+        out = run_out(args=dict(ARGS, cont=scoped_first_stop()),
+                      replies={"final-scoped": open_("race in steal"), "fix-wave-review": open_("race in renew")},
+                      patch={"setup": {"head": "e" * 40}, "fix-wave": {"start_head": "e" * 40, "commit": "9" * 40}})
+        self.assertEqual((out["result"]["stage"], out["result"]["cont"]["review_rounds"], out["result"]["fix_waves"]), ("fix-wave-review", 2, 2))
+        return out
+
+    def capped(self, replies=None):
+        return run_out(args=dict(ARGS, cont=self.second()["result"]["cont"]),
+                       replies=dict({"final-scoped": open_("race in renew")}, **(replies or {})), patch={"setup": {"head": "f" * 40}})
+
+    def test_a_third_round_left_open_stops_at_the_cap(self):
+        second = self.second()
+        self.assertIn("fix-wave", labels(second["calls"]))
+        self.assertNotIn("round_cap", second["result"])
+        self.assertNotIn("round_cap", second["result"]["cont"])
+        out = self.capped()
+        result, cont = out["result"], out["result"]["cont"]
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual(result["round_cap"], {"rounds": 3, "findings": ["race in renew"]})
+        self.assertEqual(cont["round_cap"], result["round_cap"])
+        self.assertTrue(result["reason"].startswith(self.REASON), result["reason"])
+        self.assertLessEqual(len(result["reason"]), 300)
+        self.assertEqual(waves(out["calls"]), [])
+        self.assertEqual((result["fix_waves"], cont["fix_waves"]), (2, 2))
+        self.assertEqual(cont["review_rounds"], 3)
+        self.assertEqual([f["summary"] for f in cont["fix_findings"]], ["race in renew"])
+        passed, _ = run(args=dict(ARGS, cont=second["result"]["cont"]), patch={"setup": {"head": "f" * 40}},
+                        replies={"final-scoped": {"verdict": "pass", "findings": [], "closed": [1]}, "verify": None})
+        self.assertEqual(passed["stage"], "verify")
+        self.assertNotIn("round_cap", passed["cont"])
+
+    def test_a_resume_of_a_capped_cont_starts_no_agent(self):
+        cont = self.capped()["result"]["cont"]
+        held = dict(cont, decisions=["An earlier answer."])
+        for name, c, more in (("none", cont, {}), ("blank", cont, {"decisions": "  "}), ("rerun", cont, {"decisions": "rerun"}),
+                              ("already held", held, {"decisions": "An earlier answer."})):
+            with self.subTest(name):
+                result, calls = run(args=dict(ARGS, cont=c, **more))
+                self.assertEqual(calls, [])
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertEqual(result["cont"], c)
+                self.assertEqual(result["round_cap"], cont["round_cap"])
+                if name == "none":
+                    self.assertEqual(result["reason"], f"{self.REASON}; not run again: this resume brings nothing new from the owner; "
+                                     "resume with decisions (how to settle the open findings), or amend")
+        _, calls = run(args=dict(ARGS, cont={k: v for k, v in cont.items() if k != "fix_findings"}))
+        self.assertNotEqual(calls, [])
+
+    def test_only_a_cap_stop_gates_the_resume(self):
+        lost, _ = run(args=dict(ARGS, cont=scoped_first_stop()), replies={"final-scoped": open_("race in steal"), "fix-wave": None},
+                      patch={"setup": {"head": "e" * 40}})
+        self.assertEqual(lost["stage"], "fix-wave")
+        self.assertNotIn("round_cap", lost)
+        self.assertNotIn("round_cap", lost["cont"])
+        self.assertEqual([f["summary"] for f in lost["cont"]["fix_findings"]], ["race in steal"])
+        _, calls = run(args=dict(ARGS, cont=dict(lost["cont"], review_rounds=3)), patch={"setup": {"head": "e" * 40}})
+        self.assertEqual(labels(calls)[0], "setup")
+        self.assertIn("final-scoped", labels(calls))
+        cont = self.capped()["result"]["cont"]
+        out = run_out(args=dict(ARGS, cont=cont, decisions=self.DECISION),
+                      replies={"final-scoped": open_("race in renew"), "fix-wave-review": None}, patch=self.EIGHT)
+        self.assertEqual(out["result"]["stage"], "fix-wave-review")
+        self.assertNotIn("round_cap", out["result"]["cont"])
+        self.assertIn(self.DECISION, out["result"]["cont"]["decisions"])
+        _, calls = run(args=dict(ARGS, cont=out["result"]["cont"]), patch=self.EIGHT)
+        self.assertIn("final-scoped", labels(calls))
+        out = run_out(args=dict(ARGS, cont=cont, decisions=self.DECISION),
+                      replies={"final-scoped": open_("race in renew"), "fix-wave": None}, patch=self.EIGHT)
+        self.assertEqual(out["result"]["stage"], "fix-wave")
+        self.assertEqual(out["result"]["cont"]["round_cap"]["rounds"], 3)
+        self.assertNotIn(self.DECISION, out["result"]["cont"].get("decisions", []))
+        result, calls = run(args=dict(ARGS, cont=out["result"]["cont"]))
+        self.assertEqual(calls, [])
+
+    def test_an_owner_decision_admits_one_more_scoped_round(self):
+        cont = self.capped()["result"]["cont"]
+        out = run_out(args=dict(ARGS, cont=cont, decisions=self.DECISION), replies={"final-scoped": open_("race in renew"), "verify": None}, patch=self.EIGHT)
+        result, calls = out["result"], out["calls"]
+        for label in ("final-scoped", "fix-wave", "fix-wave-review"):
+            self.assertIn(label, labels(calls))
+            self.assertIn(self.DECIDED, prompt(calls, label))
+        for label in ("final-scoped", "fix-wave-review"):
+            self.assertIn(f"{self.DECIDED}. Report no finding that only disputes it.", prompt(calls, label))
+        self.assertEqual((result["stage"], result["cont"]["review_rounds"]), ("verify", 4))
+        self.assertIn(self.DECISION, result["cont"]["decisions"])
+        self.assertNotIn("round_cap", result["cont"])
+        again = run_out(args=dict(ARGS, cont=cont, decisions=self.DECISION),
+                        replies={"final-scoped": open_("race in renew"), "fix-wave-review": open_("race in lease")}, patch=self.EIGHT)["result"]
+        self.assertEqual(again["stage"], "fix-wave-review")
+        self.assertEqual(again["round_cap"], {"rounds": 4, "findings": ["race in lease"]})
+        self.assertEqual(again["cont"]["round_cap"], again["round_cap"])
+
+    def test_an_amend_admits_one_more_scoped_round(self):
+        cont = self.capped()["result"]["cont"]
+        out = run_out(args=dict(ARGS, cont=cont, amend=[dict(AMEND_EDIT, file="task-1.md")]),
+                      replies={"final-scoped": open_("race in renew"), "verify": None}, patch=self.EIGHT)
+        for label in ("amend", "fix-wave"):
+            self.assertIn(label, labels(out["calls"]))
+        self.assertIn(" The owner amended the plan after the review round cap (plan.md, Amendments): it is binding.", prompt(out["calls"], "fix-wave"))
+        self.assertEqual(out["result"]["stage"], "verify")
+
+    def test_the_existing_bounds_still_apply_inside_the_cap(self):
+        first = run(args=dict(ARGS, cont=FixWavesConvergeTest().stopped()), replies={"fix-wave-review": FixWavesConvergeTest.left()},
+                    patch={"setup": {"head": "e" * 40}})[0]
+        self.assertEqual(first["diverging"], {"file": "claim.py", "waves": 4})
+        self.assertNotIn("round_cap", first)
+        cont = dict(self.capped()["result"]["cont"], fix_waves=3)
+        result, _ = run(args=dict(ARGS, cont=cont, decisions=self.DECISION),
+                        replies={"final-scoped": open_("race in renew"), "fix-wave-review": FixWavesConvergeTest.left()}, patch=self.EIGHT)
+        self.assertEqual(result["diverging"], {"file": "claim.py", "waves": 4})
+        self.assertEqual(result["round_cap"]["rounds"], 4)
+        self.assertTrue(result["reason"].startswith("fix-wave-review: the fix waves do not converge on claim.py after 4 waves"), result["reason"])
+        self.assertIn("the review round cap is reached", result["reason"])
+        decision = FixWaveHistoryTest.DECISION
+        oscillating = dict(FixWaveHistoryTest().stopped()["cont"], review_rounds=3)
+        _, calls = run(args=dict(ARGS, cont=oscillating, decisions=decision), patch={"setup": {"head": "e" * 40}})
+        for label in ("final-scoped", "fix-wave"):
+            self.assertIn(label, labels(calls))
+        self.assertIn(json.dumps(decision), prompt(calls, "fix-wave"))
+
+
 class FixDiffFindingTest(unittest.TestCase):
     """#950: a finding not marked narrowing, in a file the fix wave's commits changed, is admitted to the next wave like a narrowing one."""
 
