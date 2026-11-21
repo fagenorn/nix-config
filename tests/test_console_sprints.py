@@ -3434,5 +3434,113 @@ class LookCardTest(unittest.TestCase):
                 sprints.parse_look_retry(bad)
 
 
+RELEASE = {"commit": "a" * 40, "version": "v1.2.0", "title": "v1.2.0 notes",
+           "confirmations": ["publish:0123456789ab"], "approve": "Run the release"}
+RELEASE_QUESTION = {"question": "Run the v1.2.0 release?", "blocks": "the release",
+                    "options": ["Run the release", "Not yet"], "recommended": "Not yet",
+                    "release": RELEASE, "owner_only": True, "consequential": True}
+RELEASED = sprints.QuestionRelease("a" * 40, "v1.2.0", "v1.2.0 notes",
+                                   ("publish:0123456789ab",), "Run the release")
+
+
+class ReleaseCardTest(unittest.TestCase):
+    """A release card names the exact preview and only the owner's plain pick approves it (#1377)."""
+
+    def rows(self, *more):
+        return [*approved_rows(), asked(41, SID, [RELEASE_QUESTION]), *more]
+
+    def state(self, *more):
+        return sprints.sprint_states(self.rows(*more))[SID]
+
+    def pick(self, seq=42, chosen="Run the release", words=None, **by):
+        row = answer_row(seq, SID, 41, 0, chosen, chosen, question=RELEASE_QUESTION["question"],
+                         recommended="Not yet", words=words)
+        return Event(row.seq, row.at, row.kind, row.project, {**row.payload, **by})
+
+    def refused(self, question):
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_round({"questions": [question]})
+        return str(caught.exception)
+
+    def test_a_release_card_is_kept_on_the_asked_row(self):
+        for limits in (True, False):
+            with self.subTest(limits=limits):
+                checked = sprints.checked_round({"questions": [RELEASE_QUESTION]}, limits=limits)
+                self.assertEqual(checked["questions"][0]["release"], RELEASE)
+        (question,) = self.state().questions
+        self.assertEqual(question.release, RELEASED)
+        self.assertIsNone(sprints.sprint_states([*approved_rows(), asked(41, SID, [QUESTION])])
+                          [SID].questions[0].release)
+
+    def test_a_release_card_must_be_owner_only_and_consequential(self):
+        for missing in ("owner_only", "consequential"):
+            with self.subTest(missing=missing):
+                question = {k: v for k, v in RELEASE_QUESTION.items() if k != missing}
+                self.assertEqual(self.refused(question), sprints.RELEASE_OWNER_ONLY.format(n=1))
+
+    def test_a_malformed_release_card_is_refused(self):
+        shape = sprints.RELEASE_SHAPE.format(n=1)
+        bad = {"commit 39 hex": {"commit": "a" * 39}, "commit upper": {"commit": "A" * 40},
+               "version space": {"version": "v 1"}, "version dash": {"version": "-v1"},
+               "version equals": {"version": "=v1"}, "version empty": {"version": ""},
+               "version long": {"version": "v" * 65}, "title quote": {"title": "it's"},
+               "title double": {"title": 'say "hi"'}, "title dollar": {"title": "$HOME"},
+               "title tick": {"title": "a`b"}, "title slash": {"title": "a\\b"},
+               "title bang": {"title": "a!"}, "title newline": {"title": "a\nb"},
+               "title empty": {"title": ""}, "title long": {"title": "t" * 501},
+               "no confirmations": {"confirmations": []},
+               "duplicated": {"confirmations": ["publish:0123456789ab"] * 2},
+               "bad token": {"confirmations": ["publish:XYZ"]},
+               "too many": {"confirmations": [f"a{i}:0123456789ab" for i in range(17)]},
+               "not a list": {"confirmations": "publish:0123456789ab"},
+               "extra key": {"extra": 1}, "approve not text": {"approve": 3}}
+        for name, change in bad.items():
+            with self.subTest(name):
+                self.assertEqual(self.refused({**RELEASE_QUESTION,
+                                               "release": {**RELEASE, **change}}), shape)
+        with self.subTest("not an object"):
+            self.assertEqual(self.refused({**RELEASE_QUESTION, "release": []}), shape)
+        with self.subTest("missing key"):
+            short = {k: v for k, v in RELEASE.items() if k != "title"}
+            self.assertEqual(self.refused({**RELEASE_QUESTION, "release": short}), shape)
+        self.assertEqual(self.refused({**RELEASE_QUESTION,
+                                       "release": {**RELEASE, "approve": "Go"}}),
+                         sprints.RELEASE_APPROVE.format(n=1))
+        self.assertEqual(self.refused({**RELEASE_QUESTION, "needs_words": ["Run the release"]}),
+                         sprints.RELEASE_APPROVE_WORDS.format(n=1))
+        self.assertEqual(self.refused({**RELEASE_QUESTION,
+                                       "look": {"issue": 7, "pr": 12, "head": "a" * 40,
+                                                "approve": "Run the release"}}),
+                         sprints.RELEASE_WITH_LOOK.format(n=1))
+
+    def test_the_owners_plain_pick_records_the_release(self):
+        self.assertEqual(self.state(self.pick()).approved_releases, (RELEASED,))
+        twice = sprints.sprint_states([
+            *approved_rows(), asked(41, SID, [RELEASE_QUESTION, RELEASE_QUESTION]),
+            replace(self.pick(42), payload={**self.pick(42).payload, "index": 0}),
+            replace(self.pick(43), payload={**self.pick(43).payload, "index": 1})])[SID]
+        self.assertEqual(twice.approved_releases, (RELEASED,))
+
+    def test_words_another_option_or_any_by_approve_nothing(self):
+        for name, row in {"words": self.pick(words="but wait"),
+                          "another option": self.pick(chosen="Not yet"),
+                          "guest": self.pick(by=GUEST),
+                          "malformed by": self.pick(by="Colleague@Example.invalid"),
+                          "null by": self.pick(by=None)}.items():
+            with self.subTest(name):
+                state = self.state(row)
+                self.assertEqual(state.approved_releases, ())
+                self.assertEqual(state.messages[-1].kind, sprints.MESSAGE_ANSWER)
+
+    def test_a_withdrawn_release_card_approves_nothing(self):
+        state = self.state(taken_back(42, SID, 41, 0, question=RELEASE_QUESTION["question"]),
+                           self.pick(43))
+        self.assertEqual(state.approved_releases, ())
+
+    def test_a_new_brief_clears_the_approvals(self):
+        self.assertEqual(self.state(self.pick()).approved_releases, (RELEASED,))
+        self.assertEqual(self.state(self.pick(), sent(43, SID, 2, PARTS)).approved_releases, ())
+
+
 if __name__ == "__main__":
     unittest.main()
