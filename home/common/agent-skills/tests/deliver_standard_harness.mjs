@@ -124,6 +124,8 @@ const DEFAULTS = [
   [/^hold-draft$/, prompt => ({ complete: true, merge: SHA, posted: [], written: unverified(prompt) })],
   [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: (/Merge commit: ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held', release: { verdict: 'released' } })],
   // #1186: an approved marked delivery's close-out call also carries the look tick, which answers ticked.
+  // #1433: the live-fault lane's green-time read: the head went green at this time.
+  [/^live-green$/, { state: 'green', head: SHA, green_at: '2026-11-21T12:52:30Z' }],
   [/^close-out$/, prompt => ({ issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok', ...(prompt.includes('look-approval tick') ? { look_tick: { verdict: 'ticked', ticked: 1 } } : {}) })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.

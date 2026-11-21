@@ -1065,6 +1065,32 @@ const INDIRECT_FOR = (PR, fail, same = false) => ` When that mergeCommit is null
 let landRelease = null
 // #1356: the landing commit a merged replay resolved before it judged the approval; its tick names it too.
 let landedCommit = null
+// #1433: the declaration the live-fault lane's pull request names; it holds no quote, dollar sign, backtick or backslash.
+const LIVE_LINE = () => `Live-fault lane: declaration ${LIVE_REC.id} of sprint ${LIVE_REC.sprint_id} for issue #${LIVE_REC.issue}, declared ${LIVE_REC.at}`
+// #1433: the seconds from the declaration to the green time, cut to milliseconds, or null when either is unreadable or green is before the declaration.
+const secondsBetween = (declaredAt, greenAt) => {
+  const ms = v => (typeof v === 'string' ? Date.parse(v.replace(/(\.\d{3})\d+/, '$1')) : NaN)
+  const d = ms(declaredAt), g = ms(greenAt)
+  return Number.isFinite(d) && Number.isFinite(g) && g >= d ? (g - d) / 1000 : null
+}
+const LIVE_GREEN = { type: 'object', properties: { state: { enum: ['green', 'failed', 'pending', 'error'] }, head: FULL_SHA, green_at: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['state'] }
+// The timing is reported, never a gate: an unread, failed or pending green time still lands the delivery.
+const liveTiming = async PR => {
+  let green = null
+  try {
+    green = await call(`Issue #${ISSUE} of ${SLUG}: read when the pull request #${PR} went green, changing nothing: post, edit, label and run nothing else. Run alone and exactly: pr-green --repo ${SLUG} --pr ${PR}
+It prints one JSON line. Return its state, head and green_at (error as state, with the stderr line as detail, on exit 2). Run nothing else.
+${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'live-green', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LIVE_GREEN }, true)
+  } catch (error) {
+    green = null
+  }
+  const read = isEntry(green) && green.state === 'green' && sameSha(green.head, liveCommit()) && typeof green.green_at === 'string' ? green.green_at : null
+  const seconds = read === null ? null : secondsBetween(LIVE_REC.at, read)
+  const within = seconds !== null && seconds <= 3600
+  log(read === null || seconds === null ? `live fault ${LIVE_REC.id}: no green time was read (${isEntry(green) && typeof green.state === 'string' ? green.state : 'no reply'})` : `live fault ${LIVE_REC.id}: declared ${LIVE_REC.at}, green ${read}: ${seconds} s, ${within ? 'within' : 'over'} the hour`)
+  return { id: LIVE_REC.id, sprint_id: LIVE_REC.sprint_id, issue: LIVE_REC.issue, declared_at: LIVE_REC.at, pr: PR, green_at: read, seconds, within_hour: within }
+}
+
 const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
   const planned = plan ? plan.acceptance : null
   // #1356: a landing under a recorded approval answers the criterion the issue's look-marker line names: the close-out ticks it, so the hold leaves it out and raises no second ask.
@@ -1246,7 +1272,8 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType
   if (!co || co.issue_state !== want || co.decision_ended !== true || co.released !== true || (notes.length && co.notes_posted !== true)) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
   const lookTick = tickStep ? (co.look_tick || null) : null
   if (tickStep && !(lookTick && ['ticked', 'already', 'unmarked'].includes(lookTick.verdict))) log(`close-out: the look marker of issue ${ISSUE} was not ticked: ${lookTick ? lookTick.verdict : 'no reply'}`)
-  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, ...(tickStep ? { look_tick: lookTick } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), acceptance: planned, fix_waves: fixWaves }
+  const liveFault = LANE === 'live' && LIVE_REC ? await liveTiming(PR) : null
+  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, ...(liveFault ? { live_fault: liveFault } : {}), ...(tickStep ? { look_tick: lookTick } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), acceptance: planned, fix_waves: fixWaves }
 }
 
 if (CONT && setup.merged_pr) {
@@ -3024,7 +3051,7 @@ const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, reb
   return { fix, review, moved, ok: true }
 }
 // #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call. #1246: a function, so its Evidence names the results of verify as it is when the call is made (an approved head's verification replaces them).
-const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : LANE === 'live' ? 'live-fault lane review: one reviewer, no plan' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
+const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : LANE === 'live' ? 'live-fault lane review: one reviewer, no plan' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}${LANE === 'live' && LIVE_REC ? `; the Evidence section also holds, on a line of its own, exactly: ${LIVE_LINE()}` : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
 const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is read back
 // (look-approval status, #1260: the owner records it where they answered; this program never posts one) only for the head the owner saw, when that is the pull request head. #1246: a head that is not the verified head is verified first (a look-verify step), and recorded only when it

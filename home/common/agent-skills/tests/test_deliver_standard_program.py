@@ -13786,5 +13786,86 @@ class PromptPhraseTableTest(unittest.TestCase):
         self.assertEqual(used, set(PROMPT_SCENARIOS))
 
 
+class LiveTimingTest(unittest.TestCase):
+    """#1433: the pull request names the declaration, and the close-out records the time from declaration to a green head."""
+
+    AT = "2026-11-21T12:10:00.000000+00:00"
+
+    def whole_hour(self, green_at, state="green", head=SHA):
+        fault = dict(DECLARED["fault"], at=self.AT)
+        patch = {"setup": {"live_fault": dict(DECLARED, fault=fault)}}
+        replies = {"live-green": {"state": state, "head": head, "green_at": green_at}}
+        result, _ = run(args=ARGS, replies=replies, patch=patch)
+        self.assertEqual(result["stage"], "done", result)
+        return result["live_fault"]
+
+    def test_the_done_result_records_the_time_from_declaration_to_green(self):
+        out = run_out(args=ARGS, patch=LIVE_PATCH)
+        self.assertEqual(out["result"]["stage"], "done")
+        member = out["result"]["live_fault"]
+        for key, value in (("id", 5), ("sprint_id", "0123456789abcdef"), ("issue", 9), ("pr", 42),
+                           ("declared_at", "2026-11-21T12:10:00.123456+00:00"),
+                           ("green_at", "2026-11-21T12:52:30Z"), ("within_hour", True)):
+            self.assertEqual(member[key], value, key)
+        self.assertAlmostEqual(member["seconds"], 2549.877, places=3)
+        self.assertTrue([l for l in out["logs"] if l.startswith(
+            "live fault 5: declared 2026-11-21T12:10:00.123456+00:00, green 2026-11-21T12:52:30Z:")], out["logs"])
+        names = labels(out["calls"])
+        self.assertLess(names.index("close-out"), names.index("live-green"))
+        self.assertIn("pr-green --repo owner/repo --pr 42", prompt(out["calls"], "live-green"))
+
+    def test_exactly_one_hour_is_within_and_one_second_more_is_not(self):
+        exact = self.whole_hour("2026-11-21T13:10:00Z")
+        self.assertEqual(exact["seconds"], 3600)
+        self.assertIs(exact["within_hour"], True)
+        over = self.whole_hour("2026-11-21T13:10:01Z")
+        self.assertEqual(over["seconds"], 3601)
+        self.assertIs(over["within_hour"], False)
+
+    def test_a_green_time_before_the_declaration_is_null(self):
+        member = self.whole_hour("2026-11-21T11:00:00Z")
+        self.assertIsNone(member["seconds"])
+        self.assertIs(member["within_hour"], False)
+
+    def test_a_failed_or_pending_head_records_no_green_time(self):
+        for state, head in (("failed", SHA), ("pending", SHA), ("green", "e" * 40)):
+            with self.subTest(state=state, head=head):
+                member = self.whole_hour(None if state != "green" else "2026-11-21T12:52:30Z", state, head)
+                self.assertIsNone(member["green_at"])
+                self.assertIsNone(member["seconds"])
+
+    def test_an_unread_green_time_records_null_and_lands(self):
+        for reply in (None, "throw"):
+            with self.subTest(reply=reply):
+                result, _ = run(args=ARGS, replies={"live-green": reply}, patch=LIVE_PATCH)
+                self.assertEqual(result["stage"], "done")
+                self.assertIsNone(result["live_fault"]["seconds"])
+                self.assertNotIn("live-green", result.get("dead_agents", []))
+
+    def test_the_pr_body_names_the_declaration(self):
+        result, calls = run(args=ARGS, patch=LIVE_PATCH)
+        self.assertIn("Live-fault lane: declaration 5 of sprint 0123456789abcdef for issue #9, declared "
+                      "2026-11-21T12:10:00.123456+00:00", prompt(calls, "pr"))
+        for args in (dict(ARGS, lane="direct"), ARGS):
+            with self.subTest(lane=args.get("lane")):
+                result, calls = run(args=args)
+                self.assertEqual(result["stage"], "done")
+                self.assertNotIn("Live-fault lane", prompt(calls, "pr"))
+                self.assertNotIn("live-green", labels(calls))
+                self.assertNotIn("live_fault", result)
+
+    def test_a_merged_replay_after_withdrawal_records_the_time(self):
+        stopped, _ = run(args=ARGS, replies={"close-out": None}, patch=LIVE_PATCH)
+        self.assertEqual(stopped["stage"], "close-out")
+        for verdict in ("none", "no-sprint"):
+            with self.subTest(verdict=verdict):
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                                    patch={"setup": dict(merged(42, SHA), live_fault={"verdict": verdict})})
+                self.assertEqual(result["stage"], "done", result)
+                self.assertIn("close-out", labels(calls))
+                self.assertIn("live-green", labels(calls))
+                self.assertEqual(result["live_fault"]["id"], 5)
+
+
 if __name__ == "__main__":
     unittest.main()
