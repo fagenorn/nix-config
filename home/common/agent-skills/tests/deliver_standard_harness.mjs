@@ -78,6 +78,12 @@ const DEFAULTS = [
     return { status: 'applied', edits: input.edits.map(e => ({ file: e.file, exists: true, occurrences: 1, already: false })), refused: [] }
   }],
   [/^direct-review/, { ...PASS, acceptance: [{ id: 'AC1', met: true, evidence: 'test_a.py:10 test_works' }] }],
+  // #1386: the follow-up filing step files each entry it is given as the next issue number of its call.
+  [/^follow-ups-\d+$/, (prompt, label) => {
+    const m = /^Follow-ups: (\[.*\])$/m.exec(prompt)
+    const k = +label.split('-').pop()
+    return { filed: (m ? JSON.parse(m[1]) : []).map(f => ({ n: f.n, issue: 900 + 10 * k + f.n })) }
+  }],
   [/review|^final-/, PASS],
   // #913: the resolution of an aborted sync merge, outside the land lock; like the sync default, its merge commit is the head unless a scenario names one.
   [/^sync-resolve-/, { status: 'done', conflicted: true, merge_commit: SHA, resolved_files: ['a.py'], notes: 'resolved' }],

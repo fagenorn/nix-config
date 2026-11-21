@@ -300,7 +300,7 @@ OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
     (BUILDING, r"direct-impl"),
     (
         FINAL_REVIEW,
-        r"renew-final-review|diff-size|final-codex|final-\d+|final-integration|final-scoped|fix-wave|fix-wave-\d+"
+        r"renew-final-review|diff-size|final-codex|final-\d+|final-integration|final-scoped|follow-ups-\d+|fix-wave|fix-wave-\d+"
         r"|fix-wave-review|fix-wave-review-\d+|direct-codex|direct-review|direct-review-full|direct-fix"
         r"|direct-rereview",
     ),
