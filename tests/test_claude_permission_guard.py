@@ -2251,6 +2251,49 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             self.run_guard(f"gh run rerun 9 --repo {PROD}", cwd=own,
                            guard_args=guard_args).stderr)
 
+    def test_every_way_gh_reads_a_repository_flag_names_the_project_the_guard_judges(self):
+        """Issue 1375 A2: a short flag group (`-dR`), `-R=...`, a redirection glued to the
+        value and a later unnamed rerun never hide the project a rerun names."""
+        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
+        own = self.make_repo(f"git@github.com:{self.OWN}.git")
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        other = self.make_repo("git@github.com:fagenorn/tool.git")
+        for cwd in (own, prod, other):
+            for command in (
+                    f"gh run rerun 9 --repo {self.OWN} -dR {PROD}",
+                    f"gh run rerun 9 --repo {self.OWN} -dR{PROD}",
+                    f"gh run rerun 9 --repo {self.OWN} -R={PROD}",
+                    f"gh run rerun 9 --repo {self.OWN} -dR={PROD}",
+                    f"gh run rerun 9 --repo {PROD}>rerun.log",
+                    f"gh run rerun 9 --repo {PROD} 2>&1",
+                    f"gh run rerun 9 >rerun.log --repo {PROD}",
+                    f"gh run rerun 9 --repo >rerun.log {PROD}",
+                    f"gh run rerun 1 --repo {PROD} && gh run rerun 2",
+                    f"gh run rerun 2 && gh run rerun 1 --repo {PROD}"):
+                with self.subTest(cwd=cwd.name, command=command):
+                    result = self.run_guard(command, cwd=cwd, guard_args=guard_args)
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    self.assertIn(self.RERUN, result.stderr)
+
+    def test_a_repository_flag_inside_an_option_value_names_no_repository(self):
+        """Issue 1375 I1: the word after a value-taking option is its value, so a comment
+        body that spells `--repo=...` never selects another project's rule."""
+        row = {**PROD_ROW, "production": {
+            "changes": [{"id": "deploy-comment", "argv": ["gh", "issue", "comment"]}],
+            "read_only": [], "release_profile": "forge-main"}}
+        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: row})
+        own = self.make_repo(f"git@github.com:{self.OWN}.git")
+        other = self.make_repo("git@github.com:fagenorn/tool.git")
+        for cwd in (own, other):
+            for command in (
+                    f"gh issue comment 5 --repo {self.OWN} --body '--repo={PROD}'",
+                    f"gh issue comment 5 --repo {self.OWN} --body --repo={PROD}",
+                    f"gh issue comment 5 --repo {self.OWN} -b '-R{PROD}'",
+                    f"gh issue comment 5 --repo {self.OWN} --body='--repo={PROD}'"):
+                with self.subTest(cwd=cwd.name, command=command):
+                    result = self.run_guard(command, cwd=cwd, guard_args=guard_args)
+                    self.assertEqual(0, result.returncode, result.stderr)
+
     def test_a_rerun_that_names_no_repository_keeps_the_checkout_judgement(self):
         """Issue 1375: only an explicit `--repo` on a parsed run narrows the rules; every
         other reading keeps judging by the checkout, so a hidden or unnamed rerun still
