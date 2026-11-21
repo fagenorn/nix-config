@@ -1084,6 +1084,95 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertEqual(self.stops, [])
         self.assertEqual((self.nudges[-1].route, self.nudges[-1].session_id), ("wake", "s-1"))
 
+    def due_for_wake(self, **overrides):
+        svc, sid, answer, start = self.relayed_twice(**overrides)
+        self.now[0] += 300
+        svc.renudge()
+        self.assertEqual(len(self.queued.jobs), 1)
+        return svc, sid, answer, start
+
+    def test_an_answer_read_while_the_wake_reads_the_listing_is_not_stopped(self):
+        svc, sid, answer, start = self.due_for_wake()
+        listing = svc._listing
+
+        def reads_then_lists():
+            svc.read_inbox(sid, self.secret(sid))
+            return listing()
+        svc._listing = reads_then_lists
+        rows = len(self.nudged())
+        self.queued.run_next()
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.routes(start), ["relay", "relay"])
+        self.assertEqual(len(self.nudged()), rows)
+        self.assertEqual(svc._nudging, set())
+
+    def test_a_manager_that_restarts_during_the_full_listing_is_not_woken_in_a_copy(self):
+        def restarts(profile, cwd):
+            self.listed["s-1"] = sessions.Observation(
+                "s-1", "/srv/p01", 1, "idle", None, self.name(sid), None)
+            return frozenset({"s-1"})
+        svc, sid, answer, start = self.due_for_wake(full_listing=restarts)
+        rows = len(self.nudged())
+        self.queued.run_next()
+        self.assertEqual(self.stops, [("s-1", start + 2)])
+        self.assertEqual(self.routes(start), ["relay", "relay"])
+        self.assertEqual(len(self.nudged()), rows)
+        self.assertEqual(svc._nudging, set())
+
+    def test_a_wake_never_stops_a_session_other_than_the_one_it_resumes(self):
+        for name, others in (("a replacement", ("s-2",)), ("a replacement beside it", ("s-1", "s-2"))):
+            with self.subTest(name):
+                self.setUp()
+                svc, sid, answer, start = self.due_for_wake()
+                self.listed.clear()
+                for session_id in others:
+                    self.listed[session_id] = sessions.Observation(
+                        session_id, "/srv/p01", 1, "idle", None, self.name(sid), None)
+                rows = len(self.nudged())
+                self.queued.run_next()
+                self.assertEqual(self.stops, [])
+                self.assertEqual(self.routes(start), ["relay", "relay"])
+                self.assertEqual(len(self.nudged()), rows)
+                self.assertEqual(svc._nudging, set())
+                svc.close()
+
+    def test_a_message_sent_after_the_second_relay_does_not_postpone_the_wake(self):
+        svc, sid, answer, start = self.relayed_twice()
+        self.now[0] += 240
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.routes(start), ["relay", "relay", "relay"])
+        self.now[0] += 60
+        svc.renudge()
+        self.queued.run_next()
+        self.assertEqual(self.routes(start), ["relay", "relay", "relay", "wake"])
+        self.assertEqual(self.stops, [("s-1", start + 3)])
+
+    def test_a_message_sent_during_the_wake_is_dispatched_even_when_the_wake_fails_twice(self):
+        svc, sid, answer, start = self.relayed_twice()
+        sent = []
+
+        def sends():
+            svc.send_message("owner/p01", sid, TEXT)
+            sent.append(len(self.nudges))
+        self.outcomes[:] = ["first", None]
+        self.now[0] += 300
+        with contextlib.redirect_stderr(io.StringIO()):
+            svc.renudge()
+            self.queued.run_next()
+            self.assertEqual(self.queued.jobs, [])
+            self.now[0] += 300
+            self.outcomes[:] = ["second"]
+            self.during[:] = [sends]
+            svc.renudge()
+            self.queued.run_next()
+        self.assertEqual(sprints.unreachable(svc._sprints[sid]), True)
+        self.assertEqual(len(self.queued.jobs), 1)
+        self.queued.run_next()
+        self.assertEqual(len(self.nudges), sent[0] + 1)
+        self.assertEqual(self.nudged()[-1][1]["ok"], True)
+        self.assertIsNotNone(svc._sprints[sid].messages[-1].delivered_at)
+
     def test_a_wake_that_cannot_be_dispatched_is_a_failed_wake(self):
         svc, sid, answer, start = self.relayed_twice()
 

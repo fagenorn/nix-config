@@ -1695,6 +1695,14 @@ class UnreadStepTest(unittest.TestCase):
         self.assertEqual(self.step(rows, now, session="s-1"), sprints.WAKE_UNREAD)
         self.assertIsNone(self.step(rows, now))
 
+    def test_traffic_after_the_second_relay_neither_moves_the_wake_nor_holds_it_back(self):
+        rows = message_rows() + [routed(7, SID, 6, True, "relay"), routed(8, SID, 6, True, "relay"),
+                                 routed(9, SID, 6, True, "relay")]
+        state = message_state_of(rows)
+        self.assertEqual([(m.relays, m.relayed_at) for m in state.messages], [(2, at(8))] * 3)
+        now = ms(8) + sprints.UNREAD_AGAIN_MS
+        self.assertEqual(self.step(rows, now, session="s-1"), sprints.WAKE_UNREAD)
+
     def test_a_read_or_woken_message_needs_no_step(self):
         rows = message_rows() + [routed(7, SID, 6, True, "relay"), routed(8, SID, 6, True, "relay")]
         later = ms(9) + 10 * sprints.UNREAD_AGAIN_MS

@@ -267,7 +267,8 @@ repeated decision, which `_folded_brief` ignores, makes none. `sprint.read` with
 resets `failed_nudges` (when the row carries `covers`, a list of ids, on exactly the listed messages
 instead: a message released after the nudge began, a look approval the console had held, was not told
 of), `ok` false adds one to it. An `ok` row whose `route` is `"relay"` also adds one to `relays`
-and sets `relayed_at` (the row's `at`) on the same messages, and one whose `route` is `"wake"` sets
+and sets `relayed_at` (the row's `at`) on the same messages (a message already relayed twice keeps
+both, so later traffic never moves its wake), and one whose `route` is `"wake"` sets
 `woken_at` on them (the latest row wins); a failed row, a null route or any other route changes
 none of the three. `sprint.answered` with an int `message` naming one
 of the sprint's messages and a string `reply` sets that message's `reply` and `reply_at` (the latest
@@ -292,7 +293,7 @@ changes the shown state, it only feeds the service's re-nudge, and `relays`, `re
 held, in id order; `unreachable(state)` is true once `failed_nudges` reaches `UNREACHABLE_AFTER`.
 `unread_step(state, now_ms)` is pure and decides what a message that was relayed and is still unread
 needs, the first of these that holds: None when `unreachable(state)`; None when `last_nudge_at` is
-less than `UNREAD_AGAIN_MS` before `now_ms`; of the unread messages with no `woken_at` and a
+less than `UNREAD_AGAIN_MS` before `now_ms` and failed (`last_nudge_ok` false); of the unread messages with no `woken_at` and a
 `relayed_at` at least `UNREAD_AGAIN_MS` old, `WAKE_UNREAD` when one has `relays` of 2 or more and
 `manager_session` is set, else `RELAY_AGAIN` when one has exactly 1 relay, else None.
 `STILL_RUNNING_TEXT` is the reason a wake gives up when the manager's session did not stop. `checked_message(text)` refuses
@@ -1813,7 +1814,7 @@ def unread_step(state: SprintState, now_ms: int) -> str | None:
     """Return `RELAY_AGAIN`, `WAKE_UNREAD` or None: what an unread, once relayed message needs now."""
     if unreachable(state):
         return None
-    if (state.last_nudge_at is not None
+    if (state.last_nudge_at is not None and not state.last_nudge_ok
             and now_ms - _ms(state.last_nudge_at) < UNREAD_AGAIN_MS):
         return None
     due = [message for message in unread(state)
@@ -2410,6 +2411,8 @@ def _nudged_message(message: Message, at: str, route: object) -> Message:
     if message.delivered_at is None:
         message = replace(message, delivered_at=at)
     if route == "relay":
+        if message.relays >= 2:
+            return message
         return replace(message, relays=message.relays + 1, relayed_at=at)
     if route == "wake":
         return replace(message, woken_at=at)
