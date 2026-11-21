@@ -8793,6 +8793,120 @@ class LiveSizeTest(unittest.TestCase):
         self.assertNotIn("live-review", labels(calls))
 
 
+CRIT = {"severity": "critical", "file": "src/fix.py", "summary": "the token is written to the log", "commit": SHA}
+HARD = {"severity": "important", "file": "src/fix.py", "summary": "could also check the length", "commit": SHA}
+MINOR = {"severity": "minor", "file": "src/fix.py", "summary": "rename the helper", "commit": SHA}
+BEYOND = [{"file": "db/schema.sql", "summary": "add an index on the address table"}]
+BEYOND_PATCH = dict(LIVE_PATCH, **{"live-impl": dict(LIVE_IMPL_REPLY, beyond=BEYOND)})
+LIVE_RESUME = {"setup": {"head": SHA, "live_fault": DECLARED}}
+
+
+def live_reply(*findings, met=True):
+    return {"verdict": "findings" if findings else "pass", "findings": list(findings), "head": SHA,
+            "acceptance": [{"id": "AC1", "met": met, "evidence": "tests/test_harm.py:3" if met else ""}]}
+
+
+class LiveReviewTest(unittest.TestCase):
+    """#1433: only a critical finding, or one naming an unmet criterion, blocks the live-fault lane; the rest are filed as follow-up issues."""
+
+    def live(self, *findings, met=True, patch=LIVE_PATCH, replies=None):
+        return run(args=ARGS, patch=patch, replies=dict({"live-review": live_reply(*findings, met=met)}, **(replies or {})))
+
+    def test_a_critical_finding_blocks_the_merge(self):
+        result, calls = self.live(CRIT)
+        self.assertEqual(result["stage"], "live-review")
+        self.assertIn("a critical finding blocks the live-fault lane", result["reason"])
+        for label in ("pr", "merge", "verify", "follow-ups-1"):
+            self.assertNotIn(label, labels(calls))
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], ["live-impl"])
+        self.assertEqual(result["cont"]["live_fault"]["final"], "live-review")
+
+    def test_other_findings_are_filed_as_follow_ups_and_the_delivery_lands(self):
+        result, calls = self.live(HARD)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertLess(labels(calls).index("follow-ups-1"), labels(calls).index("verify"))
+        self.assertEqual({k: result["follow_ups"][0][k] for k in ("issue", "file", "summary", "commit")},
+                         {"issue": 911, "file": "src/fix.py", "summary": "could also check the length", "commit": SHA})
+        self.assertTrue(items(calls, "follow-ups-1")[0]["body"].startswith(
+            "Follow-up of #9: the live-fault lane's diff review raised this important finding, which does not block that delivery."))
+        self.assertIn("The live-fault lane of this issue left the items below out of the fix", prompt(calls, "follow-ups-1"))
+
+    def test_a_minor_finding_is_filed_too(self):
+        result, calls = self.live(MINOR)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+
+    def test_a_finding_naming_a_met_criterion_is_filed(self):
+        result, calls = self.live(dict(HARD, ac="AC1"))
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+
+    def test_a_finding_naming_an_unmet_criterion_blocks(self):
+        result, _ = self.live(dict(HARD, ac="AC1"), met=False)
+        self.assertEqual(result["stage"], "live-review")
+
+    def test_a_finding_naming_a_criterion_the_review_never_graded_blocks(self):
+        result, calls = self.live(dict(HARD, ac="AC9"))
+        self.assertEqual(result["stage"], "live-review")
+        self.assertEqual(filings(calls), [])
+
+    def test_an_ungraded_code_criterion_blocks(self):
+        result, _ = self.live(met=False)
+        self.assertEqual(result["stage"], "live-review")
+
+    def test_a_mixed_review_files_the_rest_and_blocks(self):
+        result, calls = self.live(CRIT, MINOR)
+        self.assertEqual(result["stage"], "live-review")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual(len(items(calls, "follow-ups-1")), 1)
+        self.assertIn("rename the helper", items(calls, "follow-ups-1")[0]["body"])
+        self.assertEqual([{k: f[k] for k in ("issue", "file", "summary", "commit")} for f in result["cont"]["follow_ups"]],
+                         [{"issue": 911, "file": "src/fix.py", "summary": "rename the helper", "commit": SHA}])
+        self.assertEqual([f["severity"] for f in result["findings"]], ["critical"])
+
+    def test_beyond_items_are_filed_as_follow_ups(self):
+        result, calls = run(args=ARGS, patch=BEYOND_PATCH)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(len(result["follow_ups"]), 1)
+        body = items(calls, "follow-ups-1")[0]["body"]
+        self.assertTrue(body.startswith("Follow-up of #9: the live-fault lane left this out of the fix, which stops the harm and nothing more."), body)
+        self.assertIn("db/schema.sql", body)
+        self.assertIn(SHA, body)
+
+    def test_a_beyond_item_survives_a_stop_and_is_filed_once(self):
+        stopped, calls = run(args=ARGS, patch=BEYOND_PATCH, replies={"live-size": None})
+        self.assertEqual(stopped["stage"], "live-size")
+        self.assertEqual(stopped["cont"]["done"][0]["beyond"], BEYOND)
+        self.assertEqual(filings(calls), [])
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=LIVE_RESUME)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual(len(result["follow_ups"]), 1)
+        cut, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=LIVE_RESUME, replies={"verify": None})
+        self.assertEqual(cut["stage"], "verify")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertNotIn("beyond", cut["cont"]["done"][0])
+        self.assertEqual(len(cut["cont"]["follow_ups"]), 1)
+        result, calls = run(args=dict(ARGS, cont=cut["cont"]), patch=LIVE_RESUME)
+        self.assertEqual(filings(calls), [])
+
+    def test_a_beyond_item_is_filed_when_no_review_runs(self):
+        stopped, _ = run(args=ARGS, patch=BEYOND_PATCH, replies={"live-size": None})
+        cont = dict(stopped["cont"], done=[dict(stopped["cont"]["done"][0], reviewed_head=SHA, reviewer="reviewer")])
+        result, calls = run(args=dict(ARGS, cont=cont), patch=LIVE_RESUME)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("live-review", labels(calls))
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+
+    def test_an_unconfirmed_follow_up_stops_before_verify(self):
+        result, calls = self.live(HARD, replies={"follow-ups-1": {"filed": []}, "follow-ups-2": {"filed": []}})
+        self.assertEqual(result["stage"], "final-review")
+        self.assertNotIn("verify", labels(calls))
+        self.assertTrue(result["cont"]["follow_ups_pending"][0]["lead"].startswith("Follow-up of #9: the live-fault lane's diff review"))
+        self.assertEqual(items(calls, "follow-ups-2")[0]["body"], items(calls, "follow-ups-1")[0]["body"])
+
+
 class DeadAgentTest(unittest.TestCase):
     """deliver-batch (#636 D12) reads dead_agents to tell an agent that returned nothing from a stop."""
 

@@ -800,7 +800,7 @@ const keyOf = f => {
 const followUpOf = (f, filed) => {
   if (!isEntry(f) || !textOf(f.file) || !textOf(f.summary) || !fullSha(f.commit)) return null
   const key = keyOf(f)
-  const rest = { file: textOf(f.file), summary: textOf(f.summary), ...(textOf(f.failing_input) ? { failing_input: textOf(f.failing_input) } : {}), commit: normSha(f.commit), ...(key ? { key } : {}) }
+  const rest = { file: textOf(f.file), summary: textOf(f.summary), ...(textOf(f.failing_input) ? { failing_input: textOf(f.failing_input) } : {}), commit: normSha(f.commit), ...(key ? { key } : {}), ...(textOf(f.lead) ? { lead: textOf(f.lead) } : {}) }
   if (filed) return Number.isInteger(f.issue) && f.issue > 0 ? { issue: f.issue, ...rest } : null
   return ['critical', 'important', 'minor'].includes(f.severity) ? { severity: f.severity, ...rest } : null
 }
@@ -812,14 +812,14 @@ const followUpKey = f => (f.key ? `${textOf(f.file)}\n${f.key}` : `${textOf(f.fi
 // title (no shell quote character in it) and body; an entry is confirmed only by exactly one issue number of its own, so a lost, partial or shared
 // reply leaves it pending, and the gate before Verify files it again.
 const titleOf = f => `Follow-up of #${ISSUE}: ${f.file}: ${f.summary}`.replace(/['"`$\\]/g, '').replace(/\s+/g, ' ').slice(0, 120)
-const bodyOf = f => [`Follow-up of #${ISSUE}: a scoped review round of its delivery raised this ${f.severity} finding, which does not block that delivery.`, '', `File: ${f.file}`, `Commit: ${f.commit}`, `Finding: ${f.summary}`, ...(f.failing_input ? [`Failing input: ${f.failing_input}`] : []), ...(f.key ? [`Identity: ${f.key}`] : [])].join('\n')
+const bodyOf = f => [f.lead || `Follow-up of #${ISSUE}: a scoped review round of its delivery raised this ${f.severity} finding, which does not block that delivery.`, '', `File: ${f.file}`, `Commit: ${f.commit}`, `Finding: ${f.summary}`, ...(f.failing_input ? [`Failing input: ${f.failing_input}`] : []), ...(f.key ? [`Identity: ${f.key}`] : [])].join('\n')
 const LOOKUP_LIMIT = 1000
 const fileFollowUps = async list => {
   const m = ++followUpCalls
   const entries = list.map((f, i) => ({ n: i + 1, title: titleOf(f), body: bodyOf(f) }))
   let r = null
   try {
-    r = await call(`Issue #${ISSUE} of ${SLUG}. A review round after the first full review raised the findings below, which do not block the merge: file one follow-up issue for each, changing nothing in any worktree.
+    r = await call(`Issue #${ISSUE} of ${SLUG}. ${list.every(f => f.lead) ? 'The live-fault lane of this issue left the items below out of the fix or raised them in its diff review; they do not block the merge' : 'A review round after the first full review raised the findings below, which do not block the merge'}: file one follow-up issue for each, changing nothing in any worktree.
 Follow-ups: ${JSON.stringify(entries)}
 First run once ${UNSET}gh issue list --repo ${SLUG} --state all --search "Follow-up of #${ISSUE} in:title" --limit ${LOOKUP_LIMIT} --json number,body
 When that list holds ${LOOKUP_LIMIT} issues it may be cut short: then, before creating any issue, look for each entry on its own with ${UNSET}gh issue list --repo ${SLUG} --state all --search "<the entry's title> in:title" --limit ${LOOKUP_LIMIT} --json number,body, and leave out an entry whose own list also holds ${LOOKUP_LIMIT} issues instead of creating it.
@@ -1607,6 +1607,20 @@ const EVIDENCE_REREVIEW = ' These findings are acceptance criteria the review di
 
 // #1433: the live-fault lane's one implementer returns the test it ran twice: failing at start_head, passing at its commit.
 const RUN = { type: 'object', properties: { command: { type: 'string' }, exit: { type: 'integer' }, head: FULL_SHA, failed: STRS, passed: STRS, output: { type: 'string' } }, required: ['command', 'exit', 'head'] }
+// #1433: a finding of the live-fault review blocks only when it is critical, names a criterion the review did not grade met with evidence, is an ungraded code criterion, or cannot be filed; every other finding is a follow-up issue, as is each item the implementer left out.
+const LIVE_FINDING_LEAD = f => `Follow-up of #${ISSUE}: the live-fault lane's diff review raised this ${f.severity} finding, which does not block that delivery.`
+const LIVE_BEYOND_LEAD = `Follow-up of #${ISSUE}: the live-fault lane left this out of the fix, which stops the harm and nothing more.`
+const metWithEvidence = (review, id) => (Array.isArray(review.acceptance) ? review.acceptance : []).some(x => isEntry(x) && x.id === id && x.met === true && typeof x.evidence === 'string' && x.evidence.trim() !== '')
+const liveSplit = (review, criteria) => {
+  const blocking = []
+  const filed = []
+  for (const f of review.findings.filter(isEntry)) {
+    const entry = f.severity === 'critical' || (namesAc(f) && !metWithEvidence(review, f.ac)) ? null : followUpOf({ ...f, lead: LIVE_FINDING_LEAD(f) }, false)
+    if (entry) filed.push(entry)
+    else blocking.push(f)
+  }
+  return { blocking: blocking.concat(ungradedFindings(review, criteria)), filed }
+}
 const LIVE_IMPL = {
   ...IMPL,
   properties: {
@@ -1761,6 +1775,8 @@ ${RULES}`, { label: 'live-impl', phase: 'Tasks', agentType: 'implementer', model
   planRefs()
   log('live-fault lane: one implementer, one reviewer')
   const d1 = taskLog.find(d => d.n === 1)
+  let liveReview = null
+  let liveSplitOf = { blocking: [], filed: [] }
   if (!(SKIP_REVIEW || (!impl && present(d1.reviewed_head) && sameSha(d1.reviewed_head, setup.head)))) {
     phase('Final review')
     const lost = await renew('final-review', 'Final review')
@@ -1779,10 +1795,15 @@ ${RULES}`, { label: 'live-size', phase: 'Final review', agentType: 'clerk', mode
 lane: live. Review git -C ${W} diff ${RANGE} for issue #${ISSUE}, the fix of the live fault ${JSON.stringify({ observed: LIVE.observed, when: LIVE.when, proven: LIVE.proven })}: it must stop the harm and nothing more. Acceptance criteria: ${ACS}. The implementer's failing-then-passing test: ${JSON.stringify(d1.fault_test)}. Confirm the test is in the diff and that the failure line of its first run is the observed harm. Return head (git -C ${W} rev-parse HEAD). ${KNOW} ${CRITICAL_MEANS} ${COMMIT_ASK(d1.commit)} Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a code criterion that is not met, or has no evidence, is an Important finding, and criteria of other kinds are not findings (grade them and give what you observed). Do not edit anything.`, { label: 'live-review', phase: 'Final review', agentType: 'reviewer', schema: LIVE_FINDINGS }, { once: true })
     if (!review) return stop('live-review', { review: null })
     if (!sameSha(review.head, d1.commit)) return stop('live-bound', { details: `the review read ${typeof review.head === 'string' ? review.head : 'no head'}, not the delivered commit ${d1.commit}; ${LIVE_WAY}` })
-    const findings = findingsOf(review).concat(ungradedFindings(review, plan.acceptance))
-    if (findings.length) return stop('live-review', { review, findings })
-    Object.assign(d1, { reviewed_head: d1.commit, reviewer: 'reviewer' })
+    liveReview = review
+    liveSplitOf = liveSplit(review, plan.acceptance)
   }
+  // #1433: every filing comes first, whatever the outcome: the filed findings and the items the implementer left out, then d1.beyond is gone, and only then does a blocking finding stop the lane.
+  const liveEntries = liveSplitOf.filed.concat((Array.isArray(d1.beyond) ? d1.beyond : []).map(b => followUpOf({ severity: 'minor', file: b.file, summary: b.summary, commit: d1.commit, lead: LIVE_BEYOND_LEAD }, false)).filter(Boolean))
+  if (liveEntries.length) await fileFollowUps(liveEntries)
+  delete d1.beyond
+  if (liveSplitOf.blocking.length) return stop('live-review', { review: liveReview, findings: liveSplitOf.blocking, details: `a critical finding blocks the live-fault lane; ${LIVE_WAY}` })
+  if (liveReview) Object.assign(d1, { reviewed_head: d1.commit, reviewer: 'reviewer' })
 } else {
 phase('Plan')
 if (plan) {
