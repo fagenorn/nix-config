@@ -312,7 +312,12 @@ class QuestionCheckTest(unittest.TestCase):
                      "Answer: For issues 1357 and 1364 tokens were unavailable.\nRead: " + own + " (spend)",
                      "Answer: In PR 1364 tokens were not recorded.\nRead: " + own + " (spend)",
                      "Answer: Issue  1357 tokens unavailable\nRead: " + own + " (spend)",
-                     "Answer: Issues 1357 tokens unavailable\nRead: " + own + " (spend)"):
+                     "Answer: Issues 1357 tokens unavailable\nRead: " + own + " (spend)",
+                     "Answer: For issue `1357` tokens were unavailable.\nRead: " + own + " (spend)",
+                     "Answer: For issue **1357** tokens were unavailable.\nRead: " + own + " (spend)",
+                     "Answer: For #1357 and 1364 tokens were unavailable.\nRead: " + own + " (spend)",
+                     "Answer: For issues 1357-1364 tokens were unavailable.\nRead: " + own + " (spend)",
+                     "Answer: For issue-1357 tokens were unavailable.\nRead: " + own + " (spend)"):
             with self.subTest(text=text):
                 h = Harness(self)
                 h.seed([grounded("q1"), text, grounded("q3")])
@@ -403,7 +408,9 @@ class QuestionCheckTest(unittest.TestCase):
                      "$5 is the total for planning.", "Planning's $5 is the most of any phase.",
                      "its $5 is about half of each issue's spend", "with $5 spent", "use $5 a month",
                      "Planning cost `$5` per issue.", "Planning cost **`$5`** per issue.", "`$5`",
-                     "Issue 1357 used 4,200 tokens.", "Issues 1357 and 1364 used 4,200 tokens."):
+                     "Issue 1357 used 4,200 tokens.", "Issues 1357 and 1364 used 4,200 tokens.",
+                     "Issue `1357` used `4,200` tokens.", "Issue-1357 used 4,200 tokens.",
+                     "Issues 1357-1364 used 4,200 tokens."):
             with self.subTest(text=text):
                 self.assertIs(question_check.spend_figure(text), True)
         for text in (None, "Planning costs the most per issue.", "#1271 took 3 runs over 7 days",
@@ -413,7 +420,13 @@ class QuestionCheckTest(unittest.TestCase):
                      "In PR 1364 tokens were not recorded.", "Issue  1357 tokens unavailable",
                      "Issues 1357 tokens unavailable", "For issues 1357, 1364 tokens were unavailable.",
                      "Pull request 1364 tokens unavailable", "Ticket 12 dollars unavailable", "$1 as an argument", "$1abc", "Issue 1357 token usage is unavailable",
-                     "`$1` as its argument", "takes `$1` as its argument", "$1 is the first argument"):
+                     "`$1` as its argument", "takes `$1` as its argument", "$1 is the first argument",
+                     "For issue `1357` tokens were unavailable.", "For issue **1357** tokens were unavailable.",
+                     "For #1357 and 1364 tokens were unavailable.", "For issues 1357-1364 tokens were unavailable.",
+                     "For issue-1357 tokens were unavailable.", "For issues `1357` and `1364` tokens unavailable.",
+                     "For issues #1357, 1364 and 1370 tokens unavailable.", "For issue no. 1357 tokens unavailable.",
+                     "For issue: 1357 tokens unavailable.", "Issues 1357 to 1364 tokens unavailable.",
+                     "For **issue 1357** tokens were unavailable.", "For issue `1357` dollars unavailable."):
             with self.subTest(text=text):
                 self.assertIs(question_check.spend_figure(text), False)
         own = READ.format("q2")

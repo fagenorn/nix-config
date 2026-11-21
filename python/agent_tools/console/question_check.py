@@ -100,7 +100,7 @@ be an argument (`$1 is a script argument`, also in a code span), an argument nou
 argument; a code span alone is no cue, so `` `$5` `` is a figure), a number followed by `tokens`
 (with an optional `k`, `m`, `b`, `thousand`, `million` or `billion`) or a number followed by `dollars` or
 `usd` (not when it follows an identifier word, `issue`, `PR`, `pull request`, `ticket`, `run` or `id`, alone
-or in a list of numbers, so `issue 1357 tokens`, `issues 1357 and 1364 tokens` and `PR 1364 tokens` hold none), with the `**bold**` or `inline code` marks the answer rules permit around the number or the unit
+or in a list of numbers, also with `no.`, a colon, a hyphen, a `#` or the marks between the word and the number and a `-`, `..`, `to` or `and` between numbers, or in a list that leads with a `#` number, so `issue 1357 tokens`, `issue-1357 tokens`, `issues 1357-1364 tokens`, `#1357 and 1364 tokens` and `PR 1364 tokens` hold none), with the `**bold**` or `inline code` marks the answer rules permit around the number or the unit
 (`**4,200** tokens`). A number is digits with commas only between three-digit groups and an optional fraction, and one right after `#`, a word character, `.` or `,` is
 not a figure, so `issue #7, tokens` and `issue 7, tokens` hold none. `cites_part(read_text, name, part)`
 is True iff `cites(read_text, name)` holds and some occurrence of `name` in the Read text, at the start
@@ -165,9 +165,14 @@ _COUNT_FIGURE = re.compile(
     r"(?<![#\w.,])" + _NUMBER + _MARK + r"(?:" + _MAGNITUDE + _MARK + r")?tokens\b"
     + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:dollars|usd)\b", re.IGNORECASE)
 # A number right after an identifier word, alone or in a list of numbers (`issues 1357 and 1364`, `PR 1364`), is
-# that identifier and no count, so `issues 1357 and 1364 tokens` holds no figure.
+# that identifier and no count, so `issues 1357 and 1364 tokens` holds no figure. The identifier word may be followed
+# by `no.`/`number`, a colon, a hyphen, a `#` or the `**bold**`/`inline code` marks; the numbers may be marked, joined
+# by `,`, `&`, `/`, a hyphen or dots (a range), `and`, `or` or `to`, and a list may lead with a `#` number alone.
+_ID_ITEM = r"[*`]*#?\d+[*`]*"
+_ID_SEP = r"(?:\s*(?:-|\u2013|\u2014|\.\.|,|&|/)\s*|\s+(?:and|or|to)\s+|\s+)"
 _IDENTIFIER_BEFORE = re.compile(
-    r"\b(?:issues?|prs?|pull\s+requests?|tickets?|runs?|ids?)\s+(?:#?\d+\s*(?:,|&|and|or|/)?\s*)*\Z", re.IGNORECASE)
+    r"(?:\b(?:issues?|prs?|pull\s+requests?|tickets?|runs?|ids?)(?:\s+(?:no\.?|number))?[\s:#*`-]*"
+    r"|(?<!\w)[*`]*#\d+[*`]*" + _ID_SEP + r")(?:" + _ID_ITEM + _ID_SEP + r")*[*`]*\Z", re.IGNORECASE)
 # A lone digit after `$` is a dollar amount unless a cue marks it as a shell positional argument ($1): a word that
 # names an argument leads into it or an argument is what it is said to be, or the article `the` leads into it at the
 # end of a sentence. A code span around it is no cue: the prompt permits `inline code` around a figure.
