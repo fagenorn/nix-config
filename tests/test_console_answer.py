@@ -624,12 +624,14 @@ class CheckAnswerServiceTest(unittest.TestCase):
                                            "/api/account-remove",
                                            "/api/register-project",
                                            "/api/plan-answer", "/api/plan-approve",
-                                           "/api/adoption-register", "/api/plan-defer",
+                                           "/api/adoption-register", "/api/adoption-merge", "/api/plan-defer",
                                            "/api/register-confirm", "/api/register-cancel",
                                        "/api/trust-check", "/api/owner-notice",
                                        "/api/owner-notice-withdraw", "/api/project-question",
                                        "/api/activate", "/api/share-tailnet",
-                                       "/api/share-colleague", "/api/share-remove", "/api/look-retry"})
+                                       "/api/share-colleague", "/api/share-remove", "/api/look-retry",
+                                       "/api/guest-account", "/api/guest-signin-code",
+                                       "/api/guest-signin-cancel"})
         keys = [PAID10["key"], LIVE12["key"]]
         single = {"project_id": P, "key": LIVE12["key"], "answer": "approve", "version": LIVE12["version"],
                   "confirm": "octo/widgets#12"}

@@ -324,6 +324,27 @@ class ReaderTest(unittest.TestCase):
         reader.read([self.projects], SINCE)
         self.assertEqual(self.totals(reader)[Key(DAY, "s1", None, None, SESSION)].input, 1)
 
+    def test_a_read_whose_every_root_fails_to_list_says_so_and_a_missing_root_does_not(self):
+        self.transcript("s1", assistant("A", DAY, input=1))
+        failing = [True]
+
+        def scandir(directory):
+            if failing[0] and os.path.realpath(directory) == os.path.realpath(self.projects):
+                raise PermissionError(13, "denied")
+            return os.scandir(directory)
+
+        reader = self.reader(scandir=scandir)
+        self.assertIs(reader.roots_unreadable, False)
+        reader.read([self.projects], SINCE)
+        self.assertEqual((reader.roots_unreadable, self.totals(reader)), (True, {}))
+        reader.read([self.projects, self.projects.parent / "other"], SINCE)
+        self.assertIs(reader.roots_unreadable, False)
+        failing[0] = False
+        reader.read([self.projects], SINCE)
+        self.assertEqual(reader.roots_unreadable, False)
+        reader.read([self.projects.parent / "absent"], SINCE)
+        self.assertIs(reader.roots_unreadable, False)
+
     def test_failed_listing_keeps_cursors(self):
         path = self.transcript("s1", assistant("A", DAY, input=1), assistant("B", DAY, input=2))
         failing = [False]
@@ -538,6 +559,44 @@ class SpendViewTest(ViewCase):
             for phase in ("plan", "implement"):
                 self.assertEqual(phases[phase]["dollars"], d["phase"][phase]["dollars"])
         self.assertGreater(sprint["manager"]["dollars"], 0)
+
+    def project_items_view(self, totals, *, journals=None, names=None, repos=None):
+        snap = spend.Snapshot(totals, journals or {}, {}, names or {}, repos or {})
+        view = spend.spend_view(snap, today=TODAY, project_of={"/srv/p00": "p00",
+                                                               "/srv/p01": "p01"}.get,
+                                profiles={})
+        return view["days"][-1]
+
+    def test_project_items_keep_two_projects_runs_with_one_run_id_apart(self):
+        journals = {("s1", "wf_1"): {"a1": "impl-1"}, ("s2", "wf_1"): {"a1": "impl-1"}}
+        d = self.project_items_view(
+            {Key(TODAY, "s1", ("s1", "wf_1"), "a1", AGENT): Tokens(input=100),
+             Key(TODAY, "s2", ("s2", "wf_1"), "a1", AGENT): Tokens(input=7)},
+            journals=journals, repos={"s1": "/srv/p00", "s2": "/srv/p01"})
+        self.assertEqual(d["project_items"]["p00"]["run"]["wf_1"],
+                         {"implement": Tokens(input=100).wire()})
+        self.assertEqual(d["project_items"]["p01"]["run"]["wf_1"],
+                         {"implement": Tokens(input=7).wire()})
+        self.assertEqual(d["run_phase"]["wf_1"], {"implement": Tokens(input=107).wire()})
+
+    def test_project_items_hold_a_managers_sprint_under_its_project(self):
+        sid = "0123456789abcdef"
+        d = self.project_items_view(
+            {Key(TODAY, "s1", None, None, SESSION): Tokens(input=30, output=2)},
+            names={"s1": f"p00 sprint {sid}"}, repos={"s1": "/srv/p00"})
+        self.assertEqual(d["project_items"]["p00"]["sprint"][sid],
+                         {spend.MANAGER_PHASE: Tokens(input=30, output=2).wire()})
+        self.assertNotIn("p01", d["project_items"])
+
+    def test_an_unattributed_project_or_an_empty_day_has_no_project_items(self):
+        sid = "0123456789abcdef"
+        d = self.project_items_view(
+            {Key(TODAY, "s1", None, None, SESSION): Tokens(input=30)},
+            names={"s1": f"p00 sprint {sid}"})
+        self.assertEqual(d["project_items"], {})
+        self.assertEqual(d["sprint_phase"][sid], {spend.MANAGER_PHASE: Tokens(input=30).wire()})
+        self.basic()
+        self.assertEqual(self.view()["days"][0]["project_items"], {})
 
     def test_unattributed_items_have_no_phase_breakdown(self):
         run = self.slug / "s1" / "subagents" / "workflows" / "wf_2"

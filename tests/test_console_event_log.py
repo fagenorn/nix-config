@@ -201,7 +201,11 @@ class CancelledRegistrationTest(unittest.TestCase):
         self.assertEqual(event_log.cancelled_registration(event(**exact)), ("/x/r", "P"))
         self.assertEqual(event_log.cancelled_registration(event(**{**exact, "plan_id": None})),
                          ("/x/r", None))
+        self.assertEqual(event_log.cancelled_registration(event(**exact, restore=True)),
+                         ("/x/r", "P"))
         for name, bad in (
+                ("restore false", event(**exact, restore=False)),
+                ("restore a number", event(**exact, restore=1)),
                 ("no plan id", event(by="owner", root="/x/r")),
                 ("extra member", event(**exact, more=1)),
                 ("another by", event(**{**exact, "by": "page"})),
@@ -281,6 +285,23 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(self.retain_at(log, NOW), 3)
         self.assertEqual([(row[0], row[2]) for row in rows(self.store)],
                          [(3, "activation.started"), (4, "activation.finished")])
+
+    def test_the_registry_rows_that_start_and_end_a_roots_ownership_outlive_the_window(self):
+        # #1271: a kept activation row names a root, and who owned that root is told only by the
+        # registrations, so no registration of a project, nor the unregistration that ends one,
+        # is removed; an unregistration that ends no registration is.
+        log = self.open()
+        self.now = OLD
+        log.append([("project.registered", "o/a", {"root": "/srv/p"}),
+                    ("project.unregistered", "o/a", {}),
+                    ("project.registered", "o/b", {"root": "/srv/p"}),
+                    ("project.unregistered", "o/c", {}),
+                    ("old", "o/a", {})])
+        self.assertEqual(self.retain_at(log, NOW), 2)
+        self.assertEqual([(row[0], row[2], row[3]) for row in rows(self.store)],
+                         [(1, "project.registered", "o/a"), (2, "project.unregistered", "o/a"),
+                          (3, "project.registered", "o/b")])
+        self.assertEqual(self.retain_at(log, NOW), 0)
 
     def test_a_raw_delete_of_a_kept_row_is_refused_after_a_pass(self):
         log = self.three_rows()

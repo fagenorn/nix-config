@@ -14,14 +14,17 @@ import json
 import os
 import pwd
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
-from agent_tools.console import checkout_remote, event_log, folder_trust, register, register_check
+from agent_tools.console import (
+    approve, checkout_remote, event_log, folder_trust, manager, register, register_check, sprints)
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -141,6 +144,7 @@ class Fake:
         self.register_operands = []
         self.answers = []
         self.contracts = []
+        self.environments = []
         self.applied = []
         self.discards = []
         self.order = []
@@ -152,7 +156,8 @@ class Fake:
         if self.raises is not None:
             raise self.raises
 
-    def plan(self, root, cancel=None, answers=(), contract=None):
+    def plan(self, root, cancel=None, answers=(), contract=None, environment=None):
+        self.environments.append(environment)
         self.contracts.append((
             contract, contract is not None and os.path.exists(contract),
             contract is None or not Path(contract).resolve().is_relative_to(Path(root).resolve())))
@@ -188,6 +193,66 @@ class Fake:
         if self.discard_result is not None:
             return self.discard_result
         return {"plan_id": plan_id, "discarded": True}
+
+
+class Held(Fake):
+    """A `Fake` whose chosen verb waits for `release` and ignores `cancel`, as a child the stop does not end at once."""
+
+    def __init__(self, *args, hold, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hold = hold
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.cancelled = None
+
+    def _wait(self, cancel):
+        self.entered.set()
+        self.release.wait(30)
+        self.cancelled = cancel is not None and cancel.is_set()
+
+    def _run(self, verb, root, cancel):
+        super()._run(verb, root, cancel)
+        if ((verb == "plan" and (self.hold == "plan" or (self.hold == "answers" and self.answers[-1])))
+                or (verb == "register" and self.hold == "register")):
+            self._wait(cancel)
+
+    def discard(self, plan_id, cancel=None):
+        found = super().discard(plan_id, cancel)
+        if self.hold == "discard":
+            self._wait(cancel)
+        return found
+
+
+def closing(svc) -> tuple[threading.Thread, list]:
+    """Start `svc.close()` on a daemon thread; the thread and the exceptions it raised, once the stop is set."""
+    errors = []
+
+    def run():
+        try:
+            svc.close()
+        except BaseException as error:
+            errors.append(error)
+
+    closer = threading.Thread(target=run, daemon=True)
+    closer.start()
+    end = time.monotonic() + 10
+    while not svc._stop.is_set():
+        if time.monotonic() > end:
+            raise AssertionError("close never set the stop")
+        time.sleep(0.01)
+    return closer, errors
+
+
+def assert_held(test, closer):
+    """2 s is past the server's 0.5 s shutdown poll, so only the drain can still hold the close."""
+    closer.join(2)
+    test.assertTrue(closer.is_alive())
+
+
+def assert_freed(test, closer, errors):
+    closer.join(10)
+    test.assertFalse(closer.is_alive())
+    test.assertEqual(errors, [])
 
 
 class Case(unittest.TestCase):
@@ -383,9 +448,9 @@ class RegisterRefusalTest(Case):
 class RegisterRunTest(Case):
     def test_the_write_answers_while_the_plan_runs_and_the_view_says_running(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=PLANNED, block=gate)
         svc = self.begin(fake, dispatch=None)
+        self.addCleanup(gate.set)
         repo = git_repo(self.parent / "r")
         status, _, body = self.post({"path": str(repo)})
         self.assertEqual((status, body), (204, b""))
@@ -403,9 +468,9 @@ class RegisterRunTest(Case):
 
     def test_a_second_registration_while_one_runs_is_refused(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=PLANNED, block=gate)
         self.begin(fake, dispatch=None)
+        self.addCleanup(gate.set)
         first = git_repo(self.parent / "r")
         second = git_repo(self.parent / "r2")
         self.assertEqual(self.post({"path": str(first)})[0], 204)
@@ -554,6 +619,36 @@ class RegisterRunTest(Case):
         self.assertEqual(real_home_state(), before)
 
 
+class DarwinRegistrationTest(Case):
+    def test_a_darwin_registration_reaches_its_register_card_and_registers_without_a_linux_tool(self):
+        shims = self.parent / "shims"
+        shims.mkdir()
+        marker = self.parent / "linux-tool-ran"
+        for name in ("systemd-run", "systemctl"):
+            shim = shims / name
+            shim.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0\" >> {marker}\nexit 1\n")
+            shim.chmod(0o755)
+        patched = unittest.mock.patch.dict(
+            os.environ, {"PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"})
+        patched.start()
+        self.addCleanup(patched.stop)
+        before = real_home_state()
+        root = register_check.adopted_repository(
+            self.parent, "fixture/console-darwin", ROOT / register_check.CONTRACT_SOURCE)
+        self.begin(register.adopter_for("darwin"), dispatch=None, trust_home=self.home)
+        status, _, body = self.post({"path": str(root)})
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(self.settled_row(root)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(len(self.confirm_cards()), 1)
+        plans = self.home / ".agents/state/adopt/plans"
+        self.assertTrue(plans.is_dir() and any(plans.iterdir()))
+        status, _, body = self.confirm({"root": str(root), "choice": "register"})
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(self.settled_row(root)["result"], "registered")
+        self.assertFalse(marker.exists())
+        self.assertEqual(real_home_state(), before)
+
+
 class RegisterTrustTest(Case):
     """An adopted repository waits for its Register card; only its approval grants and registers (#1078)."""
 
@@ -615,8 +710,8 @@ class RegisterTrustTest(Case):
         nothing = {**NO_CHANGE, "decisions": {"open": [], "recommended": [], "answered": [A1]}}
 
         class Answered(Fake):
-            def plan(self, root, cancel=None, answers=(), contract=None):
-                super().plan(root, cancel, answers, contract)
+            def plan(self, root, cancel=None, answers=(), contract=None, environment=None):
+                super().plan(root, cancel, answers, contract, environment)
                 return nothing if answers else DRAFT
 
         self.svc.close()
@@ -820,6 +915,102 @@ class CancelChecks:
         self.assertEqual(self.captured(repo), before)
 
 
+class RegisterAdmissionTest(Case):
+    """A conditional registration is admitted only while none is open on the page (#1334, ADR-console-084)."""
+
+    def test_an_open_registration_refuses_a_conditional_registration(self):
+        fake = Fake(plan=NO_CHANGE)
+        self.begin(fake)
+        owner = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(owner)})[0], 204)
+        self.assertEqual(self.settled_row(owner)["note"], register.CONFIRM_NOTE)
+        other = git_repo(self.parent / "r2")
+        rows = len(self.rows("registration.ended"))
+        status, _, body = self.post({"path": str(other), "unless_open": True})
+        self.assertEqual((status, body), (409, (register.OPEN_SHOWN + "\n").encode()))
+        self.assertEqual(fake.calls, [("plan", str(owner.resolve()))])
+        self.assertEqual(len(self.rows("registration.ended")), rows)
+        self.assertEqual(self.view()["registration"]["root"], str(owner.resolve()))
+        self.assertEqual(self.post({"path": str(other)})[0], 204)
+
+    def test_a_registration_that_is_not_open_admits_a_conditional_one(self):
+        fake = Fake(plan=RegisterFailureCardTest.FAILED)
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "not_now"})[0], 204)
+        self.assertEqual(self.view()["registration"]["note"], register.LATER_NOTE)
+        other = git_repo(self.parent / "r2")
+        self.assertEqual(self.post({"path": str(other), "unless_open": True})[0], 204)
+
+    def test_a_registration_opened_before_admission_refuses_the_conditional_one(self):
+        fake = Fake(plan=NO_CHANGE)
+        self.begin(fake)
+        other = git_repo(self.parent / "r2")
+        waiting = {**register.failed(str(self.parent / "owner"), "failed"),
+                   "result": "not_registered", "outcome": "no_change",
+                   "note": register.CONFIRM_NOTE}
+        real_lock = self.svc._ingest
+        armed = [None]
+        svc = self.svc
+
+        class Wrapper:
+            def __enter__(self):
+                real_lock.acquire()
+                if armed[0] == threading.get_ident():
+                    armed[0] = None
+                    svc._fold(svc.log.append([register.ended(waiting)]))
+                return self
+
+            def __exit__(self, *exc):
+                real_lock.release()
+
+        svc._ingest = Wrapper()
+        self.addCleanup(setattr, svc, "_ingest", real_lock)
+        real = register.refusal
+
+        def arm(*args, **kwargs):
+            armed[0] = threading.get_ident()
+            return real(*args, **kwargs)
+
+        with unittest.mock.patch.object(register, "refusal", side_effect=arm):
+            with self.assertRaises(sprints.Refused) as raised:
+                svc.register_project(str(other), unless_open=True)
+        self.assertEqual(str(raised.exception), register.OPEN_SHOWN)
+        self.assertIsNone(armed[0])
+        self.assertEqual(fake.calls, [])
+        self.assertIsNone(svc._registering)
+
+    def test_a_card_that_opens_over_a_dismissed_registration_refuses_the_conditional_one(self):
+        fake = Fake(plan=RegisterFailureCardTest.FAILED)
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "not_now"})[0], 204)
+        dismissed = self.view()["registration"]
+        self.assertEqual(dismissed["note"], register.LATER_NOTE)
+        card = {
+            "type": "inbox_item", "reason": "register_retry", "key": "register-retry/P/t",
+            "project_id": None, "root": dismissed["root"], "name": register.name_of(dismissed["root"]),
+            "title": "Register r", "plan_id": "P", "id": None, "subject": None,
+            "headline": "Registering r was refused.", "why": "Try again.", "refusal": None,
+            "more_questions": 0,
+            "questions": [{"question": "Registering r was refused.", "options": ["Retry"],
+                           "chosen": None, "recommended": None, "recommended_index": None}],
+            "values": ["retry"], "items": [], "answers": [], "answered": False,
+            "waiting_since": "t"}
+        calls = list(fake.calls)
+        rows = len(self.rows("registration.ended"))
+        other = git_repo(self.parent / "r2")
+        with unittest.mock.patch.object(approve, "retry_entries", return_value=[card]):
+            status, _, body = self.post({"path": str(other), "unless_open": True})
+        self.assertEqual((status, body), (409, (register.OPEN_SHOWN + "\n").encode()))
+        self.assertEqual(fake.calls, calls)
+        self.assertEqual(len(self.rows("registration.ended")), rows)
+
+
 class RegisterCancelTest(CancelChecks, Case):
     """Cancel registration of a plan or a failure that was never applied (#1088, ADR-console-037)."""
 
@@ -867,6 +1058,27 @@ class RegisterCancelTest(CancelChecks, Case):
         self.assertEqual(self.inbox_of(repo), [])
         self.assert_cancelled(repo)
 
+    def test_a_restoring_cancel_gives_back_the_registration_it_ran_over(self):
+        self.start(Fake(plan=self.FAILED))
+        y = git_repo(self.parent / "y")
+        self.assertEqual(self.post({"path": str(y)})[0], 204)
+        self.settled_row(y)
+        self.assertEqual(self.confirm({"root": str(y), "choice": "not_now"})[0], 204)
+        shown = self.view()["registration"]
+        self.assertEqual((shown["status"], shown["note"]), ("done", register.LATER_NOTE))
+        repo = git_repo(self.parent / "fail-app")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(self.settled_row(repo)["result"], "failed")
+        self.assertTrue(self.view()["registration"]["cancel"])
+        self.assertEqual(self.cancel({"root": str(repo), "restore": True})[::2], (204, b""))
+        self.assertEqual(self.view()["registration"], shown)
+        self.assertEqual(self.rows("registration.cancelled")[-1][1],
+                         {"by": "owner", "root": str(repo), "plan_id": None, "restore": True})
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual(self.cancel({"root": str(repo)})[::2], (204, b""))
+        self.assertIsNone(self.view()["registration"])
+
     def test_cancel_survives_a_restart(self):
         self.start(Fake(plan=DRAFT))
         repo = git_repo(self.parent / "r")
@@ -880,9 +1092,9 @@ class RegisterCancelTest(CancelChecks, Case):
 
     def test_cancel_is_refused_while_a_run_is_under_way(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=[DRAFT, READY])
         self.start(fake, dispatch=None)
+        self.addCleanup(gate.set)
         repo = git_repo(self.parent / "r")
         self.registered(repo)
         fake.block = gate
@@ -1014,9 +1226,9 @@ class PlanAnswerRefusalTest(Case):
 
     def test_an_answer_while_a_run_is_under_way_is_refused(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=DRAFT, block=gate)
         self.begin(fake, dispatch=None)
+        self.addCleanup(gate.set)
         repo = git_repo(self.parent / "r")
         self.assertEqual(self.post({"path": str(repo)})[0], 204)
         self.refused(answer_of(PID_A, A1), f"a registration is already running for {repo.name}")
@@ -1087,9 +1299,9 @@ class PlanAnswerRunTest(Case):
 
     def test_the_answer_run_shows_its_own_running_headline(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=[DRAFT, READY])
         self.begin(fake, dispatch=None)
+        self.addCleanup(gate.set)
         repo = git_repo(self.parent / "r")
         other = git_repo(self.parent / "r2")
         self.registered(repo)
@@ -1380,6 +1592,21 @@ class DraftRealTest(DraftCase):
         first = self.registered(self.repo)
         second = self.answered_draft(first["plan_id"], "build-command", "none")
         return self.answered_draft(second["plan_id"], "test-command", "none")
+
+    def test_the_draft_read_runs_git_in_its_own_group_under_the_stop(self):
+        runs = []
+        original = manager.run_in_own_group
+
+        def recording(argv, **kwargs):
+            runs.append((argv, kwargs))
+            return original(argv, **kwargs)
+
+        with unittest.mock.patch.object(manager, "run_in_own_group", recording):
+            self.registered(self.repo)
+        reads = [kwargs for argv, kwargs in runs if argv[1] == "-C" and "ls-remote" in argv]
+        self.assertEqual(len(reads), 1)
+        self.assertIs(reads[0]["cancel"], self.svc._stop)
+        self.assertIs(reads[0]["start_new_session"], True)
 
     def test_a_repository_with_no_contract_is_drafted_from_its_remote(self):
         reg = self.registered(self.repo)
@@ -1870,6 +2097,141 @@ class PlanAnswerSecretTest(Case):
         self.assertEqual(reg["state"], "draft")
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         self.assertEqual(real_home_state(), before)
+
+
+class RegisterCloseTest(Case):
+    """Close drains every run that starts an adoption child (#1330, ADR-console-081 D3)."""
+
+    def held_run(self, held):
+        self.begin(held, dispatch=None)
+        self.addCleanup(held.release.set)
+
+    def release_and_free(self, held, closer, errors):
+        assert_held(self, closer)
+        held.release.set()
+        assert_freed(self, closer, errors)
+
+    def test_close_waits_for_a_registration_run_and_cancels_it_first(self):
+        held = Held(plan=PLANNED, hold="plan")
+        self.held_run(held)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertTrue(held.entered.wait(10))
+        closer, errors = closing(self.svc)
+        self.release_and_free(held, closer, errors)
+        self.assertIs(held.cancelled, True)
+
+    def test_close_waits_for_a_confirmed_registration(self):
+        held = Held(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"},
+                    hold="register")
+        profile = self.parent / "accounts" / "profiles" / "work"
+        profile.mkdir(parents=True)
+        (profile / ".claude.json").write_text(json.dumps({"oauthAccount": {"a": 1}}), "utf-8")
+        self.begin(held, dispatch=None, profile_dirs=[profile], trust_home=self.home)
+        self.addCleanup(held.release.set)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(self.settled_row(repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "register"})[0], 204)
+        self.assertTrue(held.entered.wait(10))
+        closer, errors = closing(self.svc)
+        self.release_and_free(held, closer, errors)
+
+    def test_close_waits_for_a_plan_answer_run(self):
+        held = Held(plan=[DRAFT, READY], hold="answers")
+        self.held_run(held)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.wait_done(repo)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        self.assertTrue(held.entered.wait(10))
+        closer, errors = closing(self.svc)
+        self.release_and_free(held, closer, errors)
+
+    def test_a_registration_accepted_before_the_stop_holds_close_and_starts_nothing(self):
+        queued = []
+        fake = Fake(plan=PLANNED)
+        self.begin(fake, dispatch=queued.append)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(len(queued), 1)
+        closer, errors = closing(self.svc)
+        assert_held(self, closer)
+        queued[0]()
+        assert_freed(self, closer, errors)
+        self.assertEqual(fake.calls, [])
+        self.assertIsNone(self.svc._registering)
+
+    def test_a_registration_asked_after_the_stop_is_refused_and_reserves_nothing(self):
+        fake = Fake(plan=PLANNED)
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.svc._stop.set()
+        with self.assertRaises(sprints.Refused) as caught:
+            self.svc.register_project(str(repo))
+        self.assertEqual(str(caught.exception), register.STOPPING)
+        self.assertEqual(fake.calls, [])
+        self.assertIsNone(self.svc._registering)
+
+    def test_a_failed_event_log_write_at_the_end_of_a_run_leaves_close_free(self):
+        self.begin(Fake(plan=PLANNED), dispatch=None)
+        repo = git_repo(self.parent / "r")
+        append = self.svc.log.append
+
+        def failing(events):
+            if any(event[0] == event_log.REGISTRATION_ENDED for event in events):
+                raise sqlite3.OperationalError("disk I/O error")
+            return append(events)
+
+        with (unittest.mock.patch.object(self.svc.log, "append", failing),
+              unittest.mock.patch.object(threading, "excepthook", lambda args: None)):
+            self.assertEqual(self.post({"path": str(repo)})[0], 204)
+            end = time.monotonic() + 10
+            while self.svc._registering is not None and time.monotonic() < end:
+                time.sleep(0.05)
+            self.assertIsNone(self.svc._registering)
+            closer, errors = closing(self.svc)
+            assert_freed(self, closer, errors)
+
+    def test_a_publication_that_fails_before_the_dispatch_releases_the_reservation(self):
+        queued = []
+        self.begin(Fake(plan=PLANNED), dispatch=queued.append)
+        repo = git_repo(self.parent / "r")
+        with unittest.mock.patch.object(self.svc, "_publish", side_effect=RuntimeError("publish")):
+            with self.assertRaises(RuntimeError):
+                self.svc.register_project(str(repo))
+        self.assertEqual(queued, [])
+        self.assertIsNone(self.svc._registering)
+        closer, errors = closing(self.svc)
+        assert_freed(self, closer, errors)
+
+    def test_a_dispatch_that_refuses_leaves_close_free(self):
+        def dispatch(job):
+            raise RuntimeError("no thread")
+
+        self.begin(Fake(plan=PLANNED), dispatch=dispatch)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 500)
+        closer, errors = closing(self.svc)
+        closer.join(5)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertIsNone(self.svc._registering)
+
+    def test_an_inline_job_that_raises_after_it_ran_leaves_close_free(self):
+        def dispatch(job):
+            job()
+            raise RuntimeError("after")
+
+        self.begin(Fake(plan=PLANNED), dispatch=dispatch)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 500)
+        closer, errors = closing(self.svc)
+        closer.join(5)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertIsNone(self.svc._registering)
+        self.assertEqual(self.rows("registration.ended")[-1][1]["result"], "planned")
 
 
 class SnapshotTest(unittest.TestCase):

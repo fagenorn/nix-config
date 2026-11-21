@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the forty screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -86,8 +86,56 @@ Contract:
   meta (`#console-door`) is not the guest page. On the base commit's page, which has neither
   the Sharing button nor a door meta, `sharing-panel` is the desk with no panel opened and
   `guest-page` is the page the guest port served then, so a base run still writes every file.
+  `guest-steer` is `guest-page` over a fixture of three `owner/web` sprints and a release confirm: two
+  sprints the colleague started (every row of theirs carries `"by"`), one whose brief is approved and
+  whose newest message is the colleague's answer to a plain question, so the line `Answered by
+  COLLEAGUE: ...` shows, and one whose brief version 1 waits, so the page shows an open card the colleague
+  can act on with its Approve and Ask for changes controls; and an owner sprint with an owner message;
+  and one tracker card, a release confirm of `owner/web#12`, waiting on the owner, which the page
+  draws as `.guest-wait` with no control. `owner-actors` is the owner's desk over the same seed.
+  `guest-page`, `guest-steer` and `owner-actors` also hold the pool's three accounts, `work-main` and
+  `work-spare`, each with a week and a 5h window, and `colleague-1`, which COLLEAGUE added himself (an
+  `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1"}` written straight to the log) and
+  whose week is the tightest of the three (5% left against `work-spare`'s 10% and `work-main`'s 60%);
+  every manager runs on `work-main`, so the guest page shows `yours`, `Account 2` and `Account 3` and
+  the sprint's account, `Account 2`, and the owner's strip shows COLLEAGUE beside `colleague-1` in
+  its tightest node, the one the 480 px width keeps. On a page with `#pool` the
+  guest shots wait for the pool, a session reset and the sprint's account (`.sprint-account`); on a
+  page without it they wait for none of them. On a page with `.pool-add` the `guest-page` and
+  `guest-steer` shots click it at each width and wait for `.guest-consent` and a disabled
+  `.guest-signin` (the consent open, nothing ticked, nothing posted); on a page without it they click
+  nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` on a page that has a `.cap-owner`
+  and for none on a page that has not. With `--sheets` `capture` also writes
+  `<state>-sheet.png` after each state's widths, the shots side by side in one PNG that must stay
+  under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. Each
+  width waits for what the owner judges to be visible, which fails the run when it is not:
+  `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
+  `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
+  straight into the event log, so the base commit's service, which ignores `by`, serves a page
+  without those parts. On a page whose service does not read the actor (`reads_actors()` is False,
+  `SprintState` having no `started_by`) those waits are skipped, so a base run still writes every
+  file and the pictures are the before pictures of the actors.
+  `register-apply` and `register-draft` are the console's registration of `sample-app`, a
+  repository with no contract whose ready plan proposes the command its adoption commit runs
+  through (`PROPOSAL_LINE`, #1268), served with a stand-in adopter and forge so the plan can be
+  applied: `register-apply` is the ready Apply card, its first line the proposal and then the
+  plan's own lines (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
+  and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
+  `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
+  the proposal as a main line beside its Change control. `register-reconcile-apply` and
+  `register-reconcile-draft` are the same two screens for a repository that already has a contract
+  and pending adoption work, a `reconcile` plan (#1333): the row seeds the reading the console takes
+  of a pre-commit hook whose runner is not on the plain PATH and of a `devenv.nix`, so the plan
+  proposes the same command, and the first is the Apply card, the second the plan after Not now.
+  `REGISTER_READING` reads the card's first
+  line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
+  holds what each state must read on a page that proposes it (`proposes(state)`, which is
+  `proposes_environment()` for the first two and `proposes_reconcile()` for the reconcile pair); on
+  a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
+  picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
+  card opens on the plan's own first line and its draft shows nothing.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 80 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 92 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -141,6 +189,15 @@ Contract:
   column, the question once); any other reading fails with the same line. The jargon count is not
   checked (the text is the session's, not the page's labels); every other check still applies. Playwright is imported inside `capture` only,
   so the fixture half of this module needs nothing beyond the standard library.
+- `adoption-merge`, `adoption-moved` and `adoption-failed` are the adoption card of a pull request the console opened
+  and read ready, seeded through a stand-in forge that reads it as it is: the first at the head
+  the console pushed, so the card offers Merge, the second at another head, so the card says why
+  it does not (#1338). The third is the first with Merge clicked, its stand-in forge refusing the
+  merge and then reading the pull request merged at another head: the card has left the inbox and
+  the page keeps the refusal as the "Could not merge the adoption" notice with its Dismiss button
+  (the notice of a refused click whose card the forge's state removed); its two widths are
+  served by two consoles, since the click cannot be repeated. On a page with no merge the opened step's `created` member is left out (a
+  base console refuses it) and both shots wait only for the card, which is the before picture.
 - The before pictures are the base commit's service, view and page together: this module imports
   nothing from `agent_tools` that the base commit lacks, so running it with `PYTHONPATH` at an
   archive of the base commit's `python/` (`git archive <base> python`) serves the base page over the
@@ -151,6 +208,7 @@ base commit's guest port or the branch's guest socket, so a base run still serve
 from __future__ import annotations
 
 import argparse
+import base64
 import http.client
 import inspect
 import json
@@ -167,13 +225,14 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import capacity, event_log, manager, pictures, sessions, signin
+from agent_tools.console import approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState
+from agent_tools.system.forge_api import ForgeError
 
 from .console_test_support import hook_body, write_registry
 
@@ -183,8 +242,9 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
-          "ask-goal", "question-read", "activation-tooling", "activation-host", "sharing-panel",
-          "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page")
+          "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
+          "register-draft", "register-reconcile-apply", "register-reconcile-draft", "adoption-merge", "adoption-moved", "adoption-failed", "sharing-panel",
+          "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -200,8 +260,42 @@ COLLEAGUE = "colleague@example.invalid"
 SELF_ADDRESS = "100.64.0.10"
 OTHER_DEVICE_ADDRESS = "100.64.0.20"
 SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached",
-                  "guest-page")
+                  "guest-page", "guest-steer")
 SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
+REGISTER_STATES = ("register-apply", "register-draft", "register-reconcile-apply",
+                   "register-reconcile-draft")
+ADOPTION_STATES = ("adoption-merge", "adoption-moved", "adoption-failed")
+CLICKED_STATES = ("adoption-failed",)
+ADOPTION_BRANCH = "adopt-" + "5" * 12
+ADOPTION_COMMIT = "a" * 40
+ADOPTION_MOVED_HEAD = "d" * 40
+ADOPTION_PULL_ID = 1007
+ADOPTION_CARD = "#inbox .adoption"
+REGISTER_NAME = "sample-app"
+REGISTER_PLAN_ID = "sha256:" + "6" * 64
+REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
+PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
+REGISTER_SHOWN = {"register-apply": (PROPOSAL_LINE, None, False),
+                  "register-draft": (None, PROPOSAL_LINE, True),
+                  "register-reconcile-apply": (PROPOSAL_LINE, None, False),
+                  "register-reconcile-draft": (None, PROPOSAL_LINE, True)}
+REGISTER_BASE = {"register-apply": (REGISTER_PLAN_LINES[0], None, False),
+                 "register-draft": (None, None, False),
+                 "register-reconcile-apply": (REGISTER_PLAN_LINES[0], None, False),
+                 "register-reconcile-draft": (None, None, False)}
+# The first line of the Apply card's list, the proposal's draft row and whether that row carries a
+# visible Change button; None for what the page does not show.
+REGISTER_READING = """(() => {
+  const shown = (node) => node && node.getClientRects().length > 0;
+  const first = document.querySelector('.apply-lines li');
+  const row = Array.from(document.querySelectorAll('ul.register-draft > li')).find((item) => {
+    const line = item.querySelector('.draft-line');
+    return shown(line) && line.textContent.trim().startsWith('commits run in its development shell');
+  });
+  const change = row ? row.querySelector('button.draft-change') : null;
+  return [shown(first) ? first.textContent.trim() : null,
+          row ? row.querySelector('.draft-line').textContent.trim() : null, Boolean(shown(change))];
+})()"""
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
 MILESTONES = {"Add resumable uploads": "the upload form",
@@ -377,6 +471,9 @@ class Fixture:
     holding: tuple[int, ...] = ()
     deaf: bool = False
     activating: tuple[str, ...] = ()
+    registering: bool = False
+    adopting: bool = False
+    refusing: bool = False
 
 
 @dataclass(frozen=True)
@@ -1756,6 +1853,7 @@ class Shot:
     reading: tuple[bool, int, bool, bool, int] | None = None
     activation: tuple[str | None, int] | None = None
     card: tuple[str | None, str | None, bool | None, str | None] | None = None
+    register: tuple[str | None, str | None, bool] | None = None
     style: tuple[str, ...] = ()
     checked: tuple[str, ...] = ()
     broke: tuple[str, ...] = ()
@@ -1913,14 +2011,73 @@ class _Seed:
             "answers": ["passed", "failed", "note"], "paid": False, "confirm": "",
             "answered": False, "held_work": 1, "blocking": [], "version": "v1"})
 
-    def account(self, name: str, week: float) -> None:
-        """A signed-in profile with one capacity reading whose week window is `week` used."""
+    def approval(self, project: str, issue: int, ago: float) -> None:
+        """One open release confirm of `issue`: a `verify-approve` card waiting on the owner."""
+        self.put(ago, "inbox.seen", project, {
+            "key": f"{project}#{issue}/9002", "project_id": project, "repo": project,
+            "issue": issue, "comment_id": 9002,
+            "url": f"https://github.com/{project}/issues/{issue}#issuecomment-9002",
+            "reason": "verify-approve", "kind": "approval",
+            "question": "Approve the release of the importer change?", "detail": "",
+            "check_id": "", "questions": [], "items": [], "answers": ["approve"],
+            "paid": False, "confirm": f"{project}#{issue}", "answered": False,
+            "held_work": 1, "blocking": [], "version": "v1"})
+
+    def colleague_sprint(self, project: str, title: str, *, started: float, by: str,
+                         answered: bool = False) -> tuple[str, str]:
+        """One sprint stated by the colleague `by`, every row of theirs carrying `"by"`.
+
+        Without `answered` its brief version 1 is sent and waits. With it the brief is approved, one
+        message is sent, one plain question is asked and answered last, so the answer is the
+        sprint's newest message.
+        """
+        self.count += 1
+        sid = f"{self.count:016x}"
+        goal = f"{title}."
+        base = {"sprint_id": sid, "goal": goal}
+        actor = {"by": by}
+        self.put(started, "goal.stated", project, {**base, **actor})
+        self.put(started - 1 * MINUTE, "manager.started", project, {
+            "sprint_id": sid, "profile": "work-main",
+            "session_name": manager.session_name(project, sid)})
+        self.put(started - 4 * MINUTE, "brief.sent", project, {**base, "version": 1, "brief": {
+            "title": title, "done": f"{title}, merged and checked.",
+            "slices": ["the first slice", "the second slice"], "excluded": [],
+            "risks": ["a partial write"], "asks": []}})
+        if not answered:
+            return sid, goal
+        self.put(started - 8 * MINUTE, "brief.approved", project, {**base, "version": 1, **actor})
+        self.put(started - 10 * MINUTE, "sprint.messaged", project,
+                 {**base, "text": TELL_TEXT, **actor})
+        asked = self.put(started - 12 * MINUTE, "questions.asked", project, {
+            **base, "blocker": False, "questions": [{
+                "question": "Which store should the checkpoint use?",
+                "blocks": "the first slice",
+                "options": ["the existing database", "a new file"],
+                "recommended": "the existing database"}]})
+        self.put(started - 14 * MINUTE, "question.answered", project, {
+            **base, "round": asked.seq, "index": 0,
+            "question": "Which store should the checkpoint use?", "answer": "a new file",
+            "chosen": "a new file", "recommended": "the existing database", "differs": True,
+            **actor})
+        return sid, goal
+
+    def account(self, name: str, week: float, *, session: float | None = None,
+                week_in: int = 86400, session_in: int | None = None) -> None:
+        """A signed-in profile with one capacity reading whose week window is `week` used.
+
+        With `session` it also has a `5h` window that much used, reset `session_in` seconds on;
+        the week window and the reading itself reset `week_in` seconds on.
+        """
         self._at[0] = _iso(self.now_s)
+        windows = {"7d": {"status": "allowed", "utilization": week,
+                          "reset": int(self.now_s) + week_in}}
+        if session is not None:
+            windows["5h"] = {"status": "allowed", "utilization": session,
+                             "reset": int(self.now_s) + session_in}
         reading = capacity.parse_report({
-            "http_status": 200, "status": "allowed", "reset": int(self.now_s) + 86400, "binding": None,
-            "claim": None, "account": None, "session_id": None,
-            "windows": {"7d": {"status": "allowed", "utilization": week,
-                               "reset": int(self.now_s) + 86400}}})
+            "http_status": 200, "status": "allowed", "reset": int(self.now_s) + week_in, "binding": None,
+            "claim": None, "account": None, "session_id": None, "windows": windows})
         self.log.append(capacity.report_entries(reading, name))
         self.log.append([signin.entry(name, signin.Status("signed_in", None))])
 
@@ -1935,10 +2092,76 @@ class _Seed:
                      {**base, "message": said.seq, "reply": REPLY_TEXT})
 
 
+def _seed_registration(seed: _Seed, state: str, root: str) -> None:
+    """A ready plan of `root`, a repository with no contract whose draft proposes a commit environment.
+
+    The reading names one GitHub remote, so the draft has no open question; its hook and
+    environment file are what a checkout with a devenv and installed commit hooks reads. The base
+    commit's draft ignores both and proposes nothing (the before picture).
+    """
+    if state.startswith("register-reconcile"):
+        fields = (contract_draft.reconcile_fields(root, {
+            "hooks": ["pre-commit"], "stranded": ["pre-commit"], "environments": ["devenv.nix"]})
+            if proposes_reconcile() else None)
+        seed.put(MINUTE, event_log.REGISTRATION_ENDED, None, {
+            "by": "owner", "root": root, "project_id": f"owner/{REGISTER_NAME}", "result": "planned",
+            "outcome": "reconcile", "headline": f"What adopting {REGISTER_NAME} would change.",
+            "lines": list(REGISTER_PLAN_LINES), "note": None, "plan_id": REGISTER_PLAN_ID,
+            "state": "ready", "questions": [], "answered": [], "draft": fields, "remote": None})
+        if state == "register-reconcile-draft":
+            seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
+        return
+    reading = {**contract_draft.read(root),
+               "remotes": [("origin", f"https://github.com/owner/{REGISTER_NAME}.git")],
+               "default_branch": "main", "branches": ["main"],
+               "hooks": ["pre-commit"], "environments": ["devenv.nix"]}
+    fields = contract_draft.draft(root, reading)
+    seed.put(MINUTE, event_log.REGISTRATION_ENDED, None, {
+        "by": "owner", "root": root, "project_id": f"owner/{REGISTER_NAME}", "result": "planned",
+        "outcome": "changes", "headline": f"What adopting {REGISTER_NAME} would change.",
+        "lines": list(REGISTER_PLAN_LINES), "note": None, "plan_id": REGISTER_PLAN_ID,
+        "state": "ready", "questions": [], "answered": [], "draft": fields, "remote": None})
+    if state == "register-draft":
+        seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
+
+
+def offers_merge() -> bool:
+    """Whether this page's adoption card can offer Merge; a base commit's forge has no such method."""
+    return hasattr(approve.GitHubForge, "merge_pull_request")
+
+
+def _seed_adoption(seed: _Seed, state: str, root: str) -> None:
+    """An adoption pull request of `root` the console opened, read ready at the head it pushed or at another.
+
+    Both rows are payload dicts, as a base commit's `approve` refuses the `head` argument and the
+    `created` member; a base console ignores the head and refuses the opened step's `created`
+    member, so the member is written only when this page offers Merge (the before picture shows
+    the card without it).
+    """
+    pull = {"number": 7, "url": f"https://github.com/owner/{REGISTER_NAME}/pull/7"}
+    if offers_merge():
+        pull["created"] = True
+        pull["id"] = ADOPTION_PULL_ID
+    seed.put(MINUTE, event_log.ADOPTION_STEP, None, {
+        "by": "owner", "plan_id": REGISTER_PLAN_ID, "root": root, "project_id": f"owner/{REGISTER_NAME}",
+        "step": "opened", "branch": ADOPTION_BRANCH, "commit": ADOPTION_COMMIT, "base": "main",
+        "pull_request": pull, "reason": None, "note": None, "kept": None, "evidence": None})
+    seed.put(MINUTE / 2, event_log.ADOPTION_PULL, None, {
+        "plan_id": REGISTER_PLAN_ID, "number": 7, "url": pull["url"], "state": "ready",
+        "head": ADOPTION_MOVED_HEAD if state == "adoption-moved" else ADOPTION_COMMIT,
+        "base": "main"})
+
+
 def _seed_state(seed: _Seed, state: str, web_root: str = "",
                 read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> tuple[str, ...]:
     """Seed the events of `state`; returns the sprint ids whose transcripts the state writes."""
     web, api = PROJECTS[0], PROJECTS[1]
+    if state in REGISTER_STATES:
+        _seed_registration(seed, state, str(Path(web_root).parent / REGISTER_NAME))
+        return ()
+    if state in ADOPTION_STATES:
+        _seed_adoption(seed, state, web_root)
+        return ()
     if state == "live-several":
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
         seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
@@ -1959,13 +2182,27 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "name": manager.session_name(web, sid)})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
-    elif state in SHARING_STATES:
+    elif state in (*SHARING_STATES, "owner-actors"):
         seed.put(3 * MINUTE, SHARING_TAILNET, None, {"tailnet": TAILNET})
         if state == "sharing-off":
             seed.put(MINUTE, SHARING_TAILNET, None, {"shared": False})
         seed.put(2 * MINUTE, SHARING_COLLEAGUE, None, {"login": COLLEAGUE, "projects": [web]})
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
-        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
+        if state in ("guest-steer", "owner-actors"):
+            seed.colleague_sprint(web, "Add resumable uploads", started=40 * MINUTE,
+                                  by=COLLEAGUE, answered=True)
+            seed.colleague_sprint(web, "Fix the settings page", started=20 * MINUTE, by=COLLEAGUE)
+            sid, goal = seed.sprint(web, "Try a new cache", started=30 * MINUTE,
+                                    report=6 * MINUTE)
+            seed.message(web, sid, goal, sent=2 * MINUTE)
+            seed.approval(web, 12, MINUTE)
+        else:
+            seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
+            seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
+        if state in ("guest-page", "guest-steer", "owner-actors"):
+            seed.account("work-main", 0.4, session=0.25, week_in=3 * 86400, session_in=2 * 3600)
+            seed.account("work-spare", 0.9, session=0.6, week_in=5 * 86400, session_in=4 * 3600)
+            seed.put(10 * MINUTE, event_log.ACCOUNT_ADDED, None, {"by": COLLEAGUE, "profile": "colleague-1"})
+            seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
@@ -2181,7 +2418,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         token=console / "token", secrets=console / "sprint-secrets", home=home,
         accounts=accounts, config=config, state=state_dir, projects=projects,
         holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
-        activating=ACTIVATION_PATHS.get(state, ()))
+        activating=ACTIVATION_PATHS.get(state, ()), registering=state in REGISTER_STATES,
+        adopting=state in ADOPTION_STATES, refusing=state == "adoption-failed")
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -2190,8 +2428,9 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         sprint_ids = _seed_state(_Seed(log, at, now_s, console / "pictures"), state, str(projects[0]), read=read)
     finally:
         log.close()
-    if state == "accounts-panel":
-        for name in ("work-main", "work-spare"):
+    if state in ("accounts-panel", "guest-page", "guest-steer", "owner-actors"):
+        colleague = ("colleague-1",) if state != "accounts-panel" else ()
+        for name in ("work-main", "work-spare", *colleague):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
     if state == "manager-cannot-hear":
         _write_held_manager(fixture, now_s)
@@ -2225,12 +2464,74 @@ def reads_other() -> bool:
     return "other" in Activation.__dataclass_fields__
 
 
+def reads_actors() -> bool:
+    """Whether this page's service reads who started a sprint (`SprintState` has `started_by`)."""
+    return "started_by" in SprintState.__dataclass_fields__
+
+
 def _activation_reader(paths: tuple[str, ...]):
     """A stand-in reading of merged changes outside the console; a base commit's `Activation` has no `other`."""
     def read(roots):
         other = {"other": paths} if reads_other() else {}
         return Activation(sorted(roots)[0], (), ACTIVATION_COMMIT, **other)
     return read
+
+
+class _AdoptionForge:
+    """A stand-in forge of the adoption states: it reads the seeded pull request as it is, so a poll
+    changes nothing. `adoption-merge` and `adoption-moved` are never clicked; with `refuses` its
+    merge call fails and the pull request then reads merged at another head, as when someone else
+    merged it with commits the console did not push."""
+
+    def __init__(self, head: str, refuses: bool = False):
+        self._head = head
+        self._refuses = refuses
+        self._refused = False
+
+    def pull_request_reading(self, slug, number, cancel=None) -> dict:
+        if self._refused:
+            return {"state": "merged", "head": ADOPTION_MOVED_HEAD, "base": "main", "checks_error": None,
+                    "id": ADOPTION_PULL_ID}
+        return {"state": "ready", "head": self._head, "base": "main", "checks_error": None,
+                "id": ADOPTION_PULL_ID}
+
+    def merge_pull_request(self, slug, number, head, cancel=None) -> None:
+        if not self._refuses:
+            raise AssertionError("this state's pull request is never merged")
+        self._refused = True
+        raise ForgeError("gh_failed", "the pull request was merged elsewhere")
+
+    def pull_request_state(self, slug, number, cancel=None) -> str:
+        return "ready"
+
+
+def _seeded_head(fixture: Fixture) -> str:
+    """The head the fixture's adoption pull request row records."""
+    log = EventLog(fixture.store)
+    try:
+        return [event.payload["head"] for event in log.events()
+                if event.kind == event_log.ADOPTION_PULL][-1]
+    finally:
+        log.close()
+
+
+class _Inert:
+    """A stand-in adopter or forge: its presence lets a ready plan be applied, nothing calls it."""
+
+
+def proposes_environment() -> bool:
+    """Whether this page's drafted contract can propose the command the adoption commit runs through."""
+    return hasattr(contract_draft, "proposed_lines")
+
+
+def proposes_reconcile() -> bool:
+    """Whether this page's reconcile plan can propose that command for a hook its PATH cannot find."""
+    return hasattr(contract_draft, "reconcile_fields")
+
+
+def proposes(state: str) -> bool:
+    """Whether this page proposes the commit environment in the register state `state`."""
+    return proposes_reconcile() if state.startswith("register-reconcile") else proposes_environment()
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -2297,6 +2598,10 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
             PullRequest(7, frozenset(fixture.holding), False, None, True),)
     if fixture.activating:
         forge["activation_reader"] = _activation_reader(fixture.activating)
+    if fixture.registering:
+        forge.update(adopter=_Inert(), forge=_Inert())
+    if fixture.adopting:
+        forge["forge"] = _AdoptionForge(_seeded_head(fixture), refuses=fixture.refusing)
     bound: list = []
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
@@ -2406,7 +2711,7 @@ class _Serve:
 
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
-            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER),
+            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False,
             mutate: bool = False) -> list[Shot]:
     try:
         from playwright.sync_api import Error, sync_playwright
@@ -2422,32 +2727,39 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
             raise Unavailable(f"no Chromium to launch: {' '.join(str(error).split())[:120]}") from error
         try:
             for state in states:
-                with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
-                        tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
-                    now_s = datetime.now(timezone.utc).timestamp()
-                    service = start_service(
-                        build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
-                        guest_dir=Path(door) if state in SHARING_STATES else None,
-                        tailnet_readable=state != "sharing-unreadable")
-                    serve = None
-                    try:
-                        host, port = service.address
-                        if state in SHARING_PANELS:
-                            guest_requests(state, guest_door(service))
-                        elif state == "guest-page":
-                            serve = _Serve(guest_door(service))
-                            host, port = serve.address
-                        for width in widths:
-                            path = "spend" if state == "spend-page" else ""
-                            taken.append(
-                                _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
-                                       question=read[0],
-                                       canonical=read == (READ_QUESTION, READ_ANSWER),
-                                       mutate=mutate))
-                    finally:
-                        if serve is not None:
-                            serve.close()
-                        service.close()
+                # A state that clicks changes its console for good, so each width gets its own.
+                groups = [(width,) for width in widths] if state in CLICKED_STATES else [tuple(widths)]
+                shot_paths = []
+                for group in groups:
+                    with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
+                            tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
+                        now_s = datetime.now(timezone.utc).timestamp()
+                        service = start_service(
+                            build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
+                            guest_dir=Path(door) if state in SHARING_STATES else None,
+                            tailnet_readable=state != "sharing-unreadable")
+                        serve = None
+                        try:
+                            host, port = service.address
+                            if state in SHARING_PANELS:
+                                guest_requests(state, guest_door(service))
+                            elif state in ("guest-page", "guest-steer"):
+                                serve = _Serve(guest_door(service))
+                                host, port = serve.address
+                            for width in group:
+                                path = "spend" if state == "spend-page" else ""
+                                taken.append(
+                                    _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
+                                           question=read[0],
+                                           canonical=read == (READ_QUESTION, READ_ANSWER),
+                                           mutate=mutate))
+                                shot_paths.append(out / f"{state}-{width}.png")
+                        finally:
+                            if serve is not None:
+                                serve.close()
+                            service.close()
+                if sheets:
+                    sheet(browser, shot_paths, out / f"{state}-sheet.png")
         finally:
             browser.close()
     return taken
@@ -2639,10 +2951,33 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
-        if state == "guest-page" and page.query_selector("#console-door") is not None:
+        if state in ("guest-page", "guest-steer") and page.query_selector("#console-door") is not None:
             page.wait_for_selector("#top-who:not([hidden])")
             if page.query_selector("#capacity") is not None:
                 raise RuntimeError("the guest shot is not the guest page")
+        if state in ("guest-page", "guest-steer") and page.query_selector("#pool") is not None:
+            for selector in ("#pool:not([hidden])", "#pool .pool-session time", ".sprint-account"):
+                page.wait_for_selector(selector)
+        if state in ("guest-page", "guest-steer") and page.query_selector(".pool-add") is not None:
+            page.click(".pool-add")
+            for selector in (".guest-consent", ".guest-signin:disabled"):
+                page.wait_for_selector(selector)
+        if state == "guest-steer" and reads_actors():
+            for selector in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
+                page.wait_for_selector(selector)
+        if state == "owner-actors" and reads_actors():
+            for selector in (".started-by", "text=Answered by"):
+                page.wait_for_selector(selector)
+        if state == "owner-actors" and page.query_selector(".cap-owner") is not None:
+            page.wait_for_selector(".cap-tightest .cap-owner")
+        if state in ADOPTION_STATES:
+            page.wait_for_selector(
+                ADOPTION_CARD + (" .reason" if state == "adoption-moved" else " button.adoption-merge")
+                if offers_merge() else ADOPTION_CARD)
+        if state == "adoption-failed" and offers_merge():
+            page.click(ADOPTION_CARD + " button.adoption-merge")
+            page.wait_for_selector("#inbox .adoption-failed button.adoption-failed-dismiss")
+            page.wait_for_selector(ADOPTION_CARD, state="detached")
         if state in ("finished-list", "desk-spend"):
             if state == "desk-spend":
                 page.click('details[data-key="line:owner/web"] > summary')
@@ -2723,6 +3058,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         activation = None
         if state in ACTIVATION_PATHS:
             activation = tuple(page.evaluate(ACTIVATION_READING))
+        register = None
+        if state in REGISTER_STATES:
+            register = tuple(page.evaluate(REGISTER_READING))
         page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
         squeezed = page.evaluate(SQUEEZED_COUNT)
@@ -2754,7 +3092,32 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                card=card, activation=activation, style=style, checked=checked, broke=broke)
+                card=card, activation=activation, register=register, style=style, checked=checked, broke=broke)
+
+
+def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
+    """One PNG of the given pictures side by side, top-aligned, in the order given.
+
+    Refuses with a RuntimeError when the file is over `pictures.MAX_BYTES`, the size `sprint ask`
+    refuses a picture over.
+    """
+    out = Path(out)
+    images = "".join(
+        '<img src="data:image/png;base64,' + base64.b64encode(Path(path).read_bytes()).decode() + '">'
+        for path in paths)
+    page = browser.new_page(viewport={"width": 2400, "height": HEIGHT})
+    try:
+        page.set_content(
+            "<!doctype html><html><body style=\"margin:0;background:#fff\">"
+            "<div id=\"row\" style=\"display:inline-flex;align-items:flex-start;gap:16px;"
+            f"padding:16px;background:#fff\">{images}</div></body></html>")
+        page.locator("#row").screenshot(path=str(out))
+    finally:
+        page.close()
+    size = out.stat().st_size
+    if size > pictures.MAX_BYTES:
+        raise RuntimeError(f"{out} is {size} bytes, over the {pictures.MAX_BYTES} a picture may be")
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2764,6 +3127,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="the directory the PNG files go to")
     parser.add_argument("--question", help="the owner's question, shot with --answer-file")
     parser.add_argument("--answer-file", help="the stored answer's text (UTF-8), shot with --question")
+    parser.add_argument("--sheets", action="store_true",
+                        help="also write <state>-sheet.png, the state's widths side by side")
     args = parser.parse_args(argv)
     if (args.question is None) != (args.answer_file is None):
         parser.error("--question and --answer-file go together")
@@ -2774,8 +3139,9 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="console-shots-env-") as tmp:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
-            taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text))
-                     if real else capture(Path(args.out)))
+            taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
+                             sheets=args.sheets)
+                     if real else capture(Path(args.out), sheets=args.sheets))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
             return 2
@@ -2787,6 +3153,9 @@ def main(argv: list[str] | None = None) -> int:
                     os.environ[name] = value
     for shot in taken:
         print(shot.path)
+    if args.sheets:
+        for state in dict.fromkeys(shot.state for shot in taken):
+            print(Path(args.out) / f"{state}-sheet.png")
     wide = [shot for shot in taken if shot.scroll_width > shot.width]
     for shot in wide:
         print(f"console-screenshots: {shot.path.name} scrolls sideways "
@@ -2828,6 +3197,11 @@ def main(argv: list[str] | None = None) -> int:
     for shot in unlined:
         print(f"console-screenshots: {shot.path.name} does not show the activation line with its "
               "Activate button")
+    proposals = [shot for shot in taken if shot.state in REGISTER_SHOWN and shot.register != (
+        REGISTER_SHOWN[shot.state] if proposes(shot.state) else REGISTER_BASE[shot.state])]
+    for shot in proposals:
+        print(f"console-screenshots: {shot.path.name} does not show the proposed commit "
+              "environment on the Apply card or as a changeable draft line")
     expected = {"question-words": WORDS_CARD, "question-refused": REFUSED_CARD}
     uncarded = [shot for shot in taken
                 if shot.state in expected and shot.card not in (None, expected[shot.state])]
@@ -2851,7 +3225,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} breaks a page style "
               f"({'; '.join(shot.style)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or unlined or uncarded or offrow or scrolled or short or broken) else 0
+                 or unlined or proposals or uncarded or offrow or scrolled or short or broken) else 0
 
 
 if __name__ == "__main__":

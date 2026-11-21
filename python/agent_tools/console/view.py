@@ -7,7 +7,8 @@ orders and folds the state into the wire view; `encode_view` renders it as one
 line of JSON.
 
 Events: `project.registered` (payload `{"root": ...}`) sets a project, keeping
-its open work; `project.unregistered` removes it; a project question's asked or answered event
+its open work; `project.unregistered` (payload `{"root": ...}`, the root the registry
+no longer holds, #1334) removes it; a project question's asked or answered event
 (#1178) changes nothing, so a question or follow-up neither reorders projects nor resets a
 project's untouched age; any other event that names a
 project updates only that project's last sequence and time; an event naming no
@@ -173,7 +174,9 @@ counts in `inbox_items` and the headline. Its entry is
     {"type": "inbox_item", "reason": "brief", "key": "brief/<sprint id>", "project_id",
      "sprint_id", "title", "version": <int>, "brief": {"title", "done", "excluded", "slices",
      "risks", "asks"}, "pictures": [{"id", "line", "pair"}], "answered": false,
-     "waiting_since": "<time the brief was sent>"}
+     "waiting_since": "<time the brief was sent>", "started_by": "<login>" | null}
+
+`started_by` is the login of the guest who stated the sprint's goal, null for the owner (#1263).
 
 `pictures` is `_picture_entries(brief.pictures)`, `[]` for a brief with none, each line cut to
 `MAX_PICTURE_LINE_CHARS` and never refused; `brief` holds the six parts only.
@@ -221,7 +224,9 @@ one entry of `inbox.open`, after the stalls and the failed starts and before the
 stalls, progress, sign-in, questions, then the existing ones.
 
 A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
-`entry.get("signin")` so a capacity without that member shows none) is one entry of `inbox.open`,
+`entry.get("signin")` so a capacity without that member shows none) and that no colleague added (#1361,
+ADR-console-087 D3: its entry's `owner` is none, a read of `entry.get("owner")`; signing a colleague's
+account in is his, so it raises no card) is one entry of `inbox.open`,
 after the progress entries and before the questions, ordered by profile, and counts in
 `inbox_items` and the headline. Its entry is
 
@@ -244,7 +249,7 @@ is that mapping, `{profile: run}`, copied (an empty object when none is given). 
 link is never in the view: the page holds it from the start answer, the add answer and the
 link answer of `POST /api/signin-link` alone, each a guarded page request.
 
-An adoption whose pull request is ready to merge (#1054, `approve.inbox_entries`) arrives through the
+An adoption with a card (#1054, #1338, `approve.inbox_entries`) arrives through the
 `adoption_items` argument, one mapping each, and is one entry of `inbox.open`, copied, after the
 sign-in entries and before the questions, in the order given. It counts in `inbox_items` and the
 headline and is not filtered by the registered projects: the adoption's project is not registered
@@ -254,9 +259,13 @@ yet. Its entry is
      "project_id": "<the contract's project id>" | null, "name": "<the checkout's name>",
      "headline": "The adoption of <project> is ready to merge", "url": "<pull request url>",
      "number": <pull request number>, "answered": false, "waiting_since": "<time the pull request
-     was first read as ready>"}
+     was first read as ready>", "plan_id": "<plan id>", "commit": "<sha>",
+     "merge": <bool>, "why": "<plain words>" | null}
 
-`ADOPTION_SENTENCE` says what the page offers: opening the pull request, where the owner merges it.
+The item is listed per `approve.inbox_entries`, and Merge is offered (`merge` true, `why` null) only per
+`approve.merge_refusal`; otherwise `why` says in plain words why the card offers no Merge.
+
+`ADOPTION_SENTENCE` says what the page offers: merging the adoption from its card, which says why when it cannot.
 It follows `SIGNIN_SENTENCE` and precedes `QUESTION_SENTENCE` in the precedence.
 
 The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list of the profile names
@@ -302,7 +311,8 @@ then that entry's `out_until` (null when unknown), else null. Digest and bring-b
 state without the quota. `view` reads no clock.
 
 `BRIEF_SENTENCE` ("Press Enter to approve the brief, or write a reply to ask for changes.") says
-what the page offers. An approved or changes-asked brief is no inbox item; only registered
+what the page offers. An approved or changes-asked brief, or one of a sprint with a stop requested (the console
+refuses its decision), is no inbox item; only registered
 projects' briefs appear, as for sprints.
 
 Each open question of a shown sprint (`sprints.open_questions`; a registered project, as briefs) is
@@ -319,7 +329,11 @@ is none. Its entry is
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
      "look": null | {"issue", "pr", "head", "state": "open" | "moved" | "posting" | "failed",
                      "line": <str>, "approve_index": <int> | null},
-     "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
+     "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>",
+     "started_by": "<login>" | null, "owner_only"?: true}
+
+`owner_only` is present, and true, only on a question the manager marked for the owner alone
+(#1263); a colleague never answers it.
 
 `look` (#1260) is null for a question that carries no look. For one that does, `approve_index` is the index
 among the logged options of the option that approves the head (the page never starts that option picked, so
@@ -457,7 +471,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state_text": "<text>",
                       "ball": "manager" | "owner" | "nobody" | null,
                       "ball_text": "<text>" | null, "now_text": "<sentence>" | null,
-                      "stated_at", "age_text", "manager_text": <text> | null,
+                      "stated_at", "started_by": "<login>" | null, "age_text",
+                      "manager_text": <text> | null,
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
                                        | "stalled" | "unavailable",
                       "manager_until": "<time>" | null, "retry": <bool>,
@@ -493,7 +508,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
                        "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
-                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>}
+                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>,
+                       "by": "<login>" | null, "question": <str> | null}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -745,7 +761,7 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import (
     Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_QUESTION_ANSWERED,
-    PROJECT_QUESTION_ASKED, PROJECT_UNREGISTERED as UNREGISTERED)
+    PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED, PROJECT_UNREGISTERED as UNREGISTERED)
 from agent_tools.console.manager import Wait, plain_reason, quota_wait, session_name
 from agent_tools.console.movement import NUDGE_REPLY_MS, ProjectMovement, SessionMovement
 from agent_tools.console.sessions import (
@@ -866,6 +882,7 @@ from agent_tools.console.sprints import (
     progress_text,
     sprint_title,
     takes_notices,
+    takes_questions,
     unreachable,
 )
 from agent_tools.verification import verify_owner
@@ -928,7 +945,7 @@ SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
 TERMINAL_SENTENCE = "Answer it in the manager's terminal."
 DEAF_SENTENCE = "Bring the manager back, or drop the sprint."
 TERMINAL_DEAF_SENTENCE = "Answer it in the manager's terminal, or bring the other manager back, or drop its sprint."
-ADOPTION_SENTENCE = "Open the pull request to merge the adoption."
+ADOPTION_SENTENCE = "Merge the adoption from its card; when it cannot be merged there, the card says why."
 REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
 REGISTER_STEP_SENTENCE = "Each one says what to do next."
@@ -993,7 +1010,7 @@ def project_states(
                 previous.open_work if previous else 0)
         elif event.kind == UNREGISTERED:
             result.pop(project, None)
-        elif event.kind in (PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED):
+        elif event.kind in (PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_KEYED):
             continue
         elif project in result:
             result[project] = replace(
@@ -1131,7 +1148,7 @@ def registry_changes(
         for project_id, root in sorted(wanted.items())
         if project_id not in states or states[project_id].root != root
     ]
-    changes.extend((UNREGISTERED, project_id, {})
+    changes.extend((UNREGISTERED, project_id, {"root": states[project_id].root})
                    for project_id in sorted(states) if project_id not in wanted)
     return changes
 
@@ -1560,6 +1577,14 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
     return ON_TRACK, ON_TRACK_TEXT
 
 
+def brief_pending(state: SprintState) -> bool:
+    """Whether the sprint's brief waits on a decision the console still takes: the one rule that
+    makes it an inbox item and the owner's ball (a sprint with a stop requested or one that takes
+    no question refuses the decision, so its brief is neither)."""
+    return (state.brief is not None and state.brief.decision == NONE and state.stop_at is None
+            and takes_questions(state))
+
+
 def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
                 listed: Collection[str], waits: WaitSignals = NO_WAITS,
                 failed_start: bool = False, deaf: bool = False) -> str | None:
@@ -1575,8 +1600,7 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
-    brief = state.brief
-    if (waiting or deaf or (brief is not None and brief.decision == NONE) or state.stalled is not None
+    if (waiting or deaf or brief_pending(state) or state.stalled is not None
             or state.no_progress_at is not None or failed_start
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
@@ -1691,7 +1715,7 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
             "text": message.text, "at": message.at, "state": shown, "state_text": text,
             "action_text": action, "read_at": message.read_at, "reply": message.reply,
             "reply_at": message.reply_at, "words": message.words,
-            "new": _is_new(message, looked)}
+            "new": _is_new(message, looked), "by": message.by, "question": message.question}
 
 
 def _approval_entry(state: SprintState, now_ms: int | None, minute: bool, retry: bool,
@@ -1773,6 +1797,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                                sprint_wait(state, now_ms, listed, waits), failed_start=failed,
                                deaf=deaf),
         "stated_at": state.stated_at,
+        "started_by": state.started_by,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
         "manager_state": manager_state,
@@ -1910,6 +1935,7 @@ def _question_threads(questions: Sequence[project_question.AskedQuestion]) -> di
             "back_text": None if parts is None else said(ASK_BACK_TEXT, parts.back),
             "back_choices": None if parts is None else list(parts.choices),
             "production_text": None if parts is None else parts.production,
+            "request_key": question.request_key,
         }
 
     threads = project_question.threads(questions)
@@ -2003,7 +2029,8 @@ def _brief_entry(sprint: SprintState) -> dict:
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
             "title": sprint_title(sprint), "version": brief.version, "brief": brief.parts,
             "pictures": _picture_entries(brief.pictures),
-            "answered": False, "waiting_since": brief.sent_at}
+            "answered": False, "waiting_since": brief.sent_at,
+            "started_by": sprint.started_by}
 
 
 def _look_entry(question: Question) -> dict | None:
@@ -2030,7 +2057,7 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
     ask = cut(question.question, MAX_ASK_CHARS)
     context = question.context
     answered = question.answer is not None
-    return {"type": "inbox_item", "reason": "question",
+    entry = {"type": "inbox_item", "reason": "question",
             "key": f"question/{sprint.sprint_id}/{question.round_id}/{question.index}",
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
             "title": sprint_title(sprint),
@@ -2048,7 +2075,11 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "needs_words_index": [i for i, option in enumerate(question.options)
                                                  if option in question.needs_words]}],
             "pictures": _picture_entries(question.pictures), "look": _look_entry(question),
-            "items": [], "answers": [], "answered": answered, "waiting_since": question.at}
+            "items": [], "answers": [], "answered": answered, "waiting_since": question.at,
+            "started_by": sprint.started_by}
+    if question.owner_only:
+        entry["owner_only"] = True
+    return entry
 
 
 def _stall_entry(sprint: SprintState) -> dict:
@@ -2203,7 +2234,7 @@ def derive_view(
             kept.setdefault(sprint.project_id, []).append(sprint)
 
     briefs = sorted((s for group in drafted.values() for s in group
-                     if s.brief is not None and s.brief.decision == NONE),
+                     if brief_pending(s)),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
     asked = sorted(((s, q) for group in drafted.values() for s in group
                     for q in (*open_questions(s), *pending_looks(s))),
@@ -2215,7 +2246,8 @@ def derive_view(
                            if s.no_progress_at is not None),
                           key=lambda s: (s.no_progress_at, s.sprint_id))
     signins = sorted((e for e in capacity["profiles"]
-                      if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")),
+                      if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")
+                      and not e.get("owner")),
                      key=lambda e: e["profile"])
     adoptions = [dict(item) for item in adoption_items]
     retries = [dict(item) for item in retry_items]

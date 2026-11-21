@@ -11,13 +11,14 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
-    ACTIVATION, ADD_STEPS, ADDED, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
+    ACTIVATION, ADD_STEPS, ADDED, ADOPTION_ITEM, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
     FAILED_LINE, asking, check_item, frame, nodes, panel, postable, project, real_capacity, render,
     look_answered, thread, view, with_check, with_notices, with_run, with_sprints)
-from .test_console_guest_page import SHARED_FRAME, UNSHARED_OPEN
+from .test_console_guest_page import (
+    GUEST, MANUAL, OPEN_OWN, SHARED_FRAME, TICK, UNSHARED_OPEN, attempt_reply, harness)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -47,7 +48,7 @@ def _roles(kinds: frozenset, *names: str) -> dict:
 
 DESK_CONTROLS: dict = {
     **_roles(PRIMARY_OR_QUIET, "approve", "send", "try-again", "signin-start", ANS_ROLE),
-    **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry", "look-retry"),
+    **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry", "look-retry", "adoption-merge"),
     **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "start-withdraw", "progress-withdraw",
              "acct-remove", "acct-remove-send", "share-off", "share-remove"),
     **_roles(OPTION_ONLY, "opt"),
@@ -63,13 +64,17 @@ DESK_CONTROLS: dict = {
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
         "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate",
         "share-open", "share-close", "share-on", "share-edit", "share-project",
-        "share-add"),
+        "share-add", "adoption-failed-dismiss"),
     **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "kept-words-text", "ask-text",
              "follow-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
              "notice-text", "register-path", "goal-filter", "goal-text", "share-login"),
     **_roles(CODE_ONLY, "signin-code", "account-code"),
 }
+# The guest page's own-account controls (#1343): drawn only on the guest door, so the desk scenarios never reach them.
+GUEST_CONTROLS: dict = {"pool-add": QUIET_ONLY, "guest-signin": PRIMARY_ONLY, "guest-code": QUIET_ONLY,
+                        "guest-cancel": QUIET_ONLY}
+GUEST_CHECKBOXES = frozenset({"guest-tick"})  # a native tick has no kind: it is neither a button nor a typed field
 SPEND_CONTROLS: dict = {"span": QUIET_ONLY}
 BARE_BUTTONS = frozenset({"cap", "pic-thumb", "sprint-check", "draft-pick", "thread-open"})
 BARE_FIELDS = frozenset({"goal-text"})
@@ -177,6 +182,10 @@ def desk_scenarios() -> list:
         [START, {"frame": with_check([DECISION_ITEM])}, snapshot],
         # an approved look card whose post failed, with its Retry (#1260)
         [START, {"frame": frame([look_answered("failed", FAILED_LINE)])}, snapshot],
+        # an adoption card with Merge, then the notice a refused click leaves once its card is gone
+        [START, {"frame": frame([ADOPTION_ITEM])}, snapshot],
+        [START, {"frame": frame([ADOPTION_ITEM])}, ADOPTION_REFUSED, {"click": "adoption-merge"},
+         {"frame": frame([])}, snapshot],
         # a stall and a progress card
         [START, {"frame": frame([STALL, PROGRESS])}, snapshot],
         [START, {"frame": frame([FAILED_START])}, snapshot],
@@ -284,6 +293,25 @@ class ControlInventoryTest(unittest.TestCase):
                  if n["tag"] != "a" or "btn-primary" in n["cls"].split()}
         self.assertEqual(sorted(set(DESK_CONTROLS) - drawn), [])
 
+    def test_the_guest_page_draws_every_own_account_control_with_one_kind(self) -> None:
+        start, linked = harness([*OPEN_OWN, SNAP, TICK, attempt_reply(7, MANUAL, "manual"),
+                                 {"click": "guest-signin"}, SNAP], GUEST)
+        drawn, wrong = set(), []
+        for snap in (start, linked):
+            for node, parent in _walk(snap["own_account"], None):
+                if not _is_control(node, parent):
+                    continue
+                key = role(node["cls"])
+                drawn.add(key)
+                if key in GUEST_CHECKBOXES:
+                    continue
+                kinds = set(node["cls"].split()) & set(KINDS)
+                allowed = GUEST_CONTROLS.get(key, DESK_CONTROLS.get(key))
+                if len(kinds) != 1 or allowed is None or not kinds <= allowed:
+                    wrong.append(node["cls"])
+        self.assertEqual(wrong, [])
+        self.assertEqual(sorted((set(GUEST_CONTROLS) | GUEST_CHECKBOXES) - drawn), [])
+
     def test_every_creation_site_names_a_listed_role(self) -> None:
         script = page_script()
         problems = []
@@ -298,9 +326,10 @@ class ControlInventoryTest(unittest.TestCase):
                     continue
                 dynamic = literal == "ans-" and re.match(r'\s*"ans-"\s*\+', expression)
                 name = literal.split()[0] if literal.split() else ""
-                if not dynamic and name not in DESK_CONTROLS:
+                if not dynamic and name not in DESK_CONTROLS and name not in GUEST_CONTROLS \
+                        and name not in GUEST_CHECKBOXES:
                     problems.append(f"unlisted role {name!r} in {expression!r}")
-                if not kind_in(literal) and not suffixed:
+                if not kind_in(literal) and not suffixed and name not in GUEST_CHECKBOXES:
                     problems.append(f"no kind in {expression!r}")
         for literal in summary_literals(script):
             if "btn-" in literal:
@@ -369,6 +398,7 @@ def summary_literals(script: str) -> list:
 
 
 SNAP = {"snapshot": True}
+ADOPTION_REFUSED = {"respond": {"status": 409, "text": "the pull request was merged elsewhere\n"}}
 NO_REPLY = {"status": 204, "text": ""}
 BUSY_ROLES = frozenset({
     "tell-send", "notice-send", "register-send", "account-add-send", "goal-send", "reply-send",
@@ -378,7 +408,7 @@ BUSY_ROLES = frozenset({
     "stall-withdraw", "start-retry", "start-withdraw", "continue", "progress-withdraw",
     "signin-start", "signin-send", "look-retry",
     "signin-cancel", "notice-withdraw", "ans-draft", "opt", "words-text", "draft-text",
-    "share-on", "share-off", "share-add", "share-remove"})
+    "share-on", "share-off", "share-add", "share-remove", "adoption-merge"})
 
 
 def refusal(text: str) -> dict:
@@ -449,6 +479,8 @@ BUSY_SCENARIOS = [
     busy_row("reply-send", [START, {"frame": frame([BRIEF])},
                             {"input": {"cls": "reply-text", "value": "redo"}}],
              held("reply-send"), NO_REPLY),
+    busy_row("adoption-merge", [START, {"frame": frame([ADOPTION_ITEM])}], held("adoption-merge"),
+             NO_REPLY),
     busy_row("acct-toggle", [START, {"frame": F3}, {"click": "cap"}], held("acct-toggle"),
              NO_REPLY, where="panel"),
     busy_row("acct-pin", [START, {"frame": F3}, {"click": "cap"}], held("acct-pin"),

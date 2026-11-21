@@ -1,6 +1,6 @@
 # ADR-console-075 — A manager on macOS starts in its own session outside the console's launchd job
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-081
 - **Decided in:** #894, #831
 
 ## Context

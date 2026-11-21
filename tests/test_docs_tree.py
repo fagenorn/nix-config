@@ -541,7 +541,7 @@ class DocsTreeTest(unittest.TestCase):
                     "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
                     "ADR-console-076, ADR-console-078")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1237, #1294, #1305"))
+        self.assertTrue(decided.endswith("#1237, #1263, #1294, #1305"))
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         console = next(row for row in context if row.startswith("The per-host loopback service"))
         self.assertIn("ADR-console-076", console)
@@ -610,7 +610,7 @@ class DocsTreeTest(unittest.TestCase):
         status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
                                       "through-tailscale-serve-on-a-guest-port.md"
                                       ).read_text().splitlines() if row.startswith("- **Status:**"))
-        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077")
+        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077, ADR-console-086")
 
     def test_the_tailnet_name_source_is_recorded_as_adr_078(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
@@ -815,12 +815,28 @@ class DocsTreeTest(unittest.TestCase):
                          "ADR-console-076, ADR-console-078"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
-                 "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064"),
+                 "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
+                 "ADR-console-086"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
-                 "- **Status:** accepted; amended by ADR-console-025, ADR-console-075")):
+                 "- **Status:** accepted; amended by ADR-console-025, ADR-console-075, "
+                 "ADR-console-080")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, status)
+
+    def test_the_sign_in_route_decision_is_recorded_as_adr_080(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        adrs = sorted(adr_dir.glob("080-*.md"))
+        self.assertEqual(len(adrs), 1)
+        numbers = [int(n) for n in re.findall(r"ADR-console-(\d+)",
+                                              adrs[0].read_text().splitlines()[0])]
+        self.assertEqual(numbers, [80])
+        for older in ("024-the-owner-signs-a-profile-in-from-the-page.md",
+                      "025-the-owner-adds-an-account-from-the-page.md"):
+            status = next(row for row in (adr_dir / older).read_text().splitlines()
+                          if row.startswith("- **Status:**"))
+            amenders = [int(n) for n in re.findall(r"ADR-console-(\d+)", status)]
+            self.assertIn(80, amenders)
 
     def test_the_register_project_decision_is_recorded(self):
         path = "docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md"
@@ -850,7 +866,8 @@ class DocsTreeTest(unittest.TestCase):
                                           "ADR-console-058, ADR-system-004, ADR-console-076, ADR-console-078"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
-                                          "ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064")):
+                                          "ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
+                                          "ADR-console-086")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -911,12 +928,16 @@ class DocsTreeTest(unittest.TestCase):
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
                          "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
                          "ADR-console-076, ADR-console-078"),
-                (adr028, "- **Status:** accepted; amended by ADR-console-029, "
-                         "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035, "
-                         "ADR-console-070; extended by #1055 (D10, D11)")):
+                (adr028, None)):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
-            self.assertEqual(line, expected)
+            if expected is not None:
+                self.assertEqual(line, expected)
+                continue
+            lead = "- **Status:** accepted; amended by "
+            self.assertTrue(line.startswith(lead))
+            amenders = line[len(lead):].split(";")[0].split(", ")
+            self.assertIn("ADR-console-029", amenders)
 
     def test_the_console_answer_decision_is_recorded(self):
         path = "docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md"

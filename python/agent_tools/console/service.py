@@ -41,6 +41,7 @@ stream `Content-Length`):
     POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
     POST /api/plan-answer 204, a JSON body, the page answers one question of the adoption plan (below)
     POST /api/plan-approve 204, a JSON body, the page approves a ready adoption plan (below)
+    POST /api/adoption-merge 204, a JSON body, the page merges an adoption's pull request at its recorded head (below)
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
     POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
@@ -115,8 +116,12 @@ by `X-Console-Probe` arrived as a login header, and never repeats a login. After
 owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
 its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`) answer the guest's
-scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the guest page (`GUEST_PAGE`: the page with its door meta set to `guest`, so it draws the
-read-only layout) carrying the guest token, `GET
+scoped view (`guest.scoped`, `guest.scrub`; it carries the pool and each running sprint's account label,
+`guest.pool_view`, `guest.sprint_labels`, each reading `yours` for an account the colleague added
+himself and `Account <n>` for every other, and `own_signin`, the state of his own profile's latest
+sign-in run, #1343): `GET /` is the guest page (`GUEST_PAGE`: the page with its
+door meta set to `guest`, so it draws the
+desk page with the guest's own controls only) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
 stream of it, which re-admits on every publish and ends when the colleague or the sharing is gone or the
 read tailnet name moved or went, even when the change came and went while a frame was being written
@@ -154,6 +159,51 @@ reads a tailnet name other than the one a reading was judged under drops that re
 before a change of address or name is never kept as one judged under the old. That read runs on one worker
 thread, never on the request's thread (a guest request never waits on Tailscale), the latest waiting
 reading alone kept; `settle_guest_readings` waits for it and `close` does.
+
+Guest writes (#1263). Five page writes are open to a listed colleague on the guest door, the members of
+`GUEST_WRITES`: `POST /api/goal`, `/api/approve`, `/api/reply`, `/api/round-answer` and `/api/message`.
+`GuestHandler._guest_write` takes them in this order after admission: a method other than POST is `405`
+`Allow: POST`; then `write_guard.refusal` with `https://<read name>` and the guest token (`403` `origin
+refused` or `token refused`, the body unread, the owner's page token refused as `token refused`); then
+the owner's body helper for the route with a `guest.GuestActor` (`411`, `415`, `413`, `400` `bad
+<name>`); then, under the ingest lock and before anything is appended, the write-time re-check of the
+sharing switch, the read tailnet name the request was admitted under, the access list, the project, the starter (`409`
+`guest.NOT_YOUR_SPRINT_TEXT` unless the colleague started the sprint) and the look rule (`409`
+`guest.OWNER_LOOK_TEXT` for a question carrying a `look` or a before-and-after pair, `guest.OWNER_ONLY_TEXT` for a
+question marked `owner_only`); success is an empty `204`.
+A guest's row carries `"by": <login>`, an owner's carries none; no refusal body or stderr line names a login.
+
+Three more guest writes (#1343, ADR-console-087), the members of `GUEST_ACCOUNT_WRITES` (`POST /api/guest-account`,
+`/api/guest-signin-code` and `/api/guest-signin-cancel`), are taken the same way by `_guest_write` and are page
+writes: on the owner's port they pass `_page_write`'s guard and are then `404` `not found`, the body unread and nothing
+appended. The add reads `{"consent": <bool>}` with, when the page presses Sign in again for a link it lacks, the shown
+`"attempt"` (`MAX_ACCOUNT_BYTES`, 400 `bad account`; `false` is 409 `guest.CONSENT_TEXT` before anything else; with an
+attempt nothing is created or started: his own live sign-in of that attempt hands out its link, else `NO_OWN_SIGNIN_TEXT`), the code `{"attempt", "code"}` and the cancel `{"attempt"}` (`MAX_SIGNIN_BYTES`, 400 `bad code` or
+`bad cancel`; the attempt is the one the add answered and `own_signin` shows). Under `_adding` and one `_ingest` block the add
+checks the access and the epoch, then takes his own live sign-in (the newest, the one his page shows), else his own profile not
+signed in, else a new `colleague-<n>`: the console chooses it after a listing that was read (an unreadable listing
+creates and records nothing, `AddFailed` `unavailable`), runs the adder, and reads the listing again. The name is his only then:
+its `account.added` row, with `by` his login and `identity` that `account_add.mark` returned for the directory the launcher made (its inode, creation time where the platform gives one and a random marker file the console wrote there), is
+appended in the block that stores that second listing, with no access check between. A profile is his only while its directory is
+that one (`_owned_now`): the owner who removes it with the CLI and makes another of the name takes it from him, in the add's
+choice, in his sign-in, code and cancel, and in both pages' labels (at the next listing). A launcher that fails leaves its name
+reserved and unowned, so a profile that appears under it later (the owner's, made with the CLI) is never his, and his retry takes
+a new name; a launcher that returned but whose listing could not be read keeps the name and the directory's identity for his
+retry, which skips the adder and takes the profile only if its directory is still that one, else drops it and takes a new
+name (with no other profile listed there is no directory to mark at once: a failed second listing then leaves the
+profile unowned and his retry makes another); a new profile's status is read before its row (it must read signed out, else the add is `AddFailed`
+`not_listed` and the profile stays unowned: a reused name can find the launcher's keychain entry), and an add whose marker
+could not be written is `not_listed` too; then, still under `_adding` (a second add of his cannot pick the new profile before the grant is done), the trust grant and `start_signin(profile, by=...)`,
+which refuses a profile that is not his (`guest.NO_OWN_SIGNIN_TEXT`) or being removed (`guest.ACCOUNT_BUSY_TEXT`), and, once the
+link wait ends, refuses again when his access or epoch is gone or the live run of that attempt has ended (the runner no longer holds it, even
+while the end callback's final status read has yet to clear it) or been replaced, or the profile is no longer his. The code and the
+cancel act on his own live sign-in of that attempt only, else `NO_OWN_SIGNIN_TEXT`. A refusal is 409 with `guest.account_text`, a fixed text that names
+no profile; the add answers `200` `{"attempt", "link", "route"}` (`signin_run.guest_answer_members`, no `port` or `forward`, the
+link null for a loopback-only run), the other two `204`; `AddFailed` is 502 `the account could not be created: <kind>`, a failed
+start 502 `the sign-in could not start: <kind>`, anything else 500. Stderr lines are `console: guest_account_refused <reason>` and
+`console: guest_signin_refused <reason>` (reason one of `consent`, `access`, `no_run`, `busy`, `unavailable`), `console:
+guest_account_failed <kind or Type>` and `console: guest_signin_failed <Type>`; the status read and the trust grant of his profile
+print no profile name. No line names a login, a profile, a link or a code.
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -195,9 +245,10 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
-`POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
+`POST /api/adoption-register`, `POST /api/adoption-merge`, `POST /api/plan-defer`,
+`POST /api/register-confirm`, `POST /api/trust-check`,
 `POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
-`POST /api/share-tailnet`, `POST /api/share-colleague` and `POST /api/share-remove`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code` and `POST /api/guest-signin-cancel` (the last three are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -308,7 +359,8 @@ runs, `unknown profile` for a profile that is not listed, `no sign-in is running
 code or a cancel with no live run); any other exception is `console: signin_failed <Type>` (never its
 message) and 500 `sign-in failed`. Each accepted write appends exactly one `signin.acted` row and no
 refusal appends one. The start route alone answers with a body: `200` `application/json`
-`{"attempt": <int>, "link": <string> | null}` (the attempt is the `seq` of the started row, and a
+`{"attempt": <int>, "forward": <string> | null, "link": <string> | null, "port": <int> | null,
+"route": "manual" | "loopback" | "unknown" | null}` (the attempt is the `seq` of the started row, and a
 start while a run is live answers that run's attempt and link and starts no second client), after
 waiting for the link outside the service's lock; a failed start is a `signin.acted` row with outcome
 `failed`, one stderr line `console: signin_start_failed <profile> <kind>` and 502 `the sign-in could
@@ -317,10 +369,14 @@ signin_code_failed <profile> <Type>` and 502 `the code could not be passed on`, 
 The cancel route answers `204`. `POST /api/signin-link` (#1035) hands a page opened after the start the
 live run's link: the same body rule (`MAX_SIGNIN_BYTES`, `signin_run.parse_profile_request`, 400 `bad
 link`) and the same refusals (`no sign-in is running for <profile>` when no run is live), and it
-answers `200` `application/json` `{"attempt": <int>, "link": <string> | null}` after waiting for the
+answers `200` `application/json` with the start route's five members after waiting for the
 link outside the service's lock. It appends no row, starts no client, folds nothing and publishes
 nothing; when the run it was asked of is replaced while it waits it is refused 409 `the sign-in for
 <profile> changed while waiting for its link`, so an attempt is never answered with another run's link.
+
+`route` is `manual` when the client offered its manual link, `loopback` with `port` and `forward` as `signin_run` gives them when the
+browser link returns to a loopback port, `unknown` when its return cannot be read, and all of them
+are null with no link. None of these members is in a row, the view or a stream frame.
 
 `POST /api/account-add` (#1027) runs the same checks with `MAX_ACCOUNT_BYTES` (4096) and
 `account_add.parse_add_request`: 400 `bad account`. Under the lock `_adding` (never `_ingest`) the
@@ -341,11 +397,10 @@ trust_account_registry_unreadable <name>`) and no grant fails the add. A sign-in
 cannot start leaves the row and the profile, appends the start route's `failed` row and answers
 502 `the account was added; its sign-in could not start: <kind>`, with `console: signin_start_failed
 <name> <kind>`. Any other exception is `console: account_add_failed <Type>` (never its message) and
-500 `adding the account failed`. Success is `200` `application/json`
-`{"attempt": <int>, "link": <string> | null, "profile": <name>}` with the start route's attempt and
-link; no row, stderr line, view or stream frame carries the link. The token is created once in
-`page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
-the slot in the page's `console-token` meta tag.
+500 `adding the account failed`. Success is `200` `application/json` with the start route's five
+members and `"profile": <name>`; no row, stderr line, view or stream frame carries the link. The
+token is created once in `page-token` beside the event log and reaches a client only inside `GET /`,
+where it replaces the slot in the page's `console-token` meta tag.
 
 `POST /api/account-remove` (#1030) runs the same checks with `MAX_REMOVE_BYTES` (4096) and
 `account_remove.parse_remove_request`: 400 `bad removal`. The service refuses, in this order, each
@@ -385,8 +440,11 @@ service refuses, each as 409 with the text, one stderr line `console: registrati
 <reason>`, appending and running nothing: without an adopter, `register.UNAVAILABLE`; a path
 `register.refusal` rejects (not a full path, not a directory, not the top of a checkout, already
 registered); and, under the ingest lock, a second registration while one runs
-(`register.running`). Otherwise the answer is an empty `204` at once and the run is dispatched: the
-adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
+(`register.running`). With `"unless_open": true`, under the same lock, a registration the owner's view
+shows open (`register.open_shown` of `derive_view` of the inputs `_publish` uses: not null and not
+dismissed; a card that reduces the entry makes it open) is refused with `register.OPEN_SHOWN` (#1334,
+ADR-console-084 D2); the page never sends the member. Otherwise the answer is an empty `204` at once
+and the run is dispatched: the adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
 ADR-console-070): a checkout behind a remote's default branch is one `behind` row (`register.behind`)
 and the `register_behind` card, with no plan, no draft and no child; an unreadable remote runs today's
 run and carries `remote` (`register.unread`) on its row, and each plan-answer row after it; no origin or no default branch runs today's
@@ -427,8 +485,11 @@ child. Nothing is granted or registered before this answer. Any other exception 
 register_confirm_failed <Type>` and 500 `registering failed`.
 
 `POST /api/register-cancel` (#1088, ADR-console-037) is the owner's Cancel registration of the shown
-registration, which was not applied yet or whose apply failed. It takes exactly `{"root"}` with
-`MAX_REGISTER_CANCEL_BYTES` (4096) and `register.parse_cancel_request`: 400 `bad registration cancel`.
+registration, which was not applied yet or whose apply failed. It takes `{"root"}`, or `{"root", "restore":
+true}` (#1334): a restoring Cancel writes the shown plan's row with `"restore": true` and gives the page
+back the registration shown before the cancelled one (ADR-console-084 D2) instead of none; the page sends
+only `{"root"}`. The body has `MAX_REGISTER_CANCEL_BYTES` (4096) and goes through
+`register.parse_cancel_request`: 400 `bad registration cancel`.
 The service refuses, each as 409 with the text, one stderr line `console: register_cancel_refused
 <reason>`, appending nothing, in this order: while a run is under way, `register.running`; when the shown
 registration is none or names another root, `register.NOT_WAITING`; when `register.cancellable` is false
@@ -487,6 +548,16 @@ drafts the plan again from the changed fields as a registration does, appending 
 or the plan's row. An answer of any other question to a row that holds a draft plans it with the
 draft file the same way, and the plan's row carries the draft.
 
+A checkout that already has a contract proposes the commit environment a stranded hook needs
+(ADR-console-083). A fresh run (no draft, no answers, not confirmed) reads its hooks once
+(`hook_reader`, `contract_draft.read_hooks` by default); when
+`contract_draft.reconcile_fields` is non-empty the run plans with the one `commit-environment`
+record: the adopter's `--commit-environment` command, never a draft file, and the row carries the
+record as its draft only when the plan took the command (`contract_draft.carried`). An answer run
+and a confirm run read no hooks and resend the command the row's draft holds. A `contract-draft`
+answer to such a row changes the record through `contract_draft.set_value`; `none` plans as
+today, and the run never writes a draft file.
+
 `POST /api/plan-approve` (#1054, ADR-console-030) runs the same checks with `MAX_PLAN_APPROVE_BYTES`
 (4096) and `approve.parse_approve_request`: 400 `bad plan approval`. The service refuses, each as
 409 with the text, one stderr line `console: plan_approve_refused <reason>`, appending and running
@@ -522,8 +593,9 @@ the open without pushing again. The console stops between steps and inside every
 and forge call when it closes, appending nothing for the stopped step, so the next approval resumes;
 the one exception is the `applied` row, which is appended even when the close has begun, because
 apply has already made its branch and a restarted console must not offer a fresh apply.
-The console never merges: it pushes the one branch and opens its pull request, and the forge's
-required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
+The console merges only on the owner's Merge (`POST /api/adoption-merge`, ADR-console-088): it
+pushes the one branch and opens its pull request, Apply is refused while that pull request is open,
+ready or failing, and the forge's required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
 run. Any other exception is `console: plan_approve_failed <Type>` and 500 `approving failed`.
 
 A `trust.granted` row that leaves a profile `failed` is folded (`folder_trust.failures`, at start,
@@ -562,6 +634,46 @@ refused registration, `approve.NOT_REFUSED`. Otherwise the answer is an empty `2
 is dispatched on a tracked thread (`APPROVAL_THREAD`) that `close` joins, and the run appends its
 outcome whatever it is (an identical refusal included, so the card is fresh). Any other exception
 is `console: adoption_register_failed <Type>` and 500 `registering failed`.
+
+`POST /api/adoption-merge` (#1338, ADR-console-088) is the owner's Merge on an adoption's card. It
+is an owner-only page write (`OWNER_ONLY`; in neither `GUEST_WRITES` nor `MANAGER_WRITES`), so
+`write_guard.refusal` runs first and a request without the page's `Origin` and exact token merges
+and appends nothing. It runs the same checks with `MAX_ADOPTION_MERGE_BYTES` (4096) and
+`approve.parse_merge_request` (`{"plan_id", "number", "commit"}`): 400 `bad adoption merge`. The
+service refuses, each as 409 with the words, one stderr line `console: adoption_merge_refused
+<words>`, no forge merge call and nothing appended, in this order: without a forge,
+`approve.MERGE_UNAVAILABLE`; once the stop is set, `register.STOPPING`; while the plan is in
+`_merging`, `approve.MERGING`; when the folded adoption is `opened` and its pull request number or
+commit differs from the body's (a card of a replaced pull request), `approve.STALE_CARD`; then
+`approve.merge_refusal` of the folded adoption (no pull request the console opened, merged, closed,
+not made by the console, unread head, moved head, failing, not ready); the refusal for a plan with
+no pull request (a re-applied step) is computed before any slug is read. Then, still outside the
+ingest lock, one `forge.pull_request_reading` is taken (the forge's merge call pins only the head, so
+a pull request retargeted since the page polled would land the same commit elsewhere): it is
+recorded as a poll's reading is, and `approve.merge_refusal` of the refolded adoption decides again
+(a reading rejected as stale is never used: a reading that differs from the folded state refuses
+`approve.STALE_CARD`, one that names another forge id than the opened step recorded refuses
+`approve.FOUND`; a failed read refuses `approve.merge_failure`, and a recorded `merged` also dispatches
+registration); the target can still move between that read and the
+merge call, which the forge cannot pin. Otherwise
+`forge.merge_pull_request(slug, number, commit, cancel=<stop>)` runs outside the ingest lock with
+the folded commit, never a head the forge showed; `_merging` holds the plan id from the check until
+the outcome is recorded and registration dispatched, and `close` waits for it to be empty before it
+closes the log. When the call returned, `_record_reading` appends the `merged` row at that commit,
+`register_merged` is dispatched on the approval worker unless the stop is set (a dispatch that raises is one
+line `console: adoption_register_dispatch_failed <Type>` and does not change the answer: the poll's
+`register_merged` registers the recorded merge), the answer is an empty
+`204` and one line `console: adoption_merge_ended <plan_id> merged` ends it. A call that failed
+(any exception but `approve.Cancelled`, which refuses `register.STOPPING`) is first one line
+`console: adoption_merge_error <json>` (the plan, the number, the exception and, for a `ForgeError`,
+its code, detail and transience), then one `forge.pull_request_reading`, recorded as read, never as
+requested, and only while no other reading was recorded since it began (a `merged` one always): `merged` at the folded commit and the adoption's base is success as above, `merged` into another branch is 409
+`approve.MERGED_ELSEWHERE_BASE`, a reading that names another forge id is `approve.merge_failure(error)`, `merged` at another head is 409
+`approve.MERGED_ELSEWHERE` (`merged` with no readable head is `approve.merge_failure(error)`) with
+`register_merged` still dispatched, any other reading refuses with `approve.merge_refusal` of the
+refolded adoption, else `approve.merge_failure(error)`; a failed re-read is one line `console:
+adoption_poll_failed ...` and refuses `approve.merge_failure(error)`. Any other exception is
+`console: adoption_merge_failed <Type>` and 500 `merging failed`.
 
 `POST /api/plan-defer` (#1073, ADR-console-030) is the `Not now` of the apply card. It runs the
 same checks with `MAX_PLAN_DEFER_BYTES` (4096) and `approve.parse_approve_request`: 400
@@ -807,9 +919,12 @@ reason; any other exception is `console: <route>_failed <Type>: <message>` and 5
 The reason is always one of `sprints.py`'s fixed refusal texts, which never carry a key or value the
 manager sent, so every stderr line is one line and neither the secret nor the notice text is printed.
 Success is 200 `application/json` (sorted keys, compact): `{"notice":<id>}` for a post (the new row's
-`seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...]}` for the list.
+`seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...],"overlaps":
+[<sprints.claim_overlaps of those entries>...]}` for the list.
 `post_notice(sprint_id, secret, notice)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then
-`SecretRefused`), then `sprints.postable_notice` against every other folded sprint; it appends exactly
+`SecretRefused`), then `sprints.postable_notice` against every other folded sprint, with a folder
+test built from the sprint's project root (a stat per part of a claim's `what`, so a claim naming a
+directory is refused; a project not registered has no folder); it appends exactly
 one `notice.posted` row (project the sprint's project) `{"sprint_id", "goal", "notice": <checked>}`,
 folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint` then
 `sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal",
@@ -1065,18 +1180,23 @@ is in `KEPT_KINDS`, but retention leaves the newest row of each kind whatever it
 
 Adoption pull requests (#1054): when the service is given a `forge`, a thread, `ADOPTION_THREAD`,
 started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
-(`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_state(slug, number,
-cancel=...)`, the pull request of each adoption whose step is `opened` and whose state is still
-`open` or `ready` (`approve.waiting`), in the repository its recorded link names
+(`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_reading(slug, number,
+cancel=...)` (the state, the head and the target branch), the pull request of each adoption whose step is `opened` and
+whose state is still `open`, `ready` or `failing` (`approve.waiting`), in the repository its recorded link names
 (`approve.pull_slug`, never the checkout's origin of the day), one after another and never inside the ingest lock; the
 stop flag cancels the call in flight and a read finished after the stop appends nothing. Only a
-state that differs from the folded one is appended, as one `adoption.pull_request` row, and the
-view is published, so a ready pull request is one inbox item (`approve.inbox_entries`, see
-`view.py`) until it is merged, closed or reads open again; a merged or closed one is read no
-more. A failed read is one stderr line `console: adoption_poll_failed <plan_id> <Type>:
-<message>` and the item stays as it was. An exception escaping a round is one stderr line
-`console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console never
-merges: the owner does, on the forge.
+state, head or target that differs from the folded one is appended (`_record_reading`), as one
+`adoption.pull_request` row, and the view is published, so a ready or failing pull request is one
+inbox item (`approve.inbox_entries`, see `view.py`) until it is merged, closed or reads open again;
+a merged or closed one is read no more. Each plan has a mark bumped by every row appended; the poll
+takes it under the lock before its read and its reading is recorded only while the mark is
+unchanged, and nothing is recorded over `merged`, so a reading made before a click merged cannot
+bring the card back. A failed read is one stderr line `console: adoption_poll_failed <plan_id> <Type>:
+<message>` and the item stays as it was; a pull request whose head was read but whose checks were
+not (`checks_error`) records that head and target with one such line, as `open` unless it was
+`failing`, so a moved head never keeps its Merge. An exception escaping a round is one stderr line
+`console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console merges only
+on the owner's Merge (`POST /api/adoption-merge`, ADR-console-088).
 
 The same round ends with the merged registration (#1055, ADR-console-028 D10, ADR-project-contract-005):
 `register_merged()` runs `Adopter.register(root, cancel=..., integration_branch=<the recorded pull
@@ -1218,7 +1338,7 @@ at that moment (`_read_profiles`, never the last poll's) with the sign-ins and e
 folded from the log's session rows (`manager.profile_use`, kept after a session leaves; ADR-console-023,
 #1011) and the excluded profiles folded from the log's `profile.exclusion` rows (`exclusion.excluded_profiles`,
 #1028), which `capacity_view` leaves out of the room, and the pinned profile (#1029), which it
-answers first while it has room, and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
+answers first while it has room, with the sprint's starter and `_waiting_logins()` so that a colleague's account serves his own sprints first (#1344, ADR-console-087 D1), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
 no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
@@ -1498,7 +1618,9 @@ unreadable, again only after it read successfully in between) and `console: jour
 
 Spend (#1134): the thread named `SPEND_THREAD`, started by `start()`, calls `poll_spend()` every
 `spend_seconds` (`SPEND_SECONDS`), the first poll `spend_seconds` after `start()`; construction never
-reads a transcript, so the view's `spend` is null until that poll. `poll_spend()` reads the session,
+reads a transcript, so the view's `spend` is null until that poll; a question job that finds no view runs
+one spend read itself (#1357), the spend loop, that read and a direct `poll_spend()` hold one lock so they
+never read at once, and a job that finds a view once it holds the lock reads nothing. `poll_spend()` reads the session,
 session-subagent and workflow agent transcripts under the `projects` directory beside each of
 `session_dirs()` (see `spend.py`), and on darwin the keepalive ping log (`ping_log()`), outside the
 ingest lock, then builds the spend view and publishes it under that lock; it appends nothing to the
@@ -1525,14 +1647,15 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
-`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062)
+`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062) and an optional
+`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
-`project_question.parse_request` does not accept is 400 `bad question`; `project_question.Refused` is
+`project_question.parse_keyed_request` does not accept is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
 exception is `console: project_question_failed <Type>: <message>` and 500 `question failed`;
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
-once it is answered. `ask_project_question(project_id, text, thread_id=None)` admits a question under the ingest
+once it is answered. `ask_project_question(project_id, text, thread_id=None, request_key=None)` admits a question under the ingest
 lock, in this order: no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
 question's own checks, with a `thread_id` only the follow-up checks of
@@ -1541,12 +1664,15 @@ whose last question is not answered, a thread too long to carry), and no account
 start a session under (`_session_choice`); a refusal appends nothing and counts nothing. An
 accepted question appends one `project_question.asked` row (`question_id`, `question`, `profile`,
 `session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
-`thread_id` it was given) and counts itself open in that same section. A follow-up's session gets
+`thread_id` and `request_key` it was given) and, for a keyed question, one `project_question.keyed` receipt row (`request_key`, `question_id`) in the same append, which retention never removes, so the key finds its question after the asked row is gone; it counts itself open in that same section. A follow-up's session gets
 the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
 model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's reach (its read-only routes and its GitHub repository,
 `project_question.reach_of`; a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
-project_question_contract_failed <question_id> <Type>: <message>`), then runs the asker under the
+project_question_contract_failed <question_id> <Type>: <message>`), then gathers the project's own
+records (`question_records.project_records`, ADR-console-089, first reading spend when no poll has yet) after the reach and before the
+session, under the ingest lock and only while the project still holds the root the question was asked in; a gathering that raises (a root taken by another project included) is a `failed` answer with one stderr line `console:
+project_question_records_failed <question_id> <Type>: <message>` and starts no session; then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
 question and a question whose profile is being removed or already removed fails without starting a
 session (`claude-account` would otherwise recreate a removed profile directory). A job that finds
@@ -1564,6 +1690,7 @@ import contextlib
 import dataclasses
 import errno
 import fcntl
+import glob
 import hmac
 import http.server
 import json
@@ -1587,12 +1714,12 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, pin, plan_questions, probe, question_records, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
-    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
+    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
@@ -1604,6 +1731,11 @@ from agent_tools.console.view import (
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
+
+def _by(actor: "guest.GuestActor | None") -> dict:
+    """The `by` member a guest's row carries; an owner's row carries none."""
+    return {} if actor is None else {"by": actor.login}
+
 
 def _epoch_ms(at: str) -> int:
     return int(datetime.fromisoformat(at).timestamp() * 1000)
@@ -1626,6 +1758,7 @@ GUEST_PAGE: bytes = PAGE.replace(DOOR_OWNER, DOOR_GUEST)
 SPEND_PAGE: bytes = Path(__file__).with_name("spend.html").read_bytes()
 BACKLOG = 16
 POLL_SECONDS = 0.25
+DRAIN_POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
 SPEND_PAGE_PATH = "/spend"
@@ -1675,6 +1808,7 @@ REGISTER_PATH = "/api/register-project"
 PLAN_ANSWER_PATH = "/api/plan-answer"
 PLAN_APPROVE_PATH = "/api/plan-approve"
 ADOPTION_REGISTER_PATH = "/api/adoption-register"
+ADOPTION_MERGE_PATH = "/api/adoption-merge"
 PLAN_DEFER_PATH = "/api/plan-defer"
 REGISTER_CONFIRM_PATH = "/api/register-confirm"
 TRUST_CHECK_PATH = "/api/trust-check"
@@ -1685,14 +1819,19 @@ SHARE_TAILNET_PATH = "/api/share-tailnet"
 SHARE_COLLEAGUE_PATH = "/api/share-colleague"
 SHARE_REMOVE_PATH = "/api/share-remove"
 MAX_SHARE_BYTES = 4096
+GUEST_ACCOUNT_PATH = "/api/guest-account"
+GUEST_SIGNIN_CODE_PATH = "/api/guest-signin-code"
+GUEST_SIGNIN_CANCEL_PATH = "/api/guest-signin-cancel"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
+    ADOPTION_REGISTER_PATH, ADOPTION_MERGE_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH,
+    TRUST_CHECK_PATH,
     REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
-    LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH})
+    LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
+    GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1700,6 +1839,7 @@ MAX_REGISTER_BYTES = 4096
 MAX_PLAN_ANSWER_BYTES = 4096
 MAX_PLAN_APPROVE_BYTES = 4096
 MAX_ADOPTION_REGISTER_BYTES = 4096
+MAX_ADOPTION_MERGE_BYTES = 4096
 MAX_PLAN_DEFER_BYTES = 4096
 MAX_REGISTER_CONFIRM_BYTES = 4096
 MAX_TRUST_CHECK_BYTES = 4096
@@ -1756,8 +1896,14 @@ STREAM_PATH = "/api/stream"
 WHOAMI_PATH = "/api/whoami"
 OWNER_READS: frozenset[str] = frozenset({SPEND_PAGE_PATH, STATUS_PATH, PROFILE_PATH, EXCLUDED_PATH})
 GUEST_READS: frozenset[str] = frozenset({PAGE_PATH, STATE_PATH, STREAM_PATH, WHOAMI_PATH})
-OWNER_ONLY: frozenset[str] = (PAGE_WRITES | MANAGER_WRITES | frozenset(POST_LIMITS) | OWNER_READS)
-ROUTES: frozenset[str] = OWNER_ONLY | GUEST_READS | {PICTURE_PREFIX}
+GUEST_WRITES: frozenset[str] = frozenset({GOAL_PATH, APPROVE_PATH, REPLY_PATH, ROUND_ANSWER_PATH,
+                                          MESSAGE_PATH})
+GUEST_ACCOUNT_WRITES: frozenset[str] = frozenset({GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH,
+                                                  GUEST_SIGNIN_CANCEL_PATH})
+OWNER_ONLY: frozenset[str] = ((PAGE_WRITES - GUEST_WRITES - GUEST_ACCOUNT_WRITES) | MANAGER_WRITES
+                              | frozenset(POST_LIMITS) | OWNER_READS)
+ROUTES: frozenset[str] = (OWNER_ONLY | GUEST_WRITES | GUEST_ACCOUNT_WRITES | GUEST_READS
+                          | {PICTURE_PREFIX})
 SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
@@ -1804,11 +1950,18 @@ def default_session_dirs() -> list[Path]:
 def default_profile_dirs() -> list[Path]:
     """Every account's config directory: each directory of `profiles/`.
 
-    The unprofiled `~/.claude` is not an account (#1016).
+    The unprofiled `~/.claude` is not an account (#1016). A missing `profiles/` is no accounts; one
+    that cannot be listed raises `OSError`, which is not the same thing (`glob` would hide it), so a
+    caller decides what an unlistable folder means for it: the service names it on stderr and keeps
+    its last reading, `register_check` names what it could not clean, and `cleanup_check` is not yet.
     """
     home = Path.home()
     accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(home / ".claude-accounts")
-    return sorted(p for p in Path(accounts).glob("profiles/*") if p.is_dir())
+    try:
+        with os.scandir(Path(accounts) / "profiles") as entries:
+            return sorted(Path(e.path) for e in entries if e.is_dir())
+    except (FileNotFoundError, NotADirectoryError):
+        return []
 
 
 def default_choice_file() -> Path:
@@ -2039,7 +2192,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _goal_request(self, console: "ConsoleService", route: str) -> bool:
+    def _goal_request(self, console: "ConsoleService", route: str,
+                      by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out a goal or a withdrawal; False when it was refused."""
         name = "goal" if route == GOAL_PATH else "withdraw"
         body = self._json_body(MAX_GOAL_BYTES if route == GOAL_PATH else MAX_WITHDRAW_BYTES)
@@ -2055,7 +2209,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         try:
             if route == GOAL_PATH:
-                console.state_goal(project_id, goal)
+                console.state_goal(project_id, goal, by=by)
             else:
                 console.withdraw_goal(project_id, sprint_id)
         except sprints.Refused as error:
@@ -2074,12 +2228,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            project_id, question, thread_id = project_question.parse_request(body)
+            project_id, question, thread_id, request_key = project_question.parse_keyed_request(body)
         except ValueError:
             self._refuse(400, "bad question")
             return False
         try:
-            console.ask_project_question(project_id, question, thread_id)
+            console.ask_project_question(project_id, question, thread_id, request_key)
         except project_question.Refused as error:
             print(f"console: project_question_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2110,8 +2264,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             if route in (SIGNIN_PATH, SIGNIN_LINK_PATH):
                 attempt, link = (console.start_signin(profile) if route == SIGNIN_PATH
                                  else console.signin_link(profile))
-                answer = json.dumps({"attempt": attempt, "link": link}, sort_keys=True,
-                                    separators=(",", ":")).encode()
+                answer = json.dumps({"attempt": attempt, **signin_run.answer_members(link)},
+                                    sort_keys=True, separators=(",", ":")).encode()
             elif route == SIGNIN_CODE_PATH:
                 console.send_signin_code(profile, code)
             else:
@@ -2173,8 +2327,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             print(f"console: account_add_failed {type(error).__name__}", file=sys.stderr)
             self._refuse(500, "adding the account failed")
             return False
-        answer = json.dumps({"attempt": attempt, "link": link, "profile": name}, sort_keys=True,
-                            separators=(",", ":")).encode()
+        answer = json.dumps({"attempt": attempt, **signin_run.answer_members(link),
+                             "profile": name}, sort_keys=True, separators=(",", ":")).encode()
         try:
             self._send(200, "application/json", answer, ("Connection", "close"))
             self.wfile.flush()
@@ -2228,12 +2382,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            path = register.parse_register_request(body)
+            path, unless_open = register.parse_register_request(body)
         except ValueError:
             self._refuse(400, "bad registration")
             return False
         try:
-            console.register_project(path)
+            console.register_project(path, unless_open=unless_open)
         except sprints.Refused as error:
             print(f"console: registration_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2310,6 +2464,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _adoption_merge_request(self, console: "ConsoleService") -> bool:
+        """Carry out the owner's merge of an adoption's pull request; True when the 204 is to be sent."""
+        body = self._json_body(MAX_ADOPTION_MERGE_BYTES)
+        if body is None:
+            return False
+        try:
+            plan_id, number, commit = approve.parse_merge_request(body)
+        except ValueError:
+            self._refuse(400, "bad adoption merge")
+            return False
+        try:
+            console.merge_adoption(plan_id, number, commit)
+        except sprints.Refused as error:
+            print(f"console: adoption_merge_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: adoption_merge_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "merging failed")
+            return False
+        return True
+
     def _plan_defer_request(self, console: "ConsoleService") -> bool:
         """Carry out the Not now write; True when the shared 204 is to be sent."""
         body = self._json_body(MAX_PLAN_DEFER_BYTES)
@@ -2361,12 +2537,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            root = register.parse_cancel_request(body)
+            root, restore = register.parse_cancel_request(body)
         except ValueError:
             self._refuse(400, "bad registration cancel")
             return False
         try:
-            console.cancel_registration(root)
+            console.cancel_registration(root, restore=restore)
         except sprints.Refused as error:
             print(f"console: register_cancel_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2655,7 +2831,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             print(f"console: notices_failed {type(error).__name__}: {error}", file=sys.stderr)
             return self._refuse(500, "notices failed")
         self._send(200, "application/json", json.dumps(
-            {"notices": entries}, sort_keys=True, separators=(",", ":")).encode())
+            {"notices": entries, "overlaps": sprints.claim_overlaps(entries)},
+            sort_keys=True, separators=(",", ":")).encode())
 
     def _withdraw_notice_request(self):
         """The manager's route: one open notice of the sprint taken back, with its secret."""
@@ -2716,7 +2893,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self._send(200, "application/json", json.dumps(
             {"picture": picture_id}, sort_keys=True, separators=(",", ":")).encode())
 
-    def _round_answer_request(self, console: "ConsoleService") -> bool:
+    def _round_answer_request(self, console: "ConsoleService",
+                              by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out the owner's answer to one question; False when it was refused."""
         body = self._json_body(MAX_ROUND_ANSWER_BYTES)
         if body is None:
@@ -2727,7 +2905,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._refuse(400, "bad round answer")
             return False
         try:
-            console.answer_question(*parsed)
+            console.answer_question(*parsed, by=by)
         except sprints.Refused as error:
             print(f"console: round_answer_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2770,7 +2948,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _message_request(self, console: "ConsoleService") -> bool:
+    def _message_request(self, console: "ConsoleService",
+                         by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out an owner's message; False when it was refused."""
         body = self._json_body(MAX_MESSAGE_BYTES)
         if body is None:
@@ -2781,7 +2960,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._refuse(400, "bad message")
             return False
         try:
-            console.send_message(*parsed)
+            console.send_message(*parsed, by=by)
         except sprints.Refused as error:
             print(f"console: message_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2890,7 +3069,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _decision_request(self, console: "ConsoleService", route: str) -> bool:
+    def _decision_request(self, console: "ConsoleService", route: str,
+                          by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out an approval or a reply; False when it was refused."""
         name = "approve" if route == APPROVE_PATH else "reply"
         body = self._json_body(MAX_APPROVE_BYTES if route == APPROVE_PATH else MAX_REPLY_BYTES)
@@ -2906,9 +3086,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         try:
             if route == APPROVE_PATH:
-                console.approve_brief(*parsed)
+                console.approve_brief(*parsed, by=by)
             else:
-                console.reply_brief(*parsed)
+                console.reply_brief(*parsed, by=by)
         except sprints.Refused as error:
             print(f"console: {name}_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -3052,6 +3232,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
         if refusal is not None:
             return self._refuse(*refusal)
+        if route in GUEST_ACCOUNT_WRITES:
+            self.close_connection = True
+            return self._refuse(404, "not found")
         if route in (ANSWER_PATH, CHECK_PATH):
             self.close_connection = True
             if not self._answer_request(console, route):
@@ -3127,6 +3310,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == ADOPTION_REGISTER_PATH:
             self.close_connection = True
             if not self._adoption_register_request(console):
+                return
+        elif route == ADOPTION_MERGE_PATH:
+            self.close_connection = True
+            if not self._adoption_merge_request(console):
                 return
         elif route == PLAN_DEFER_PATH:
             self.close_connection = True
@@ -3320,6 +3507,10 @@ class GuestHandler(ConsoleHandler):
         login, text = guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
         if text is not None:
             return self._refuse(403, text)
+        if route in GUEST_WRITES or route in GUEST_ACCOUNT_WRITES:
+            if self.command != "POST":
+                return self._send(405, "text/plain", b"method not allowed\n", ("Allow", "POST"))
+            return self._guest_write(route, policy, login, snapshot.epoch)
         if route in OWNER_ONLY:
             return self._refuse(403, guest.OWNER_ONLY_TEXT)
         if self.command != "GET":
@@ -3340,6 +3531,110 @@ class GuestHandler(ConsoleHandler):
             self._guest_picture(route, policy.name, snapshot.pictures.get(login, frozenset()))
         else:
             self._refuse(404, "not found")
+
+    def _guest_account_request(self, console: "ConsoleService", by: "guest.GuestActor") -> bool:
+        """Carry out a colleague's add-account write; it answers itself, so this is always False."""
+        body = self._json_body(MAX_ACCOUNT_BYTES)
+        if body is None:
+            return False
+        try:
+            consent, shown = account_add.parse_guest_add_request(body)
+        except ValueError:
+            self._refuse(400, "bad account")
+            return False
+        try:
+            attempt, link = console.add_guest_account(by, consent, shown)
+        except sprints.Refused as error:
+            print(f"console: guest_account_refused {guest.account_reason(str(error))}",
+                  file=sys.stderr)
+            self._refuse(409, guest.account_text(str(error)))
+            return False
+        except account_add.AddFailed as error:
+            print(f"console: guest_account_failed {error.kind}", file=sys.stderr)
+            self._refuse(502, f"the account could not be created: {error.kind}")
+            return False
+        except signin_run.StartFailed as error:
+            print(f"console: guest_signin_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(502, f"the sign-in could not start: {error.kind}")
+            return False
+        except Exception as error:
+            print(f"console: guest_account_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "adding the account failed")
+            return False
+        answer = json.dumps({"attempt": attempt, **signin_run.guest_answer_members(link)},
+                            sort_keys=True, separators=(",", ":")).encode()
+        try:
+            self._send(200, "application/json", answer, ("Connection", "close"))
+            self.wfile.flush()
+        except OSError:
+            pass
+        return False
+
+    def _guest_signin_request(self, console: "ConsoleService", route: str,
+                              by: "guest.GuestActor") -> bool:
+        """Carry out a colleague's code or cancel write; True when the shared empty 204 is still to be sent."""
+        name = "code" if route == GUEST_SIGNIN_CODE_PATH else "cancel"
+        body = self._json_body(MAX_SIGNIN_BYTES)
+        if body is None:
+            return False
+        try:
+            if route == GUEST_SIGNIN_CODE_PATH:
+                attempt, code = signin_run.parse_guest_code_request(body)
+            else:
+                attempt, code = signin_run.parse_guest_cancel_request(body), None
+        except ValueError:
+            self._refuse(400, f"bad {name}")
+            return False
+        try:
+            if route == GUEST_SIGNIN_CODE_PATH:
+                console.guest_signin_code(by, attempt, code)
+            else:
+                console.guest_signin_cancel(by, attempt)
+        except sprints.Refused as error:
+            print(f"console: guest_signin_refused {guest.account_reason(str(error))}",
+                  file=sys.stderr)
+            self._refuse(409, guest.account_text(str(error)))
+            return False
+        except Exception as error:
+            print(f"console: guest_signin_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "sign-in failed")
+            return False
+        return True
+
+    def _guest_write(self, route: str, policy: "guest.Policy", login: str, epoch: int):
+        """One of the eight guest writes (#1263, #1343): the owner's guard shape, the guest token and origin."""
+        console = self.server.console
+        refusal = write_guard.refusal(
+            policy.name, self.headers.get_all("Origin") or [],
+            self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.guest_token,
+            scheme="https")
+        if refusal is not None:
+            return self._refuse(*refusal)
+        by = guest.GuestActor(login, policy.name, epoch)
+        self.close_connection = True
+        if route == GUEST_ACCOUNT_PATH:
+            done = self._guest_account_request(console, by)
+        elif route in (GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH):
+            done = self._guest_signin_request(console, route, by)
+        elif route == GOAL_PATH:
+            done = self._goal_request(console, route, by)
+        elif route in (APPROVE_PATH, REPLY_PATH):
+            done = self._decision_request(console, route, by)
+        elif route == ROUND_ANSWER_PATH:
+            done = self._round_answer_request(console, by)
+        else:
+            done = self._message_request(console, by)
+        if not done:
+            return
+        try:
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+        except OSError:
+            return
 
     def _readmitting(self, admitted: "guest.Snapshot", login: str, hosts: list[str],
                      forwarded_hosts: list[str], logins: list[str]):
@@ -3607,7 +3902,8 @@ class ConsoleService:
                  signer_out: Callable[[probe.Probe], None] | None = None,
                  account_remover: Callable[[str], None] | None = None,
                  adopter=None,
-                 draft_reader: Callable[[str], dict] = contract_draft.read,
+                 draft_reader: Callable[[str], dict] | None = None,
+                 hook_reader: Callable[[str], dict] | None = None,
                  checkout_reader: Callable[..., checkout_remote.Comparison] = checkout_remote.compare,
                  checkout_updater: Callable[..., checkout_remote.Updated] = checkout_remote.update,
                  forge=None,
@@ -3654,7 +3950,8 @@ class ConsoleService:
         self._signer_out = signer_out
         self._account_remover = account_remover
         self._adopter = adopter
-        self._draft_reader = draft_reader
+        self._draft_reader = draft_reader or self._read_draft
+        self._hook_reader = hook_reader or self._read_hooks
         self._checkout_reader = checkout_reader
         self._checkout_updater = checkout_updater
         self._forge = forge
@@ -3667,6 +3964,8 @@ class ConsoleService:
         self._cancelled: dict[str, int] = {}
         self._approving = False
         self._enrolling: set[str] = set()
+        self._merging: set[str] = set()
+        self._pull_marks: dict[str, int] = {}
         self._approval_workers: list[threading.Thread] = []
         self._approval_dispatch = (
             self._on_approval_thread if approval_dispatch is None else approval_dispatch)
@@ -3691,6 +3990,7 @@ class ConsoleService:
         self._project_question_dispatch = (
             self._on_project_question_thread if project_question_dispatch is None
             else project_question_dispatch)
+        self._question_keys: dict[tuple[str, str], str] = {}
         self._project_questions_open = 0  # accepted questions whose answered row is not yet written
         self._project_question_workers: list[threading.Thread] = []
         self._probe_thread: threading.Thread | None = None
@@ -3727,11 +4027,28 @@ class ConsoleService:
         self._profile_dirs = profile_dirs
         self._profiles: frozenset[str] = frozenset()
         self._capacity = capacity.CapacityState({}, {})
+        self._numbers_path = Path(store).with_name(guest.NUMBERS_FILE)
+        self._account_numbers = guest.read_numbers(self._numbers_path)
+        self._retired_numbers = guest.read_retired(self._numbers_path)
+        self._numbers_saved = (dict(self._account_numbers), dict(self._retired_numbers))
+        self._numbers_established: dict[str, str] = {}
+        self._profiles_read = False
         self._signins: dict[str, signin.SignIn] = {}
         self._excluded: frozenset[str] = frozenset()
         self._pinned: str | None = None
         self._signin_ends: dict[str, signin_run.Ended] = {}
         self._accounts_added: frozenset[str] = frozenset()
+        # Under `_adding` only (#1343): names a colleague's add chose (`_guest_tried`, never chosen again) and
+        # the ones whose launcher returned, awaiting their ownership row (`_guest_made`, name -> (login, the
+        # identity of the directory the launcher made, None when it could not be read before the listing)).
+        self._guest_tried: set[str] = set()
+        self._guest_made: dict[str, tuple[str, str | None]] = {}
+        self._account_owners: dict[str, str] = {}
+        # The identity each colleague-owned profile's directory had when his add was recorded, and the identity
+        # of every account directory at the last good listing (None before one): a name now given to another
+        # directory is not his (#1343).
+        self._account_identities: dict[str, str] = {}
+        self._identities_seen: dict[str, str | None] | None = None
         self._trust_failures: dict[tuple[str, str], dict] = {}
         self._pin_launches: pin.PinLaunches = pin.pin_launches([])
         self._signin_live: dict[str, int] = {}
@@ -3745,6 +4062,7 @@ class ConsoleService:
         self._use = manager.ProfileUse({}, {})
         self._spend = spend.SpendReader(repo_of=repo_of)
         self._spend_view: dict | None = None
+        self._spend_lock = threading.Lock()
         self._spend_profiles: dict[str, str] = {}
         self._spend_questions: dict[str, str] = {}
         self._absent: frozenset[str] = frozenset()
@@ -3820,7 +4138,10 @@ class ConsoleService:
         self._idle = threading.Condition(self._ingest)
         self._grants_done = threading.Condition(self._ingest)
         self._project_questions_done = threading.Condition(self._ingest)
+        self._runs_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
+        if self._signin_runs is not None:
+            self._signin_runs.named = lambda profile: profile not in self._account_owners
         self._published = threading.Condition()
         self._view = b""
         self._version = 0
@@ -3830,6 +4151,7 @@ class ConsoleService:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._access = guest.NO_ACCESS
+        self._guest_epoch = 0  # revocations so far (`guest.revokes`, a name change): an admitted write checks it
         self._guest = guest.NO_SNAPSHOT
         self._guest_token: str | None = None
         self._guest_page: bytes | None = None
@@ -3869,8 +4191,11 @@ class ConsoleService:
             self._pinned = pin.pinned_profile(events)
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
+            self._account_owners = account_add.owners_state(events)
+            self._account_identities = account_add.identities_state(events)
             self._trust_failures = folder_trust.failures(events)
-            self._registration = register.latest(events)
+            self._registration_fold = register.fold(events)
+            self._registration = self._registration_fold.latest
             self._adoptions = approve.adoptions(events)
             self._deferred = approve.deferrals(events)
             self._pin_launches = pin.pin_launches(events)
@@ -3881,6 +4206,7 @@ class ConsoleService:
             self._withdrawn = sprints.withdrawn_ids(events)
             self._owner_notices = sprints.owner_notices(events)
             self._project_questions = project_question.asked_questions(events)
+            self._question_keys = project_question.question_keys(events)
             self._activation_run = activation_run.fold(events)
             self._pending = sprints.pending_stops(events)
             self._access = guest.access_list(events)
@@ -4102,19 +4428,15 @@ class ConsoleService:
                 return
             worker.join()
 
-    def _publish(self, *, guests: bool = True) -> None:
-        """Derive and publish the views; `guests=False` publishes the owner's view alone.
-
-        A guest view is derived from the clock (a sprint's age text), so recomputing it for a
-        guest-port reading would change a guest's bytes: the cached guest views are kept.
-        """
+    def _view_inputs(self) -> dict:
+        """The `derive_view` inputs of the owner's view as they stand; `_ingest` held, no side effect."""
         adoption, action, apply_items = self._approval_view()
         latest = self._registration
         cancel = (self._registering is None and latest is not None
                   and register.cancellable(latest, self._adoptions.get(latest["plan_id"])))
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
-            excluded=self._excluded, pinned=self._pinned)
+            excluded=self._excluded, pinned=self._pinned, owners=self._owners_now())
         inputs = dict(
             states=list(self._states.values()), records=self._inbox, health=self._health,
             sessions=list(self._sessions.values()), deliveries=self._deliveries,
@@ -4130,7 +4452,9 @@ class ConsoleService:
                 None if self._approving else self._registering, self._registration,
                 again=self._answering, refusal=self._answer_refusal, adoption=adoption,
                 approve=action, cancel=cancel),
-            adoption_items=approve.inbox_entries(self._adoptions),
+            adoption_items=approve.inbox_entries(
+                self._adoptions,
+                shown_root=None if self._registration is None else self._registration["root"]),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),
@@ -4138,10 +4462,72 @@ class ConsoleService:
                 self._registration, running=self._registering is not None),
             failure_items=register.failure_items(
                 self._registration, running=self._registering is not None),
-            pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
+            pin=pin.note(self._pinned, cap, manager.session_profile(
+                cap, self._use.last, None, self._waiting_logins())),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
+        return inputs
+
+    def _publish(self, *, guests: bool = True) -> None:
+        """Derive and publish the views; `guests=False` publishes the owner's view alone.
+
+        A guest view is derived from the clock (a sprint's age text), so recomputing it for a
+        guest-port reading would change a guest's bytes: the cached guest views are kept. The account
+        numbers are kept in `account-numbers.json` beside the event log, written when they change,
+        and a failed write keeps them in memory and is retried on every publish while they differ from
+        the last numbers written (ADR-console-086). A view that lists no profile before the profiles are
+        first read leaves them as they are, so a restart does not forget them; once they are read, an
+        empty list is a confirmed empty pool and ends the numbering, but a failed read of the profiles
+        directory is not a list (`_scan_profiles`) and leaves them as they are. The number of a
+        removed profile that a sprint still runs on is kept for that sprint, with the address the
+        profile had, while a profile still on that address holds the number, so the sprint keeps
+        its account label and a number given to another account never labels it; when none does,
+        or none had, the sprint is kept detached (a None number) so a profile name recreated for
+        another account never labels it. It is kept in
+        `account-numbers.json` too, so a restart keeps the label, and by sprint, so a profile name
+        given to another account later does not move it, with the profile the sprint's manager was on,
+        so it ends when the manager runs on another profile (a takeover): the sprint is then labelled
+        by the account of the profile it runs on. A write that fails and a profiles directory
+        that cannot be listed are each named once on stderr until the next good one (`numbers_unwritten`,
+        `profiles_unlistable`).
+        """
+        inputs = self._view_inputs()
+        if inputs["capacity"]["profiles"] or self._profiles_read:
+            numbers = guest.account_numbers(
+                inputs["capacity"], self._account_numbers, self._numbers_established)
+            before = self._numbers_established
+            self._numbers_established = {
+                entry["profile"]: entry["account"] for entry in inputs["capacity"]["profiles"]
+                if entry["account"] is not None}
+            managers = guest.running_managers(self._sprints)
+            held = {sprint_id: entry for sprint_id, entry in self._retired_numbers.items()
+                    if managers.get(sprint_id) == entry[2]}
+            gone = {**{sprint_id: (
+                         (self._account_numbers[name], before[name], name)
+                         if name in self._account_numbers and name in before else (None, "", name))
+                       for sprint_id, name in managers.items()
+                       if name not in numbers and sprint_id not in held},
+                    **held}
+            self._retired_numbers = {
+                sprint_id: (number, address, name) if number is not None and any(
+                    numbers[other] == number and now == address
+                    for other, now in self._numbers_established.items())
+                else (None, address, name)
+                for sprint_id, (number, address, name) in gone.items()}
+            self._account_numbers = numbers
+        if (self._account_numbers, self._retired_numbers) != self._numbers_saved:
+            try:
+                guest.write_numbers(self._numbers_path, self._account_numbers,
+                                    self._retired_numbers)
+            except OSError as error:
+                self._warn_once(
+                    "numbers", f"console: numbers_unwritten {type(error).__name__}: {error}")
+            else:
+                self._numbers_saved = (dict(self._account_numbers), dict(self._retired_numbers))
+                self._unreadable.discard("numbers")
+        latest = self._registration
+        apply_items = inputs["apply_items"]
         access = self._access
         name = self._tailnet_name
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
@@ -4164,8 +4550,18 @@ class ConsoleService:
         views: dict[str, bytes] = {}
         seen_pictures: dict[str, frozenset[str]] = {}
         if self._guest_server is not None and access.shared and name is not None:
+            owners = self._owners_now()
             for login, projects in access.colleagues.items():
-                derived = guest.scrub(derive_view(**guest.scoped(inputs, projects)))
+                mine = {profile for profile, owner in owners.items() if owner == login}
+                pool = guest.pool_view(inputs["capacity"], self._account_numbers, mine)
+                running = guest.sprint_labels(
+                    self._sprints, guest.profile_labels(self._account_numbers, mine),
+                    guest.retired_labels(self._retired_numbers, self._account_numbers, mine))
+                own = guest.own_signin(inputs["signin_runs"], owners, login)
+                derived = guest.mark_steer(
+                    guest.scrub(derive_view(**guest.scoped(inputs, projects)), pool, running,
+                                own_signin=own),
+                    login)
                 views[login] = encode_view(derived)
                 seen_pictures[login] = guest.picture_ids(derived)
         with self._published:
@@ -4176,7 +4572,8 @@ class ConsoleService:
                 self._version += 1
             self._view = view
             self._guest = guest.Snapshot(
-                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked)
+                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked,
+                self._guest_epoch)
             self._track_evidence_card(evidence_key)
             self._published.notify_all()
 
@@ -4339,9 +4736,32 @@ class ConsoleService:
         self._answered[slot] = self._answer_generation
         self._publish()
 
-    def state_goal(self, project_id: str, goal: str) -> str:
+    def _guest_refusal(self, by: "guest.GuestActor | None", project_id: str) -> None:
+        """Under the ingest lock: refuse a guest whose access is gone or does not cover the project, or whose project is no longer registered."""
+        if by is not None:
+            text = guest.write_refusal(guest.Policy(self._access, self._tailnet_name), by, project_id)
+            if text is not None:
+                raise sprints.Refused(text)
+            if project_id not in self._states:
+                raise sprints.Refused(sprints.UNREGISTERED)
+            if by.epoch is not None and by.epoch != self._guest_epoch:
+                raise sprints.Refused(guest.REVOKED_TEXT)
+
+    def _steered(self, by: "guest.GuestActor | None", project_id: str,
+                 sprint_id: str) -> sprints.SprintState:
+        """Under the ingest lock: the sprint, and for a guest the check that they started it."""
+        sprint = self._project_sprint(project_id, sprint_id)
+        if by is not None:
+            text = guest.steer_refusal(by.login, sprint.started_by)
+            if text is not None:
+                raise sprints.Refused(text)
+        return sprint
+
+    def state_goal(self, project_id: str, goal: str, *,
+                   by: "guest.GuestActor | None" = None) -> str:
         """Append one `goal.stated` event for a registered project and return the new sprint id."""
         with self._ingest:
+            self._guest_refusal(by, project_id)
             if project_id not in self._states:
                 raise sprints.Refused(sprints.UNREGISTERED)
             goal = sprints.checked_goal(goal)
@@ -4349,7 +4769,8 @@ class ConsoleService:
             sprints.create_secret(self._sprint_secrets, sprint_id)
             try:
                 appended = self.log.append(
-                    [(GOAL_STATED, project_id, {"sprint_id": sprint_id, "goal": goal})])
+                    [(GOAL_STATED, project_id, {"sprint_id": sprint_id, "goal": goal,
+                                                **_by(by)})])
             except BaseException:
                 sprints.remove_secret(self._sprint_secrets, sprint_id)
                 raise
@@ -4359,6 +4780,39 @@ class ConsoleService:
         if self._launcher is not None:
             self._dispatch_launch(sprint_id)
         return sprint_id
+
+    def _admit_run(self, root: str) -> None:
+        """Reserve the run of `root`, or refuse once the console stops (ADR-console-081 D3); `_ingest` held."""
+        if self._stop.is_set():
+            raise sprints.Refused(register.STOPPING)
+        self._registering = root
+
+    def _announce_run(self) -> None:
+        """Publish an admitted run, releasing it when the publication fails; `_ingest` held (#1330).
+
+        Nothing is dispatched yet at that point, so no worker would ever release the reservation
+        and `close` would wait on it for good.
+        """
+        try:
+            self._publish()
+        except BaseException:
+            self._answering = False
+            self._approving = False
+            self._end_run()
+            raise
+
+    def _read_draft(self, root: str) -> dict:
+        """Read a checkout for its draft, its git children ended by the stop (#1330)."""
+        return contract_draft.read(root, cancel=self._stop)
+
+    def _read_hooks(self, root: str) -> dict:
+        """Read a contract checkout's installed commit hooks, its git children ended by the stop (#1333)."""
+        return contract_draft.read_hooks(root, cancel=self._stop)
+
+    def _end_run(self) -> None:
+        """Release the reservation and wake the drain of `close` (ADR-console-081 D3); `_ingest` held."""
+        self._registering = None
+        self._runs_done.notify_all()
 
     def _on_new_thread(self, job: Callable[[], None]) -> None:
         threading.Thread(target=job, name=MANAGER_THREAD, daemon=True).start()
@@ -4373,9 +4827,11 @@ class ConsoleService:
     def _on_approval_thread(self, job: Callable[[], None]) -> None:
         worker = threading.Thread(target=job, name=APPROVAL_THREAD, daemon=True)
         with self._ingest:
+            # Started inside the lock and listed only once started: the list never holds an
+            # unstarted thread, which `close` could not join (and a failed start lists nothing).
             self._approval_workers = [w for w in self._approval_workers if w.is_alive()]
+            worker.start()
             self._approval_workers.append(worker)
-        worker.start()
 
     def _on_project_question_thread(self, job: Callable[[], None]) -> None:
         """Run a question's job on a tracked daemon thread; `close` joins every one it started."""
@@ -4389,14 +4845,17 @@ class ConsoleService:
             self._project_question_workers.append(worker)
 
     def ask_project_question(self, project_id: str, text: str,
-                             thread_id: str | None = None) -> str:
+                             thread_id: str | None = None, request_key: str | None = None) -> str:
         """Accept one question about a registered project and return its id (#1176, ADR-console-058).
 
         Admission, the asked row and the open count are one section under the ingest lock; the
         session runs on a job handed to `project_question_dispatch` outside it. A `thread_id`
         makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
         questions after the question's own checks and before the profile choice, and its thread's
-        turns go to the job. Refusals are `project_question.Refused` and append and count nothing.
+        turns go to the job. A `request_key` already on a folded question of the project returns
+        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089 D9); the
+        check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
+        `project_question.Refused` and append and count nothing.
         """
         with self._ingest:
             if self._project_asker is None:
@@ -4406,6 +4865,12 @@ class ConsoleService:
             if project_id not in self._states:
                 raise project_question.Refused(project_question.UNREGISTERED)
             text = project_question.checked_question(text)
+            if request_key is not None:
+                known = self._question_keys.get((project_id, request_key)) or next(
+                    (item.question_id for item in self._project_questions.get(project_id, ())
+                     if item.request_key == request_key), None)
+                if known is not None:
+                    return known
             thread = () if thread_id is None else project_question.follow_up(
                 self._project_questions.get(project_id, ()), thread_id, text)
             profile = self._session_choice(self._read_profiles())
@@ -4418,7 +4883,13 @@ class ConsoleService:
                        "session_id": session_id}
             if thread_id is not None:
                 payload["thread_id"] = thread_id
-            appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, payload)])
+            if request_key is not None:
+                payload["request_key"] = request_key
+            rows = [(PROJECT_QUESTION_ASKED, project_id, payload)]
+            if request_key is not None:
+                rows.append((PROJECT_QUESTION_KEYED, project_id,
+                             {"request_key": request_key, "question_id": question_id}))
+            appended = self.log.append(rows)
             self._apply(appended)
             self._project_questions_open += 1
         try:
@@ -4452,25 +4923,36 @@ class ConsoleService:
                             detail=f"{type(error).__name__}: {error}"))
                 else:
                     try:
-                        with self._client_run(profile):
-                            if profile not in self._read_profiles():
-                                outcome = project_question.Outcome(
-                                    project_question.FAILED,
-                                    reason=project_question.PROFILE_GONE.format(profile=profile))
-                            else:
-                                ask = project_question.new_ask(
-                                    question_id, project_id, root, text, profile, reach.routes,
-                                    Path(self._store).with_name(project_question.SETTINGS_DIR),
-                                    session_id=session_id, thread=thread, repo=reach.repo,
-                                    unset=reach.unset)
-                                try:
-                                    outcome = self._project_asker(ask, self._stop)
-                                except Exception as error:
+                        records = self._question_records(project_id, root)
+                    except Exception as error:
+                        print(f"console: project_question_records_failed {question_id} "
+                              f"{type(error).__name__}: {error}", file=sys.stderr)
+                        outcome = project_question.Outcome(
+                            project_question.FAILED,
+                            reason=project_question.RECORDS_FAILED.format(
+                                detail=f"{type(error).__name__}: {error}"))
+                    else:
+                        try:
+                            with self._client_run(profile):
+                                if profile not in self._read_profiles():
                                     outcome = project_question.Outcome(
                                         project_question.FAILED,
-                                        reason=f"{type(error).__name__}: {error}")
-                    except _ProfileRemoving as error:
-                        outcome = project_question.Outcome(project_question.FAILED, reason=str(error))
+                                        reason=project_question.PROFILE_GONE.format(profile=profile))
+                                else:
+                                    ask = project_question.new_ask(
+                                        question_id, project_id, root, text, profile, reach.routes,
+                                        Path(self._store).with_name(project_question.SETTINGS_DIR),
+                                        session_id=session_id, thread=thread, repo=reach.repo,
+                                        unset=reach.unset, records=records)
+                                    try:
+                                        outcome = self._project_asker(ask, self._stop)
+                                    except Exception as error:
+                                        outcome = project_question.Outcome(
+                                            project_question.FAILED,
+                                            reason=f"{type(error).__name__}: {error}")
+                        except _ProfileRemoving as error:
+                            outcome = project_question.Outcome(
+                                project_question.FAILED, reason=str(error))
         except Exception as error:
             # Never raised on: a dispatch that runs the job inline would answer the question twice.
             traceback.print_exc()
@@ -4481,6 +4963,34 @@ class ConsoleService:
                 outcome = project_question.Outcome(
                     project_question.FAILED, reason=project_question.STOPPED_TEXT)
             self._record_project_answer(question_id, project_id, outcome)
+
+    def _question_records(self, project_id: str, root: str) -> str:
+        """The encoded document of the console's own records of one project (ADR-console-089).
+
+        The events and the folded state are read in one section under the ingest lock, so a delivery
+        that finishes while the records are gathered shows either before or after, never half of each.
+        That section also rechecks that `project_id` still holds `root`: a checkout path taken by another
+        project since the question was admitted would put the next owner's activations after the cutoff,
+        so the gathering raises and the question is a failed answer. A question asked before the first
+        spend poll reads the spend view first through the console's own poll (#1357, ADR-console-090),
+        and spend stays null only when that read failed.
+        """
+        if self._spend_view is None:
+            self._spend_step(only_without_view=True)
+        with self._ingest:
+            held_state = self._states.get(project_id)
+            if held_state is None or held_state.root != root:
+                raise RuntimeError("the project no longer holds the checkout the question was asked in")
+            events = self.log.events()
+            spend_view, sprint_states, inbox = self._spend_view, self._sprints, self._inbox
+            live_runs = {
+                key for key in self._deliveries
+                if (held := self._sessions.get(key[0])) is not None and held.state != sessions.ENDED
+                and held.repo is not None and project_for(held.repo, self._states) == project_id}
+        return question_records.encode(question_records.project_records(
+            project_id, root=root, events=events, spend=spend_view, live_runs=live_runs,
+            sprint_states=sprint_states, inbox=inbox,
+            written_at=self._now().isoformat(timespec="seconds")))
 
     def _record_project_answer(self, question_id: str, project_id: str,
                                outcome: "project_question.Outcome") -> None:
@@ -4623,24 +5133,27 @@ class ConsoleService:
         except _ProfileRemoving as error:
             raise manager.StopFailed(str(error)) from None
 
-    def _read_signin_now(self, profile: str, when: str) -> signin.Status | None:
+    def _read_signin_now(self, profile: str, when: str, *,
+                         named: bool = True) -> signin.Status | None:
         """The status read at once (`when` is "end", "add" or "remove"); a failed read records nothing.
 
         The removal's own read ("remove") is the only one that runs while the profile is marked as
         being removed; any other is held in the profile's client-run count and is not run (None)
-        once the mark is set.
+        once the mark is set. With `named` False the stderr line carries no profile name (a
+        colleague's profile, #1343).
         """
         ticket = self._signin_ticket(profile)
+        label = f"{profile} " if named else ""
         try:
             with (contextlib.nullcontext() if when == "remove" else self._client_run(profile)):
                 status = self._signin_reader(probe.Probe(profile, str(uuid.uuid4()), self._stop))
         except _ProfileRemoving:
             return None
         except signin.StatusFailed as error:
-            print(f"console: signin_{when}_read_failed {profile} {error.kind}", file=sys.stderr)
+            print(f"console: signin_{when}_read_failed {label}{error.kind}", file=sys.stderr)
             return None
         except Exception as error:
-            print(f"console: signin_{when}_read_failed {profile} {type(error).__name__}",
+            print(f"console: signin_{when}_read_failed {label}{type(error).__name__}",
                   file=sys.stderr)
             return None
         self._record_signin(profile, status, ticket)
@@ -4657,7 +5170,8 @@ class ConsoleService:
         attempt = found[1]
         status = None
         if self._signin_reader is not None:
-            status = self._read_signin_now(profile, "end")
+            status = self._read_signin_now(profile, "end",
+                                           named=profile not in self._account_owners)
         if end != "exited":
             outcome = end
         elif returncode == 0 and status is not None and status.state == "signed_in":
@@ -4679,35 +5193,70 @@ class ConsoleService:
             raise sprints.Refused("unknown profile")
         return self._signin_runs
 
-    def _record_signin_action(self, profile: str, action: str, outcome: str) -> Event:
-        appended = self.log.append([signin_run.acted(profile, action, outcome)])
+    def _record_signin_action(self, profile: str, action: str, outcome: str,
+                              by: str = "owner") -> Event:
+        appended = self.log.append([signin_run.acted(profile, action, outcome, by)])
         self._fold(appended)
         return appended[0]
 
-    def start_signin(self, profile: str) -> tuple[int, str | None]:
-        """Start the profile's client login, or join the live one; the attempt and the link."""
+    def start_signin(self, profile: str, *, by: "guest.GuestActor | None" = None
+                     ) -> tuple[int, signin_run.Link | None]:
+        """Start the profile's client login, or join the live one; the attempt and the routed link.
+
+        With `by` (a colleague, #1343) the profile must be one he added and its client is started
+        only for him; his refusals carry no profile name.
+        Without `by` (the owner) a profile a colleague added is refused: signing it in is his (#1361).
+        """
         runs = self._signin_refuse_unless_listed(profile)
+        who = "owner" if by is None else by.login
         with self._ingest:
-            if profile in self._removing:
+            if by is not None:
+                self._guest_account_refusal(by)
+                accounts = self._scan_accounts()
+                if accounts is None or profile not in self._owned_now(by, accounts):
+                    raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT)
+                if profile in self._removing:
+                    raise sprints.Refused(guest.ACCOUNT_BUSY_TEXT)
+            elif profile in self._removing:
                 raise sprints.Refused(account_remove.removing(profile))
+            else:
+                colleague = self._owners_now().get(profile)
+                if colleague is not None:
+                    raise sprints.Refused(guest.colleague_signin_text(profile, colleague))
             try:
                 started = runs.start(profile)
             except signin_run.StartFailed:
-                self._record_signin_action(profile, "start", "failed")
+                self._record_signin_action(profile, "start", "failed", who)
                 self._publish()
                 raise
             if started.fresh:
-                attempt = self._record_signin_action(profile, "start", "started").seq
+                attempt = self._record_signin_action(profile, "start", "started", who).seq
                 self._signin_live[profile] = attempt
                 self._signin_by_run[started.run] = (profile, attempt)
             else:
-                self._record_signin_action(profile, "start", "running")
+                self._record_signin_action(profile, "start", "running", who)
                 attempt = self._signin_live[profile]
             self._publish()
-        return attempt, runs.wait_link(profile)
+        link = runs.wait_link(profile)
+        if by is not None:
+            self._guest_link_still_his(by, runs, profile, attempt)
+        return attempt, link
 
-    def signin_link(self, profile: str) -> tuple[int, str | None]:
-        """The live run's attempt and link, for a page opened after the start; no row, no client."""
+    def _guest_link_still_his(self, by: "guest.GuestActor", runs: signin_run.SignIns, profile: str,
+                              attempt: int) -> None:
+        """After a link wait: refuse when his access is gone, the run of `attempt` ended or was replaced, or the
+        profile is no longer his (the owner removed it and made another of the name while he waited).
+
+        The end callback clears `_signin_live` only after the client's final status read, so the runner's
+        own liveness is checked too: a client that has ended hands out no link (#1343).
+        """
+        with self._ingest:
+            self._guest_account_refusal(by)
+            if self._own_live_signin(by, runs, attempt) != profile:
+                raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT)
+
+    def signin_link(self, profile: str) -> tuple[int, signin_run.Link | None]:
+        """The live run's attempt and routed link, for a page opened after the start; no row, no client."""
         runs = self._signin_refuse_unless_listed(profile)
         with self._ingest:
             attempt = self._signin_live.get(profile)
@@ -4719,8 +5268,8 @@ class ConsoleService:
                 raise sprints.Refused(f"the sign-in for {profile} changed while waiting for its link")
         return attempt, link
 
-    def add_account(self, name: str) -> tuple[int, str | None]:
-        """Create the account through the launcher, then start its sign-in; the attempt and link."""
+    def add_account(self, name: str) -> tuple[int, signin_run.Link | None]:
+        """Create the account through the launcher, then start its sign-in; the attempt and routed link."""
         if self._account_adder is None or self._signin_runs is None or self._signin_reader is None:
             raise sprints.Refused(account_add.UNAVAILABLE)
         reason = account_add.refusal(name)
@@ -4735,13 +5284,148 @@ class ConsoleService:
                 raise account_add.AddFailed("not_listed")
             with self._ingest:
                 self._profiles = listed
+                self._profiles_read = True
                 self._fold(self.log.append([account_add.added(name)]))
                 self._publish()
         self._grant_registered_projects(name)
         self._read_signin_now(name, "add")
         return self.start_signin(name)
 
-    def _grant_registered_projects(self, name: str) -> None:
+    def _guest_account_refusal(self, by: "guest.GuestActor") -> None:
+        """Under the ingest lock: refuse a colleague whose access is gone or changed since his request was admitted."""
+        text = guest.account_refusal(guest.Policy(self._access, self._tailnet_name), by)
+        if text is not None:
+            raise sprints.Refused(text)
+        if by.epoch is not None and by.epoch != self._guest_epoch:
+            raise sprints.Refused(guest.REVOKED_TEXT)
+
+    def _owners_now(self) -> dict[str, str]:
+        """Under the ingest lock: the owners map less each profile whose name the last good listing found on
+        another directory than the one his add recorded (the whole map before any listing)."""
+        seen = self._identities_seen
+        if seen is None:
+            return dict(self._account_owners)
+        return {profile: login for profile, login in self._account_owners.items()
+                if self._account_identities.get(profile) in (None, seen.get(profile))}
+
+    def _owned_now(self, by: "guest.GuestActor", accounts: Mapping[str, Path]) -> list[str]:
+        """Under the ingest lock: the profiles `by` added and still owns among the listed `accounts`, sorted.
+
+        A profile is his only while its directory is the one his add recorded: one the owner removed
+        and made again under the name is not, and a row that recorded no directory proves none, so
+        it gives him no write (#1343).
+        """
+        return sorted(
+            profile for profile, owner in self._account_owners.items()
+            if owner == by.login and profile in accounts
+            and self._account_identities.get(profile) is not None
+            and self._account_identities.get(profile) == account_add.identity(accounts[profile]))
+
+    def add_guest_account(self, by: "guest.GuestActor", consent: bool, attempt: int | None = None
+                          ) -> tuple[int, signin_run.Link | None]:
+        """A colleague's add: sign in again a profile of his, else create one he owns; the attempt and link.
+
+        `consent` False is refused before anything else. With `attempt` (the sign-in his page shows with
+        no link yet) nothing is created or started: his own live sign-in of that attempt hands out its
+        link, any other attempt is refused with `guest.NO_OWN_SIGNIN_TEXT`. Else, under `_adding`, the
+        choice of profile and the checks are made under one `_ingest` block. A new profile is his only once
+        this console saw the launcher return for a name it chose after a listing that did not hold it and
+        then read the name listed on the very directory the launcher made, its sign-in status read signed out (a
+        credential left under a reused name, or a read that fails, makes nothing his): its `account.added` row, with
+        his login and that directory's identity (marked by the console as soon as the launcher returned, and an add whose exclusive marker could not be
+        written is refused, so a directory made later under the name, whatever inode it gets, holds no marker), is appended in the block
+        that stores that second listing, with no access check between. A listing that cannot be read creates and records nothing; a launcher
+        that fails leaves its name reserved and unowned, whatever a later listing shows; a launcher that
+        returned but whose listing could not be read keeps the name and the directory's identity for his
+        retry, which takes the profile only if its directory is still that one, else drops the name and
+        makes another; with no other profile listed there is no directory to mark at once, so a listing that fails
+        after the launcher returned leaves the profile unowned and his retry makes another (#1343, ADR-console-087).
+        """
+        if not consent:
+            raise sprints.Refused(guest.CONSENT_TEXT)
+        if self._account_adder is None or self._signin_runs is None or self._signin_reader is None:
+            raise sprints.Refused(guest.ACCOUNT_UNAVAILABLE_TEXT)
+        runs = self._signin_runs
+        if attempt is not None:
+            with self._ingest:
+                self._guest_account_refusal(by)
+                profile = self._own_live_signin(by, runs, attempt)
+            link = runs.wait_link(profile)
+            self._guest_link_still_his(by, runs, profile, attempt)
+            return attempt, link
+        with self._adding:
+            with self._ingest:
+                self._guest_account_refusal(by)
+                accounts = self._scan_accounts()
+                if accounts is None:
+                    raise account_add.AddFailed("unavailable")
+                own = self._owned_now(by, accounts)
+                live = [p for p in own if p in self._signin_live and p in runs.running()]
+                target = max(live, key=lambda p: self._signin_live[p], default=None)
+                if target is None:
+                    target = next((p for p in own if getattr(
+                        self._signins.get(p), "state", None) != "signed_in"), None)
+                if target is None:
+                    pending = next(((n, kept[1]) for n, kept in sorted(self._guest_made.items())
+                                    if kept[0] == by.login), None)
+                    if pending is not None and (pending[0] not in accounts or pending[1] is None
+                                                or account_add.identity(accounts[pending[0]])
+                                                != pending[1]):
+                        del self._guest_made[pending[0]]
+                        pending = None
+                    if pending is not None:
+                        name, recorded = pending
+                    else:
+                        name = account_add.guest_name(
+                            set(accounts) | set(self._account_owners) | set(self._accounts_added)
+                            | self._guest_tried | set(self._guest_made))
+                        self._guest_tried.add(name)
+                        recorded = None
+                        root = next((d.parent for d in accounts.values()), None)
+            if target is None:
+                if pending is None:
+                    self._account_adder(name)
+                    recorded = None if root is None else account_add.mark(root / name)
+                    if root is not None and recorded is None:
+                        # The exclusive marker was not written, so a marker found later is not the one this
+                        # add made: the name stays reserved and unowned.
+                        raise account_add.AddFailed("not_listed")
+                    self._guest_made[name] = (by.login, recorded)
+                accounts = self._scan_accounts()
+                if accounts is None:
+                    if recorded is None:
+                        del self._guest_made[name]
+                    raise account_add.AddFailed("not_listed")
+                if recorded is None and root is None and name in accounts:
+                    bound = account_add.mark(accounts[name])  # no other profile showed where to mark early
+                else:
+                    bound = account_add.identity(accounts[name]) if name in accounts else None
+                if bound is None or (recorded is not None and bound != recorded):
+                    del self._guest_made[name]
+                    raise account_add.AddFailed("not_listed")
+                # A fresh credential slot only: a name the owner removed with the CLI can still find the
+                # launcher's keychain entry of the earlier profile, which must not become his.
+                status = self._read_signin_now(name, "add", named=False)
+                if status is None or status.state != "signed_out":
+                    del self._guest_made[name]
+                    raise account_add.AddFailed("not_listed")
+                with self._ingest:
+                    self._profiles = frozenset(accounts)
+                    self._profiles_read = True
+                    if self._identities_seen is not None:
+                        # The listing above saw the directory before its marker was written: the marked
+                        # identity is published with the row, or the owner's start would find it unowned (#1361).
+                        self._identities_seen[name] = bound
+                    self._fold(self.log.append([account_add.added(name, by=by.login, identity=bound)]))
+                    del self._guest_made[name]
+                    self._publish()
+                target = name
+                # Still under `_adding`: another add of his cannot pick the new profile and start its
+                # client before this one has granted the folder trust.
+                self._grant_registered_projects(target, named=False)
+        return self.start_signin(target, by=by)
+
+    def _grant_registered_projects(self, name: str, *, named: bool = True) -> None:
         """Grant a page-added profile every registered project's folder trust (#1078).
 
         Runs after the adder returned, so the add deadline bounds creation only, and before the
@@ -4750,18 +5434,19 @@ class ConsoleService:
         entries = read_fleet(self.registry)
         if entries is None:
             if os.path.lexists(self.registry):
-                print(f"console: trust_account_registry_unreadable {name}", file=sys.stderr)
+                print(f"console: trust_account_registry_unreadable{' ' + name if named else ''}",
+                      file=sys.stderr)
             return
-        found = [d for d in self._profile_dirs() if sessions.account_name(d) == name]
+        found = [d for d in self._dirs() if sessions.account_name(d) == name]
         if not found:
             return
         for entry in entries:
             try:
                 self._grant_trust("account", entry["root"], entry["project_id"],
-                                  profiles=[(name, found[0] / ".claude.json")])
+                                  profiles=[(name, found[0] / ".claude.json")], named=named)
             except Exception as error:
-                print(f"console: trust_account_failed {name} {type(error).__name__}",
-                      file=sys.stderr)
+                print(f"console: trust_account_failed {name + ' ' if named else ''}"
+                      f"{type(error).__name__}", file=sys.stderr)
 
     def _grant_at_start(self) -> None:
         """Grant every registered project's folder trust in every target, once (#1183).
@@ -4784,8 +5469,11 @@ class ConsoleService:
                 print(f"console: trust_start_failed {entry['project_id']} {type(error).__name__}",
                       file=sys.stderr)
 
-    def register_project(self, path: str) -> None:
-        """Dispatch the adoption plan of a repository; refusals are `sprints.Refused`."""
+    def register_project(self, path: str, *, unless_open: bool = False) -> None:
+        """Dispatch the adoption plan of a repository; refusals are `sprints.Refused`.
+
+        With `unless_open`, a registration the owner's view shows open refuses it (#1334).
+        """
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
         entries = read_fleet(self.registry)
@@ -4799,13 +5487,16 @@ class ConsoleService:
         with self._ingest:
             if self._registering is not None:
                 raise sprints.Refused(register.running(register.name_of(self._registering)))
-            self._registering = str(root)
-            self._publish()
+            if unless_open and register.open_shown(
+                    derive_view(**self._view_inputs())["registration"]):
+                raise sprints.Refused(register.OPEN_SHOWN)
+            self._admit_run(str(root))
+            self._announce_run()
         try:
             self._dispatch(lambda: self._run_registration(str(root), entries))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._publish()
             raise
 
@@ -4831,8 +5522,8 @@ class ConsoleService:
         with self._ingest:
             if self._check_answerable(root, choice)["at"] != latest["at"]:
                 raise sprints.Refused(register.NOT_WAITING)
-            self._registering = root
-            self._publish()
+            self._admit_run(root)
+            self._announce_run()
 
         remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
 
@@ -4851,12 +5542,14 @@ class ConsoleService:
             self._dispatch(run)
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._publish()
             raise
 
-    def cancel_registration(self, root: str) -> None:
+    def cancel_registration(self, root: str, *, restore: bool = False) -> None:
         """Cancel the shown registration of `root` before apply; refusals are `sprints.Refused`.
+
+        With `restore` the page gets back the registration shown before it (#1334).
 
         Every failed apply of the root is cleaned and forgotten, not only the shown plan's: a shown
         failure can carry no plan id while an earlier attempt still keeps its copy (#1088).
@@ -4869,8 +5562,8 @@ class ConsoleService:
             with self._ingest:
                 if self._cancellable(root) is not latest:
                     raise sprints.Refused(register.NOT_WAITING)
-                self._registering = root
-                self._publish()
+                self._admit_run(root)
+                self._announce_run()
             try:
                 if self._adopter is None:
                     refused = True
@@ -4881,33 +5574,46 @@ class ConsoleService:
                 refused = True
             except BaseException:
                 with self._ingest:
-                    self._registering = None
+                    self._end_run()
                     self._publish()
                 raise
+            # The reservation stays through the log append: a registration admitted between the
+            # discard and the row would otherwise find the copy gone and no cancellation (#1330).
             with self._ingest:
-                self._registering = None
-                if refused:
+                try:
+                    if refused:
+                        raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+                    self._record_cancel(root, latest, held=True, restore=restore)
+                finally:
+                    self._end_run()
                     self._publish()
-            if refused:
-                raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+            return
         with self._ingest:
-            if self._cancellable(root) is not latest:
-                raise sprints.Refused(register.NOT_WAITING)
-            plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
-                                             if one != latest["plan_id"])]
-            self._cancelled[root] = self._cancelled.get(root, 0) + 1
-            self._fold(self.log.append([register.cancelled_row(root, one) for one in plan_ids]))
-            self._answer_refusal = None
+            self._record_cancel(root, latest, held=False, restore=restore)
             self._publish()
+
+    def _record_cancel(self, root: str, latest: dict, *, held: bool, restore: bool = False) -> None:
+        """Append the cancellation rows of `root`; `held` is the caller's own reservation; `_ingest` held."""
+        if self._cancellable(root, held=held) is not latest:
+            raise sprints.Refused(register.NOT_WAITING)
+        plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
+                                         if one != latest["plan_id"])]
+        self._cancelled[root] = self._cancelled.get(root, 0) + 1
+        self._fold(self.log.append([register.cancelled_row(root, one, restore and index == 0)
+                                    for index, one in enumerate(plan_ids)]))
+        self._answer_refusal = None
 
     def _failed_applies(self, root: str) -> list[str]:
         """The plan ids of `root` whose apply failed, held under the ingest lock."""
         return sorted(plan_id for plan_id, found in self._adoptions.items()
                       if found["root"] == root and found["step"] == "apply_failed")
 
-    def _cancellable(self, root: str) -> dict:
-        """The shown registration of `root` when it may be cancelled, held under the ingest lock."""
-        if self._registering is not None:
+    def _cancellable(self, root: str, *, held: bool = False) -> dict:
+        """The shown registration of `root` when it may be cancelled, held under the ingest lock.
+
+        `held` is a cancel that keeps its own reservation, which is not another run.
+        """
+        if self._registering is not None and not held:
             raise sprints.Refused(register.running(register.name_of(self._registering)))
         latest = self._registration
         if latest is None or latest["root"] != root:
@@ -4984,14 +5690,21 @@ class ConsoleService:
                         fields = contract_draft.draft(root, reading, entries=entries)
                         payload = self._plan_draft(root, fields, [])
                     else:
-                        plan = (self._plan_with(root, draft, answers) if answers or draft
-                                else self._adopter.plan(root, cancel=self._stop))
+                        proposal = []
+                        if draft is None and answers is None and not confirmed:
+                            proposal = contract_draft.reconcile_fields(
+                                root, self._hook_reader(root))
+                        start = draft if draft is not None else (proposal or None)
+                        plan = (self._plan_with(root, start, answers or [])
+                                if answers or start else self._adopter.plan(root, cancel=self._stop))
                         report = None
                         if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
                             verb = "register"
                             report = self._adopter.register(root, cancel=self._stop)
                         self._log_registration_failure(root, plan, report)
-                        payload = register.summary(root, plan, report)
+                        payload = (register.summary(
+                            root, plan, report, draft=contract_draft.carried(proposal, plan))
+                            if proposal else register.summary(root, plan, report))
         except register.RunFailed as error:
             self._log_registration_error({"root": root, "verb": verb, "failure": error.kind,
                                           "cause": repr(error.__cause__)})
@@ -5007,9 +5720,11 @@ class ConsoleService:
         elif remote is not None:
             payload = {**payload, "remote": remote}
         with self._ingest:
-            if not self._closed:
-                self._fold(self.log.append([register.ended(payload)]))
-            self._registering = None
+            try:
+                if not self._closed:
+                    self._fold(self.log.append([register.ended(payload)]))
+            finally:
+                self._end_run()
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -5063,15 +5778,15 @@ class ConsoleService:
             asked = {"id": question, "subject": subject}
             draft = latest["draft"]
             remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
-            self._registering = root
+            self._admit_run(root)
             self._answering = True
             self._answer_refusal = None
-            self._publish()
+            self._announce_run()
         try:
             self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed, remote))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._answering = False
                 self._publish()
             raise
@@ -5086,6 +5801,9 @@ class ConsoleService:
             plan_ids = sorted(plan_id for plan_id, found in self._adoptions.items()
                               if found["root"] == root and found["step"] == "apply_failed")
         for plan_id in plan_ids:
+            if self._stop.is_set():
+                # A run queued behind a kept copy starts no cleanup once the console stops (#1330).
+                raise register.RunFailed("cancelled")
             if not approve.left_behind(plan_id, root):
                 continue
             try:
@@ -5110,9 +5828,15 @@ class ConsoleService:
         return Path(name)
 
     def _plan_with(self, root: str, fields: list[dict] | None, answers: list[dict]) -> dict:
-        """The adopter's plan, with the drafted contract as a file that is gone when it returns."""
+        """The adopter's plan: the drafted contract as a file that is gone when it returns, or an amendment's command (#1333)."""
         if fields is None:
             return self._adopter.plan(root, cancel=self._stop, answers=answers)
+        if contract_draft.amends(fields):
+            command = contract_draft.environment(fields)
+            if command is None:
+                return self._adopter.plan(root, cancel=self._stop, answers=answers)
+            return self._adopter.plan(root, cancel=self._stop, answers=answers,
+                                      environment=command)
         path = self._write_draft(fields)
         try:
             return self._adopter.plan(root, cancel=self._stop, answers=answers, contract=str(path))
@@ -5146,7 +5870,7 @@ class ConsoleService:
             if refusals:
                 return plan
             self._log_registration_error({"root": root, "verb": "plan", "error": plan["error"]})
-        return register.summary(root, plan, None, draft=fields)
+        return register.summary(root, plan, None, draft=contract_draft.carried(fields, plan))
 
     def _run_answer(self, root: str, plan_id: str, answers: list[dict], asked: dict,
                     draft: list[dict] | None = None, changed: list[dict] | None = None,
@@ -5174,7 +5898,8 @@ class ConsoleService:
                         result = register.drafting(
                             root, contract_draft.mark_refused(draft, *refused), answers)
                     elif "error" not in result:
-                        result = register.summary(root, result, draft=draft)
+                        result = register.summary(
+                            root, result, draft=contract_draft.carried(draft, result))
                 if "error" in result:
                     self._log_answer_error({"root": root, "error": result["error"]})
                     text = plan_questions.refusal_text(result["error"])
@@ -5191,14 +5916,16 @@ class ConsoleService:
             traceback.print_exception(error, file=sys.stderr)
             text = plan_questions.rerun_failed(register.UNEXPECTED)
         with self._ingest:
-            if payload is not None and not self._closed:
-                self._fold(self.log.append([register.ended(payload)]))
-            elif payload is None:
-                self._answer_refusal = {
-                    "plan_id": plan_id, "text": text,
-                    "id": asked["id"], "subject": asked["subject"]}
-            self._registering = None
-            self._answering = False
+            try:
+                if payload is not None and not self._closed:
+                    self._fold(self.log.append([register.ended(payload)]))
+                elif payload is None:
+                    self._answer_refusal = {
+                        "plan_id": plan_id, "text": text,
+                        "id": asked["id"], "subject": asked["subject"]}
+            finally:
+                self._end_run()
+                self._answering = False
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -5224,21 +5951,21 @@ class ConsoleService:
                 raise sprints.Refused(approve.NOT_READY)
             found = self._adoptions.get(plan_id)
             if found is not None and found["step"] == "opened":
-                if found["pull_state"] in ("open", "ready"):
+                if found["pull_state"] in ("open", "ready", "failing"):
                     raise sprints.Refused(approve.OPENED)
                 if found["pull_state"] == "merged":
                     raise sprints.Refused(approve.MERGED)
             root = latest["root"]
             shown = dict(latest)
             adoption = None if found is None else dict(found)
-            self._registering = root
+            self._admit_run(root)
             self._approving = True
-            self._publish()
+            self._announce_run()
         try:
             self._approval_dispatch(lambda: self._run_approval(root, shown, adoption))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._approving = False
                 self._publish()
             raise
@@ -5268,7 +5995,8 @@ class ConsoleService:
 
     def _grant_trust(self, cause: str, root: str, project: str,
                      profiles: Sequence[tuple[str, Path]] | None = None,
-                     slot: str | None = None, epoch: int | None = None) -> list[tuple[str, str]]:
+                     slot: str | None = None, epoch: int | None = None,
+                     named: bool = True) -> list[tuple[str, str]]:
         """Grant the folder's client trust in every target and log one `trust.granted` row.
 
         The key is read from `root` every time. The row names the key, or `slot` when the caller
@@ -5278,6 +6006,9 @@ class ConsoleService:
 
         The row is kept even when `close` has begun, the files being written already; a grant that
         starts after `close` began writes nothing. `close` waits for every grant under way.
+
+        With `named` False the stderr line of a failed write carries no profile name (a colleague's
+        profile, #1343).
 
         A retry passes the `epoch` it read of the root's cancellations (#1088): once the owner has
         cancelled the root's registration, nothing is written and no row is logged, so a Check again
@@ -5292,7 +6023,7 @@ class ConsoleService:
                 return []
             self._grants_running += 1
         try:
-            found = (folder_trust.targets(self._trust_home, self._profile_dirs())
+            found = (folder_trust.targets(self._trust_home, self._dirs())
                      if profiles is None else list(profiles))
             if not found:
                 return []
@@ -5305,7 +6036,8 @@ class ConsoleService:
                 try:
                     results.append((name, self._trust_granter(path, key)))
                 except Exception as error:
-                    print(f"console: trust_grant_error {name} {type(error).__name__}",
+                    print(f"console: trust_grant_error {name + ' ' if named else ''}"
+                          f"{type(error).__name__}",
                           file=sys.stderr)
                     results.append((name, folder_trust.FAILED))
             named = slot if slot is not None else (
@@ -5342,7 +6074,7 @@ class ConsoleService:
         with self._ingest:
             failed = self._trust_failures.get((root, profile))
             epoch = self._cancelled.get(root, 0)
-        found = [pair for pair in folder_trust.targets(self._trust_home, self._profile_dirs())
+        found = [pair for pair in folder_trust.targets(self._trust_home, self._dirs())
                  if pair[0] == profile]
         if failed is None or not found:
             raise sprints.Refused(folder_trust.NOT_FAILED)
@@ -5360,11 +6092,13 @@ class ConsoleService:
             traceback.print_exception(error, file=sys.stderr)
         appended = False
         with self._ingest:
-            if final is not None and not self._closed:
-                self._fold(self.log.append([approve.step_row(final)]))
-                appended = True
-            self._registering = None
-            self._approving = False
+            try:
+                if final is not None and not self._closed:
+                    self._fold(self.log.append([approve.step_row(final)]))
+                    appended = True
+            finally:
+                self._end_run()
+                self._approving = False
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -5458,7 +6192,15 @@ class ConsoleService:
 
     def _pull_request(self, slug: str, branch: str, base: str, name: str, shown: Mapping,
                       stop: threading.Event, where: dict) -> tuple[dict | None, Exception | None]:
-        """The branch's pull request, found or opened; (None, the failure) when neither worked."""
+        """The branch's pull request, found or opened; (None, the failure) when neither worked.
+
+        One found before the console tried to open any is not the console's, whatever its words say
+        (a person can open one with the same title and plan sentence); one found after its own open
+        failed is the console's only when it carries the console's title, its plan sentence and the
+        marker of this create attempt (a token made here, fresh for the attempt, and never stored: a
+        person's pull request opened at the same time cannot carry it, and a restart before the
+        console recorded the pull request leaves it not established, so Merge is not offered).
+        """
         try:
             found = self._forge.find_pull_request(slug, branch, base, cancel=stop)
         except approve.Cancelled:
@@ -5466,11 +6208,14 @@ class ConsoleService:
         except Exception as error:
             self._log_forge_error("find", error, where)
             return None, error
+        plan_id = shown["plan_id"]
         if found is not None:
-            return found, None
+            return self._recorded(found, False), None
+        attempt = uuid.uuid4().hex
         try:
-            return self._forge.open_pull_request(
-                slug, branch, base, approve.title(name), approve.body(shown), cancel=stop), None
+            return self._recorded(self._forge.open_pull_request(
+                slug, branch, base, approve.title(name), approve.body(shown, attempt),
+                cancel=stop), True), None
         except approve.Cancelled:
             raise
         except Exception as error:
@@ -5483,7 +6228,17 @@ class ConsoleService:
         except Exception as error:
             self._log_forge_error("find", error, where)
             found = None
-        return (found, None) if found is not None else (None, failure)
+        if found is None:
+            return None, failure
+        return self._recorded(found, approve.console_made(found, name, plan_id, attempt)), None
+
+    @staticmethod
+    def _recorded(pull: Mapping, created: bool) -> dict:
+        """The pull request as the opened step stores it: its link, whether the console made it and the forge's id."""
+        recorded = {"number": pull["number"], "url": pull["url"], "created": created}
+        if "id" in pull:
+            recorded["id"] = pull["id"]
+        return recorded
 
     def remove_account(self, profile: str, typed: str) -> None:
         """Sign the profile out, then remove it through the launcher; refusals are `sprints.Refused`.
@@ -5520,12 +6275,13 @@ class ConsoleService:
                 except account_remove.RemoveFailed as error:
                     self._record_removal(profile, "remove_failed", error.kind)
                     raise
-                listed = self._read_profiles()
-                if profile in listed:
+                listed = self._scan_profiles()
+                if listed is None or profile in listed:
                     self._record_removal(profile, "remove_failed", "still_listed")
                     raise account_remove.RemoveFailed("still_listed")
                 with self._ingest:
                     self._profiles = listed
+                    self._profiles_read = True
                     rows = []
                     if profile in self._excluded:
                         rows.append(exclusion.entry(profile, False))
@@ -5560,17 +6316,28 @@ class ConsoleService:
             self._fold(self.log.append([account_remove.removed(profile, outcome, kind)]))
             self._publish()
 
+    def _send_code_locked(self, profile: str, runs: signin_run.SignIns, code: str,
+                          by_login: str) -> None:
+        """Under the ingest lock: pass the code to the live client and record it; NotRunning escapes."""
+        runs.send_code(profile, code)
+        self._record_signin_action(profile, "code", "sent", by_login)
+        self._publish()
+
+    def _cancel_locked(self, profile: str, runs: signin_run.SignIns, by_login: str) -> None:
+        """Under the ingest lock: cancel the live client and record it; NotRunning escapes."""
+        runs.cancel(profile)
+        self._record_signin_action(profile, "cancel", "cancelled", by_login)
+        self._publish()
+
     def send_signin_code(self, profile: str, code: str) -> None:
         runs = self._signin_refuse_unless_listed(profile)
         with self._ingest:
             if profile not in runs.running():
                 raise sprints.Refused(f"no sign-in is running for {profile}")
             try:
-                runs.send_code(profile, code)
+                self._send_code_locked(profile, runs, code, "owner")
             except signin_run.NotRunning:
                 raise sprints.Refused(f"no sign-in is running for {profile}") from None
-            self._record_signin_action(profile, "code", "sent")
-            self._publish()
 
     def cancel_signin(self, profile: str) -> None:
         runs = self._signin_refuse_unless_listed(profile)
@@ -5578,11 +6345,44 @@ class ConsoleService:
             if profile not in runs.running():
                 raise sprints.Refused(f"no sign-in is running for {profile}")
             try:
-                runs.cancel(profile)
+                self._cancel_locked(profile, runs, "owner")
             except signin_run.NotRunning:
                 raise sprints.Refused(f"no sign-in is running for {profile}") from None
-            self._record_signin_action(profile, "cancel", "cancelled")
-            self._publish()
+
+    def _own_live_signin(self, by: "guest.GuestActor", runs: signin_run.SignIns,
+                         attempt: int) -> str:
+        """Under the ingest lock: the profile of a colleague's own live sign-in of `attempt`, else the fixed refusal."""
+        accounts = self._scan_accounts()
+        for profile in () if accounts is None else self._owned_now(by, accounts):
+            if self._signin_live.get(profile) == attempt and profile in runs.running():
+                return profile
+        raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT)
+
+    def guest_signin_code(self, by: "guest.GuestActor", attempt: int, code: str) -> None:
+        """Pass a colleague's code to his own live sign-in of `attempt`; refusals carry only fixed texts."""
+        runs = self._signin_runs
+        if runs is None:
+            raise sprints.Refused(guest.ACCOUNT_UNAVAILABLE_TEXT)
+        with self._ingest:
+            self._guest_account_refusal(by)
+            profile = self._own_live_signin(by, runs, attempt)
+            try:
+                self._send_code_locked(profile, runs, code, by.login)
+            except signin_run.NotRunning:
+                raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT) from None
+
+    def guest_signin_cancel(self, by: "guest.GuestActor", attempt: int) -> None:
+        """Cancel a colleague's own live sign-in of `attempt`; refusals carry only fixed texts."""
+        runs = self._signin_runs
+        if runs is None:
+            raise sprints.Refused(guest.ACCOUNT_UNAVAILABLE_TEXT)
+        with self._ingest:
+            self._guest_account_refusal(by)
+            profile = self._own_live_signin(by, runs, attempt)
+            try:
+                self._cancel_locked(profile, runs, by.login)
+            except signin_run.NotRunning:
+                raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT) from None
 
     def expire_signins(self) -> list[str]:
         """End every sign-in run past its deadline; the profiles ended."""
@@ -5657,6 +6457,18 @@ class ConsoleService:
                    if r.item.get("project_id") == sprint.project_id and not r.item["answered"]
                    and not is_waiting(r.item)]
         return sprint_waiting(sprint, records)
+
+    def _waiting_logins(self) -> frozenset[str]:
+        """Under the ingest lock: the logins with an open sprint whose manager waits for a profile (#1344).
+
+        A colleague's account is kept for them: another starter's sprint does not take it while
+        one of the owner's waits (ADR-console-087 D1).
+        """
+        return frozenset(
+            sprint.started_by for sprint in self._sprints.values()
+            if sprint.started_by is not None and sprint.manager is not None
+            and sprint.manager.state == sprints.WAITING and sprint.stop_at is None
+            and sprints.ended_at(sprint) is None)
 
     def _quota_wait(self, sprint: sprints.SprintState) -> manager.Wait | None:
         """Under the ingest lock: where the sprint's manager waits for quota, None when its account has room.
@@ -5805,8 +6617,8 @@ class ConsoleService:
         choice = manager.choose_profile(
             capacity.capacity_view(self._read_profiles() - self._removing, self._capacity,
                                    self._clock(), self._signins, excluded=self._excluded,
-                                   pinned=self._pinned),
-            self._use.last)
+                                   pinned=self._pinned, owners=self._owners_now()),
+            self._use.last, sprint.started_by, self._waiting_logins())
         if isinstance(choice, manager.Wait):
             self._append_manager(MANAGER_WAITING, project_id, {
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
@@ -5822,25 +6634,26 @@ class ConsoleService:
 
     def _unexcluded_launch(self, launch: manager.Launch, token: object,
                            prepared_pin: str | None) -> manager.Launch | None:
-        """Under the ingest lock: `launch`, or its replacement when its profile was excluded, is being removed or gone, or the pin moved after it was prepared.
+        """Under the ingest lock: `launch`, or its replacement when its profile was excluded, is being removed or gone, or the pin moved after it was prepared, or it is a colleague's account (room and reservation are read again, #1344).
 
         `prepared_pin` is the pin in force when it was prepared. The choice is made again over the
         set and the pin now in force; with nothing to choose a wait row is appended (as
         `_prepared_launch` does) and None returned.
         """
+        sprint = self._sprints.get(launch.sprint_id)
+        view = capacity.capacity_view(
+            self._read_profiles() - self._removing, self._capacity, self._clock(), self._signins,
+            excluded=self._excluded, pinned=self._pinned, owners=self._owners_now())
         if (launch.profile not in self._excluded and self._pinned == prepared_pin
                 and launch.profile not in self._removing
-                and launch.profile in self._read_profiles()):
+                and launch.profile in self._read_profiles()
+                and not manager.colleague_account(view, launch.profile)):
             return launch
-        sprint = self._sprints.get(launch.sprint_id)
         if sprint is None:
             self._release(launch.sprint_id, token)
             return None
-        choice = manager.choose_profile(
-            capacity.capacity_view(self._read_profiles() - self._removing, self._capacity,
-                                   self._clock(), self._signins, excluded=self._excluded,
-                                   pinned=self._pinned),
-            self._use.last)
+        choice = manager.choose_profile(view, self._use.last, sprint.started_by,
+                                        self._waiting_logins())
         if isinstance(choice, manager.Wait):
             marks = {"takeover": True, "goal": sprint.goal} if launch.takeover else {}
             self._append_manager(MANAGER_WAITING, launch.project_id, {
@@ -5917,6 +6730,10 @@ class ConsoleService:
                        brief: dict) -> tuple[sprints.SprintState, dict]:
         """Every refusal of a brief, in order, with nothing written (the caller holds the lock)."""
         sprint = self._manager_sprint(sprint_id, secret)
+        if sprint.stopped_at is not None or sprint.closing is not None:
+            raise sprints.Refused(sprints.ENDED)  # a card for it would show and no decision would take it (#1263)
+        if sprint.stop_at is not None:
+            raise sprints.Refused(sprints.ALREADY_STOPPING)  # the page hides it and no decision takes it (#1263)
         checked = sprints.checked_brief(brief)
         for m, member in enumerate(checked.get("pictures", ()), 1):
             self._own_picture(sprint, member["picture"],
@@ -6004,10 +6821,17 @@ class ConsoleService:
             self._dispatch_stop(sprint_id)
         return appended[-1].at
 
-    def _waiting_brief(self, project_id: str, sprint_id: str, version: int) -> sprints.SprintState:
+    def _project_sprint(self, project_id: str, sprint_id: str) -> sprints.SprintState:
         sprint = self._sprints.get(sprint_id)
         if sprint is None or sprint.project_id != project_id:
             raise sprints.Refused(sprints.NOT_OPEN)
+        return sprint
+
+    def _waiting_brief(self, sprint: sprints.SprintState, version: int) -> sprints.SprintState:
+        if not sprints.takes_questions(sprint):
+            raise sprints.Refused(sprints.ENDED)
+        if sprint.stop_at is not None:
+            raise sprints.Refused(sprints.ALREADY_STOPPING)
         if sprint.brief is None:
             raise sprints.Refused(sprints.NOT_WAITING)
         if version != sprint.brief.version:
@@ -6016,41 +6840,46 @@ class ConsoleService:
             raise sprints.Refused(sprints.NOT_WAITING)
         return sprint
 
-    def approve_brief(self, project_id: str, sprint_id: str, version: int) -> None:
+    def approve_brief(self, project_id: str, sprint_id: str, version: int, *,
+                      by: "guest.GuestActor | None" = None) -> None:
         """Append one `brief.approved` event for the waiting brief of that version."""
         with self._ingest:
-            sprint = self._waiting_brief(project_id, sprint_id, version)
+            self._guest_refusal(by, project_id)
+            sprint = self._waiting_brief(self._steered(by, project_id, sprint_id), version)
             appended = self.log.append([(BRIEF_APPROVED, project_id, {
-                "sprint_id": sprint_id, "version": version, "goal": sprint.goal})])
+                "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
+                **_by(by)})])
             self._apply(appended)
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
             self._dispatch_nudge(sprint_id)
 
-    def reply_brief(self, project_id: str, sprint_id: str, version: int, reply: str) -> None:
+    def reply_brief(self, project_id: str, sprint_id: str, version: int, reply: str, *,
+                    by: "guest.GuestActor | None" = None) -> None:
         """Append one `brief.replied` event carrying the owner's words exactly as sent."""
         with self._ingest:
-            sprint = self._waiting_brief(project_id, sprint_id, version)
+            self._guest_refusal(by, project_id)
+            sprint = self._waiting_brief(self._steered(by, project_id, sprint_id), version)
             sprints.checked_reply(reply)
             appended = self.log.append([(BRIEF_REPLIED, project_id, {
                 "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
-                "reply": reply})])
+                "reply": reply, **_by(by)})])
             self._apply(appended)
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
             self._dispatch_nudge(sprint_id)
 
-    def send_message(self, project_id: str, sprint_id: str, text: str) -> int:
+    def send_message(self, project_id: str, sprint_id: str, text: str, *,
+                     by: "guest.GuestActor | None" = None) -> int:
         """Append one `sprint.messaged` event with the owner's text exactly as sent; its id."""
         with self._ingest:
-            sprint = self._sprints.get(sprint_id)
-            if sprint is None or sprint.project_id != project_id:
-                raise sprints.Refused(sprints.NOT_OPEN)
+            self._guest_refusal(by, project_id)
+            sprint = self._steered(by, project_id, sprint_id)
             if sprint.stopped_at is not None or sprints.ended_at(sprint) is not None:
                 raise sprints.Refused(sprints.ENDED)
             sprints.checked_message(text)
             appended = self.log.append([(SPRINT_MESSAGED, project_id, {
-                "sprint_id": sprint_id, "goal": sprint.goal, "text": text})])
+                "sprint_id": sprint_id, "goal": sprint.goal, "text": text, **_by(by)})])
             self._apply(appended)
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
@@ -6562,8 +7391,10 @@ class ConsoleService:
         profile or the launcher's last-used fallback is no reason to leave a session that only waits.
         """
         view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned)
-        choice = manager.choose_profile(view, self._use.last)
+                                      self._signins, excluded=self._excluded, pinned=self._pinned,
+                                      owners=self._owners_now())
+        choice = manager.choose_profile(view, self._use.last, sprint.started_by,
+                                        self._waiting_logins())
         mine = sprint.manager.profile if sprint.manager else None
         if not isinstance(choice, str) or choice == mine:
             return False
@@ -6970,7 +7801,15 @@ class ConsoleService:
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
             others = [other for key, other in self._sprints.items() if key != sprint_id]
-            checked = sprints.postable_notice(sprint, notice, others)
+            project = self._states.get(sprint.project_id)
+            root = project.root if project is not None else None
+
+            def is_folder(path: str) -> bool:
+                return root is not None and any(
+                    os.path.isdir(match) for match in glob.glob(
+                        os.path.join(glob.escape(root), path)))
+
+            checked = sprints.postable_notice(sprint, notice, others, is_folder)
             appended = self.log.append([(NOTICE_POSTED, sprint.project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "notice": checked})])
             self._apply(appended)
@@ -7076,11 +7915,19 @@ class ConsoleService:
             "recommended": asked.recommended, "differs": chosen != asked.recommended, **extra})
 
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
-                        choice: int | None, text: str | None) -> int:
+                        choice: int | None, text: str | None, *,
+                        by: "guest.GuestActor | None" = None) -> int:
         """Append one `question.answered` event, a message to the manager; its id."""
         slot = (sprint_id, round_id, index)
         with self._ingest:
+            self._guest_refusal(by, project_id)
+            self._steered(by, project_id, sprint_id)
             sprint, asked = self._open_question(project_id, sprint_id, round_id, index)
+            if by is not None and (asked.look is not None
+                                   or guest.is_look(p.pair for p in asked.pictures)):
+                raise sprints.Refused(guest.OWNER_LOOK_TEXT)
+            if by is not None and asked.owner_only:
+                raise sprints.Refused(guest.OWNER_ONLY_TEXT)
             words = None
             if choice is not None:
                 if not 0 <= choice < len(asked.options):
@@ -7097,7 +7944,7 @@ class ConsoleService:
             plain = look is None or chosen != look.approve or words is not None
             if plain:
                 appended = self.log.append([self._answered_row(
-                    project_id, sprint, asked, chosen, said, **extra)])
+                    project_id, sprint, asked, chosen, said, **extra, **_by(by))])
                 self._apply(appended)
                 reserved = self._reserve_nudge(sprint_id)
             else:
@@ -7306,7 +8153,9 @@ class ConsoleService:
                 self._sessions, observations, self._absent, self._repo_of, project_of)
             appended = self.log.append(changes)
             self._absent = absent
-            self._profiles = self._read_profiles()
+            scanned = self._scan_profiles()
+            if scanned is not None:
+                self._profiles, self._profiles_read = scanned, True
             if appended:
                 self._fold(appended)
             self._publish()
@@ -7324,8 +8173,9 @@ class ConsoleService:
             capacity.capacity_view(profiles - self._removing, self._capacity, self._clock(),
                                    self._signins,
                                    excluded=self._excluded if excluded is None else excluded,
-                                   pinned=self._pinned if pinned is _FOLDED else pinned),
-            self._use.last)
+                                   pinned=self._pinned if pinned is _FOLDED else pinned,
+                                   owners=self._owners_now()),
+            self._use.last, None, self._waiting_logins())
 
     def set_exclusion(self, profile: str, excluded: bool) -> list[Event]:
         """Exclude `profile` from the console's choice, or put it back; `exclusion.Refused` when it cannot.
@@ -7415,10 +8265,51 @@ class ConsoleService:
         self._choice = profile
         self._unreadable.discard("choice")
 
+    def _listed_dirs(self) -> list[Path] | None:
+        """The profile directories, None (one stderr line until the next good listing) when they cannot be listed."""
+        try:
+            found = list(self._profile_dirs())
+        except OSError as error:
+            self._warn_once(
+                "profiles", f"console: profiles_unlistable {type(error).__name__}: {error}")
+            return None
+        self._unreadable.discard("profiles")
+        return found
+
+    def _dirs(self) -> list[Path]:
+        """The profile directories, none when they cannot be listed."""
+        return self._listed_dirs() or []
+
+    def _scan_accounts(self) -> dict[str, Path] | None:
+        """The account directories by name as they are now; None when they cannot be listed.
+
+        A good listing also keeps each directory's identity (`_identities_seen`) for the views.
+        """
+        found = self._listed_dirs()
+        if found is None:
+            return None
+        accounts = {}
+        for directory in found:
+            name = sessions.account_name(directory)
+            if name is not None and directory.is_dir():
+                accounts[name] = directory
+        self._identities_seen = {name: account_add.identity(directory)
+                                 for name, directory in accounts.items()}
+        return accounts
+
+    def _scan_profiles(self) -> frozenset[str] | None:
+        """The accounts among the profile directories as they are now; None when they cannot be listed.
+
+        A directory that cannot be listed is not an empty one: the numbering is not ended by a read
+        that failed, and `_read_profiles` answers no account rather than a stale one.
+        """
+        accounts = self._scan_accounts()
+        return None if accounts is None else frozenset(accounts)
+
     def _read_profiles(self) -> frozenset[str]:
-        """The accounts among the profile directories as they are now."""
-        names = (sessions.account_name(d) for d in self._profile_dirs() if d.is_dir())
-        return frozenset(name for name in names if name is not None)
+        """The accounts among the profile directories as they are now; none when they cannot be listed."""
+        scanned = self._scan_profiles()
+        return frozenset() if scanned is None else scanned
 
     def _warn_once(self, key: str, line: str) -> None:
         """Print `line` unless `key` is already unreadable; `_unreadable` is cleared by a good read."""
@@ -7581,8 +8472,11 @@ class ConsoleService:
         self._pinned = pin.pinned_profile(appended, self._pinned)
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
+        self._account_owners = account_add.owners_state(appended, self._account_owners)
+        self._account_identities = account_add.identities_state(appended, self._account_identities)
         self._trust_failures = folder_trust.failures(appended, self._trust_failures)
-        self._registration = register.latest(appended, self._registration)
+        self._registration_fold = register.fold(appended, self._registration_fold)
+        self._registration = self._registration_fold.latest
         self._adoptions = approve.adoptions(appended, self._adoptions)
         self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
@@ -7592,9 +8486,14 @@ class ConsoleService:
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
         self._owner_notices = sprints.owner_notices(appended, self._owner_notices)
         self._project_questions = project_question.asked_questions(appended, self._project_questions)
+        self._question_keys = project_question.question_keys(appended, self._question_keys)
         self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
-        self._access = guest.access_list(appended, self._access)
+        for event in appended:
+            after = guest.access_list([event], self._access)
+            if guest.revokes(self._access, after):
+                self._guest_epoch += 1
+            self._access = after
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
 
@@ -7618,12 +8517,16 @@ class ConsoleService:
                 self._pinned = pin.pinned_profile(events)
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
+                self._account_owners = account_add.owners_state(events)
+                self._account_identities = account_add.identities_state(events)
                 self._trust_failures = folder_trust.failures(events)
-                self._registration = register.latest(events)
+                self._registration_fold = register.fold(events)
+                self._registration = self._registration_fold.latest
                 self._adoptions = approve.adoptions(events)
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._project_questions = project_question.asked_questions(events)
+                self._question_keys = project_question.question_keys(events)
                 self._derive_digest(events)
                 self._publish()
             self._sweep_pictures(events)
@@ -7654,6 +8557,10 @@ class ConsoleService:
 
     def poll_spend(self) -> None:
         """Read the transcripts, rebuild the spend view and publish it; see the module docstring."""
+        with self._spend_lock:
+            self._poll_spend()
+
+    def _poll_spend(self) -> None:
         projects_dirs: list[Path] = []
         for directory in self._session_dirs():
             projects = Path(directory).parent / "projects"
@@ -7662,6 +8569,10 @@ class ConsoleService:
         today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
         since = (today - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
         self._spend.read(projects_dirs, since, self._ping_log())
+        if self._spend.roots_unreadable and self._spend_view is None:
+            # A cold start whose only transcript roots cannot be listed knows no spend: publishing the empty totals
+            # would show 30 zero days, so the view stays absent and the records' spend stays null.
+            raise OSError("the transcript directories cannot be listed")
         snapshot = self._spend.snapshot()
         with self._ingest:
             self._spend_view = spend.spend_view(
@@ -7670,9 +8581,11 @@ class ConsoleService:
                 profiles=self._spend_profiles, questions=self._spend_questions)
             self._publish()
 
-    def _spend_step(self) -> None:
+    def _spend_step(self, *, only_without_view: bool = False) -> None:
         try:
-            self.poll_spend()
+            with self._spend_lock:
+                if not (only_without_view and self._spend_view is not None):
+                    self._poll_spend()
         except Exception as error:
             print(f"console: spend_poll_failed {type(error).__name__}: {error}",
                   file=sys.stderr)
@@ -7786,6 +8699,8 @@ class ConsoleService:
         addresses = guest.own_addresses(status)
         with self._ingest:
             self._serve_status = found
+            if name != self._tailnet_name:
+                self._guest_epoch += 1
             self._tailnet_name = name
             if addresses and addresses != self._tailnet_addresses:
                 # a reading and the other-device flag were judged against the old addresses: a
@@ -7941,28 +8856,201 @@ class ConsoleService:
             if slug is None:
                 continue
             number = entry["pull_request"]["number"]
+            plan_id = entry["plan_id"]
+            with self._ingest:
+                mark = self._pull_marks.get(plan_id, 0)
             try:
-                state = self._forge.pull_request_state(slug, number, cancel=self._stop)
+                reading = self._forge.pull_request_reading(slug, number, cancel=self._stop)
             except approve.Cancelled:
                 return
             except Exception as error:
-                print(f"console: adoption_poll_failed {entry['plan_id']} "
+                print(f"console: adoption_poll_failed {plan_id} "
                       f"{type(error).__name__}: {error}", file=sys.stderr)
                 continue
             if self._stop.is_set():
                 return
-            with self._ingest:
-                found = self._adoptions.get(entry["plan_id"])
-                if (found is None or found["step"] != "opened"
-                        or found["pull_request"]["number"] != number
-                        or found["pull_state"] == state):
-                    continue
-                appended = self.log.append(
-                    [approve.pull_row(entry["plan_id"], number, found["pull_request"]["url"],
-                                      state)])
-                self._fold(appended)
-                self._publish()
+            self._record_reading(plan_id, number, reading, mark)
         self.register_merged()
+
+    def _record_reading(self, plan_id: str, number: int, reading: Mapping,
+                        mark: int | None = None) -> bool:
+        """Append the forge's reading of a pull request when it differs; True when it appended.
+
+        A reading is refused for a plan whose pull request is not that number, is already
+        merged, already reads the same, or (when `mark` is given) has recorded another reading
+        since the mark was taken: a poll that read before a click merged must not undo it, and a
+        read that finished after a newer one was recorded must not replace it (a `merged` reading
+        is final and is never refused for that). A reading whose checks could not be read keeps a
+        `failing` pull request failing, and still records the head and target it saw.
+        """
+        unread = reading.get("checks_error")
+        if unread is not None:
+            print(f"console: adoption_poll_failed {plan_id} "
+                  f"{type(unread).__name__}: {unread}", file=sys.stderr)
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            if found is None:
+                return False
+            if (found["step"] == "opened" and found["pull_request"].get("id") is not None
+                    and "id" in reading and reading["id"] != found["pull_request"]["id"]):
+                return False
+            state = reading["state"]
+            if unread is not None and found["pull_state"] == "failing":
+                state = "failing"
+            base = reading.get("base")
+            if (found["step"] != "opened"
+                    or found["pull_request"]["number"] != number
+                    or found["pull_state"] == "merged"
+                    or (found["pull_state"], found["pull_head"], found["pull_base"])
+                    == (state, reading["head"], base)
+                    or (mark is not None and state != "merged"
+                        and self._pull_marks.get(plan_id, 0) != mark)):
+                return False
+            appended = self.log.append(
+                [approve.pull_row(plan_id, number, found["pull_request"]["url"],
+                                  state, reading["head"], base)])
+            self._pull_marks[plan_id] = self._pull_marks.get(plan_id, 0) + 1
+            self._fold(appended)
+            self._publish()
+            return True
+
+    def merge_adoption(self, plan_id: str, number: int, commit: str) -> None:
+        """Merge the adoption's pull request at its recorded commit; refusals are `sprints.Refused`."""
+        if self._forge is None:
+            raise sprints.Refused(approve.MERGE_UNAVAILABLE)
+        with self._ingest:
+            if self._stop.is_set():
+                raise sprints.Refused(register.STOPPING)
+            if plan_id in self._merging:
+                raise sprints.Refused(approve.MERGING)
+            found = self._adoptions.get(plan_id)
+            if (found is not None and found["step"] == "opened"
+                    and (found["pull_request"]["number"] != number or found["commit"] != commit)):
+                raise sprints.Refused(approve.STALE_CARD)
+            refusal = approve.merge_refusal(found)
+            if refusal is not None:
+                raise sprints.Refused(refusal)
+            slug = approve.pull_slug(found["pull_request"])
+            if slug is None:
+                raise sprints.Refused(approve.NO_PULL)
+            self._merging.add(plan_id)
+        try:
+            self._merge_and_record(plan_id, number, commit, slug)
+        finally:
+            with self._ingest:
+                self._merging.discard(plan_id)
+                self._runs_done.notify_all()
+
+    def _read_before_merging(self, plan_id: str, number: int, commit: str, slug: str) -> None:
+        """Refuse unless the forge shows, now, a ready pull request at `commit` and the recorded base.
+
+        The forge's merge call pins only the head, so a pull request retargeted since the page
+        polled would land the same commit on the new branch; this read is the check that the
+        target is still the recorded one. What it read is recorded like a poll's reading.
+        """
+        with self._ingest:
+            mark = self._pull_marks.get(plan_id, 0)
+        try:
+            reading = self._forge.pull_request_reading(slug, number, cancel=self._stop)
+        except approve.Cancelled:
+            raise sprints.Refused(register.STOPPING) from None
+        except Exception as error:
+            print(f"console: adoption_poll_failed {plan_id} {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            raise sprints.Refused(approve.merge_failure(error)) from None
+        self._record_reading(plan_id, number, reading, mark)
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            if found is None or found["step"] != "opened":
+                refusal = approve.NO_PULL
+            elif self._other_pull_request(found, reading):
+                refusal = approve.FOUND
+            else:
+                refusal = approve.merge_refusal(found)
+                if refusal is None and (found["pull_state"], found["pull_head"],
+                                        found["pull_base"]) != (
+                        reading["state"], reading["head"], reading["base"]):
+                    refusal = approve.STALE_CARD
+            merged = found is not None and found["pull_state"] == "merged"
+        if merged:
+            self._dispatch_registration()
+        if refusal is not None:
+            raise sprints.Refused(refusal)
+
+    @staticmethod
+    def _other_pull_request(found: Mapping, reading: Mapping) -> bool:
+        """Whether the forge's reading names another pull request than the one recorded (a reused name and number)."""
+        recorded = found["pull_request"].get("id")
+        return recorded is not None and reading["id"] != recorded
+
+    def _merge_and_record(self, plan_id: str, number: int, commit: str, slug: str) -> None:
+        self._read_before_merging(plan_id, number, commit, slug)
+        try:
+            self._forge.merge_pull_request(slug, number, commit, cancel=self._stop)
+        except approve.Cancelled:
+            raise sprints.Refused(register.STOPPING) from None
+        except Exception as error:
+            self._confirm_merged(plan_id, number, commit, slug, error)
+        else:
+            self._record_reading(plan_id, number, {"state": "merged", "head": commit})
+        self._dispatch_registration()
+        print(f"console: adoption_merge_ended {plan_id} merged", file=sys.stderr)
+
+    def _confirm_merged(self, plan_id: str, number: int, commit: str, slug: str,
+                        error: Exception) -> None:
+        """After a failed merge call, return only when the forge shows it merged at `commit`.
+
+        Anything else raises `sprints.Refused` with what the forge showed; the head recorded is
+        the one read, never the one requested.
+        """
+        record = {"plan_id": plan_id, "number": number, "exception": type(error).__name__}
+        if isinstance(error, ForgeError):
+            record.update({"code": error.code, "detail": error.detail,
+                           "transient": error.transient})
+        else:
+            record["detail"] = str(error)
+        print(f"console: adoption_merge_error {json.dumps(record, sort_keys=True)}",
+              file=sys.stderr)
+        if not isinstance(error, ForgeError):
+            traceback.print_exception(error, file=sys.stderr)
+        with self._ingest:
+            mark = self._pull_marks.get(plan_id, 0)
+        try:
+            reading = self._forge.pull_request_reading(slug, number, cancel=self._stop)
+        except approve.Cancelled:
+            raise sprints.Refused(register.STOPPING) from None
+        except Exception as again:
+            print(f"console: adoption_poll_failed {plan_id} {type(again).__name__}: {again}",
+                  file=sys.stderr)
+            raise sprints.Refused(approve.merge_failure(error)) from None
+        self._record_reading(plan_id, number, reading, mark)
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            if found is not None and found["step"] == "opened" and self._other_pull_request(
+                    found, reading):
+                raise sprints.Refused(approve.merge_failure(error))
+            targeted = None if found is None else found["base"]
+        if reading["state"] == "merged":
+            if reading["head"] == commit and reading["base"] == targeted:
+                return
+            self._dispatch_registration()
+            if reading["head"] is None or reading["base"] is None:
+                raise sprints.Refused(approve.merge_failure(error))
+            raise sprints.Refused(approve.MERGED_ELSEWHERE if reading["head"] != commit
+                                  else approve.MERGED_ELSEWHERE_BASE)
+        with self._ingest:
+            refusal = approve.merge_refusal(self._adoptions.get(plan_id))
+        raise sprints.Refused(refusal if refusal is not None else approve.merge_failure(error))
+
+    def _dispatch_registration(self) -> None:
+        """Register what the forge merged, on the approval worker, unless the console is stopping."""
+        if self._stop.is_set():
+            return
+        try:
+            self._approval_dispatch(self.register_merged)
+        except Exception as error:
+            print(f"console: adoption_register_dispatch_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
 
     def register_merged(self) -> None:
         """One round of merged registrations; see the module docstring."""
@@ -8050,6 +9138,8 @@ class ConsoleService:
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
         with self._ingest:
+            if self._stop.is_set():
+                raise sprints.Refused(register.STOPPING)
             found = self._adoptions.get(plan_id)
             if plan_id in self._enrolling:
                 name = register.name_of(found["root"]) if found is not None else plan_id
@@ -8340,6 +9430,8 @@ class ConsoleService:
         for worker in workers:
             worker.join()
         with self._ingest:
+            while self._registering is not None or self._enrolling or self._merging:
+                self._runs_done.wait(DRAIN_POLL_SECONDS)
             workers = list(self._approval_workers)
         for worker in workers:
             worker.join()

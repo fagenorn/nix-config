@@ -3,7 +3,7 @@
 Why. The console answers an owner's question about a registered project with one Claude Code
 client run in that project's folder, under the account the console chose. The session only reads.
 This module builds that session (routes, prompt, settings, argv) and runs it to one `Outcome`; the
-service (Task 3 of the plan) owns admission, the event log and the thread. Linux only: the
+service (Task 3 of the plan) owns admission, the event log and the thread. Linux and macOS: the
 session is a child of the console, started by `manager.run_in_own_group` under
 `manager.client_environment`, both reused and never copied. The manager's own model is not
 compared or changed (D1): the session names `--model sonnet` and nothing else changes.
@@ -40,8 +40,24 @@ command named in the answer), then a routes paragraph
 cannot be read), then the reads paragraph (the git reads with their examples, and either the gh
 reads pinned to `--repo <repo>` with their examples or the sentence that gh cannot be used), then the
 thread text, then `QUESTION_MARK` and the question (ADR-console-065).
+
+Records (ADR-console-089). An `Ask` may carry `records`, the encoded document of the console's own
+records for the project (None: none). The session's file is `records_path(ask)`: `SETTINGS_DIR`'s
+directory (0700), the question's id plus `RECORDS_SUFFIX`, mode 0600, written atomically after the
+settings file with exactly `ask.records`. The settings file is removed on every path once the run ends;
+the records file is removed then too unless the outcome is `ANSWERED`, when it is kept so the verify check
+can read its spend section (`question_check`, ADR-console-090 D3), and a write of any records file first removes
+the kept files older than `RECORDS_KEPT_SECONDS` (90 days, the question's own retention). `prompt` puts `RECORDS_TEXT` with that path after the reads paragraph and before the
+thread text, only with records. With records it also gives each part of `question_records.SECTIONS`
+that the document holds as `<name> offset <n> limit <m>` (`SECTIONS_TEXT`, from `section_lines`), so
+the session reads one part alone, and it asks the session to cite the file with the parts it read in
+parentheses right after the file name, as `<path> (spend)`; a cost question is answered with figures
+from the spend part, and spend is null only when the console could not read its spend (ADR-console-090).
+No permission rule is added: Read is already admitted. A write that
+fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
-`parse_request` reads the page's strict JSON body of exactly `project_id` and `question`.
+`parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
+(`parse_keyed_request` also reads an optional `request_key`, ADR-console-089 D9).
 
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
 layers each refuse on their own: `--setting-sources ""` loads no user, project or local settings,
@@ -51,13 +67,14 @@ when the project has a GitHub repository, the `GH_READ_RULES`; the deny list is 
 which wins over any allow; `--tools` removes every other built-in tool, and Bash is always a tool
 (the git reads need it even with no route). On top of those, a PreToolUse command hook
 (`project_question_hook`, run through `siblings.sibling_argv`, given the allowed argv and the
-repository) admits only reads, the bare declared commands and the plain git and gh reads;
+repository, and with records also `private_dir(ask)`, the console's state directory, and
+`records_path(ask)`, which confine its reads to that one file: ADR-console-089) admits only reads, the bare declared commands and the plain git and gh reads;
 `"onFailure": "block"` makes the pinned client treat a hook that errors, fails
 to start or times out as a block, because without it such a hook is non-blocking and the call would
 fall to the permission rules. The file lives in `SETTINGS_DIR` under the console's state (a 0700
 directory, the file 0600, written atomically) and is removed when the run ends.
 
-Argv. `launch_command` is None off Linux, else `claude-account run -p --model sonnet
+Argv. `launch_command` is None on a host `manager.supported` refuses, else `claude-account run -p --model sonnet
 --session-id <id> --permission-mode dontAsk --setting-sources "" --strict-mcp-config --tools <tools>
 --output-format json --settings <file> <prompt>`. `--tools` is variadic: it is always followed by
 another option, so the prompt, which is last, is never swallowed into the tool list. The session id
@@ -66,13 +83,14 @@ the question's transcript (ADR-console-059). No `systemd-run` scope is used.
 
 Runner. `run_question` never raises for these cases and removes the settings file once written, in
 this order: no launch command (`UNAVAILABLE_TEXT`); a root that is not a directory; a settings
-write that fails; the run itself with `TIMEOUT_SECONDS`, the `cancel` event, `stdin` closed and
+write that fails; a records write that fails (`RECORDS_UNWRITABLE`, only with records, after the
+settings write); the run itself with `TIMEOUT_SECONDS`, the `cancel` event, `stdin` closed and
 stderr to a temporary file; `TimeoutExpired` (`TIMED_OUT`); a missing `claude-account`; a set
 `cancel` (`STOPPED_TEXT`); a non-zero exit (the last non-empty stderr line); then the JSON on
 stdout: not an object with a string `result` (`UNREADABLE_TEXT`), `is_error` true (the result text),
 else `ANSWERED` with `answer_text`, which adds `NO_PRODUCTION_LINE` when no route is declared (D5).
-`asker_for(platform)` is `run_question` on Linux only, else None (ADR-console-058 D2: a project
-question runs on Linux only, though managers run on macOS too).
+`asker_for(platform)` is `run_question` on Linux and macOS (what `manager.supported` admits), else None
+(ADR-console-081: a project question runs wherever a manager does).
 
 Fold and answer shape (#1177). `asked_questions(events, known)` folds the two row kinds into each
 project's questions, a tuple of `AskedQuestion` in ascending `seq`. An asked row counts only with
@@ -112,8 +130,13 @@ after refusing, in this order, a `thread_id` that is not a thread's id (`THREAD_
 follow-up's own id is not one), a thread whose last question is not answered (`THREAD_UNANSWERED`)
 and a thread whose `thread_text` plus the question exceeds `MAX_THREAD_BYTES` UTF-8 bytes
 (`THREAD_TOO_LONG`): the prompt is one argv string and Linux refuses one past 131072 bytes.
-`parse_request` reads exactly `project_id` and `question`, or those with a non-empty string
-`thread_id`, and returns `(project_id, question, thread_id or None)`.
+`parse_keyed_request` reads exactly `project_id` and `question`, plus optionally a non-empty
+string `thread_id` and optionally a `request_key` (a string that fullmatches `REQUEST_KEY`, 32
+lowercase hex digits; any other is a `ValueError`), and returns
+`(project_id, question, thread_id or None, request_key or None)`; `parse_request` returns its
+first three. The key names one request: an asked row carries `request_key` only when one was
+given, the fold keeps it only when it is a string fullmatching `REQUEST_KEY`, and the service asks
+a key once per project (ADR-console-089 D9).
 """
 
 from __future__ import annotations
@@ -126,6 +149,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -133,9 +157,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import manager
+from agent_tools.console import manager, question_records
 from agent_tools.console.event_log import (
-    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, Event)
+    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED, Event)
 from agent_tools.console.project_question_hook import (
     GH_READ_GROUPS, GH_READ_VERBS, GIT_READS, PLAIN_WORD, REPO_SLUG)
 from agent_tools.project_contract import resolve_project
@@ -147,12 +171,15 @@ TIMEOUT_SECONDS = 300
 MAX_QUESTION_CHARS = 2000
 SETTINGS_DIR = "project-question-settings"
 SETTINGS_SUFFIX = ".settings.json"
+RECORDS_SUFFIX = ".records.json"
+RECORDS_KEPT_SECONDS = 90 * 24 * 3600
 HOOK_MODULE = "console.project_question_hook"
 GIT_REPOSITORY_ENV = (
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
 HOOK_TIMEOUT = 10
 QUESTION_MARK = "The question: "
+REQUEST_KEY = re.compile(r"[0-9a-f]{32}")
 EARLIER_QUESTION = "Earlier question: "
 EARLIER_ANSWER = "Earlier answer: "
 MAX_THREAD_BYTES = 98304
@@ -175,6 +202,25 @@ NO_PRODUCTION_LINE = (
     "Production cannot be read for this project: its contract declares no read-only command that "
     "runs from its root."
 )
+RECORDS_UNWRITABLE = "cannot write the question's records: {detail}"
+SECTIONS_TEXT = (
+    "To read one part alone, give Read this file with that part's offset and limit: {parts}. "
+    "Read a part longer than one read in steps from its offset. ")
+RECORDS_TEXT = (
+    "The console's own records for this project are in the file {path}: its spend over the last "
+    "30 days by day, delivery run, issue, phase and sprint, in tokens and estimated dollars; its "
+    "sprints; its delivery runs with each issue's stage; this host's activation runs of it with "
+    "how each ended and why; and its held checks. Read it with Read, or Grep it for an issue "
+    "number, a run id or a commit, whenever the question is about cost, time, effort, what was "
+    "delivered or is live, sprints, checks, or why a delivery or production run failed, and name "
+    "it under Read with the parts you read, in parentheses right after the file name, for "
+    "example {path} (spend). Answer a cost question with figures from the spend part, in tokens "
+    "or dollars, and quote each figure exactly as the records print it: a token count as its "
+    "whole number (commas between thousands are fine) and a dollar amount as $ with two "
+    "decimals, never rounded, converted or reworded. {sections}The console wrote it for this project when this question started; "
+    "its spend is null only when the console could not read its spend. The console's other "
+    "files are not readable from this session.\n\n")
+RECORDS_FAILED = "the console's records could not be gathered: {detail}"
 CONTRACT_UNREADABLE = "the project's contract could not be resolved, so no session was started: {detail}"
 UNAVAILABLE_TEXT = "questions are not available on this host yet"
 UNREGISTERED = "this project is not registered"
@@ -279,6 +325,7 @@ class Ask:
     thread: tuple[Turn, ...] = ()
     repo: str | None = None
     unset: tuple[str, ...] = ()
+    records: str | None = None
 
 
 @dataclass(frozen=True)
@@ -354,10 +401,19 @@ def new_session_id() -> str:
 def new_ask(question_id: str, project_id: str, root: str, question: str, profile: str,
             routes: Sequence[Route], settings_dir: Path, *, session_id: str,
             thread: Sequence[Turn] = (), repo: str | None = None,
-            unset: Sequence[str] = ()) -> Ask:
+            unset: Sequence[str] = (), records: str | None = None) -> Ask:
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
                Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread), repo,
-               tuple(unset))
+               tuple(unset), records)
+
+
+def records_path(ask: Ask) -> Path:
+    return ask.settings.with_name(ask.question_id + RECORDS_SUFFIX)
+
+
+def private_dir(ask: Ask) -> Path:
+    """The console's state directory: it holds the settings directory, the event log and the page token."""
+    return ask.settings.parent.parent
 
 
 def checked_question(text: str) -> str:
@@ -369,25 +425,35 @@ def checked_question(text: str) -> str:
     return text
 
 
-def parse_request(body: bytes) -> tuple[str, str, str | None]:
+def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
     except RecursionError as error:
         raise ValueError("the body is nested too deeply") from error
-    if not isinstance(value, dict) or set(value) not in (
-            {"project_id", "question"}, {"project_id", "question", "thread_id"}):
+    required = {"project_id", "question"}
+    if not isinstance(value, dict) or not required <= set(value) <= required | {
+            "thread_id", "request_key"}:
         raise ValueError(
-            "the body must be an object of project_id, question and an optional thread_id")
+            "the body must be an object of project_id, question, an optional thread_id and an "
+            "optional request_key")
     project_id, question = value["project_id"], value["question"]
     thread_id = value.get("thread_id")
     if "thread_id" in value and (not isinstance(thread_id, str) or not thread_id):
         raise ValueError("thread_id must be a non-empty string")
+    request_key = value.get("request_key")
+    if "request_key" in value and not (
+            isinstance(request_key, str) and REQUEST_KEY.fullmatch(request_key)):
+        raise ValueError("request_key must be 32 lowercase hex digits")
     if not isinstance(project_id, str) or not project_id:
         raise ValueError("project_id must be a non-empty string")
     if not isinstance(question, str):
         raise ValueError("question must be a string")
-    return project_id, question, thread_id
+    return project_id, question, thread_id, request_key
+
+
+def parse_request(body: bytes) -> tuple[str, str, str | None]:
+    return parse_keyed_request(body)[:3]
 
 
 def thread_text(thread: Sequence[Turn]) -> str:
@@ -416,26 +482,35 @@ def reads_paragraph(repo: str | None) -> str:
 
 
 def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = (), *,
-           repo: str | None = None) -> str:
+           repo: str | None = None, records: str | None = None,
+           sections: Mapping[str, tuple[int, int]] | None = None) -> str:
     if routes:
         paragraph = ("Commands you may run, each exactly as written and alone: "
                      + ", ".join(shlex.join(route.argv) for route in routes) + ".\n\n")
     else:
         paragraph = ("This project declares no read-only command, so production cannot be read: "
                      "answer from the code, the docs and the reads below.\n\n")
-    return LEAD + paragraph + reads_paragraph(repo) + thread_text(thread) + QUESTION_MARK + question
+    parts = "; ".join(f"{name} offset {sections[name][0]} limit {sections[name][1]}"
+                      for name in question_records.SECTIONS if name in (sections or {}))
+    held = (RECORDS_TEXT.format(path=records, sections=SECTIONS_TEXT.format(parts=parts) if parts else "")
+            if records is not None else "")
+    return (LEAD + paragraph + reads_paragraph(repo) + held + thread_text(thread) + QUESTION_MARK
+            + question)
 
 
 def tools(routes: Sequence[Route]) -> str:
     return "Read,Grep,Glob,Bash"
 
 
-def hook_command(routes: Sequence[Route], repo: str | None = None) -> str:
+def hook_command(routes: Sequence[Route], repo: str | None = None,
+                 confinement: tuple[str, str] | None = None) -> str:
     allowed = json.dumps([list(route.argv) for route in routes], separators=(",", ":"))
-    return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed, repo or ""])
+    return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed, repo or "",
+                       *(confinement or ())])
 
 
-def settings_document(routes: Sequence[Route], repo: str | None = None) -> dict:
+def settings_document(routes: Sequence[Route], repo: str | None = None,
+                      confinement: tuple[str, str] | None = None) -> dict:
     return {
         "permissions": {
             "defaultMode": PERMISSION_MODE,
@@ -444,19 +519,22 @@ def settings_document(routes: Sequence[Route], repo: str | None = None) -> dict:
             "deny": list(DENIED_RULES),
         },
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{
-            "type": "command", "command": hook_command(routes, repo),
+            "type": "command", "command": hook_command(routes, repo, confinement),
             "timeout": HOOK_TIMEOUT, "onFailure": "block",
         }]}]},
     }
 
 
 def launch_command(ask: Ask, platform: str) -> list[str] | None:
-    if not platform.startswith("linux"):
+    if not manager.supported(platform):
         return None
     return ["claude-account", "run", "-p", "--model", MODEL, "--session-id", ask.session_id,
             "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
             "--output-format", "json", "--settings", str(ask.settings),
-            prompt(ask.question, ask.routes, ask.thread, repo=ask.repo)]
+            prompt(ask.question, ask.routes, ask.thread, repo=ask.repo,
+                   records=str(records_path(ask)) if ask.records is not None else None,
+                   sections=(question_records.section_lines(ask.records)
+                             if ask.records is not None else None))]
 
 
 def answer_text(result: str, routes: Sequence[Route]) -> str:
@@ -473,15 +551,44 @@ def session_environment(ask: Ask, environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def _write_settings(ask: Ask) -> None:
+    confinement = ((str(private_dir(ask)), str(records_path(ask)))
+                   if ask.records is not None else None)
     directory = ask.settings.parent
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(settings_document(ask.routes, ask.repo), handle)
+            json.dump(settings_document(ask.routes, ask.repo, confinement), handle)
         os.chmod(temporary, 0o600)
         os.replace(temporary, ask.settings)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def _prune_records(directory: Path, *, clock=time.time) -> None:
+    """Remove the retained records files older than `RECORDS_KEPT_SECONDS` (the question's own 90 days)."""
+    cutoff = clock() - RECORDS_KEPT_SECONDS
+    for path in directory.glob("*" + RECORDS_SUFFIX):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _write_records(ask: Ask) -> None:
+    directory = ask.settings.parent
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    _prune_records(directory)
+    descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(ask.records)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, records_path(ask))
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
@@ -506,7 +613,14 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
         _write_settings(ask)
     except OSError as error:
         return Outcome(FAILED, reason=f"cannot write the question's settings: {error.strerror or error}")
+    kept = False
     try:
+        if ask.records is not None:
+            try:
+                _write_records(ask)
+            except OSError as error:
+                return Outcome(
+                    FAILED, reason=RECORDS_UNWRITABLE.format(detail=error.strerror or error))
         with tempfile.TemporaryFile() as stderr:
             try:
                 done = run(argv, timeout=TIMEOUT_SECONDS, cancel=cancel, cwd=ask.root,
@@ -522,9 +636,13 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
             if done.returncode != 0:
                 return Outcome(FAILED, reason=_last_line(stderr)
                                or f"the session exited {done.returncode}")
-        return _outcome_of(done.stdout, ask.routes)
+        outcome = _outcome_of(done.stdout, ask.routes)
+        kept = outcome.outcome == ANSWERED and ask.records is not None
+        return outcome
     finally:
         ask.settings.unlink(missing_ok=True)
+        if not kept:
+            records_path(ask).unlink(missing_ok=True)
 
 
 def _outcome_of(stdout: bytes | None, routes: Sequence[Route]) -> Outcome:
@@ -541,7 +659,7 @@ def _outcome_of(stdout: bytes | None, routes: Sequence[Route]) -> Outcome:
 
 
 def asker_for(platform: str) -> Callable[[Ask, threading.Event | None], Outcome] | None:
-    return run_question if platform.startswith("linux") else None
+    return run_question if manager.supported(platform) else None
 
 
 @dataclass(frozen=True)
@@ -566,6 +684,7 @@ class AskedQuestion:
     reason: str | None = None
     answered_at: str | None = None
     thread_id: str | None = None
+    request_key: str | None = None
 
 
 def _part(lines: list[str], key: str) -> str | None:
@@ -633,12 +752,31 @@ def asked_questions(events: Iterable[Event],
                 head = next((item for item in items if isinstance(named, str) and named
                              and item.question_id == named), None)
                 thread_id = (head.thread_id or head.question_id) if head else question_id
-                items.append(AskedQuestion(question_id, question, event.at, event.seq,
-                                           thread_id=thread_id))
+                key = payload.get("request_key")
+                items.append(AskedQuestion(
+                    question_id, question, event.at, event.seq, thread_id=thread_id,
+                    request_key=key if isinstance(key, str) and REQUEST_KEY.fullmatch(key) else None))
         elif event.kind == PROJECT_QUESTION_ANSWERED:
             if index is not None and items[index].state == WORKING:
                 items[index] = _answered(items[index], event)
     return {project: tuple(items) for project, items in found.items() if items}
+
+
+def question_keys(events: Iterable[Event],
+                  known: Mapping[tuple[str, str], str] | None = None) -> dict[tuple[str, str], str]:
+    """`(project, request key)` to the id of the question asked under it, from the receipt rows (ADR-console-089 D9).
+
+    A receipt is kept whatever its age, so this outlives the asked row `asked_questions` folds; the first receipt of a key wins.
+    """
+    found = dict(known or {})
+    for event in events:
+        if event.kind != PROJECT_QUESTION_KEYED or not isinstance(event.project, str):
+            continue
+        key, question_id = event.payload.get("request_key"), event.payload.get("question_id")
+        if (isinstance(key, str) and REQUEST_KEY.fullmatch(key)
+                and isinstance(question_id, str) and question_id):
+            found.setdefault((event.project, key), question_id)
+    return found
 
 
 def threads(questions: Sequence[AskedQuestion]) -> tuple[tuple[AskedQuestion, ...], ...]:

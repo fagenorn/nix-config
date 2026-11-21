@@ -7674,7 +7674,7 @@ class DeclaredBranchTest(unittest.TestCase):
 
 
 # #1139: a marked issue stops at awaiting look; MARKED is the setup's look read, D a head a sync or a push moves the branch to.
-MARKED = {"verdict": "marked", "covers": ["the settings page"]}
+MARKED = {"verdict": "marked", "covers": ["the settings page"], "acs": []}
 D = "d" * 40
 AWAIT_REASON = "issue 9 needs the owner's look before merge"
 F, B = "f" * 40, "b" * 40
@@ -7692,7 +7692,7 @@ LOOK_CONT = {
               "review": {"code": "cr", "plan": "pr"}, "review_state": {"code": "available", "plan": "available"},
               "knowledge": {"standards": ["/r/docs/standards"], "hints": ["/r/.hints"], "rejections": ["/r/.rej"]},
               "verification": [{"id": "build", "argv": ["make", "build"], "cwd": "."}],
-              "look": {"verdict": "marked", "covers": ["the settings page"]}, "holder": "h1/session-s1",
+              "look": {"verdict": "marked", "covers": ["the settings page"], "acs": []}, "holder": "h1/session-s1",
               "worktree": "/r/.wt/w-issue-9-x", "base_sha": SHA, "plan_dir": "/r/.git/worktrees/w/deliver-standard"},
     "lane": "standard",
     "plan": {"status": "planned", "plan_root": "/r/.git/worktrees/w/deliver-standard/plan.md",
@@ -7711,7 +7711,7 @@ EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
-             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-status", "look-verify")),
+             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-", "look-fix")),
@@ -7777,6 +7777,9 @@ SCENARIOS = (
                               "look-status": {"verdict": "approved", "kept_from": SHA}})},
     # #1246: an approve answer for a PR head that merged the integration branch on the verified head verifies it first.
     {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": D}), "patch": LOOK_MERGED},
+    # #1356: an approval that answers a plan criterion reads the earlier hold before the hold.
+    {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": SHA}),
+     "patch": dict(RESUME, setup={"look": dict(MARKED, acs=["AC1"]), "head": SHA})},
     WS_SCENARIO,
 )
 
@@ -10712,6 +10715,329 @@ class LookTickTest(unittest.TestCase):
         self.assertEqual(silent["result"]["stage"], "done")
         self.assertIsNone(silent["result"]["look_tick"])
         self.assertTrue([l for l in silent["logs"] if "was not ticked: no reply" in l])
+
+
+def stale(*entries):
+    """The reply of a complete look-stale read naming `entries`."""
+    return {"complete": True, "stale": list(entries)}
+
+
+class LookHoldTest(unittest.TestCase):
+    """#1356: the hold leaves out the criterion the issue's own look-marker line names, whatever the plan reworded it to."""
+
+    REWORDED = {"id": "AC2", "text": "Before merge, the owner judges the settings page", "kind": "human",
+                "verify": {"ac": "AC2", "kind": "human", "host": "h1", "when": {"days_after": {"event": "deployed", "days": 1}},
+                           "run": {"ask": "Does the settings page look right"}, "reason": "senses"},
+                "lint": OK_LINT}
+    LOOKED = {"verdict": "marked", "covers": ["the settings page"], "acs": ["AC2"]}
+    MERGE = "c0ffee" + "0" * 34
+
+    def deliver(self, *criteria, hold=None, look=None, close="OPEN", replies=None):
+        look = look or self.LOOKED
+        planned = {"plan": with_criteria(*criteria)}
+        args = dict(ARGS, cont=run(patch={"setup": {"look": look}}, replies=planned)[0]["cont"],
+                    look={"answer": "approve", "head": SHA})
+        held = [c for c in with_criteria(*criteria)["acceptance"] if c["id"] not in look.get("acs", []) and c["kind"] != "code"]
+        covering = {"v": 1, "merge": self.MERGE, "checks": [{"ac": c["id"], "kind": c["kind"]} for c in held]}
+        replies = dict(planned, hold=dict(HoldTest.HOLD, **dict({"block": covering}, **(hold or {}))), **(replies or {}))
+        return run(args=args, replies=replies, patch={"setup": {"look": look, "head": SHA},
+                                                      "merge": {"merge_commit": self.MERGE},
+                                                      "close-out": {"issue_state": close}})
+
+    def test_an_approved_reworded_look_criterion_is_not_held(self):
+        result, calls = self.deliver(self.REWORDED, close="CLOSED")
+        hold = prompt(calls, "hold")
+        self.assertNotIn("Before merge, the owner judges", hold)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("verify-pending run", hold)
+        self.assertIn("look-approval tick", prompt(calls, "close-out"))
+        self.assertEqual(result["acceptance"][-1]["id"], "AC2")
+
+    def test_an_ordinary_human_criterion_is_still_held(self):
+        ordinary = dict(HUMAN, id="AC3")
+        result, calls = self.deliver(self.REWORDED, ordinary)
+        self.assertEqual(result["stage"], "done")
+        hold = prompt(calls, "hold")
+        self.assertIn("looks right", hold)
+        self.assertNotIn("Before merge, the owner judges", hold)
+        self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+
+    def test_a_look_read_that_names_no_criterion_holds_every_human_criterion(self):
+        result, calls = self.deliver(self.REWORDED, look={"verdict": "marked", "covers": ["the settings page"], "acs": []})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("Before merge, the owner judges", prompt(calls, "hold"))
+
+    def awaiting(self, *criteria, look=None):
+        """The cont of the awaiting-look stop of a plan made while the issue's look read was `look`."""
+        result, _ = run(patch={"setup": {"look": look or self.LOOKED}}, replies={"plan": with_criteria(*criteria)})
+        self.assertEqual(result["stage"], "awaiting-look")
+        return result["cont"]
+
+    def replay(self, cont, *criteria, left_out=("AC2",), read=None, replies=None, close="CLOSED"):
+        """A resume of `cont` whose approved PR has already merged: a cont of an awaiting-look stop carries no approval."""
+        read = read or self.LOOKED
+        held = [c for c in with_criteria(*criteria)["acceptance"] if c["id"] not in left_out and c["kind"] != "code"]
+        covering = {"v": 1, "merge": self.MERGE, "checks": [{"ac": c["id"], "kind": c["kind"]} for c in held]}
+        replies = dict({"hold": dict(HoldTest.HOLD, block=covering)}, **(replies or {}))
+        return run(args=dict(ARGS, cont=cont), replies=replies,
+                   patch={"setup": {"look": read, "head": SHA, **merged(42, "c0ffee")}, "close-out": {"issue_state": close}})
+
+    def test_a_replay_after_the_approved_pr_merged_reads_the_approval_before_the_hold(self):
+        """#1356 C1: the replayed awaiting-look cont has no approved head, so the recorded approval is read against the merged head."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        self.assertEqual(result["stage"], "done")
+        got = labels(calls)
+        self.assertLess(got.index("look-head"), got.index("look-read"))
+        self.assertLess(got.index("look-read"), got.index("hold"))
+        self.assertIn("gh pr view 42 --repo owner/repo --json state,headRefOid", prompt(calls, "look-head"))
+        self.assertIn(f"look-approval status --repo owner/repo --issue 9 --pr 42 --head {SHA} --merge-commit {self.MERGE}", prompt(calls, "look-read"))
+        self.assertNotIn("Before merge, the owner judges", prompt(calls, "hold"))
+        self.assertIn(f"look-approval tick --repo owner/repo --issue 9 --pr 42 --head {SHA} --merge-commit {self.MERGE}", prompt(calls, "close-out"))
+
+    def test_a_replay_with_no_recorded_approval_holds_the_look_criterion_and_ticks_nothing(self):
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED, close="OPEN", left_out=(),
+                                    replies={"look-read": {"verdict": "needed", "kept_from": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("Before merge, the owner judges", prompt(calls, "hold"))
+        self.assertNotIn("look-approval tick", prompt(calls, "close-out"))
+
+    def test_a_replay_whose_approval_cannot_be_read_stops_before_the_hold(self):
+        for name, replies in (("error", {"look-read": {"verdict": "error", "kept_from": None}}), ("no head", {"look-head": None}),
+                              ("no landing commit", {"look-head": {"head": SHA, "state": "MERGED", "merge": None}})):
+            with self.subTest(case=name):
+                result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED, replies=replies)
+                self.assertEqual(result["stage"], "look-approve")
+                self.assertNotIn("hold", labels(calls))
+
+    def test_a_replay_fetches_before_it_resolves_the_landing_commit(self):
+        """#1356 I3: the landing commit is read against origin, so a checkout that predates the other pull request's merge is refreshed first."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        self.assertEqual(result["stage"], "done")
+        head = prompt(calls, "look-head")
+        self.assertIn("git -C /r fetch origin", head)
+        self.assertLess(head.index("git -C /r fetch origin"), head.index("gh pr view 42"))
+        self.assertLess(head.index("git -C /r fetch origin"), head.index("merge-base --is-ancestor"))
+
+    def test_a_replay_of_an_indirect_merge_names_the_landing_commit_to_the_look_stale_read_and_the_hold(self):
+        """#1356 I3: the merged PR has a null mergeCommit, so the split-child fence match and the hold name the landing commit the replay resolved."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        self.assertEqual(result["stage"], "done")
+        stale_read, hold = prompt(calls, "look-stale"), prompt(calls, "hold")
+        self.assertIn(f"the merge commit of PR 42 ({self.MERGE})", stale_read)
+        self.assertIn(f"Merge commit: {self.MERGE}", hold)
+        self.assertNotIn("read from gh pr view", stale_read + hold)
+        self.assertNotIn("merge-base --is-ancestor", prompt(calls, "hold"))
+
+    def test_a_swapped_checkbox_order_keeps_the_marker_to_plan_mapping_of_the_planning(self):
+        """#1356 C2: the look checkbox and an ordinary human checkbox swapped while delivery waited; the plan's ids still name the look criterion."""
+        ordinary = dict(HUMAN, id="AC3")
+        cont = self.awaiting(self.REWORDED, ordinary)
+        self.assertEqual(cont["look_acs"], ["AC2"])
+        swapped = dict(self.LOOKED, acs=["AC3"])
+        result, calls = self.replay(cont, self.REWORDED, ordinary, read=swapped, close="OPEN")
+        self.assertEqual(result["stage"], "done")
+        hold = prompt(calls, "hold")
+        self.assertNotIn("Before merge, the owner judges", hold)
+        self.assertIn("looks right", hold)
+
+    def test_an_existing_verify_block_naming_the_look_check_is_reconciled_before_it_runs(self):
+        """#1356 I1: the hold names the answered criterion and edits a posted block that still checks it; a block that still checks it stops."""
+        ordinary = dict(HUMAN, id="AC3")
+        result, calls = self.deliver(self.REWORDED, ordinary)
+        self.assertIn("gh api --method PATCH repos/owner/repo/issues/comments/<comment id>", prompt(calls, "hold"))
+        both = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "human"}, {"ac": "AC3", "kind": "human"}]}
+        result, _ = self.deliver(self.REWORDED, ordinary, hold={"block": both})
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+
+    def test_a_marked_look_read_without_acs_is_asked_again_and_a_second_one_is_a_failed_read(self):
+        """#1356 I2: a marked reply that omits acs is incomplete, never an empty list."""
+        bare = dict(SETUP_OK, look={"verdict": "marked", "covers": ["the settings page"]})
+        whole = dict(SETUP_OK, look=self.LOOKED)
+        result, calls = run(replies={"setup": [bare, whole]})
+        self.assertEqual((result["stage"], labels(calls).count("setup")), ("awaiting-look", 2))
+        result, calls = run(replies={"setup": [bare, bare]})
+        self.assertEqual(result["stage"], "look")
+        self.assertEqual(labels(calls).count("setup"), 2)
+
+    def test_a_landing_whose_open_issue_still_holds_an_answered_check_stops_before_the_hold(self):
+        """#1356: a hold posted before the approval was read still checks the answered criterion, so the landing stops before the hold call."""
+        result, calls = self.deliver(self.REWORDED, close="CLOSED", replies={"look-stale": stale({"issue": 9, "acs": ["AC2"], "results": False})})
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+        got = labels(calls)
+        self.assertNotIn("hold", got)
+        self.assertNotIn("close-out", got)
+        self.assertLess(got.index("merge"), got.index("look-stale"))
+
+    def test_a_stale_split_child_always_stops_and_a_stale_parent_with_an_open_criterion_is_reconciled_by_the_hold(self):
+        ordinary = dict(HUMAN, id="AC3")
+        child = {"look-stale": stale({"issue": 50, "acs": ["AC2"], "results": False})}
+        for name, criteria in (("child, nothing held", (self.REWORDED,)), ("child, one held", (self.REWORDED, ordinary))):
+            with self.subTest(case=name):
+                kw = {"close": "CLOSED"} if len(criteria) == 1 else {}
+                result, calls = self.deliver(*criteria, replies=child, **kw)
+                self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+                self.assertNotIn("hold", labels(calls))
+        with self.subTest(case="parent, one held"):
+            result, calls = self.deliver(self.REWORDED, ordinary, replies={"look-stale": stale({"issue": 9, "acs": ["AC2"], "results": False})})
+            self.assertEqual(result["stage"], "done")
+            self.assertIn("hold", labels(calls))
+
+    def test_a_stale_read_that_names_no_array_stops_before_the_hold(self):
+        for name, reply in (("key omitted", {}), ("lost reply", None), ("entry without an integer issue", stale({"issue": "9", "acs": ["AC2"], "results": False})),
+                            ("entry without results", stale({"issue": 9, "acs": ["AC2"]})),
+                            ("a read that failed", {"complete": False, "stale": [], "detail": "timeline read failed"}),
+                            ("a read that did not say", {"stale": []})):
+            with self.subTest(case=name):
+                result, calls = self.deliver(self.REWORDED, close="CLOSED", replies={"look-stale": reply})
+                self.assertEqual(result["stage"], "hold")
+                self.assertNotIn("hold", labels(calls))
+                self.assertNotIn("close-out", labels(calls))
+
+    def test_a_landing_whose_approval_answers_no_criterion_reads_no_earlier_hold(self):
+        result, calls = self.deliver(self.REWORDED, look={"verdict": "marked", "covers": ["the settings page"], "acs": []})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("look-stale", labels(calls))
+
+    def test_a_landing_with_nothing_held_reads_the_earlier_hold_and_names_no_fence_run(self):
+        result, calls = self.deliver(self.REWORDED, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("verify-pending", prompt(calls, "hold"))
+        stale = prompt(calls, "look-stale")
+        self.assertIn("gh api repos/owner/repo/issues/9/comments --paginate", stale)
+        self.assertIn("gh api repos/owner/repo/issues/9/timeline --paginate", stale)
+        # #1356: AC ids are local to an issue, so a cross-referencing issue counts as a split of this one only by the merge commit its fence names.
+        self.assertIn(self.MERGE, stale)
+
+    def test_a_replay_of_a_merge_stop_whose_pr_merged_at_another_head_reads_the_approval_at_that_head(self):
+        other = "e" * 40
+        stopped, _ = self.deliver(self.REWORDED, close="CLOSED", replies={"merge": None})
+        self.assertEqual(stopped["stage"], "merge")
+        self.assertEqual(stopped["cont"]["look"]["approved"], SHA)
+        with self.subTest(case="approved at another head"):
+            result, calls = self.replay(stopped["cont"], self.REWORDED, replies={"look-head": {"head": other, "state": "MERGED", "merge": self.MERGE}})
+            self.assertIn("look-read", labels(calls))
+            self.assertIn("--head " + other, prompt(calls, "look-read"))
+            self.assertEqual(result["stage"], "done")
+            self.assertIn(f"look-approval tick --repo owner/repo --issue 9 --pr 42 --head {other} --merge-commit {self.MERGE}", prompt(calls, "close-out"))
+        with self.subTest(case="not approved at another head"):
+            result, calls = self.replay(stopped["cont"], self.REWORDED, left_out=(), close="OPEN",
+                                        replies={"look-head": {"head": other, "state": "MERGED", "merge": self.MERGE},
+                                                 "look-read": {"verdict": "needed", "kept_from": None}})
+            self.assertEqual(result["stage"], "done")
+            self.assertNotIn("look-approval tick", prompt(calls, "close-out"))
+            self.assertNotIn("look-stale", labels(calls))
+        with self.subTest(case="same head, recorded under the merged pull request"):
+            result, calls = self.replay(stopped["cont"], self.REWORDED)
+            self.assertIn("look-read", labels(calls))
+            self.assertIn("--head " + SHA, prompt(calls, "close-out"))
+        with self.subTest(case="same head, the carried approval is not recorded for the merged pull request"):
+            # #1356 C1: the cont's approval is of this head, but the head merged under another pull request that holds none.
+            result, calls = self.replay(stopped["cont"], self.REWORDED, left_out=(), close="OPEN",
+                                        replies={"look-read": {"verdict": "needed", "kept_from": None}})
+            self.assertEqual(result["stage"], "done")
+            self.assertIn("look-read", labels(calls))
+            self.assertNotIn("look-approval tick", prompt(calls, "close-out"))
+            self.assertIn("Before merge, the owner judges", prompt(calls, "hold"))
+            self.assertNotIn("look-stale", labels(calls))
+
+    def test_a_hold_of_this_issue_with_recorded_results_is_not_rewritten(self):
+        """#1356 I1: removing the look check changes the block's version and discards the results of the checks that stay."""
+        ordinary = dict(HUMAN, id="AC3")
+        for results, want in ((False, "done"), (True, "hold")):
+            with self.subTest(results=results):
+                result, calls = self.deliver(self.REWORDED, ordinary,
+                                             replies={"look-stale": stale({"issue": 9, "acs": ["AC2"], "results": results})})
+                self.assertEqual(result["stage"], want)
+                self.assertEqual("hold" in labels(calls), want == "done")
+                if want == "hold":
+                    self.assertEqual(result["look_checks"], ["AC2"])
+
+    def test_a_split_child_whose_fence_checks_the_answered_criterion_stops_the_landing(self):
+        """#1356 I4: the child's returned fence is validated, whatever the clerk was told."""
+        ordinary = dict(HUMAN, id="AC3")
+        own = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC3", "kind": "human"}]}
+        both = dict(own, checks=[{"ac": "AC3", "kind": "human"}, {"ac": "AC2", "kind": "human"}])
+        for name, block, want in (("only its own check", own, "done"), ("with the approved one", both, "hold")):
+            with self.subTest(case=name):
+                hold = {"blocks": [12], "split": [dict(HoldTest.CHILD, block=block)], "issue_state": "CLOSED",
+                        "lint": None, "verify_run": None, "block": None}
+                result, calls = self.deliver(self.REWORDED, ordinary, hold=hold, close="CLOSED")
+                self.assertEqual(result["stage"], want)
+                if want == "hold":
+                    self.assertEqual(result["look_checks"], ["AC2"])
+                    self.assertNotIn("close-out", labels(calls))
+
+    def test_a_replay_whose_setup_look_read_failed_stops_before_the_hold(self):
+        for name, read in (("marked without acs twice", {"verdict": "marked", "covers": ["the settings page"]}),
+                           ("error", {"verdict": "error", "detail": "x"})):
+            with self.subTest(case=name):
+                result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED, read=read)
+                self.assertEqual(result["stage"], "look")
+                self.assertNotIn("hold", labels(calls))
+                self.assertNotIn("close-out", labels(calls))
+
+    def test_a_replay_resolves_the_landing_commit_of_a_pr_whose_merge_commit_is_its_own_head(self):
+        """#1356 C1: the forge records an indirectly merged PR with its head as merge commit, so a landing that is not the head is resolved for that shape too."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        self.assertEqual(result["stage"], "done")
+        head = prompt(calls, "look-head")
+        self.assertIn("or when its oid equals headRefOid", head)
+        self.assertIn("rev-list --first-parent <headRefOid>..origin/", head)
+        self.assertIn("has <headRefOid> as its first parent", head)
+        # the hold is given the landing commit the replay resolved, so it resolves nothing itself
+        self.assertNotIn("oid equals headRefOid", prompt(calls, "hold"))
+
+    def test_a_head_that_landed_as_itself_is_never_named_as_its_own_landing_commit(self):
+        """#1356 C1: a fast-forward landing has the head as its own landing commit, whose first parent lies inside the PR, so no base before the landing exists to judge a kept approval against: the read returns merge null and the replay stops."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        head = prompt(calls, "look-head")
+        self.assertNotIn("merge commit is <headRefOid>", head)
+        self.assertIn("so it landed as itself (a fast-forward): no commit before the head names the tip of dev before the landing, and the first commit that contains the head is the head's own child, never a landing commit, so return merge null and stop here", head)
+        # #1356: the first-parent check does not wait for the forge's oid to equal the head: a null mergeCommit reaches the same child of the head
+        self.assertIn("when the last commit of the first list has <headRefOid> as its first parent", head)
+        self.assertIn("whatever mergeCommit is (null or the head's own oid)", head)
+        self.assertNotIn("when the oid equals headRefOid and the last commit", head)
+        self.assertIn("is the head itself and it landed as itself: return merge null and stop here", head)
+        self.assertNotIn("merge commit is <headRefOid>", prompt(calls, "hold"))
+        stopped, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED,
+                                     replies={"look-head": {"head": SHA, "state": "MERGED", "merge": None}})
+        self.assertEqual(stopped["stage"], "look-approve")
+        self.assertNotIn("look-read", labels(calls))
+        self.assertNotIn("hold", labels(calls))
+
+    def test_a_fence_that_spells_the_answered_check_in_lower_case_still_stops_the_landing(self):
+        """#1356 C2: the runner compares check ids upper-cased, so ac2 is the criterion AC2 for the stale read and the returned block."""
+        ordinary = dict(HUMAN, id="AC3")
+        result, calls = self.deliver(self.REWORDED, ordinary)
+        self.assertIn("compared ignoring case", prompt(calls, "look-stale"))
+        self.assertIn("an id compared ignoring case", prompt(calls, "hold"))
+        child = {"look-stale": stale({"issue": 50, "acs": ["ac2"], "results": False})}
+        result, calls = self.deliver(self.REWORDED, ordinary, replies=child)
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+        self.assertNotIn("hold", labels(calls))
+        both = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "ac2", "kind": "human"}, {"ac": "AC3", "kind": "human"}]}
+        result, calls = self.deliver(self.REWORDED, ordinary, hold={"block": both})
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+        self.assertNotIn("close-out", labels(calls))
+        split = {"blocks": [12], "split": [dict(HoldTest.CHILD, block=dict(both, checks=[{"ac": "AC3", "kind": "human"}, {"ac": "Ac2", "kind": "human"}]))],
+                 "issue_state": "CLOSED", "lint": None, "verify_run": None, "block": None}
+        result, calls = self.deliver(self.REWORDED, ordinary, hold=split, close="CLOSED")
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_the_stale_read_counts_what_the_runner_recorded_or_asked_for_the_selected_block_by_its_trusted_markers(self):
+        """#1356 I1 and I2: an owner answer to a prompt of a retained check is lost by a rewrite as a result is, and only a trusted marker of that block counts."""
+        ordinary = dict(HUMAN, id="AC3")
+        result, calls = self.deliver(self.REWORDED, ordinary)
+        read = prompt(calls, "look-stale")
+        self.assertNotIn("<!-- agent: verify-result", read)
+        self.assertNotIn("<!-- agent: marker", read)
+        self.assertIn("<!-- agent:KIND v1", read)
+        self.assertIn("author_association OWNER or MEMBER", read)
+        self.assertIn("block=<selected comment id>.<digest>", read)
+        self.assertIn("a prompt to the owner for one of its checks", read)
+        self.assertIn("names another block (or none) counts for nothing", read)
+        self.assertIn("discard those results and the owner's pending answers", read)
 
 
 LONG_BASH_TIMEOUT = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "

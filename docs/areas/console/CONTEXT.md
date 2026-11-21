@@ -34,7 +34,7 @@ A registered project with no open work, no live session and no open sprint. It r
 _Avoid_: dormant project, idle project
 
 **Guest**:
-A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest door of its own (a Unix socket only Serve and the owner can open, ADR-console-077), shared at this host's own tailnet name, read from this host's Tailscale client (ADR-console-078), reachable from another device only while the tailnet's access rules allow TCP 443 to this host (ADR-console-079), and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); the guest page is the desk page read-only.
+A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest door of its own (a Unix socket only Serve and the owner can open, ADR-console-077), shared at this host's own tailnet name, read from this host's Tailscale client (ADR-console-078), reachable from another device only while the tailnet's access rules allow TCP 443 to this host (ADR-console-079), and never on the owner's port; the guest page carries a guest token (its own write token, in its HTML and no other guest response; the owner's token, a credential and the sign-in client's output never reach a guest), shows only the listed projects, and sees the pool's room under neutral account labels (ADR-console-086) and leaves spend, account names and controls, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); on the guest page a guest may add and sign in a Claude account of his own after ticking the owner's consent, shown to him as `yours` (ADR-console-087), and may state a goal on a listed project and, on sprints they started, approve or ask for changes to the brief, answer questions other than a look before merge or one the manager marked `owner_only`, and message the manager; everything else there is read-only.
 _Avoid_: user, viewer
 
 **Goal**:
@@ -58,11 +58,11 @@ The questions a manager sends at once with `sprint ask`: each leads with its ask
 _Avoid_: poll, survey
 
 **Notice**:
-A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. The owner posts a heads-up to every manager of a project from the page, and only the owner withdraws it (ADR-console-053). It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. It ends when it is withdrawn or when its sprint ends (ADR-console-044). Every manager is shown the open notices of its project's other sprints, one line each, in its first prompt, with `sprint inbox` and with `sprint status`, and an overlap with a claim goes to the owner as a question (ADR-console-046). The owner reads a project's open notices in its closed "Notices (n)" fold in the Work column, which counts in nothing that needs the owner (ADR-console-002). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
+A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. The owner posts a heads-up to every manager of a project from the page, and only the owner withdraws it (ADR-console-053). It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. A claim names files and its slice's issue and ends when the slice lands. A notice also ends when it is withdrawn or when its sprint ends (ADR-console-044). Every manager is shown the open notices of its project's other sprints, one line each, in its first prompt, with `sprint inbox` and with `sprint status`, and an overlap of two claims is ordered by a default rule, so only one the rule cannot settle goes to the owner as a question (ADR-console-046, ADR-console-085). The owner reads a project's open notices in its closed "Notices (n)" fold in the Work column, which counts in nothing that needs the owner (ADR-console-002). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
 _Avoid_: lock, reservation, announcement
 
 **Project question**:
-What the owner asks about one registered project, from the page, in its project's Ask box, where the answer opens in the main column, formatted, with what the session needs from the owner as buttons (ADR-console-067). A short read-only session the console starts in the project's folder answers it; the question and its one answer, failure or time-out are kept only in the console's log, never on the tracker (ADR-console-058). Its session's spend shows on the Spend page under its project and the questions aspect (ADR-console-059).
+What the owner asks about one registered project, from the page, in its project's Ask box, where the answer opens in the main column, formatted, with what the session needs from the owner as buttons (ADR-console-067). A short read-only session the console starts in the project's folder answers it; the question and its one answer, failure or time-out are kept only in the console's log, never on the tracker (ADR-console-058). Its session's spend shows on the Spend page under its project and the questions aspect (ADR-console-059). Its session reads the console's own records of that project (spend, sprints, deliveries, activations and held checks) from a file the console writes for it, and no other file of the console's state (ADR-console-089).
 _Avoid_: query, ask
 
 **Question thread**:
@@ -137,6 +137,10 @@ _Avoid_: quota bar
 The one place that holds every account control and detail: opened from the capacity strip or the `a` key and closed with Escape, one row per account with its allowance details, the account it is signed in to, sign-in end and run status, and Exclude, Pin, Sign in and Remove, then Add account (ADR-console-002, ADR-console-023, ADR-console-024, ADR-console-025, ADR-console-026).
 _Avoid_: settings page, account menu
 
+**Account label**:
+The neutral name `Account <n>` a guest sees for one account of the pool; every profile signed in to that account shares it, it stays with the account while the account stays in the pool, across a console restart, and carries nothing of a profile name, address or organisation (ADR-console-086); a colleague sees `yours` for the account he added himself (ADR-console-087).
+_Avoid_: account name, profile
+
 **Activation line**:
 The one line at the head of the Work column when origin's integration branch carries a merged change this host is built from and does not run, in console wording for a console change and in plain words otherwise. It names the commit and carries Activate, which has the console run this host's activation for that commit; it then reads the run's outcome in plain words. It is not an inbox item and is not counted in the statement (ADR-console-043, ADR-system-004, ADR-console-073).
 _Avoid_: deploy banner, update notice
@@ -166,7 +170,7 @@ One open question of a repository's adoption plan, shown on the page as an inbox
 _Avoid_: adoption prompt, open decision
 
 **Drafted contract**:
-The project contract the console drafts for a repository that has none, from its remote and its tracked files; the values it read are shown with where they came from and the rest under one counted line that opens to a plain list, every value changeable before the plan is applied; it lives in the console's state and the stored plan until `adopt-project apply` writes it (ADR-console-031, ADR-console-033).
+The project contract the console drafts for a repository that has none, from its remote and its tracked files; the values it read are shown with where they came from and the rest under one counted line that opens to a plain list, every value changeable before the plan is applied; for a checkout with a devenv.nix and installed commit hooks it also proposes that commits run in its development shell, `devenv shell --`; it lives in the console's state and the stored plan until `adopt-project apply` writes it (ADR-console-031, ADR-console-033, ADR-console-082).
 _Avoid_: generated contract, default contract
 
 **Folder trust**:
@@ -174,7 +178,7 @@ The client's per-profile record, `projects[<git root>].hasTrustDialogAccepted` i
 _Avoid_: workspace trust, permission
 
 **Approved adoption**:
-A ready adoption plan the owner approved on the page by choosing `Apply it` on its question card: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox item while the pull request is ready to merge; the owner merges it on the forge (ADR-console-030).
+A ready adoption plan the owner approved on the page by choosing `Apply it` on its question card: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox card while the pull request is ready to merge, has a failed check, holds commits the console did not push, or was closed while another registration is shown; the owner merges it with Merge on that card, pinned to the recorded head (ADR-console-030, ADR-console-088).
 _Avoid_: auto-adoption, auto-merge
 
 **Merged adoption**:

@@ -65,6 +65,14 @@ NaN or Infinity literal or nesting too deep to parse raises `ValueError`.
 (`stated_seq` and `stated_at` are the event's `seq` and `at`); a `goal.withdrawn` with a string
 `sprint_id` removes it; the brief rows and the manager rows below change an open sprint; every other
 event and any malformed goal event changes nothing.
+
+A guest's `goal.stated`, `brief.approved`, `brief.replied`, `sprint.messaged` and
+`question.answered` rows carry `"by": <login>` (#1263), and an owner's row carries none. `actor_of`
+reads it: the login when it is already a normal login (`event_log.normal_login`, the definition
+admission uses), else None, which means the owner. `SprintState.started_by` is the actor of the
+`goal.stated` row, `Message.by` the actor of the row that made the message, and
+`Question.answered_by` the actor of its `question.answered` row. A malformed `by` reads as the
+owner, so no guest can steer that sprint.
 Registration events change nothing here: a goal row outlives the registration rows retention
 removes, and the view alone shows sprints only under registered projects. Folding `a + b` equals
 folding `b` onto the fold of `a`.
@@ -296,6 +304,7 @@ console did about a look card's approval:
                        "look_repo"?: <str> (the project's repository when a question has a look),
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "needs_words"?: [<option text>],
+                                      "owner_only"?: true,
                                       "pictures"?: [{"picture": <id>,
                                       "line": <str>, "pair"?: "before" | "after"}],
                                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>,
@@ -335,8 +344,8 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `checked_round(round, limits=True)` refuses with `Refused` the first failure, in this order:
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
-a key outside `question, context, blocks, options, recommended, needs_words, pictures, look,
-replaces`),
+a key outside `question, context, blocks, options, recommended, needs_words, owner_only,
+pictures, look, replaces`),
 `QUESTION_MEMBER` for
 `question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
@@ -350,7 +359,8 @@ at least 1, `head`, 40 lowercase hex, and `approve`, a string) and `LOOK_APPROVE
 whose strip equals no stripped option), then `NEEDS_WORDS_SHAPE`
 (`needs_words` present and not a non-empty list of strings whose strips are each one stripped
 option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in `needs_words`: choosing it
-records the approval and takes no words, so the owner could never approve), then `REPLACES_SHAPE`
+records the approval and takes no words, so the owner could never approve), then `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`),
+then `REPLACES_SHAPE`
 (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
 and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
@@ -382,7 +392,8 @@ order. With
 picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a new
 `{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
 text stripped, a question carrying `"context"` only when the round gave one, `"needs_words"` (the
-stripped option texts, in the given order) only when it gave one, `"look"` (`{"issue",
+stripped option texts, in the given order) only when it gave one, `"owner_only"` (`true`) only when it
+gave it, `"look"` (`{"issue",
 "pr", "head", "approve"}`, `approve` stripped) only when it gave one, and `"pictures"`
 (`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
 (`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each
@@ -404,8 +415,10 @@ index)`. A `questions.asked` row changes a sprint only when it is open, its brie
 (`STARTING`) and `checked_round(..., limits=False)` accepts the row's `questions` and `blocker`
 (absent: false), so a logged round over a limit folds whole and renders cut; each
 checked question is then added with `round_id` the row's `seq`, its `index` and `at`, and its
-`look` kept as a `QuestionLook`, and its `needs_words` (`Question.needs_words`, `()` when the round
-gave none). Each checked
+`look` kept as a `QuestionLook`, its `needs_words` (`Question.needs_words`, `()` when the round
+gave none) and `owner_only`
+(`Question.owner_only`, false unless the round marked it: a question only the console's owner
+answers, #1263). Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
 matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
@@ -480,7 +493,7 @@ carry them, both kept (`event_log.NOTICE_POSTED`, `NOTICE_WITHDRAWN`; each with 
 project column):
 
     notice.posted     {"sprint_id", "goal": <str>, "notice": {"kind", "text", "what"?, "until"?,
-                       "to"?}}
+                       "issue"?, "live_fault"?, "to"?}}
     notice.withdrawn  {"sprint_id", "goal": <str>, "notice": <int>}
 
 A third row, `notice.nudged {"sprint_id", "notice", "route", "ok", "reason"?, "listing_failed"?,
@@ -488,27 +501,47 @@ A third row, `notice.nudged {"sprint_id", "notice", "route", "ok", "reason"?, "l
 cost a manager; the fold reads only its `permission`.
 
 `checked_notice(notice)` returns a new dict of exactly the kind's members (`NOTICE_MEMBERS`: a claim
-has kind, text, what and until; a heads-up kind and text; a hand-off kind, text and to), texts
+has kind, text, what, until, issue and live_fault; a heads-up kind and text; a hand-off kind, text and to), texts
 stripped, or raises `Refused` at the first failure, in this order: not an object
 (`NOTICE_NOT_OBJECT`); `kind` missing or not in `NOTICE_KINDS` (`NOTICE_KIND`); a key outside the
 kind's members (`NOTICE_EXTRA`, one fixed text per kind that never carries the key); then `text`,
 then a claim's `what`, then its `until`: not a string, empty after stripping, or holding a line
 break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
-`MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then a hand-off's `to`, which is
-`"owner"` or a sprint id (`NOTICE_MEMBER`). Every notice refusal is one line built only from fixed
+`MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then, for a claim, `issue`
+(optional; an int of at least 1, not a bool) and `live_fault` (optional; a bool), each refused as
+`NOTICE_MEMBER`; then a hand-off's `to`, which is `"owner"` or a sprint id (`NOTICE_MEMBER`).
+Every notice refusal is one line built only from fixed
 kinds, member names and limits, never from a key or value the manager sent, because the command
 prints it and the service answers it as it is. `takes_notices(state)` is `takes_questions(state)`
 and no stop requested. `postable_notice(state, notice, others)` refuses, in order: a sprint that
-takes no notice (`ALREADY_STOPPING` while a stop waits, else `ENDED`); `checked_notice`; for a
-hand-off to a sprint, its own id (`NOTICE_TO_SELF`) or an id that is no sprint of `others` of the
+takes no notice (`ALREADY_STOPPING` while a stop waits, else `ENDED`); `checked_notice`; for a claim,
+no `issue` (`NOTICE_MEMBER`), then no part in its `what` (`claim_parts`: split on commas, stripped,
+empty parts and repeats dropped; `NOTICE_MEMBER`), then a part outside the project (absolute or with
+a `..` segment, `outside_claim_part`; `CLAIM_OUTSIDE`), and only then a part naming a whole folder
+tree (`wide_claim_part`: a trailing slash, the root, a `**`, a last segment `*`, or a directory
+`is_folder` reports; `CLAIM_FOLDER`), so no path leaving the project reaches `is_folder`; the
+checked claim keeps `what` as written and `claim_path` / `claim_paths` give the normalized
+comparison keys; for a hand-off to a sprint, its own id (`NOTICE_TO_SELF`) or an id that is no sprint of `others` of the
 same project that takes notices (`NOTICE_TO_REFUSED`); and a sixth open notice (`NOTICE_LIMIT`);
 it never looks at another sprint's claims. `withdrawable_notice(state, notice_id, others)` refuses
 a sprint that takes no notice as `postable_notice` does, then returns the open notice of `state`,
 or raises `NOTICE_ENDED` (withdrawn or ended), `NOTICE_FOREIGN` (a notice of a sprint in `others`)
 or `NOTICE_UNKNOWN`. `open_notices(state)` is the notices neither withdrawn nor ended, in id order
 (the row's `seq`); `notice_entry` and `project_notices(states, project_id)` are the wire entries
-`{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"` and `"until"` for a claim and
-`"to"` for a hand-off, of the project's open notices in id order. `notice_block(entries, sprint_id,
+`{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"`, `"until"`, `"issue"`,
+`"live_fault"` and `"started"` for a claim (the lowest notice id of the sprint's claims, withdrawn and
+ended ones included, naming the same issue, so a withdrawn and reposted claim keeps its slice's start;
+the claim's own id when it names no issue) and
+`"to"` for a hand-off, of the project's open notices in id order.
+`claim_overlaps(entries)` is the console's reading of those entries (#1337, D5-D8): one dict per pair
+of claims of two different sprints whose paths overlap, `{"claims": [a, b], "sprints": [...],
+"files": [...], "first", "rule", "asks"}`, `a` being the claim with the lower `started`. Paths are
+compared segment by segment (`claim_paths`, `*` never crosses a `/`, a shorter path reads as a folder);
+the rule is `OVERLAP_EARLIER` (the earlier-started slice is `first`), `OVERLAP_FAULT` (the one live-fault
+fix is `first`, even when the feature started earlier) or `OVERLAP_UNSETTLED` (both fix a live fault:
+`first` None, `asks` the later-started sprint). The console refuses nothing because of an overlap.
+`notice_block` ends with one `- overlap with "<title>" on <files>: ...` line per reading naming the
+reader's sprint, saying who lands first (or, unsettled, who asks the owner). `notice_block(entries, sprint_id,
 now_ms)` renders those entries for the manager of `sprint_id` under `NOTICE_BLOCK_HEAD`, one line
 per entry of another sprint (the sprint's own notices are left out), in the order given, and is
 `""` when no other sprint's notice is open. The four line forms are
@@ -558,7 +591,9 @@ The fold: a `notice.posted` row for a folded sprint that takes notices and whose
 A `notice.withdrawn` row whose `notice` is an int (not a bool) naming an open notice of a sprint that
 takes notices sets that notice's `withdrawn_at` to the row's `at`; anything else changes nothing.
 The fold enforces neither the limit nor the addressee: the service does, under its lock. After
-every row that names a folded sprint, the end sweep (`_ended_notices`) sets `ended_at` to the
+every row that names a folded sprint, the landing sweep (`_landed_claims`) sets `ended_at` to the row's
+`at` on each open claim whose `issue` the sprint's report lists as landed or held (a claim without an
+`issue`, a heads-up and a hand-off are never ended by it), and the end sweep (`_ended_notices`) sets `ended_at` to the
 row's `at` on each notice still open when the sprint takes no notice (a stop was requested, it
 closed, stopped or is done); `ended_at` is never cleared, so a notice stays ended when its sprint
 reopens (a newer brief or report clears a done report), and folding the rows in one call, one row
@@ -639,8 +674,10 @@ verification` and `, <dropped> dropped` for each non-zero count. The new texts a
 The module reads no clock and no environment; only the secret helpers touch the filesystem.
 """
 
+import fnmatch
 import json
 import os
+import posixpath
 import re
 import secrets
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -656,6 +693,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
                                            MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED,
+                                           normal_login,
                                            NOTICE_WITHDRAWN,
                                            PICTURE_STORED, QUESTION_ANSWERED,
                                            QUESTION_WITHDRAWN, QUESTIONS_ASKED,
@@ -842,6 +880,7 @@ OPTION_COUNT = "question {n} needs two to four options"
 OPTION_TWICE = "question {n} offers one option twice"
 NO_RECOMMENDATION = "question {n} recommends none of its options"
 NEEDS_WORDS_SHAPE = "question {n}'s needs_words must list some of its options, each once"
+OWNER_ONLY_SHAPE = "question {n}'s owner_only must be true when given"
 WORDS_NEEDED = "say what to change"
 ROUND_OPEN = "a round of questions is already open"
 UNKNOWN_QUESTION = "this question is not known"
@@ -855,14 +894,17 @@ MAX_CLAIM_UNTIL_CHARS = 140
 MAX_OPEN_NOTICES = 5
 NOTICE_OWNER = "owner"
 NOTICE_KINDS = ("claim", "heads-up", "hand-off")
-NOTICE_MEMBERS = {"claim": ("kind", "text", "what", "until"), "heads-up": ("kind", "text"),
+NOTICE_MEMBERS = {"claim": ("kind", "text", "what", "until", "issue", "live_fault"),
+                  "heads-up": ("kind", "text"),
                   "hand-off": ("kind", "text", "to")}
 NOTICE_NOT_OBJECT = "the notice is not a JSON object"
 NOTICE_KIND = "the notice's kind is not one of claim, heads-up, hand-off"
-NOTICE_EXTRA = {"claim": "a claim notice has only kind, text, what and until",
+NOTICE_EXTRA = {"claim": "a claim notice has only kind, text, what, until, issue and live_fault",
                 "heads-up": "a heads-up notice has only kind and text",
                 "hand-off": "a hand-off notice has only kind, text and to"}
 NOTICE_MEMBER = "the notice has no valid {member}"
+CLAIM_FOLDER = "a claim's what names files or a narrow path, never a whole folder tree"
+CLAIM_OUTSIDE = "a claim's what names paths inside the project, relative to its root"
 NOTICE_TOO_LONG = "the notice's {member} is over {limit} characters"
 NOTICE_TO_SELF = ("the hand-off's to names this sprint: address another open sprint of this "
                   "project or the owner")
@@ -1019,6 +1061,7 @@ class Message:
     chosen: str | None = None
     held: bool = False
     words: str | None = None
+    by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1065,6 +1108,8 @@ class Question:
     look_repo: str | None = None
     needs_words: tuple[str, ...] = ()
     words: str | None = None
+    answered_by: str | None = None
+    owner_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1078,6 +1123,8 @@ class Notice:
     to: str | None = None
     withdrawn_at: str | None = None
     ended_at: str | None = None
+    issue: int | None = None
+    live_fault: bool = False
 
 
 @dataclass(frozen=True)
@@ -1114,6 +1161,7 @@ class SprintState:
     pictures: frozenset[str] = frozenset()
     notices: tuple[Notice, ...] = ()
     permission: Permission | None = None
+    started_by: str | None = None
 
     @property
     def state(self) -> str:
@@ -1460,8 +1508,8 @@ LOOK_WORDS = re.compile(r"\bscreen ?shots?\b|\.png\b|(?:^|[/\\])screenshots(?:[/
 def _checked_question(n: int, question: object, limits: bool, files_withheld: bool) -> dict:
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
                                                                 "options", "recommended",
-                                                                "needs_words", "pictures", "look",
-                                                                "replaces"}:
+                                                                "needs_words", "owner_only",
+                                                                "pictures", "look", "replaces"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1511,6 +1559,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
             raise Refused(NEEDS_WORDS_SHAPE.format(n=n))
         if "look" in question and look["approve"].strip() in kept:
             raise Refused(LOOK_APPROVE_WORDS.format(n=n))
+    if "owner_only" in question and question["owner_only"] is not True:
+        raise Refused(OWNER_ONLY_SHAPE.format(n=n))
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
@@ -1527,6 +1577,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
         checked["context"] = context.strip()
     if "needs_words" in question:
         checked["needs_words"] = kept
+    if "owner_only" in question:
+        checked["owner_only"] = True
     if pictures:
         checked["pictures"] = pictures
     if "look" in question:
@@ -1773,6 +1825,44 @@ def _notice_line(value: object) -> bool:
             and "\r" not in value)
 
 
+def claim_parts(what: str) -> tuple[str, ...]:
+    """A claim's `what` split on commas: each part stripped, empty parts and repeats dropped."""
+    parts: dict[str, None] = {}
+    for part in what.split(","):
+        if part.strip():
+            parts.setdefault(part.strip())
+    return tuple(parts)
+
+
+def claim_path(part: str) -> str:
+    """The one normalized, project-relative key a claim part is compared by."""
+    return posixpath.normpath(part)
+
+
+def claim_paths(what: str) -> tuple[str, ...]:
+    """`claim_path` of each part of `what`, repeats dropped, in first-seen order."""
+    return tuple(dict.fromkeys(claim_path(part) for part in claim_parts(what)))
+
+
+def outside_claim_part(part: str) -> bool:
+    """True when the part is absolute or climbs out of the project with a `..` segment."""
+    return part.startswith("/") or ".." in part.split("/")
+
+
+def wide_claim_part(part: str, is_folder: Callable[[str], bool]) -> bool:
+    """True when the part names a whole folder tree: a trailing slash, the root, a `**`, a last
+    segment of `*` and `?` that holds a `*` (it matches every name), or a path, wildcards read as
+    patterns, that `is_folder` finds to be a directory."""
+    path = claim_path(part)
+    last = path.split("/")[-1]
+    return (part.endswith("/") or path == "." or "**" in path
+            or ("*" in last and not last.strip("*?")) or is_folder(path))
+
+
+def _no_folder(path: str) -> bool:
+    return False
+
+
 def checked_notice(notice: object) -> dict:
     """The notice reduced to its kind's members, texts stripped, else `Refused` at the first failure."""
     if not isinstance(notice, dict):
@@ -1793,6 +1883,16 @@ def checked_notice(notice: object) -> dict:
         if len(value.strip()) > _NOTICE_LIMITS[member]:
             raise Refused(NOTICE_TOO_LONG.format(member=member, limit=_NOTICE_LIMITS[member]))
         checked[member] = value.strip()
+    if kind == "claim":
+        if "issue" in notice:
+            issue = notice["issue"]
+            if not isinstance(issue, int) or isinstance(issue, bool) or issue < 1:
+                raise Refused(NOTICE_MEMBER.format(member="issue"))
+            checked["issue"] = issue
+        if "live_fault" in notice:
+            if not isinstance(notice["live_fault"], bool):
+                raise Refused(NOTICE_MEMBER.format(member="live_fault"))
+            checked["live_fault"] = notice["live_fault"]
     if kind == "hand-off":
         to = notice.get("to")
         if not isinstance(to, str) or (to != NOTICE_OWNER and SPRINT_ID.fullmatch(to) is None):
@@ -1807,10 +1907,21 @@ def _refused_notices(state: SprintState) -> None:
                       else ENDED)
 
 
-def postable_notice(state: SprintState, notice: object, others: Iterable[SprintState]) -> dict:
+def postable_notice(state: SprintState, notice: object, others: Iterable[SprintState],
+                    is_folder: Callable[[str], bool] = _no_folder) -> dict:
     """The checked notice `state` may post now, else `Refused` with why not."""
     _refused_notices(state)
     checked = checked_notice(notice)
+    if checked["kind"] == "claim":
+        if "issue" not in checked:
+            raise Refused(NOTICE_MEMBER.format(member="issue"))
+        parts = claim_parts(checked["what"])
+        if not parts:
+            raise Refused(NOTICE_MEMBER.format(member="what"))
+        if any(outside_claim_part(part) for part in parts):
+            raise Refused(CLAIM_OUTSIDE)
+        if any(wide_claim_part(part, is_folder) for part in parts):
+            raise Refused(CLAIM_FOLDER)
     to = checked.get("to")
     if checked["kind"] == "hand-off" and to != NOTICE_OWNER:
         if to == state.sprint_id:
@@ -1880,6 +1991,10 @@ def notice_entry(state: SprintState, notice: Notice) -> dict:
              "kind": notice.kind, "text": notice.text}
     if notice.kind == "claim":
         entry["what"], entry["until"] = notice.what, notice.until
+        entry["issue"], entry["live_fault"] = notice.issue, notice.live_fault
+        entry["started"] = (notice.notice_id if notice.issue is None else min(
+            other.notice_id for other in state.notices
+            if other.kind == "claim" and other.issue == notice.issue))
     if notice.kind == "hand-off":
         entry["to"] = notice.to
     entry["at"] = notice.at
@@ -1900,12 +2015,155 @@ def project_notices(states: Iterable[SprintState], project_id: str,
                   key=lambda entry: entry["id"])
 
 
+OVERLAP_EARLIER = "earlier-started"
+OVERLAP_FAULT = "live-fault"
+OVERLAP_UNSETTLED = "unsettled"
+_WILDCARDS = "*?["
+
+
+def _segment_tokens(segment: str) -> list[str]:
+    """`*`, `?`, a bracket class as `fnmatch` reads it, or one literal character, each a token."""
+    tokens, i = [], 0
+    while i < len(segment):
+        if segment[i] == "[":
+            j = i + 1
+            if j < len(segment) and segment[j] == "!":
+                j += 1
+            if j < len(segment) and segment[j] == "]":
+                j += 1
+            while j < len(segment) and segment[j] != "]":
+                j += 1
+            if j < len(segment):
+                tokens.append(segment[i:j + 1])
+                i = j + 1
+                continue
+        tokens.append(segment[i])
+        i += 1
+    return tokens
+
+
+def _is_class(token: str) -> bool:
+    return len(token) > 1
+
+
+def _classes_meet(x: str, y: str) -> bool:
+    """True when some character is in both bracket classes: an endpoint, a neighbour of one, or a
+    character neither names (two negated classes) is tried."""
+    named = {c for c in x + y if c not in "[]!-"}
+    tried = {chr(n) for c in named for n in (ord(c) - 1, ord(c), ord(c) + 1) if 0 <= n <= 0x10FFFF}
+    outside = next(chr(n) for n in range(0x10FFFF, 0, -1) if chr(n) not in named | tried)
+    return any(fnmatch.fnmatchcase(c, x) and fnmatch.fnmatchcase(c, y) for c in tried | {outside})
+
+
+def _stand_together(x: str, y: str) -> bool:
+    """True when two single-character tokens may stand for one character (class and class: yes)."""
+    if x == "?" or y == "?":
+        return True
+    if _is_class(x) and _is_class(y):
+        return _classes_meet(x, y)
+    if _is_class(x):
+        return fnmatch.fnmatchcase(y, x)
+    if _is_class(y):
+        return fnmatch.fnmatchcase(x, y)
+    return x == y
+
+
+def _segments_meet(first: str, second: str) -> bool:
+    """True when some name without a `/` matches both segments read as `fnmatch` patterns."""
+    xs, ys = _segment_tokens(first), _segment_tokens(second)
+    reached = {(0, 0)}
+    todo = [(0, 0)]
+    while todo:
+        i, j = todo.pop()
+        steps = []
+        if i < len(xs) and xs[i] == "*":
+            steps.append((i + 1, j))
+            if j < len(ys) and ys[j] != "*":
+                steps.append((i, j + 1))
+        if j < len(ys) and ys[j] == "*":
+            steps.append((i, j + 1))
+            if i < len(xs) and xs[i] != "*":
+                steps.append((i + 1, j))
+        if i < len(xs) and j < len(ys) and "*" not in (xs[i], ys[j]) \
+                and _stand_together(xs[i], ys[j]):
+            steps.append((i + 1, j + 1))
+        for step in steps:
+            if step not in reached:
+                reached.add(step)
+                todo.append(step)
+    return (len(xs), len(ys)) in reached
+
+
+def _overlapping_files(first: str, second: str) -> list[str]:
+    """The files two claim paths both name, `[]` when they share none (a shorter path is a folder)."""
+    xs = [] if first == "." else first.split("/")
+    ys = [] if second == "." else second.split("/")
+    depth = min(len(xs), len(ys))
+    if not all(_segments_meet(xs[k], ys[k]) for k in range(depth)):
+        return []
+    if len(xs) < len(ys):
+        return [second]
+    if len(ys) < len(xs):
+        return [first]
+    first_glob = any(c in first for c in _WILDCARDS)
+    second_glob = any(c in second for c in _WILDCARDS)
+    if first_glob and second_glob:
+        return [first, second]
+    return [second] if first_glob else [first]
+
+
+def _claim_start(entry: Mapping) -> int:
+    return entry.get("started", entry["id"])
+
+
+def claim_overlaps(entries: Iterable[Mapping]) -> list[dict]:
+    """One reading per pair of slices with overlapping open claims, in `(start, start)` order.
+
+    A slice is a sprint's claims for one issue. A slice is a live-fault fix when any of its
+    overlapping claims is; its claim in the reading is its earliest such claim, else its earliest."""
+    claims = [entry for entry in entries
+              if entry.get("kind") == "claim" and entry.get("owner") is not True]
+    pairs: dict[frozenset, dict] = {}
+    for index, one in enumerate(claims):
+        for two in claims[index + 1:]:
+            if one["sprint_id"] == two["sprint_id"]:
+                continue
+            files = {file for p in claim_paths(one["what"]) for q in claim_paths(two["what"])
+                     for file in _overlapping_files(p, q)}
+            if not files:
+                continue
+            slices = [(c["sprint_id"], c.get("issue", c["id"])) for c in (one, two)]
+            group = pairs.setdefault(frozenset(slices), {"files": set(), "claims": {}})
+            group["files"] |= files
+            for slice_key, claim in zip(slices, (one, two)):
+                group["claims"].setdefault(slice_key, []).append(claim)
+    readings = []
+    for group in pairs.values():
+        speaking = []
+        for slice_claims in group["claims"].values():
+            faulted = [c for c in slice_claims if c.get("live_fault") is True]
+            speaking.append(min(faulted or slice_claims, key=lambda c: (_claim_start(c), c["id"])))
+        a, b = sorted(speaking, key=lambda c: (_claim_start(c), c["id"]))
+        fault_a, fault_b = a.get("live_fault") is True, b.get("live_fault") is True
+        if fault_a and fault_b:
+            first, rule, asks = None, OVERLAP_UNSETTLED, b["sprint_id"]
+        elif fault_a != fault_b:
+            first, rule, asks = (a if fault_a else b)["id"], OVERLAP_FAULT, None
+        else:
+            first, rule, asks = a["id"], OVERLAP_EARLIER, None
+        reading = {"claims": [a["id"], b["id"]], "sprints": [a["sprint_id"], b["sprint_id"]],
+                   "files": sorted(group["files"]), "first": first, "rule": rule, "asks": asks}
+        readings.append(((_claim_start(a), _claim_start(b), a["id"], b["id"]), reading))
+    return [reading for _, reading in sorted(readings, key=lambda keyed: keyed[0])]
+
+
 def _one_line(value: object) -> str:
     return " ".join(str(value).split())
 
 
 def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str:
     """The open notices of the other sprints as a head and one `- ` line each, or `""`."""
+    entries = list(entries)
     lines = []
     for entry in entries:
         if entry.get("owner") is True:
@@ -1924,12 +2182,31 @@ def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str
             lines.append(f'- {form} from "{title}", {age}: {text}')
         else:
             lines.append(f'- heads-up from "{title}", {age}: {text}')
+    if lines:
+        titles = {entry["sprint_id"]: entry["title"] for entry in entries
+                  if entry.get("kind") == "claim" and entry.get("owner") is not True}
+        for reading in claim_overlaps(entries):
+            if sprint_id not in reading["sprints"]:
+                continue
+            other = next(s for s in reading["sprints"] if s != sprint_id)
+            who, files = _one_line(titles[other]), _one_line(", ".join(reading["files"]))
+            head = f'- overlap with "{who}" on {files}: '
+            if reading["rule"] == OVERLAP_UNSETTLED:
+                lines.append(head + ("both fix a live fault; ask the owner which lands first"
+                                     if reading["asks"] == sprint_id else
+                                     "both fix a live fault; they ask the owner which lands first"))
+            elif reading["claims"].index(reading["first"]) == reading["sprints"].index(sprint_id):
+                lines.append(head + "your slice lands first; theirs rebases")
+            else:
+                lines.append(head + "their slice lands first; rebase yours after it lands")
     return "\n".join([NOTICE_BLOCK_HEAD, *lines]) if lines else ""
 
 
 def inbox_entry(message: Message) -> dict:
     entry = {"id": message.message_id, "kind": message.kind, "version": message.version,
              "text": message.text, "at": message.at}
+    if message.by is not None:
+        entry["by"] = message.by
     if message.kind == MESSAGE_ANSWER:
         words = (message.words if message.words is not None
                  else message.text if message.chosen is None else None)
@@ -1975,18 +2252,28 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     if event.kind == BRIEF_APPROVED:
         return _with_message(
             replace(state, brief=replace(brief, decision=APPROVED, decided_at=event.at)),
-            Message(event.seq, MESSAGE_APPROVED, event.at, version, None))
+            Message(event.seq, MESSAGE_APPROVED, event.at, version, None, by=actor_of(payload)))
     reply = payload.get("reply")
     if isinstance(reply, str):
         return _with_message(
             replace(state,
                     brief=replace(brief, decision=CHANGES, reply=reply, decided_at=event.at)),
-            Message(event.seq, MESSAGE_CHANGES, event.at, version, reply))
+            Message(event.seq, MESSAGE_CHANGES, event.at, version, reply, by=actor_of(payload)))
     return state
 
 
 def _id(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def actor_of(payload: Mapping) -> str | None:
+    """The guest login a row's `by` names, or None for the owner (#1263).
+
+    `by` counts only when it is already a normal login (`event_log.normal_login`, the one definition
+    admission shares); an absent, malformed or non-canonical member reads as the owner, so no guest
+    can steer a sprint whose start row is malformed."""
+    value = payload.get("by")
+    return value if isinstance(value, str) and normal_login(value) == value else None
 
 
 def _folded_notice(state: SprintState, event: Event) -> SprintState:
@@ -1999,7 +2286,8 @@ def _folded_notice(state: SprintState, event: Event) -> SprintState:
         except Refused:
             return state
         notice = Notice(event.seq, event.at, checked["kind"], checked["text"],
-                        checked.get("what"), checked.get("until"), checked.get("to"))
+                        checked.get("what"), checked.get("until"), checked.get("to"),
+                        issue=checked.get("issue"), live_fault=checked.get("live_fault", False))
         return replace(state, notices=(*state.notices, notice))
     notice_id = payload.get("notice")
     if not _id(notice_id):
@@ -2054,12 +2342,27 @@ def _ended_notices(state: SprintState, at: str) -> SprintState:
         for notice in state.notices))
 
 
+def _landed_claims(state: SprintState, at: str) -> SprintState:
+    """Marks every open claim ended whose slice the sprint's report lists as landed or held."""
+    if state.report is None:
+        return state
+    done = {issue for issue, stage in state.report.issues if stage in (LANDED, HELD)}
+    if not any(notice.kind == "claim" and notice.issue in done and notice.withdrawn_at is None
+               and notice.ended_at is None for notice in state.notices):
+        return state
+    return replace(state, notices=tuple(
+        replace(notice, ended_at=at)
+        if notice.kind == "claim" and notice.issue in done and notice.withdrawn_at is None
+        and notice.ended_at is None else notice for notice in state.notices))
+
+
 def _folded_message(state: SprintState, event: Event) -> SprintState:
     payload = event.payload
     if event.kind == SPRINT_MESSAGED:
         text = payload.get("text")
         if isinstance(text, str):
-            return _with_message(state, Message(event.seq, MESSAGE_TEXT, event.at, None, text))
+            return _with_message(state, Message(event.seq, MESSAGE_TEXT, event.at, None, text,
+                                                by=actor_of(payload)))
     elif event.kind == SPRINT_READ:
         through = payload.get("through")
         if _id(through):
@@ -2117,6 +2420,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                context=row.get("context"),
                                look=QuestionLook(**row["look"], repo=bound) if "look" in row else None,
                                needs_words=tuple(row.get("needs_words", ())),
+                               owner_only=row.get("owner_only", False) is True,
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
@@ -2146,6 +2450,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
         words = payload.get("words")
         answered = replace(question, answer=answer, chosen=chosen, answered_at=event.at,
                            differs=chosen != question.recommended, words=words,
+                           answered_by=actor_of(payload),
                            look_state=LOOK_POSTING if held else None,
                            look_found=None, look_found_state=None,
                            look_message=event.seq if held else None,
@@ -2154,7 +2459,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
         return _with_message(
             replace(state, questions=questions),
             Message(event.seq, MESSAGE_ANSWER, event.at, None, answer, question=question.question,
-                    round_id=round_id, chosen=chosen, held=held, words=words))
+                    round_id=round_id, chosen=chosen, held=held, words=words, by=actor_of(payload)))
     return state
 
 
@@ -2427,7 +2732,7 @@ def sprint_states(events: Iterable[Event],
             goal = event.payload.get("goal")
             if event.project is not None and isinstance(goal, str):
                 folded[sprint_id] = SprintState(sprint_id, event.project, goal, event.seq,
-                                                event.at)
+                                                event.at, started_by=actor_of(event.payload))
         elif event.kind == GOAL_WITHDRAWN:
             folded.pop(sprint_id, None)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:
@@ -2474,6 +2779,7 @@ def sprint_states(events: Iterable[Event],
                                             pictures=folded[sprint_id].pictures | {picture})
         if sprint_id in folded:
             folded[sprint_id] = _ended_notices(folded[sprint_id], event.at)
+            folded[sprint_id] = _landed_claims(folded[sprint_id], event.at)
     return folded
 
 

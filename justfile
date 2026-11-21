@@ -135,6 +135,7 @@ agent-workflow-tests *args:
     tests/test_host_readings.py \
     tests/test_darwin_user_agent_reload.py \
     tests/test_darwin_path_order.py \
+    tests/test_pinned_file.py \
     tests/test_github_runners.py \
     tests/test_host_sudo.py \
     tests/test_runner_home.py \
@@ -221,6 +222,8 @@ agent-workflow-tests *args:
     tests/test_console_trust_start.py \
     tests/test_console_plan_questions.py \
     tests/test_console_project_question.py \
+    tests/test_console_question_records.py \
+    tests/test_console_question_check.py \
     tests/test_console_contract_draft.py \
     tests/test_console_checkout_remote.py \
     tests/test_console_register.py \
@@ -291,6 +294,8 @@ agent-workflow-tests *args:
     tests/test_console_guest_socket_check.py \
     tests/test_console_guest_service.py \
     tests/test_console_guest_page.py \
+    tests/test_console_guest_actions.py \
+    tests/test_console_guest_account.py \
     tests/test_console_units.py \
     tests/test_owner_services_units.py \
     tests/test_system_packages.py \
@@ -316,7 +321,7 @@ agent-instruction-budget *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 80 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 98 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail

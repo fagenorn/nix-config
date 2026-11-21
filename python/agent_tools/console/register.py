@@ -5,10 +5,14 @@ tools as children, off the request path, and tells the owner in plain words what
 change. The adoption tools stay the one implementation: nothing here edits a repository or writes the
 fleet registry.
 
-Request. `parse_register_request(body)` takes a UTF-8 JSON object with exactly the member `path`,
-whose value is a string with no character below 0x20 and no 0x7F (the empty string included:
-`refusal` judges the rule, so that an empty path is answered as a refusal, not as a malformed
-request), and returns it. It raises `ValueError` otherwise. `expand(path, home)` strips the path and
+Request. `parse_register_request(body)` takes a UTF-8 JSON object with the member `path`, whose value
+is a string with no character below 0x20 and no 0x7F (the empty string included: `refusal` judges
+the rule, so that an empty path is answered as a refusal, not as a malformed request), and
+optionally the member `unless_open`, only the JSON `true` (#1334, ADR-console-084), and returns
+`(path, unless_open)`. It raises `ValueError` otherwise. `OPEN_SHOWN` is the 409 text of a
+conditional request that finds a registration open, and `open_shown(entry)` is the one rule of an
+open registration, read on the entry the owner's view shows: false for None and for a done entry
+whose note is `LATER_NOTE` (the owner's Not now), true for anything else. `expand(path, home)` strips the path and
 turns a leading `~` (alone, or before a `/`) into `home`. `name_of(root)` is the last path segment.
 
 Refusals. `refusal(path, entries, *, home, toplevel=checkout_root)` returns `(reason, None)` for the
@@ -27,7 +31,8 @@ exists but cannot be read (an absent registry is an empty fleet), also decided b
 Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT, apply_timeout=APPLY_TIMEOUT)` runs
 `[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`, followed by `--answer <id>
 <subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4, then
-`--contract-draft <contract>` when `contract` is given: ADR-console-031) or
+`--contract-draft <contract>` when `contract` is given: ADR-console-031, then `--commit-environment
+<environment>` when `environment` is given: ADR-console-083) or
 `[*command, "verify", "--repo-root", root, "--register"]` (`register`) or `[*command, "apply",
 "--plan-id", plan_id]` with `--acknowledge-deletions` and then `--discard-retained` added when asked
 (`apply`, #1054, #1088) or `[*command, "discard", "--plan-id", plan_id]` (`discard`, #1088), the command
@@ -39,8 +44,8 @@ or 2 returns the parsed stdout object. A failed run raises `RunFailed(kind)`, `s
 `kind` one of `RUN_KINDS`: `cancelled` (the `cancel` event is set), `failed` (any other exit),
 `unreadable` (stdout is not a JSON object), `timed_out` (`subprocess.TimeoutExpired`), `not_installed`
 (`FileNotFoundError`, or `PermissionError` on the executable) and `unavailable` (any other
-`OSError`). `adopter_for(platform)` is `Adopter()` on Linux only, else None (ADR-console-028 D9: registration
-and the adoption it opens stay Linux only, though managers run on macOS too).
+`OSError`). `adopter_for(platform)` is `Adopter()` on Linux and macOS (what `manager.supported` admits), else None
+(ADR-console-081: registration and the adoption it opens run wherever a manager does).
 
 Plain lines. `plan_lines(document)` is the D4 list of ADR-console-028, each line only when its count
 is above zero, in this order: `moves N agent file(s)` (followed by ` under .agents/` when every move
@@ -126,10 +131,14 @@ Try again card). `unread(payload)` is the row with the member `remote` set to `R
 sentence that the remote could not be read and the checkout was used as it is; it changes no line.
 
 Cancel (#1088, ADR-console-037). `CANCELLED` is `event_log.REGISTRATION_CANCELLED`; `cancelled_row(root,
-plan_id)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`. `latest` folds the registration to
-None when a valid cancel row names the folded row's root and plan id (a cancel naming another, or
-malformed, changes nothing; a later `registration.ended` row starts a new registration).
-`parse_cancel_request(body)` is exactly `{"root"}`, a non-empty string with no character below 0x20 and
+plan_id, restore=False)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`, with `"restore":
+true` added when `restore` (#1334, ADR-console-084). `latest` folds the registration to None, and clears
+the chain of earlier registrations (see Row), when a valid cancel row names the folded row's root and
+plan id (a cancel naming another, or malformed, changes nothing; a later `registration.ended` row
+starts a new registration); a row that carries `"restore": true` folds it to the registration shown
+before it instead (none when there is none).
+`parse_cancel_request(body)` is `{"root"}`, or `{"root", "restore"}` with `restore` the JSON `true`, returning
+`(root, restore)`; `root` is a non-empty string with no character below 0x20 and
 no 0x7F (`ValueError` otherwise). `cancellable(latest, adoption)` is true when `latest` is not None,
 its `result` is not `registered` and the plan's folded adoption is None or `apply_failed`.
 `CANCEL_REFUSED`, `CANCEL_UNSEEN` (a failed commit's evidence card no page stream was sent yet, ADR-console-071)
@@ -155,7 +164,16 @@ also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEY
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
 `contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
-never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
+never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service.
+`fold(events, state=None)` is the `Fold` `(latest, before, roots)`: `before` the registrations shown
+before the current one, oldest first, one per root (an ended row naming another root pushes the
+current one and drops the new root's older entry), `roots` each registered project's root; a
+`project.unregistered` row's root is its payload `root`, else the root its project was registered
+with, else it names nothing; while another registered project still holds that root it changes
+nothing, else it drops the root from `before` and, when it is the shown
+registration's, folds back to the last entry of `before`, so a registration whose project left the
+registry gives the page back what it replaced (ADR-console-084 D1); a matching cancel folds to none
+and clears `before`; `latest(events, state)` is `fold(events, Fold(state, (), {})).latest`. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
 approve=None)` is that member, always the same twenty-two keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
@@ -185,6 +203,7 @@ import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_tools.console import contract_draft, event_log, folder_trust, manager, plan_questions
 from agent_tools.system import siblings
@@ -198,6 +217,7 @@ RESULTS = ("planned", "registered", "not_registered", "needs_migration", "needs_
            "drafting", "behind")
 RUN_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "unreadable", "cancelled")
 UNAVAILABLE = "registering a project is not available on this host"
+STOPPING = "the console is stopping"
 EMPTY = "type the path of a repository"
 RELATIVE = "type the full path of the repository, starting with / or ~"
 OUTCOME_TEXT = {
@@ -265,6 +285,7 @@ UPDATE_VALUE = "update"
 UPDATE_STEP = "Update the checkout in a terminal, then " + AGAIN
 REMOTE_UNREAD = "The remote could not be read, so the console used the checkout as it is."
 NOT_WAITING = "that project is not waiting to be registered"
+OPEN_SHOWN = "another registration is open on the page"
 CANCEL_REFUSED = "only a registration that was not applied yet can be cancelled"
 CANCEL_UNSEEN = "the reason the last attempt failed has not been shown yet; read its card, then cancel"
 CANCEL_DISCARD_FAILED = ("The copy that the failed attempt left on this computer could not be removed, "
@@ -295,16 +316,25 @@ def waiting_headline(name: str) -> str:
     return f"{name} is already adopted and is not registered yet."
 
 
-def parse_register_request(body: bytes) -> str:
+def parse_register_request(body: bytes) -> tuple[str, bool]:
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("not a JSON object") from error
-    if not isinstance(value, dict) or set(value) != {"path"} or not isinstance(value["path"], str):
+    if (not isinstance(value, dict) or set(value) not in ({"path"}, {"path", "unless_open"})
+            or not isinstance(value["path"], str)):
         raise ValueError("wrong members")
+    if "unless_open" in value and value["unless_open"] is not True:
+        raise ValueError("wrong types")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value["path"]):
         raise ValueError("control character")
-    return value["path"]
+    return value["path"], "unless_open" in value
+
+
+def open_shown(entry: object) -> bool:
+    """True when the entry the owner's view shows is an open registration (#1334, ADR-console-084)."""
+    return not (entry is None or (isinstance(entry, Mapping) and entry.get("status") == "done"
+                                  and entry.get("note") == LATER_NOTE))
 
 
 def expand(path: str, home: str) -> str:
@@ -591,28 +621,76 @@ def ended(payload: Mapping) -> tuple[str, None, dict]:
     return (ENDED, None, dict(payload))
 
 
-def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict | None:
-    found = state
+PROJECT_REGISTERED = "project.registered"  # view.REGISTERED, which this module cannot import
+
+
+class Fold(NamedTuple):
+    """The folded registration, the ones shown before it and each registered project's root (#1334)."""
+
+    latest: dict | None
+    before: tuple[dict, ...]
+    roots: Mapping[str, str]
+
+
+def _root_of(payload: object) -> str | None:
+    root = payload.get("root") if isinstance(payload, Mapping) else None
+    return root if isinstance(root, str) and root else None
+
+
+def _row_of(event: event_log.Event) -> dict | None:
+    try:
+        _, _, payload = ended(event.payload)
+    except ValueError:
+        return None
+    found = {**DEFAULTS, **payload, "at": event.at}
+    if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
+        found["note"] = LEGACY_NOTES[found["note"]]
+    if isinstance(found["draft"], list) and isinstance(found["root"], str):
+        found["draft"] = contract_draft.refresh(found["root"], found["draft"])
+        if found["result"] == "drafting":
+            found["questions"] = contract_draft.questions(found["draft"])
+    return found
+
+
+def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
+    found, before, known = state or Fold(None, (), {})
+    roots = dict(known)
     for event in events:
         cancelled = event_log.cancelled_registration(event)
         if cancelled is not None:
             if found is not None and cancelled == (found["root"], found["plan_id"]):
-                found = None
+                if event.payload.get("restore") is True and before:
+                    found, before = before[-1], before[:-1]
+                else:
+                    found, before = None, ()
+            continue
+        if event.kind == PROJECT_REGISTERED:
+            root = _root_of(event.payload)
+            if event.project is not None and root is not None:
+                roots[event.project] = root
+            continue
+        if event.kind == event_log.PROJECT_UNREGISTERED:
+            root = _root_of(event.payload) or roots.get(event.project)
+            roots.pop(event.project, None)
+            if root is None or root in roots.values():
+                continue
+            before = tuple(e for e in before if e["root"] != root)
+            if found is not None and found["root"] == root:
+                found, before = (before[-1], before[:-1]) if before else (None, ())
             continue
         if event.kind != ENDED:
             continue
-        try:
-            _, _, payload = ended(event.payload)
-        except ValueError:
+        row = _row_of(event)
+        if row is None:
             continue
-        found = {**DEFAULTS, **payload, "at": event.at}
-        if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
-            found["note"] = LEGACY_NOTES[found["note"]]
-        if isinstance(found["draft"], list) and isinstance(found["root"], str):
-            found["draft"] = contract_draft.refresh(found["root"], found["draft"])
-            if found["result"] == "drafting":
-                found["questions"] = contract_draft.questions(found["draft"])
-    return found
+        if found is not None and found["root"] != row["root"]:
+            before = tuple(e for e in before if e["root"] != row["root"]) + (found,)
+        found = row
+    return Fold(found, before, roots)
+
+
+def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict | None:
+    return fold(events, Fold(state, (), {})).latest
 
 
 def waiting(latest: Mapping | None) -> bool:
@@ -704,23 +782,24 @@ def parse_confirm_request(body: bytes) -> tuple[str, str]:
     return root, choice
 
 
-def cancelled_row(root: str, plan_id: str | None) -> tuple[str, None, dict]:
-    return (CANCELLED, None, {"by": "owner", "root": root, "plan_id": plan_id})
+def cancelled_row(root: str, plan_id: str | None, restore: bool = False) -> tuple[str, None, dict]:
+    payload = {"by": "owner", "root": root, "plan_id": plan_id}
+    return (CANCELLED, None, {**payload, "restore": True} if restore else payload)
 
 
-def parse_cancel_request(body: bytes) -> str:
+def parse_cancel_request(body: bytes) -> tuple[str, bool]:
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("not a JSON object") from error
-    if not isinstance(value, dict) or set(value) != {"root"}:
+    if not isinstance(value, dict) or set(value) not in ({"root"}, {"root", "restore"}):
         raise ValueError("wrong members")
     root = value["root"]
-    if not isinstance(root, str) or not root:
+    if not isinstance(root, str) or not root or ("restore" in value and value["restore"] is not True):
         raise ValueError("wrong types")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in root):
         raise ValueError("control character")
-    return root
+    return root, "restore" in value
 
 
 def cancellable(latest: Mapping | None, adoption: Mapping | None) -> bool:
@@ -798,12 +877,14 @@ class Adopter:
         self._apply_timeout = apply_timeout
 
     def plan(self, root: str, cancel=None, answers: Sequence[Mapping[str, str]] = (),
-             contract: str | None = None) -> dict:
+             contract: str | None = None, environment: str | None = None) -> dict:
         arguments = ["plan", "--repo-root", root, "--format", "json"]
         for answer in answers:
             arguments += ["--answer", answer["id"], answer["subject"], answer["value"]]
         if contract is not None:
             arguments += ["--contract-draft", contract]
+        if environment is not None:
+            arguments += ["--commit-environment", environment]
         return self._run(arguments, cancel, self._timeout)
 
     def register(self, root: str, cancel=None, *, integration_branch: str | None = None,
@@ -854,4 +935,4 @@ class Adopter:
 
 
 def adopter_for(platform: str) -> Adopter | None:
-    return Adopter() if platform.startswith("linux") else None
+    return Adopter() if manager.supported(platform) else None

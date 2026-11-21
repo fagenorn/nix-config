@@ -3,6 +3,8 @@
 Run: just agent-workflow-tests
 """
 
+import contextlib
+import inspect
 import io
 import json
 import os
@@ -21,12 +23,53 @@ from agent_tools.console.event_log import Event
 from agent_tools.console.signin_run import (
     ACTED, ENDED, CODE_END, CODE_INPUT, LINK_WAIT, LOGIN_DEADLINE, MAX_CODE_CHARS, MAX_LINK_CHARS,
     Ended, NotRunning, SignIns, Started, StartFailed, acted, ended, ended_state, login_command,
-    login_environment, parse_code_request, parse_profile_request, runs_for, valid_link)
+    guest_answer_members, login_environment, parse_code_request, parse_guest_cancel_request,
+    parse_guest_code_request, parse_profile_request, runs_for, valid_link)
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .process_liveness import process_alive
 
 LINK = "https://claude.example/oauth/authorize?state=SENTINEL-LINK-7f3a"
 CODE = "SENTINEL-CODE-91c2#x"
+LOOPBACK_LINK = ("https://claude.com/cai/oauth/authorize?code=true"
+                 "&redirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fcallback"
+                 "&state=SENTINEL-LINK-loop")
+MANUAL_LINK = ("https://claude.com/cai/oauth/authorize?code=true"
+               "&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code"
+               "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+               "&code_challenge=SENTINEL-LINK-challenge&code_challenge_method=S256"
+               "&state=SENTINEL-LINK-manual")
+NOISE_LINK = ("https://claude.example/oauth/authorize"
+              "?redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcallback&state=SENTINEL-OUT")
+BAD_LINK = ("https://[SENTINEL-OUT/oauth/authorize"
+            "?redirect_uri=https%3A%2F%2Fplatform.claude.example%2Fcb")
+LOOPBACK_FORWARD = "ssh -N -L 54321:localhost:54321 console-host"
+
+
+def route_of(link):
+    return (getattr(link, "url", link), getattr(link, "route", None),
+            getattr(link, "port", None), getattr(link, "forward", None))
+
+
+@contextlib.contextmanager
+def stderr_text():
+    """Everything written to stderr inside the block: Python's and descriptor 2's, joined."""
+    class Captured:
+        text = ""
+
+    captured = Captured()
+    python_side = io.StringIO()
+    saved = os.dup(2)
+    with tempfile.TemporaryFile() as descriptor_side:
+        try:
+            with contextlib.redirect_stderr(python_side):
+                os.dup2(descriptor_side.fileno(), 2)
+                yield captured
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+            descriptor_side.seek(0)
+            captured.text = python_side.getvalue() + descriptor_side.read().decode(
+                "utf-8", "replace")
 
 FAKE = textwrap.dedent('''\
     #!%(python)s
@@ -45,8 +88,39 @@ FAKE = textwrap.dedent('''\
             "proxy": os.environ.get("CLAUDE_CACHE_PROXY"),
             "leader": os.getsid(0) == os.getpid(), "cwd": os.getcwd(),
             "stdin_tty": os.isatty(0)})
+
+    def out(text, stream=sys.stdout):
+        stream.write(text)
+        stream.flush()
+
+    def offer(manual):
+        out("Opening browser to sign in...\\n")
+        out("If the browser didn't open, visit: \\x1b]8;;" + manual + "\\x07" + manual
+            + "\\x1b]8;;\\x07\\n")
+
+    noise = os.environ.get("FAKE_NOISE")
+    manual = os.environ.get("FAKE_MANUAL")
+    delay = os.environ.get("FAKE_MANUAL_DELAY")
+    if noise:
+        for _ in range(200):
+            out("SENTINEL-OUT " + "x" * 1490 + "\\n")
+        out("see javascript:SENTINEL-OUT and " + noise + "\\n")
+    if os.environ.get("FAKE_BAD"):
+        out(os.environ["FAKE_BAD"] + "\\n")
+    if manual and not delay:
+        offer(manual)
     if mode != "nolink":
         subprocess.run([os.environ["BROWSER"], os.environ["FAKE_LINK"]])
+    if manual and delay:
+        time.sleep(float(delay))
+        offer(manual)
+        record({"manual_written": True})
+    if noise:
+        for _ in range(200):
+            out("SENTINEL-OUT " + "x" * 1490 + "\\n")
+            out("SENTINEL-ERR " + "y" * 1490 + "\\n", sys.stderr)
+    if mode != "nolink":
+        out("Paste code here if prompted > ")
     if mode in ("code", "nolink"):
         line = sys.stdin.readline()
         record({"code": line.rstrip("\\r\\n")})
@@ -91,6 +165,8 @@ class ConstantsTest(unittest.TestCase):
             self.assertNotIn(name, env)
         self.assertEqual((LOGIN_DEADLINE, LINK_WAIT, MAX_LINK_CHARS, MAX_CODE_CHARS),
                          (600, 15, 4096, 512))
+        self.assertEqual((signin_run.MANUAL_GRACE, signin_run.ROUTES),
+                         (2.0, ("manual", "loopback", "unknown")))
         self.assertIn(CODE_INPUT, ("pipe", "pty"))
         self.assertEqual(CODE_END, {"pipe": "\n", "pty": "\r"})
         self.assertEqual(event_log.SIGNIN_ACTED, "signin.acted")
@@ -124,6 +200,202 @@ class ParseTest(unittest.TestCase):
             with self.subTest(text=text[:20]):
                 self.assertFalse(valid_link(text))
         self.assertTrue(valid_link("https://" + "a" * 4088))
+
+
+    def test_link_route_table(self):
+        def query(text):
+            return "https://a.example/o?" + text
+
+        rows = [
+            (LOOPBACK_LINK, ("loopback", 54321)),
+            (query("redirect_uri=http%3A%2F%2F127.0.0.1%3A8%2Fcallback"), ("loopback", 8)),
+            (query("redirect_uri=http%3A%2F%2F%5B%3A%3A1%5D%3A9%2Fcallback"), ("loopback", 9)),
+            (query("redirect_uri=http%3A%2F%2Flocalhost%2Fcallback"), ("loopback", 80)),
+            (query("redirect_uri=http%3A%2F%2F%5B0%3A0%3A0%3A0%3A0%3A0%3A0%3A1%5D%3A54321%2Fcallback"),
+             ("loopback", 54321)),
+            (query("redirect_uri=http%3A%2F%2F%5B0%3A0%3A0%3A0%3A0%3A0%3A0%3A1%5D%2Fcallback"),
+             ("loopback", 80)),
+            (query("redirect_uri=https%3A%2F%2F%5B0%3A0%3A0%3A0%3A0%3A0%3A0%3A1%5D%3A5%2Fcb"), None),
+            ("https://?redirect_uri=https%3A%2F%2Fexample.com%2Fcallback", None),
+            ("https://:8443/o?redirect_uri=https%3A%2F%2Fexample.com%2Fcallback", None),
+            (query("redirect_uri=http%3A%2F%2Flocalhost%3A99999%2Fcallback"), None),
+            (query("redirect_uri=https%3A%2F%2Fexample.com%3A99999%2Fcb"), None),
+            (query("redirect_uri=https%3A%2F%2Fexample.com%3A0%2Fcb"), None),
+            (query("redirect_uri=https%3A%2F%2Fexample.com%3A8443%2Fcb"), ("manual", None)),
+            ("https://a.example:99999/o?redirect_uri=https%3A%2F%2Fexample.com%2Fcb", None),
+            (query("redirect_uri=http%3A%2F%2F%5B%3A%3A1%2Fcallback"), None),
+            (BAD_LINK, None),
+            (MANUAL_LINK, ("manual", None)),
+            (LINK, None),
+            (query("redirect_uri=http%3A%2F%2Fevil.example%2Fcb"), None),
+            (query("redirect_uri=https%3A%2F%2Flocalhost%3A5%2Fcb"), None),
+            (query("redirect_uri=https%3A%2F%2Fplatform.claude.example%2Fcb"
+                   "&redirect_uri=http%3A%2F%2Flocalhost%3A5%2Fcb"), None),
+        ]
+        for url, expected in rows:
+            with self.subTest(url=url[:60]):
+                self.assertEqual(signin_run.link_route(url), expected)
+
+    def test_output_links_finds_each_https_token_of_a_line(self):
+        manual = MANUAL_LINK.encode()
+        rows = [
+            (b"If the browser didn't open, visit: \x1b]8;;" + manual + b"\x07" + manual
+             + b"\x1b]8;;\x07", [MANUAL_LINK, MANUAL_LINK]),
+            (b"visit: " + manual, [MANUAL_LINK]),
+            (b"javascript:x https://a b", ["https://a"]),
+            (b"\xffhttps://x\xff", ["https://x"]),
+            (b"https://" + b"a" * 4089, []),
+            (b"no link here", []),
+        ]
+        for line, expected in rows:
+            with self.subTest(line=line[:40]):
+                self.assertEqual(signin_run.output_links(line), expected)
+
+    def test_lines_drop_a_token_the_limit_cut_in_two(self):
+        rows = [
+            (10, b"ab cdefghijkl\n", [b"ab "]),
+            (10, b"abcdefghi jkl\n", [b"abcdefghi "]),
+            (10, b"abcdefghijkl\nnext\n", [b"", b"next"]),
+            (10, b"abcdefghij\n", [b"abcdefghij"]),
+        ]
+        for limit, data, expected in rows:
+            with self.subTest(data=data):
+                self.assertEqual(signin_run._Lines(limit).feed(data), expected)
+        chunked = signin_run._Lines(10)
+        self.assertEqual(chunked.feed(b"ab cdefgh") + chunked.feed(b"ijkl\n"), [b"ab "])
+
+    def test_forward_command_table(self):
+        self.assertEqual(signin_run.forward_command(54321, "console-host"), LOOPBACK_FORWARD)
+        self.assertEqual(signin_run.forward_command(80, "h"), "ssh -N -L 80:localhost:80 h")
+        for port, host in ((0, "h"), (65536, "h"), (5, "a b"), (5, "-x"), (5, ""), (5, "h;rm")):
+            with self.subTest(port=port, host=host):
+                self.assertIsNone(signin_run.forward_command(port, host))
+
+    def test_answer_members(self):
+        self.assertEqual(signin_run.answer_members(None),
+                         {"link": None, "route": None, "port": None, "forward": None})
+        self.assertEqual(
+            signin_run.answer_members(signin_run.Link(
+                LOOPBACK_LINK, "loopback", 54321, "ssh -N -L 54321:localhost:54321 h")),
+            {"link": LOOPBACK_LINK, "route": "loopback", "port": 54321,
+             "forward": "ssh -N -L 54321:localhost:54321 h"})
+        self.assertEqual(
+            signin_run.answer_members(signin_run.Link(LINK, "unknown", None, None)),
+            {"link": LINK, "route": "unknown", "port": None, "forward": None})
+
+
+A = "colleague@example.invalid"
+
+
+class GuestRecordTest(unittest.TestCase):
+    def test_a_colleagues_sign_in_row_names_his_login(self):
+        self.assertEqual(acted("colleague-1", "start", "started", by=A)[2],
+                         {"by": A, "profile": "colleague-1", "action": "start",
+                          "outcome": "started"})
+        with self.assertRaises(ValueError):
+            acted("w", "start", "started", by="nobody")
+
+    def test_the_guest_code_and_cancel_bodies_name_an_attempt_and_no_profile(self):
+        self.assertEqual(parse_guest_code_request(json.dumps({"attempt": 7, "code": CODE}).encode()),
+                         (7, CODE))
+        self.assertEqual(parse_guest_cancel_request(b'{"attempt": 7}'), 7)
+        for body in ({"attempt": 7, "code": CODE, "profile": "work"}, {"attempt": 7, "code": ""},
+                     {"attempt": 7, "code": "a b"}, {"attempt": 7, "code": "x" * 513},
+                     {"code": CODE}, {"attempt": 0, "code": CODE}, {"attempt": -1, "code": CODE},
+                     {"attempt": True, "code": CODE}, {"attempt": "7", "code": CODE},
+                     {"attempt": 7.0, "code": CODE}, {}):
+            with self.subTest(code=body), self.assertRaises(ValueError):
+                parse_guest_code_request(json.dumps(body).encode())
+        for body in (b'{}', b'{"profile": "work"}', b'{"attempt": 7, "profile": "work"}',
+                     b'{"attempt": true}', b'{"attempt": 0}', b'{"attempt": "7"}', b'[]',
+                     b'{"attempt":1,"attempt":1}', b'\xff'):
+            with self.subTest(cancel=body), self.assertRaises(ValueError):
+                parse_guest_cancel_request(body)
+        with self.assertRaises(ValueError):
+            parse_guest_code_request(b'{"attempt": 7, "code": "a", "code": "a"}')
+
+    def test_the_guest_answer_hands_out_a_remote_link_only(self):
+        self.assertEqual(guest_answer_members(None), {"link": None, "route": None})
+        self.assertEqual(guest_answer_members(signin_run.Link(MANUAL_LINK, "manual", None, None)),
+                         {"link": MANUAL_LINK, "route": "manual"})
+        self.assertEqual(guest_answer_members(signin_run.Link(MANUAL_LINK, "unknown", None, None)),
+                         {"link": MANUAL_LINK, "route": "unknown"})
+        loopback = signin_run.Link(LOOPBACK_LINK, "loopback", 54545,
+                                   "ssh -N -L 54545:localhost:54545 console-host")
+        self.assertEqual(guest_answer_members(loopback), {"link": None, "route": "loopback"})
+
+    def test_a_printed_url_that_is_not_the_sign_in_request_is_handed_to_no_guest(self):
+        authorize = "https://claude.com/cai/oauth/authorize"
+        callback = "https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+        redirect = f"redirect_uri={callback}"
+        for url in (f"{authorize}?{redirect}&access_token=SENTINEL-TOKEN",
+                    f"https://diag.example/report?{redirect}&token=SENTINEL-TOKEN",
+                    f"{authorize}?{redirect}#access_token=SENTINEL-TOKEN",
+                    f"https://user:SENTINEL-TOKEN@claude.com/cai/oauth/authorize?code=true&{redirect}",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fp.example%2Fcb%3Faccess_token%3DSENTINEL",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fp.example%2Fcb%23SENTINEL",
+                    f"https://platform.claude.com/oauth/code/callback?code=SENTINEL-AUTH&state=s"
+                    f"&{redirect}",
+                    f"https://claude.com/oauth/code/callback?code=true&{redirect}",
+                    f"{authorize}?code=SENTINEL-AUTH&{redirect}",
+                    f"{authorize}?code=true&code=SENTINEL-AUTH&{redirect}",
+                    f"{authorize}?{redirect}&state=s",
+                    f"{authorize}x?code=true&{redirect}",
+                    # the authorization host or path is the client's own, as a pair
+                    f"https://evil.example/oauth/authorize?code=true&{redirect}",
+                    f"https://evil.example/cai/oauth/authorize?code=true&{redirect}",
+                    f"https://claude.com/oauth/authorize?code=true&{redirect}",
+                    f"https://platform.claude.com/cai/oauth/authorize?code=true&{redirect}",
+                    f"https://claude.com:8443/cai/oauth/authorize?code=true&{redirect}",
+                    f"https://claude.com/cai/oauth/authorize;SENTINEL-TOKEN?code=true&{redirect}",
+                    f"https://claude.com/cai/oauth/authorize;x=SENTINEL?code=true&{redirect}",
+                    # the return address is the client's manual one, nothing after its path
+                    f"{authorize}?code=true&redirect_uri={callback}%2FSENTINEL-TOKEN",
+                    f"{authorize}?code=true&redirect_uri={callback}%3BSENTINEL-TOKEN",
+                    f"{authorize}?code=true&redirect_uri={callback}%2F",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fevil.example%2Foauth%2Fcode%2Fcallback",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%3A8443"
+                    "%2Foauth%2Fcode%2Fcallback",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Fcb",
+                    f"{authorize}?code=true&state=s",
+                    # the whole authorization request, not a part of it: a client id and a challenge
+                    f"{authorize}?code=true&{redirect}&state=s",
+                    f"{authorize}?code=true&{redirect}&response_type=code&code_challenge_method=S256"
+                    "&state=s&code_challenge=x_Y-9",
+                    f"{authorize}?code=true&{redirect}&response_type=code&code_challenge_method=S256"
+                    "&state=s&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+                    f"{authorize}?code=true&{redirect}&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+                    "&code_challenge=x_Y-9&state=s",
+                    f"{authorize}?code=true&{redirect}&code_challenge=x_Y-9&state=s"
+                    "&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code",
+                    f"{authorize}?code=true&{redirect}&{redirect}",
+                    f"{authorize}?code=true&{redirect}&state=a&state=SENTINEL-TOKEN",
+                    # a member the client sends is still one of its own values, not any text
+                    f"{authorize}?code=true&{redirect}&client_id=SENTINEL-TOKEN",
+                    f"{authorize}?code=true&{redirect}&scope=SENTINEL-TOKEN",
+                    f"{authorize}?code=true&{redirect}&scope=user%3Aprofile%20sk-ant-oat01-SENTINEL",
+                    f"{authorize}?code=true&{redirect}&response_type=token",
+                    f"{authorize}?code=true&{redirect}&code_challenge_method=plain",
+                    f"{authorize}?code=true&{redirect}&code_challenge=SENTINEL.TOKEN",
+                    f"{authorize}?code=true&{redirect}&state=SENTINEL%20TOKEN"):
+            with self.subTest(url=url):
+                link = signin_run.Link(url, "manual", None, None)
+                self.assertFalse(signin_run.guest_link(url))
+                self.assertEqual(guest_answer_members(link), {"link": None, "route": None})
+        for url in (f"{authorize}?code=true&{redirect}&access_token=SENTINEL-TOKEN",
+                    f"{authorize}?code=true&redirect_uri={callback}%2FSENTINEL-TOKEN"):
+            self.assertEqual(signin_run.link_route(url), ("manual", None))
+        self.assertFalse(signin_run.guest_link(
+            f"http://claude.com/cai/oauth/authorize?code=true&{redirect}"))
+        for endpoint in ("https://claude.com/cai/oauth/authorize", "https://claude.ai/oauth/authorize",
+                         "https://platform.claude.com/oauth/authorize"):
+            full = (f"{endpoint}?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code"
+                    f"&{redirect}&scope=org%3Acreate_api_key%20user%3Aprofile%20user%3Ainference"
+                    "&code_challenge=x_Y-9&code_challenge_method=S256&state=s")
+            with self.subTest(endpoint=endpoint):
+                self.assertTrue(signin_run.guest_link(full))
+                self.assertEqual(guest_answer_members(signin_run.Link(full, "manual", None, None)),
+                                 {"link": full, "route": "manual"})
 
 
 class EntryTest(unittest.TestCase):
@@ -186,8 +458,11 @@ class RunTest(unittest.TestCase):
         return root
 
     def make(self, **kwargs):
+        wanted = {"manual_grace": 0.2, "host": "console-host", **kwargs}
+        known = inspect.signature(SignIns).parameters
         runs = SignIns(on_end=lambda *args: self.ends.append(args), environ=self.environ,
-                       clock=lambda: self.now[0], **kwargs)
+                       clock=lambda: self.now[0],
+                       **{key: value for key, value in wanted.items() if key in known})
         self.addCleanup(runs.close)
         return runs
 
@@ -211,7 +486,7 @@ class RunTest(unittest.TestCase):
         self.arrange("code")
         runs = self.make()
         self.assertEqual(runs.start("work"), Started(1, True))
-        self.assertEqual(runs.wait_link("work"), LINK)
+        self.assertEqual(route_of(runs.wait_link("work")), (LINK, "unknown", None, None))
         self.assertEqual(runs.running(), frozenset({"work"}))
         first = self.lines()[0]
         self.assertEqual(first["argv"], ["run", "auth", "login"])
@@ -240,8 +515,8 @@ class RunTest(unittest.TestCase):
         runs = self.make()
         self.assertEqual(runs.start("work"), Started(1, True))
         self.assertEqual(runs.start("work"), Started(1, False))
-        self.assertEqual(runs.wait_link("work"), LINK)
-        self.assertEqual(runs.wait_link("work"), LINK)
+        self.assertEqual(route_of(runs.wait_link("work")), (LINK, "unknown", None, None))
+        self.assertEqual(route_of(runs.wait_link("work")), (LINK, "unknown", None, None))
         self.assertEqual(len([line for line in self.lines() if "argv" in line]), 1)
 
     def test_a_run_past_its_deadline_is_killed_with_its_group_and_its_port_released(self):
@@ -334,6 +609,185 @@ class RunTest(unittest.TestCase):
             until(self, lambda: err.getvalue())
         self.assertEqual(err.getvalue(), "console: signin_link_refused work\n")
         self.assertNotIn("SENTINEL-BAD", err.getvalue())
+
+    def test_an_unusable_link_of_an_unnamed_profile_is_dropped_without_its_name(self):
+        self.arrange("code", FAKE_LINK="javascript:SENTINEL-BAD")
+        runs = self.make(link_wait=0.5)
+        runs.named = lambda profile: False
+        err = io.StringIO()
+        with redirect_stderr(err):
+            runs.start("work")
+            self.assertIsNone(runs.wait_link("work"))
+            until(self, lambda: err.getvalue())
+        self.assertEqual(err.getvalue(), "console: signin_link_refused\n")
+
+    def test_a_client_offering_a_manual_link_hands_back_the_manual_route(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK)
+        runs = self.make()
+        runs.start("work")
+        link = runs.wait_link("work")
+        runs.send_code("work", CODE)
+        until(self, lambda: self.ends)
+        self.assertEqual(route_of(link), (MANUAL_LINK, "manual", None, None))
+        self.assertIn({"code": CODE}, self.lines())
+
+    def test_a_client_offering_only_a_loopback_link_names_its_port_and_forward_command(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK)
+        runs = self.make()
+        runs.start("work")
+        link = runs.wait_link("work")
+        self.assertEqual(route_of(link), (LOOPBACK_LINK, "loopback", 54321, LOOPBACK_FORWARD))
+
+    def test_a_link_whose_return_cannot_be_read_is_handed_out_as_unknown(self):
+        for fake_link in (LINK, "https://a.example/o?redirect_uri=http%3A%2F%2Flocalhost"
+                                "%3A99999%2Fcallback"):
+            with self.subTest(link=fake_link[:40]):
+                self.arrange("code", FAKE_LINK=fake_link)
+                runs = self.make()
+                runs.start("work")
+                link = runs.wait_link("work")
+                self.assertEqual(route_of(link), (fake_link, "unknown", None, None))
+
+    def test_a_manual_link_printed_after_the_browser_call_within_the_grace_wins(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_MANUAL_DELAY="0.3")
+        runs = self.make(manual_grace=3)
+        runs.start("work")
+        link = runs.wait_link("work")
+        self.assertEqual(route_of(link)[:2], (MANUAL_LINK, "manual"))
+
+    def test_a_loopback_link_is_answered_once_the_grace_passes(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK)
+        runs = self.make(manual_grace=0.3, link_wait=10)
+        runs.start("work")
+        began = time.monotonic()
+        link = runs.wait_link("work")
+        elapsed = time.monotonic() - began
+        self.assertEqual(route_of(link)[1], "loopback")
+        self.assertLess(elapsed, 5)
+
+    def test_the_route_handed_out_stays_the_same_for_the_attempt(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_MANUAL_DELAY="1.0")
+        runs = self.make(manual_grace=0.2)
+        expected = (LOOPBACK_LINK, "loopback", 54321, LOOPBACK_FORWARD)
+        runs.start("work")
+        first = runs.wait_link("work")
+        self.assertEqual(route_of(first), expected)
+        self.wait_record("manual_written")
+        until(self, lambda: getattr(runs._runs.get("work"), "manual", None) is not None)
+        second = runs.wait_link("work")
+        self.assertEqual(route_of(second), expected)
+
+    def test_an_unusable_manual_link_does_not_displace_a_working_one(self):
+        unusable = ("https://claude.example/oauth/authorize?code=true"
+                    "&redirect_uri=https%3A%2F%2Fexample.com%3A99999%2Fcb&state=SENTINEL-OUT")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=unusable,
+                     FAKE_MANUAL=MANUAL_LINK)
+        runs = self.make()
+        runs.start("work")
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_diagnostic_url_printed_first_does_not_take_the_manual_slot_from_the_real_link(self):
+        diagnostic = ("https://diag.example/report?redirect_uri=https%3A%2F%2Fp.example%2Fcb"
+                      "&access_token=SENTINEL-TOKEN")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=diagnostic, FAKE_MANUAL=MANUAL_LINK)
+        runs = self.make()
+        runs.start("work")
+        first = runs.wait_link("work")
+        self.assertEqual(route_of(first), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(guest_answer_members(first), {"link": MANUAL_LINK, "route": "manual"})
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_usable_manual_link_that_arrives_after_a_diagnostic_choice_replaces_it_on_retry(self):
+        diagnostic = ("https://diag.example/report?redirect_uri=https%3A%2F%2Fp.example%2Fcb"
+                      "&access_token=SENTINEL-TOKEN")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=diagnostic, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_MANUAL_DELAY="1.0")
+        runs = self.make(manual_grace=0.2)
+        runs.start("work")
+        first = runs.wait_link("work")
+        self.assertEqual(guest_answer_members(first), {"link": None, "route": None})
+        self.wait_record("manual_written")
+        until(self, lambda: getattr(runs._runs.get("work"), "manual", None) is not None)
+        second = runs.wait_link("work")
+        self.assertEqual(route_of(second), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(guest_answer_members(second), {"link": MANUAL_LINK, "route": "manual"})
+
+    def test_an_incomplete_authorization_url_printed_first_does_not_take_the_manual_slot(self):
+        incomplete = ("https://claude.com/cai/oauth/authorize?code=true"
+                      "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+                      "&state=SENTINEL-DIAG")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=incomplete, FAKE_MANUAL=MANUAL_LINK)
+        runs = self.make()
+        runs.start("work")
+        link = runs.wait_link("work")
+        self.assertEqual(route_of(link), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(guest_answer_members(link), {"link": MANUAL_LINK, "route": "manual"})
+
+    def test_a_manual_link_no_colleague_may_have_still_serves_the_owner_when_it_is_the_only_one(self):
+        diagnostic = ("https://diag.example/report?redirect_uri=https%3A%2F%2Fp.example%2Fcb"
+                      "&access_token=SENTINEL-TOKEN")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=diagnostic)
+        runs = self.make()
+        runs.start("work")
+        link = runs.wait_link("work")
+        self.assertEqual(route_of(link), (diagnostic, "manual", None, None))
+        self.assertEqual(guest_answer_members(link), {"link": None, "route": None})
+
+    def test_a_line_cut_by_the_output_limit_never_hands_out_a_shortened_link(self):
+        cut = len(MANUAL_LINK) - 5
+        long_line = " " * (signin_run.MAX_OUTPUT_LINE - cut) + MANUAL_LINK
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=long_line,
+                     FAKE_MANUAL=MANUAL_LINK, FAKE_MANUAL_DELAY="0.3")
+        runs = self.make(manual_grace=5)
+        runs.start("work")
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_request_deadline_inside_the_grace_waits_out_the_grace_for_the_manual_link(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_MANUAL_DELAY="1.5")
+        runs = self.make(manual_grace=8, link_wait=0.6)
+        runs.start("work")
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_request_deadline_inside_the_grace_still_ends_with_the_grace(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_MANUAL_DELAY="3.0")
+        runs = self.make(manual_grace=0.8, link_wait=0.4)
+        runs.start("work")
+        expected = (LOOPBACK_LINK, "loopback", 54321, LOOPBACK_FORWARD)
+        self.assertEqual(route_of(runs.wait_link("work")), expected)
+        self.assertEqual(route_of(runs.wait_link("work")), expected)
+
+    def test_a_malformed_link_on_the_output_is_skipped_and_the_run_finishes(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=BAD_LINK,
+                     FAKE_MANUAL=MANUAL_LINK)
+        runs = self.make()
+        with stderr_text() as captured:
+            runs.start("work")
+            link = runs.wait_link("work")
+            runs.send_code("work", CODE)
+            until(self, lambda: self.ends)
+        self.assertEqual(route_of(link), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(len(self.ends), 1)
+        self.assertIn({"code": CODE}, self.lines())
+        self.assertNotIn("SENTINEL", captured.text)
+
+    def test_client_output_is_read_but_reaches_no_stderr_line(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_NOISE=NOISE_LINK)
+        runs = self.make()
+        with stderr_text() as captured:
+            runs.start("work")
+            link = runs.wait_link("work")
+            runs.send_code("work", CODE)
+            until(self, lambda: self.ends)
+        self.assertEqual(route_of(link), (MANUAL_LINK, "manual", None, None))
+        self.assertIn({"code": CODE}, self.lines())
+        self.assertEqual(captured.text, "")
+        self.assertNotIn("SENTINEL-OUT", repr(link))
 
     def test_a_missing_client_is_not_installed(self):
         root = self.arrange("code")

@@ -161,10 +161,22 @@ class PageTest(unittest.TestCase):
             with self.subTest(pattern=pattern):
                 self.assertEqual(re.findall(pattern, self.data), [])
 
-    def test_the_page_is_under_61_kb_compressed(self) -> None:
+    def test_the_page_is_under_65_kb_compressed(self) -> None:
         # Raised from 60 KB by #1260: main sat 5 bytes under the old cap, so the look card's own code could
         # only fit by dropping ten of the page's explanatory comments, which a merge did silently.
-        self.assertLess(len(gzip.compress(self.data, 9)), 62464)
+        # Raised from 61 KB by #1323: the route sentence, its three wordings and the forward-command check
+        # (about 700 bytes compressed) did not fit the 439 bytes the cap had left.
+        # Raised from 62 KB by #1263: its guest controls and actor marks on both pages, merged with #1323's
+        # route sentence, came to 64126 bytes against the 63488 the two caps held.
+        # Raised from 63 KB by #1341: the guest pool's line, rows and settling (about 1.4 KB compressed) did
+        # not fit the 302 bytes the cap had left.
+        # #1338 also needed room beyond the 63 KB cap: the notice that keeps a refused merge's words once its
+        # card is gone (a merge that found another head merged) took the 63 bytes it had left, and merged with
+        # #1341 the page is 66082 bytes against the 66560 the cap holds.
+        # Raised from 65 KB by #1343: the guest page's own-account form (consent, tick, sign-in, link, code box and
+        # their redraws, about 2.1 KB compressed) did not fit the room the 65 KB cap had left, and merged with
+        # #1338 the page is 68280 bytes against the 66560 the cap before it held.
+        self.assertLess(len(gzip.compress(self.data, 9)), 69632)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -207,7 +219,8 @@ class PageTest(unittest.TestCase):
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
              "/api/activate", "/api/look-retry", "/api/share-tailnet", "/api/share-colleague",
-             "/api/share-remove"},
+             "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
+             "/api/guest-signin-cancel", "/api/adoption-merge"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -216,7 +229,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 46)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 50)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -918,7 +931,7 @@ class CapacityPageTest(unittest.TestCase):
         result = render_page({**view([]), "capacity": capacity([
             profile("a", "ok", week_left=65, excluded=True),
             profile("b", "out", out_until="2026-11-20T09:30:00+00:00"),
-        ], all_out=True)})
+        ], all_out=True)}, NOW_MS)
         items = [n["text"] for n in nodes(result["promoted"]) if n["tag"] == "li"]
         self.assertEqual(items, ["a excluded", "b out until Fri 09:30"])
 
@@ -7110,6 +7123,15 @@ SIGNIN = {
     "answered": False, "waiting_since": "2026-11-12T08:00:00+00:00",
 }
 ANSWER = "{\"attempt\":7,\"link\":\"https://claude.example/a?s=1\"}"
+LINK_A = "https://claude.example/a?s=1"
+FWD = "ssh -N -L 54321:localhost:54321 console-host"
+PORT_LINE = ("This sign-in returns to port 54321 on the console's machine. "
+             "If your browser is on another machine, forward that port to it first")
+MANUAL_SENTENCE = ("Sign in on that page; it then shows a code. "
+                   "Paste the code here and press Send code.")
+UNKNOWN_SENTENCE = ("The console could not tell where this sign-in returns, "
+                    "so a browser on another machine may not finish it.")
+LOOPBACK_ANSWER = {"attempt": 7, "forward": FWD, "link": LINK_A, "port": 54321, "route": "loopback"}
 
 
 def with_run(entry: dict, state: str, attempt: int) -> dict:
@@ -7561,6 +7583,18 @@ class StripPageTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(snap["capacity"])
                           if has_class(n, "acct-pin") or has_class(n, "cap-pin")], [])
 
+    def test_a_row_of_a_profile_a_colleague_added_offers_no_sign_in_but_keeps_the_owners_other_actions(self) -> None:
+        """#1361: the service refuses the owner that sign-in, so the row offers none."""
+        cap = real_capacity(NOW_S, [{"name": "a", "week": .5, "signin": ("signed_out", None), "ever": True},
+                                    {"name": "b", "week": .5, "signin": ("signed_out", None), "ever": True}])
+        for entry in cap["profiles"]:
+            entry["owner"] = "ana@corp.invalid" if entry["profile"] == "b" else None
+        snap = opened({**view([]), "capacity": cap})
+        self.assertEqual(len(in_row(row_of(snap, "a"), "button", "acct-signin")), 1)
+        theirs = row_of(snap, "b")
+        self.assertEqual(in_row(theirs, "button", "acct-signin"), [])
+        self.assertEqual(len(in_row(theirs, "button", "acct-remove")), 1)
+
     def test_sign_in_words_show_only_when_the_sign_in_asks(self) -> None:
         reading = {"week": .5, "week_reset": NOW_S + 86400}
         frame_ = {**view([]), "capacity": real_capacity(NOW_S, [
@@ -7963,6 +7997,18 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(default["cls"], "cap-signed-out")
         self.assertEqual(full(default), "default signed out")
 
+    def test_a_signed_out_colleague_profile_waits_for_him_and_the_owners_own_says_signed_out(self) -> None:
+        """#1361, ADR-console-087 D3: the strip says whose sign-in a signed-out account waits for."""
+        snap = capacity_snap(capacity([
+            profile("work", "unknown", signin=si("signed_out", None, ask=True), owner=None),
+            profile("colleague-1", "unknown", signin=si("signed_out", None, ask=True),
+                    owner="ana@corp.invalid")]))
+        by_name = {next(c["text"] for c in nodes(n) if c["tag"] == "b"): n for n in accounts(snap)}
+        self.assertEqual([full(n) for n in nodes(by_name["work"]) if has_class(n, "cap-signin")],
+                         ["signed out"])
+        self.assertEqual([full(n) for n in nodes(by_name["colleague-1"]) if has_class(n, "cap-signin")],
+                         ["waits for ana@corp.invalid to sign in"])
+
     def test_only_signed_out_profiles_show_without_a_state_word(self) -> None:
         snap = capacity_snap(capacity([
             profile("default", "unknown", signin=si("signed_out", None))]))
@@ -8028,6 +8074,67 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
         self.assertEqual([full(n) for n in of_class(card, "p", "signin-run")],
                          ["A sign-in is running."])
+
+    def route_card(self, answer: dict | None = None, text: str | None = None) -> dict:
+        body = text if text is not None else json.dumps(answer, sort_keys=True, separators=(",", ":"))
+        steps = [START, {"frame": frame([SIGNIN])}, {"respond": {"status": 200, "text": body}},
+                 {"click": "signin-start"}, {"frame": frame([with_run(SIGNIN, "running", 7)])},
+                 {"snapshot": True}]
+        (snap,) = render(steps)
+        return sign_in_card(snap)
+
+    def route_texts(self, card: dict) -> list:
+        return [full(n) for n in of_class(card, "p", "signin-route")]
+
+    def test_a_manual_route_answer_shows_the_paste_the_code_sentence(self) -> None:
+        card = self.route_card({"attempt": 7, "forward": None, "link": LINK_A, "port": None,
+                                "route": "manual"})
+        (link,) = of_class(card, "a", "signin-link")
+        self.assertEqual(link["href"], LINK_A)
+        self.assertEqual(self.route_texts(card), [MANUAL_SENTENCE])
+        self.assertEqual(of_class(card, "code", "signin-forward"), [])
+        self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+
+    def test_a_loopback_route_answer_names_the_port_and_the_forward_command(self) -> None:
+        card = self.route_card(LOOPBACK_ANSWER)
+        self.assertEqual(self.route_texts(card), [PORT_LINE + ": " + FWD])
+        (forward,) = of_class(card, "code", "signin-forward")
+        self.assertEqual(full(forward), FWD)
+
+    def test_a_loopback_route_answer_without_a_forward_still_names_the_port(self) -> None:
+        card = self.route_card({**LOOPBACK_ANSWER, "forward": None})
+        self.assertEqual(self.route_texts(card), [PORT_LINE + "."])
+        self.assertEqual(of_class(card, "code", "signin-forward"), [])
+
+    def test_an_unknown_route_answer_says_the_return_could_not_be_told(self) -> None:
+        for answer in (
+            {"attempt": 7, "forward": None, "link": LINK_A, "port": None, "route": "unknown"},
+            {"attempt": 7, "forward": None, "link": LINK_A, "port": 0, "route": "loopback"},
+            {"attempt": 7, "forward": FWD, "link": LINK_A, "port": "54321", "route": "loopback"},
+        ):
+            with self.subTest(answer=answer):
+                card = self.route_card(answer)
+                self.assertEqual(self.route_texts(card), [UNKNOWN_SENTENCE])
+                self.assertEqual(of_class(card, "code", "signin-forward"), [])
+
+    def test_an_answer_without_a_route_shows_no_route_sentence(self) -> None:
+        for text in (ANSWER, json.dumps({**json.loads(ANSWER), "route": "elsewhere"})):
+            with self.subTest(text=text):
+                card = self.route_card(text=text)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-route")], [])
+                (link,) = of_class(card, "a", "signin-link")
+                self.assertEqual(link["href"], LINK_A)
+                self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+
+    def test_a_forward_command_of_another_shape_is_not_shown(self) -> None:
+        control = self.route_card(LOOPBACK_ANSWER)
+        self.assertEqual(len(of_class(control, "code", "signin-forward")), 1)
+        for forward in ("rm -rf /", "ssh -N -L 1:localhost:1 console-host",
+                        "ssh -N -L 54321:localhost:54321 a;b"):
+            with self.subTest(forward=forward):
+                card = self.route_card({**LOOPBACK_ANSWER, "forward": forward})
+                self.assertEqual(of_class(card, "code", "signin-forward"), [])
+                self.assertEqual(self.route_texts(card), [PORT_LINE + "."])
 
     def test_a_code_is_sent_to_the_code_route_and_the_field_empties(self) -> None:
         (snap,) = render(SIGNED_IN_STEPS + [
@@ -8187,6 +8294,87 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(full(link), "Open the pull request")
         self.assertEqual(link["href"], ADOPTION_ITEM["url"])
 
+    def test_a_ready_adoption_card_offers_merge_and_posts_its_card(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])}, {"click": "adoption-merge"}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (button,) = of_class(card, "button", "adoption-merge")
+        self.assertEqual(full(button), "Merge")
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/adoption-merge")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "number": 7, "commit": "a" * 40})
+        self.assertIn("X-Console-Token", post["headers"])
+
+    def test_an_adoption_card_without_merge_says_why_and_offers_no_button(self) -> None:
+        (snap,) = render([START, {"frame": frame([MOVED_ITEM])}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (reason,) = of_class(card, "span", "reason")
+        self.assertEqual(full(reason), MOVED_ITEM["why"])
+        self.assertEqual(of_class(card, "button", "adoption-merge"), [])
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "button"], [])
+        self.assertEqual(len(of_class(card, "a", "pr-link")), 1)
+
+    def test_a_refused_merge_says_why_through_a_redraw_and_can_be_tried_again(self) -> None:
+        refusal = "the pull request's branch holds commits the console did not push\n"
+        first, second = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": refusal}}, {"click": "adoption-merge"},
+            {"frame": frame([ADOPTION_ITEM])}, {"snapshot": True},
+            {"respond": {"status": 204, "text": ""}}, {"click": "adoption-merge"},
+            {"snapshot": True}])
+        (card,) = [n for n in nodes(first["inbox"]) if has_class(n, "adoption")]
+        (fail,) = of_class(card, "span", "fail")
+        self.assertEqual(
+            full(fail),
+            "Could not merge: the pull request's branch holds commits the console did not push")
+        self.assertEqual(
+            [p["url"] for p in second["posts"]], ["/api/adoption-merge", "/api/adoption-merge"])
+        (card,) = [n for n in nodes(second["inbox"]) if has_class(n, "adoption")]
+        self.assertEqual(of_class(card, "span", "fail"), [])
+
+    def test_an_empty_error_answer_says_plain_words(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 500, "text": ""}}, {"click": "adoption-merge"},
+            {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (fail,) = of_class(card, "span", "fail")
+        self.assertEqual(full(fail), "Could not merge: the console did not answer")
+        self.assertNotIn("HTTP", full(card))
+
+    def test_a_refusal_outlives_a_card_the_forge_state_removed_until_dismissed(self) -> None:
+        refusal = "the pull request was merged on the forge with commits the console did not push\n"
+        steps = [START, {"frame": frame([ADOPTION_ITEM])},
+                 {"respond": {"status": 409, "text": refusal}}, {"click": "adoption-merge"},
+                 {"frame": frame([])}, {"snapshot": True}]
+        (gone,) = render(steps)
+        self.assertEqual([n for n in nodes(gone["inbox"]) if has_class(n, "adoption")], [])
+        (notice,) = [n for n in nodes(gone["inbox"]) if has_class(n, "adoption-failed")]
+        self.assertIn("Could not merge the adoption of o/r", full(notice))
+        self.assertIn(refusal.strip(), full(notice))
+        (kept,) = render(steps[:-1] + [{"frame": frame([])}, {"snapshot": True}])
+        self.assertEqual(len([n for n in nodes(kept["inbox"]) if has_class(n, "adoption-failed")]), 1)
+        (done,) = render(steps[:-1] + [{"click": "adoption-failed-dismiss"}, {"snapshot": True}])
+        self.assertEqual([n for n in nodes(done["inbox"]) if has_class(n, "adoption-failed")], [])
+
+    def test_a_refusal_shows_no_notice_while_the_plans_card_is_still_listed(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": "no\n"}}, {"click": "adoption-merge"},
+            {"frame": frame([MOVED_ITEM])}, {"snapshot": True}])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "adoption-failed")], [])
+
+    def test_a_replaced_pull_requests_card_shows_no_old_refusal_and_a_notice_carries_it(self) -> None:
+        refusal = "this card is out of date; the page now shows the current one"
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": refusal + "\n"}}, {"click": "adoption-merge"},
+            {"frame": frame([{**ADOPTION_ITEM, "number": 8}])}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        self.assertEqual(of_class(card, "span", "fail"), [])
+        (notice,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption-failed")]
+        self.assertIn(refusal, full(notice))
+
 
 LATER = [START, {"respond": {"status": 200, "text": ANSWER}},
          {"frame": frame([with_run(SIGNIN, "running", 7)])}]
@@ -8310,6 +8498,17 @@ class SigninRecoveredPageTest(unittest.TestCase):
         self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
         self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
 
+    def test_a_running_sign_in_of_a_profile_a_colleague_added_raises_no_card_and_no_link_request(self) -> None:
+        """#1361: signing a colleague's account in is his, so the owner's page recovers no card for it."""
+        run = {"colleague-1": {"state": "running", "at": None, "attempt": 7}}
+        cap = capacity([profile("colleague-1", "unknown", signin=si("signed_out", None, ask=True),
+                                owner="ana@corp.invalid")])
+        (snap,) = render([
+            START, {"respond": {"status": 200, "text": ANSWER}},
+            {"frame": {**frame([]), "capacity": cap, "signin_runs": run}}, {"snapshot": True}])
+        self.assertEqual(asks(snap), [])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "signin")], [])
+
     def test_a_typed_code_and_its_focus_survive_a_frame_on_a_recovered_card(self) -> None:
         run = {"work": {"state": "running", "at": None, "attempt": 7}}
         one, two = render([
@@ -8382,6 +8581,19 @@ class AddAccountPageTest(unittest.TestCase):
         self.assertEqual([full(n) for n in of_class(card, "p", "signin-elsewhere")], [ELSE])
         for cls in ("signin-link", "signin-code", "signin-start", "signin-cancel"):
             self.assertEqual([n for n in nodes(card) if has_class(n, cls)], [], cls)
+
+    def test_the_add_account_continuation_shows_the_route_sentence(self) -> None:
+        answer = json.dumps({"attempt": 9, "forward": None, "link": "https://claude.example/b",
+                             "port": None, "profile": "fresh", "route": "manual"},
+                            sort_keys=True, separators=(",", ":"))
+        steps = [step if step.get("respond", {}).get("text") != ADDED
+                 else {"respond": {"status": 200, "text": answer}} for step in ADD_STEPS]
+        (snap,) = render(steps + [
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in added(snap, "signin-route")], [MANUAL_SENTENCE])
+        order = [n for n in nodes(snap["account_add"])
+                 if has_class(n, "account-add-link") or has_class(n, "signin-route")]
+        self.assertEqual([n["tag"] for n in order], ["a", "p"])
 
     def test_the_add_box_shows_the_outcome_when_the_sign_in_ends(self) -> None:
         for state, text in (
@@ -9379,7 +9591,12 @@ ADOPTION_ITEM = {
     "type": "inbox_item", "reason": "adoption", "key": "adoption/" + PLAN_A, "project_id": "o/r",
     "name": "r", "headline": "The adoption of o/r is ready to merge",
     "url": "https://github.com/o/r/pull/7", "number": 7, "answered": False,
-    "waiting_since": "2026-11-15T08:00:00+00:00"}
+    "waiting_since": "2026-11-15T08:00:00+00:00",
+    "plan_id": PLAN_A, "commit": "a" * 40, "merge": True, "why": None}
+MOVED_ITEM = {**ADOPTION_ITEM, "merge": False,
+              "headline": "Merge is not offered for the adoption of o/r",
+              "why": "Its branch holds commits the console did not push. Review them on the forge "
+                     "and merge it there, or close it and choose Apply it again."}
 READY = [START, {"frame": {**frame([]), "registration": READY_SHOWN}}]
 R_PLAN = PLAN_A
 

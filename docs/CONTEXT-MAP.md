@@ -19,6 +19,7 @@
 | Term | Area |
 |---|---|
 | Account binding | Hosts |
+| Account label | Console |
 | Account profile | Hosts |
 | Accounts panel | Console |
 | Activation line | Console |

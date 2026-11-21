@@ -1592,7 +1592,7 @@ class PictureDocsTest(unittest.TestCase):
                     "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
                     "ADR-console-076, ADR-console-078")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237, #1294, #1305"))
+        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237, #1263, #1294, #1305"))
         text = self.doc(adr008)
         for needle in ("GET /api/picture/<id>", "Sec-Fetch-Site", "same-origin", "omit",
                        "ADR-console-036"):
@@ -1629,7 +1629,7 @@ class PictureDocsTest(unittest.TestCase):
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
         lines = (ROOT / adr / "002-the-desk-page-design-rules.md").read_text().splitlines()
         status = next(r for r in lines if r.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064"), status)
+        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, ADR-console-086"), status)
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Question round**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]

@@ -20,21 +20,63 @@ runs `[*command, "add", name]` with no shell, `stdin` from `DEVNULL`, `stdout` a
 `add` then grants no folder trust itself, because the console grants every registered project after
 the add, outside the timeout, and reads each grant back (#1078); the variable marks nothing
 trusted. Exit 0 returns None. The launcher's `add` is the one implementation of
-profile creation: nothing here makes a directory or a link.
+profile creation: nothing here makes a directory or a link. It makes the profile directory with a plain `mkdir`, which fails
+when the directory exists, so a zero exit means that run created it, even when another add of the name ran at the same time.
 
 Failures. A failed run raises `AddFailed(kind)`, `str(error) == kind`, `kind` one of `KINDS`:
 `not_installed` (`FileNotFoundError`, or `PermissionError` on the executable), `timed_out`
 (`subprocess.TimeoutExpired`), `unavailable` (any other `OSError`) and `failed` (a non-zero exit).
-`not_listed` is raised by the console service when the profile does not appear in the listing after
+`failed` is also the exit of an add whose name was made by another add first. `not_listed` is raised by the console service when the profile does not appear in the listing after
 a successful add.
 
-Row. `added(profile)` is `("account.added", None, {"by": "owner", "profile": profile})`, one per
-account the owner adds from the page; it raises `ValueError` when `refusal(profile)` is not None.
+Row. `added(profile, by="owner", identity=None)` is `("account.added", None, {"by": by, "profile": profile})`,
+one per account the owner or a listed colleague adds from the page (#1343); `by` is `owner` or the colleague's
+login (`event_log.normal_login(by) == by`), and it raises `ValueError` when `refusal(profile)` is not
+None or `by` is neither. A row built with the default `by` is what it was before #1343. A colleague's row also
+carries `"identity"` (a non-empty string, else `ValueError`; none for an owner's row) when the service gives
+one: `identity(directory)` of the profile directory the add created.
 `ADDED` is `event_log.ACCOUNT_ADDED`. The kind is not in `KEPT_KINDS`. `added_state(events, state=None)`
 is `state` (default empty) united with the `payload["profile"]` of every `ADDED` event whose payload is
 a dict with a string `profile` that `refusal` accepts, as a frozenset: the view's `accounts_added`
 member, folded by the service and rebuilt from the retained log on a restart or a retention pass.
 An invalid payload is ignored.
+
+Owner. `owners_state(events, state=None)` is the profile -> colleague login map folded from
+`account.added` and `account.removal` rows in order, onto a copy of `state` (never mutated): an
+`account.added` row whose payload is a dict with a `profile` that `refusal` accepts and a string `by`
+sets the owner to `by` when `normal_login(by) == by`, removes the profile when `by == "owner"`, and is
+ignored otherwise; an `account.removal` row whose `outcome` is in `GONE_OUTCOMES` removes the profile
+(the removal succeeded, so a later directory of that name, made by the launcher with no console row,
+is not his), and any other outcome changes nothing; any other row is ignored. Folding later events
+onto an earlier fold gives the fold of all of them. `GONE_OUTCOMES` is `event_log.ACCOUNT_GONE_OUTCOMES`,
+the same two outcomes as `folder_trust.GONE_OUTCOMES` (folder_trust imports this module).
+
+Identity. `identity(directory)` is `<inode>:<birth>:<marker>` of the directory as `_stat` (`directory.stat()`) reads it, and
+None when the directory or its marker cannot be read. `<birth>` is the creation time in nanoseconds where the
+platform gives one (`st_birthtime_ns`, else `st_birthtime`; empty where it does not, as on Linux). `<marker>` is the
+random token `mark(directory)` wrote into the directory as the file `MARKER`: 32 lowercase hex digits, read through
+`os.open` with `O_NOFOLLOW` and `O_NONBLOCK` from a descriptor checked to be a regular file (a FIFO or a device at the path is
+no marker and is never waited on, so the read cannot block a caller that holds a lock), any other content is no marker. A profile name can be given to another directory (the
+owner removes a profile with the CLI and makes one of that name), and a freed inode may be given to it at once (ext4
+does, and Linux gives no creation time), so the inode and the creation time alone do not tell the two apart: the
+marker is what does, because the replacement is a new directory the launcher made, which holds none. `mark(directory)`
+creates the marker with `O_CREAT | O_EXCL` and returns the identity, or None when a marker is already there, the file
+cannot be written or the identity cannot be read (a directory is never marked twice, so a marker found at once in a
+directory the launcher just made is not trusted). The device number is left out of the identity: it is not stable
+across a restart on every platform. `identities_state(events, state=None)` is the
+profile -> identity map folded like `owners_state` (an `account.added` row whose `by` is a login and whose
+`identity` is a non-empty string sets it, any other valid `account.added` row and a completed removal drop
+it), onto a copy of `state`. A name owned with no identity (a row without one) is owned by name alone. Stated limit: a
+copy of a marked directory with its marker (the owner copying a colleague's profile by hand) has the marker but not
+its inode, which is not enough to take it from him either.
+
+Guest add. `GUEST_PREFIX` is `colleague-` and `guest_name(taken)` is `colleague-<n>` for the smallest
+`n >= 1` not among the `taken` names, a name `refusal` accepts: the console names a colleague's
+profile, never the colleague. `parse_guest_add_request(body)` reads strict UTF-8 JSON (a repeated
+key, `NaN` or nesting too deep is `ValueError`) whose value is an object of exactly the member
+`consent`, a `bool` (not `1`, not `"true"`), and optionally `attempt`, a positive `int` (not a `bool`), and
+returns `(consent, attempt)`, `attempt` None when absent; anything else is `ValueError`. An `attempt` is the
+sign-in the page shows with no link yet: the add then only joins that one (#1343).
 
 Platform. `adder_for(platform)` is `Adder()` where `manager.supported(platform)`, else None.
 """
@@ -44,12 +86,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import stat
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from pathlib import Path
 
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import event_log, manager
 
 ADDED = event_log.ACCOUNT_ADDED
+REMOVAL = event_log.ACCOUNT_REMOVAL
+GONE_OUTCOMES = event_log.ACCOUNT_GONE_OUTCOMES
+GUEST_PREFIX = "colleague-"
+MARKER = ".console-owner"
+MARKER_BYTES = 32
+MARKER_TOKEN = re.compile(r"[0-9a-f]{32}")
 ADD_TIMEOUT = 30
 SKIP_TRUST_ENV = "CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST"
 NAME = re.compile(r"[a-z0-9_-]+")
@@ -81,11 +133,71 @@ def parse_add_request(body: bytes) -> str:
     return value["name"]
 
 
-def added(profile: str) -> tuple[str, None, dict]:
+def added(profile: str, by: str = "owner", identity: str | None = None) -> tuple[str, None, dict]:
     reason = refusal(profile)
     if reason is not None:
         raise ValueError(reason)
-    return (ADDED, None, {"by": "owner", "profile": profile})
+    if by != "owner" and event_log.normal_login(by) != by:
+        raise ValueError("by is neither owner nor a login")
+    payload = {"by": by, "profile": profile}
+    if identity is not None:
+        if not isinstance(identity, str) or not identity:
+            raise ValueError("identity is not a non-empty string")
+        payload["identity"] = identity
+    return (ADDED, None, payload)
+
+
+def _stat(directory: Path) -> os.stat_result:
+    return directory.stat()
+
+
+def _marker(directory: Path) -> str | None:
+    try:
+        descriptor = os.open(directory / MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            text = handle.read(MARKER_BYTES + 1)
+    except OSError:
+        return None
+    try:
+        token = text.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    return token if MARKER_TOKEN.fullmatch(token) else None
+
+
+def identity(directory: Path) -> str | None:
+    try:
+        found = _stat(directory)
+    except OSError:
+        return None
+    token = _marker(directory)
+    if token is None:
+        return None
+    born = getattr(found, "st_birthtime_ns", None)
+    if born is None:
+        seconds = getattr(found, "st_birthtime", None)
+        born = None if seconds is None else int(seconds * 1_000_000_000)
+    return f"{found.st_ino}:{'' if born is None else born}:{token}"
+
+
+def mark(directory: Path) -> str | None:
+    token = secrets.token_hex(MARKER_BYTES // 2)
+    try:
+        descriptor = os.open(directory / MARKER,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(token.encode("ascii"))
+    except OSError:
+        return None
+    return identity(directory)
 
 
 def added_state(events: Iterable[event_log.Event],
@@ -98,6 +210,79 @@ def added_state(events: Iterable[event_log.Event],
         if isinstance(profile, str) and refusal(profile) is None:
             names.add(profile)
     return frozenset(names)
+
+
+def owners_state(events: Iterable[event_log.Event],
+                 state: Mapping[str, str] | None = None) -> dict[str, str]:
+    owners = dict(state or {})
+    for event in events:
+        payload = event.payload
+        if event.kind not in (ADDED, REMOVAL) or not isinstance(payload, dict):
+            continue
+        profile = payload.get("profile")
+        if not isinstance(profile, str) or refusal(profile) is not None:
+            continue
+        if event.kind == REMOVAL:
+            if payload.get("outcome") in GONE_OUTCOMES:
+                owners.pop(profile, None)
+            continue
+        by = payload.get("by")
+        if not isinstance(by, str):
+            continue
+        if by == "owner":
+            owners.pop(profile, None)
+        elif event_log.normal_login(by) == by:
+            owners[profile] = by
+    return owners
+
+
+def identities_state(events: Iterable[event_log.Event],
+                     state: Mapping[str, str] | None = None) -> dict[str, str]:
+    identities = dict(state or {})
+    for event in events:
+        payload = event.payload
+        if event.kind not in (ADDED, REMOVAL) or not isinstance(payload, dict):
+            continue
+        profile = payload.get("profile")
+        if not isinstance(profile, str) or refusal(profile) is not None:
+            continue
+        if event.kind == REMOVAL:
+            if payload.get("outcome") in GONE_OUTCOMES:
+                identities.pop(profile, None)
+            continue
+        by = payload.get("by")
+        if not isinstance(by, str) or not (by == "owner" or event_log.normal_login(by) == by):
+            continue
+        found = payload.get("identity")
+        if by != "owner" and isinstance(found, str) and found:
+            identities[profile] = found
+        else:
+            identities.pop(profile, None)
+    return identities
+
+
+def guest_name(taken: Collection[str]) -> str:
+    number = 1
+    while f"{GUEST_PREFIX}{number}" in taken:
+        number += 1
+    return f"{GUEST_PREFIX}{number}"
+
+
+def parse_guest_add_request(body: bytes) -> tuple[bool, int | None]:
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise ValueError("the body is nested too deeply") from error
+    except UnicodeDecodeError as error:
+        raise ValueError("not a JSON object") from error
+    if not isinstance(value, dict) or not {"consent"} <= set(value) <= {"consent", "attempt"}:
+        raise ValueError("the body must be an object of a consent bool and at most an attempt")
+    attempt = value.get("attempt")
+    if type(value["consent"]) is not bool or ("attempt" in value and (
+            type(attempt) is not int or attempt < 1)):
+        raise ValueError("the body must be an object of a consent bool and at most an attempt")
+    return value["consent"], attempt
 
 
 class AddFailed(Exception):

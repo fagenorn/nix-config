@@ -1,6 +1,6 @@
 # ADR-console-058 — A question about a project is answered by a read-only session
 
-- **Status:** accepted; amended by ADR-console-059, ADR-console-065
+- **Status:** accepted; amended by ADR-console-059, ADR-console-065, ADR-console-081, ADR-console-089
 - **Decided in:** #1176
 
 ## Context

@@ -73,9 +73,49 @@ kept project's root (so no unmanaged entry, no other repository); `deliveries` k
 kept session. `PASSED_INPUTS` pass as given and every `OWNER_ONLY_INPUTS` key is reset to its listed
 empty value whether or not it was given. The input set is closed: a key of none of the three sets
 is refused with `ValueError("unscoped view input <name>")`, so a view input added later must be
-classified before a guest can see it. `scrub(view)` then drops what the inputs cannot: the `sharing`
-member, the unmanaged list, the per-profile session counts, the sign-in, account, pin and
-registration members, the digest, the activation line, the spend view and the capacity profiles.
+classified before a guest can see it. `scrub(view, pool, sprint_accounts)` then drops what the inputs
+cannot: the `sharing` member, the unmanaged list, the per-profile session counts, the sign-in,
+account, pin and registration members, the digest, the activation line, the spend view and the
+capacity profiles, and puts in their place the `pool` member (#1341, ADR-console-086). `pool_view`
+builds it from the owner's capacity view: `POOL_MEMBERS` are `state`, `tight`, `all_out`,
+`resumes_at`, `no_reading` and `accounts`; each account row carries exactly `ACCOUNT_MEMBERS`: a
+neutral `label` (`Account <n>`, or `yours` on the page of a colleague holding a profile of that
+account, ADR-console-087 D4), `state`, the percent left and reset of the week and the session,
+`next_reset`, `out_until` and `in_use` (not signed out and not excluded). One row stands for one
+account: a profile whose `duplicate_of` is set (signed in to an address another profile counts) has
+no row and shares its account's label. `tight`, `all_out`, `resumes_at` and `no_reading` are the
+capacity view's own; `state` is None while no row in use has a reading, else `out`, `tight` or
+`fine`. A number belongs to an account, not a profile (`account_numbers`): the accounts that hold a
+number in the previous numbering keep it, those with an address first, then by their smallest
+profile name, and every other account takes the smallest positive integer none holds, so an alias,
+a pin or a removal never moves a label. When several profiles of one account hold numbers (a profile
+numbered before it signed in, then signed in to an address another already holds), the number of a
+profile in `established` (those that had an address at the previous numbering) is kept over a
+smaller one, so the established account and its running sprints keep their label. When several
+accounts claim one number (an alias moved from one account to another, or a profile left a shared
+account for a new address), it goes to the account whose profiles holding it kept their address
+(`established` given as a Mapping of profile to the address it had), then to the one with more
+holders, then to the one whose counted profile held it, then by the order above; the others keep
+another number they held or take a free one. The numbering lives in `NUMBERS_FILE`, beside the event
+log (`read_numbers`, `read_retired`, `write_numbers`; an unreadable file numbers afresh). The file
+holds the numbers and, for each running sprint whose profile was removed, the number and address
+its sprint keeps while another profile still holds that address, with the removed profile's name
+(`retired`, by sprint id, so a restart keeps the label and a profile name given to another account
+later never moves it); once no profile holds the address, or none did, the entry stays with a None
+number, so the sprint is detached from the name for good and has no label. The entry ends when the
+sprint's manager runs on another profile than the one named in it, and the sprint is then labelled
+by that profile's account.
+`sprint_labels` gives the label of the account each running sprint's manager is on, a `retired` one
+first (a detached one has none), and `scrub` adds it as `account_label` to
+every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
+`STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. A stalled sprint's `manager_text` is likewise cut to `STALLED_TEXT` and the stall card's `last_reason` becomes `MANAGER_REASON_TEXT`, since a recorded stall can read `<profile> is being removed` (a failed start's text is already `manager.plain_reason`, never the reason). `scrub` also sets `own_signin`, a copy of its argument or None:
+the run of the profiles the guest added that his page shows, the newest running one else the newest (`own_signin`: `state`, `at`, `attempt`, never
+a profile name). `profile_labels(numbers, mine)` and `retired_labels(retired, numbers, mine)` apply
+the `yours` rule to a sprint's label as `pool_view` does to a row's, so every profile of a
+colleague's account, counted or duplicate, reads `yours` for him. No profile name, address,
+organisation or
+proxy account id reaches a guest, and `spend` stays None: money is the owner's bill, and a spend
+per account or per project would show work on projects the colleague is not listed for.
 `picture_ids(view)` is the set of every picture id in the scoped view, found by walking every list
 stored under a key `pictures`: a picture read is answered to a guest only for an id this walk
 finds in that guest's scoped view.
@@ -119,6 +159,47 @@ at `path` as `serve status --json` (no shell, no other argument, `SERVE_TIMEOUT_
 the parsed JSON, or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it
 never raises.
 
+A guest's writes (#1263) are decided by `write_refusal(policy, actor, project_id)`, where `actor` is
+a `GuestActor` (the login and the read tailnet name the request was admitted under). The checks run in
+this order and the first that fails gives its text: sharing is off (`SHARING_OFF_TEXT`); no tailnet
+name is read from this host's Tailscale client (`NAME_UNREAD_TEXT`); the name read from this host's
+Tailscale client is not the one the request was admitted under (`HOST_TEXT`); the login is no longer
+listed (`NOT_SHARED_TEXT`); the project is not on the login's list (`NOT_YOUR_PROJECT_TEXT`);
+otherwise None. The service adds a last check under its ingest lock: the actor's `epoch` is the count of
+revocations (`revokes`: sharing switched off, a colleague or one of their projects removed, or the read
+name changed) when its request was admitted, and a write whose epoch is no longer the current count is
+refused with `REVOKED_TEXT` even when sharing, the name, the login and the project look as they did, so a
+write admitted before a revocation never lands after the access came back. `Snapshot.epoch` carries the
+count the admitting snapshot was published with. `steer_refusal(login, started_by)` is None
+exactly when the sprint was started by that login (`NOT_YOUR_SPRINT_TEXT`; a sprint with no starter
+is the owner's). A question that carries a before-and-after pair or a `look` is a look before merge
+and stays the owner's (`is_look` for the pair, `OWNER_LOOK_TEXT`; ADR-console-074), as does a question the manager marked `owner_only`
+(`OWNER_ONLY_TEXT`); tracker items (release confirmations, paid approvals,
+production holds) are never steerable. The service answers a write refused on these merits as
+`409`. No text names a project or a login.
+
+Three more guest writes (#1343, ADR-console-087), `POST /api/guest-account`, `/api/guest-signin-code` and
+`/api/guest-signin-cancel`, let a listed colleague add his own account and sign it in. The first four checks of
+`write_refusal` are `account_refusal(policy, actor)`, which they use alone (sharing off, no name read, another
+name, login not listed). The add takes `{"consent": true}` and at most the `attempt` the page shows with no link yet: without the tick it is
+refused with `CONSENT_TEXT` before anything is created, and with an attempt it creates and starts nothing, only handing
+out that live sign-in's link (any other attempt is `NO_OWN_SIGNIN_TEXT`). The service picks the profile: the colleague's own live
+sign-in (the newest, the one his page shows), else one of his own profiles that is not signed in, else a new
+`colleague-<n>` it names itself; no body names a profile, the code and the cancel carry the attempt the add
+answered and act on that attempt only, and no sign-in of a profile that is not his own is ever started, passed a code or
+cancelled. A refusal is read by a guest only as one of the fixed texts `CONSENT_TEXT`, `NO_OWN_SIGNIN_TEXT`,
+`ACCOUNT_BUSY_TEXT`, `ACCOUNT_UNAVAILABLE_TEXT`, `NOT_SHARED_TEXT` or `REVOKED_TEXT` (`account_text` maps any
+other text, such as one that names a profile, to `ACCOUNT_BUSY_TEXT`). No answer names a profile, a login, a
+code or the client's output.
+
+`mark_steer(view, login)` returns a copy of a scrubbed guest view in which every sprint mapping
+gains `steer` (started by that login) and every `inbox.open` and `inbox.answered` item gains `steer`
+(a brief or a question started by that login that is neither a look (a before-and-after pair or a
+`look`, ADR-console-074) nor `owner_only`). The marks are the server's and
+are applied to a scrubbed guest view only; it adds the login nowhere and never mutates its argument.
+A message's `action_text` that is `NUDGE_ACTION_TEXT` reads `NUDGE_ACTION_TEXT_GUEST` ("Tell the
+manager again.") in the copy: a colleague cannot drop a sprint, so the line offers no drop.
+
 `parse_sharing` (`{"shared": true|false}`, nothing else), `parse_colleague` and `parse_removal` read the owner's write bodies as strict
 JSON (a duplicate key, a non-object or an extra or missing key is refused) and raise
 `ValueError` on a malformed body. Whether each project of a colleague is registered is checked by
@@ -133,14 +214,18 @@ import os
 import re
 import stat
 import subprocess
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import tempfile
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.event_log import (
-    SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event)
+    LOGIN_MAX, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event, normal_login)
+from agent_tools.console.sprints import (
+    NUDGE_ACTION_TEXT, STALLED_TEXT, STARTED, SprintState, ended_at)
 from agent_tools.console.view import project_for
 
 OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
@@ -170,6 +255,20 @@ NAME_UNREAD_TEXT = "This console cannot read its tailnet name, so it lets nobody
 HOST_TEXT = "This console is shared only at its tailnet name."
 NOT_SHARED_TEXT = "This console is not shared with you. Ask its owner to add your Tailscale login."
 OWNER_ONLY_TEXT = "Only the console's owner can do that."
+NUDGE_ACTION_TEXT_GUEST = "Tell the manager again."
+NOT_YOUR_PROJECT_TEXT = "That project is not shared with you."
+NOT_YOUR_SPRINT_TEXT = "You can steer only the sprints you started."
+OWNER_LOOK_TEXT = "Only the console's owner answers a look before merge."
+REVOKED_TEXT = "Your access changed while you were sending that. Reload the page and try again."
+CONSENT_TEXT = "Tick that you agree before you sign in."
+NO_OWN_SIGNIN_TEXT = "No sign-in of yours is running."
+
+
+def colleague_signin_text(profile: str, login: str) -> str:
+    """The owner's refusal to start a sign-in of a profile a colleague added (#1361, ADR-console-087 D3)."""
+    return f"{profile} is {login}'s account, so only {login} can sign it in. You can sign it out or remove it."
+ACCOUNT_BUSY_TEXT = "That cannot be done right now. Try again in a moment."
+ACCOUNT_UNAVAILABLE_TEXT = "Adding an account is not available on this host."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
                    "Point Tailscale Serve at the console's guest socket.")
 
@@ -186,13 +285,11 @@ READING_MEMBERS = ("admitted", "client", "forwarded_for", "forwarded_host", "for
                    "probe", "probe_login_arrived", "reason")
 
 TAILNET_MAX = 253
-LOGIN_MAX = 254
 PROJECTS_MAX = 50
 PROJECT_MAX = 200
 
 _TAILNET = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
 _SELF_NAME = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2}ts\.net")
-_LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 
 
 class Refused(Exception):
@@ -226,9 +323,23 @@ class Snapshot:
     views: Mapping[str, bytes]
     pictures: Mapping[str, frozenset[str]]
     revoked: int
+    epoch: int = 0
 
 
 NO_SNAPSHOT = Snapshot(NO_POLICY, MappingProxyType({}), MappingProxyType({}), 0)
+
+
+@dataclass(frozen=True)
+class GuestActor:
+    """Who acts on the guest port: the login, the tailnet name and the revocation epoch the request was admitted under.
+
+    `epoch` is the service's count of revocations at admission (None for a caller that has no admission, which is
+    never checked); a write whose epoch is not the service's current one is refused with `REVOKED_TEXT`.
+    """
+
+    login: str
+    tailnet: str
+    epoch: int | None = None
 
 
 def valid_tailnet(text: object) -> bool:
@@ -301,13 +412,6 @@ def _switch(payload: object) -> bool:
     if "shared" in payload:
         return payload["shared"] is True
     return valid_tailnet(payload.get("tailnet"))
-
-
-def normal_login(text: object) -> str | None:
-    if (not isinstance(text, str) or len(text) > LOGIN_MAX or not text.isascii()
-            or _LOGIN.fullmatch(text) is None):
-        return None
-    return text.lower()
 
 
 def _projects_in_force(projects: object) -> bool:
@@ -398,6 +502,61 @@ def admit(access: Access, name: str | None, hosts: Sequence[str], forwarded_host
     return login, None
 
 
+ACCESS_TEXTS = frozenset({SHARING_OFF_TEXT, NAME_UNREAD_TEXT, HOST_TEXT, NOT_SHARED_TEXT, REVOKED_TEXT})
+ACCOUNT_TEXTS = frozenset({CONSENT_TEXT, NO_OWN_SIGNIN_TEXT, ACCOUNT_BUSY_TEXT,
+                           ACCOUNT_UNAVAILABLE_TEXT, NOT_SHARED_TEXT, REVOKED_TEXT})
+
+
+def account_refusal(policy: Policy, actor: GuestActor) -> str | None:
+    if not policy.access.shared:
+        return SHARING_OFF_TEXT
+    if policy.name is None:
+        return NAME_UNREAD_TEXT
+    if policy.name != actor.tailnet:
+        return HOST_TEXT
+    if actor.login not in policy.access.colleagues:
+        return NOT_SHARED_TEXT
+    return None
+
+
+def account_text(text: str) -> str:
+    """The text a guest reads for a refusal of an account write: only a fixed guest text, else the busy text."""
+    return text if text in ACCOUNT_TEXTS else ACCOUNT_BUSY_TEXT
+
+
+def account_reason(text: str) -> str:
+    """The stderr reason of a refused account write: one of consent, access, no_run, busy, unavailable."""
+    return {CONSENT_TEXT: "consent", NO_OWN_SIGNIN_TEXT: "no_run",
+            ACCOUNT_UNAVAILABLE_TEXT: "unavailable", ACCOUNT_BUSY_TEXT: "busy"}.get(
+                text, "access" if text in ACCESS_TEXTS else "busy")
+
+
+def write_refusal(policy: Policy, actor: GuestActor, project_id: str) -> str | None:
+    text = account_refusal(policy, actor)
+    if text is not None:
+        return text
+    if project_id not in policy.access.colleagues[actor.login]:
+        return NOT_YOUR_PROJECT_TEXT
+    return None
+
+
+def revokes(before: Access, after: Access) -> bool:
+    """Whether going from `before` to `after` takes something away: the switch goes off, or a login or one of its projects goes."""
+    if before.shared and not after.shared:
+        return True
+    return any(login not in after.colleagues or not projects <= after.colleagues[login]
+               for login, projects in before.colleagues.items())
+
+
+def steer_refusal(login: str, started_by: str | None) -> str | None:
+    return None if started_by == login else NOT_YOUR_SPRINT_TEXT
+
+
+def is_look(pairs: Iterable[str | None]) -> bool:
+    """A look is a question carrying both a before and an after picture; one alone is a plain picture."""
+    return {"before", "after"} <= set(pairs)
+
+
 def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_hosts: Sequence[str],
             logins: Sequence[str], forwarded: Sequence[str], probes: Sequence[str],
             *, own: frozenset = frozenset()) -> dict:
@@ -479,13 +638,244 @@ def scoped(inputs: Mapping[str, object], projects: frozenset[str]) -> dict:
     return result
 
 
-def scrub(view: Mapping) -> dict:
-    scrubbed = {name: member for name, member in view.items() if name != "sharing"}
+ACCOUNT_MEMBERS = ("label", "state", "week_left", "five_hour_left", "week_reset",
+                   "five_hour_reset", "next_reset", "out_until", "in_use")
+POOL_MEMBERS = ("state", "tight", "all_out", "resumes_at", "no_reading", "accounts")
+NUMBERS_FILE = "account-numbers.json"
+STOP_FAILED_TEXT = "could not stop the manager; trying again"
+MANAGER_REASON_TEXT = "the owner has the details"
+UNSTOPPED_TEXT = "The manager of a dropped sprint could not be stopped; trying again"
+
+
+def _accounts(capacity: Mapping) -> list[tuple[bool, list[str], str]]:
+    """Each account as (has an address, its profiles sorted, its counted profile), in no order."""
+    accounts = []
+    for entry in capacity["profiles"]:
+        if entry["duplicate_of"] is None:
+            accounts.append((entry["account"] is not None,
+                             sorted({entry["profile"], *entry["same_account_as"]}),
+                             entry["profile"]))
+    return accounts
+
+
+def account_numbers(capacity: Mapping, previous: Mapping[str, int],
+                    established: Collection[str] = ()) -> dict[str, int]:
+    accounts = sorted(_accounts(capacity), key=lambda account: (not account[0], account[1][0]))
+    address = {entry["profile"]: entry["account"] for entry in capacity["profiles"]}
+    before = established if isinstance(established, Mapping) else {}
+    claims = []
+    for index, (_, profiles, counted) in enumerate(accounts):
+        for number in {previous[name] for name in profiles if name in previous}:
+            holders = [name for name in profiles if previous.get(name) == number]
+            claims.append((
+                not any(name in established for name in holders),
+                -sum(address[name] is not None and before.get(name) == address[name]
+                     for name in holders),
+                -len(holders), previous.get(counted) != number, number, index))
+    numbered: dict[int, int] = {}
+    taken: set[int] = set()
+    for *_, number, index in sorted(claims):
+        if index not in numbered and number not in taken:
+            numbered[index] = number
+            taken.add(number)
+    for index, _ in sorted(enumerate(accounts), key=lambda item: item[1][1][0]):
+        if index not in numbered:
+            number = 1
+            while number in taken:
+                number += 1
+            numbered[index] = number
+            taken.add(number)
+    return {name: numbered[index] for index, (_, profiles, _) in enumerate(accounts)
+            for name in profiles}
+
+
+YOURS = "yours"
+
+
+def _label(number: int, own: Collection[int]) -> str:
+    return YOURS if number in own else f"Account {number}"
+
+
+def _own_numbers(numbers: Mapping[str, int], mine: Collection[str]) -> set[int]:
+    return {numbers[profile] for profile in mine if profile in numbers}
+
+
+def profile_labels(numbers: Mapping[str, int],
+                   mine: Collection[str] = frozenset()) -> dict[str, str]:
+    """Each profile's label: `yours` when its account's number is one a profile of `mine` holds."""
+    own = _own_numbers(numbers, mine)
+    return {profile: _label(number, own) for profile, number in numbers.items()}
+
+
+def retired_labels(retired: Mapping[str, tuple[int | None, str, str]], numbers: Mapping[str, int],
+                   mine: Collection[str] = frozenset()) -> dict[str, str | None]:
+    """The `retired` argument of `sprint_labels` for one page: None for a detached sprint, else the
+    label of its kept number, `yours` when a profile of `mine` holds that account."""
+    own = _own_numbers(numbers, mine)
+    return {sprint_id: None if number is None else _label(number, own)
+            for sprint_id, (number, _, _) in retired.items()}
+
+
+def own_signin(signin_runs: Mapping[str, Mapping], owners: Mapping[str, str],
+               login: str) -> dict | None:
+    """The run a colleague's page shows among the profiles `login` added: the highest `attempt` of the
+    running ones, else of all, as a copy of its `state`, `at` and `attempt`; None when there is none.
+    It never carries a profile name."""
+    runs = [signin_runs[profile] for profile, owner in owners.items()
+            if owner == login and profile in signin_runs]
+    if not runs:
+        return None
+    latest = max(runs, key=lambda run: (run["state"] == "running", run["attempt"]))
+    return {key: latest[key] for key in ("state", "at", "attempt")}
+
+
+def pool_view(capacity: Mapping, numbers: Mapping[str, int],
+              mine: Collection[str] = frozenset()) -> dict:
+    own = _own_numbers(numbers, mine)
+    entries = sorted((entry for entry in capacity["profiles"] if entry["duplicate_of"] is None),
+                     key=lambda entry: (numbers[entry["profile"]], entry["profile"]))
+    rows = [{"label": _label(numbers[entry["profile"]], own), "state": entry["state"],
+             "week_left": entry["week_left"], "five_hour_left": entry["five_hour_left"],
+             "week_reset": entry["week_reset"], "five_hour_reset": entry["five_hour_reset"],
+             "next_reset": entry["next_reset"], "out_until": entry["out_until"],
+             "in_use": entry["signin"]["state"] != "signed_out" and not entry["excluded"]}
+            for entry in entries]
+    read = any(row["in_use"] and row["state"] != "unknown" for row in rows)
+    state = (None if not read else "out" if capacity["all_out"]
+             else "tight" if capacity["tight"] else "fine")
+    return {"state": state, "tight": capacity["tight"], "all_out": capacity["all_out"],
+            "resumes_at": capacity["resumes_at"], "no_reading": capacity["no_reading"],
+            "accounts": rows}
+
+
+EMPTY_POOL: dict = pool_view(EMPTY, {})
+
+
+def running_managers(sprints: Mapping[str, SprintState]) -> dict[str, str]:
+    """Each running sprint's id with the profile its manager is on."""
+    return {sprint_id: state.manager.profile for sprint_id, state in sprints.items()
+            if state.manager is not None and state.manager.state == STARTED
+            and ended_at(state) is None}
+
+
+def sprint_labels(sprints: Mapping[str, SprintState], labels: Mapping[str, str],
+                  retired: Mapping[str, str | None] = MappingProxyType({})) -> dict[str, str]:
+    """The account label of each running sprint: `retired[sprint_id]` when the sprint's profile left
+    while it ran (a profile name can be given to another account since; a None one is detached and
+    has no label, never its name's), else its profile's label."""
+    found = {}
+    for sprint_id, profile in running_managers(sprints).items():
+        label = retired[sprint_id] if sprint_id in retired else labels.get(profile)
+        if label is not None:
+            found[sprint_id] = label
+    return found
+
+
+def _read_numbering(path: Path) -> tuple[dict[str, int], dict[str, tuple[int | None, str, str]]]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"),
+                              object_pairs_hook=reject_duplicate_keys,
+                              parse_constant=reject_nonfinite_literal)
+    except (OSError, ValueError, RecursionError):
+        return {}, {}
+
+    def number(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+    numbers = document.get("numbers") if isinstance(document, dict) else None
+    retired = document.get("retired") if isinstance(document, dict) else None
+    if (not isinstance(numbers, dict) or not isinstance(retired, dict)
+            or not all(isinstance(key, str) and number(value) for key, value in numbers.items())
+            or not all(isinstance(key, str) and isinstance(value, list) and len(value) == 3
+                       and (value[0] is None or number(value[0])) and isinstance(value[1], str)
+                       and isinstance(value[2], str)
+                       for key, value in retired.items())):
+        return {}, {}
+    return dict(numbers), {key: (value[0], value[1], value[2]) for key, value in retired.items()}
+
+
+def read_numbers(path: Path) -> dict[str, int]:
+    return _read_numbering(path)[0]
+
+
+def read_retired(path: Path) -> dict[str, tuple[int | None, str, str]]:
+    return _read_numbering(path)[1]
+
+
+def write_numbers(path: Path, numbers: Mapping[str, int],
+                  retired: Mapping[str, tuple[int | None, str, str]] = MappingProxyType({})) -> None:
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps({"numbers": dict(numbers), "retired": dict(retired)},
+                                sort_keys=True))
+        os.replace(name, path)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+
+
+def scrub(view: Mapping, pool: Mapping | None = None,
+          sprint_accounts: Mapping[str, str] | None = None,
+          own_signin: Mapping | None = None) -> dict:
+    accounts = sprint_accounts or {}
+
+    def labelled(node: object) -> object:
+        if isinstance(node, Mapping):
+            result = {key: labelled(member) for key, member in node.items()}
+            if node.get("type") == "sprint":
+                result["account_label"] = accounts.get(node.get("sprint_id"))
+                if result.get("stop_text") is not None:
+                    result["stop_text"] = STOP_FAILED_TEXT
+                if node.get("manager_state") == "stalled":
+                    result["manager_text"] = STALLED_TEXT
+            if node.get("type") == "inbox_item" and node.get("reason") == "manager":
+                result["last_reason"] = MANAGER_REASON_TEXT
+            return result
+        if isinstance(node, list):
+            return [labelled(member) for member in node]
+        return node
+
+    scrubbed = labelled({name: member for name, member in view.items() if name != "sharing"})
+    scrubbed["unstopped"] = [{**item, "text": UNSTOPPED_TEXT} for item in view.get("unstopped", ())]
+    shown = EMPTY_POOL if pool is None else pool
     scrubbed.update({"unmanaged": [], "profile_sessions": {}, "signin_runs": {},
                      "accounts_added": [], "pin": None, "pin_launches": [],
                      "registration": None, "digest": None, "activation": None, "spend": None,
-                     "capacity": dict(EMPTY)})
+                     "capacity": dict(EMPTY),
+                     "own_signin": None if own_signin is None else dict(own_signin),
+                     "pool": {**shown, "accounts": [dict(row) for row in shown["accounts"]]}})
     return scrubbed
+
+
+def mark_steer(view: Mapping, login: str) -> dict:
+    def steers(item: Mapping) -> bool:
+        reason = item.get("reason")
+        return (reason in ("brief", "question") and item.get("started_by") == login
+                and not (reason == "question"
+                         and (item.get("owner_only") is True or item.get("look") is not None
+                              or is_look(picture.get("pair") for picture in item.get("pictures", [])))))
+
+    def copy(node: object) -> object:
+        if isinstance(node, Mapping):
+            result = {key: copy(member) for key, member in node.items()}
+            if result.get("action_text") == NUDGE_ACTION_TEXT:
+                result["action_text"] = NUDGE_ACTION_TEXT_GUEST
+            if node.get("type") == "sprint":
+                result["steer"] = node.get("started_by") == login
+            return result
+        if isinstance(node, list):
+            return [copy(member) for member in node]
+        return node
+
+    marked = copy(view)
+    inbox = view.get("inbox")
+    if isinstance(inbox, Mapping):
+        for part in ("open", "answered"):
+            if part in inbox:
+                marked["inbox"][part] = [
+                    {**copy(item), "steer": steers(item)} for item in inbox[part]]
+    return marked
 
 
 def picture_ids(view: object) -> frozenset[str]:
