@@ -10258,6 +10258,15 @@ class LookChecksTest(unittest.TestCase):
         self.assertIn("app_id", text)
         self.assertNotIn("whenever that reply lists no required status checks", text)
 
+    def test_the_poll_reads_the_app_of_each_run_from_a_source_that_carries_it(self):
+        # #1373 C2: the pull request rollup has no app field, so the app of a run is read from the check runs of the head the rollup names.
+        text = prompt(self.go()[1], "look-checks-1")
+        view = text.index("gh pr view 42 --repo owner/repo --json headRefOid,statusCheckRollup")
+        runs = text.index("gh api repos/owner/repo/commits/<its headRefOid>/check-runs --paginate", view)
+        self.assertIn("app.id", text[runs:])
+        self.assertLess(runs, text.index("Classify", runs))
+        self.assertNotIn("that one read alone", text)
+
     def test_the_poll_has_one_watch_and_one_deadline(self):
         # #1373 I1: a stuck check must end a poll so the three-wait counter advances.
         text = prompt(self.go()[1], "look-checks-1")
@@ -10550,6 +10559,14 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual(result["stage"], "checks-pending")
         self.assertNotIn("look-status", got)
         self.assertNotIn("merge", got)
+
+    def test_every_landing_checks_prompt_asks_for_a_required_list_even_when_empty(self):
+        # #1373: a marked landing reads an omitted required list as pending, so the clerk is told to always return one.
+        patch = dict(self.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None}}, pr={"checks": {"state": "behind", "head": SHA}})
+        _, calls = self.approve(patch=patch)
+        text = prompt(calls, "checks-2")
+        self.assertIn("Return required always, even as an empty list", text)
+        self.assertNotIn("none only when neither lists any", text)
 
     def test_a_marked_landing_reads_a_missing_required_check_as_pending(self):
         # #1373, D8: a passed reply that leaves a required name out of passed is pending for a marked landing too.
