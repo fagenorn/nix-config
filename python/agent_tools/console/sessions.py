@@ -126,8 +126,8 @@ ENDED = "ended"
 
 STATE_TEXT = {
     WORKING: "working",
-    WAITING_ANSWER: "waiting for an answer in its terminal",
-    WAITING_PERMISSION: "waiting for a permission in its terminal",
+    WAITING_ANSWER: "waiting for an answer",
+    WAITING_PERMISSION: "waiting for a permission",
     IDLE: "idle",
     LIMIT: "stopped on a usage limit",
 }
