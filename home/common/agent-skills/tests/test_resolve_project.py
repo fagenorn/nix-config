@@ -1072,6 +1072,17 @@ class CommittedContractTest(ResolverTestCase):
             self.assertEqual(
                 commands[m.id], {"argv": list(m.argv), "cwd": str(REPO_ROOT), "env": []}, m.id)
 
+    def test_the_repositorys_own_verification_is_lint_then_test(self):
+        # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        self.assertEqual(snapshot["bindings"]["workflow"]["verification"], ["lint", "test"])
+        commands = snapshot["bindings"]["commands"]
+        for name, argv in (("lint", ["just", "lint"]), ("test", ["just", "test"]),
+                           ("nix-build", ["just", "build"])):
+            self.assertEqual(commands[name], {"argv": argv, "cwd": str(REPO_ROOT), "env": []}, name)
+
 
 def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, str]:
     """Run the resolver with `PATH` replaced by exactly `path_value`.
