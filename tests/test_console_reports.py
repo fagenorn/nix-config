@@ -12,8 +12,8 @@ from agent_tools.console import service, sprints
 from agent_tools.console.deliveries import QUIET_AFTER_MS, IssueStage
 from agent_tools.console.sprints import (
     BALL_TEXT, CHANGES, NOW_ANSWER_TEXT, NOW_BRIEF_TEXT, NOW_DECISION_TEXT, NOW_DRAFTING_TEXT,
-    NOW_NO_PROGRESS_TEXT, NOW_PERMISSION_TEXT, NOW_QUOTA_TEXT, NOW_REFUSED_TEXT, NOW_STALLED_TEXT,
-    NOW_STARTING_TEXT, NOW_STOPPING_TEXT, Question, refused_reason)
+    NOW_NO_PROGRESS_TEXT, NOW_PAUSED_TEXT, NOW_PERMISSION_TEXT, NOW_QUOTA_TEXT, NOW_REFUSED_TEXT,
+    NOW_STALLED_TEXT, NOW_STARTING_TEXT, NOW_STOPPING_TEXT, NOW_WAIT_TEXT, Question, refused_reason)
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -36,12 +36,13 @@ CLOSING = {"summary": "Importer resumes after a crash\nwith detail",
            "differently": "cut smaller slices"}
 CHECKED = {**REPORT, "issues": [{"issue": 12, "stage": "building"},
                                 {"issue": 13, "stage": "landed"}]}
+NOW = 1_800_000_000  # 2027-01-15T08:00:00Z
 
 
 class ReportRouteTest(Case):
-    def open(self):
+    def open(self, **kwargs):
         support.write_registry(self.registry, support.entries(2))
-        return self.start()
+        return self.start(**kwargs)
 
     def started(self, svc):
         sid = svc.state_goal("owner/p01", GOAL_TEXT)
@@ -171,6 +172,128 @@ class ReportRouteTest(Case):
              if m["sentence"] == f"A merge in {PARTS['title']} was refused: "
                                  "required checks are not green"],
             [f"A merge in {PARTS['title']} was refused: required checks are not green"])
+
+    def test_a_report_may_state_a_wait_until_or_a_pause_and_it_is_stored_and_folded(self):
+        svc = self.open(clock=lambda: NOW)
+        sid = self.started(svc)
+        secret = self.secret(sid)
+        got = self.report(svc, sid, secret, {**REPORT, "wait_until": "2027-01-15T10:00:00Z"})
+        self.assertEqual(got[0], 200)
+        report = json.loads(support.log_rows(self.store)[-1][4])["report"]
+        self.assertEqual(report, {**CHECKED, "wait_until": "2027-01-15T10:00:00+00:00"})
+        folded = svc._sprints[sid].report
+        self.assertEqual((folded.wait_until, folded.paused),
+                         ("2027-01-15T10:00:00+00:00", None))
+        got = self.report(svc, sid, secret, {**REPORT, "paused": "  the lead freed this account  "})
+        self.assertEqual(got[0], 200)
+        report = json.loads(support.log_rows(self.store)[-1][4])["report"]
+        self.assertEqual(report, {**CHECKED, "paused": "the lead freed this account"})
+        folded = svc._sprints[sid].report
+        self.assertEqual((folded.wait_until, folded.paused),
+                         (None, "the lead freed this account"))
+
+    def dry(self, svc, sid, secret, extra):
+        body = json.dumps({"sprint_id": sid, "secret": secret, "dry_run": True,
+                           "report": {**REPORT, **extra}}).encode()
+        return self.assert_unchanged(
+            svc, lambda: support.post_page(svc.address, REPORT_PATH, JSON, body))
+
+    def test_a_wait_until_in_the_past_unparseable_or_beyond_the_limit_is_refused_with_the_report(self):
+        svc = self.open(clock=lambda: NOW)
+        sid = self.started(svc)
+        secret = self.secret(sid)
+        member = "the report has no valid {}"
+        table = [
+            ({"wait_until": "2027-01-15T07:59:59Z"}, sprints.WAIT_PAST),
+            ({"wait_until": "2027-01-15T08:00:00Z"}, sprints.WAIT_PAST),
+            ({"wait_until": "2027-01-16T08:00:01Z"}, sprints.WAIT_TOO_FAR),
+            ({"wait_until": "2027-01-16T08:00:00.000500Z"}, sprints.WAIT_TOO_FAR),
+            ({"wait_until": "2027-01-16T08:00:00.0000001Z"}, sprints.WAIT_TOO_FAR),
+            ({"wait_until": "tomorrow"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T10:00:00"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T12:00:00+02:00"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T10:00:00+00:00:00.5"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T10:00:00-00:00:00.5"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T10:00:00+00:00:30"}, member.format("wait_until")),
+            ({"wait_until": 1800007200}, member.format("wait_until")),
+            ({"wait_until": None}, member.format("wait_until")),
+            ({"paused": ""}, member.format("paused")),
+            ({"paused": "a\nb"}, member.format("paused")),
+            ({"paused": "x" * 501}, member.format("paused")),
+            ({"paused": "#12 waits"}, sprints.PAUSED_NUMBER),
+            ({"wait_until": "2027-01-15T10:00:00Z", "paused": "the lead asked"},
+             sprints.WAIT_AND_PAUSE),
+        ]
+        for extra, reason in table:
+            with self.subTest(route="send", extra=extra):
+                body = {**REPORT, **extra}
+                self.refused(svc, lambda: self.report(svc, sid, secret, body), 409,
+                             reason.encode())
+            with self.subTest(route="dry run", extra=extra):
+                got = self.dry(svc, sid, secret, extra)
+                self.assertEqual((got[0], got[2]), (409, reason.encode() + b"\n"))
+        for edge in ("2027-01-16T08:00:00Z", "2027-01-15T08:00:00.000500Z"):
+            with self.subTest(edge=edge):
+                got = self.dry(svc, sid, secret, {"wait_until": edge})
+                self.assertEqual((got[0], got[2]), (200, b'{"checked":true}'))
+
+    def test_a_wait_until_inside_the_clocks_own_millisecond_is_judged_against_the_exact_clock(self):
+        svc = self.open(clock=lambda: NOW + 0.0009)  # 08:00:00.0009Z
+        sid = self.started(svc)
+        secret = self.secret(sid)
+        for route in ("send", "dry run"):
+            with self.subTest(route=route, past=True):
+                extra = {"wait_until": "2027-01-15T08:00:00.000500Z"}
+                if route == "send":
+                    self.refused(svc, lambda: self.report(svc, sid, secret, {**REPORT, **extra}),
+                                 409, sprints.WAIT_PAST.encode())
+                else:
+                    got = self.dry(svc, sid, secret, extra)
+                    self.assertEqual((got[0], got[2]), (409, sprints.WAIT_PAST.encode() + b"\n"))
+        got = self.dry(svc, sid, secret, {"wait_until": "2027-01-15T08:00:00.001Z"})
+        self.assertEqual((got[0], got[2]), (200, b'{"checked":true}'))
+
+    def test_a_wait_until_finer_than_a_microsecond_is_kept_by_rounding_up(self):
+        svc = self.open(clock=lambda: NOW)
+        sid = self.started(svc)
+        got = self.report(svc, sid, self.secret(sid),
+                          {**REPORT, "wait_until": "2027-01-15T10:00:00.0000001Z"})
+        self.assertEqual(got[0], 200)
+        self.assertEqual(svc._sprints[sid].report.wait_until, "2027-01-15T10:00:00.000001+00:00")
+
+    def test_a_wait_until_is_read_from_the_forms_of_a_utc_time(self):
+        for given, stored in (
+                ("2027-01-15T10:00:00Z", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15T10:00:00z", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15 10:00:00+0000", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15T10:00:00-00", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15T10:00Z", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15T10:00:00,25Z", "2027-01-15T10:00:00.250000+00:00"),
+                ("2027-01-15T10:00:00.1234567Z", "2027-01-15T10:00:00.123457+00:00"),
+                ("2027-01-15T10:00:00.1234560Z", "2027-01-15T10:00:00.123456+00:00")):
+            with self.subTest(given=given):
+                self.assertEqual(
+                    sprints.checked_report({**REPORT, "wait_until": given})["wait_until"], stored)
+        for given in ("2027-01-15", "2027-01-15T24:00:00Z", "2027-02-30T10:00:00Z",
+                      "2027-01-15T10:00:00.Z", "2027-01-15T10:00:00\u0661Z"):
+            with self.subTest(given=given), self.assertRaises(sprints.Refused):
+                sprints.checked_report({**REPORT, "wait_until": given})
+
+    def test_the_fold_keeps_a_wait_until_whose_time_has_passed(self):
+        self.assertEqual(sprints.checked_report({**REPORT, "wait_until": "2000-01-01T00:00:00Z"}),
+                         {**CHECKED, "wait_until": "2000-01-01T00:00:00+00:00"})
+        with self.assertRaises(sprints.Refused) as raised:
+            sprints.checked_report({**REPORT, "wait_until": "2000-01-01T00:00:00Z"},
+                                   now_ms=NOW * 1000)
+        self.assertEqual(str(raised.exception), sprints.WAIT_PAST)
+        svc = self.open(clock=lambda: NOW)
+        sid = self.started(svc)
+        got = self.report(svc, sid, self.secret(sid),
+                          {**REPORT, "wait_until": "2027-01-15T10:00:00Z"})
+        self.assertEqual(got[0], 200)
+        svc.close()
+        second = self.start(clock=lambda: NOW + 3 * 3600)
+        self.assertEqual(second._sprints[sid].report.wait_until, "2027-01-15T10:00:00+00:00")
 
     def test_a_report_survives_a_restart(self):
         svc = self.open()
@@ -351,6 +474,58 @@ class SprintBallViewTest(unittest.TestCase):
         self.assertEqual((permission["ball"], permission["now_text"]),
                          ("owner", NOW_PERMISSION_TEXT))
         self.assertEqual(self.shown(s, PAST, manager_session("waiting_answer"))["ball"], "owner")
+
+    def test_a_stated_wait_reads_waiting_until_its_time_and_a_pause_reads_its_reason(self):
+        s = reported(with_manager(started(A)), T0_MS)
+        until = iso(T0_MS + 120 * MIN)
+        waiting = dataclasses.replace(s, report=dataclasses.replace(s.report, wait_until=until))
+        paused = dataclasses.replace(
+            s, report=dataclasses.replace(s.report, paused="the lead freed the account"))
+        idle = manager_session("idle")
+        got = self.shown(waiting, PAST, idle)
+        self.assertEqual((got["now_text"], got["now_until"]), ("waiting until", until))
+        self.assertEqual(NOW_WAIT_TEXT, "waiting until")
+        got = self.shown(waiting, T0_MS + 120 * MIN, idle)
+        self.assertEqual((got["now_text"], got["now_until"]),
+                         ("last seen building 1 of 7: Importer resumes", None))
+        got = self.shown(paused, PAST, idle)
+        self.assertEqual((got["now_text"], got["now_until"]),
+                         ("paused: the lead freed the account", None))
+        self.assertEqual(NOW_PAUSED_TEXT.format(reason="x"), "paused: x")
+        self.assertIsNone(self.shown(s, PAST, idle)["now_until"])
+
+    def test_a_stated_wait_and_a_pause_never_read_manager_working_nor_nothing_running(self):
+        s = reported(with_manager(started(A)), T0_MS)
+        until = iso(T0_MS + 120 * MIN)
+        waiting = dataclasses.replace(s, report=dataclasses.replace(s.report, wait_until=until))
+        paused = dataclasses.replace(
+            s, report=dataclasses.replace(s.report, paused="the lead freed the account"))
+        idle = manager_session("idle")
+        self.assertEqual(self.shown(s, PAST, idle)["ball"], "nobody")
+        for held, ball in ((waiting, "waiting"), (paused, "paused")):
+            with self.subTest(held=held.report):
+                got = self.shown(held, PAST, idle)
+                self.assertEqual((got["ball"], got["ball_text"]), (ball, ball))
+                got = self.shown(held, PAST, manager_session("working"))
+                self.assertEqual((got["ball"], got["ball_text"]), (ball, ball))
+        got = self.shown(waiting, T0_MS + 120 * MIN, idle)
+        self.assertEqual((got["ball"], got["ball_text"]), ("nobody", "nothing running, may be stuck"))
+
+    def test_an_owner_wait_and_a_quota_beat_a_stated_wait_and_a_stated_wait_beats_a_merge_refusal(self):
+        until = iso(T0_MS + 120 * MIN)
+        base = reported(with_manager(started(A)), T0_MS)
+        waiting = dataclasses.replace(base, report=dataclasses.replace(base.report, wait_until=until))
+        asked = reported(with_manager(started(A)), T0_MS, inbox=(9,))
+        asked = dataclasses.replace(asked, report=dataclasses.replace(asked.report, wait_until=until))
+        refused = dataclasses.replace(waiting, report=dataclasses.replace(
+            waiting.report, status="merge refused: required checks are not green"))
+        now = T0_MS + MIN
+        got = self.shown(asked, now, records={("p00", "k9"): open_item("p00", "k9", 9)})
+        self.assertEqual((got["now_text"], got["now_until"]), (NOW_DECISION_TEXT, None))
+        got = self.shown(waiting, now, capacity=out())
+        self.assertEqual((got["now_text"], got["now_until"]), (NOW_QUOTA_TEXT, None))
+        got = self.shown(refused, now)
+        self.assertEqual((got["now_text"], got["now_until"]), ("waiting until", until))
 
     def test_each_now_sentence_rule(self):
         now = T0_MS + MIN

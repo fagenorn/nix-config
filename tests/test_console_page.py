@@ -6076,6 +6076,14 @@ class PageSprintBlockTest(unittest.TestCase):
         self.assertEqual(now["title"], full(now))
         self.assertEqual(now["title"], REPORTED["now_text"])
 
+    def test_a_waiting_sprint_reads_its_time_in_the_now_line(self) -> None:
+        (snap,) = render([START, {"frame": with_sprints([
+            {**REPORTED, "now_text": "waiting until", "now_until": "2026-11-12T12:00:00+00:00"}])},
+            {"snapshot": True}])
+        (now,) = of_class(snap["projects"], "p", "sp-now")
+        self.assertEqual(full(now), "waiting until Thu 12:00")
+        self.assertEqual(now["title"], "waiting until Thu 12:00")
+
     def test_the_now_sentence_is_a_full_width_line_of_at_most_two_lines(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
@@ -6536,6 +6544,8 @@ class PageSprintGlanceTest(unittest.TestCase):
             ("manager", "manager working", "sic-play", "st-go"),
             ("owner", "waiting on you", "sic-pause", "needs"),
             ("nobody", "nothing running, may be stuck", "sic-dashed", "st-wait"),
+            ("waiting", "waiting", "sic-pause", "st-dim"),
+            ("paused", "paused", "sic-pause", "st-dim"),
         ]
         steps = [START]
         for ball, words, _, _ in cases:
@@ -6550,6 +6560,9 @@ class PageSprintGlanceTest(unittest.TestCase):
                 self.assertTrue(has_class(said, tone))
                 (mark,) = [n for n in top(line) if has_class(n, "sic")]
                 self.assertTrue(has_class(mark, icon_class))
+                if ball in ("waiting", "paused"):
+                    self.assertFalse(has_class(said, "st-go"))
+                    self.assertFalse(has_class(mark, "sic-play"))
                 self.assertTrue(has_class(mark, tone))
                 self.assertIs(has_class(mark, "needs"), ball == "owner")
 

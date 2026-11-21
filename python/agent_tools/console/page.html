@@ -813,6 +813,8 @@ const BALL_LOOKS = new Map([
   ["manager", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
   ["owner", { icon: "pause-icon", mark: "sic-pause", tone: "needs" }],
   ["nobody", { icon: "dashed-icon", mark: "sic-dashed", tone: "st-wait" }],
+  ["waiting", { icon: "pause-icon", mark: "sic-pause", tone: "st-dim" }],
+  ["paused", { icon: "pause-icon", mark: "sic-pause", tone: "st-dim" }],
 ]);
 function ballLook(sprint) {
   const look = BALL_LOOKS.get(sprint.ball);
@@ -1071,8 +1073,12 @@ function drawSprint(item, entry, sprint) {
     head.appendChild(prog);
   }
   const nowYours = nowSteers(sprint);
-  const now = el("p", "sp-now", nowWords(sprint.now_text, nowYours));
-  now.setAttribute("title", nowWords(sprint.now_text, nowYours));
+  const nowText = nowWords(sprint.now_text, nowYours);
+  const now = typeof sprint.now_until === "string"
+    ? phrase("p", "sp-now", nowText + " ", timeEl("weekday", sprint.now_until, "now-until"))
+    : el("p", "sp-now", nowText);
+  now.setAttribute("title", typeof sprint.now_until === "string"
+    ? nowText + " " + timeWords("weekday", sprint.now_until) : nowText);
   head.appendChild(now);
   const words = el("p", "sp-status");
   words.appendChild(el("span", "sprint-ball " + look.tone, ballWords(sprint.ball_text, yours)));
