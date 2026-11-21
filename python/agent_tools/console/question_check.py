@@ -94,20 +94,23 @@ to open`) is removed first (`_FAILED_RUN`), so `q.records.json (failed activatio
 
 `spend_figure(text)` is False for None, else whether the text holds a spend figure: a dollar amount
 (`$0.42`, `$1,200`, `$3k`, `$12`, `$5 a month`: a complete amount, not followed by a digit, `,` or `.` and a
-digit, so `$12,34` is no figure; a lone digit is a figure unless a word character follows it, it is wrapped
-in a code span (`` `$1` ``), it is said to be an argument (`$1 is a script argument`), an argument noun leads
-into it (`argument $1`) or `the` leads into it at the end of a sentence (`the $1.`), since `$1` is also a
-shell argument), a number followed by `tokens`
+digit, so `$12,34` is no figure; a lone digit is a figure unless a word character follows it, it is said to
+be an argument (`$1 is a script argument`, also in a code span), an argument noun leads into it
+(`argument $1`) or `the` leads into it at the end of a sentence (`the $1.`), since `$1` is also a shell
+argument; a code span alone is no cue, so `` `$5` `` is a figure), a number followed by `tokens`
 (with an optional `k`, `m`, `b`, `thousand`, `million` or `billion`) or a number followed by `dollars` or
-`usd` (not right after `issue`, so `issue 1357 tokens` holds none), with the `**bold**` or `inline code` marks the answer rules permit around the number or the unit
+`usd` (not when it follows an identifier word, `issue`, `PR`, `pull request`, `ticket`, `run` or `id`, alone
+or in a list of numbers, so `issue 1357 tokens`, `issues 1357 and 1364 tokens` and `PR 1364 tokens` hold none), with the `**bold**` or `inline code` marks the answer rules permit around the number or the unit
 (`**4,200** tokens`). A number is digits with commas only between three-digit groups and an optional fraction, and one right after `#`, a word character, `.` or `,` is
 not a figure, so `issue #7, tokens` and `issue 7, tokens` hold none. `cites_part(read_text, name, part)`
 is True iff `cites(read_text, name)` holds and some occurrence of `name` in the Read text, at the start
 of a line or after whitespace, `/`, a backquote, a quote, `(`, `[`, `<` or `*`, is followed by optional
 closing backquotes or asterisks, an optional line range (`:120-400`) and optional whitespace and then a
 parenthesized group one of whose words equals `part` (case-insensitively; the group is split at whitespace and
-at `,`, `;`, `:`, `/`, `&` and the brackets and marks around a word, so `spend offset 3 limit 40` marks the
-spend part and a group that holds `not`, `no` or `excluding` marks none, as in `deliveries only, excluding spend`), so the part is bound to the citation of the
+at `,`, `;`, `:`, `/`, `&` and the brackets and marks around a word, and every word must be a section name of
+`question_records.SECTIONS`, `held`, `checks`, `offset`, `limit`, `part`, `parts`, `section`, `sections`, `only`,
+`and`, `line`, `lines` or a number, so `spend offset 3 limit 40` marks the spend part and a group with any
+other word, `excluding`, `not`, `skipped`, `but` or `unread`, marks none, as in `deliveries only, spend skipped`), so the part is bound to the citation of the
 question's own file: `<path> (deliveries), old-profile.md (spend)` does not cite the spend part.
 
 The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key` and `revision`.
@@ -126,7 +129,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.console import manager_check, project_question, service, view
+from agent_tools.console import manager_check, project_question, question_records, service, view
 
 QUESTIONS = (
     "What shipped, and what is live, in the last 7 days?",
@@ -156,13 +159,18 @@ _NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 _MAGNITUDE = r"(?:[kmb]|thousand|million|billion)"
 _MARK = r"[*`]{0,2}\s?[*`]{0,2}"
 _END = r"(?![\d]|[.,]\d)"
-_SPEND_FIGURE = re.compile(
-    r"\$\s?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+|\d{1,3}(?:,\d{3})+|\d+\s?" + _MAGNITUDE + r"\b|\d{2,})" + _END
-    + r"|(?<![#\w.,])(?<!\bissue\s)" + _NUMBER + _MARK + r"(?:" + _MAGNITUDE + _MARK + r")?tokens\b"
-    + r"|(?<![#\w.,])(?<!\bissue\s)" + _NUMBER + _MARK + r"(?:dollars|usd)\b", re.IGNORECASE)
-# A lone digit after `$` is a dollar amount unless a cue marks it as a shell positional argument ($1): it is
-# wrapped in a code span, a word that names an argument leads into it or an argument is what it is said to be,
-# or the article `the` leads into it at the end of a sentence.
+_DOLLAR_AMOUNT = re.compile(
+    r"\$\s?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+|\d{1,3}(?:,\d{3})+|\d+\s?" + _MAGNITUDE + r"\b|\d{2,})" + _END)
+_COUNT_FIGURE = re.compile(
+    r"(?<![#\w.,])" + _NUMBER + _MARK + r"(?:" + _MAGNITUDE + _MARK + r")?tokens\b"
+    + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:dollars|usd)\b", re.IGNORECASE)
+# A number right after an identifier word, alone or in a list of numbers (`issues 1357 and 1364`, `PR 1364`), is
+# that identifier and no count, so `issues 1357 and 1364 tokens` holds no figure.
+_IDENTIFIER_BEFORE = re.compile(
+    r"\b(?:issues?|prs?|pull\s+requests?|tickets?|runs?|ids?)\s+(?:#?\d+\s*(?:,|&|and|or|/)?\s*)*\Z", re.IGNORECASE)
+# A lone digit after `$` is a dollar amount unless a cue marks it as a shell positional argument ($1): a word that
+# names an argument leads into it or an argument is what it is said to be, or the article `the` leads into it at the
+# end of a sentence. A code span around it is no cue: the prompt permits `inline code` around a figure.
 _LONE_DOLLAR = re.compile(r"\$\s?\d(?![\w]|[.,]\d)")
 _ARGUMENT = r"(?:arg|args|argument|arguments|param|parameter|parameters|variable|var|positional)"
 _SHELL_AFTER = re.compile(
@@ -172,7 +180,12 @@ _SHELL_AFTER = re.compile(
 _SHELL_BEFORE = re.compile(r"\b" + _ARGUMENT + r"\s+`?\Z", re.IGNORECASE)
 _ARTICLE_BEFORE = re.compile(r"\bthe\s+\Z", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"\.?\s*\Z|\.(?!\d)")
-_NEGATION = re.compile(r"\b(?:not?|non|excl(?:uding|udes?|uded)?|without|except(?:ing)?)\b", re.IGNORECASE)
+# The words a parenthesized group may hold besides the part it marks: the records' section names, the prompt's
+# `offset`/`limit` pair and numbers. Any other word (`excluding`, `skipped`, `but`, `unread`) can say the part
+# was not read, so a group that holds one marks no part.
+_PART_WORDS = frozenset((*question_records.SECTIONS, "held", "checks", "offset", "limit", "part", "parts",
+                         "section", "sections", "only", "and", "line", "lines"))
+_PART_NUMBER = re.compile(r"[\d,.-]+")
 _PART_SPLIT = re.compile(r"[\s,;:/&()\[\]<>`'\"*]+")
 _EXIT = {"met": 0, "not_met": 1, "waiting": NOT_YET}
 
@@ -195,14 +208,15 @@ def cites(read_text: str | None, name: str) -> bool:
 
 def spend_figure(text: str | None) -> bool:
     """Whether `text` holds a spend figure: a dollar amount or a number of tokens or dollars."""
-    return text is not None and (_SPEND_FIGURE.search(text) is not None
-                                 or any(not _shell_argument(text, found) for found in _LONE_DOLLAR.finditer(text)))
+    return text is not None and (
+        _DOLLAR_AMOUNT.search(text) is not None
+        or any(not _shell_argument(text, found) for found in _LONE_DOLLAR.finditer(text))
+        or any(_IDENTIFIER_BEFORE.search(text[:found.start()]) is None for found in _COUNT_FIGURE.finditer(text)))
 
 
 def _shell_argument(text: str, found: re.Match) -> bool:
     before, after = text[:found.start()], text[found.end():]
-    return ((before.endswith("`") and after.startswith("`"))
-            or _SHELL_AFTER.match(after) is not None
+    return (_SHELL_AFTER.match(after) is not None
             or _SHELL_BEFORE.search(before) is not None
             or (_ARTICLE_BEFORE.search(before) is not None and _SENTENCE_END.match(after) is not None))
 
@@ -214,9 +228,13 @@ def cites_part(read_text: str | None, name: str, part: str) -> bool:
     body = read_text.removeprefix(view.ASK_READ_TEXT.format(text=""))
     pattern = re.compile(r"(?:^|(?<=[\s/`'\"(\[<*]))" + re.escape(name)
                          + r"[*`]*(?::[0-9][0-9,-]*)?[*`]*\s*\(([^)]*)\)", re.MULTILINE)
-    return any(part.casefold() == item.casefold()
-               for found in pattern.finditer(body) if not _NEGATION.search(found.group(1))
-               for item in _PART_SPLIT.split(found.group(1)))
+    return any(_marks(found.group(1), part) for found in pattern.finditer(body))
+
+
+def _marks(group: str, part: str) -> bool:
+    words = [word.casefold() for word in _PART_SPLIT.split(group) if word]
+    return part.casefold() in words and all(
+        word in _PART_WORDS or _PART_NUMBER.fullmatch(word) for word in words)
 
 
 def _names(clause: str, name: str) -> bool:

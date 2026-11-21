@@ -308,7 +308,11 @@ class QuestionCheckTest(unittest.TestCase):
         for text in ("Answer: For issue #7, tokens were unavailable.\nRead: " + own + " (spend)",
                      "Answer: For issue 7, tokens were unavailable.\nRead: " + own + " (spend)",
                      "Answer: #7 cost 4,200 tokens.\nRead: " + own + " (deliveries), old-profile.md (spend)",
-                     "Answer: #7 cost 4,200 tokens ($0.42).\nRead: " + own):
+                     "Answer: #7 cost 4,200 tokens ($0.42).\nRead: " + own,
+                     "Answer: For issues 1357 and 1364 tokens were unavailable.\nRead: " + own + " (spend)",
+                     "Answer: In PR 1364 tokens were not recorded.\nRead: " + own + " (spend)",
+                     "Answer: Issue  1357 tokens unavailable\nRead: " + own + " (spend)",
+                     "Answer: Issues 1357 tokens unavailable\nRead: " + own + " (spend)"):
             with self.subTest(text=text):
                 h = Harness(self)
                 h.seed([grounded("q1"), text, grounded("q3")])
@@ -333,7 +337,8 @@ class QuestionCheckTest(unittest.TestCase):
                        "Planning cost $5 per issue.", "$5 is the average cost per issue.",
                        "Planning costs the most per issue; its $5 is about half of each issue's spend.",
                        "Planning led with $5.", "Planning was the costliest, using $5.",
-                       "$5 is the total for planning.", "Planning's $5 is the most of any phase."):
+                       "$5 is the total for planning.", "Planning's $5 is the most of any phase.",
+                       "Planning cost `$5` per issue.", "Planning cost **`$5`** per issue.", "**`$5`**"):
             with self.subTest(answer=answer):
                 h = Harness(self)
                 h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + READ.format("q2") + " (spend)",
@@ -345,7 +350,11 @@ class QuestionCheckTest(unittest.TestCase):
         for read in (READ.format("q2") + " (deliveries only, excluding spend)",
                      READ.format("q2") + " (excluding deliveries and spend)",
                      READ.format("q2") + " (excluding deliveries, spend)",
-                     READ.format("q2") + " (not spend)"):
+                     READ.format("q2") + " (not spend)",
+                     READ.format("q2") + " (deliveries, skipped spend)",
+                     READ.format("q2") + " (everything but spend)",
+                     READ.format("q2") + " (deliveries only, spend skipped)",
+                     READ.format("q2") + " (deliveries; spend unread)"):
             with self.subTest(read=read):
                 h = Harness(self)
                 h.seed([grounded("q1"), "Answer: Planning used 4,200 tokens.\nRead: " + read, grounded("q3")])
@@ -392,13 +401,18 @@ class QuestionCheckTest(unittest.TestCase):
                      "Planning: $5", "$5, the most", "the $5 spent", "($5)", "**$5**",
                      "$5 is the average cost per issue", "Planning led with $5.", "Planning was the costliest, using $5.",
                      "$5 is the total for planning.", "Planning's $5 is the most of any phase.",
-                     "its $5 is about half of each issue's spend", "with $5 spent", "use $5 a month"):
+                     "its $5 is about half of each issue's spend", "with $5 spent", "use $5 a month",
+                     "Planning cost `$5` per issue.", "Planning cost **`$5`** per issue.", "`$5`",
+                     "Issue 1357 used 4,200 tokens.", "Issues 1357 and 1364 used 4,200 tokens."):
             with self.subTest(text=text):
                 self.assertIs(question_check.spend_figure(text), True)
         for text in (None, "Planning costs the most per issue.", "#1271 took 3 runs over 7 days",
                      "For issue #7, tokens were unavailable.", "For issue 7, tokens were unavailable.",
                      "#7 tokens", "12,34 tokens", "$1 is a script argument", "costs $12,34", "the $1.", "$123,4",
-                     "the $1", "script argument $1.", "$1 as an argument", "$1abc", "Issue 1357 token usage is unavailable",
+                     "the $1", "script argument $1.", "For issues 1357 and 1364 tokens were unavailable.",
+                     "In PR 1364 tokens were not recorded.", "Issue  1357 tokens unavailable",
+                     "Issues 1357 tokens unavailable", "For issues 1357, 1364 tokens were unavailable.",
+                     "Pull request 1364 tokens unavailable", "Ticket 12 dollars unavailable", "$1 as an argument", "$1abc", "Issue 1357 token usage is unavailable",
                      "`$1` as its argument", "takes `$1` as its argument", "$1 is the first argument"):
             with self.subTest(text=text):
                 self.assertIs(question_check.spend_figure(text), False)
@@ -417,6 +431,9 @@ class QuestionCheckTest(unittest.TestCase):
                      "Read: " + own + " (deliveries only, excluding spend)",
                      "Read: " + own + " (excluding deliveries and spend)",
                      "Read: " + own + " (excluding deliveries, spend)",
+                     "Read: " + own + " (deliveries, skipped spend)", "Read: " + own + " (everything but spend)",
+                     "Read: " + own + " (deliveries only, spend skipped)", "Read: " + own + " (deliveries; spend unread)",
+                     "Read: " + own + " (spend omitted)",
                      "Read: the spend part of " + own):
             with self.subTest(read=read):
                 self.assertIs(question_check.cites_part(read, "q2.records.json", "spend"), False)
