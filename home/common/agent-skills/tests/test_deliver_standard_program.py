@@ -9664,7 +9664,7 @@ EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind,
     (CLERK, ("setup", "acquire", "worktree", "renew-", "live-size", "live-green", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
              "hold-draft", "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
-             "look-checks-", "look-reverify")),
+             "look-checks-", "look-reverify", "look-carry", "look-carry-verify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "live-impl", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-", "look-fix", "fix-retest")),
@@ -9730,6 +9730,12 @@ SCENARIOS = (
      "patch": dict(RESUME, **{"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": D, "head": D},
                               "checks-2": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]},
                               "look-status": {"verdict": "approved", "kept_from": SHA}})},
+    # #1566: a landing resync that needs a new look verifies the new head and asks look-approval carry whether the approval carries.
+    {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": SHA}),
+     "patch": dict(RESUME, **{"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": D, "head": D},
+                              "checks-2": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]},
+                              "look-status": {"verdict": "needed", "kept_from": None},
+                              "look-checks-1": {"state": "passed", "head": D, "behind": False, "required": ["ci"], "passed": ["ci"]}})},
     # #1211: a fix answer records the approval with the owner's words (the only look-post of a resume), fixes once and lands the fixed head.
     {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "fix", "head": SHA, "words": "make the label bold"}),
      "patch": dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F},
@@ -12739,10 +12745,13 @@ class LookResumeTest(unittest.TestCase):
         self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
 
     def test_a_moved_head_whose_status_is_needed_stops_at_awaiting_look(self):
-        result, calls = self.approve(patch=dict(self.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None}}))
+        result, calls = self.approve(patch=dict(self.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None},
+                                                               "look-checks-1": {"state": "passed", "head": D, "behind": False, "required": ["ci"], "passed": ["ci"]}}))
         got = labels(calls)
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], D)
+        self.assertEqual(result["reason"], "the approval of " + SHA + " does not carry to " + D + ": pictures-differ; " + AWAIT_REASON)
+        self.assertLess(got.index("look-carry"), got.index("look-checks-1"))
         self.assertNotIn("merge", got)
         self.assertIn("land-unlock", got)
         self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
@@ -13192,6 +13201,128 @@ class LookResumeTest(unittest.TestCase):
 
     def test_the_scenario_look_cont_is_a_real_stop_cont(self):
         self.assertEqual(LOOK_CONT, self.look_cont())
+
+
+class LookCarryLandingTest(unittest.TestCase):
+    """#1566: a landing resync that moves the head asks look-approval carry, after verifying the new head, before it asks the owner again."""
+
+    PICS = [{"kind": "before", "path": "/r/pics/before.png"}, {"kind": "after", "path": "/r/pics/after.png"}]
+    NEEDED = dict(LookResumeTest.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None},
+                                           "look-checks-1": {"state": "passed", "head": D, "behind": False, "required": ["ci"], "passed": ["ci"]}})
+    CARRIED = {"verdict": "carried", "from": SHA, "reason": None, "comment_id": 501}
+    OK = [{"id": "build", "status": "pass", "summary": "ok"}]
+
+    def approve(self, patch=None, replies=None, cont=None):
+        if cont is None:
+            first, _ = run(patch={"setup": {"look": MARKED}})
+            cont = first["cont"]
+        return run(args=dict(ARGS, cont=cont, look={"answer": "approve", "head": SHA}), patch=self.NEEDED if patch is None else patch, replies=replies)
+
+    def stops_unasked(self, result, calls, stage="look-carry"):
+        got = labels(calls)
+        self.assertEqual(result["stage"], stage)
+        self.assertNotIn("merge", got)
+        self.assertFalse([l for l in got if l.startswith("look-checks-")], got)
+        self.assertIn("land-unlock", got)
+
+    def test_a_head_that_only_merged_the_integration_branch_lands_on_a_carry_line(self):
+        result, calls = self.approve(replies={"look-carry": self.CARRIED})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertLess(got.index("look-status"), got.index("look-carry-verify"))
+        self.assertLess(got.index("look-carry-verify"), got.index("look-carry"))
+        self.assertLess(got.index("look-carry"), got.index("merge"))
+        verify = prompt(calls, "look-carry-verify")
+        self.assertIn("merge-base --is-ancestor " + SHA + " " + D, verify)
+        self.assertIn("rev-list --no-merges " + SHA + ".." + D + " ^origin/dev", verify)
+        self.assertIn("merge-tree --write-tree", verify)
+        self.assertIn("Run the project's declared verification once on the worktree head", verify)
+        self.assertIn("look-approval carry --repo owner/repo --issue 9 --pr 42 --from " + SHA + " --head " + D
+                      + " --picture /r/pics/before.png --picture /r/pics/after.png", prompt(calls, "look-carry"))
+        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
+        self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
+        for call in calls:
+            self.assertNotIn("look-approval post", call["prompt"])
+
+    def test_a_changed_picture_stops_for_a_new_look(self):
+        result, calls = self.approve()
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertEqual(result["reason"], "the approval of " + SHA + " does not carry to " + D + ": pictures-differ; " + AWAIT_REASON)
+        self.assertEqual(result["pictures"], self.PICS)
+        self.assertLess(got.index("look-carry"), got.index("look-checks-1"))
+        self.assertNotIn("merge", got)
+        self.assertIn("land-unlock", got)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
+
+    def test_a_non_merge_commit_stops_for_a_new_look_at_the_new_head(self):
+        theirs = [{"kind": "before", "path": "/r/pics/a-before.png"}, {"kind": "after", "path": "/r/pics/a-after.png"}]
+        mine = [{"kind": "before", "path": "/r/pics/h-before.png"}, {"kind": "after", "path": "/r/pics/h-after.png"}]
+        first, _ = run(patch={"setup": {"look": MARKED}, "verify": {"pictures": theirs}})
+        reply = {"head": D, "clean": True, "merge_only": False, "results": self.OK, "pictures": mine}
+        result, calls = self.approve(cont=first["cont"], replies={"look-carry-verify": reply})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertEqual(result["pictures"], mine)
+        self.assertEqual(result["cont"]["verified"]["head"], D)
+        self.assertEqual(result["cont"]["verified"]["pictures"], mine)
+        self.assertTrue(result["reason"].endswith("it adds commits that are not clean merges of dev; " + AWAIT_REASON), result["reason"])
+        self.assertNotIn("look-carry", got)
+        self.assertIn("look-checks-1", got)
+
+    def test_a_carry_whose_verification_fails_stops_without_asking(self):
+        failed = {"head": D, "clean": True, "merge_only": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
+        result, calls = self.approve(replies={"look-carry-verify": failed})
+        self.stops_unasked(result, calls)
+        self.assertNotIn("look-carry", labels(calls))
+
+    def test_an_unusable_verification_reply_stops_without_asking(self):
+        for name, reply in (("none", None), ("another head", {"head": F, "clean": True, "merge_only": True, "results": self.OK})):
+            with self.subTest(reply=name):
+                result, calls = self.approve(replies={"look-carry-verify": reply})
+                self.stops_unasked(result, calls)
+                self.assertNotIn("look-carry", labels(calls))
+
+    def test_an_unsafe_picture_path_carries_nothing(self):
+        odd = {"head": D, "clean": True, "merge_only": True, "results": self.OK, "pictures": [{"kind": "after", "path": "/r/my pics/a.png"}]}
+        result, calls = self.approve(replies={"look-carry-verify": odd})
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertNotIn("look-carry", labels(calls))
+
+    def test_an_unusable_carry_reply_stops_without_asking(self):
+        replies = (({"verdict": "moved"}), ({"verdict": "error", "detail": "x"}), None, ({"verdict": "carried"}),
+                   {"verdict": "carried", "from": SHA, "comment_id": None}, {"verdict": "carried", "from": None, "comment_id": 501},
+                   {"verdict": "carried", "from": SHA[:7], "comment_id": 501}, {"verdict": "carried", "from": F, "comment_id": 501},
+                   {"verdict": "carried", "from": SHA, "comment_id": 0}, {"verdict": "needed"}, {"verdict": "needed", "reason": "whatever"})
+        for reply in replies:
+            with self.subTest(reply=reply):
+                result, calls = self.approve(replies={"look-carry": reply})
+                self.stops_unasked(result, calls)
+
+    def test_a_kept_approval_runs_no_carry(self):
+        result, calls = self.approve(patch=dict(self.NEEDED, **{"look-status": {"verdict": "approved", "kept_from": SHA}}))
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("look-carry-verify", labels(calls))
+        self.assertNotIn("look-carry", labels(calls))
+
+    def test_a_second_resync_carries_from_the_owners_head(self):
+        stale = {"merged": False, "behind": True, "notes": "Head branch is not up to date with the base branch", "renew": {"verdict": "renewed"},
+                 "lock": {"verdict": "already_held", "lock_sha": D}}
+        replies = {"look-status": [{"verdict": "approved", "kept_from": SHA}, {"verdict": "needed", "kept_from": None}],
+                   "merge": [stale, {"merged": True, "merge_commit": F, "notes": "merged", "renew": {"verdict": "renewed"},
+                                     "lock": {"verdict": "already_held", "lock_sha": F}}],
+                   "look-carry": self.CARRIED}
+        patch = dict(LookResumeTest.MOVED, **{"checks-3": {"state": "behind", "head": D}, "sync-2": {"merge_commit": F, "head": F},
+                                              "checks-4": {"state": "passed", "head": F, "required": ["ci"], "passed": ["ci"]}})
+        result, calls = self.approve(patch=patch, replies=replies)
+        self.assertEqual(result["stage"], "done", labels(calls))
+        verify = prompt(calls, "look-carry-verify")
+        self.assertIn("rev-list --no-merges " + SHA + ".." + F, verify)
+        self.assertNotIn(D + ".." + F, verify)
+        self.assertIn("--from " + SHA + " --head " + F, prompt(calls, "look-carry"))
+        self.assertIn("--match-head-commit " + F, prompt(calls, "merge"))
 
 
 class LookTickTest(unittest.TestCase):
