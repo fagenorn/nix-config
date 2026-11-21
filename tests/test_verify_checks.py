@@ -2550,7 +2550,7 @@ class ConsoleManagerMergeTest(unittest.TestCase):
             return self.pulls[int(path[len(prefix):])]
 
         out = io.StringIO()
-        args = ["console-manager-merge", "--repo", self.REPO, "--since", self.shas["S"], "--issue", "1377",
+        args = ["console-manager-merge", "--repo", self.REPO, "--since", self.shas["S"],
                 "--log", str(self.log_path), "--repo-root", str(self.root), *argv]
         with mock.patch.object(verify_checks.forge_api, "api_get", api_get), \
                 mock.patch.object(verify_checks, "_utcnow", lambda: self.T0 + now), \
@@ -2616,24 +2616,25 @@ class ConsoleManagerMergeTest(unittest.TestCase):
                 self.pull(merged_at)
                 self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
 
-    def test_a_merge_only_another_sprint_made_is_not_counted(self):
+    def test_a_sprint_that_reported_no_issue_before_the_judgement_is_not_counted(self):
         self.activated()
-        self.seen()
         self.seen(sprint=self.OTHER_SPRINT)
-        self.reported(self.OTHER_SPRINT, 999)
         self.landed_merge(sprint=self.OTHER_SPRINT)
+        self.append("sprint.reported", {"sprint_id": self.OTHER_SPRINT, "goal": "g", "report": {
+            "issues": []}}, timedelta(days=0))
+        self.append("sprint.reported", {"sprint_id": self.OTHER_SPRINT, "goal": "g", "report": {
+            "issues": [{"issue": 5, "stage": "building"}]}}, timedelta(days=3))
         self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
         self.assertEqual(self.run_check(timedelta(days=10))[0], 1)
 
-    def test_the_sprint_that_reported_the_issue_is_the_one_that_counts(self):
+    def test_any_sprints_manager_merge_counts_whichever_issue_it_delivered(self):
+        """Issue 1377 itself may have been delivered outside a sprint or as a sprint's last issue."""
         self.activated()
         self.seen(sprint=self.OTHER_SPRINT)
         self.reported(self.OTHER_SPRINT, 999)
         self.landed_merge(sprint=self.OTHER_SPRINT)
-        self.seen()
-        self.landed_merge(call="call-2")
         code, report = self.run_check(timedelta(days=2))
-        self.assertEqual((code, report["verdict"]), (0, "met"))
+        self.assertEqual((code, report["verdict"], report["pr"]), (0, "met", 7))
 
     def test_a_landing_of_another_tool_call_does_not_complete_the_allowed_one(self):
         self.activated()
@@ -2662,7 +2663,7 @@ class ConsoleManagerMergeTest(unittest.TestCase):
         with mock.patch.object(verify_checks.forge_api, "api_get") as api_get, \
                 contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
             code = verify_checks.main(["console-manager-merge", "--repo", self.REPO, "--since",
-                                       self.shas["S"], "--issue", "1377", "--log", str(self.log_path),
+                                       self.shas["S"], "--log", str(self.log_path),
                                        "--repo-root", str(self.root)])
         self.assertEqual(code, 2)
         self.assertIn("git", stderr.getvalue())
@@ -2683,12 +2684,9 @@ class ConsoleManagerMergeTest(unittest.TestCase):
         self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
 
     def test_bad_arguments_are_a_usage_error(self):
-        issue = ["--issue", "1377"]
-        for argv in (["--repo", "bad", "--since", self.shas["S"], *issue],
-                     ["--repo", self.REPO, "--since", "abc", *issue],
-                     ["--repo", self.REPO, "--since", self.shas["S"], "--issue", "0"],
-                     ["--repo", self.REPO, "--since", self.shas["S"], "--issue", "x"],
-                     ["--repo", self.REPO, "--since", self.shas["S"]]):
+        for argv in (["--repo", "bad", "--since", self.shas["S"]],
+                     ["--repo", self.REPO, "--since", "abc"],
+                     ["--repo", self.REPO]):
             with self.subTest(argv=argv):
                 with mock.patch.object(verify_checks.forge_api, "api_get") as api_get, \
                         contextlib.redirect_stderr(io.StringIO()):

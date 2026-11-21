@@ -20,12 +20,14 @@ It returns the words with their quotes removed, or None for anything else (an op
 redirection, an expansion, a glob, a comment, a tilde, a brace, a newline outside quotes).
 
 `mentions(command)` is True when, after deleting every quote and backslash and splitting on
-whitespace and on `;|&()<>$` and the backtick, some word whose basename is `gh` is followed by `pr
-merge` or `run rerun`, or some word whose basename is `release` or `release.py`, or the module
-`agent_tools.release.release` (alone or glued to `-m`), is followed by `transaction run` or
-`transaction abandon`. It reads through every spelling the shell would accept for those words. Only
-the `release` executable's own form is ever granted: the module and script spellings of the same
-verb are `DENY` with `ALONE`, never undecided.
+whitespace and on `;|&()<>$`, the backtick, `,`, `[`, `]`, `{` and `}`, some word whose basename is `gh` is followed by `pr
+merge` or `run rerun`, or the release verb is reached. The release verb fails closed: it is reached
+by the words `transaction run` or `transaction abandon` side by side, however the program is named or
+reached (`xargs release`, `r=release; $r ...`, `runpy.run_module(...)`); by a word that is the `release`
+program, `release.py` or the module `agent_tools.release.release` (alone, glued to `-m` or assigned,
+`r=release`) beside any `$` or backtick anywhere in the command; or by such a word followed later by
+`transaction` and a word other than `status` or `preview`. Only the `release` executable's own literal
+form is ever granted: every other spelling that `mentions` is `DENY` with `ALONE`, never undecided.
 
 `judge` returns a `Verdict`. A command that `mentions` no granted verb gets `Verdict(None, "", None, {})`
 and no reader is called. A command that does is `ALLOW` only in a granted shape and `DENY` otherwise,
@@ -337,23 +339,43 @@ def words(command: str) -> list[str] | None:
     return found
 
 
-_SPLIT = re.compile(r"[\s;|&()<>$`]+")
+_SPLIT = re.compile(r"[\s;|&()<>$`,\[\]{}]+")
 _RELEASE_PROGRAMS = ("release", "release.py")
 _RELEASE_MODULE = "agent_tools.release.release"
+_RELEASE_READS = ("status", "preview")
+
+
+def _names_release(part: str) -> bool:
+    """A word that is the release program, its script or its module, alone, glued to `-m` or assigned (`r=release`)."""
+    name = os.path.basename(part.rpartition("=")[2])
+    module = part[2:] if part.startswith("-m") else part
+    return name in _RELEASE_PROGRAMS or module == _RELEASE_MODULE
+
+
+def _is_release(command: str, parts: list[str]) -> bool:
+    """Fail closed: any spelling that can reach a release run or abandon, however the shell names the program."""
+    if any(first == "transaction" and second in ("run", "abandon")
+           for first, second in zip(parts, parts[1:])):
+        return True
+    named = [index for index, part in enumerate(parts) if _names_release(part)]
+    if not named:
+        return False
+    if any(char in command for char in "$`"):
+        return True
+    after = parts[named[0] + 1:]
+    return any(part == "transaction" and following not in _RELEASE_READS
+               for part, following in zip(after, after[1:]))
 
 
 def _verb_of(command: str) -> str | None:
     parts = _SPLIT.split(re.sub(r"['\"\\]", "", command))
     for index, part in enumerate(parts):
         name, rest = os.path.basename(part), parts[index + 1:index + 3]
-        module = part[2:] if part.startswith("-m") else part
         if name == "gh" and rest == ["pr", "merge"]:
             return MERGE
         if name == "gh" and rest == ["run", "rerun"]:
             return RERUN
-        if (name in _RELEASE_PROGRAMS or module == _RELEASE_MODULE) and rest in (["transaction", "run"], ["transaction", "abandon"]):
-            return RELEASE
-    return None
+    return RELEASE if _is_release(command, parts) else None
 
 
 def verb_of(command: str) -> str | None:

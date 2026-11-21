@@ -298,6 +298,30 @@ class JudgeTest(unittest.TestCase):
                 self.assertFalse(mentions(command))
         self.assertEqual([], self.fake.calls)
 
+    def test_an_indirect_release_run_is_judged_and_refused_not_left_undecided(self):
+        run = self.release.removeprefix("release ")
+        for command in (f"printf '%s\\n' {run} | xargs release",
+                        f"r=release; $r {run}",
+                        f"python3 -c 'import runpy; runpy.run_module(\"agent_tools.release.release\", "
+                        f"run_name=\"__main__\")' {run}",
+                        f"python3 -c \"import agent_tools.release.release as r; r.main(['transaction','run'])\"",
+                        f"r=release; $r transaction abandon",
+                        f"x=transaction; release $x run",
+                        f"release transaction $verb --repo-root {self.root}",
+                        f"echo {run}"):
+            with self.subTest(command):
+                self.assertTrue(mentions(command))
+                self.assertEqual("release", permit.verb_of(command))
+                self.assertRefused(command, permit.ALONE)
+        self.assertEqual([], self.fake.calls)
+
+    def test_release_words_that_reach_no_run_or_abandon_are_not_mentioned(self):
+        for command in ("release transaction status", "release transaction preview --repo-root r",
+                        "sed -n 1,20p python/agent_tools/release/release.py", "git checkout release",
+                        "gh release list", "echo transaction"):
+            with self.subTest(command):
+                self.assertFalse(mentions(command))
+
     def test_an_unreadable_forge_is_refused(self):
         self.fake.pr_error = ForgeUnreadable("boom")
         self.assertRefused(self.merge, permit.FORGE_UNREADABLE.format(reason="boom"))
