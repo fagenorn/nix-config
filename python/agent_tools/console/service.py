@@ -1495,7 +1495,27 @@ failure is `console: renudge_failed <Type>: <message>`), reserves under the lock
 unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
 message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS` before
 `self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
-(row times are compared as epoch milliseconds). The WAKE route (#949) first asks the `full_listing`
+(row times are compared as epoch milliseconds).
+
+Unread after a relay (#1379, ADR-console-094): a sprint `renudge()` did not reserve by that rule is
+asked `sprints.unread_step(sprint, now)`. `RELAY_AGAIN` reserves it and dispatches the ordinary message
+nudge (so a manager listed meanwhile gets a relay and a gone one a wake); `WAKE_UNREAD` reserves it and
+dispatches `_dispatch_unread_wake` after the lock. `_unread_wake` decides the step again under the lock
+(a sprint no longer nudgeable, a project gone, no `manager_session` or another step drops the
+reservation with no row), reads the running listing off the lock and, for a listed manager, goes on only
+while it is idle by `idle.IDLE_STATES`, by that fresh listing (`sessions.registry_state`) and by its folded
+session (`_manager_session`): a manager working, or waiting at a permission or an answer prompt, gets
+nothing and no row, so a pending prompt is never lost to a stop. It then stops the session through
+`_stop_one` (`manager.stop_listed`; with no stopper, or a session the listing still shows after the stop,
+the reason is `sprints.STILL_RUNNING_TEXT`; a `manager.StopFailed` gives its text), reads the full
+listing and settings as the WAKE route does (`_wake_settings`), drops the reservation when the profile
+is out of quota, refreshes the settings file and sends one WAKE with `NUDGE_TEXT`. It appends one
+`sprint.nudged` row with route `wake` and `covers` the unread ids, carrying the mode it wrote; a
+dispatch that raises is the row `the wake could not start: <Type>: <message>`. Every failure counts in
+`failed_nudges`, and the nudger, listing, full listing and stopper are never called with the ingest lock
+held.
+
+The WAKE route (#949) first asks the `full_listing`
 seam (`nudge.full_lister_for(sys.platform)`, called `full_listing(profile, cwd)` with the manager row's
 profile and the project's root; None means every wake is bare and no read is made) which sessions the
 profile's full listing shows, stopped ones included: `_wake_settings` gives `Nudge.settings` None
@@ -7872,7 +7892,7 @@ class ConsoleService:
         """Nudge again the managers whose message went unread and undelivered for a minute."""
         if self._nudger is None:
             return
-        due, noticed = [], []
+        due, noticed, woken = [], [], []
         with self._ingest:
             now = int(self._clock() * 1000)
             for sprint_id in list(self._notice_due):
@@ -7883,19 +7903,94 @@ class ConsoleService:
                 if (found is None or sprint_id in self._nudging
                         or sprints.unreachable(sprint)):
                     continue
-                if not any(message.delivered_at is None
-                           and now - _epoch_ms(message.at) >= sprints.RENUDGE_AFTER_MS
-                           for message in found[1]):
+                if any(message.delivered_at is None
+                       and now - _epoch_ms(message.at) >= sprints.RENUDGE_AFTER_MS
+                       for message in found[1]):
+                    if sprint.last_nudge_at is not None and \
+                            now - _epoch_ms(sprint.last_nudge_at) < sprints.RENUDGE_AFTER_MS:
+                        continue
+                    self._nudging.add(sprint_id)
+                    due.append(sprint_id)
                     continue
-                if sprint.last_nudge_at is not None and \
-                        now - _epoch_ms(sprint.last_nudge_at) < sprints.RENUDGE_AFTER_MS:
-                    continue
-                self._nudging.add(sprint_id)
-                due.append(sprint_id)
+                step = sprints.unread_step(sprint, now)
+                if step == sprints.RELAY_AGAIN:
+                    self._nudging.add(sprint_id)
+                    due.append(sprint_id)
+                elif step == sprints.WAKE_UNREAD:
+                    self._nudging.add(sprint_id)
+                    woken.append(sprint_id)
         for sprint_id in noticed:
             self._dispatch_notice_nudge(sprint_id)
         for sprint_id in due:
             self._dispatch_nudge(sprint_id)
+        for sprint_id in woken:
+            self._dispatch_unread_wake(sprint_id)
+
+    def _dispatch_unread_wake(self, sprint_id: str) -> None:
+        """Hand a reserved sprint's wake for an unread message to the dispatcher; one that cannot start is a failed wake."""
+        try:
+            self._dispatch(lambda: self._unread_wake(sprint_id))
+        except Exception as error:
+            reason = f"the wake could not start: {type(error).__name__}: {error}"
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._settled[sprint_id] = int(self._clock() * 1000)
+                self._record_nudge(sprint_id, None, nudge.WAKE, reason)
+
+    def _unread_wake(self, sprint_id: str) -> None:
+        """Stop the manager's listed session and wake it in place for a message it left unread; the reservation ends here (ADR-console-094)."""
+        with self._ingest:
+            found = self._nudgeable(sprint_id)
+            sprint = None if found is None else found[0]
+            project = None if sprint is None else self._states.get(sprint.project_id)
+            if (sprint is None or project is None or sprint.manager_session is None
+                    or sprints.unread_step(sprint, int(self._clock() * 1000)) != sprints.WAKE_UNREAD):
+                self._nudging.discard(sprint_id)
+                return
+            name = manager.session_name(sprint.project_id, sprint_id)
+            profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
+            through = found[1][-1].message_id
+            heard = {message.message_id for message in found[1]}
+        reason, listing_failed, written = None, None, None
+        try:
+            listed = self._listing()
+            observed = [o for o in listed.values() if o.name == name]
+            if observed:
+                with self._ingest:
+                    sprint = self._sprints.get(sprint_id)
+                    folded = None if sprint is None else self._manager_session(sprint)
+                    idle_now = (sprint is not None
+                                and all(sessions.registry_state(o) in idle.IDLE_STATES for o in observed)
+                                and (folded is None or folded.state in idle.IDLE_STATES))
+                    if not idle_now:
+                        self._nudging.discard(sprint_id)
+                        return
+                if self._stopper is None:
+                    reason = sprints.STILL_RUNNING_TEXT
+                else:
+                    try:
+                        manager.stop_listed([name], lambda: listed, self._stop_one)
+                    except manager.StopFailed as error:
+                        reason = str(error)
+                if reason is None and self._listed_ids(name):
+                    reason = sprints.STILL_RUNNING_TEXT
+            if reason is None:
+                settings, listing_failed = self._wake_settings(sprint_id, known, profile, cwd)
+                with self._ingest:
+                    if self._held_for_quota(sprint_id):
+                        self._nudging.discard(sprint_id)
+                        return
+                written = self._refresh_settings(sprint_id, cwd)
+                self._send_nudge(nudge.Nudge(
+                    sprint_id, nudge.WAKE, name, known, profile, cwd, settings))
+        except Exception as error:
+            reason = (str(error) if isinstance(error, nudge.NudgeFailed)
+                      else f"{type(error).__name__}: {error}")
+        with self._ingest:
+            self._nudging.discard(sprint_id)
+            self._settled[sprint_id] = int(self._clock() * 1000)
+            self._record_nudge(sprint_id, through, nudge.WAKE, reason, listing_failed, written,
+                               sorted(heard))
 
     def stop_sprint(self, project_id: str, sprint_id: str) -> None:
         """Append the owner's stop request for an open sprint and nudge its manager with the stop message."""
