@@ -987,6 +987,7 @@ const scriptRun = (check, merge) => {
   if (!run || typeof run !== 'object' || typeof run.script !== 'string') return null
   return JSON.stringify([run.script, typeof run.at === 'string' ? run.at : merge, Array.isArray(run.args) ? run.args : []])
 }
+const OWNER_REFUSED = (ids, issues) => `${ids.join(', ')} ${ids.length === 1 ? 'is a human criterion' : 'are human criteria'} and only a check that asks the owner (kind human, an ask or an act run) settles one: hold it as such a check, never one a machine settles` + (issues.length ? `. The verify fence of the hold comment on ${issues.map(n => '#' + n).join(', ')} already holds another check for it: remove that check from the fence, or delete that comment and remove the needs-verification label, by hand before resuming, since a resume reads the posted fence again` : '') + ', then resume'
 const SCRIPT_REFUSED = (ids, issues) => `${ids.join(', ')} ${ids.length === 1 ? 'is' : 'are'} held without the committed verification script ${ids.length === 1 ? 'its' : 'their'} verify member runs (the same path, commit and args): hold each as a kind evidence check running that script unchanged` + (issues.length ? `. Fix the verify fence of the hold comment on ${issues.map(n => '#' + n).join(', ')} by hand before resuming` : '') + ', then resume'
 
 const RUN_OK = r => !!(r && r.ran === true && r.exit === 0)
@@ -1033,6 +1034,10 @@ const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
   const machine = acceptance.filter(a => a && (a.kind === 'code' || a.kind === 'evidence') && typeof a.id === 'string')
   const machineOf = v => { const a = machine.find(m => upId(m.id) === upId(v)); return a ? a.id : null }
   const humanFor = checks => [...new Set(checks.filter(c => asksOwner(c)).map(c => machineOf(c.ac)).filter(id => id !== null))]
+  // #1281: the human criteria a list of checks settles with a check that does not ask the owner: a human criterion always reaches the owner.
+  const humans = acceptance.filter(a => a && a.kind === 'human' && typeof a.id === 'string')
+  const humanOf = v => { const a = humans.find(m => upId(m.id) === upId(v)); return a ? a.id : null }
+  const notOwnerFor = checks => [...new Set(checks.filter(c => c && typeof c === 'object' && !asksOwner(c)).map(c => humanOf(c.ac)).filter(id => id !== null))]
   // Ship regrades the code rows for every plan; a plan with a non-code row is then held by the acceptance-planning rules' "Linting a hold" procedure.
   // #1356: a replay of a PR merged indirectly has already resolved the landing commit (landedCommit), so the hold and the look-stale read are given it, not asked to resolve it again.
   const known = mergeCommit || landedCommit
@@ -1063,9 +1068,8 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'look-stale', phase: 'Ship', agentTyp
   }
   // #1281: before the call that posts, labels and runs once, read every check that call would leave standing (the fences already posted) and write the ones the plan lacks, so a check that asks the owner for a code or evidence criterion is refused before anything is posted.
   let authorized = []
-  // #1281: the evidence criteria whose verify member runs a committed script, and the invocation each is held with (the base sha replaced by the merge commit).
-  const scripted = openCriteria.filter(a => a.kind === 'evidence' && scriptRun(a.verify, '') !== null)
-  let wanted = () => null
+  // #1281: the invocation each evidence criterion that runs a committed script is held with, read off the authorized check (the verify member with the base sha replaced by the merge commit, or the check the draft wrote), keyed by the criterion's id in upper case.
+  const wantedRun = new Map()
   if (!noHold) {
     const draft = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Draft the hold of the issue's acceptance, changing nothing: post, edit, label, file and run nothing, and run no verify-pending command. Each command in its own Bash call:
 Step A. Run git -C ${REPO} fetch origin. Merge commit: ${merged}.${known ? '' : INDIRECT_FOR(PR, 'complete false')} Return it as merge.
@@ -1080,20 +1084,36 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold-draft', phase: 'Ship', agentTyp
     if (!(isEntry(draft) && draft.complete === true && Array.isArray(draft.written) && posted !== null && posted.every(e => isEntry(e) && Number.isInteger(e.issue) && Array.isArray(e.checks)) && (known || (typeof draft.merge === 'string' && SHA40.test(draft.merge))))) return stop('hold', { pr: PR, draft, details: 'the hold could not be drafted: the posted fences and the merge commit could not be read; nothing was held' })
     const mergeSha = known || draft.merge
     const subMerge = v => JSON.parse(JSON.stringify(v).split(setup.base_sha).join(mergeSha))
-    wanted = a => scriptRun(subMerge(a.verify), mergeSha)
     authorized = openCriteria.map(a => a.verify && typeof a.verify === 'object' ? subMerge(a.verify) : draft.written.find(c => isEntry(c) && upId(c.ac) === upId(a.id)))
-    const lacking = openCriteria.filter((a, i) => !isEntry(authorized[i])).map(a => a.id)
+    const lacking = openCriteria.filter((a, i) => !isEntry(authorized[i]) || (a.kind === 'human' && !asksOwner(authorized[i]))).map(a => a.id)
     if (lacking.length) return stop('hold', { pr: PR, draft, missing_checks: lacking })
     const ids = [...new Set([...humanFor(authorized), ...posted.flatMap(e => humanFor(e.checks))])]
     const posted_holds = posted.filter(e => humanFor(e.checks).length).map(e => e.issue)
     if (ids.length) return stop('hold', { pr: PR, draft, human_checks: ids, posted_holds, details: HUMAN_REFUSED(ids, posted_holds) })
+    const outsideDrafted = authorized.filter(commandOutside)
+    if (outsideDrafted.length) return stop('hold', { pr: PR, draft, unattended: outsideDrafted.map(c => c.ac) })
+    const ownerIds = [...new Set(posted.flatMap(e => notOwnerFor(e.checks)))]
+    const ownerIssues = posted.filter(e => notOwnerFor(e.checks).length).map(e => e.issue)
+    if (ownerIds.length) return stop('hold', { pr: PR, draft, owner_checks: ownerIds, posted_holds: ownerIssues, details: OWNER_REFUSED(ownerIds, ownerIssues) })
+    openCriteria.forEach((a, i) => {
+      const run = a.kind === 'evidence' ? scriptRun(authorized[i], mergeSha) : null
+      if (run !== null) wantedRun.set(upId(a.id), run)
+    })
     const scriptIds = []
     const scriptIssues = []
-    for (const e of posted) for (const c of e.checks) {
-      const a = c && scripted.find(m => upId(m.id) === upId(c.ac))
-      if (a && scriptRun(c, typeof e.merge === 'string' ? e.merge : mergeSha) !== wanted(a)) {
-        if (!scriptIds.includes(a.id)) scriptIds.push(a.id)
-        if (!scriptIssues.includes(e.issue)) scriptIssues.push(e.issue)
+    const flag = (a, issue) => {
+      if (!scriptIds.includes(a.id)) scriptIds.push(a.id)
+      if (!scriptIssues.includes(issue)) scriptIssues.push(issue)
+    }
+    for (const e of posted) {
+      const at = typeof e.merge === 'string' ? e.merge : mergeSha
+      for (const c of e.checks) {
+        const a = c && openCriteria.find(m => wantedRun.has(upId(m.id)) && upId(m.id) === upId(c.ac))
+        if (a && scriptRun(c, at) !== wantedRun.get(upId(a.id))) flag(a, e.issue)
+      }
+      // The parent's own fence stands in the once-run that follows, which closes the issue when its checks pass: every scripted criterion must be in it, or the once-run could close the issue without running the script.
+      if (e.issue === ISSUE) for (const a of openCriteria) {
+        if (wantedRun.has(upId(a.id)) && !e.checks.some(c => c && upId(c.ac) === upId(a.id))) flag(a, e.issue)
       }
     }
     if (scriptIds.length) return stop('hold', { pr: PR, draft, script_checks: scriptIds, posted_holds: scriptIssues, details: SCRIPT_REFUSED(scriptIds, scriptIssues) })
@@ -1132,7 +1152,7 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
     const splitLook = [...new Set(held.split.flatMap(x => (x && x.block && Array.isArray(x.block.checks) ? x.block.checks : []).filter(c => c && isAnswered(c.ac)).map(c => upId(c.ac))))]
     if (splitLook.length) return stop('hold', { pr: PR, hold: held, look_checks: splitLook })
     const humanIds = acceptance.filter(a => a.kind === 'human').map(a => upId(a.id))
-    const badSplit = held.split.filter(x => !(x && humanIds.includes(upId(x.ac)) && !noteIds.includes(x.ac) && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && covers(x.block.checks, [x.ac]).length === 0 && !x.block.checks.some(c => commandOutside(c) || (c && noteIds.includes(c.ac))))).map(x => (x && x.ac) || null)
+    const badSplit = held.split.filter(x => !(x && humanIds.includes(upId(x.ac)) && !noteIds.includes(x.ac) && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && covers(x.block.checks, [x.ac]).length === 0 && x.block.checks.some(c => c && upId(c.ac) === upId(x.ac) && asksOwner(c)) && !x.block.checks.some(c => commandOutside(c) || (c && noteIds.includes(c.ac))))).map(x => (x && x.ac) || null)
     if (badSplit.length) return stop('hold', { pr: PR, hold: held, bad_split: badSplit })
     const remaining = openCriteria.filter(a => !splitIds.includes(a.id))
     if (remaining.length && !closedBefore) {
@@ -1145,9 +1165,12 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
       if (uncovered.length) return stop('hold', { pr: PR, hold: held, missing_checks: uncovered })
       const outside = held.block.checks.filter(commandOutside)
       if (outside.length) return stop('hold', { pr: PR, hold: held, unattended: outside.map(c => c.ac) })
-      const unscripted = remaining.filter(a => scripted.includes(a)).filter(a => {
+      const ownerOnly = notOwnerFor(held.block.checks)
+      const ownerMissing = remaining.filter(a => a.kind === 'human' && !held.block.checks.some(c => c && upId(c.ac) === upId(a.id) && asksOwner(c))).map(a => a.id)
+      if (ownerOnly.length || ownerMissing.length) return stop('hold', { pr: PR, hold: held, owner_checks: [...new Set([...ownerOnly, ...ownerMissing])], posted_holds: [ISSUE], details: OWNER_REFUSED([...new Set([...ownerOnly, ...ownerMissing])], [ISSUE]) })
+      const unscripted = remaining.filter(a => wantedRun.has(upId(a.id))).filter(a => {
         const own = held.block.checks.filter(c => c && upId(c.ac) === upId(a.id))
-        return !own.length || !own.every(c => c.kind === 'evidence' && scriptRun(c, held.block.merge) === wanted(a))
+        return !own.length || !own.every(c => c.kind === 'evidence' && scriptRun(c, held.block.merge) === wantedRun.get(upId(a.id)))
       }).map(a => a.id)
       if (unscripted.length) return stop('hold', { pr: PR, hold: held, script_checks: unscripted, posted_holds: [ISSUE], details: SCRIPT_REFUSED(unscripted, [ISSUE]) })
     } else if (held.issue_state !== 'CLOSED') return stop('hold', { pr: PR, hold: held })
