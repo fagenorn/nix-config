@@ -1513,12 +1513,12 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None
             or sprint_quiet_for(state, now_ms, listed, waits) is not None):
         return None
-    return _fresh_wait(waits, now_ms)
+    return fresh_wait(waits, now_ms)
 
 
-def _fresh_wait(waits: WaitSignals, now_ms: int) -> str | None:
+def fresh_wait(waits: WaitSignals, now_ms: int) -> str | None:
     """The first of CI, a committing delivery, a release step and the land lock whose signal is
-    inside `QUIET_AFTER_MS`."""
+    inside `QUIET_AFTER_MS`. The idle hold of an in-progress run reads it too (#1381)."""
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
                      (waits.release_ms, NOW_RELEASE_TEXT), (waits.lock_ms, NOW_LOCK_TEXT)):
         if ms is not None and now_ms - ms < QUIET_AFTER_MS:
@@ -1554,7 +1554,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
     wait = None
     if (waits is not None and now_ms is not None and now_ms - base >= QUIET_AFTER_MS
             and now_ms - latest < QUIET_AFTER_MS):
-        wait = _fresh_wait(waits, now_ms)
+        wait = fresh_wait(waits, now_ms)
     if wait is not None:
         quiet, text = False, wait
     return RunReading(quiet, text, latest, wait)
