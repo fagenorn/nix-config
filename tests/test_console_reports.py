@@ -494,6 +494,21 @@ class SprintBallViewTest(unittest.TestCase):
         self.assertEqual(NOW_PAUSED_TEXT.format(reason="x"), "paused: x")
         self.assertIsNone(self.shown(s, PAST, idle)["now_until"])
 
+    def test_the_nothing_running_ball_waits_out_a_stated_wait_and_a_pause_and_returns_after_the_time(self):
+        s = reported(with_manager(started(A)), T0_MS)
+        until = iso(T0_MS + 120 * MIN)
+        waiting = dataclasses.replace(s, report=dataclasses.replace(s.report, wait_until=until))
+        paused = dataclasses.replace(
+            s, report=dataclasses.replace(s.report, paused="the lead freed the account"))
+        idle = manager_session("idle")
+        self.assertEqual(self.shown(s, PAST, idle)["ball"], "nobody")
+        for held in (waiting, paused):
+            with self.subTest(held=held.report):
+                got = self.shown(held, PAST, idle)
+                self.assertEqual((got["ball"], got["ball_text"]), ("manager", "manager working"))
+        got = self.shown(waiting, T0_MS + 120 * MIN, idle)
+        self.assertEqual((got["ball"], got["ball_text"]), ("nobody", "nothing running, may be stuck"))
+
     def test_an_owner_wait_and_a_quota_beat_a_stated_wait_and_a_stated_wait_beats_a_merge_refusal(self):
         until = iso(T0_MS + 120 * MIN)
         base = reported(with_manager(started(A)), T0_MS)
