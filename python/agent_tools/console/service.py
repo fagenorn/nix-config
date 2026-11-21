@@ -1610,7 +1610,18 @@ and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not exclu
 still be scanned and not being removed. Otherwise the reservation ends, nothing is appended and the
 sprint is marked in `_move_cancelled` until the manager's account has room: no later poll decides a
 move again. The started manager row stays, and the sprint waits to wake its session after the reset
-(#1279). A launch is a takeover when it was reserved by the bring-back
+(#1279). A listed manager waiting on quota is moved too (#1378, ADR-console-094): when it is idle
+or at its limit, the sprint is open, not stalled, with no open no-progress item and work to do, fewer than
+`revive.LIMIT` counted revivals sit in the window, a launcher and a stopper exist, the move was not
+cancelled and `_move_target` finds an account with room, `revive()` reserves a `_ListedMoveReservation`
+(a `_TakeoverReservation` that remembers the sessions it stopped). Its job stops every listed session
+carrying the manager's name through `_stop_one`, off the lock, reads the listing again, and launches only
+when that listing no longer shows the name, no folded session of that name is left unstopped and the move
+still holds; nothing listed to stop only releases it. Any other outcome cancels the move as #1279 does and a
+failed stop or listing writes `console: quota_move_failed <sprint_id> <reason>`. The takeover's
+`manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
+sprint moved to another account and the new manager's first send is not an after-the-reset resume. A launch
+is a takeover when it was reserved by the bring-back
 or is a retry of a stalled sprint or of a manager row that is a takeover; every manager row it writes
 (`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries
 `"takeover": true` and `"goal"`, every `manager.started` carries `"seen_after"` (the sprint's
@@ -4082,6 +4093,19 @@ class _TakeoverReservation:
         self.target = target
         self.account = account
         self.pinned = pinned
+
+
+class _ListedMoveReservation(_TakeoverReservation):
+    """The quota move of a listed manager (#1378): its session is stopped first, then the takeover runs only on `target`.
+
+    `stopped` holds the ids of the sessions this move stopped, so a session still carrying the
+    manager's name that it did not stop keeps the launch from starting a second manager.
+    """
+
+    def __init__(self, target: str, account: tuple[str | None, str | None],
+                 pinned: str | None) -> None:
+        super().__init__(target, account, pinned)
+        self.stopped: set[str] = set()
 
 
 MOVE_NOT_STARTED = "the manager could not be started again after its account was signed out or removed"
@@ -7065,11 +7089,14 @@ class ConsoleService:
 
     def _manager_session(self, sprint: sprints.SprintState) -> sessions.SessionState | None:
         """The folded session a listed manager is: the lowest session id carrying its name, or None."""
+        return min(self._manager_sessions(sprint), key=lambda s: s.session_id, default=None)
+
+    def _manager_sessions(self, sprint: sprints.SprintState) -> Iterable[sessions.SessionState]:
+        """The folded sessions of the sprint's project that carry its manager's name and have not ended."""
         name = manager.session_name(sprint.project_id, sprint.sprint_id)
-        return min((s for s in self._sessions.values()
-                    if s.name == name and s.state != sessions.ENDED and s.repo is not None
-                    and project_for(s.repo, self._states) == sprint.project_id),
-                   key=lambda s: s.session_id, default=None)
+        return (s for s in self._sessions.values()
+                if s.name == name and s.state != sessions.ENDED and s.repo is not None
+                and project_for(s.repo, self._states) == sprint.project_id)
 
     def _manager_listed(self, sprint: sprints.SprintState) -> bool:
         """Whether a listed session of the sprint's project carries the sprint's manager name."""
@@ -7164,7 +7191,11 @@ class ConsoleService:
             return
         try:
             listed = None
-            if isinstance(token, _TakeoverReservation):
+            if isinstance(token, _ListedMoveReservation):
+                listed = self._stop_for_move(sprint_id, token)
+                if listed is None:
+                    return
+            elif isinstance(token, _TakeoverReservation):
                 try:
                     listed = self._listing()
                 except Exception as error:
@@ -7212,7 +7243,17 @@ class ConsoleService:
                 or sprint.closing is not None):
             self._release(sprint_id, token)
             return None
-        if isinstance(token, _TakeoverReservation):
+        if isinstance(token, _ListedMoveReservation):
+            now = int(self._clock() * 1000)
+            name = manager.session_name(sprint.project_id, sprint_id)
+            shown = any(o.name == name for o in (listed or {}).values())
+            if shown:
+                self._last_listed[sprint_id] = now
+            if (shown or self._unstopped_manager(sprint, token.stopped)
+                    or not self._listed_move_due(sprint, now)):
+                self._cancel_move(sprint_id, token)
+                return None
+        elif isinstance(token, _TakeoverReservation):
             now = int(self._clock() * 1000)
             name = manager.session_name(sprint.project_id, sprint_id)
             shown = any(o.name == name for o in (listed or {}).values())
@@ -7330,6 +7371,9 @@ class ConsoleService:
             marks = ({"takeover": True, "goal": self._sprints[launch.sprint_id].goal}
                      if launch.takeover else {})
             if reason is None:
+                if isinstance(token, _ListedMoveReservation):
+                    marks["moved"] = True
+                    self._quota_held.discard(launch.sprint_id)
                 self._append_manager(MANAGER_STARTED, launch.project_id, {
                     "sprint_id": launch.sprint_id, "profile": launch.profile,
                     "session_name": launch.session_name, "seen_after": launch.seen_after,
@@ -8067,6 +8111,86 @@ class ConsoleService:
                                       owners=self._owners_now())
         return _TakeoverReservation(target, self._move_account(view, target), self._pinned)
 
+    def _listed_move_due(self, sprint: sprints.SprintState, now: int) -> bool:
+        """Under the ingest lock: whether a listed manager of the sprint waits on quota and may be moved (#1378).
+
+        Everything the move needs but the session's own state: a launcher and a stopper, a started
+        manager on an open sprint that is not stalled and has no open no-progress item, work to do,
+        fewer than `revive.LIMIT` counted revivals in the window, an account that is out and no
+        cancelled move for it.
+        """
+        return (self._launcher is not None and self._stopper is not None
+                and sprint.manager is not None and sprint.manager.state == sprints.STARTED
+                and sprint.stop_at is None and sprint.stopped_at is None
+                and sprint.closing is None and sprint.stalled is None
+                and sprint.no_progress_at is None
+                and revive.has_work(sprint, self._waiting(sprint))
+                and revive.counted(sprint, now) < revive.LIMIT
+                and self._quota_wait(sprint) is not None
+                and sprint.sprint_id not in self._move_cancelled)
+
+    def _listed_move_reservation(self, sprint: sprints.SprintState,
+                                 now: int) -> "_ListedMoveReservation | None":
+        """Under the ingest lock: the reservation moving a listed, idle manager off an account that is out, else None."""
+        if not self._listed_move_due(sprint, now):
+            return None
+        session = self._manager_session(sprint)
+        if session is None or session.state not in idle.IDLE_STATES:
+            return None
+        target = self._move_target(sprint)
+        if target is None:
+            return None
+        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned,
+                                      owners=self._owners_now())
+        return _ListedMoveReservation(target, self._move_account(view, target), self._pinned)
+
+    def _unstopped_manager(self, sprint: sprints.SprintState, stopped: set[str]) -> bool:
+        """Under the ingest lock: whether a folded session carrying the manager's name is not one the move stopped."""
+        return any(s.session_id not in stopped for s in self._manager_sessions(sprint))
+
+    def _stop_for_move(self, sprint_id: str, token: "_ListedMoveReservation"
+                       ) -> Mapping[str, sessions.Observation] | None:
+        """Stop the listed manager's sessions for its move, off the lock; the listing after the stop, or None.
+
+        None ends the reservation: released when the move no longer applies or nothing was listed
+        to stop (the bring-back owns a gone manager), cancelled when the move no longer holds or a
+        listing or a stop failed, which also writes `console: quota_move_failed <sprint_id> <reason>`.
+        """
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or not self._listed_move_due(sprint, int(self._clock() * 1000)):
+                self._release(sprint_id, token)
+                return None
+            view = capacity.capacity_view(
+                self._read_profiles() - self._removing, self._capacity, self._clock(),
+                self._signins, excluded=self._excluded, pinned=self._pinned,
+                owners=self._owners_now())
+            if not self._move_holds(view, sprint, token):
+                self._cancel_move(sprint_id, token)
+                return None
+            name = manager.session_name(sprint.project_id, sprint_id)
+
+        def stop(session_id: str, profile: str) -> None:
+            self._stop_one(session_id, profile)
+            token.stopped.add(session_id)
+
+        try:
+            listed = self._listing()
+            manager.stop_listed([name], lambda: listed, stop)
+            if not token.stopped:
+                with self._ingest:
+                    self._release(sprint_id, token)
+                return None
+            return self._listing()
+        except Exception as error:
+            reason = (str(error) if isinstance(error, manager.StopFailed)
+                      else f"{type(error).__name__}: {error}")
+            print(f"console: quota_move_failed {sprint_id} {reason}", file=sys.stderr)
+            with self._ingest:
+                self._cancel_move(sprint_id, token)
+            return None
+
     def _cancel_move(self, sprint_id: str, token: object) -> None:
         """Under the ingest lock: end a quota move that no longer holds, and keep it from being decided again.
 
@@ -8154,6 +8278,12 @@ class ConsoleService:
             for sprint_id, sprint in list(self._sprints.items()):
                 if self._manager_listed(sprint):
                     self._last_listed[sprint_id] = now
+                    if (sprint_id not in self._launching and sprint_id not in self._nudging
+                            and sprint_id not in self._stopping):
+                        moved = self._listed_move_reservation(sprint, now)
+                        if moved is not None:
+                            self._launching[sprint_id] = moved
+                            jobs.append((sprints.TAKEOVER, sprint_id))
                     continue
                 if sprint_id in self._launching or sprint_id in self._nudging:
                     continue

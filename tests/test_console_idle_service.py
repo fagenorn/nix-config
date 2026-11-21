@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import capacity, nudge, permission, service, signin, sprints
+from agent_tools.console import capacity, manager, nudge, permission, service, sessions, signin, sprints
 
 from . import console_test_support as support
 from .test_console_messages import PARTS
@@ -21,6 +21,8 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 RESET = int(T0) + 3600
 RESUMED = PARTS["title"] + " resumed after the quota reset"
+MOVED = PARTS["title"] + " moved to another account"
+TOOK_OVER = "A new manager took over " + PARTS["title"]
 JSON = {"Content-Type": "application/json"}
 
 
@@ -32,6 +34,8 @@ class IdleCase(ReviveCase):
         self.out_now = False
         self.svc = None
         self.arrival = 0
+        self.stops = []
+        self.held = []
 
     def arrive(self, svc):
         """`on_track`, then forget the nudge its brief approval caused: only later sends count."""
@@ -353,6 +357,187 @@ class IdleServiceTest(IdleCase):
 
 
 class IdleQuotaTest(IdleCase):
+    def record_stop(self, session_id, profile):
+        """Note one stop: its profile, the launches so far, and whether the ingest lock was free."""
+        self.stops.append((session_id, profile, len(self.launches.calls)))
+        if self.svc is not None:
+            got = self.svc._ingest.acquire(blocking=False)
+            self.held.append(got)
+            if got:
+                self.svc._ingest.release()
+
+    def stopper(self, session_id, profile):
+        self.record_stop(session_id, profile)
+        self.listed.pop(session_id, None)
+
+    def listed_out(self, stopper=None, **overrides):
+        """`start_out` with a stopper and `s-1` listed on the profile the manager was launched on."""
+        svc, sid = self.start_out(stopper=stopper or self.stopper, **overrides)
+        self.svc = svc
+        if "s-1" in self.listed:
+            self.listed["s-1"] = sessions.Observation(
+                "s-1", "/srv/p01", 1, "idle", None, self.name(sid), None, "work")
+        return svc, sid
+
+    def seen_row(self, svc, sid, session_id="s-1", state="idle"):
+        self.append(svc, [("session.seen", "owner/p01", {
+            "session_id": session_id, "cwd": "/srv/p01", "repo": "/srv/p01", "state": state,
+            "name": self.name(sid)})])
+
+    def test_a_listed_manager_waiting_on_quota_is_stopped_and_taken_over_on_an_account_with_room(self):
+        svc, sid = self.listed_out()
+        self.poll(svc, 300)
+        self.assertEqual(self.stops, [("s-1", "work", 1)])
+        self.assertTrue(self.held)
+        self.assertTrue(all(self.held))
+        self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+        self.assertIs(self.launches.calls[-1].takeover, True)
+        started = self.rows("manager.started")[-1]
+        self.assertEqual((started["profile"], started["takeover"], started["moved"], started["goal"]),
+                         ("home", True, True, GOAL))
+        self.assertEqual(self.said(svc).count(MOVED), 1)
+        self.assertEqual(self.said(svc).count(TOOK_OVER), 0)
+        self.assertNotIn(sid, svc._launching)
+        self.assertNotIn(sid, svc._quota_held)
+        self.gone(svc)
+        self.seen_row(svc, sid, "s-2")
+        self.listed = {"s-2": sessions.Observation(
+            "s-2", "/srv/p01", 1, "idle", None, self.name(sid), None, "home")}
+        self.poll(svc, 1800)
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+        self.assertEqual([n.session_id for n in self.continues()], ["s-2"])
+        self.assertFalse(any(row.get("resumed") for row in self.rows("manager.nudged")))
+        self.assertEqual(self.said(svc).count(RESUMED), 0)
+        self.assertEqual(self.said(svc).count(MOVED), 1)
+
+    def test_a_listed_manager_waits_on_quota_when_no_account_has_room(self):
+        def other_out(svc):
+            self.readings(svc, lambda p: self.exhausted(RESET))
+
+        def home_room(svc):
+            self.append(svc, [(capacity.READING, None, {"profile": "home", **self.weekly(0.1)})])
+
+        def work_only(svc):
+            self.append(svc, [(capacity.READING, None, {"profile": "work", **self.exhausted(RESET)})])
+
+        cases = [
+            ("the other account is out too", {"readings": False}, other_out, home_room),
+            ("the other account is excluded", {}, lambda svc: svc.set_exclusion("home", True),
+             lambda svc: svc.set_exclusion("home", False)),
+            ("the other account has no reading", {"readings": False}, work_only, home_room),
+        ]
+        for name, overrides, arrange, give_room in cases:
+            with self.subTest(name):
+                self.setUp()
+                svc, sid = self.listed_out(**overrides)
+                arrange(svc)
+                self.poll(svc, 300)
+                self.poll(svc, 600)
+                self.assertEqual(self.stops, [])
+                self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+                self.assertNotIn(sid, svc._launching)
+                shown = self.entry(svc, sid)
+                self.assertEqual((shown["state"], shown["state_text"]),
+                                 ("quota", "waiting on quota until"))
+                self.assertEqual(self.nudges, [])
+                give_room(svc)
+                self.poll(svc, 900)
+                self.assertEqual(self.stops, [("s-1", "work", 1)])
+                self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+
+    def test_a_move_never_starts_a_second_manager_while_the_first_is_listed(self):
+        def failing(session_id, profile):
+            self.record_stop(session_id, profile)
+            raise manager.StopFailed("the stop timed out")
+
+        def listed_on(session_id, profile):
+            self.record_stop(session_id, profile)
+
+        def renamed(session_id, profile):
+            self.stopper(session_id, profile)
+            self.seen_row(self.svc, self.sid, "s-2")
+
+        def loses_room(session_id, profile):
+            self.stopper(session_id, profile)
+            self.svc.set_exclusion("home", True)
+
+        cases = [("the stop fails", failing), ("the session stays listed", listed_on),
+                 ("another session carries the manager's name", renamed),
+                 ("the target loses room during the stop", loses_room)]
+        for name, stop in cases:
+            with self.subTest(name):
+                self.setUp()
+                svc, sid = self.listed_out(stopper=stop)
+                self.sid = sid
+                self.poll(svc, 300)
+                self.poll(svc, 600)
+                self.assertEqual(len(self.stops), 1)
+                self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+                self.assertEqual(len(self.rows("manager.started")), 1)
+                self.assertIn(sid, svc._move_cancelled)
+                self.assertNotIn(sid, svc._launching)
+                self.assertNotIn(MOVED, self.said(svc))
+                if name == "the stop fails":
+                    self.assertIn("console: quota_move_failed " + sid, self.stderr.getvalue())
+                if name == "the target loses room during the stop":
+                    self.gone(svc)
+                    self.assert_waits_to_wake(svc, sid)
+
+    def test_a_listed_manager_is_not_moved_while_it_works_without_a_stopper_while_handed_to_the_owner_or_after_three_bring_backs(self):
+        with self.subTest("working"):
+            svc, sid = self.listed_out()
+            self.seen_row(svc, sid, state="working")
+            self.poll(svc, 300)
+            self.assertEqual(self.stops, [])
+            self.seen_row(svc, sid, state="idle")
+            self.poll(svc, 600)
+            self.assertEqual(len(self.stops), 1)
+            self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+        with self.subTest("without a stopper"):
+            self.setUp()
+            svc, sid = self.start_out()
+            self.poll(svc, 300)
+            self.poll(svc, 600)
+            self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+            self.assertNotIn("quota_move_failed", self.stderr.getvalue())
+            self.assertEqual(self.entry(svc, sid)["state"], "quota")
+        with self.subTest("the no-progress item is open"):
+            self.setUp()
+            svc, sid = self.listed_out()
+            self.append(svc, [("manager.no_progress", "owner/p01", {
+                "sprint_id": sid, "goal": GOAL, "status": None})])
+            self.poll(svc, 300)
+            self.assertEqual(self.stops, [])
+            self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+        with self.subTest("three bring-backs within the hour"):
+            self.setUp()
+            svc, sid = self.listed_out()
+            self.append(svc, [("manager.started", "owner/p01", {
+                "sprint_id": sid, "profile": "work", "session_name": self.name(sid),
+                "takeover": True, "goal": GOAL})] * 3)
+            self.poll(svc, 300)
+            self.assertEqual(self.stops, [])
+            self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+
+    def test_a_listed_move_whose_manager_left_the_listing_before_the_stop_is_left_to_the_bring_back(self):
+        svc, sid = self.listed_out()
+        self.now[0] = T0 + 300
+        svc.revive()
+        self.assertIsInstance(svc._launching[sid], service._ListedMoveReservation)
+        self.assertEqual(svc._launching[sid].target, "home")
+        self.listed.clear()
+        self.drain()
+        self.assertEqual(self.stops, [])
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+        self.assertNotIn(sid, svc._move_cancelled)
+        self.assertNotIn(sid, svc._launching)
+        self.gone(svc)
+        self.poll(svc, 600)
+        self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+        self.assertEqual(self.said(svc).count(TOOK_OVER), 1)
+        self.assertEqual(self.said(svc).count(MOVED), 0)
+
     def test_nothing_is_sent_while_the_account_is_out_and_one_resume_follows_the_reset(self):
         svc, sid = self.start_out()
         for seconds in (300, 1800):
