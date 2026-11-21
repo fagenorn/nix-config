@@ -34,7 +34,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.project_contract import resolve_project
+from agent_tools.project_contract import agent_platform, resolve_project
 
 from ._inprocess_cli import run_module
 
@@ -230,6 +230,20 @@ SCHEMA_TWO_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "project-con
 
 def source_contract() -> dict:
     return json.loads(SCHEMA_TWO_FIXTURE.read_text("utf-8"))
+
+
+def without_review_commands(contract: dict) -> dict:
+    """The contract with neither platform review command authored (#1450)."""
+    commands = contract["bindings"]["commands"]
+    commands.pop("codex-plan-review", None)
+    commands.pop("codex-diff-review", None)
+    return contract
+
+
+def platform_entry(command_id: str, root: str) -> dict:
+    """The snapshot entry the platform defines under `command_id`, at `root`."""
+    return {"argv": list(agent_platform.PLATFORM_COMMANDS[command_id]["argv"]),
+            "cwd": root, "env": []}
 
 
 def forge_profile() -> dict:
@@ -478,6 +492,81 @@ class SnapshotShapeTest(ResolverTestCase):
         self.assertNotIn("\n", out[:-1])
         self.assertEqual(out, json.dumps(
             json.loads(out), sort_keys=True, separators=(",", ":")) + "\n")
+
+
+class PlatformCommandsTest(ResolverTestCase):
+    """#1450: every snapshot carries the platform's two review commands."""
+
+    IDS = ("codex-plan-review", "codex-diff-review")
+
+    def test_a_contract_authoring_no_review_command_resolves_with_both_platform_entries(self):
+        root = self.make_root(without_review_commands(source_contract()))
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        for command_id in self.IDS:
+            with self.subTest(command_id=command_id):
+                self.assertEqual(snap["bindings"]["commands"][command_id],
+                                 platform_entry(command_id, snap["project"]["root"]))
+        self.assertEqual(snap["bindings"]["workflow"]["review"],
+                         {"plan": "codex-plan-review", "code": "codex-diff-review"})
+
+    def test_a_contract_with_no_review_binding_still_carries_both_platform_entries(self):
+        contract = without_review_commands(source_contract())
+        contract["bindings"]["workflow"]["review"] = {"plan": None, "code": None}
+        contract["capabilities"]["review.plan"] = {"support": "unsupported"}
+        contract["capabilities"]["review.code"] = {"support": "unsupported"}
+        code, snap, err = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 0, err)
+        for command_id in self.IDS:
+            with self.subTest(command_id=command_id):
+                self.assertEqual(snap["bindings"]["commands"][command_id],
+                                 platform_entry(command_id, snap["project"]["root"]))
+        self.assertEqual(snap["capabilities"]["review.plan"]["state"], "unsupported")
+        self.assertEqual(snap["capabilities"]["review.code"]["state"], "unsupported")
+
+    def test_an_entry_authored_under_a_platform_id_is_read_as_authored(self):
+        contract = without_review_commands(source_contract())
+        contract["bindings"]["commands"]["codex-plan-review"] = {
+            "argv": ["true"], "cwd": ".", "env": []}
+        code, snap, err = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 0, err)
+        root = snap["project"]["root"]
+        commands = snap["bindings"]["commands"]
+        self.assertEqual(commands["codex-plan-review"],
+                         {"argv": ["true"], "cwd": root, "env": []})
+        self.assertEqual(commands["codex-diff-review"],
+                         platform_entry("codex-diff-review", root))
+
+    def test_every_command_reference_may_name_a_platform_id(self):
+        def verification(contract):
+            contract["bindings"]["workflow"]["verification"] = [
+                "nix-build", "codex-plan-review"]
+
+        def commit_environment(contract):
+            contract["bindings"]["vcs"]["commit"]["environment"] = "codex-diff-review"
+
+        def read_only(contract):
+            contract["production"] = copy.deepcopy(ProductionRulesTest.VALID)
+            contract["production"]["read_only"]["commands"] = [
+                "nix-build", "codex-plan-review"]
+
+        for name, arrange in (("verification", verification),
+                              ("commit.environment", commit_environment),
+                              ("production.read_only.commands", read_only)):
+            with self.subTest(reference=name):
+                contract = without_review_commands(source_contract())
+                arrange(contract)
+                code, _, err = self.resolve(self.make_root(contract))
+                self.assertEqual(code, 0, err)
+
+    def test_an_id_neither_authored_nor_platform_is_still_refused(self):
+        contract = source_contract()
+        contract["bindings"]["workflow"]["review"]["plan"] = "no-such-review"
+        code, payload, _ = self.resolve(self.make_root(contract))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertIn("/bindings/workflow/review/plan",
+                      [v["pointer"] for v in error["violations"]])
+        self.assertEqual(error["repair_id"], "contract.workflow.unknown_command_id")
 
 
 class NormalizationTest(ResolverTestCase):
@@ -2595,6 +2684,27 @@ class PublicResolveTest(InProcessTestCase):
                               '"resolver.internal","violations":[{"message":'
                               '"the resolver failed unexpectedly","pointer":""}]}}\n')
         self.assertEqual(self.raised_refusal(root), json.loads(out)["error"])
+
+
+class PlatformCommandsInProcessTest(InProcessTestCase):
+    """#1450 I5, I6: the platform definition is data the resolver never changes."""
+
+    def test_resolving_leaves_the_platform_definition_unchanged(self):
+        before = copy.deepcopy(agent_platform.PLATFORM_COMMANDS)
+        root = make_project_root(without_review_commands(source_contract()))
+        resolve_project.resolve(str(root))
+        resolve_project.resolve(str(root))
+        self.assertEqual(agent_platform.PLATFORM_COMMANDS, before)
+        for entry in agent_platform.PLATFORM_COMMANDS.values():
+            self.assertEqual(entry["cwd"], ".")
+
+    def test_the_platform_entries_have_the_authored_command_shape(self):
+        violations: list[dict] = []
+        resolve_project.validate_commands(
+            copy.deepcopy(agent_platform.PLATFORM_COMMANDS), violations)
+        self.assertEqual(violations, [])
+        self.assertEqual(sorted(agent_platform.PLATFORM_COMMANDS),
+                         ["codex-diff-review", "codex-plan-review"])
 
 
 if __name__ == "__main__":
