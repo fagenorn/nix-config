@@ -4019,6 +4019,43 @@ class PushBoundLandFixTest(unittest.TestCase):
                 for later in ("land-fix-review-1", "land-record-1-1"):
                     self.assertNotIn(later, labels(out["calls"]))
 
+    GUARDS = [{"id": "format", "argv": ["treefmt", "--fail-on-change"], "cwd": "tools"}]
+    PUSH = "git -C /r/.wt/w-issue-1-x push origin issue-1-x"
+
+    def test_the_declared_cheap_guards_reach_both_landing_fixes(self):
+        _, calls, _ = run(patch=dict(folded(CI_RED), setup={"guards": self.GUARDS}))
+        self.assertEqual(push_tests(prompt(calls, "land-fix-1")), dict(PUSH_PAYLOAD, guards=self.GUARDS))
+        found = {"land-sync-review-1-1": SyncFixRoundTest.FOUND}
+        _, calls, _ = run(patch=dict(BEHIND, setup={"guards": self.GUARDS}), replies=dict(
+            {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": SyncFixRoundTest.CONFLICTED}, **found))
+        self.assertEqual(push_tests(prompt(calls, "land-sync-fix-1-1")), dict(PUSH_PAYLOAD, guards=self.GUARDS))
+
+    def test_a_setup_reply_with_unusable_guards_stops_the_run(self):
+        for bad in (None, "fmt", [{"id": "format", "argv": [], "cwd": "."}], [{"id": "format", "argv": ["x"]}], ["format"]):
+            with self.subTest(bad=bad):
+                result, calls, _ = run(patch={"setup": {"guards": bad}})
+                self.assertEqual((result["stage"], result["invalid"]), ("setup", "guards"))
+                self.assertEqual(labels(calls), ["setup"])
+
+    def test_the_program_pushes_a_tested_reviewed_fix_and_the_fix_agent_does_not(self):
+        sites = (
+            ("mode first", run(patch=folded(CI_RED))[1], "land-fix-1", "land-fix-review-1", "land-record-1-1"),
+            ("mode unasked", run_full(patch=OwnRedOutsideLockTest.PRE_RED,
+                                      replies={"land-fix-1": dict(OwnRedOutsideLockTest.FIXED, tests=["t"])})["calls"],
+             "land-fix-1", "land-fix-review-1", "land-record-1-1"),
+            ("sync fix", SyncFixRoundTest().land(**{"land-sync-review-1-1": SyncFixRoundTest.FOUND})[1],
+             "land-sync-fix-1-1", "land-sync-rereview-1-1", "land-record-1-1"),
+        )
+        for site, calls, fix, review, record in sites:
+            with self.subTest(site=site):
+                self.assertEqual(prompt(calls, fix).count(self.PUSH), prompt(calls, review).count(self.PUSH))
+                text = prompt(calls, record)
+                self.assertLess(text.index(self.PUSH), text.index("gh pr view"))
+                self.assertLess(labels(calls).index(review), labels(calls).index(record))
+        _, calls, _ = SyncFixRoundTest().land()
+        text = prompt(calls, "land-record-1-1")
+        self.assertGreater(text.index(self.PUSH), text.index("gh pr view"))
+
     def test_a_landing_fix_that_commits_nothing_needs_no_test_record(self):
         out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(OwnRedOutsideLockTest.RERAN, tests=[])})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")

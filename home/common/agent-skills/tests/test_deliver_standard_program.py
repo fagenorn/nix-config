@@ -8339,6 +8339,48 @@ class PushBoundFixTestsTest(unittest.TestCase):
             self.assertEqual(result["stage"], "checks-fix")
             self.assertNotIn("pr", labels(calls))
 
+    READY_AT_F = dict(RESUME, setup={"look": MARKED, "head": F}, verify={"head": F})
+
+    def test_a_ready_mode_resume_retests_before_it_returns_ready(self):
+        cont = dict(LOOK_CONT, untested={"stage": "look-fix", "start_head": SHA, "head": F})
+
+        def resume(reply):
+            return run(args=dict(ARGS, mode="ready", cont=cont), patch=dict(self.READY_AT_F, **{"fix-retest": reply}))
+
+        with self.subTest(case="records its tests"):
+            result, calls = resume({"start_head": F, "commit": F, "tests": self.TESTED})
+            self.assertEqual(result["stage"], "ready")
+            self.assertIn("fix-retest", labels(calls))
+            self.assertNotIn("untested", result["cont"])
+        for case, reply in (("records no test", {"start_head": F, "commit": F, "tests": []}),
+                            ("the retest committed", {"start_head": F, "commit": "e" * 40, "tests": self.TESTED})):
+            with self.subTest(case=case):
+                result, calls = resume(reply)
+                self.assertEqual(result["stage"], "look-fix")
+                self.assertEqual(result["cont"]["untested"], {"stage": "look-fix", "start_head": SHA, "head": F})
+
+    def test_a_fix_report_with_no_start_head_keeps_the_head_the_program_asked_it_at(self):
+        sites = (
+            ("checks-fix", SHA, FIX, self.PUSH_BOUND[0][1], "fix-ci"),
+            ("sync-fix", MERGE, FIX, self.PUSH_BOUND[1][1], "fix-sync-1"),
+            ("look-fix", SHA, F, self.PUSH_BOUND[2][1], "look-fix"),
+        )
+        for stage, start, commit, kwargs, label in sites:
+            for status in ("done", "blocked"):
+                with self.subTest(stage=stage, status=status):
+                    reply = {"status": status, "notes": "fixed", "commit": commit, "tests": []}
+                    result, calls = run(**dict(kwargs, replies={**kwargs.get("replies", {}), label: reply}))
+                    self.assertEqual(result["stage"], stage)
+                    self.assertEqual(result["cont"]["untested"], {"stage": stage, "start_head": start, "head": commit})
+
+    def test_a_second_untested_look_fix_keeps_the_earliest_pending_start(self):
+        cont = dict(LOOK_CONT, untested={"stage": "look-fix", "start_head": SHA, "head": F})
+        result, calls = run(args=dict(ARGS, cont=cont, look={"answer": "changes", "words": "make the label bolder"}),
+                            patch=dict(RESUME, setup={"look": MARKED, "head": F},
+                                       **{"look-fix": {"start_head": F, "commit": D, "tests": []}}))
+        self.assertEqual(result["stage"], "look-fix")
+        self.assertEqual(result["cont"]["untested"], {"stage": "look-fix", "start_head": SHA, "head": D})
+
     def test_a_fix_that_commits_nothing_needs_no_test_record(self):
         result, calls = run(replies={"checks-2": {"state": "passed", "passed": ["ci"], "head": SHA, "required": ["ci"]}},
                             patch={"pr": {"checks": RED}, "fix-ci": dict(ShipFixWaveTest.RERAN, tests=[])})

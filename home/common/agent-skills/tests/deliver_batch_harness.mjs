@@ -35,7 +35,7 @@ const RELEASED = (p, r) => (/return lock_released true/i.test(p) && !sameHead(r.
 const jsonAfter = (p, lead) => JSON.parse(p.slice(p.indexOf(lead) + lead.length).split('\n')[0])
 // Ordered: the first matching pattern wins. A default gets the label, the prompt and the scenario's acceptance (one copy per scenario, shared with a ready child's).
 const DEFAULTS = [
-  [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null })],
+  [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null, guards: [] })],
   [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_refs: [], open_pr: null, native: { verdict: 'read', blocked_by: [] }, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' }, lane: 'standard', why: 'x', look: { verdict: 'unmarked' } })],
   [/^acquire-/, () => ({ verdict: 'acquired', comment_id: 7 })],
   [/^renew-/, () => ({ verdict: 'renewed' })],
