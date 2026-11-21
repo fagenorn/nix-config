@@ -16,7 +16,8 @@
       },
       "commit": {
         "co_authored_by": true,
-        "signed": true
+        "signed": true,
+        "environment": "commit-environment"
       },
       "merge": {
         "strategy": "merge",
@@ -111,6 +112,15 @@
           "--fresh",
           "--reviewer",
           "diff-review"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "commit-environment": {
+        "argv": [
+          "devenv",
+          "shell",
+          "--"
         ],
         "cwd": ".",
         "env": []

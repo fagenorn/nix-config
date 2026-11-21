@@ -59,6 +59,16 @@ EVALUATED_ATTRIBUTE = (
     ".#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath"
 )
 
+# The steps `Nix Eval` runs for the platform package (#1439): each is a name and one
+# single-line `run:`, with no `|| true`, `if:` or `continue-on-error:` to make it pass empty.
+PLATFORM_PACKAGE_STEPS = (
+    ("Build the platform package", "nix build --no-link '.#packages.x86_64-linux.agent-platform'"),
+    ("Evaluate the macOS platform package",
+     "nix eval --raw '.#packages.aarch64-darwin.agent-platform.drvPath'"),
+    ("Check the platform package runs with no home configuration",
+     "nix build --no-link '.#checks.x86_64-linux.agent-platform'"),
+)
+
 # The run `Agent Workflow Tests` exists to perform (issue 608): the whole suite on the
 # source surface, at the job count the hosted 4-vCPU runner has always used, with node
 # for the deliver-standard program scenarios (issue 618).
@@ -571,6 +581,15 @@ class WorkflowShape(unittest.TestCase):
                 f"running its evaluation, so the gate would report green on a tree "
                 f"nothing checked",
             )
+
+    def test_nix_eval_builds_and_checks_the_platform_package(self):
+        nix_path, nix_key = required_jobs()["Nix Eval"]
+        steps = step_blocks(nix_key, nix_path)
+        for name, run in PLATFORM_PACKAGE_STEPS:
+            with self.subTest(step=name):
+                self.assertIn(name, steps)
+                self.assertEqual([line for line in steps[name] if line.strip()],
+                                 [f"      - name: {name}", f"        run: {run}"])
 
     def test_each_required_job_still_runs_the_evaluation_it_exists_for(self):
         """Steps that run fine and evaluate nothing are the inverse of green-without-work:
