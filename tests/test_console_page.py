@@ -2287,6 +2287,16 @@ class PageDigDeeperTest(unittest.TestCase):
                 self.assertEqual(role(row["children"][-tail]["cls"]), "ask-goal")
                 self.assertEqual(full(row["children"][-tail]), "Make it a goal")
 
+    def test_dig_deeper_keeps_the_gap_other_button_pairs_have_to_make_it_a_goal(self) -> None:
+        # The owner's look at head 0412359: the two buttons sit side by side, so Dig deeper
+        # takes Make it a goal's 10 px top margin and the 8 px gap button pairs use elsewhere.
+        rule = re.search(r"^\.ask > \.ask-deep \{([^}]*)\}", PAGE_TEXT, re.MULTILINE)
+        self.assertIsNotNone(rule)
+        self.assertIn("margin-top: 10px", rule.group(1))
+        self.assertIn("margin-right: 8px", rule.group(1))
+        goal = re.search(r"^\.ask > \.ask-goal \{([^}]*)\}", PAGE_TEXT, re.MULTILINE)
+        self.assertIn("margin-top: 10px", goal.group(1))
+
     def test_a_choice_follow_up_body_is_unchanged(self) -> None:
         (snap,) = render([*self.opened(thread(ASK_FIRST, ASK_CHOOSE)), {"click": "ask-choice", "nth": 1},
                           {"snapshot": True}])
