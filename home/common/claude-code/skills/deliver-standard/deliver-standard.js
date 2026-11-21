@@ -738,6 +738,12 @@ let verified = (CONT && CONT.verified) || null
 const UNTESTED_STAGES = ['checks-fix', 'sync-fix', 'look-fix']
 const untestedOf = u => (isEntry(u) && UNTESTED_STAGES.includes(u.stage) && present(u.head) && present(u.start_head) ? { stage: u.stage, start_head: String(u.start_head), head: String(u.head) } : null)
 let untested = untestedOf(CONT && CONT.untested)
+// #1371: a push-bound fix reply that moved the head and records no test command, whatever its status, is carried in cont.untested so a resume retests it before any push; true when it recorded one.
+const noteUntested = (stage, f) => {
+  if (!f || !present(f.commit) || !present(f.start_head) || sameSha(f.commit, f.start_head) || tested(f)) return false
+  untested = { stage, start_head: String(f.start_head), head: String(f.commit) }
+  return true
+}
 // #1139: the setup's look read. A marked delivery stops at awaiting-look instead of landing; a read with neither verdict stops at stage look after verify.
 const LOOK = isEntry(setup.look) ? setup.look : null
 const LOOK_READ = !!LOOK && (LOOK.verdict === 'marked' || LOOK.verdict === 'unmarked')
@@ -2099,8 +2105,8 @@ if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === '
   const lostClaim = await renew('look-fix', 'Verify')
   if (lostClaim) return lostClaim
   const lookFix = await call(`${CTX}\n${PLAN_REF} The owner looked at the pull request head and asked for changes; the owner's words are the one finding of this fix round: ${JSON.stringify(asked)}. Fix it in the worktree, with a regression test for each real defect, then commit. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'look-fix', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  if (noteUntested('look-fix', lookFix)) return stop('look-fix', { fix: lookFix, details: UNTESTED })
   if (!implDone(lookFix) || sameSha(lookFix.commit, lookFix.start_head)) return stop('look-fix', { fix: lookFix })
-  if (!tested(lookFix)) { untested = { stage: 'look-fix', start_head: lookFix.start_head, head: lookFix.commit }; return stop('look-fix', { fix: lookFix, details: UNTESTED }) }
   const lookReview = await readReview(`${CTX}\nRe-review only this owner finding against the fix: ${span(lookFix)}; the implementer's notes: ${lookFix.notes}. Findings: ${JSON.stringify(asked)}. Report the finding if it is still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'look-fix-review', phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
   if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
   VERIFY_CACHED = false
@@ -2323,11 +2329,11 @@ ${lockMaybe && !sameSha(lockMaybe, lockSha) ? RELEASE_AGAIN(lockMaybe) : ''}${RU
 // #1371: a committed fix with no test command recorded is refused before its review and its push, and its commit is carried in cont.
 const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false, rerun = false, schema = IMPL, committed = null }) => {
   const fix = await call(fixPrompt, { label, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema })
+  if (noteUntested(stage, fix)) return { fix, ok: false, details: UNTESTED }
   if (!implDone(fix) || !sameSha(fix.start_head, expected)) return { fix, ok: false }
   const moved = !sameSha(fix.commit, expected)
   if (!moved && rerun) return { fix, ok: true, rerun: true, moved }
   if (!moved && !(rebuttal && present(fix.notes))) return { fix, ok: false }
-  if (moved && !tested(fix)) { untested = { stage, start_head: fix.start_head, head: fix.commit }; return { fix, ok: false, details: UNTESTED } }
   if (moved && committed) await committed(fix)
   const review = await readReview(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
   return { fix, review, moved, ok: true }

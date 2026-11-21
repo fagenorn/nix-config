@@ -8287,6 +8287,23 @@ class PushBoundFixTestsTest(unittest.TestCase):
                 with self.subTest(stage=stage, label=label, record=record):
                     self.refused(stage, start, commit, forbidden, kwargs, label, fix, record)
 
+    def test_a_blocked_fix_that_committed_with_no_test_recorded_carries_untested_too(self):
+        fixed = OwnRedOutsideLockTest.FIXED
+        sites = (
+            ("checks-fix", SHA, FIX, ("fix-ci-review", "land-push-2", "merge"), self.PUSH_BOUND[0][1], "fix-ci",
+             {"start_head": SHA, "commit": FIX}),
+            ("checks-fix", fixed["start_head"], fixed["commit"], ("fix-ci-review", "land-push-1", "merge"),
+             {"replies": {"checks-2": PASSED_AT_FIX}, "patch": {"pr": OwnRedOutsideLockTest.PRE_RED}}, "fix-ci", dict(fixed)),
+            ("sync-fix", MERGE, FIX, ("fix-sync-review-1", "land-push-2", "merge"), self.PUSH_BOUND[1][1], "fix-sync-1",
+             {"start_head": MERGE, "commit": FIX}),
+            ("look-fix", SHA, F, ("look-fix-review", "verify", "look-pr", "look-push", "merge"), self.PUSH_BOUND[2][1], "look-fix",
+             {"start_head": SHA, "commit": F}),
+        )
+        for stage, start, commit, forbidden, kwargs, label, fix in sites:
+            for record in ([], None):
+                with self.subTest(stage=stage, label=label, record=record):
+                    self.refused(stage, start, commit, forbidden, kwargs, label, dict(fix, status="blocked", notes="tests still red"), record)
+
     AT_FIX = {"setup": {"head": FIX}, "verify": {"head": FIX},
               "pr": {"head": FIX, "lock": {"verdict": "already_held", "lock_sha": FIX},
                      "checks": {"state": "passed", "head": FIX, "required": ["ci"], "passed": ["ci"]}}}
