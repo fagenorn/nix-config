@@ -8691,7 +8691,7 @@ class LiveLaneTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
-def sized(*rows, sensitive=()):
+def live_sized(*rows, sensitive=()):
     """A live-size patch from (path, added, deleted) rows."""
     return {"live-size": {"measured": True, "head": SHA, "sensitive": [dict(s) for s in sensitive],
                           "files": [{"path": p, "added": a, "deleted": d} for p, a, d in rows]}}
@@ -8714,28 +8714,28 @@ class LiveSizeTest(unittest.TestCase):
         self.assertNotIn("verify", labels(calls))
 
     def test_a_diff_over_80_lines_outside_tests_is_refused_in_one_line(self):
-        self.refusal(sized(("src/a.py", 60, 30), ("tests/test_a.py", 40, 0)),
+        self.refusal(live_sized(("src/a.py", 60, 30), ("tests/test_a.py", 40, 0)),
                      refused_with("the diff changes 90 lines outside tests, over the live lane's 80"))
 
     def test_a_fourth_file_is_refused(self):
-        self.refusal(sized(("src/a.py", 1, 0), ("src/b.py", 1, 0), ("src/c.py", 1, 0), ("tests/test_a.py", 1, 0)),
+        self.refusal(live_sized(("src/a.py", 1, 0), ("src/b.py", 1, 0), ("src/c.py", 1, 0), ("tests/test_a.py", 1, 0)),
                      refused_with("the diff changes 4 files, over the live lane's 3"))
 
     def test_a_sensitive_change_is_refused(self):
-        patch = sized(("src/fix.py", 5, 2), ("tests/test_harm.py", 20, 0),
+        patch = live_sized(("src/fix.py", 5, 2), ("tests/test_harm.py", 20, 0),
                       sensitive=[{"path": "src/auth.py", "why": "authentication"}])
         self.refusal(patch, refused_with("the diff touches authentication in src/auth.py"))
 
     def test_80_lines_outside_tests_in_3_files_pass(self):
-        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **sized(("src/a.py", 50, 30), ("tests/test_a.py", 300, 0), ("src/b.py", 0, 0))))
+        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized(("src/a.py", 50, 30), ("tests/test_a.py", 300, 0), ("src/b.py", 0, 0))))
         self.assertEqual(result["stage"], "done")
 
     def test_test_lines_do_not_count(self):
         for path in ("tests/x.py", "pkg/__tests__/x.js", "spec/x_spec.rb", "test_x.py", "x_test.go", "src/x.test.ts", "src/x.spec.js"):
             with self.subTest(path=path):
-                result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **sized((path, 500, 0), ("src/fix.py", 10, 0))))
+                result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized((path, 500, 0), ("src/fix.py", 10, 0))))
                 self.assertEqual(result["stage"], "done")
-        self.refusal(sized(("src/testing.py", 500, 0), ("src/fix.py", 10, 0)),
+        self.refusal(live_sized(("src/testing.py", 500, 0), ("src/fix.py", 10, 0)),
                      refused_with("the diff changes 510 lines outside tests, over the live lane's 80"))
 
     def test_an_unmeasured_diff_stops_before_the_review(self):
@@ -8775,15 +8775,15 @@ class LiveSizeTest(unittest.TestCase):
             self.assertIn(piece, text)
 
     def test_a_rename_counts_both_paths(self):
-        self.refusal(sized(("tests/test_a.py", 0, 40), ("src/a.py", 40, 0), ("src/b.py", 1, 0), ("src/c.py", 1, 0)),
+        self.refusal(live_sized(("tests/test_a.py", 0, 40), ("src/a.py", 40, 0), ("src/b.py", 1, 0), ("src/c.py", 1, 0)),
                      refused_with("the diff changes 4 files, over the live lane's 3"))
-        self.refusal(sized(("tests/helper.py", 0, 50), ("src/helper.py", 50, 0), ("src/fix.py", 31, 0)),
+        self.refusal(live_sized(("tests/helper.py", 0, 50), ("src/helper.py", 50, 0), ("src/fix.py", 31, 0)),
                      refused_with("the diff changes 81 lines outside tests, over the live lane's 80"))
 
     def test_a_path_listed_twice_counts_once(self):
-        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **sized(("src/a.py", 30, 0), ("src/a.py", 30, 0), ("tests/test_a.py", 5, 0), ("src/b.py", 1, 0))))
+        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized(("src/a.py", 30, 0), ("src/a.py", 30, 0), ("tests/test_a.py", 5, 0), ("src/b.py", 1, 0))))
         self.assertEqual(result["stage"], "done")
-        self.refusal(sized(("src/a.py", 41, 0), ("src/a.py", 40, 0)),
+        self.refusal(live_sized(("src/a.py", 41, 0), ("src/a.py", 40, 0)),
                      refused_with("the diff changes 81 lines outside tests, over the live lane's 80"))
 
     def test_a_measurement_at_another_head_stops(self):
@@ -9370,7 +9370,7 @@ LOOK_CONT = {
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
-    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
+    (CLERK, ("setup", "acquire", "worktree", "renew-", "live-size", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
              "hold-draft", "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
              "look-checks-", "look-reverify")),
