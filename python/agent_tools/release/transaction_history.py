@@ -20,9 +20,10 @@ on every load (#208 D6, D12), its `recovery_event_violation` checks each recover
 binds `recovery_started` to the entry into `recovering`, `recovery_settled` to the entry into
 `rolled_back` and `recovery_incomplete` to its park (#208 D7, D9, D10); a
 `roll_forward_linked` must also name a transaction id (#208 D11). The `created` event carries
-a non-empty `authority_class`, and each `grant_issued` an `actor_kind` in `ACTOR_KINDS` and a
-non-empty `authority_class` (#209 D11, D22); `agent_tools.release.transaction_disposition`'s
-`failure_event_violation` re-derives each `failure_disposed`, its
+a non-empty `authority_class`, and may name, sorted and non-empty, the actions a guard-refused
+attempt of which may run again (`rerun_denied`, ADR-release-015); each `grant_issued` carries
+an `actor_kind` in `ACTOR_KINDS` and a non-empty `authority_class` (#209 D11, D22);
+`agent_tools.release.transaction_disposition`'s `failure_event_violation` re-derives each `failure_disposed`, its
 `disposition_pairing_violation` binds that event and every entry into `failed` as the
 recovery pairing does, and its `terminal_blocker` names the action no terminal transition
 may cross (#209 D21). A terminal's last event is `receipt_sealed`, admitted once
@@ -104,6 +105,7 @@ _STATE_KEYS = frozenset({"schema", "transaction_id", "creation_key", "subject", 
 _KEY_COLLECTIONS = (list, tuple, set, frozenset)
 _CREATED_KEYS = frozenset({"seq", "type", "at", "proof_plan_digest", "recovery_plan_digest",
                            "recovers", "authority_class"})
+_CREATED_RERUN_KEYS = _CREATED_KEYS | {"rerun_denied"}
 _TRANSITIONED_KEYS = frozenset({"seq", "type", "at", "from", "to", "reason",
                                 "external_state"})
 _ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
@@ -228,6 +230,19 @@ def key_set_violation(keys: Any) -> str | None:
             return f"concurrency key {key!r} is not encodable as UTF-8"
     if len(set(keys)) != len(keys):
         return "concurrency_keys holds a duplicate key"
+    return None
+
+
+def rerun_names_violation(names: Any) -> str | None:
+    """The first rule the `rerun_denied` names `names` break, or None: a list, tuple, set or
+    frozenset of distinct non-empty strings (ADR-release-015)."""
+    if type(names) not in _KEY_COLLECTIONS:
+        return "is not a list, tuple, set or frozenset"
+    for name in names:
+        if type(name) is not str or not name:
+            return f"holds {name!r}, which is not a non-empty string"
+    if len(set(names)) != len(names):
+        return "holds a duplicate name"
     return None
 
 
@@ -558,7 +573,7 @@ def _history_projection(document: dict,
     if type(events) is not list or not events:
         raise refuse("events is not a non-empty list")
     first = events[0]
-    if type(first) is not dict or set(first) != _CREATED_KEYS:
+    if type(first) is not dict or set(first) not in (_CREATED_KEYS, _CREATED_RERUN_KEYS):
         raise refuse("event 1 is not the closed created event")
     if type(first["seq"]) is not int or first["seq"] != 1 or first["type"] != "created":
         raise refuse("event 1 is not seq 1 of type created")
@@ -573,6 +588,11 @@ def _history_projection(document: dict,
         raise refuse("event 1 recovers is neither null nor another transaction's rel_ UUIDv7")
     if type(first["authority_class"]) is not str or not first["authority_class"]:
         raise refuse("event 1 authority_class is not a non-empty string")
+    rerun = first.get("rerun_denied", ())
+    if "rerun_denied" in first and (
+            type(rerun) is not list or not rerun or rerun_names_violation(rerun) is not None
+            or rerun != sorted(rerun)):
+        raise refuse("event 1 rerun_denied is not a sorted list of distinct non-empty strings")
     state, parked, entered_terminal, sealed = "created", None, None, False
     fold = _CustodyFold(keys)
     actions: dict = {}
@@ -627,7 +647,7 @@ def _history_projection(document: dict,
                 violation = action_event_violation(
                     event, actions, transaction_id=transaction_id, keys=keys,
                     open_fence=None if fold.custody is None else fold.custody["fence"],
-                    state=state)
+                    state=state, rerun_denied=rerun)
                 if (violation is None and event_type == "invocation_intended"
                         and selection_refusal(document["recovery_plan"], events[:seq - 1],
                                               state, event["action_id"])):

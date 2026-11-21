@@ -1,10 +1,11 @@
 """The integration land lock of a two-branch release (issue 875), through the real driver, the
 real forge adapter and the real `forge_land_lock` against the fake gh and its ref store.
 
-The caller acquires the lock before the first preview; `run` re-checks it right before it may
-merge, proceeds only on `already_held`, and releases it on every ending but a `confirm` or
-`wait` that can still merge.
+The caller acquires the lock before the first preview; `preview` takes it one-shot when it is
+free (issue 1376), `run` re-checks it right before it may merge, proceeds only on
+`already_held`, and releases it on every ending but a `confirm` or `wait` that can still merge.
 """
+import json
 import unittest
 from unittest import mock
 
@@ -12,6 +13,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.release import release_driver, release_lock
 from . import release_driver_support as rs
 from . import release_test_support as support
+from . import forge_world
 from .forge_world import CANONICAL, LAND_LOCK, SYNC_ROWS, ForgeWorld
 
 SLUG, COMMIT = CANONICAL["slug"], CANONICAL["commit"]
@@ -61,9 +63,23 @@ class LockCase(unittest.TestCase):
     def lock_reads(self):
         return [c for c in self.world.calls() if "agent-locks" in " ".join(c["argv"])]
 
-    def refused(self, code, driver):
+    def held_by_other(self):
+        """Another pull request (77) is the open one at the sha `OTHER`."""
+        repo = {"full_name": SLUG}
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{OTHER}/pulls?per_page=100"], [{
+            "number": 77, "state": "open", "merged_at": None, "base": {"ref": "dev", "repo": repo},
+            "head": {"ref": "issue-77-x", "sha": OTHER, "repo": repo}}])
+        owner, name = SLUG.split("/")
+        self.world.respond_json(
+            "gh", ["api", "graphql", "-f", f"query={fm.CLOSING_ISSUES}", "-f", f"owner={owner}",
+                   "-f", f"name={name}", "-F", "number=77"],
+            {"data": {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}}}})
+
+    def refused(self, code, driver, between=None):
         shown = driver.preview(rs.candidate())
         self.assertTrue(shown["runnable"])
+        if between is not None:
+            between()
         with self.assertRaises(release_driver.Refusal) as caught:
             driver.run(rs.candidate(), [c["token"] for c in shown["confirmations"]])
         self.assertEqual(caught.exception.code, code)
@@ -88,11 +104,6 @@ class HeldLockTest(LockCase):
         rerun = driver.run(None, [])
         self.assertEqual((rerun["next"], rerun["lock"]), ("done", None))
         self.assertEqual(len(self.swaps()), 1)
-
-    def test_preview_never_touches_the_lock(self):
-        self.driver().preview(rs.candidate())
-        self.assertEqual(self.lock_reads(), [])
-        self.assertEqual(self.world.refs(), {REF: COMMIT})
 
     def test_a_release_that_waits_before_its_merge_keeps_the_lock(self):
         _, result = rs.release(self.driver(MergeInProgress(self.world)), rs.candidate())
@@ -131,16 +142,18 @@ class HeldLockTest(LockCase):
     def test_a_run_that_starts_after_the_merge_makes_no_lock_call(self):
         driver, tokens = self.crashed("tag")
         before = len(self.lock_reads())
+        self.assertIsNone(driver.preview(None)["lock"])
+        self.assertEqual(len(self.lock_reads()), before)
         result = driver.run(None, tokens)
         self.assertEqual((result["next"], result["lock"]), ("done", None))
         self.assertEqual((len(self.lock_reads()), self.swaps()), (before, []))
         self.assertEqual(self.world.refs(), {REF: COMMIT})  # stale: its pull request is merged
 
     def test_a_resumed_release_checks_the_lock_before_it_invokes_the_merge(self):
-        self.world.land_lock_ready(lock=None)
         driver = self.driver()
         rs.seed(driver, merge=support.MERGE)
         tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+        self.world.set_ref(REF, None)
         with self.assertRaises(release_driver.Refusal) as caught:
             driver.run(None, tokens)
         self.assertEqual(caught.exception.code, "land_lock_lost")
@@ -151,27 +164,101 @@ class HeldLockTest(LockCase):
         self.assertEqual((result["next"], result["lock"], len(self.merges())), ("done", RELEASED, 1))
 
 
+class PreviewLockTest(LockCase):
+    """Issue 1376 (ADR-release-014): `preview` takes the land lock the run will hold."""
+
+    def test_a_run_right_after_a_preview_of_a_free_lock_merges(self):
+        self.world.land_lock_ready(lock=None)
+        driver = self.driver()
+        shown = driver.preview(rs.candidate())
+        self.assertTrue(shown["runnable"])
+        self.assertEqual(shown["lock"]["verdict"], "acquired")
+        self.assertEqual(self.world.refs(), {REF: COMMIT})
+        result = driver.run(rs.candidate(), [c["token"] for c in shown["confirmations"]])
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(result["lock"], RELEASED)
+        self.assertEqual(len(self.merges()), 1)
+
+    def test_a_preview_of_the_held_lock_leaves_the_ref_unchanged(self):
+        shown = self.driver().preview(rs.candidate())
+        self.assertEqual(shown["lock"], HELD)
+        self.assertEqual((self.world.refs(), self.swaps()), ({REF: COMMIT}, []))
+
+    def test_a_resumed_preview_takes_the_lock_its_merge_needs(self):
+        self.world.land_lock_ready(lock=None)
+        driver = self.driver()
+        rs.seed(driver, merge=support.MERGE)
+        shown = driver.preview(None)
+        self.assertEqual((shown["runnable"], shown["lock"]["verdict"]), (True, "acquired"))
+        result = driver.run(None, [c["token"] for c in shown["confirmations"]])
+        self.assertEqual((result["next"], result["lock"]), ("done", RELEASED))
+        self.assertEqual(len(self.merges()), 1)
+
+    def test_a_preview_another_pull_request_holds_is_not_runnable(self):
+        self.world.land_lock_ready(lock=OTHER)
+        self.held_by_other()
+        driver = self.driver()
+        shown = driver.preview(rs.candidate())
+        self.assertEqual((shown["runnable"], shown["refusal"]["code"]), (False, "land_lock_held"))
+        self.assertIn(f"held_by {OTHER} (pull request 77)", shown["refusal"]["detail"])
+        self.assertEqual((shown["confirmations"], shown["lock"]["verdict"]), ([], "held_by"))
+        self.assertEqual((self.world.refs(), self.swaps()), ({REF: OTHER}, []))
+        self.assertFalse((driver.project.common_dir / "agent-release").exists())
+
+    def test_a_preview_whose_lock_cannot_be_checked_is_not_runnable(self):
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{COMMIT}/pulls?per_page=100"], [])
+        shown = self.driver().preview(rs.candidate())
+        self.assertEqual((shown["runnable"], shown["refusal"]["code"]),
+                         (False, "land_lock_unavailable"))
+        self.assertIn("no_open_pr", shown["refusal"]["detail"])
+        self.assertEqual(shown["confirmations"], [])
+        self.assertEqual(self.world.refs(), {REF: COMMIT})
+
+    def test_every_lock_verdict_the_preview_cannot_keep_is_reported_in_the_document(self):
+        for verdict, code in (("already_held", None), ("acquired", None),
+                              ("moved", "land_lock_lost"), ("held_by", "land_lock_held"),
+                              ("lost_to", "land_lock_held"), ("error", "land_lock_unavailable")):
+            with self.subTest(verdict=verdict):
+                seen = []
+                answer = {"verdict": verdict, "lock_sha": OTHER if verdict != "error" else None,
+                          "detail": "d"}
+
+                def recorder(*args):
+                    seen.append(args)
+                    return answer
+
+                with mock.patch.object(release_lock, "call", side_effect=recorder):
+                    shown = self.driver().preview(rs.candidate())
+                self.assertEqual(seen, [("acquire", SLUG, "dev", COMMIT)])
+                self.assertEqual(shown["lock"], answer)
+                self.assertEqual(shown["runnable"], code is None)
+                self.assertEqual(None if code is None else shown["refusal"]["code"], code)
+                if code is not None:
+                    self.assertEqual(shown["confirmations"], [])
+
+    def test_an_unrunnable_preview_makes_no_lock_call(self):
+        self.world.merge_observation_ready(prs=[])
+        shown = self.driver().preview(rs.candidate())
+        self.assertEqual(shown["refusal"]["code"], "release_pr_missing")
+        self.assertIsNone(shown["lock"])
+        self.assertEqual(self.lock_reads(), [])
+        self.assertFalse(any(f"commits/{COMMIT}/pulls" in " ".join(c["argv"])
+                             for c in self.world.calls()))
+
+
 class RefusedLockTest(LockCase):
     def test_a_lock_the_run_had_to_take_refuses_and_creates_nothing(self):
         """`acquired` exits 0 too, but means the lock was lost: the head may have moved."""
-        self.world.land_lock_ready(lock=None)
-        detail = self.refused("land_lock_lost", self.driver())
+        detail = self.refused("land_lock_lost", self.driver(),
+                              between=lambda: self.world.set_ref(REF, None))
         self.assertIn("(acquired)", detail)
         self.assertIn("preview again", detail)
         self.assertEqual(self.world.refs(), {REF: COMMIT})
 
     def test_a_lock_another_pull_request_holds_refuses_and_creates_nothing(self):
-        self.world.land_lock_ready(lock=OTHER)
-        repo = {"full_name": SLUG}
-        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{OTHER}/pulls?per_page=100"], [{
-            "number": 77, "state": "open", "merged_at": None, "base": {"ref": "dev", "repo": repo},
-            "head": {"ref": "issue-77-x", "sha": OTHER, "repo": repo}}])
-        owner, name = SLUG.split("/")
-        self.world.respond_json(
-            "gh", ["api", "graphql", "-f", f"query={fm.CLOSING_ISSUES}", "-f", f"owner={owner}",
-                   "-f", f"name={name}", "-F", "number=77"],
-            {"data": {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}}}})
-        detail = self.refused("land_lock_held", self.driver())
+        self.held_by_other()
+        detail = self.refused("land_lock_held", self.driver(),
+                              between=lambda: self.world.set_ref(REF, OTHER))
         self.assertIn(f"held_by {OTHER} (pull request 77)", detail)
         self.assertEqual((self.world.refs(), self.swaps()), ({REF: OTHER}, []))
 
@@ -183,7 +270,11 @@ class RefusedLockTest(LockCase):
         self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{COMMIT}/pulls?per_page=100"], [])
         reason = f"merge: release pull request no longer at {COMMIT}"
         for _ in range(3):
-            tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+            shown = driver.preview(None)
+            self.assertTrue(shown["runnable"])
+            self.assertEqual(shown["lock"]["verdict"], "error")
+            self.assertTrue(release_lock.gone(shown["lock"]))
+            tokens = [c["token"] for c in shown["confirmations"]]
             result = driver.run(None, tokens)
             self.assertEqual((result["state"], result["next"], result["sync"]),
                              ("attention_required", "attention", None))
@@ -209,7 +300,7 @@ class RefusedLockTest(LockCase):
                 mock.patch.object(release_lock, "sleep", slept.append):
             _, result = rs.release(self.driver(), rs.candidate())
         self.assertEqual((result["next"], result["lock"]), ("done", RELEASED))
-        self.assertEqual((calls, slept), (["acquire", "acquire", "release"],
+        self.assertEqual((calls, slept), (["acquire", "acquire", "acquire", "release"],
                                           [release_lock.RETRY_DELAY]))
 
     def test_a_failure_that_is_not_transient_or_repeats_is_not_retried_again(self):
@@ -231,8 +322,10 @@ class RefusedLockTest(LockCase):
                 self.assertFalse(release_lock.gone(lock))
 
     def test_a_lock_that_cannot_be_checked_refuses_and_creates_nothing(self):
-        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{COMMIT}/pulls?per_page=100"], [])
-        detail = self.refused("land_lock_unavailable", self.driver())
+        detail = self.refused(
+            "land_lock_unavailable", self.driver(),
+            between=lambda: self.world.respond_json(
+                "gh", ["api", f"repos/{SLUG}/commits/{COMMIT}/pulls?per_page=100"], []))
         self.assertIn("no_open_pr", detail)
         self.assertEqual(self.world.refs(), {REF: COMMIT})
 
@@ -284,6 +377,7 @@ class SingleBranchTest(unittest.TestCase):
                                        registry={"github-forge": rs.StatefulForge(world)})
         _, result = rs.release(driver, rs.candidate())
         self.assertEqual((result["next"], "lock" in result), ("done", False))
+        self.assertNotIn("lock", driver.preview(rs.candidate()))
         self.assertFalse(any("agent-locks" in " ".join(c["argv"]) or c["argv"][:2] == ["api", "graphql"]
                              for c in world.calls()))
         seeded = release_driver.Driver(rs.project(self), clock=rs.Clock())
@@ -293,3 +387,101 @@ class SingleBranchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+GUARD = "claude-bash-lifecycle-guard"
+
+
+class TagDenied(rs.StatefulForge):
+    """A forge whose guard starts refusing right after the merge landed."""
+
+    def land(self, request):
+        super().land(request)
+        if request["operation"] == "pr_merge":
+            self.world.respond(GUARD, [], exit=2, stderr="lifecycle guard: refused")
+
+
+class DeniedMergeTest(LockCase):
+    def deny(self):
+        self.world.respond(GUARD, [], exit=2, stderr="lifecycle guard: refused")
+
+    def admit(self):
+        self.world.respond(GUARD, [], exit=0)
+
+    def again(self, driver):
+        self.clock.advance(16_200_000)
+        tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+        return driver.run(None, tokens)
+
+    def merge_asks(self):
+        return [c for c in self.world.calls()
+                if c["tool"] == GUARD and "pr merge" in c["stdin"]]
+
+    def action(self, driver, name):
+        return next(a for a in driver.status()["release"]["actions"] if a["name"] == name)
+
+    def test_a_merge_the_guard_refused_runs_again_and_merges_once_the_guard_admits_it(self):
+        self.deny()
+        driver = self.driver()
+        prefix = "merge: absent after rejected authorization_denied: guard:"
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        self.assertTrue(driver.status()["release"]["reason"].startswith(prefix))
+        self.assertEqual((self.merges(), result["lock"]), ([], RELEASED))
+        self.assertEqual(driver.current()[1].events[0]["rerun_denied"], ["merge"])
+        result = self.again(driver)
+        self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        self.assertTrue(driver.status()["release"]["reason"].startswith(prefix))
+        self.assertEqual(self.action(driver, "merge")["attempts"], 2)
+        self.admit()
+        result = self.again(driver)
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(len(self.merges()), 1)
+        self.assertEqual(self.action(driver, "merge")["attempts"], 3)
+        self.assertEqual(result["lock"], RELEASED)
+        self.assertEqual(len(self.merge_asks()), 3)
+
+    def test_a_release_parked_before_the_names_were_stored_runs_again_too(self):
+        self.deny()
+        driver = self.driver()
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "attention")
+        transaction = driver.current()[1]
+        state = driver.store().root / transaction.transaction_id / "state.json"
+        document = json.loads(state.read_text())
+        del document["events"][0]["rerun_denied"]
+        state.write_text(json.dumps(document))
+        self.assertNotIn("rerun_denied", driver.current()[1].events[0])
+        self.admit()
+        result = self.again(driver)
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(len(self.merges()), 1)
+        self.assertEqual(driver.current()[1].events[0]["rerun_denied"], ["merge"])
+
+    def test_a_merge_refused_for_another_class_still_parks_not_retryable(self):
+        floor = forge_world.FLOOR_PROTECTION
+        self.world.merge_ready(protection={**floor, "enforce_admins": {"enabled": False}})
+        driver = self.driver()
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "attention")
+        self.assertEqual(driver.status()["release"]["reason"],
+                         "merge: absent after rejected precondition_failed: "
+                         "protection_floor_unmet: enforce_admins")
+        self.assertEqual(self.merges(), [])
+        self.world.merge_ready()
+        result = self.again(driver)
+        self.assertEqual(result["next"], "attention")
+        self.assertEqual(driver.status()["release"]["reason"], "merge: refused not_retryable")
+        self.assertEqual(self.merges(), [])
+
+    def test_a_guard_refusal_of_an_action_other_than_the_merge_stays_not_retryable(self):
+        driver = self.driver(TagDenied(self.world))
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "attention")
+        self.assertTrue(driver.status()["release"]["reason"].startswith(
+            "tag: absent after rejected authorization_denied"))
+        self.assertEqual(self.action(driver, "merge")["status"], "satisfied")
+        self.admit()
+        result = self.again(driver)
+        self.assertEqual(result["next"], "attention")
+        self.assertEqual(driver.status()["release"]["reason"], "tag: refused not_retryable")
