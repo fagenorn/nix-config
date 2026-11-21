@@ -2550,6 +2550,22 @@ const LOOK_POST_SCHEMA = { type: 'object', properties: { verdict: { type: 'strin
 // #1211: the owner's fix answer approves the head it was given for with one fix. The approval is recorded before the fix, only while the pull request is open and its head is
 // both the head the owner saw and the head the awaiting-look stop left; anything else posts nothing and stops at awaiting-look with the head just read.
 const FIX_WORDS_FILE = `${setup.plan_dir}/look-fix-words.txt`
+// #1425: the clerk has no Write tool, so the program encodes the owner's words (UTF-8, then base64: only A-Z a-z 0-9 + / =) and the clerk decodes them
+// into the file with one Bash command, byte for byte whatever quotes, dollar signs, backticks or newlines they hold.
+const B64_DIGITS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+const base64Utf8 = text => {
+  const escaped = encodeURIComponent(text)
+  const bytes = []
+  for (let i = 0; i < escaped.length; i++) {
+    if (escaped[i] === '%') { bytes.push(parseInt(escaped.slice(i + 1, i + 3), 16)); i += 2 } else bytes.push(escaped.charCodeAt(i))
+  }
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] || 0) << 8) | (bytes[i + 2] || 0)
+    out += B64_DIGITS[(n >> 18) & 63] + B64_DIGITS[(n >> 12) & 63] + (i + 1 < bytes.length ? B64_DIGITS[(n >> 6) & 63] : '=') + (i + 2 < bytes.length ? B64_DIGITS[n & 63] : '=')
+  }
+  return out
+}
 // A look marker the setup could not read is neither marked nor unmarked: a fix answer stops here, before the head check, the approval and the fix round.
 if (!LOOK_READ && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') return LOOK_UNREAD()
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') {
@@ -2564,7 +2580,8 @@ ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK
   if (hd.state !== 'OPEN') return stop('look-approve', { details: `PR #${lookAt.pr} is ${hd.state}, not open, so the approval of ${LOOK_ANSWER.head} was not recorded` })
   if (!sameSha(hd.head, LOOK_ANSWER.head) || !sameSha(LOOK_ANSWER.head, lookAt.head)) return lookWaitStop(lookAt.pr, hd.head)
   const posted = await call(`${CTX}
-Record the owner's look approval of issue #${ISSUE} of ${SLUG} with one fix. First write the owner's words, the JSON string ${JSON.stringify(LOOK_ANSWER.words)} decoded, exactly as the whole content of ${FIX_WORDS_FILE} with the Write tool. Then run alone and exactly: look-approval post --repo ${SLUG} --issue ${ISSUE} --pr ${lookAt.pr} --head ${LOOK_ANSWER.head} --answer fix --message ${LOOK_ANSWER.message || String(setup.holder).split('/').pop()} --words-file ${FIX_WORDS_FILE}
+Record the owner's look approval of issue #${ISSUE} of ${SLUG} with one fix. First write the owner's words as the whole content of ${FIX_WORDS_FILE}: run alone and exactly: printf %s '${base64Utf8(LOOK_ANSWER.words)}' | base64 -d > ${FIX_WORDS_FILE}
+The base64 text decodes to the owner's words byte for byte; type it as printed and change nothing. Then run alone and exactly: look-approval post --repo ${SLUG} --issue ${ISSUE} --pr ${lookAt.pr} --head ${LOOK_ANSWER.head} --answer fix --message ${LOOK_ANSWER.message || String(setup.holder).split('/').pop()} --words-file ${FIX_WORDS_FILE}
 It prints one JSON line. Return its verdict, comment_id and any detail. Run nothing else.
 ${RULES}`, { label: 'look-post', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_POST_SCHEMA })
   if (!posted || posted.verdict !== 'posted') return stop('look-approve', { result: posted })

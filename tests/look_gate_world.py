@@ -36,6 +36,8 @@ from .program_bridge import NODE, run_program
 # Resolved at import, before ForgeWorld patches PATH.
 GIT = shutil.which("git")
 JQ = shutil.which("jq")
+SH = shutil.which("sh")
+HOST_PATH = os.environ.get("PATH", "")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
@@ -389,7 +391,12 @@ class LookGateWorld:
                 "renew": {"verdict": "renewed"}}
 
     def _look_post(self, message, match):
-        line = re.search(r"Run alone and exactly: (look-approval post[^\n]*)", message["prompt"]).group(1)
+        """Run what the prompt tells the clerk to run: the words-file write, when it has one, then the post."""
+        write = re.search(r"run alone and exactly: (printf[^\n]*)", message["prompt"])
+        if write:
+            subprocess.run([SH, "-c", write.group(1)], check=True, cwd=self.clone, timeout=60,
+                           env={**self.env, "PATH": HOST_PATH})
+        line = re.search(r"run alone and exactly: (look-approval post[^\n]*)", message["prompt"]).group(1)
         proc = self.look_approval(*line.split()[1:])
         return json.loads(proc.stdout.strip().splitlines()[-1])
 
@@ -460,7 +467,7 @@ class LookGateWorld:
             (r"^look-head$", self._look_head),
             (r"^look-checks-\d+$", self._look_checks),
             (r"^look-post$", self._look_post),
-            (r"^look-read$", self._look_read),
+            (r"^look-(read|status)$", self._look_read),
             (r"^(merge|land-merge-\d+)$", self._merge),
             (r"^land-unlock", const({"verdict": "released"})),
             (r"^land-(re)?lock-", self._lock),

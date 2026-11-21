@@ -12253,10 +12253,31 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual(got.count("look-fix"), 1)
         self.assertIn("--answer fix --message session-s1 --words-file /r/.git/worktrees/w/deliver-standard/look-fix-words.txt",
                       prompt(calls, "look-post"))
-        self.assertIn(json.dumps("make the label bold"), prompt(calls, "look-post"))
         self.assertIn("/r/.git/worktrees/w/deliver-standard/look-fix-words.txt", prompt(calls, "look-post"))
         self.assertIn("look-approval status --repo owner/repo --issue 9 --pr 42 --head " + F, prompt(calls, "look-status"))
         self.assertIn("--match-head-commit " + F, prompt(calls, "merge"))
+
+    # #1425: the clerk has no Write tool, so the look-post prompt may name only the tools its agent definition grants.
+    def test_the_look_post_prompt_names_only_tools_the_clerk_has(self):
+        _, calls = self.fix()
+        clerk = (REPO_ROOT / "home/common/claude-code/agents/clerk.md").read_text(encoding="utf-8")
+        granted = set(re.search(r"^tools: (.*)$", clerk, re.M).group(1).split(", "))
+        self.assertEqual(granted, {"Bash", "Read", "Skill"})
+        named = set(re.findall(r"\b([A-Z][A-Za-z]+) tool\b", prompt(calls, "look-post")))
+        self.assertLessEqual(named, granted, f"the look-post prompt names tools outside the clerk's: {named - granted}")
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "look-post"], ["clerk"])
+
+    def test_the_owners_words_reach_the_words_file_unchanged(self):
+        words = "make the \"label\" bold:\nit costs $5 and `x` and 'y' \\ n \u00e9 \U0001f600\n\n"
+        look = {"answer": "fix", "head": SHA, "words": words}
+        _, calls = run(args=dict(ARGS, cont=self.look_cont(), look=look), patch=self.FIXED)
+        command = re.search(r"run alone and exactly: (printf [^\n]*)", prompt(calls, "look-post")).group(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "look-fix-words.txt"
+            command = command.replace("/r/.git/worktrees/w/deliver-standard/look-fix-words.txt", str(target))
+            self.assertIn(str(target), command)
+            subprocess.run(["sh", "-c", command], check=True, timeout=60)
+            self.assertEqual(target.read_bytes(), words.encode("utf-8"))
 
     def test_fix_for_a_moved_head_posts_nothing(self):
         result, calls = self.fix(head=B)

@@ -9,13 +9,18 @@ is stale, and an approval of the new head posts and merges.
 
 Run: just agent-workflow-tests
 """
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from .look_gate_world import (MARKED, REFUSAL, SLUG, LookGateWorld, StepFailure, mutant_guard,
+from .look_gate_world import (MARKED, PROGRAMS, REFUSAL, SLUG, LookGateWorld, StepFailure, mutant_guard,
                               play_scenario)
+from .program_bridge import run_program
+
+CLERK = Path(__file__).resolve().parents[1] / "home/common/claude-code/agents/clerk.md"
+WORDS = "make the \"heading\" bold:\nit costs $5 and `x` and 'y' \\ done \u00e9\n\n"
 
 
 class LookGateEndToEndTest(unittest.TestCase):
@@ -33,6 +38,30 @@ class LookGateEndToEndTest(unittest.TestCase):
     def test_the_six_steps_hold_on_a_throwaway_repository(self):
         out = play_scenario(self)
         self.assertEqual(out["approve"]["result"]["stage"], "done")
+
+    def test_a_fix_answer_records_the_owners_exact_words_with_the_clerks_tools_and_reaches_the_fix_round(self):
+        out = play_scenario(self, through=2)
+        world, batch = out["world"], out["batch"]
+        action = batch["result"]["owner_actions"][0]
+        prompts, labels = {}, []
+
+        def actor(message):
+            labels.append(message["label"])
+            prompts[message["label"]] = message["prompt"]
+            return world.actor(message)
+
+        run = run_program(PROGRAMS / "deliver-standard.js", {
+            "repo_root": str(world.clone), "issue": MARKED, "batch_id": "h1-20261116-1200", "mode": "ship",
+            "cont": action["cont"], "look": {"answer": "fix", "head": action["head"], "words": WORDS}}, actor)
+        self.assertIsNone(run["error"])
+        self.assertIn("look-post", labels)
+        self.assertLess(labels.index("look-post"), labels.index("look-fix"))
+        clerk_tools = re.search(r"^tools: (.*)$", CLERK.read_text(), re.M).group(1).split(", ")
+        named = set(re.findall(r"\b([A-Z][A-Za-z]+) tool\b", prompts["look-post"]))
+        self.assertTrue(named <= set(clerk_tools), f"the look-post prompt names tools {named} outside {clerk_tools}")
+        words_file = Path(re.search(r"--words-file (\S+)", prompts["look-post"]).group(1))
+        self.assertEqual(words_file.read_bytes(), WORDS.encode("utf-8"))
+        self.assertIn("answer=fix", str(world.look_comments()[-1]["body"]).split("\n", 1)[0])
 
     def test_the_actor_merges_nothing_the_guard_refuses(self):
         world = LookGateWorld(self)
