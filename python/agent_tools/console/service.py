@@ -60,6 +60,8 @@ stream `Content-Length`):
     POST /api/notice 200 application/json, a manager posts one notice for its project (below)
     POST /api/notices 200 application/json, a manager lists its project's open notices (below)
     POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
+    POST /api/live-fault 200 application/json, a manager declares an issue a fault live in production (below)
+    POST /api/live-fault-withdraw 204, a JSON body, the page withdraws a live fault (below)
     POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
     POST /api/permission-prompt 200 application/json, a manager's hook holds one Bash prompt on the console (below)
     POST /api/permission-answer 204, a JSON body, the page allows or refuses a manager's held prompt (below)
@@ -75,7 +77,7 @@ stream `Content-Length`):
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/permit`,
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/live-fault`, `/api/permit`,
                     `/api/picture`, `/api/release-card`, `/api/release-answer`, `/api/permission-prompt`,
                     `/api/permission-answer` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
@@ -272,7 +274,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/adoption-merge`, `POST /api/plan-defer`,
 `POST /api/register-confirm`, `POST /api/trust-check`,
-`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
+`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/live-fault-withdraw`, `POST /api/project-question`, `POST /api/activate`,
 `POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code`, `POST /api/guest-signin-cancel`, `POST /api/guest-account-signout` and `POST /api/guest-account-remove` (the last five are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
@@ -930,11 +932,14 @@ recap_failed <Type>: <message>` and 500 `recap failed`. `recap(sprint_id, secret
 ingest lock and is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`) and a read: it appends
 nothing, publishes nothing and marks nothing read. It answers 200 `application/json`,
 `json.dumps(recap, sort_keys=True, separators=(",", ":"))` of `{"sprint_id", "goal", "brief",
-"report", "unread"}`: `brief` is null until a brief is sent, else `{"version", "decision" ("none",
+"report", "live_faults", "unread"}`: `brief` is null until a brief is sent, else `{"version", "decision" ("none",
 "approved" or "changes"), "reply" (the owner's words, or null), "parts"}` of the latest version;
 `report` is null until a report is sent, else the last report `{"at", "status", "phase",
-"milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}`, which a newer
-brief does not remove; `unread` is the number of the owner's messages not yet read.
+"milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}` and the
+`wait_until` and `paused` the report states, only when it states them (#1380), which a newer
+brief does not remove; `live_faults` is `[sprints.fault_entry(f) for f in sprints.open_faults(sprint)]`,
+the sprint's standing live-fault declarations in id order; `unread` is the number of the owner's
+messages not yet read.
 
 Questions (#891): `POST /api/ask` is a manager write dispatched like `/api/brief`, before
 `PAGE_WRITES`: `_checked_length(MAX_ASK_BYTES)` (65536: any `Origin` 403 `origin refused`, 415, 411,
@@ -1032,6 +1037,37 @@ folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_spr
 `sprints.project_notices` over every folded sprint of the project, and appends and publishes
 nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
 writer; a refusal appends and publishes nothing.
+
+Live faults (#1432): `POST /api/live-fault` is a manager write dispatched like `/api/notice`, before
+`PAGE_WRITES`, through `_checked_length(MAX_LIVE_FAULT_BYTES)` (16384: any `Origin` 403 `origin
+refused`, 415, 411, 413 `too large`), so it is owner-only on the guest port. A body
+`sprints.parse_live_fault_request` (`sprint_id`, `secret`, `fault`) does not accept is 400 `bad live
+fault`; a `sprints.SecretRefused` is `console: live_fault_refused <sprint_id> secret refused` and 403
+`secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
+reason (a fixed `sprints.py` text: neither the secret nor the evidence text is printed); any other
+exception is `console: live_fault_failed <Type>: <message>` and 500 `live fault failed`. Success is
+200 `application/json` (sorted keys, compact) `{"fault":<id>}`, the new row's `seq`.
+`declare_live_fault(sprint_id, secret, fault)`, under the ingest lock, is `_manager_sprint`
+(`NOT_OPEN`, then `SecretRefused`), then `sprints.declarable_fault`; it appends exactly one
+`fault.declared` row (project the sprint's project) `{"sprint_id", "goal", "fault": <checked>}`,
+folds, publishes and returns the row's `seq`. It nudges nobody and calls no tracker writer; a
+refusal appends and publishes nothing.
+
+The owner withdraws a live fault (#1432): `POST /api/live-fault-withdraw` (`{"project_id", "sprint_id",
+"fault"}`, at most `MAX_LIVE_FAULT_WITHDRAW_BYTES` 4096) is a page write, so it passes `_page_write`'s guard
+before any body is read (no or a foreign `Origin` 403 `origin refused`, a missing or wrong token 403 `token
+refused`, nothing appended) and is owner-only on the guest port. A body `sprints.parse_live_fault_withdrawal`
+does not accept is 400 `bad live fault withdrawal`; a `sprints.Refused` is 409 with the reason and the one
+line `console: live_fault_withdraw_refused <sprint_id> <reason>`, where `<sprint_id>` is the id the parser
+checked as 16 lowercase hex and `<reason>` a fixed `sprints.py` text: the request's `project_id`, which may
+hold any text, is never printed; any other exception is `console: live_fault_withdraw_failed <Type>:
+<message>` and 500 `live fault withdrawal failed`. Success is 204.
+`withdraw_live_fault(project_id, sprint_id, fault_id)`, under the ingest lock, takes the folded sprint
+(`NOT_OPEN` when there is none or its project is not `project_id`), then `sprints.withdrawable_fault`
+(unknown or already withdrawn), and appends exactly one `fault.withdrawn` row (project the sprint's project)
+`{"sprint_id", "goal", "fault": <id>}`, folds, publishes and returns the id. It applies no stop or end gate:
+the owner withdraws a declaration of an ended sprint too. It nudges nobody and sends no message; a refusal
+appends and publishes nothing.
 
 Owner notice nudges (#1120, ADR-console-053, D6): with a nudger, `post_owner_notice` records, still under the
 lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
@@ -1191,6 +1227,15 @@ reason; any other exception is `console: report_failed <Type>: <message>` and 50
 Success is 200 `application/json` `{"at":"<the row's at>"}`. Every refusal is `text/plain`, one
 line, closes the connection, appends nothing and publishes nothing. The secret appears in no stderr
 line or answer.
+
+A report may also state a `wait_until` time or a `paused` reason (#1380, ADR-console-020):
+`_checked_report` passes `sprints.checked_report` the service's clock in milliseconds as an exact `Fraction`
+(never truncated, so a deadline within the clock's own millisecond is judged as it stands), so a time that is
+not after now or is more than 24 hours ahead, a pause that names an issue number and a report that
+states both are each 409 with the reason, on the send and on a dry run alike (a malformed member is
+409 `the report has no valid <member>`; any other key is 400 `bad report`). The row's `report`
+carries them only when stated. The fold judges nothing against a clock, so a stored wait whose time
+has passed still folds and a restart changes no sprint's report.
 
 Closing (#892): `POST /api/close` is a manager write like the report's: no token, the sprint's
 secret in its place, `_checked_length(MAX_CLOSE_BYTES)` (65536, the same refusals as the report's:
@@ -1587,7 +1632,12 @@ appends one `sprint.nudged {sprint_id, through: the last unread id, covers: the 
 also prints `console: nudge_failed <sprint_id> <reason>`); when the sprint was marked in
 `_nudge_again` and now holds an unread message `covers` does not list (one above `through`, or an approval
 released while the nudge ran), it is reserved and dispatched once
-more (never after a success alone). `renudge()`, called by `_poll_loop` after `poll_deliveries` (a
+more (never after a success alone). An idle nudge's end (`_end_idle`, under the lock) honours the
+mark as a relay's end does (#1380): it drops the reservation and the mark and, when the sprint was
+marked and still has an unread message the service may nudge about, reserves it again and
+dispatches the relay once the lock is released, at each of `_idle_nudge`'s exits, so a message or
+an answer that waited behind a queued idle nudge goes at once and never waits for `renudge`.
+`renudge()`, called by `_poll_loop` after `poll_deliveries` (a
 failure is `console: renudge_failed <Type>: <message>`), reserves under the lock each open
 unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
 message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS` before
@@ -1781,8 +1831,10 @@ session's runs in `_deliveries`: CI on its pull request, a committing delivery, 
 the land lock seen within the quiet window; a manager whose run reads one is neither nudged nor
 given up on, however long the run has been still, #1381), the sprint's
 waiting count and its quota; a sprint not out whose manager row is not `started` or whose manager is seen
-`working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides:
-`GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
+`working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides (it gives
+nothing while the report's stated wait or pause holds, `sprints.stated_hold`, #1380: no nudge and
+no `manager.no_progress` row are made then, while message, answer, brief and stop sends do not
+read it): `GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
 null), `NUDGE` reserves the sprint in `_nudging` and dispatches `_idle_nudge` after the lock.
 `_idle_nudge(sprint_id, forced)` decides again under the lock (`_idle_due`), reads the listing off
 the lock (a manager not listed sends nothing and appends nothing: the bring-back owns a gone
@@ -1955,6 +2007,7 @@ import collections
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -1963,7 +2016,7 @@ from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
     folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     LOOK_RECORDED, PERMIT_JUDGED, PERMIT_LANDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
@@ -2034,6 +2087,8 @@ MESSAGE_REPLY_PATH = "/api/message-reply"
 ASK_PATH = "/api/ask"
 WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
 NOTICE_PATH = "/api/notice"
+LIVE_FAULT_PATH = "/api/live-fault"
+LIVE_FAULT_WITHDRAW_PATH = "/api/live-fault-withdraw"
 NOTICES_PATH = "/api/notices"
 PERMIT_PATH = "/api/permit"
 PROMPT_PATH = prompt_card.ASK_PATH
@@ -2087,7 +2142,8 @@ PAGE_WRITES: frozenset[str] = frozenset({
     ACCOUNT_REMOVE_PATH, ACCOUNT_SIGNOUT_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, ADOPTION_MERGE_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH,
     TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, LIVE_FAULT_WITHDRAW_PATH,
+    PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
     GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH, PROMPT_ANSWER_PATH})
@@ -2123,11 +2179,13 @@ MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
                                             MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, WITHDRAW_QUESTION_PATH,
                                             NOTICE_PATH, NOTICES_PATH, WITHDRAW_NOTICE_PATH,
-                                            PERMIT_PATH, PROMPT_PATH, PICTURE_PATH})
+                                            LIVE_FAULT_PATH, PERMIT_PATH, PROMPT_PATH, PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
 MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_NOTICE_BYTES = 16384
+MAX_LIVE_FAULT_BYTES = 16384
+MAX_LIVE_FAULT_WITHDRAW_BYTES = 4096
 MAX_NOTICES_BYTES = 4096
 MAX_PERMIT_BYTES = 16384
 # The body is JSON with its default escaping, which writes one character as up to twelve bytes (an
@@ -2374,6 +2432,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._notice_request()
         if route == NOTICES_PATH:
             return self._notices_request()
+        if route == LIVE_FAULT_PATH:
+            return self._live_fault_request()
         if route == PERMIT_PATH:
             return self._permit_request()
         if route == PROMPT_PATH:
@@ -3222,6 +3282,31 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self._send(200, "application/json", json.dumps(
             {"notice": notice_id}, sort_keys=True, separators=(",", ":")).encode())
 
+    def _live_fault_request(self):
+        """The manager's route: one live fault declared for its sprint, with the sprint's secret."""
+        length = self._checked_length(MAX_LIVE_FAULT_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, fault = sprints.parse_live_fault_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad live fault")
+        try:
+            fault_id = self.server.console.declare_live_fault(sprint_id, secret, fault)
+        except sprints.SecretRefused:
+            print(f"console: live_fault_refused {sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: live_fault_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: live_fault_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "live fault failed")
+        self._send(200, "application/json", json.dumps(
+            {"fault": fault_id}, sort_keys=True, separators=(",", ":")).encode())
+
     def _notices_request(self):
         """The manager's route: the project's open notices, read with the sprint's secret."""
         length = self._checked_length(MAX_NOTICES_BYTES)
@@ -3556,6 +3641,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _live_fault_withdraw_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's withdrawal of a live fault; False when it was refused."""
+        body = self._json_body(MAX_LIVE_FAULT_WITHDRAW_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, sprint_id, fault_id = sprints.parse_live_fault_withdrawal(body)
+        except ValueError:
+            self._refuse(400, "bad live fault withdrawal")
+            return False
+        try:
+            console.withdraw_live_fault(project_id, sprint_id, fault_id)
+        except sprints.Refused as error:
+            print(f"console: live_fault_withdraw_refused {sprint_id} {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: live_fault_withdraw_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "live fault withdrawal failed")
+            return False
+        return True
+
     def _decision_request(self, console: "ConsoleService", route: str,
                           by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out an approval or a reply; False when it was refused."""
@@ -3841,6 +3949,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == OWNER_NOTICE_WITHDRAW_PATH:
             self.close_connection = True
             if not self._owner_notice_withdraw_request(console):
+                return
+        elif route == LIVE_FAULT_WITHDRAW_PATH:
+            self.close_connection = True
+            if not self._live_fault_withdraw_request(console):
                 return
         elif route == ACTIVATE_PATH:
             self.close_connection = True
@@ -7901,7 +8013,7 @@ class ConsoleService:
         sprint = self._manager_sprint(sprint_id, secret)
         if sprint.state != sprints.STARTING:
             raise sprints.Refused(sprints.NOT_STARTED)
-        checked = sprints.checked_report(report)
+        checked = sprints.checked_report(report, Fraction(self._clock()) * 1000)
         for m, member in enumerate(checked.get("pictures", ()), 1):
             self._own_picture(sprint, member["picture"],
                               sprints.PART_PICTURE_UNKNOWN.format(owner="report", m=m),
@@ -9071,13 +9183,8 @@ class ConsoleService:
         try:
             self._dispatch(lambda: self._idle_nudge(sprint_id, forced))
         except Exception as error:
-            reason = f"the nudge could not start: {type(error).__name__}: {error}"
-            with self._ingest:
-                self._nudging.discard(sprint_id)
-                self._settled[sprint_id] = int(self._clock() * 1000)
-                sprint = self._sprints.get(sprint_id)
-                self._record_idle(
-                    sprint_id, "" if sprint is None else sprint.manager_session or "", reason)
+            self._finish_idle(sprint_id, None,
+                              f"the nudge could not start: {type(error).__name__}: {error}")
 
     def _idle_due(self, sprint_id: str, forced: bool,
                   selected: str | None = None) -> tuple[sprints.SprintState, str] | None:
@@ -9116,35 +9223,79 @@ class ConsoleService:
         with self._ingest:
             due = self._idle_due(sprint_id, forced)
             if due is None:
-                self._nudging.discard(sprint_id)
-                return
-            sprint, cwd = due
-            name = manager.session_name(sprint.project_id, sprint_id)
-            profile, session_id = sprint.manager.profile, sprint.manager_session or ""
+                again = self._end_idle(sprint_id)
+            else:
+                sprint, cwd = due
+                name = manager.session_name(sprint.project_id, sprint_id)
+                profile, session_id = sprint.manager.profile, sprint.manager_session or ""
+        if due is None:
+            if again:
+                self._dispatch_nudge(sprint_id)
+            return
         reason = None
         try:
             listed = sorted((o for o in self._listing().values() if o.name == name),
                             key=lambda o: o.session_id)
             if not listed:
                 with self._ingest:
-                    self._nudging.discard(sprint_id)
+                    again = self._end_idle(sprint_id)
+                if again:
+                    self._dispatch_nudge(sprint_id)
                 return
             session_id = listed[0].session_id
             with self._ingest:
                 if (self._idle_due(sprint_id, forced, session_id) is None
                         or self._working_now(listed[0])):
-                    self._nudging.discard(sprint_id)
-                    return
-                bypass = self._relays_in_bypass(sprint_id)
+                    again = self._end_idle(sprint_id)
+                else:
+                    again = None
+                    bypass = self._relays_in_bypass(sprint_id)
+            if again is not None:
+                if again:
+                    self._dispatch_nudge(sprint_id)
+                return
             self._send_nudge(nudge.Nudge(sprint_id, nudge.CONTINUE, name, session_id, profile, cwd,
                                          sender_bypass=bypass))
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)
                       else f"{type(error).__name__}: {error}")
-        with self._ingest:
-            self._nudging.discard(sprint_id)
-            self._settled[sprint_id] = int(self._clock() * 1000)
-            self._record_idle(sprint_id, session_id, reason)
+        self._finish_idle(sprint_id, session_id, reason)
+
+    def _finish_idle(self, sprint_id: str, session_id: str | None, reason: str | None) -> None:
+        """Record an idle nudge's attempt and end its reservation, whatever the record does (#1380).
+
+        `session_id` None is the sprint's own manager session (a nudge that never started). The
+        reservation ends, and a relay marked meanwhile is dispatched, even when the record raises
+        (a locked database): a stale reservation would hold every later send until a restart.
+        """
+        try:
+            with self._ingest:
+                self._settled[sprint_id] = int(self._clock() * 1000)
+                if session_id is None:
+                    sprint = self._sprints.get(sprint_id)
+                    session_id = "" if sprint is None else sprint.manager_session or ""
+                self._record_idle(sprint_id, session_id, reason)
+        finally:
+            with self._ingest:
+                again = self._end_idle(sprint_id)
+            if again:
+                self._dispatch_nudge(sprint_id)
+
+    def _end_idle(self, sprint_id: str) -> bool:
+        """Under the ingest lock: end an idle nudge's reservation; whether a relay asked for meanwhile is reserved.
+
+        A relay asked for while the idle job held the reservation is marked in `_nudge_again`
+        (`_reserve_nudge`); the mark is honoured here as `_nudge` honours it, so a message or an
+        answer is never left to `renudge`. A true result is the caller's to dispatch with
+        `_dispatch_nudge` after leaving the lock.
+        """
+        self._nudging.discard(sprint_id)
+        wanted = sprint_id in self._nudge_again
+        self._nudge_again.discard(sprint_id)
+        if wanted and not self._stop.is_set() and self._nudgeable(sprint_id) is not None:
+            self._nudging.add(sprint_id)
+            return True
+        return False
 
     def _record_idle(self, sprint_id: str, session_id: str, reason: str | None) -> None:
         """Under the ingest lock: append one `manager.nudged` row for the open sprint and fold it."""
@@ -9188,7 +9339,10 @@ class ConsoleService:
                     "at": report.at, "status": report.status, "phase": report.phase,
                     "milestone": report.milestone, "tracker_url": report.tracker_url,
                     "issues": [{"issue": issue, "stage": stage} for issue, stage in report.issues],
-                    "inbox": list(report.inbox), "next": report.next_step},
+                    "inbox": list(report.inbox), "next": report.next_step,
+                    **({} if report.wait_until is None else {"wait_until": report.wait_until}),
+                    **({} if report.paused is None else {"paused": report.paused})},
+                "live_faults": [sprints.fault_entry(fault) for fault in sprints.open_faults(sprint)],
                 "unread": len(sprints.unread(sprint))}
 
     def answer_message(self, sprint_id: str, secret: str, message_id: int, reply: str) -> str:
@@ -9298,6 +9452,28 @@ class ConsoleService:
                 "sprint_id": sprint_id, "goal": sprint.goal, "notice": checked})])
             self._apply(appended)
             return appended[-1].seq
+
+    def declare_live_fault(self, sprint_id: str, secret: str, fault: dict) -> int:
+        """Append one `fault.declared` event for the sprint's project; its seq, the fault's id."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            checked = sprints.declarable_fault(sprint, fault)
+            appended = self.log.append([(FAULT_DECLARED, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "fault": checked})])
+            self._apply(appended)
+            return appended[-1].seq
+
+    def withdraw_live_fault(self, project_id: str, sprint_id: str, fault_id: int) -> int:
+        """Append one `fault.withdrawn` event for a standing live fault; the fault's id."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            sprints.withdrawable_fault(sprint, fault_id)
+            appended = self.log.append([(FAULT_WITHDRAWN, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "fault": fault_id})])
+            self._apply(appended)
+            return fault_id
 
     def post_owner_notice(self, project_id: str, text: str) -> int:
         """Append one owner `notice.posted` event for the project; its seq, the notice's id."""

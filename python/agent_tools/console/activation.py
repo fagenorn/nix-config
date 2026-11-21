@@ -25,7 +25,7 @@ commit, kept when `host_built(path)` holds, minus every path of `running` and ev
 exactly for a path under a `NOT_BUILT_DIRS` directory (`docs/`, `tests/`, `.github/`, `.agents/`, and the
 skills' evaluation harness `home/common/agent-skills/evals/` and `home/common/agent-skills/tests/`, which only the checkout runs) or
 equal to a `NOT_BUILT_FILES` file (the root documents and `justfile`, `.gitignore`, `.sops.yaml`, the
-Nix-module READMEs no `.nix` file reads, and `lib/omlx-check.nix`, which `flake.nix` imports only under `checks`); every other path is counted. The host's revision is
+Nix-module READMEs no `.nix` file reads, and `lib/omlx-check.nix` and `lib/agent-platform-check.nix`, which `flake.nix` imports only under `checks`); every other path is counted. The host's revision is
 read on every reading, through the `revision` seam, so a later activation clears `other` by itself;
 a revision that cannot be read, or a commit the checkout lacks, is a failed read. `Activation.pending`
 is true when `changed` or `other` is not empty.
@@ -79,6 +79,7 @@ NOT_BUILT_FILES = (
     "README.md", "CLAUDE.md", "AGENTS.md", "justfile", ".gitignore", ".sops.yaml",
     "home/common/claude-code/README.md", "home/common/agent-skills/README.md",
     "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md", "lib/omlx-check.nix",
+    "lib/agent-platform-check.nix",
 )
 
 

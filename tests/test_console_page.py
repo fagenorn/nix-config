@@ -185,6 +185,8 @@ class PageTest(unittest.TestCase):
         # the 100 bytes the cap had left.
         # Raised from 71 KB by #1424: the permission card's answer buttons keep their focus through a redraw and
         # stay focusable while sending (about 150 bytes compressed, over the 2 the cap had left).
+        # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
+        # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
         self.assertLess(len(gzip.compress(self.data, 9)), 73728)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
@@ -231,7 +233,8 @@ class PageTest(unittest.TestCase):
              "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
              "/api/guest-signin-cancel", "/api/adoption-merge", "/api/account-signout",
              "/api/guest-account-signout", "/api/guest-account-remove",
-             "/api/project-question-delete", "/api/release-answer", "/api/permission-answer"},
+             "/api/project-question-delete", "/api/release-answer", "/api/permission-answer",
+             "/api/live-fault-withdraw"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -240,7 +243,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 56)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 57)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -6078,6 +6081,14 @@ class PageSprintBlockTest(unittest.TestCase):
         self.assertEqual(now["title"], full(now))
         self.assertEqual(now["title"], REPORTED["now_text"])
 
+    def test_a_waiting_sprint_reads_its_time_in_the_now_line(self) -> None:
+        (snap,) = render([START, {"frame": with_sprints([
+            {**REPORTED, "now_text": "waiting until", "now_until": "2026-11-12T12:00:00+00:00"}])},
+            {"snapshot": True}])
+        (now,) = of_class(snap["projects"], "p", "sp-now")
+        self.assertEqual(full(now), "waiting until Thu 12:00")
+        self.assertEqual(now["title"], "waiting until Thu 12:00")
+
     def test_the_now_sentence_is_a_full_width_line_of_at_most_two_lines(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
@@ -6538,6 +6549,8 @@ class PageSprintGlanceTest(unittest.TestCase):
             ("manager", "manager working", "sic-play", "st-go"),
             ("owner", "waiting on you", "sic-pause", "needs"),
             ("nobody", "nothing running, may be stuck", "sic-dashed", "st-wait"),
+            ("waiting", "waiting", "sic-pause", "st-dim"),
+            ("paused", "paused", "sic-pause", "st-dim"),
         ]
         steps = [START]
         for ball, words, _, _ in cases:
@@ -6552,6 +6565,9 @@ class PageSprintGlanceTest(unittest.TestCase):
                 self.assertTrue(has_class(said, tone))
                 (mark,) = [n for n in top(line) if has_class(n, "sic")]
                 self.assertTrue(has_class(mark, icon_class))
+                if ball in ("waiting", "paused"):
+                    self.assertFalse(has_class(said, "st-go"))
+                    self.assertFalse(has_class(mark, "sic-play"))
                 self.assertTrue(has_class(mark, tone))
                 self.assertIs(has_class(mark, "needs"), ball == "owner")
 
@@ -11891,3 +11907,92 @@ class PagePermissionCardTest(unittest.TestCase):
 
     def test_no_page_text_names_a_terminal(self) -> None:
         self.assertNotIn("terminal", PAGE.read_text(encoding="utf-8").lower())
+
+
+FAULT_ENTRY = {
+    "id": 41, "issue": 12, "observed": "saving the settings form drops the billing address",
+    "when": "12:10 UTC today", "proven": "a saved form read back from the production database",
+    "at": "2026-11-12T10:00:00+00:00",
+    "text": "Live fault in production on #12: saving the settings form drops the billing address, "
+            "seen 12:10 UTC today, proven by a saved form read back from the production database",
+}
+
+
+def fault_frame(faults: list) -> dict:
+    return view([{**project(0, []), "sprints": [running_sprint("a", live_faults=faults)]}])
+
+
+class PageLiveFaultTest(unittest.TestCase):
+    def test_a_live_fault_is_the_first_line_of_the_sprints_checks_with_a_withdraw(self) -> None:
+        (snap,) = render([START, {"frame": fault_frame([FAULT_ENTRY])}, {"snapshot": True}])
+        (block,) = sprint_lines(snap)
+        (checks,) = of_class(block, "ul", "sprint-checks")
+        line = checks["children"][0]
+        self.assertTrue(has_class(line, "live-fault"))
+        (text,) = of_class(line, "span", "live-fault-text")
+        self.assertEqual(full(text), FAULT_ENTRY["text"])
+        buttons = [n for n in nodes(line) if n["tag"] == "button"]
+        self.assertEqual([(has_class(b, "live-fault-withdraw"), full(b)) for b in buttons],
+                         [(True, "Withdraw")])
+
+    def test_no_line_without_live_faults_or_once_the_view_drops_it(self) -> None:
+        bare = view([{**project(0, []), "sprints": [running_sprint("a")]}])
+        for shown in (fault_frame([]), bare):
+            (snap,) = render([START, {"frame": shown}, {"snapshot": True}])
+            self.assertEqual(of_class(snap["projects"], "li", "live-fault"), [])
+        (snap,) = render([
+            START, {"frame": fault_frame([FAULT_ENTRY])}, {"frame": fault_frame([])},
+            {"snapshot": True},
+        ])
+        self.assertEqual(of_class(snap["projects"], "li", "live-fault"), [])
+
+    def test_withdraw_posts_the_fault_and_a_refusal_says_why(self) -> None:
+        (snap,) = render([
+            START, {"frame": fault_frame([FAULT_ENTRY])},
+            {"respond": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"click": "live-fault-withdraw"}, {"snapshot": True},
+        ])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/live-fault-withdraw")
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "a" * 16, "fault": 41})
+        self.assertIn("X-Console-Token", post["headers"])
+        (line,) = of_class(snap["projects"], "li", "live-fault")
+        (fail,) = of_class(line, "span", "fail")
+        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+
+    def test_a_refused_withdraw_of_a_finished_sprint_shows_its_reason_on_the_row_a_frame_replaced(self) -> None:
+        ended = {**ended_sprint("b", 60_000), "live_faults": [FAULT_ENTRY]}
+        (snap,) = render([
+            START, {"frame": with_sprints([ended])}, {"hold": True},
+            {"click": "live-fault-withdraw"},
+            {"frame": with_sprints([{**ended, "title": "Sprint b again"}])},
+            {"release": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"snapshot": True},
+        ])
+        (row,) = of_class(snap["projects"], "li", "finished-line")
+        (fault,) = of_class(row, "li", "live-fault")
+        (fail,) = of_class(fault, "span", "fail")
+        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+        (button,) = [n for n in nodes(fault) if n["tag"] == "button"]
+        self.assertIs(button["disabled"], False)
+
+    def test_an_ended_sprints_live_fault_stays_on_its_finished_line_and_the_owner_withdraws_it(self) -> None:
+        ended = {**ended_sprint("b", 60_000), "live_faults": [FAULT_ENTRY]}
+        (snap,) = render([
+            START, {"frame": with_sprints([ended])},
+            {"respond": {"status": 204, "text": ""}},
+            {"click": "live-fault-withdraw"}, {"snapshot": True},
+        ])
+        (line,) = of_class(snap["projects"], "li", "finished-line")
+        (fault,) = of_class(line, "li", "live-fault")
+        (text,) = of_class(fault, "span", "live-fault-text")
+        self.assertEqual(full(text), FAULT_ENTRY["text"])
+        (fold,) = [c for c in line["children"] if c["tag"] == "details"]
+        self.assertEqual(of_class(fold, "li", "live-fault"), [])
+        (checks,) = [c for c in line["children"] if c["tag"] == "ul" and has_class(c, "sprint-checks")]
+        self.assertIn(fault, checks["children"])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/live-fault-withdraw")
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "b" * 16, "fault": 41})

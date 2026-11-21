@@ -200,7 +200,7 @@ class ActivationReadingTest(Trees):
                      "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md",
                      "home/common/agent-skills/evals/README.md", "home/common/agent-skills/evals/run-eval.sh",
                      "home/common/agent-skills/tests/test_x.py", "home/common/agent-skills/tests/fixtures/f.json",
-                     "lib/omlx-check.nix"):
+                     "lib/omlx-check.nix", "lib/agent-platform-check.nix"):
             with self.subTest(path=path):
                 self.assertFalse(activation.host_built(path))
         for path in (SKILL, "home/common/agent-skills/skills/grill-with-docs/ADR-FORMAT.md",
@@ -210,7 +210,8 @@ class ActivationReadingTest(Trees):
                      "flake.lock", "flake.nix", "secrets/secrets.yaml", "data/zshrc/common/50-aliases",
                      "python/README.md", "home/common/claude-code/README.md.orig", "newdir/README.md",
                      "home/common/agent-skills/evals-notes.md", "home/common/agent-skills/tests-notes.md",
-                     "lib/omlx-check.nix.orig", "lib/agent-tools.nix", "newdir/file"):
+                     "lib/omlx-check.nix.orig", "lib/agent-platform-check.nix.orig", "lib/agent-tools.nix",
+                     "newdir/file"):
             with self.subTest(path=path):
                 self.assertTrue(activation.host_built(path))
 

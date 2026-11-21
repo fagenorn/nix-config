@@ -170,7 +170,11 @@ constants are `QUOTA` (a view state), `QUOTA_TEXT` (the manager's waiting text, 
 until`), `NO_PROGRESS_TEXT` (`the manager has stopped making progress on {title}`) and `NOT_STUCK`
 (the service's refusal of a continue with no item open). `parse_continue(body)` reads the owner's
 continue write, exactly `parse_withdraw`'s shape and refusals, and returns `(project_id,
-sprint_id)`. `idle` (which this module does not import) reads these fields.
+sprint_id)`. `idle` (which this module does not import) reads these fields. `stated_hold(state, now_ms)` (#1380) is
+the hold the report's own `paused` or `wait_until` puts on them: `(PAUSED, reason)` or `(WAIT_UNTIL,
+time)` while it stands, else `None`; a `wait_until` holds while `now_ms * 1000` is under its
+microseconds (`_wait_us`, exact, never the truncating `_ms`), so a fractional-millisecond deadline holds
+through its own millisecond.
 
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
 `(manager_state, manager_text, retry)`; its docstring holds the rules. `failed_start(state, listed,
@@ -189,16 +193,18 @@ reads the manager's body and returns `(sprint_id, secret, report, dry_run)`:
      "report": {"status": "<one line>", "phase": "running", "milestone": "<one line>",
                 "tracker_url": "https://<host>/<path>",
                 "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
-                "inbox": [12], "next": "<one line>", "pictures": [...]}}
+                "inbox": [12], "next": "<one line>", "pictures": [...],
+                "wait_until": "<ISO 8601 UTC time>", "paused": "<one line>"}}
 
 It accepts only a UTF-8 JSON object of exactly `sprint_id`, `secret` and `report` (plus an optional
 `"dry_run": true`, as a brief's), a valid sprint id, a string secret and a `report` object whose
-keys are a subset of `REPORT_MEMBERS` and `pictures`; anything
+keys are a subset of `REPORT_MEMBERS`, `REPORT_OPTIONAL` and `pictures`; anything
 else, a repeated key, a NaN literal or nesting too deep is `ValueError`. A missing member is not (the
 service answers it with the member). `checked_report(report)` checks the members in `REPORT_MEMBERS`
 order and refuses with `Refused("the report has no valid <member>")` the first that is missing or
 invalid; right after a valid `status` it refuses `STATUS_NUMBER` when the stripped status matches
-`#` and a digit. `status`, `milestone` and `next` are a one-line text (a string, non-empty after stripping,
+`#` and a digit. `checked_report(report, now_ms=None)` takes the clock in milliseconds of the service
+that judges the report; the fold calls it without one. `status`, `milestone` and `next` are a one-line text (a string, non-empty after stripping,
 no line break, at most `MAX_LINE_CHARS` code points after stripping); `phase` is one of
 `REPORT_PHASES`; `tracker_url` is a string of at most `MAX_LINE_CHARS` code points starting with
 `https://` whose every character is printable and not whitespace; `issues` is a list of at most
@@ -210,11 +216,25 @@ given, plus `"pictures"` on the same rule as a brief's: after the seven members 
 `checked_pictures("report", report["pictures"])` checks a `pictures` list, and the checked members
 are returned only when it is non-empty. `pictures` is not one of `REPORT_MEMBERS`.
 
+A report may state a wait or a pause (#1380), the two `REPORT_OPTIONAL` members, checked after the
+seven members and `STATUS_NUMBER` and before `pictures`, in this order. `wait_until` is a string
+`WAIT_TIME` matches: `YYYY-MM-DDTHH:MM`, optional `:SS` with any number of fractional digits, and a
+UTC zone (`Z`, `+00:00`, `+0000` or `+00`); naive, any other offset (a fractional one included), a
+number, `null` or a word is `REPORT_MEMBER`. Only when `now_ms` is given (an int or a `Fraction`, so
+the service passes its clock without truncating it): a time at or before the clock is `WAIT_PAST` and
+one more than `MAX_WAIT_HOURS` hours (24) ahead is `WAIT_TOO_FAR`, both compared exactly (`_wait_us`,
+a `Fraction` of microseconds: no float, never `_ms`, which truncates to the millisecond). `paused` is a one-line text as `status` is (else `REPORT_MEMBER`),
+stripped, and `PAUSED_NUMBER` when it matches `#` and a digit. A report that states both is
+`WAIT_AND_PAUSE`. The returned dict carries `"wait_until"` (as `isoformat()` of the UTC time rounded up to the
+microsecond, so `Z` reads `+00:00` and a fractional part is kept to the microsecond) and `"paused"` (stripped) only when given, so a report
+without either is exactly the dict above.
+
 The fold keeps each open sprint's `Report(at, status, phase, milestone, tracker_url, issues, inbox,
-next_step, pictures)`. `sprint.reported` changes an open sprint only when its brief is approved
+next_step, pictures, wait_until, paused)`. `sprint.reported` changes an open sprint only when its brief is approved
 (`STARTING`) and `checked_report` accepts the dict `report` without its `pictures` key; the report
 is then replaced (`at` is the event's `at`, `issues` a tuple of `(issue, stage)`, `inbox` a tuple,
-`next_step` the `next` member, `pictures` the read-back below) and the sprint's observations are
+`next_step` the `next` member, `pictures` the read-back below, `wait_until` and `paused` the checked
+members or None; the fold checks without a clock, so a stored wait whose time has passed folds) and the sprint's observations are
 cleared; its movement (`moved_ms`) is kept (#1109). Every other report row changes nothing.
 
 Movement and observations (#1109): a `delivery.seen` row carries no sprint id and is read as the
@@ -238,7 +258,8 @@ plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
-A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
+A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER`, `BALL_NOBODY`, or, while its report
+states a wait or a pause that holds (#1380), `BALL_WAITING` or `BALL_PAUSED`, worded by
 `BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants (among them the wait sentences
 `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` (#1110) and `NOW_LOCK_TEXT` (#1184)) or
 the stage phrase (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
@@ -524,8 +545,8 @@ has kind, text, what, until, issue and live_fault; a heads-up kind and text; a h
 stripped, or raises `Refused` at the first failure, in this order: not an object
 (`NOTICE_NOT_OBJECT`); `kind` missing or not in `NOTICE_KINDS` (`NOTICE_KIND`); a key outside the
 kind's members (`NOTICE_EXTRA`, one fixed text per kind that never carries the key); then `text`,
-then a claim's `what`, then its `until`: not a string, empty after stripping, or holding a line
-break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
+then a claim's `what`, then its `until`: not a string, without a visible character, holding an
+unpaired surrogate or holding a line break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
 `MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then, for a claim, `issue`
 (optional; an int of at least 1, not a bool) and `live_fault` (optional; a bool), each refused as
 `NOTICE_MEMBER`; then a hand-off's `to`, which is `"owner"` or a sprint id (`NOTICE_MEMBER`).
@@ -620,6 +641,34 @@ closed, stopped or is done); `ended_at` is never cleared, so a notice stays ende
 reopens (a newer brief or report clears a done report), and folding the rows in one call, one row
 per call or in any split gives equal states. A dropped sprint leaves the fold with its notices.
 
+Live faults (#1432, ADR-console-099). Two kept rows record a manager's declaration that a shipped
+issue of its sprint is faulty in production (`event_log.FAULT_DECLARED`, `FAULT_WITHDRAWN`):
+
+    fault.declared    {"sprint_id", "goal": <str>, "fault": {"issue", "observed", "when", "proven"}}
+    fault.withdrawn   {"sprint_id", "goal": <str>, "fault": <int>}
+
+`checked_fault(fault)` refuses at the first failure, in order: not an object (`FAULT_NOT_OBJECT`); a
+key other than issue, observed, when and proven (`FAULT_EXTRA`, never naming the key); an `issue`
+that is not an int of at least 1 (`FAULT_MEMBER`); then `observed`, `when` and `proven`, each one
+line of text (not a string, without a visible character (whitespace, invisible format and combining characters,
+and blank fillers such as a Hangul filler or the braille blank do not count), holding an unpaired surrogate or holding a line break is
+`FAULT_MEMBER`; over `MAX_FAULT_OBSERVED_CHARS` (400), `MAX_FAULT_WHEN_CHARS` (140) or `MAX_FAULT_PROVEN_CHARS` (400)
+after stripping is `FAULT_TOO_LONG`); it returns the four members, texts stripped.
+`declarable_fault(state, fault)` refuses, in order: a sprint that takes no notice (`ALREADY_STOPPING`,
+`ENDED`); `checked_fault`; an issue not among the issues of the sprint's latest report
+(`FAULT_NOT_OURS`); an issue already declared and not withdrawn (`FAULT_TWICE`); it returns the
+checked fault. `withdrawable_fault(state, fault_id)` returns the sprint's open fault or raises
+`FAULT_UNKNOWN` or `FAULT_WITHDRAWN_ALREADY`; it applies no stop or end gate. `open_faults(state)` is
+the faults not withdrawn in id order and `fault_entry(fault)` is `{"id", "issue", "observed",
+"when", "proven", "at"}`. `parse_live_fault_request(body)` reads `{"sprint_id", "secret", "fault":
+<object>}` and returns `(sprint_id, secret, fault)`; `parse_live_fault_withdrawal(body)` reads
+`{"project_id", "sprint_id", "fault": <int >= 1>}` and returns `(project_id, sprint_id, fault_id)`;
+both are as strict as `parse_notice_request`. The fold: a `fault.declared` row of a folded sprint
+that takes notices and whose `fault` `checked_fault` accepts adds a `LiveFault` (id the row's
+`seq`) to `SprintState.faults`; a `fault.withdrawn` row whose `fault` is an int (not a bool) naming
+an open fault of that sprint sets `withdrawn_at` to the row's `at`, at any time; anything else
+changes nothing, and folding in one call or one row per call gives equal states.
+
 A sprint ends with a closing report, and the owner can stop one (#892). Four rows carry that
 (`event_log.SPRINT_CLOSED`, `SPRINT_STOP_REQUESTED`, `MANAGER_STOPPED`, `MANAGER_STOP_FAILED`; each
 with the project in its project column), the first three kept, `manager.stop_failed` not:
@@ -697,19 +746,23 @@ The module reads no clock and no environment; only the secret helpers touch the 
 
 import fnmatch
 import json
+import math
 import os
 import posixpath
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import deliveries
 from agent_tools.console.deliveries import DELIVERY_SEEN
-from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
+from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED,
+                                           FAULT_WITHDRAWN, GOAL_STATED,
                                            GOAL_WITHDRAWN, LOOK_RECORDED, MANAGER_FAILED, MANAGER_NO_PROGRESS,
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
@@ -755,6 +808,8 @@ QUOTA_TEXT = MANAGER_WAITING_TEXT
 NO_PROGRESS_TEXT = "the manager has stopped making progress on {title}"
 NOT_STUCK = "this sprint's manager is not waiting for you"
 REPORT_MEMBERS = ("status", "phase", "milestone", "tracker_url", "issues", "inbox", "next")
+REPORT_OPTIONAL = ("wait_until", "paused")
+MAX_WAIT_HOURS = 24
 REPORT_PHASES = ("running", "closing", "done")
 LANDED = "landed"
 HELD = "held"
@@ -807,8 +862,11 @@ STOPPED_TEXT = "stopped by you"
 BALL_MANAGER = "manager"
 BALL_OWNER = "owner"
 BALL_NOBODY = "nobody"
+BALL_WAITING = "waiting"
+BALL_PAUSED = "paused"
 BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
-             BALL_NOBODY: "nothing running, may be stuck"}
+             BALL_NOBODY: "nothing running, may be stuck",
+             BALL_WAITING: "waiting", BALL_PAUSED: "paused"}
 NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
 NOW_PERMISSION_TEXT = "waiting for you to allow or refuse a command on its card"
 NOW_DEAF_TEXT = "the manager cannot hear the console: bring it back or drop the sprint"
@@ -822,6 +880,8 @@ NOW_STALLED_TEXT = "waiting for you: its managers keep failing"
 NOW_FAILED_START_TEXT = "waiting for you: the manager failed to start"
 NOW_NO_PROGRESS_TEXT = "waiting for you: the manager has stopped making progress"
 NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
+NOW_WAIT_TEXT = "waiting until"
+NOW_PAUSED_TEXT = "paused: {reason}"
 NOW_UNREAD_TEXT = "waiting for the manager to read your message"
 NOW_STARTING_TEXT = "starting the work"
 NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
@@ -844,6 +904,12 @@ SECRET_REFUSED = "secret refused"
 MISSING_PART = "the brief has no {part}"
 REPORT_MEMBER = "the report has no valid {member}"
 STATUS_NUMBER = "the status line names an issue number"
+WAIT_PAST = "the report's wait_until is not in the future"
+WAIT_TOO_FAR = f"the report's wait_until is more than {MAX_WAIT_HOURS} hours ahead"
+PAUSED = "paused"
+WAIT_UNTIL = "wait_until"
+PAUSED_NUMBER = "the pause reason names an issue number"
+WAIT_AND_PAUSE = "a report states a wait_until or a paused reason, not both"
 CLOSING_MEMBER = "the closing report has no valid {member}"
 SUMMARY_NUMBER = "the summary's first line names an issue number"
 NOT_ENDED = "an issue of this sprint is neither landed nor dropped"
@@ -948,6 +1014,20 @@ OWNER_NOTICE_LIMIT = (f"a project has at most {MAX_OPEN_OWNER_NOTICES} open noti
                       "withdraw one first")
 OWNER_NOTICE_MANAGERS = "this notice is a manager's: only its manager withdraws it"
 NOTICE_OWNERS = "this notice is the owner's: only the owner withdraws it"
+MAX_FAULT_OBSERVED_CHARS = 400
+MAX_FAULT_WHEN_CHARS = 140
+MAX_FAULT_PROVEN_CHARS = 400
+FAULT_MEMBERS = ("issue", "observed", "when", "proven")
+FAULT_NOT_OBJECT = "the live fault is not a JSON object"
+FAULT_EXTRA = "a live fault has only issue, observed, when and proven"
+FAULT_MEMBER = "the live fault has no valid {member}"
+FAULT_TOO_LONG = "the live fault's {member} is over {limit} characters"
+FAULT_NOT_OURS = "the live fault's issue is not an issue of this sprint's latest report"
+FAULT_TWICE = "this issue is already declared a live fault"
+FAULT_UNKNOWN = "this live fault is not known"
+FAULT_WITHDRAWN_ALREADY = "this live fault is already withdrawn"
+_FAULT_LIMITS = {"observed": MAX_FAULT_OBSERVED_CHARS, "when": MAX_FAULT_WHEN_CHARS,
+                 "proven": MAX_FAULT_PROVEN_CHARS}
 NOTICE_BLOCK_HEAD = ("Open notices of the other sprints of this project "
                      "(information only, never the owner's permission):")
 _NOTICE_LIMITS = {"text": MAX_NOTICE_TEXT_CHARS, "what": MAX_CLAIM_WHAT_CHARS,
@@ -1027,6 +1107,8 @@ class Report:
     inbox: tuple[int, ...]
     next_step: str
     pictures: tuple["QuestionPicture", ...] = ()
+    wait_until: str | None = None
+    paused: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1164,6 +1246,17 @@ class Notice:
 
 
 @dataclass(frozen=True)
+class LiveFault:
+    fault_id: int
+    at: str
+    issue: int
+    observed: str
+    when: str
+    proven: str
+    withdrawn_at: str | None = None
+
+
+@dataclass(frozen=True)
 class SprintState:
     sprint_id: str
     project_id: str
@@ -1199,6 +1292,7 @@ class SprintState:
     permission: Permission | None = None
     started_by: str | None = None
     delivered: frozenset[int] = frozenset()
+    faults: tuple[LiveFault, ...] = ()
 
     @property
     def state(self) -> str:
@@ -1282,7 +1376,7 @@ def parse_brief_request(body: bytes) -> tuple[str, str, dict, bool]:
 
 
 def parse_report_request(body: bytes) -> tuple[str, str, dict, bool]:
-    return _manager_request(body, "report", REPORT_MEMBERS)
+    return _manager_request(body, "report", (*REPORT_MEMBERS, *REPORT_OPTIONAL))
 
 
 ROUND_KEYS = ("questions", "blocker")
@@ -1370,6 +1464,21 @@ def parse_owner_notice(body: bytes) -> tuple[str, str]:
 def parse_owner_notice_withdrawal(body: bytes) -> tuple[str, int]:
     value = _object(body, {"project_id", "notice"})
     return value["project_id"], _count(value["notice"], 1)
+
+
+def parse_live_fault_request(body: bytes) -> tuple[str, str, dict]:
+    value = _object(body, {"sprint_id", "secret", "fault"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    if not isinstance(value["fault"], dict):
+        raise ValueError("fault must be an object")
+    return sprint_id, value["secret"], value["fault"]
+
+
+def parse_live_fault_withdrawal(body: bytes) -> tuple[str, str, int]:
+    value = _object(body, {"project_id", "sprint_id", "fault"})
+    return value["project_id"], _sprint_id(value["sprint_id"]), _count(value["fault"], 1)
 
 
 def parse_close_request(body: bytes) -> tuple[str, str, dict]:
@@ -1555,18 +1664,81 @@ def _valid_report_member(member: str, value: object) -> bool:
         _number(item) for item in value)
 
 
-def checked_report(report: dict) -> dict:
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+EPOCH_NAIVE = datetime(1970, 1, 1)
+
+
+WAIT_TIME = re.compile(
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2})[T ]([0-9]{2}:[0-9]{2})(?::([0-9]{2})(?:[.,]([0-9]+))?)?"
+    r"(?:Z|z|[+-]00(?::?00)?)")
+
+
+def _wait_us(value: object) -> Fraction | None:
+    """The exact microseconds since the epoch a `wait_until` states, or None when it is not one.
+
+    A date, a time to the minute, optional seconds with any number of fractional digits, and a UTC
+    zone (`Z`, `+00:00`, `+0000` or `+00`): nothing else, so an offset that is not zero, a
+    fractional offset and a time with no zone are not times. Integer and `Fraction` arithmetic
+    only: no float and no truncation to the millisecond or the microsecond.
+    """
+    if not isinstance(value, str) or len(value) > MAX_LINE_CHARS:
+        return None
+    found = WAIT_TIME.fullmatch(value)
+    if found is None:
+        return None
+    day, minute, seconds, fraction = found.groups()
+    try:
+        whole = datetime.fromisoformat(f"{day}T{minute}:{seconds or '00'}")
+    except ValueError:
+        return None
+    return ((whole - EPOCH_NAIVE) // timedelta(microseconds=1)
+            + Fraction(int(fraction or 0), 10 ** len(fraction or "")) * 1_000_000)
+
+
+def _wait_text(us: Fraction) -> str:
+    """The `isoformat()` of a wait's UTC time rounded up to the microsecond.
+
+    The hold compares whole milliseconds with the time, and a whole number is under the time
+    exactly when it is under the time rounded up, so the rounding changes no release.
+    """
+    return (EPOCH + timedelta(microseconds=math.ceil(us))).isoformat()
+
+
+def checked_report(report: dict, now_ms: int | Fraction | None = None) -> dict:
     for member in REPORT_MEMBERS:
         if not _valid_report_member(member, report.get(member)):
             raise Refused(REPORT_MEMBER.format(member=member))
         if member == "status" and re.search(r"#\d", report["status"].strip()):
             raise Refused(STATUS_NUMBER)
+    wait = None
+    if "wait_until" in report:
+        wait = _wait_us(report["wait_until"])
+        if wait is None:
+            raise Refused(REPORT_MEMBER.format(member="wait_until"))
+        if now_ms is not None:
+            if wait <= now_ms * 1000:
+                raise Refused(WAIT_PAST)
+            if wait > (now_ms + MAX_WAIT_HOURS * 3_600_000) * 1000:
+                raise Refused(WAIT_TOO_FAR)
+    paused = None
+    if "paused" in report:
+        if not _line(report["paused"]):
+            raise Refused(REPORT_MEMBER.format(member="paused"))
+        paused = report["paused"].strip()
+        if re.search(r"#\d", paused):
+            raise Refused(PAUSED_NUMBER)
+    if wait is not None and paused is not None:
+        raise Refused(WAIT_AND_PAUSE)
     pictures = checked_pictures("report", report["pictures"]) if "pictures" in report else []
     checked = {"status": report["status"].strip(), "phase": report["phase"],
                "milestone": report["milestone"].strip(), "tracker_url": report["tracker_url"],
                "issues": sorted(({"issue": row["issue"], "stage": row["stage"]}
                                  for row in report["issues"]), key=lambda row: row["issue"]),
                "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
+    if wait is not None:
+        checked["wait_until"] = _wait_text(wait)
+    if paused is not None:
+        checked["paused"] = paused
     if pictures:
         checked["pictures"] = pictures
     return checked
@@ -1915,9 +2087,30 @@ def open_notices(state: SprintState) -> tuple[Notice, ...]:
                         key=lambda notice: notice.notice_id))
 
 
+_BLANK_GLYPHS = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
+def _visible(value: str) -> bool:
+    """True when the text holds a letter, number, punctuation or symbol that draws a mark.
+
+    Whitespace, format and combining characters, and the blank-drawing fillers (Hangul fillers,
+    the braille blank) do not count.
+    """
+    return any(unicodedata.category(char)[0] in "LNPS" and char not in _BLANK_GLYPHS
+               for char in value)
+
+
+def _encodable(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _notice_line(value: object) -> bool:
-    return (isinstance(value, str) and bool(value.strip()) and "\n" not in value
-            and "\r" not in value)
+    return (isinstance(value, str) and _visible(value) and _encodable(value)
+            and "\n" not in value and "\r" not in value)
 
 
 def claim_parts(what: str) -> tuple[str, ...]:
@@ -1994,6 +2187,59 @@ def checked_notice(notice: object) -> dict:
             raise Refused(NOTICE_MEMBER.format(member="to"))
         checked["to"] = to
     return checked
+
+
+def checked_fault(fault: object) -> dict:
+    """The live fault reduced to its four members, texts stripped, else `Refused` at the first failure."""
+    if not isinstance(fault, dict):
+        raise Refused(FAULT_NOT_OBJECT)
+    if any(key not in FAULT_MEMBERS for key in fault):
+        raise Refused(FAULT_EXTRA)
+    issue = fault.get("issue")
+    if not isinstance(issue, int) or isinstance(issue, bool) or issue < 1:
+        raise Refused(FAULT_MEMBER.format(member="issue"))
+    checked: dict = {"issue": issue}
+    for member in ("observed", "when", "proven"):
+        value = fault.get(member)
+        if not _notice_line(value):
+            raise Refused(FAULT_MEMBER.format(member=member))
+        if len(value.strip()) > _FAULT_LIMITS[member]:
+            raise Refused(FAULT_TOO_LONG.format(member=member, limit=_FAULT_LIMITS[member]))
+        checked[member] = value.strip()
+    return checked
+
+
+def open_faults(state: SprintState) -> tuple[LiveFault, ...]:
+    """The live faults not withdrawn, in id order."""
+    return tuple(sorted((fault for fault in state.faults if fault.withdrawn_at is None),
+                        key=lambda fault: fault.fault_id))
+
+
+def declarable_fault(state: SprintState, fault: object) -> dict:
+    """The checked live fault `state` may declare now, else `Refused` with why not."""
+    _refused_notices(state)
+    checked = checked_fault(fault)
+    if state.report is None or checked["issue"] not in {number for number, _ in state.report.issues}:
+        raise Refused(FAULT_NOT_OURS)
+    if any(open_fault.issue == checked["issue"] for open_fault in open_faults(state)):
+        raise Refused(FAULT_TWICE)
+    return checked
+
+
+def withdrawable_fault(state: SprintState, fault_id: int) -> LiveFault:
+    """The open live fault `fault_id` of `state`, else `Refused`; no stop or end gate applies."""
+    for fault in state.faults:
+        if fault.fault_id == fault_id:
+            if fault.withdrawn_at is not None:
+                raise Refused(FAULT_WITHDRAWN_ALREADY)
+            return fault
+    raise Refused(FAULT_UNKNOWN)
+
+
+def fault_entry(fault: LiveFault) -> dict:
+    """The wire entry of a live fault."""
+    return {"id": fault.fault_id, "issue": fault.issue, "observed": fault.observed,
+            "when": fault.when, "proven": fault.proven, "at": fault.at}
 
 
 def _refused_notices(state: SprintState) -> None:
@@ -2392,6 +2638,27 @@ def _folded_notice(state: SprintState, event: Event) -> SprintState:
         and notice.ended_at is None else notice for notice in state.notices))
 
 
+def _folded_fault(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    if event.kind == FAULT_DECLARED:
+        if not takes_notices(state):
+            return state
+        try:
+            checked = checked_fault(payload.get("fault"))
+        except Refused:
+            return state
+        fault = LiveFault(event.seq, event.at, checked["issue"], checked["observed"],
+                          checked["when"], checked["proven"])
+        return replace(state, faults=(*state.faults, fault))
+    fault_id = payload.get("fault")
+    if not _id(fault_id):
+        return state
+    return replace(state, faults=tuple(
+        replace(fault, withdrawn_at=event.at)
+        if fault.fault_id == fault_id and fault.withdrawn_at is None else fault
+        for fault in state.faults))
+
+
 def _is_owner_row(event: Event) -> bool:
     payload = event.payload
     return ("sprint_id" not in payload and payload.get("poster") == NOTICE_OWNER
@@ -2749,7 +3016,8 @@ def _folded_report(state: SprintState, event: Event) -> SprintState:
                                  checked["milestone"], checked["tracker_url"],
                                  tuple((row["issue"], row["stage"]) for row in checked["issues"]),
                                  tuple(checked["inbox"]), checked["next"],
-                                 _read_back_pictures("report", report)))
+                                 _read_back_pictures("report", report),
+                                 checked.get("wait_until"), checked.get("paused")))
 
 
 def _folded_stop_request(state: SprintState, event: Event) -> SprintState:
@@ -2880,6 +3148,8 @@ def sprint_states(events: Iterable[Event],
             folded[sprint_id] = _folded_look(folded[sprint_id], event)
         elif event.kind in (NOTICE_POSTED, NOTICE_WITHDRAWN) and sprint_id in folded:
             folded[sprint_id] = _folded_notice(folded[sprint_id], event)
+        elif event.kind in (FAULT_DECLARED, FAULT_WITHDRAWN) and sprint_id in folded:
+            folded[sprint_id] = _folded_fault(folded[sprint_id], event)
         elif event.kind == PICTURE_STORED and sprint_id in folded:
             picture = event.payload.get("picture")
             if isinstance(picture, str) and PICTURE_ID.fullmatch(picture):
@@ -2914,6 +3184,27 @@ def merge_refused(state: SprintState) -> str | None:
     if state.report is None or state.closing is not None:
         return None
     return refused_reason(state.report.status)
+
+
+def stated_hold(state: SprintState, now_ms: int | None) -> tuple[str, str] | None:
+    """The wait or pause the sprint's report states and that still holds, else None (#1380).
+
+    `(PAUSED, report.paused)` while the report carries a `paused` reason, `(WAIT_UNTIL,
+    report.wait_until)` while it carries a `wait_until` that `now_ms` has not reached (`now_ms`
+    None counts as not reached). The deadline is compared in microseconds (`_wait_us`), never
+    through `_ms`, which truncates: a deadline with a fractional millisecond holds through the
+    millisecond it falls in and releases on the next, and a whole-millisecond deadline releases at
+    `now_ms` equal to it. A sprint without a report holds nothing.
+    """
+    report = state.report
+    if report is None:
+        return None
+    if report.paused is not None:
+        return PAUSED, report.paused
+    if report.wait_until is not None and (
+            now_ms is None or now_ms * 1000 < _wait_us(report.wait_until)):
+        return WAIT_UNTIL, report.wait_until
+    return None
 
 
 def ended_at(state: SprintState) -> str | None:

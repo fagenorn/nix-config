@@ -10,6 +10,7 @@
     sprint notice [--sprint <id>] [--secret-file <path>] --notice-file <path | -> [--port N]
     sprint notices [--sprint <id>] [--secret-file <path>] [--port N]
     sprint withdraw-notice [--sprint <id>] [--secret-file <path>] --notice <id> [--port N]
+    sprint live-fault [--sprint <id>] [--secret-file <path>] --fault-file <path | -> [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint picture [--sprint <id>] [--secret-file <path>] --file <path> [--port N]
     sprint status [--sprint <id>] [--secret-file <path>] [--port N]
@@ -22,7 +23,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief`, `report`, `ask`, `withdraw-question`, `notice`, `notices`, `withdraw-notice`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `ask`, `withdraw-question`, `notice`, `notices`, `withdraw-notice`, `live-fault`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -150,6 +151,15 @@ reading of the claims that overlap, and exit 0.
 notice, a wrong secret) is `sprint: refused <status>: <text>` and exit 1, and a 200 answer without an
 integer `notice` is `sprint: refused 200: unreadable answer: <error>` and exit 1.
 
+`sprint live-fault` reads the secret the same way and the live fault from `--fault-file` (`-` reads
+stdin), a JSON object (`issue`, `observed`, `when`, `proven`), and sends `POST /api/live-fault` with
+`{"sprint_id", "secret", "fault"}`, no `Origin`. On success it prints `sprint: live fault <id>
+declared` and exit 0. The command validates no member of the fault: the console decides, in one
+place, and a refusal (a missing or blank member, an issue not in the sprint's latest report, an issue
+already declared, a wrong secret) is `sprint: refused <status>: <text>` and exit 1. A file that
+cannot be read or is not a JSON object is exit 2 with no request sent; a 200 answer without an
+integer `fault` is `sprint: refused 200: unreadable answer: <error>` and exit 1.
+
 `sprint report --help` and `sprint close --help` list the members of the report and of the closing
 report, each with one line and an example, the same lists `sprint contract` prints.
 
@@ -174,9 +184,10 @@ the JSON line stays line 1. A refused notices request is the command's refusal a
 
 `sprint recap` reads the secret the same way and sends `POST /api/recap` with `{"sprint_id",
 "secret"}`, no `Origin`. It prints the console's answer as one line of JSON, `{"sprint_id", "goal",
-"brief", "report", "unread"}`, and exit 0: the goal, the latest brief (`version`, `decision`,
-`reply`, `parts`, or null), the last report (or null) and the number of the owner's unread
-messages. It marks nothing read; a manager that was restarted or takes a sprint over runs it, then
+"brief", "report", "live_faults", "unread"}`, and exit 0: the goal, the latest brief (`version`,
+`decision`, `reply`, `parts`, or null), the last report (or null), the sprint's standing live-fault
+declarations (`id`, `issue`, `observed`, `when`, `proven`, `at`; `[]` when none) and the number of
+the owner's unread messages. It marks nothing read; a manager that was restarted or takes a sprint over runs it, then
 `sprint inbox`.
 
 `sprint reply` reads the secret the same way and the reply from `--reply-file` (`-` reads stdin) as
@@ -296,6 +307,10 @@ REPORT_HELP = """the report's members, all required:
   next:        one line, what the manager does next
 
 optional:
+  wait_until:  an ISO 8601 UTC time, "2027-01-15T10:00:00Z": after now and at most 24 hours
+               ahead; the console sends no idle nudge until then
+  paused:      one line, why the lead paused the sprint, no issue number; it stands until a
+               report without it. Send wait_until or paused, never both
   pictures:    at most 8, [{"file": "<path to a PNG>", "line": "<one line, at most 140
                characters>", "pair": "before" | "after"}, ...]; the command uploads each file
                and sends its id
@@ -389,6 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
                        ("notice", "post one notice for the sprint's project"),
                        ("notices", "print the project's open notices"),
                        ("withdraw-notice", "take back one of the sprint's notices"),
+                       ("live-fault", "declare an issue of the sprint a fault live in production"),
                        ("close", "send the sprint's closing report"),
                        ("inbox", "print the unread messages to the sprint, the owner's and a colleague's"),
                        ("recap", "print what a manager needs to pick the sprint up"),
@@ -417,6 +433,9 @@ def build_parser() -> argparse.ArgumentParser:
             if name == "notice":
                 each.add_argument("--notice-file", required=True,
                                   help="the notice as a JSON object; - reads stdin")
+            if name == "live-fault":
+                each.add_argument("--fault-file", required=True,
+                                  help="the live fault as a JSON object; - reads stdin")
             if name == "close":
                 each.add_argument("--closing-file", required=True,
                                   help="the closing report as a JSON object; - reads stdin")
@@ -466,6 +485,8 @@ def read_object(name: str, what: str) -> dict:
         text = sys.stdin.read() if name == "-" else Path(name).read_text()
         value = json.loads(text, object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise Unreadable(f"sprint: cannot read {name}: the {what} is nested too deeply") from error
     except (OSError, ValueError) as error:
         raise Unreadable(f"sprint: cannot read {name}: {error}") from error
     if not isinstance(value, dict):
@@ -870,6 +891,20 @@ def answered_notice(text: str) -> int:
     return notice
 
 
+def send_live_fault(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    fault = read_object(args.fault_file, "live fault")
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "fault": fault}).encode()
+    text = ask(args.port, "POST", service.LIVE_FAULT_PATH, body)
+    try:
+        declared = json.loads(text)["fault"]
+        if type(declared) is not int:
+            raise TypeError("fault is not an integer")
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+    return f"sprint: live fault {declared} declared"
+
+
 def read_notices(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     body = json.dumps({"sprint_id": sprint, "secret": secret}).encode()
@@ -1015,6 +1050,8 @@ def main(argv: list[str] | None = None) -> int:
             line = read_notices(args, sprint)
         elif args.command == "withdraw-notice":
             line = send_notice_withdrawal(args, sprint)
+        elif args.command == "live-fault":
+            line = send_live_fault(args, sprint)
         elif args.command == "close":
             line = send_closing(args, sprint)
         elif args.command == "inbox":

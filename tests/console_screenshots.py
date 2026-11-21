@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-two screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-five screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -15,6 +15,10 @@ Contract:
   which is the before picture (#1347);
   `notice-post-open` is that fold with the owner's post control opened, and shot against a page
   that has no such control it is the same fold, which is how the before pictures are made;
+  `live-fault` is one running sprint with a live fault its manager declared on issue 12 (its
+  `fault.declared` row is seeded as a literal kind, so the module needs nothing the base commit
+  lacks): the sprint line carries the declaration and the owner's Withdraw, and on a base console
+  that ignores the row the same sprint shows neither, which is the before picture (#1432);
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
   lock, served through a stand-in forge reader, with a live delivery run of issue 12 in its `pr`
   step (a run that is not live is no holder of the sprint's), whose run line reads
@@ -33,7 +37,10 @@ Contract:
   `/api/permission-prompt` by its literal path with the sprint's secret and kept held while shooting
   (a phase `wait` right before each width's shot), so the branch's console shows the card with Allow
   once and Refuse under "1 thing needs you"; on a console that does not know the route (the base answers 405) the seed
-  is the `PermissionRequest` hook row only, which is the before picture; `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
+  is the `PermissionRequest` hook row only, which is the before picture; `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
+  ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
+  report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console
+  ignores both and reads the stage phrase, which is the before picture); `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
   so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
@@ -129,7 +136,10 @@ Contract:
   lacks a control times out and fails instead of writing a picture without it; on the base commit's archive
   it is false and neither waits, so a base run still writes every file. With `--sheets` `capture` also writes
   `<state>-sheet.png` after each state's widths, the shots side by side in one PNG that must stay
-  under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. Each
+  under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. `--states a,b`
+  shoots only the named states (each a member of `STATES`; the default is every state), and `--composite NAME`
+  (only with `--sheets`) writes `NAME` after the last state: the named states' sheets side by side in one
+  PNG under the same 2 MiB, which `main` prints after the sheets. Each
   width waits for what the owner judges to be visible, which fails the run when it is not:
   `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
   `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
@@ -157,7 +167,7 @@ Contract:
   picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
   card opens on the plan's own first line and its draft shows nothing.
   `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 92 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 106 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -235,6 +245,7 @@ import http.client
 import inspect
 import json
 import os
+import secrets
 import socket
 import struct
 import sys
@@ -247,7 +258,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin, view
+from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, prompt_card, sessions, signin, view
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
@@ -261,8 +272,9 @@ from .console_test_support import hook_body, write_registry
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
+          "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
+          "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
@@ -278,6 +290,7 @@ HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
 GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
+PAUSE_REASON = "the lead freed its account for a release"
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
 LOOK_APPROVE = "Approve this head"
@@ -2021,8 +2034,10 @@ class _Seed:
     def sprint(self, project: str, title: str, *, started: float, report: float | None = None,
                landed: bool = False, asks: bool = False, close: float | None = None,
                stop: float | None = None, held: bool = False,
-               look: bool = False) -> tuple[str, str]:
-        """One approved sprint with a started manager; returns `(sprint_id, goal)`."""
+               look: bool = False, report_extra: Mapping | None = None) -> tuple[str, str]:
+        """One approved sprint with a started manager; returns `(sprint_id, goal)`.
+
+        `report_extra` is merged into the `sprint.reported` row's `report`."""
         self.count += 1
         sid = f"{self.count:016x}"
         goal = f"{title}."
@@ -2045,7 +2060,7 @@ class _Seed:
             self.put(report, "sprint.reported", project, {**base, "report": {
                 "status": "the first slice is in review", "phase": "running",
                 "milestone": MILESTONES[title], "tracker_url": TRACKER_URL, "issues": issues,
-                "inbox": [], "next": "merge the first slice"}})
+                "inbox": [], "next": "merge the first slice", **(report_extra or {})}})
         if asks:
             self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
                 "question": "Which store should the checkpoint use?",
@@ -2260,6 +2275,16 @@ def overlap_card() -> bool:
     return not hasattr(view, "OVERLAP_UNSETTLED_TEXT")
 
 
+LIVE_FAULT_OBSERVED = "saving the settings form drops the billing address"
+LIVE_FAULT_WHEN = "12:10 UTC today"
+LIVE_FAULT_PROVEN = "a saved form read back from the production database"
+
+
+def declares_live_faults() -> bool:
+    """Whether this service lets the owner withdraw a manager's live-fault declaration (a base commit's has no such method)."""
+    return hasattr(ConsoleService, "withdraw_live_fault")
+
+
 def offers_account_changes() -> bool:
     """Whether this service lets an account be signed out alone (a base commit's service has no such method)."""
     return hasattr(ConsoleService, "sign_out_account")
@@ -2329,6 +2354,12 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
                 "event": "PermissionRequest", "session_id": PERMISSION_MANAGER, "cwd": web_root,
                 "repo": web_root, "tool_name": "Bash"})
         return (sid,)
+    elif state == "waiting-until":
+        seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE,
+                    report_extra={"wait_until": _iso(seed.now_s + 2 * 3600)})
+    elif state == "paused":
+        seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE,
+                    report_extra={"paused": PAUSE_REASON})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state in (*SHARING_STATES, "owner-actors", "owner-accounts"):
@@ -2418,6 +2449,12 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
                     "recommended": "Add resumable uploads lands first", "owner_only": True}]})
         seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
             "kind": "heads-up", "text": "routes are frozen until Friday"}})
+    elif state == "live-fault":
+        sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE,
+                                report=6 * MINUTE)
+        seed.put(4 * MINUTE, "fault.declared", web, {"sprint_id": sid, "goal": goal, "fault": {
+            "issue": 12, "observed": LIVE_FAULT_OBSERVED, "when": LIVE_FAULT_WHEN,
+            "proven": LIVE_FAULT_PROVEN}})
     elif state in ("ask-box", "ask-goal"):
         seed.put(3 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
             "question_id": "1177a1", "question": ASK_ANSWERED_QUESTION,
@@ -2578,8 +2615,12 @@ def _write_permission_manager(fixture: Fixture, now_s: float) -> None:
         {"type": "user", "timestamp": _iso(now_s - 5 * MINUTE), "message": {"content": "carry on"}}]))
 
 
-def _permission_post(service: ConsoleService, body: Mapping) -> tuple[int, dict]:
-    """One POST of `body` to the manager's permission route by its literal path: its status and JSON."""
+def _permission_post(service: ConsoleService, fixture: Fixture, body: Mapping) -> tuple[int, dict]:
+    """One POST of `body`, signed as the manager's hook signs it (a fresh nonce, the sprint's secret never sent), to the permission route by its literal path: its status and JSON."""
+    sprint_id = fixture.prompting
+    body = {**body, "sprint_id": sprint_id, "nonce": secrets.token_hex(16)}
+    body["auth"] = prompt_card.request_auth(read_secret(fixture.secrets, sprint_id),
+                                            prompt_card.signed_bytes(body))
     connection = http.client.HTTPConnection(*service.address, timeout=10)
     try:
         connection.request("POST", PERMISSION_PROMPT, body=json.dumps(body),
@@ -2597,10 +2638,8 @@ def hold_permission(service: ConsoleService, fixture: Fixture) -> int | None:
     A console that does not know the route (the base commit answers 405, another 404) gets the `PermissionRequest` hook row
     alone, which is what its manager's hook produces there.
     """
-    sprint_id = fixture.prompting
-    status, answer = _permission_post(service, {
-        "sprint_id": sprint_id, "secret": read_secret(fixture.secrets, sprint_id), "phase": "ask",
-        "session_id": PERMISSION_MANAGER, "command": PERMISSION_COMMAND,
+    status, answer = _permission_post(service, fixture, {
+        "phase": "ask", "session_id": PERMISSION_MANAGER, "command": PERMISSION_COMMAND,
         "description": PERMISSION_WORDS})
     if status in (404, 405):
         service.ingest_hook(hook_body("permission prompt", session_id=PERMISSION_MANAGER,
@@ -2615,8 +2654,7 @@ def keep_permission(service: ConsoleService, fixture: Fixture, prompt: int | Non
     """Renew the held prompt's contact right before a shot, as its hook's wait does."""
     if prompt is None:
         return
-    status, answer = _permission_post(service, {
-        "sprint_id": fixture.prompting, "secret": read_secret(fixture.secrets, fixture.prompting),
+    status, answer = _permission_post(service, fixture, {
         "phase": "wait", "session_id": PERMISSION_MANAGER, "prompt": prompt})
     if status != 200 or answer.get("state") != "open":
         raise RuntimeError(f"the permission prompt is not held open ({status})")
@@ -2943,7 +2981,9 @@ class _Serve:
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
             read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False,
-            mutate: bool = False) -> list[Shot]:
+            mutate: bool = False, composite: str | None = None) -> list[Shot]:
+    if composite is not None and not sheets:
+        raise ValueError("a composite is made of the sheets: pass sheets with it")
     try:
         from playwright.sync_api import Error, sync_playwright
     except ImportError as error:
@@ -2996,6 +3036,8 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                             service.close()
                 if sheets:
                     sheet(browser, shot_paths, out / f"{state}-sheet.png")
+            if sheets and composite is not None:
+                composite_sheet(browser, out, states, composite)
         finally:
             browser.close()
     return taken
@@ -3120,7 +3162,8 @@ JARGON_COUNT = r"""(() => {
   }).length;
   const phrases = document.body.innerText.match(
     /\bon track\b|\bstated (just now|\d)|\bwithdraw|\bnudge|\bstop or\b|would do differently/gi);
-  const owners = Array.from(document.querySelectorAll('#projects button.notice-withdraw')).filter(
+  const owners = Array.from(document.querySelectorAll(
+    '#projects button.notice-withdraw, #projects button.live-fault-withdraw')).filter(
     (button) => button.innerText.trim() === 'Withdraw').length;
   return folds + rows + Math.max(0, (phrases ? phrases.length : 0) - owners);
 })()"""
@@ -3235,6 +3278,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.click('details[data-key^="notices:"] > summary')
             if state == "notice-post-open" and page.query_selector("button.notice-open"):
                 page.click("button.notice-open")
+        if state == "live-fault" and declares_live_faults():
+            for selector in (".sprint-checks .live-fault", ".live-fault-withdraw"):
+                page.wait_for_selector(selector)
         if state in ("goal-open", "goal-near", "goal-over"):
             page.focus("textarea.goal-text")
             page.wait_for_selector(".goal-box")
@@ -3379,6 +3425,12 @@ def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
     return out
 
 
+def composite_sheet(browser, out: Path, states: Sequence[str], name: str) -> Path:
+    """The named states' sheets side by side in `out / name`; refuses over `pictures.MAX_BYTES` as `sheet` does."""
+    out = Path(out)
+    return sheet(browser, [out / f"{state}-sheet.png" for state in states], out / name)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="console-screenshots",
@@ -3388,7 +3440,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--answer-file", help="the stored answer's text (UTF-8), shot with --question")
     parser.add_argument("--sheets", action="store_true",
                         help="also write <state>-sheet.png, the state's widths side by side")
+    parser.add_argument("--states", help="a comma list of the states to shoot (default every state)")
+    parser.add_argument("--composite", help="with --sheets, also write NAME, the shot states' sheets side by side")
     args = parser.parse_args(argv)
+    states = STATES
+    if args.states is not None:
+        states = tuple(args.states.split(","))
+        unknown = [state for state in states if state not in STATES]
+        if unknown:
+            parser.error(f"--states names {', '.join(unknown)}, which are not states")
+    if args.composite is not None and not args.sheets:
+        parser.error("--composite goes with --sheets")
     if (args.question is None) != (args.answer_file is None):
         parser.error("--question and --answer-file go together")
     real = args.question is not None
@@ -3399,8 +3461,9 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
             taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
-                             sheets=args.sheets)
-                     if real else capture(Path(args.out), sheets=args.sheets))
+                             sheets=args.sheets, composite=args.composite)
+                     if real else capture(Path(args.out), states=states, sheets=args.sheets,
+                                          composite=args.composite))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
             return 2
@@ -3415,6 +3478,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.sheets:
         for state in dict.fromkeys(shot.state for shot in taken):
             print(Path(args.out) / f"{state}-sheet.png")
+        if args.composite is not None:
+            print(Path(args.out) / args.composite)
     wide = [shot for shot in taken if shot.scroll_width > shot.width]
     for shot in wide:
         print(f"console-screenshots: {shot.path.name} scrolls sideways "

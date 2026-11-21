@@ -704,6 +704,16 @@ class ProfileTest(unittest.TestCase):
                 self.assertIsNone(manager.quota_wait(capacity, profile))
 
 
+class ClientEnvironmentTest(unittest.TestCase):
+    def test_a_client_never_inherits_a_platform_root(self):
+        environ = {"HOME": "/home/u", "PATH": "/bin",
+                   "AGENT_PLATFORM_ROOT": "/nix/store/x-agent-platform/share/agent-platform"}
+        env = manager.client_environment("p", environ)
+        self.assertNotIn("AGENT_PLATFORM_ROOT", env)
+        self.assertEqual(env["PATH"], "/home/u/.agents/bin:/bin")
+        self.assertIn("AGENT_PLATFORM_ROOT", environ)
+
+
 class StopTest(unittest.TestCase):
     FULL = "0123456789abcdef-0123-4567"
 

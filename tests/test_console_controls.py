@@ -16,7 +16,7 @@ from .test_console_page import (
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
     FAILED_LINE, asking, check_item, frame, nodes, panel, postable, project, real_capacity, render,
-    look_answered, thread, view, with_check, with_notices, with_run, with_sprints)
+    FAULT_ENTRY, fault_frame, look_answered, thread, view, with_check, with_notices, with_run, with_sprints)
 from .test_console_guest_page import (
     CHANGE_FRAME, GUEST, MANUAL, OPEN_OWN, SHARED_FRAME, TICK, UNSHARED_OPEN, attempt_reply, harness)
 
@@ -57,7 +57,7 @@ DESK_CONTROLS: dict = {
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
         "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-signout", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
-        "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
+        "notice-cancel", "notice-withdraw", "live-fault-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
         "follow-cancel", "thread-open", "reading-close", "reading-delete", "reading-delete-keep", "ask-choice", "reply-send", "undo", *ANS_PLAIN, "goal-project",
         "detail-open", "kept-words-dismiss", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
@@ -251,6 +251,8 @@ def desk_scenarios() -> list:
         [*REGISTER_TYPED, snapshot],
         # the notices fold with post opened and an own notice
         drawn_notice,
+        # a sprint's live fault with its Withdraw (#1432)
+        [START, {"frame": fault_frame([FAULT_ENTRY])}, snapshot],
         [begin, {"frame": view([own_notice])}, {"open": "notices:owner/p00"}, snapshot],
         # the goal box open with projects, and a quiet project's Give it a goal
         [START, {"frame": GOAL_FRAME}, {"key": "g"}, snapshot],

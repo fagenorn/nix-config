@@ -65,6 +65,12 @@ jobs:
           nix eval --show-trace \
             --extra-experimental-features 'nix-command flakes' \
             --raw '.#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath'
+      - name: Build the platform package
+        run: nix build --no-link '.#packages.x86_64-linux.agent-platform'
+      - name: Evaluate the macOS platform package
+        run: nix eval --raw '.#packages.aarch64-darwin.agent-platform.drvPath'
+      - name: Check the platform package runs with no home configuration
+        run: nix build --no-link '.#checks.x86_64-linux.agent-platform'
       - name: Check oMLX adapter and host settings against pinned upstream
         run: nix build --no-link '.#checks.x86_64-linux.omlx-adapter'
       - name: Check the global agent corpus is project-agnostic

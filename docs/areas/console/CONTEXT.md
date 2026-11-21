@@ -69,6 +69,10 @@ _Avoid_: poll, survey
 A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. The owner posts a heads-up to every manager of a project from the page, and only the owner withdraws it (ADR-console-053). It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. A claim names files and its slice's issue and ends when the slice lands. A notice also ends when it is withdrawn or when its sprint ends (ADR-console-044). Every manager is shown the open notices of its project's other sprints, one line each, in its first prompt, with `sprint inbox` and with `sprint status`, and an overlap of two claims is ordered by a default rule, so only one the rule cannot settle reaches the owner, as one line on the page under its two sprints, never a question (ADR-console-046, ADR-console-085, ADR-console-091). The owner reads a project's open notices in its closed "Notices (n)" fold in the Work column, which counts in nothing that needs the owner (ADR-console-002). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
 _Avoid_: lock, reservation, announcement
 
+**Live fault**:
+An issue of a sprint its manager declared live in production with `sprint live-fault` and its evidence (what was observed, when, how it was proven). It needs no go-ahead; the owner's page shows it on the sprint's line, where only the owner withdraws it, and once one is declared scope changes go to the follow-up issue, never into the fix (ADR-console-099).
+_Avoid_: incident, outage, hotfix
+
 **Project question**:
 What the owner asks about one registered project, from the page, in its project's Ask box, where the answer opens in the main column, formatted, with what the session needs from the owner as buttons (ADR-console-067). A short read-only session the console starts in the project's folder answers it; the question and its one answer, failure or time-out are kept only in the console's log, never on the tracker, until the owner deletes its thread; a question that looks like a password, token or key is refused and nothing of it is kept (ADR-console-058, ADR-console-093). Its session's spend shows on the Spend page under its project and the questions aspect (ADR-console-059). Its session reads the console's own records of that project (spend, sprints, deliveries, activations and held checks) from a file the console writes for it, and no other file of the console's state (ADR-console-089).
 _Avoid_: query, ask
@@ -82,7 +86,7 @@ One PNG a manager sent to the console, kept by the console under its SHA-256 has
 _Avoid_: screenshot file, attachment
 
 **Nudge**:
-The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report (ADR-console-020). A relay comes from a sender in the manager's own permission mode that can only message (ADR-console-068).
+The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report, none while a report's wait-until time is ahead or its pause stands (ADR-console-020). A relay comes from a sender in the manager's own permission mode that can only message (ADR-console-068).
 _Avoid_: ping, notification
 
 **Bring-back**:
@@ -90,7 +94,7 @@ The console waking a gone manager in place, or starting a successor, while its s
 _Avoid_: restart loop, resurrection
 
 **Report**:
-The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018). It may carry up to eight pictures, each with a line, shown as thumbnails in its Detail fold and full size in the viewer (ADR-console-041). A status line that starts with `merge refused: <reason>` marks a merge the guard refused; the sprint's line reads it until a later report without it clears it (the manager's report after the issue lands), and it is never a question (ADR-console-048).
+The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018). It may carry up to eight pictures, each with a line, shown as thumbnails in its Detail fold and full size in the viewer (ADR-console-041). A status line that starts with `merge refused: <reason>` marks a merge the guard refused; the sprint's line reads it until a later report without it clears it (the manager's report after the issue lands), and it is never a question (ADR-console-048). A report may state a wait-until time or a pause, and the sprint's line then says so (ADR-console-020).
 _Avoid_: update, log
 
 **Sprint**:

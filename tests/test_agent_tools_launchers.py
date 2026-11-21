@@ -22,19 +22,21 @@ INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
 SYSTEM_RESULT_ENV = "AGENT_TOOLS_SYSTEM_RESULT"
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 PACKAGE_BYTES = b"agent_tools"
-# `launcherScript` (lib/agent-tools.nix) writes a `-p` shebang line, then the body and a newline.
+# The platform package (lib/agent-tools.nix) writes each launcher as a `-p` shebang line, the
+# `unset`, the root export and the `exec`, then a newline.
 LAUNCHER = re.compile(
     rb"#![^\n]+\n"
     rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+    rb"export AGENT_PLATFORM_ROOT=(?P<root>/nix/store/[0-9a-z]{32}-agent-platform/share/agent-platform)\n"
     rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
     rb' -I -m agent_tools\.(?P<module>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?) "\$@"\n*'
 )
 MARKER = "HOSTILE agent_tools IMPORTED"
 HOSTILE_EXIT = 97
 TIMEOUT_SECONDS = 60
-# The commands #175, #179, #177, #249, #264, #279, #353, #403, #424, #623, #624 and #697 accepted as launchers: a floor, not the
+# The commands #175, #179, #177, #249, #264, #279, #353, #403, #424, #623, #624, #697 and #1440 accepted as launchers: a floor, not the
 # full set, which the command table in lib/agent-tools.nix owns (#175 D8).
-LAUNCHER_FLOOR = ("adopt-project", "agent-model-matrix", "artifact-budget", "conformance",
+LAUNCHER_FLOOR = ("adopt-project", "adr-number", "agent-model-matrix", "artifact-budget", "conformance",
                   "context-map-lint", "diff-scope", "forge-claim", "forge-issue", "lane-triage",
                   "owner-actions", "resolve-project")
 # Legacy commands may treat --help as misuse, including parser-backed commands
@@ -51,6 +53,7 @@ def launcher_bytes(module: bytes) -> bytes:
     return (
         b"#!/nix/store/" + b"a" * 32 + b"-bash/bin/bash -p\n"
         b"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+        b"export AGENT_PLATFORM_ROOT=/nix/store/" + b"c" * 32 + b"-agent-platform/share/agent-platform\n"
         b"exec /nix/store/" + b"b" * 32 + b"-python3-env/bin/python3 -I -m agent_tools."
         + module + b' "$@"\n'
     )
@@ -64,6 +67,16 @@ class LauncherPatternTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         self.assertEqual(match["module"], b"claims.forge_claim")
+
+    def test_a_launcher_without_the_root_line_does_not_match(self):
+        data = (
+            b"#!/nix/store/" + b"a" * 32 + b"-bash/bin/bash -p\n"
+            b"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+            b"exec /nix/store/" + b"b" * 32 + b"-python3-env/bin/python3 -I -m agent_tools.claims.forge_claim"
+            b' "$@"\n'
+        )
+
+        self.assertIsNone(LAUNCHER.fullmatch(data))
 
     def test_a_flat_module_launcher_still_matches(self):
         data = launcher_bytes(b"resolve_project")
@@ -131,6 +144,20 @@ class AgentToolsLauncherTest(unittest.TestCase):
             found[entry.name] = (match["python"].decode(), match["module"].decode())
         return found
 
+    def test_each_launcher_names_its_own_package_root(self):
+        checked = 0
+        for entry in sorted((self.root / ".agents" / "bin").iterdir()):
+            data = entry.read_bytes()
+            if PACKAGE_BYTES not in data:
+                continue
+            match = LAUNCHER.fullmatch(data)
+            self.assertIsNotNone(match, f"{entry} is not a generated launcher")
+            with self.subTest(entry=str(entry)):
+                self.assertEqual(match["root"].decode(),
+                                 str(entry.resolve().parent.parent / "share/agent-platform"))
+            checked += 1
+        self.assertTrue(checked, "no installed launcher names the package")
+
     def run_child(self, argv, env, cwd):
         return subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=True,
                               timeout=TIMEOUT_SECONDS, check=False)
@@ -159,13 +186,13 @@ class AgentToolsLauncherTest(unittest.TestCase):
     def closure_launchers(self) -> list[tuple[Path, str]]:
         launchers = []
         for path in self.system_closure():
-            if not re.fullmatch(r"[0-9a-z]{32}-agent-tools-.+", path.name):
+            if not re.fullmatch(r"[0-9a-z]{32}-agent-platform", path.name):
                 continue
-            self.assertTrue(path.is_file(), f"{path} is not a launcher file")
-            data = path.read_bytes()
-            match = LAUNCHER.fullmatch(data)
-            self.assertIsNotNone(match, f"{path} is not a recognized agent-tools launcher")
-            launchers.append((path, match["python"].decode()))
+            for launcher in sorted((path / "bin").iterdir()):
+                data = launcher.read_bytes()
+                match = LAUNCHER.fullmatch(data)
+                self.assertIsNotNone(match, f"{launcher} is not a recognized agent-tools launcher")
+                launchers.append((launcher, match["python"].decode()))
         return launchers
 
     def test_the_system_closure_holds_one_agent_tools_build(self):

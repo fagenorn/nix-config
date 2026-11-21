@@ -15,7 +15,7 @@ import tempfile
 import time
 import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -1034,8 +1034,12 @@ def uncovered(moved, rows) -> list[str]:
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifty_two_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 52)
+    def test_the_set_is_fifty_five_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 55)
+        self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:5],
+                         ("permission-stale", "permission-card", "waiting-until", "paused",
+                          "owner-check"))
+        self.assertEqual(shots.STATES[shots.STATES.index("notice-post-open") + 1], "live-fault")
         self.assertEqual(shots.STATES[-8:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors", "owner-accounts"))
@@ -1178,6 +1182,30 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         self.assertLess(order.index(wanted), order.index("shot"))
                     else:
                         self.assertNotIn(wanted, page.waits)
+
+    def test_the_live_fault_shot_waits_for_its_line_where_the_service_declares_them(self) -> None:
+        wanted = (".sprint-checks .live-fault", ".live-fault-withdraw")
+        for width in (1440, 480):
+            for declared in (True, False):
+                with self.subTest(width=width, declared=declared), \
+                        tempfile.TemporaryDirectory() as tmp, \
+                        mock.patch.object(shots, "declares_live_faults", return_value=declared):
+                    browser, page = fake_browser(set())
+                    order = []
+                    page.screenshot = lambda path, full_page: order.append("shot")
+                    wait = page.wait_for_selector
+                    page.wait_for_selector = lambda s: (wait(s), order.append(s))
+                    shots._shoot(browser, "http://console.test/", "live-fault", width, Path(tmp))
+                    for selector in wanted:
+                        if declared:
+                            self.assertIn(selector, page.waits)
+                            self.assertLess(order.index(selector), order.index("shot"))
+                        else:
+                            self.assertNotIn(selector, page.waits)
+
+    def test_the_live_fault_withdraw_is_not_jargon(self) -> None:
+        self.assertIn("button.live-fault-withdraw", shots.JARGON_COUNT)
+        self.assertIn("button.notice-withdraw", shots.JARGON_COUNT)
 
     def test_the_owner_accounts_shot_opens_the_panel_and_waits_for_sign_out_where_the_service_offers_it(
             self) -> None:
@@ -1845,6 +1873,19 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     shots.main(["--out", tmp, *flags])
                 self.assertEqual(raised.exception.code, 2)
 
+    def test_a_real_answer_run_passes_the_sheets_and_the_composite_to_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(shots, "capture", return_value=[]) as capture, \
+                redirect_stdout(StringIO()) as out:
+            answer = Path(tmp) / "answer.txt"
+            answer.write_text("Answer: plain", encoding="utf-8")
+            self.assertEqual(shots.main(["--out", tmp, "--question", "Q?", "--answer-file",
+                                         str(answer), "--sheets", "--composite", "combined.png"]), 0)
+        self.assertEqual(capture.call_args.kwargs["composite"], "combined.png")
+        self.assertIs(capture.call_args.kwargs["sheets"], True)
+        self.assertEqual(capture.call_args.kwargs["states"], ("question-read",))
+        self.assertIn("combined.png", out.getvalue())
+
     def test_a_real_answer_seeds_the_question_read_state_with_that_question_and_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             now_s = time.time()
@@ -2362,6 +2403,74 @@ class ScreenshotFixtureTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "out-sheet.png"):
                 shots.sheet(Browser(), [a, b], out)
 
+    def test_the_wait_and_pause_states_seed_a_report_that_states_them(self) -> None:
+        calls = []
+
+        class StandIn:
+            now_s = 1_800_000_000.0
+
+            def sprint(self, *args, **kwargs):
+                calls.append(kwargs)
+                return "0" * 16, "Add resumable uploads."
+
+        for state, extra in (("waiting-until", {"wait_until": shots._iso(1_800_000_000.0 + 7200)}),
+                             ("paused", {"paused": shots.PAUSE_REASON})):
+            with self.subTest(state=state):
+                calls.clear()
+                shots._seed_state(StandIn(), state)
+                self.assertEqual([c.get("report_extra") for c in calls], [extra])
+                self.assertEqual(calls[0]["report"], 45 * shots.MINUTE)
+
+    def test_a_composite_puts_the_named_states_sheets_side_by_side(self) -> None:
+        recorded = []
+
+        class Row:
+            def screenshot(self, path=None, **kwargs):
+                Path(path).write_bytes(b"x")
+
+        class Page:
+            def set_content(self, html, **kwargs):
+                recorded.append(html)
+
+            def locator(self, selector):
+                return Row()
+
+            def close(self):
+                pass
+
+        class Browser:
+            def new_page(self, **kwargs):
+                return Page()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "waiting-until-sheet.png").write_bytes(b"\x89PNG-waiting")
+            (tmp / "paused-sheet.png").write_bytes(b"\x89PNG-paused")
+            got = shots.composite_sheet(Browser(), tmp, ("waiting-until", "paused"),
+                                        "wait-and-pause.png")
+            self.assertEqual(got, tmp / "wait-and-pause.png")
+            waiting = base64.b64encode(b"\x89PNG-waiting").decode()
+            paused = base64.b64encode(b"\x89PNG-paused").decode()
+            self.assertLess(recorded[-1].index(waiting), recorded[-1].index(paused))
+
+    def test_main_passes_the_states_and_the_composite_to_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(shots, "capture", return_value=[]) as capture, \
+                    redirect_stdout(StringIO()) as out:
+                self.assertEqual(shots.main(["--out", tmp, "--sheets", "--states",
+                                             "waiting-until,paused", "--composite",
+                                             "wait-and-pause.png"]), 0)
+            self.assertEqual(capture.call_args.kwargs["states"], ("waiting-until", "paused"))
+            self.assertEqual(capture.call_args.kwargs["composite"], "wait-and-pause.png")
+            self.assertIn(str(Path(tmp) / "wait-and-pause.png"), out.getvalue())
+            for argv in (["--composite", "x.png"], ["--states", "nope"]):
+                with self.subTest(argv=argv), mock.patch.object(shots, "capture") as capture, \
+                        redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        shots.main(["--out", tmp, *argv])
+                    self.assertEqual(raised.exception.code, 2)
+                    capture.assert_not_called()
+
     def test_main_asks_capture_for_sheets_only_with_the_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for flag, expected in (([], False), (["--sheets"], True)):
@@ -2529,6 +2638,18 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(
                         running[0]["now_text"],
                         "the manager cannot hear the console: bring it back or drop the sprint")
+                elif state == "waiting-until":
+                    self.assertEqual(running[0]["now_text"], "waiting until")
+                    self.assertEqual((running[0]["ball"], running[0]["ball_text"]),
+                                     ("waiting", "waiting"))
+                    self.assertLess(
+                        abs(datetime.fromisoformat(running[0]["now_until"]).timestamp()
+                            - (now_s + 2 * 3600)), 1)
+                elif state == "paused":
+                    self.assertEqual(running[0]["now_text"], "paused: " + shots.PAUSE_REASON)
+                    self.assertEqual((running[0]["ball"], running[0]["ball_text"]),
+                                     ("paused", "paused"))
+                    self.assertIsNone(running[0]["now_until"])
                 elif state == "tell-box-open":
                     self.assertEqual(len(running), 1)
                     self.assertEqual(running[0]["messages"], [])
@@ -2660,6 +2781,20 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertFalse(shots.overlap_card())
                     self.assertEqual(
                         [i for i in view["inbox"]["open"] if i.get("reason") == "question"], [])
+                elif state == "live-fault":
+                    self.assertEqual([s["title"] for s in running], ["Fix the settings page"])
+                    faults = running[0]["live_faults"]
+                    self.assertEqual(len(faults), 1)
+                    self.assertIsInstance(faults[0]["id"], int)
+                    self.assertIsInstance(faults[0]["at"], str)
+                    self.assertEqual(faults, [{
+                        "id": faults[0]["id"], "issue": 12,
+                        "observed": shots.LIVE_FAULT_OBSERVED, "when": shots.LIVE_FAULT_WHEN,
+                        "proven": shots.LIVE_FAULT_PROVEN, "at": faults[0]["at"],
+                        "text": "Live fault in production on #12: saving the settings form "
+                                "drops the billing address, seen 12:10 UTC today, proven by a "
+                                "saved form read back from the production database"}])
+                    self.assertEqual(view["statement"]["inbox_items"], 0)
                 elif state in ("ask-box", "ask-goal"):
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
                     threads = web["questions"]["threads"]

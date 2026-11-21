@@ -70,6 +70,7 @@
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
+| Live fault | Console |
 | Look approval | Delivery |
 | Look file set | Delivery |
 | Look marker | Delivery |
@@ -90,6 +91,7 @@
 | Plan question | Console |
 | Plan-gated floor | Guard |
 | Platform manifest | Project contract |
+| Platform package | Project contract |
 | Prefix reorder | Hosts |
 | Production rule | Guard |
 | Probe | Verification |

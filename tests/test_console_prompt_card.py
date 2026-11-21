@@ -80,7 +80,7 @@ class PromptCardTest(unittest.TestCase):
                          ("prompt.asked", "prompt.answered", "prompt.closed"))
         for kind in (event_log.PROMPT_ASKED, event_log.PROMPT_ANSWERED, event_log.PROMPT_CLOSED):
             self.assertNotIn(kind, event_log.KEPT_KINDS)
-        self.assertEqual(event_log.SCHEMA_VERSION, 12)
+        self.assertEqual(event_log.SCHEMA_VERSION, 13)
         self.assertEqual((prompt_card.ASK_PATH, prompt_card.ANSWER_PATH),
                          ("/api/permission-prompt", "/api/permission-answer"))
         self.assertEqual((prompt_card.HOLD_SECONDS, prompt_card.POLL_SECONDS,

@@ -495,14 +495,17 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "kind": "claim" | "heads-up" | "hand-off", "kind_text": "<text>",
                       "text": "<text>", "what": "<text>" | null, "until_text": "<text>" | null,
                       "to_text": "<text>" | null, "at": "<time>", "owner": <bool>}
+    <live fault entry> = {"id": <int>, "issue": <int>, "observed", "when", "proven",
+                          "at": "<time>", "text": "<text>"}
     <overlap entry> = {"sprints": [<earlier-started sprint id>, <other sprint id>],
                        "files": ["<path>", ...], "text": "<text>"}
     <sprint entry> = {"type": "sprint", "sprint_id", "title", "goal",
                       "state": "drafting" | "starting" | "on_track" | "waiting" | "quota" | "quiet"
                                | "closing" | "done" | "stopping" | "stopped",
                       "state_text": "<text>",
-                      "ball": "manager" | "owner" | "nobody" | null,
+                      "ball": "manager" | "owner" | "nobody" | "waiting" | "paused" | null,
                       "ball_text": "<text>" | null, "now_text": "<sentence>" | null,
+                      "now_until": "<time>" | null,
                       "stated_at", "started_by": "<login>" | null, "age_text",
                       "manager_text": <text> | null,
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
@@ -518,6 +521,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "waiting": <int>,
                       "checks": [{"project_id", "key", "issue", "question", "text"}, ...],
                       "waits": [<wait entry>, ...],
+                      "live_faults": [<live fault entry>, ...],
                       "sessions": [<session entry>, ...],
                       "messages": [<message entry>, ...],
                       "reach_text": "manager not reachable" | null,
@@ -656,7 +660,7 @@ is above 0, the brief waits on the owner (decision none), the sprint is stalled,
 set, its manager failed to start with no brief (`sprints.failed_start`), the sprint has an open permission card
 (`prompted`, #1424; a listed session waiting for an answer or a permission is no longer read here), or its manager
 cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
-else `nobody` ("nothing running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
+else `nobody` ("nothing running, may be stuck"), except that a stated pause (`paused`, "paused") or a stated wait whose time is ahead (`waiting`, "waiting"; `sprints.stated_hold`, #1380) holds it, after the owner's rules and before the movement reading, until the stated time has passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
 that holds: a stop requested, `NOW_STOPPING_TEXT`; a manager that cannot hear the console
 (#1229: the sprint's manager session has `SessionMovement.held`, its transcript's last peer message
 being one the client held and did not deliver), `NOW_DEAF_TEXT`; an open permission card of the sprint,
@@ -665,7 +669,7 @@ being one the client held and did not deliver), `NOW_DEAF_TEXT`; an open permiss
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
-wait, `NOW_QUOTA_TEXT`; an unread message the console delivered (`sprints.unread`, `delivered_at` set,
+wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock), `NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); an unread message the console delivered (`sprints.unread`, `delivered_at` set,
 #1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
 (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
 whose signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
@@ -749,6 +753,11 @@ landed gives none) whose rule is `OVERLAP_UNSETTLED`, in `claim_overlaps` order,
 is `OVERLAP_UNSETTLED_TEXT` over the two sprints' titles in that order and the files joined with
 `", "`. A settled overlap gives no entry. An overlap entry is never an inbox item and changes no
 `inbox`, count, headline, sentence or `stale` (#1347, ADR-console-091).
+Every sprint entry, running or finished, carries `live_faults`: the sprint's standing live-fault
+declarations (`open_faults`, so never a withdrawn one) in id order, `[]` when none. `text` is
+`LIVE_FAULT_TEXT` over the issue, `observed`, `when` and `proven`; `at` is the declaration's own time,
+unchanged. A live fault is never an inbox item and changes no `inbox`, count, headline, sentence or
+`stale` (#1432).
 Every entry carries `owner`, false for a sprint's notice. The project's open owner notices
 (`owner_notices`, a map from project id to its folded owner notices, default none; only
 `open_owner_notices` of them, so never a withdrawn one) join the same list, ordered by `id` with the
@@ -822,6 +831,8 @@ from agent_tools.console.sprints import (
     BALL_MANAGER,
     BALL_NOBODY,
     BALL_OWNER,
+    BALL_PAUSED,
+    BALL_WAITING,
     BALL_TEXT,
     CHECK_LINE_TEXT,
     CLOSED_OUT,
@@ -860,6 +871,7 @@ from agent_tools.console.sprints import (
     NOW_FAILED_START_TEXT,
     NOW_LOCK_TEXT,
     NOW_NO_PROGRESS_TEXT,
+    NOW_PAUSED_TEXT,
     NOW_PERMISSION_TEXT,
     NOW_QUESTION_TEXT,
     NOW_QUIET_TEXT,
@@ -871,9 +883,11 @@ from agent_tools.console.sprints import (
     NOW_STARTING_TEXT,
     NOW_UNREAD_TEXT,
     NOW_STOPPING_TEXT,
+    NOW_WAIT_TEXT,
     ON_TRACK,
     ON_TRACK_TEXT,
     OVERLAP_UNSETTLED,
+    PAUSED,
     PICKED_UP,
     PICKED_UP_TEXT,
     PICKUP_MINUTE_TEXT,
@@ -910,8 +924,10 @@ from agent_tools.console.sprints import (
     QuestionPicture,
     PendingStop,
     SprintState,
+    WAIT_UNTIL,
     age_text,
     claim_overlaps,
+    fault_entry,
     closing_text,
     cut,
     ended_at,
@@ -924,10 +940,12 @@ from agent_tools.console.sprints import (
     open_questions,
     pending_looks,
     project_notices,
+    open_faults,
     open_notices,
     open_owner_notices,
     progress_text,
     sprint_title,
+    stated_hold,
     takes_notices,
     takes_questions,
     unread,
@@ -952,6 +970,7 @@ NOTICE_OWNER_TEXT = "for you"
 NOTICE_FOR_TEXT = "for {title}"
 NOTICE_OTHER_TEXT = "for another sprint"
 NOTICE_YOU_TEXT = "You"
+LIVE_FAULT_TEXT = "Live fault in production on #{issue}: {observed}, seen {when}, proven by {proven}"
 OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a live fault in {files}; "
                           "the rule could not decide which lands first")
 ASK_WORKING_TEXT = "Working on it"
@@ -1645,13 +1664,19 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     nobody; a `failed` manager with no listed session drops only the goal's stated time from the
     signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
     run, report, approval or wait signal inside the window keeps it manager whatever its order
-    against the failure. `waits` are the sprint's wait signals. A `deaf` manager (its transcript
+    against the failure. A stated pause or a stated wait whose time is ahead
+    (`sprints.stated_hold`, #1380) reads `paused` or `waiting`, not the manager's: nothing is
+    running, and the manager has said so, so the nothing-running line returns only once the stated
+    time has passed with nothing running. `waits` are the sprint's wait signals. A `deaf` manager (its transcript
     shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
     if (waiting or deaf or prompted or brief_pending(state) or state.stalled is not None
             or state.no_progress_at is not None or failed_start):
         return BALL_OWNER
+    hold = stated_hold(state, now_ms)
+    if hold is not None:
+        return BALL_PAUSED if hold[0] == PAUSED else BALL_WAITING
     quiet_for = sprint_quiet_for(state, now_ms, listed, waits)
     return BALL_MANAGER if quiet_for is None else BALL_NOBODY
 
@@ -1683,12 +1708,13 @@ def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
                stages: Sequence[tuple[int, str, str]], ball: str | None,
                wait: str | None = None, failed_start: bool = False,
-               deaf: bool = False, prompted: bool = False) -> str | None:
+               deaf: bool = False, prompted: bool = False,
+               hold: tuple[str, str] | None = None) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
     ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
     `ball`, `wait` (`sprint_wait`), `failed_start`, `deaf` (the manager holds the console's wake
-    behind a prompt no one answers, #1229) and `prompted` (an open permission card of its manager,
-    #1424) are the entry's own."""
+    behind a prompt no one answers, #1229), `prompted` (an open permission card of its manager,
+    #1424) and `hold` (`sprints.stated_hold`, #1380) are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -1720,6 +1746,8 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_NO_PROGRESS_TEXT
     if quota is not None:
         return NOW_QUOTA_TEXT
+    if hold is not None:
+        return NOW_PAUSED_TEXT.format(reason=hold[1]) if hold[0] == PAUSED else NOW_WAIT_TEXT
     if any(message.delivered_at is not None for message in unread(state)):
         return NOW_UNREAD_TEXT
     reason = merge_refused(state)
@@ -1833,6 +1861,10 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     deaf = any(m.held and m.session_id in manager_ids for m in own)
     ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf,
                        prompted=prompted)
+    hold = stated_hold(state, now_ms)
+    now_text = sprint_now(state, quota, listed, waiting, stages, ball,
+                          sprint_wait(state, now_ms, listed, waits), failed_start=failed,
+                          deaf=deaf, prompted=prompted, hold=hold)
     minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
@@ -1843,9 +1875,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "state_text": text,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
-        "now_text": sprint_now(state, quota, listed, waiting, stages, ball,
-                               sprint_wait(state, now_ms, listed, waits), failed_start=failed,
-                               deaf=deaf, prompted=prompted),
+        "now_text": now_text,
+        "now_until": (hold[1] if hold is not None and hold[0] == WAIT_UNTIL
+                      and now_text == NOW_WAIT_TEXT else None),
         "stated_at": state.stated_at,
         "started_by": state.started_by,
         "age_text": age_text(elapsed),
@@ -1872,6 +1904,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                     "text": CHECK_LINE_TEXT.format(question=r.item["question"])}
                    for r in checks],
         "waits": [dict(w) for w in wait_lines],
+        "live_faults": [{**fault_entry(f), "text": LIVE_FAULT_TEXT.format(
+            issue=f.issue, observed=f.observed, when=f.when, proven=f.proven)}
+                        for f in open_faults(state)],
         "sessions": [_session_entry(s, deliveries, now_ms, STATE_TEXT, waits_of)
                      for s in _ordered(sessions)],
         "messages": [_message_entry(m, now_ms, minute, retry, looked, ended is not None)
