@@ -62,7 +62,8 @@ A credential-shaped text (#1272) is refused first, with `CREDENTIAL`, before it 
 `credential_shaped(text)` is true when any pattern of `CREDENTIAL_SHAPES` (known token prefixes,
 key blocks, a `Bearer` value, a JWT, a `token`/`secret`/`password`-style assignment in any case,
 quoted or not, with a real value, the console's own page token, and a long base64 run that is not
-an SRI hash or a path, a path being slash-separated words each holding three lowercase letters in a row)
+an SRI hash or a path, a path being slash-separated parts that are each a word holding three lowercase letters in a row,
+a label of up to four characters, or a short CamelCase or acronym name such as `README`, `HTTP2` or `Vec3D`)
 searches it. The refusal text never holds any of the question's text.
 Limits (#1272): the shapes judge text as a paste gives it. A credential split by spaces or invisible
 characters, encoded (URL encoding, hex, or base64 of a token), a password shorter than eight characters
@@ -316,7 +317,8 @@ CREDENTIAL_SHAPES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
         ("assignment",
          r"\b[A-Za-z0-9_.-]*(?i:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)(?:"
          r"[\"']?\s*=\s*[\"'](?![$<{])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
-         r"|[\"']?\s*=\s*(?![$<{])(?![^\s\"']*(?:[(\[]|\.[A-Za-z_]))(?=[^\s\"']*[0-9-])"
+         r"|[\"']?\s*=\s*(?![$<{])(?![^\s\"']*[(\[])(?!(?![^\s\"']*[0-9])[^\s\"']*\.[A-Za-z_])"
+         r"(?=[^\s\"']*[0-9-])"
          r"(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
          r"|[\"']\s*:\s*[\"']?(?![$<{])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
          r"|\s*:\s*[\"']?(?![$<{])(?=[^\s\"']*[0-9])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,})"),
@@ -325,7 +327,10 @@ CREDENTIAL_SHAPES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
          r"[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
         ("base64_run",
          r"(?<![A-Za-z0-9+/=])(?<!sha1-)(?<!sha256-)(?<!sha384-)(?<!sha512-)"
-         r"(?!(?:(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*|[A-Za-z0-9+]{0,4})/)+(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*|[A-Za-z0-9+]{0,4})(?![A-Za-z0-9+/=]))"
+         r"(?!(?:(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*|[A-Za-z0-9+]{0,4}"
+         r"|(?=[A-Za-z0-9+]{1,10}(?![A-Za-z0-9+]))(?:[A-Z][a-z]{0,2}|[0-9][a-z]?)+)/)+"
+         r"(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*|[A-Za-z0-9+]{0,4}"
+         r"|(?=[A-Za-z0-9+]{1,10}(?![A-Za-z0-9+]))(?:[A-Z][a-z]{0,2}|[0-9][a-z]?)+)(?![A-Za-z0-9+/=]))"
          r"(?=(?:[A-Za-z0-9+/]*?[A-Z]){2})(?=(?:[A-Za-z0-9+/]*?[a-z]){2})"
          r"(?=(?:[A-Za-z0-9+/]*?[0-9]){2})[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])"),
     ))

@@ -2085,6 +2085,10 @@ class CredentialShapeTest(unittest.TestCase):
             "password = copper-harbor-lantern",
             "db_password: copper-harbor-9",
             "'secret': 'lantern-harbor'",
+            "DB_PASSWORD=Tr0ub4dor.Horse99",
+            "SECRET=v2.Kq8Zr3Lm9Xp",
+            "API_TOKEN=Ab3dE.f9Gh2Jk7Lm",
+            "PASSWORD=pass.Word2024",
         ):
             with self.subTest(text=text):
                 matched = [n for n, p in project_question.CREDENTIAL_SHAPES if p.search(text)]
@@ -2149,6 +2153,10 @@ class CredentialShapeTest(unittest.TestCase):
             "see src/UI/Components/Button2Group/Item3View/Panel4.tsx",
             "GET api/v1/Users/Profile2Settings/Avatar3Image",
             "tests/E2E/LoginFlow2Spec/Checkout3Spec.ts",
+            "see https://github.com/Org2Name/Repo3Name/blob/main/README.md",
+            "see src/math/Vec3D/Mat4x4/Quaternion.ts",
+            "see vendor/HTTP2/Server3Push/handlers/stream.go",
+            "src/codecs/MP4Box/Parser2Test/Reader.ts",
         )
         for text in texts:
             with self.subTest(text=text):
