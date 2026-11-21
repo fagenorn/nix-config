@@ -2314,6 +2314,19 @@ class QuestionRecordsServiceTest(QuestionCase):
             self.records_of(svc)
         self.assertEqual(held, [True])
 
+    def test_a_direct_poll_spend_runs_under_the_spend_lock(self):
+        svc = self.arrange(with_spend=False)
+        held = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            held.append(svc._spend_lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            svc.poll_spend()
+        self.assertEqual(held, [True])
+
     def test_questions_started_together_before_the_first_poll_share_one_spend_read(self):
         threads = []
 

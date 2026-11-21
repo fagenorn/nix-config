@@ -1619,8 +1619,8 @@ unreadable, again only after it read successfully in between) and `console: jour
 Spend (#1134): the thread named `SPEND_THREAD`, started by `start()`, calls `poll_spend()` every
 `spend_seconds` (`SPEND_SECONDS`), the first poll `spend_seconds` after `start()`; construction never
 reads a transcript, so the view's `spend` is null until that poll; a question job that finds no view runs
-one spend read itself (#1357), the spend loop and that read hold one lock so they never read at once,
-and a job that finds a view once it holds the lock reads nothing. `poll_spend()` reads the session,
+one spend read itself (#1357), the spend loop, that read and a direct `poll_spend()` hold one lock so they
+never read at once, and a job that finds a view once it holds the lock reads nothing. `poll_spend()` reads the session,
 session-subagent and workflow agent transcripts under the `projects` directory beside each of
 `session_dirs()` (see `spend.py`), and on darwin the keepalive ping log (`ping_log()`), outside the
 ingest lock, then builds the spend view and publishes it under that lock; it appends nothing to the
@@ -8540,6 +8540,10 @@ class ConsoleService:
 
     def poll_spend(self) -> None:
         """Read the transcripts, rebuild the spend view and publish it; see the module docstring."""
+        with self._spend_lock:
+            self._poll_spend()
+
+    def _poll_spend(self) -> None:
         projects_dirs: list[Path] = []
         for directory in self._session_dirs():
             projects = Path(directory).parent / "projects"
@@ -8560,7 +8564,7 @@ class ConsoleService:
         try:
             with self._spend_lock:
                 if not (only_without_view and self._spend_view is not None):
-                    self.poll_spend()
+                    self._poll_spend()
         except Exception as error:
             print(f"console: spend_poll_failed {type(error).__name__}: {error}",
                   file=sys.stderr)
