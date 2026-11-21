@@ -604,9 +604,13 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("Attribution has one source: the generated settings' `attribution`", doc)
         self.assertIn("nothing reads the contract's retired co-author member (#1449)", doc)
         self.assertNotIn("co_authored_by", raw)
-        at = raw.index("Attribution has one source")
-        self.assertGreater(at, raw.index("## Settings"))
-        self.assertLess(at, raw.index("## Allow surface and lifecycle guard"))
+        settings = land_queue_section(raw, "Settings")
+        self.assertIn("Attribution has one source: the generated settings' `attribution`", settings)
+        self.assertIn("`attribution` is the one configuration setting for Claude Code's automatic "
+                      "attribution", re.sub(r"\s+", " ", settings))
+        self.assertIn("The two delivery programs tell their agents separately to omit commit "
+                      "trailers", re.sub(r"\s+", " ", settings))
+        self.assertNotIn("delivery program decides it", doc)
 
     def test_the_owner_port_peer_decision_is_recorded(self):
         path = "docs/areas/console/adr/076-the-owners-port-answers-only-the-owners-own-processes.md"
