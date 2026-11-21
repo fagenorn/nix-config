@@ -188,6 +188,22 @@ whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` i
 (`line`, `ball`, `retry`, `reason`) otherwise. It reads only that endpoint and its report never names a
 project, root, title or reason, since the repository is public.
 
+`console-manager-merge --repo OWNER/NAME --since SHA [--log PATH] [--repo-root DIR]`
+(`verify_checks.console_manager_merge`, issue 1377) is met when a manager merged its own sprint's pull request
+through the console's permit after the change was activated. It reads the console's event log read-only (`--log`,
+default `events.sqlite3` under the console's state directory), the repository at `--repo-root` (default `.`) and
+the forge's pull request. The anchor is the earliest `activation.finished` row that is `ok` and whose `commit` has
+`--since` as an ancestor or equal (`git merge-base --is-ancestor`); with none the check is `not_yet` (75). The window
+is from that row's time to seven days after it. It is met (0) when, inside the window, a `permit.judged` row with
+verb `merge`, decision `allow` and `repo` equal to `--repo` names a session that a `session.seen` row called
+`<project> sprint <that row's sprint id>`, a `permit.landed` row with the same sprint, session, repo and target is
+at or after it, and the forge's `repos/REPO/pulls/PR` is merged at the target's head with a `merged_at` from the
+judged second to the landed time. Otherwise it is `not_yet` (75) while the verifier's clock is inside the window and
+`not_met` (1) once it is past, whenever the verifier runs. The report is `{"met", "verdict", "pr", "head",
+"judged_at", "landed_at", "merged_at", "activated_at"}`, the last six null unless met, and names no project, root,
+sprint or session. A malformed `--repo` or `--since` is a usage error (2) before any read; an unreadable log, git or
+forge is 2.
+
 `console-no-card --port N --key K [--key K ...]` (`verify_checks.console_no_card`, issue 1327) reads
 `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not JSON is `unreachable`,
 exit 75) and applies `no_card_state` to it: it is `absent` (0) only when the inbox is readable and no entry of
@@ -316,11 +332,12 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from typing import IO
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
+from agent_tools.project_contract import agent_platform
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers, forge_owner_action
@@ -1746,6 +1763,105 @@ def _activation_state(home: Path, merge: str, repo_root: Path, run) -> str:
     return "clean"
 
 
+MANAGER_MERGE_WINDOW = timedelta(days=7)
+_MANAGER_MERGE_EMPTY = {"pr": None, "head": None, "judged_at": None, "landed_at": None,
+                        "merged_at": None, "activated_at": None}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _log_rows(store: Path, kinds: Sequence[str]) -> list[tuple[datetime, str, dict]]:
+    """The (time, kind, payload) of every row of `kinds` in sequence order; rows that do not parse are dropped."""
+    try:
+        connection = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError) as error:
+        raise ToolError("log_unreadable", type(error).__name__) from error
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            f"SELECT at, kind, payload FROM events WHERE kind IN ({','.join('?' * len(kinds))}) ORDER BY seq",
+            tuple(kinds)).fetchall()
+    except sqlite3.Error as error:
+        raise ToolError("log_unreadable", type(error).__name__) from error
+    finally:
+        connection.close()
+    found = []
+    for at, kind, text in rows:
+        try:
+            payload = json.loads(text)
+            when = parse_rfc3339_utc(at)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(payload, dict):
+            found.append((when, kind, payload))
+    return found
+
+
+def _manager_merge_anchor(rows, since: str, repo_root: Path) -> datetime | None:
+    """The time of the earliest ok `activation.finished` whose commit has `since` as an ancestor, or None."""
+    for when, kind, payload in rows:
+        commit = payload.get("commit")
+        if (kind != "activation.finished" or payload.get("ok") is not True or not isinstance(commit, str)
+                or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+            continue
+        if _git(repo_root, "merge-base", "--is-ancestor", since, commit).returncode == 0:
+            return when
+    return None
+
+
+def console_manager_merge(repo: str, since: str, *, log: Path | None = None,
+                          repo_root: Path = Path(".")) -> tuple[int, dict]:
+    """Issue 1377: a manager merged its own sprint's pull request through the console's permit after activation."""
+    store = log if log is not None else agent_platform.state_root() / "console" / "events.sqlite3"
+    rows = _log_rows(store, ("activation.finished", "session.seen", "permit.judged", "permit.landed"))
+    start = _manager_merge_anchor(rows, since, repo_root)
+    if start is None:
+        return 75, {"met": False, "verdict": "not_yet", **_MANAGER_MERGE_EMPTY}
+    end = start + MANAGER_MERGE_WINDOW
+    named = {(payload.get("session_id"), payload.get("name"))
+             for _, kind, payload in rows if kind == "session.seen"}
+
+    def target_of(payload):
+        target = payload.get("target")
+        if (isinstance(target, dict) and _is_int(target.get("pr")) and isinstance(target.get("head"), str)):
+            return target["pr"], target["head"]
+        return None
+
+    def in_window(when):
+        return start <= when <= end
+
+    landings = [(when, payload, target_of(payload)) for when, kind, payload in rows
+                if kind == "permit.landed" and in_window(when)]
+    for judged_at, kind, judged in rows:
+        sprint, session, target = judged.get("sprint_id"), judged.get("session_id"), target_of(judged)
+        if (kind != "permit.judged" or not in_window(judged_at) or judged.get("verb") != "merge"
+                or judged.get("decision") != "allow" or judged.get("repo") != repo or target is None
+                or not isinstance(sprint, str) or not isinstance(session, str)
+                or not any(seen == session and isinstance(name, str) and name.endswith(f" sprint {sprint}")
+                           and len(name) > len(f" sprint {sprint}") for seen, name in named)):
+            continue
+        for landed_at, landed, landed_target in landings:
+            if (landed_at < judged_at or landed_target != target or landed.get("sprint_id") != sprint
+                    or landed.get("session_id") != session or landed.get("repo") != repo):
+                continue
+            pull = forge_api.api_get(f"repos/{repo}/pulls/{target[0]}")
+            head = pull.get("head") if isinstance(pull, dict) else None
+            if (not isinstance(pull, dict) or pull.get("merged") is not True or not isinstance(head, dict)
+                    or head.get("sha") != target[1]):
+                continue
+            merged_at = _forge_time(pull.get("merged_at"), "merged_at")
+            # The forge reports whole seconds, the log microseconds: compare at the forge's resolution.
+            if judged_at.replace(microsecond=0) <= merged_at <= landed_at:
+                return 0, {"met": True, "verdict": "met", "pr": target[0], "head": target[1],
+                           "judged_at": judged_at.isoformat(), "landed_at": landed_at.isoformat(),
+                           "merged_at": merged_at.isoformat(), "activated_at": start.isoformat()}
+    if _utcnow() <= end:
+        return 75, {"met": False, "verdict": "not_yet", **_MANAGER_MERGE_EMPTY}
+    return 1, {"met": False, "verdict": "not_met", **_MANAGER_MERGE_EMPTY}
+
+
 def _proxy_answers(port: int, timeout: float) -> bool:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
@@ -2555,6 +2671,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-failed-start",
         help="issue 1182: an open failed-start card's sprint line reads the failed start, with Retry")
     failed.add_argument("--port", type=_port, required=True)
+    manager_merge = checks.add_parser(
+        "console-manager-merge",
+        help="issue 1377: a manager merged its sprint's pull request through the console's permit "
+             "after activation")
+    manager_merge.add_argument("--repo", type=_repo, required=True)
+    manager_merge.add_argument("--since", type=_merge_sha, required=True)
+    manager_merge.add_argument("--log", type=Path)
+    manager_merge.add_argument("--repo-root", type=Path, default=Path("."))
     no_card = checks.add_parser(
         "console-no-card",
         help="issue 1327: the console lists no inbox card with any of the given keys")
@@ -2615,6 +2739,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.check == "console-failed-start":
         code, report = console_failed_start(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "console-manager-merge":
+        try:
+            code, report = console_manager_merge(args.repo, args.since, log=args.log,
+                                                 repo_root=args.repo_root)
+        except (ToolError, GitError) as error:
+            print(f"verify-checks: {getattr(error, 'kind', 'git_error')}: {error}", file=sys.stderr)
+            return 2
+        except forge_api.ForgeError as error:
+            print(f"verify-checks: forge_error: {error.code}", file=sys.stderr)
+            return 2
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "console-no-card":

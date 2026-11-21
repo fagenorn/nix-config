@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import inbox
+from agent_tools.console import event_log, inbox
 from agent_tools.console import manager as console_manager
 from agent_tools.console import sprints as console_sprints
 from agent_tools.console import view as console_view
@@ -2471,6 +2471,174 @@ class ConsoleFailedStartTest(unittest.TestCase):
 
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/console-failed-start"), "100755")
+
+
+class ConsoleManagerMergeTest(unittest.TestCase):
+    """`console-manager-merge` (issue 1377): a manager merged its own pull request after activation."""
+
+    SPRINT = "a" * 16
+    SESSION = "manager-session"
+    REPO = "octo/widgets"
+    HEAD = "b" * 40
+    T0 = datetime(2026, 11, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.root = self.dir / "repo"
+        self.root.mkdir()
+        self.shas = {}
+        self.git("init", "-q")
+        for name in ("P", "S", "C"):
+            self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                     "commit", "-q", "--allow-empty", "-m", name)
+            self.shas[name] = self.git("rev-parse", "HEAD").strip()
+        self.at = self.T0
+        self.log_path = self.dir / "events.sqlite3"
+        self.log = event_log.EventLog(self.log_path, clock=lambda: self.at.isoformat(timespec="microseconds"))
+        self.addCleanup(self.log._connection.close)
+        self.pulls = {}
+        self.calls = []
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.root), *args], capture_output=True, text=True,
+                              check=True).stdout
+
+    def append(self, kind, payload, when):
+        self.at = self.T0 + when
+        self.log.append([(kind, None, payload)])
+
+    def activated(self, commit="C", ok=True, when=timedelta(0)):
+        self.append("activation.finished", {"root": "/r", "commit": self.shas[commit], "ok": ok,
+                                            "reason": None, "next_step": None}, when)
+
+    def seen(self, session=None, sprint=None, when=timedelta(0)):
+        self.append("session.seen", {"session_id": session or self.SESSION, "cwd": "/r", "repo": None,
+                                     "state": "idle", "name": f"p00 sprint {sprint or self.SPRINT}"}, when)
+
+    def permit(self, kind, when, repo=None, session=None, pr=7, head=None):
+        payload = {"sprint_id": self.SPRINT, "session_id": session or self.SESSION,
+                   "repo": repo or self.REPO, "verb": "merge",
+                   "target": {"pr": pr, "head": head or self.HEAD}}
+        if kind == "permit.judged":
+            payload.update(decision="allow", reason="allowed")
+        self.append(kind, payload, when)
+
+    def pull(self, merged_at, head=None, pr=7, merged=True):
+        self.pulls[pr] = {"merged": merged, "head": {"sha": head or self.HEAD},
+                          "merged_at": None if merged_at is None else
+                          (self.T0 + merged_at).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+    def landed_merge(self, day=1, **extra):
+        """A judged allow at 10:00, its landing at 10:01 and the pull merged at 10:00:30 of the day."""
+        start = timedelta(days=day, hours=10)
+        self.permit("permit.judged", start, **extra)
+        self.permit("permit.landed", start + timedelta(minutes=1), **extra)
+        self.pull(start + timedelta(seconds=30), head=extra.get("head"))
+
+    def run_check(self, now, *argv):
+        def api_get(path, allow=()):
+            self.calls.append(path)
+            prefix = f"repos/{self.REPO}/pulls/"
+            self.assertTrue(path.startswith(prefix), path)
+            return self.pulls[int(path[len(prefix):])]
+
+        out = io.StringIO()
+        args = ["console-manager-merge", "--repo", self.REPO, "--since", self.shas["S"],
+                "--log", str(self.log_path), "--repo-root", str(self.root), *argv]
+        with mock.patch.object(verify_checks.forge_api, "api_get", api_get), \
+                mock.patch.object(verify_checks, "_utcnow", lambda: self.T0 + now), \
+                contextlib.redirect_stdout(out):
+            code = verify_checks.main(args)
+        return code, json.loads(out.getvalue())
+
+    def qualifying(self, day=1):
+        self.activated()
+        self.seen()
+        self.landed_merge(day)
+
+    def test_a_landed_manager_merge_after_activation_is_met(self):
+        self.qualifying()
+        code, report = self.run_check(timedelta(days=2))
+        self.assertEqual(code, 0)
+        self.assertEqual(report["pr"], 7)
+        self.assertEqual((report["met"], report["verdict"], report["head"]), (True, "met", self.HEAD))
+        self.assertEqual(report["activated_at"], self.T0.isoformat())
+        self.assertEqual(report["judged_at"], (self.T0 + timedelta(days=1, hours=10)).isoformat())
+        self.assertEqual(report["merged_at"], (self.T0 + timedelta(days=1, hours=10, seconds=30)).isoformat())
+        self.assertEqual(set(report), {"met", "verdict", "pr", "head", "judged_at", "landed_at",
+                                       "merged_at", "activated_at"})
+
+    def test_a_delayed_verifier_still_counts_a_merge_inside_the_window(self):
+        self.qualifying()
+        self.assertEqual(self.run_check(timedelta(days=10))[0], 0)
+
+    def test_a_merge_after_the_window_is_not_met(self):
+        self.qualifying(day=8)
+        code, report = self.run_check(timedelta(days=10))
+        self.assertEqual((code, report["verdict"], report["pr"]), (1, "not_met", None))
+        self.assertEqual(self.run_check(timedelta(days=8))[0], 1)
+
+    def test_a_merge_before_activation_is_not_counted(self):
+        self.activated()
+        self.seen()
+        self.landed_merge(day=-1)
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+
+    def test_no_qualifying_activation_is_not_yet(self):
+        self.seen()
+        self.landed_merge()
+        self.activated(ok=False)
+        self.activated(commit="P", when=timedelta(hours=1))
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+
+    def test_a_refused_manager_call_then_a_lead_merge_stays_pending(self):
+        self.activated()
+        self.seen()
+        self.permit("permit.judged", timedelta(days=1, hours=10))
+        self.pull(timedelta(days=1, hours=12))
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+
+    def test_a_merge_outside_the_calls_span_is_not_counted(self):
+        for merged_at in (timedelta(days=1, hours=9), timedelta(days=1, hours=11)):
+            with self.subTest(merged_at=merged_at):
+                self.setUp()
+                self.activated()
+                self.seen()
+                self.permit("permit.judged", timedelta(days=1, hours=10))
+                self.permit("permit.landed", timedelta(days=1, hours=10, minutes=1))
+                self.pull(merged_at)
+                self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+
+    def test_a_permit_of_another_repository_or_session_is_not_counted(self):
+        self.activated()
+        self.seen()
+        self.landed_merge(repo="x/y")
+        self.landed_merge(session="other-session")
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+
+    def test_a_merge_at_another_head_or_unmerged_is_skipped(self):
+        self.qualifying()
+        self.pull(timedelta(days=1, hours=10, seconds=30), head="c" * 40)
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+        self.pull(None, merged=False)
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+
+    def test_bad_arguments_are_a_usage_error(self):
+        for argv in (["--repo", "bad", "--since", self.shas["S"]], ["--repo", self.REPO, "--since", "abc"]):
+            with self.subTest(argv=argv):
+                with mock.patch.object(verify_checks.forge_api, "api_get") as api_get, \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(["console-manager-merge", *argv, "--log", str(self.log_path)])
+                self.assertEqual(raised.exception.code, 2)
+                api_get.assert_not_called()
+
+    def test_the_script_is_committed_executable_and_runs_the_check(self):
+        script = f"{CHECKS}/console-manager-merge"
+        self.assertEqual(committed_mode(script), "100755")
+        result = run_from_root([str(ROOT / script), "--repo", "bad", "--since", "x"])
+        self.assertEqual(result.returncode, 2, result.stderr)
 
 
 class ConsoleNoCardTest(unittest.TestCase):

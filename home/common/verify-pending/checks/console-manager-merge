@@ -1,0 +1,3 @@
+#!/bin/sh
+# Verify check for issue 1377: a manager merged its own sprint's pull request through the console's permit after activation.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks console-manager-merge "$@"
