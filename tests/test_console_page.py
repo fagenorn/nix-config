@@ -229,7 +229,7 @@ class PageTest(unittest.TestCase):
              "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
              "/api/guest-signin-cancel", "/api/adoption-merge", "/api/account-signout",
              "/api/guest-account-signout", "/api/guest-account-remove",
-             "/api/project-question-delete", "/api/release-answer"},
+             "/api/project-question-delete", "/api/release-answer", "/api/permission-answer"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -238,7 +238,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 55)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 56)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -11746,3 +11746,111 @@ class PageOverlapTest(unittest.TestCase):
             {"snapshot": True},
         ])
         self.assertEqual(of_class(snap["projects"], "li", "overlap"), [])
+
+
+PERMISSION_COMMAND = 'git worktree add ../w && echo "<b>"'
+PERMISSION_ITEM = {
+    "type": "inbox_item", "reason": "permission", "key": "permission/7",
+    "project_id": "o/r", "sprint_id": "s-1", "prompt": 7, "title": "Sprint one",
+    "headline": "Sprint one is asking to run a command",
+    "words": "Create the delivery's worktree", "command": PERMISSION_COMMAND,
+    "answered": False, "waiting_since": "2026-11-21T08:00:00+00:00"}
+
+
+def permission_cards(snap: dict) -> list:
+    return [n for n in nodes(snap["inbox"]) if n["tag"] == "article" and has_class(n, "permission")]
+
+
+def run_page_logged(steps: list) -> tuple[list, str]:
+    """The snapshots and everything the page wrote to stderr (a render error caught and logged shows there)."""
+    done = subprocess.run(
+        [shutil.which("node"), str(HARNESS), str(PAGE)], input=json.dumps(steps),
+        capture_output=True, text=True, timeout=30, env={**os.environ, "TZ": "UTC"})
+    if done.returncode != 0:
+        raise AssertionError(done.stderr)
+    return json.loads(done.stdout), done.stderr
+
+
+class PagePermissionCardTest(unittest.TestCase):
+    def test_an_open_card_shows_its_command_and_both_answers(self) -> None:
+        (snap,) = render([START, {"frame": frame([PERMISSION_ITEM])}, {"snapshot": True}])
+        (card,) = permission_cards(snap)
+        self.assertEqual(card["cls"].split(), ["card", "permission"])
+        self.assertEqual(
+            [(c["tag"], c["cls"].split()[0] if c["cls"] else "") for c in card["children"]],
+            [("p", "q"), ("p", "words"), ("pre", "cmd"), ("p", "meta"), ("div", "act")])
+        (headline,) = of_class(card, "p", "q")
+        (words,) = of_class(card, "p", "words")
+        (command,) = of_class(card, "pre", "cmd")
+        self.assertEqual(full(headline), PERMISSION_ITEM["headline"])
+        self.assertEqual(full(words), "Create the delivery's worktree")
+        self.assertEqual(full(command), PERMISSION_COMMAND)
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "b"], [])
+        (meta,) = of_class(card, "p", "meta")
+        self.assertIn("waiting ", full(meta))
+        (allow,) = of_class(card, "button", "permission-allow")
+        (refuse,) = of_class(card, "button", "permission-refuse")
+        self.assertEqual((full(allow), full(refuse)), ("Allow once", "Refuse"))
+        for button in (allow, refuse):
+            self.assertFalse(has_class(button, "picked"))
+            self.assertFalse(button["disabled"])
+        self.assertEqual(picked(snap), [])
+
+    def test_each_answer_posts_the_owners_choice_and_a_refusal_says_why(self) -> None:
+        for button, answer in (("permission-allow", "allow"), ("permission-refuse", "refuse")):
+            with self.subTest(button=button):
+                pending, failed = render([
+                    START, {"frame": frame([PERMISSION_ITEM])}, {"hold": True},
+                    {"click": button}, {"snapshot": True},
+                    {"release": {"status": 409, "text": "This permission prompt is no longer open.\n"}},
+                    {"snapshot": True}])
+                (post,) = pending["posts"]
+                self.assertEqual(post["url"], "/api/permission-answer")
+                self.assertEqual(posted(post), {"prompt": 7, "answer": answer})
+                self.assertIn("X-Console-Token", post["headers"])
+                (card,) = permission_cards(pending)
+                for cls in ("permission-allow", "permission-refuse"):
+                    (b,) = of_class(card, "button", cls)
+                    self.assertTrue(b["disabled"])
+                    self.assertEqual(b["busy"], "true")
+                (card,) = permission_cards(failed)
+                (fail,) = of_class(card, "span", "fail")
+                self.assertEqual(full(fail), "Could not answer: This permission prompt is no longer open.")
+                for cls in ("permission-allow", "permission-refuse"):
+                    (b,) = of_class(card, "button", cls)
+                    self.assertFalse(b["disabled"])
+                    self.assertIsNone(b["busy"])
+
+    def test_a_card_no_longer_listed_drops_its_failed_answer(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([PERMISSION_ITEM])},
+            {"respond": {"status": 409, "text": "no\n"}}, {"click": "permission-allow"},
+            {"frame": frame([])}, {"frame": frame([PERMISSION_ITEM])}, {"snapshot": True}])
+        (card,) = permission_cards(snap)
+        self.assertNotIn("Could not answer", full(card))
+        for cls in ("permission-allow", "permission-refuse"):
+            (b,) = of_class(card, "button", cls)
+            self.assertFalse(b["disabled"])
+
+    def test_a_permission_card_alone_or_beside_a_tracker_item_renders_once(self) -> None:
+        for items in ([PERMISSION_ITEM], [PERMISSION_ITEM, ANSWERABLE]):
+            with self.subTest(items=len(items)):
+                (snap,), logged = run_page_logged(
+                    [START, {"frame": frame(items)}, {"snapshot": True}])
+                self.assertEqual(logged, "")
+                self.assertEqual(len(permission_cards(snap)), 1)
+                tracker = [n for n in nodes(snap["inbox"])
+                           if n["tag"] in ("article", "li") and "Which host?" in full(n)]
+                self.assertEqual(len(tracker), 1 if len(items) == 2 else 0)
+                others = [n for n in nodes(snap["inbox"]) if n["tag"] == "article"
+                          and not has_class(n, "permission")]
+                self.assertEqual(len(others), len(items) - 1)
+                self.assertEqual(
+                    [n for n in others if PERMISSION_ITEM["headline"] in full(n)
+                     or PERMISSION_COMMAND in full(n)], [])
+                rows = [n for n in nodes(snap["inbox"]) if n["tag"] == "li"
+                        and PERMISSION_ITEM["headline"] in full(n)]
+                self.assertEqual(rows, [])
+
+    def test_no_page_text_names_a_terminal(self) -> None:
+        self.assertNotIn("terminal", PAGE.read_text(encoding="utf-8").lower())
