@@ -265,6 +265,24 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual("release-abandon", permit.ABANDON)
         self.assertEqual("release-dispose", permit.DISPOSE)
 
+    CHAINED = (
+        ("release transaction preview --repo-root r; /opt/bin/release transaction abandon --repo-root r",
+         permit.ABANDON),
+        ("release transaction run --repo-root r --confirm t; /opt/bin/release transaction abandon --repo-root r",
+         permit.ABANDON),
+        ("echo release transaction ok; release transaction abandon --repo-root r", permit.ABANDON),
+        ("release transaction status --repo-root r && release transaction run --repo-root r "
+         "--dispose no_recovery_path --reference x --confirm t", permit.DISPOSE))
+
+    def test_an_earlier_release_mention_does_not_hide_a_later_abandon_or_dispose(self):
+        for command, verb in self.CHAINED:
+            with self.subTest(command):
+                self.assertEqual(verb, permit.verb_of(command))
+                self.assertTrue(mentions(command))
+                verdict = self.judge(command)
+                self.assertEqual((DENY, verb), (verdict.decision, verdict.verb))
+        self.assertEqual([], self.fake.calls)
+
     NO_DECISION = ("release transaction preview --repo-root r",
                    "release transaction preview --repo-root r --dispose no_recovery_path",
                    "release transaction run --repo-root r --disp no_recovery_path --reference x --confirm t",

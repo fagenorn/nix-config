@@ -370,7 +370,6 @@ def release_operation(command: str) -> str | None:
             return DISPOSE
         if literal is not None and index == 0 and verb == "run" and release_target(command) is not None:
             return RELEASE
-        return None
     return None
 
 
