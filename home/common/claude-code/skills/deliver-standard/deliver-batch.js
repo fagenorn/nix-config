@@ -590,6 +590,10 @@ const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { 
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 // #787: the same text as WHOLE in deliver-standard.js.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
+// #1371: the same text in deliver-standard.js; the push_tests payload is what a test reads, the sentence around it is for the agent.
+const PUSH_TESTS = (guards, onFailure = 'fix-and-rerun') => `If you made a commit, then before pushing, run in full every test file among or covering the files you changed (never a single test class), the test files of their direct callers and checkers, and the declared cheap guards (with none declared, any fast suite the project declares), not the declared verification, as this payload lists them: ${JSON.stringify({ push_tests: { when: 'committed', scopes: ['touched', 'callers', 'guards'], guards, on_failure: onFailure, report: 'tests' } })}. touched: every test file among or covering the files you changed; callers: for each function, constant, option, command or file name the commit changed, added or removed, git grep the tree and take the test files of every file that uses or checks it; guards: each entry's argv, run with <worktree>/<its cwd> as working directory. on_failure fix-and-rerun: fix a run that fails and run it again; report: change nothing and return status blocked with the failing command in notes; either way a failing or unrun commit is never pushed. Then return tests: each command and its result, one entry per command; a commit whose report records no test command is refused`
+const tested = f => !!f && Array.isArray(f.tests) && f.tests.some(t => typeof t === 'string' && t.trim() !== '')
+const UNTESTED = 'the fix report records no test command, so its pushed commit is not accepted'
 // #941: what the resolution of a conflicted sync merge tests, the same text in deliver-standard.js: the files it resolved, not everything the merge brought in.
 const RESOLVE_SCOPE = 'the checks of the pull request cover everything else the merge brought in, so run no test for a file that merged cleanly'
 // The fix-commit scope, one line so deliver-standard.js carries it byte for byte: a fix agent once committed a lock file a tool had generated beside its fix.
@@ -1069,7 +1073,7 @@ ${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(foll
         // resolution it runs outside the lock (#913). Only a fix the re-review passes is recorded: advance(true) below takes the lock at it
         // and waits for its checks.
         const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-${SYNC_FIX(W, mc, found, after)} Then push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. ${COMMIT_SCOPE} ${IMPL_RETURN}
+${SYNC_FIX(W, mc, found, after)} Then push (git -C ${W} push origin ${B}). ${PUSH_TESTS([])}. ${COMMIT_SCOPE} ${IMPL_RETURN}
 ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
         // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a rebuttal with evidence, and a
         // full reviewer re-reviews either. A sync-review row from here on names the fix reply: its commit is pushed and unaccepted.
@@ -1078,6 +1082,8 @@ ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', mod
         if (!fix || fix.status !== 'done' || !fix.commit || !sameSha(fix.start_head, head) || (!moved && !nonEmpty(fix.notes))) {
           return syncStop('the sync fix round did not finish', found[0], fix, { review: rv, ...tried })
         }
+        // #1371: the agent pushed this commit itself; with no test command recorded it is not reviewed, recorded, locked or merged in this run.
+        if (moved && !tested(fix)) return syncStop(UNTESTED, found[0], fix, { review: rv, ...tried })
         const rr = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_REREVIEW(W, mc, found, fix, moved, after)}
 ${RULES}`, rereviewLabel, { agentType: 'reviewer', schema: FINDINGS })
@@ -1316,7 +1322,7 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
         return out('ci-failed', { failing: failingNames, ...extra })
       }
       const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${details || 'none given'}.
-${mode === 'first' ? `${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `${FIX_NO_LOCK}\n` : ''}Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
+${mode === 'first' ? `${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `${FIX_NO_LOCK}\n` : ''}Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}). ${PUSH_TESTS([])}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
 When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: mode === 'first' ? { ...IMPL, properties: { ...IMPL.properties, lock_released: { type: 'boolean' } } } : IMPL })
       if (!fix || fix.status !== 'done' || !fix.commit) return end({ detail: 'the fix round did not finish' })
@@ -1338,6 +1344,8 @@ ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema:
         carried = null
         return await waitAgain(mode === 'unasked' ? 'the failed jobs of a red check were rerun before it was asked for' : 'the step that reran the failed jobs of a red check released it')
       }
+      // #1371: the agent pushed this commit itself; with no test command recorded it is not reviewed, recorded, locked or merged in this run.
+      if (!tested(fix)) return end({ detail: UNTESTED })
       if (mode === 'first') {
         log(`#${n}: ${failingNames.join(', ') || 'a check'} failed at the head the lock was taken at; its fix is reviewed outside the land lock`)
         if (!letGo) await unlock()

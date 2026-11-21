@@ -2653,7 +2653,7 @@ class SyncFixRoundTest(unittest.TestCase):
 
     def test_both_programs_carry_the_same_wording(self):
         names = ("MARKER_CHECK", "MARKERS_UNCHECKED", "SYNC_FIX", "SYNC_REREVIEW", "COMMIT_SCOPE",
-                 "SYNC_AFTER", "DESCENDS", "RESOLVE_ORDER", "RERUN_ALL", "STALE_RERUN", "WITH_STALE", "staleOf")
+                 "SYNC_AFTER", "DESCENDS", "RESOLVE_ORDER", "RERUN_ALL", "STALE_RERUN", "WITH_STALE", "staleOf", "PUSH_TESTS", "tested")
         lines = lambda path: {line.split(" ", 2)[1]: line for line in path.read_text(encoding="utf-8").splitlines()
                               if line.startswith(tuple(f"const {name} = " for name in names))}
         batch, standard = lines(PROGRAM), lines(PROGRAM.with_name("deliver-standard.js"))
@@ -2939,7 +2939,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
 
     def test_the_fix_round_of_a_resolution_with_follow_up_commits_starts_at_its_head_and_names_the_range(self):
         d = "d" * 40
-        fixed = {"status": "done", "start_head": C, "commit": d, "notes": "ok"}
+        fixed = {"status": "done", "start_head": C, "commit": d, "notes": "ok", "tests": ["t"]}
         found = dict(self.FOUND, descends=True)
         out = self.land(**{"land-sync-resolve-1-1": self.FOLLOWED, "land-sync-review-1-1": found, "land-sync-fix-1-1": fixed})
         calls = out["calls"]
@@ -3932,6 +3932,26 @@ WHOLE_RUN = ("run in full every test file among or covering", "never a single te
              "any fast suite the project declares", "each command and its result")
 
 
+def push_tests(text):
+    """The push_tests payload a prompt carries, or None; #1371: a test reads the payload, never the sentence around it."""
+    start = text.find('{"push_tests":')
+    if start < 0:
+        return None
+    return json.JSONDecoder().raw_decode(text, start)[0]["push_tests"]
+
+
+def program_const(name):
+    """The single-quoted string literal of the program's one `const NAME = '...'` line."""
+    found = [line for line in PROGRAM.read_text(encoding="utf-8").splitlines() if line.startswith(f"const {name} = '")]
+    if len(found) != 1:
+        raise AssertionError(f"not exactly one const {name} line: {found}")
+    return found[0][len(f"const {name} = '"):found[0].rindex("'")]
+
+
+PUSH_PAYLOAD = {"when": "committed", "scopes": ["touched", "callers", "guards"], "guards": [],
+                "on_failure": "fix-and-rerun", "report": "tests"}
+
+
 class WholeTestFileLandTest(unittest.TestCase):
     """#787: the batch's post-loop implementer steps (the first resync's conflict resolution and the CI fix) run whole test files and any fast suite, and report each command and its result."""
 
@@ -3956,6 +3976,59 @@ class WholeTestFileLandTest(unittest.TestCase):
         self.assert_whole(text, "the files you changed")
         self.assertIn("push origin", text)
         self.assertIn("before pushing, run in full every test file", text)
+
+
+class PushBoundLandFixTest(unittest.TestCase):
+    """#1371: the batch's landing fixes test what they touched, their callers and the declared cheap guards before they push, and a report with no test command is refused before its review."""
+
+    RECORDS = ({"tests": []}, {"tests": [" "]}, {})
+
+    def test_both_landing_fixes_carry_the_push_tests_payload(self):
+        _, calls, _ = run(patch=folded(CI_RED))
+        self.assertEqual(push_tests(prompt(calls, "land-fix-1")), PUSH_PAYLOAD)
+        _, calls, _ = SyncFixRoundTest().land(**{"land-sync-review-1-1": SyncFixRoundTest.FOUND})
+        self.assertEqual(push_tests(prompt(calls, "land-sync-fix-1-1")), PUSH_PAYLOAD)
+        for label in ("land-sync-1-1", "land-sync-resolve-1-1"):
+            with self.subTest(label=label):
+                self.assertIsNone(push_tests(prompt(calls, label)))
+
+    def test_a_landing_fix_with_no_test_recorded_is_refused_before_its_review(self):
+        refused = program_const("UNTESTED")
+        for record in self.RECORDS:
+            with self.subTest(record=record, site="mode first"):
+                result, calls, _ = run(patch=folded(CI_RED), replies={"land-fix-1": {
+                    "status": "done", "start_head": SHA, "commit": "f" * 40, "notes": "fixed", **record}})
+                self.assertEqual(row(result, 1)["outcome"], "ci-failed")
+                self.assertIn(refused, row(result, 1)["reason"])
+                for later in ("land-fix-review-1", "land-record-1-1", "land-merge-1"):
+                    self.assertNotIn(later, labels(calls))
+            with self.subTest(record=record, site="sync fix"):
+                result, calls, _ = SyncFixRoundTest().land(**{
+                    "land-sync-review-1-1": SyncFixRoundTest.FOUND,
+                    "land-sync-fix-1-1": {"status": "done", "start_head": B, "commit": SyncFixRoundTest.FIXED,
+                                          "notes": "fixed", **record}})
+                self.assertEqual(row(result, 1)["outcome"], "sync-review")
+                self.assertIn(refused, row(result, 1)["reason"])
+                for later in ("land-sync-rereview-1-1", "land-record-1-1", "land-merge-1"):
+                    self.assertNotIn(later, labels(calls))
+            with self.subTest(record=record, site="mode unasked"):
+                out = run_full(patch=OwnRedOutsideLockTest.PRE_RED,
+                               replies={"land-fix-1": dict(OwnRedOutsideLockTest.FIXED, **record)})
+                self.assertEqual(row(out["result"], 1)["outcome"], "ci-failed")
+                self.assertIn(refused, row(out["result"], 1)["reason"])
+                for later in ("land-fix-review-1", "land-record-1-1"):
+                    self.assertNotIn(later, labels(out["calls"]))
+
+    def test_a_landing_fix_that_commits_nothing_needs_no_test_record(self):
+        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(OwnRedOutsideLockTest.RERAN, tests=[])})
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        self.assertEqual(OwnRedOutsideLockTest.landing(out),
+                         ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+        _, calls, _ = SyncFixRoundTest().land(**{
+            "land-sync-review-1-1": SyncFixRoundTest.FOUND,
+            "land-sync-fix-1-1": {"status": "done", "start_head": B, "commit": B,
+                                  "notes": "the finding is wrong: x.py keeps both lines", "tests": []}})
+        self.assertIn("land-sync-rereview-1-1", labels(calls))
 
 
 class CodexUnavailableDetailTest(unittest.TestCase):
@@ -6565,7 +6638,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
 
     def test_a_red_first_poll_releases_the_lock_for_the_fix_and_lands_the_reviewed_head(self):
         """The 2212 shape: ready, the PR open before the lock, the lock waited for, the first poll red on the branch's own check."""
-        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(self.FIXED, lock_released=True)})
+        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(self.FIXED, tests=["t"], lock_released=True)})
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
         # No step is added: the fix step releases the lock itself, and the record step takes it again.
@@ -6590,7 +6663,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertIn("#1: ci failed at the head the lock was taken at; its fix is reviewed outside the land lock", out["logs"])
 
     def test_a_release_the_fix_step_did_not_report_is_made_before_the_review(self):
-        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(self.FIXED, lock_released=False)})
+        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(self.FIXED, tests=["t"], lock_released=False)})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-unlock-1", "land-fix-review-1", "land-record-1-1",
                                              "land-merge-1", "close-out-1"])
@@ -6633,7 +6706,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         synced = {"status": "done", "conflicted": False, "head": B, "merge_commit": B, "notes": "ok"}
         out = run_full(patch=BEHIND, replies={
             "land-sync-1-1": synced, "land-record-1-1": {"ok": True, "head": B, "checks": dict(CI_RED, head=B)},
-            "land-fix-1": {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed"},
+            "land-fix-1": {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed", "tests": ["t"]},
             "land-record-1-2": {"ok": True, "head": FIX}})
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
@@ -6669,7 +6742,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertEqual(object_branch(member)["required"], ["head", "failing"])
 
     def test_a_check_already_red_before_the_lock_is_fixed_with_no_lock_and_the_fix_head_takes_it(self):
-        out = run_full(patch=self.PRE_RED, replies={"land-fix-1": self.FIXED})
+        out = run_full(patch=self.PRE_RED, replies={"land-fix-1": dict(self.FIXED, tests=["t"])})
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
         self.assertEqual(self.landing(out), self.LANDS)
@@ -6699,7 +6772,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertEqual(labels(again["calls"]).count("land-fix-1"), 1)
 
     def test_a_stop_before_the_first_take_releases_the_ready_head_once(self):
-        for name, replies in (("review", {"land-fix-1": self.FIXED, "land-fix-review-1": self.FINDING}), ("fix", {"land-fix-1": None})):
+        for name, replies in (("review", {"land-fix-1": dict(self.FIXED, tests=["t"]), "land-fix-review-1": self.FINDING}), ("fix", {"land-fix-1": None})):
             with self.subTest(name=name):
                 out = run_full(patch=self.PRE_RED, replies=replies)
                 self.assertEqual(row(out["result"], 1)["outcome"], "ci-failed")
@@ -6733,7 +6806,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
     def test_a_red_first_poll_after_a_conflict_resolved_before_the_lock_releases_the_reviewed_head(self):
         """#941 then #1001: the lock was first taken at the reviewed head, so that head, never the ready one, is released and retaken from."""
         red_at_b = {"ok": True, "head": B, "lock": {"verdict": "acquired", "lock_sha": B}, "checks": dict(CI_RED, head=B)}
-        fixed = {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed"}
+        fixed = {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed", "tests": ["t"]}
         for told in (True, False):
             with self.subTest(lock_released=told):
                 out = run_full(patch=ResolveBeforeLockTest.EARLY, replies={
@@ -6755,7 +6828,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         for verdict in ("moved", "already_held", "acquired"):
             with self.subTest(verdict=verdict):
                 out = run_full(patch=folded(CI_RED), replies={
-                    "land-fix-1": dict(self.FIXED, lock_released=True),
+                    "land-fix-1": dict(self.FIXED, tests=["t"], lock_released=True),
                     "land-record-1-1": {"ok": True, "head": FIX, "lock": {"verdict": verdict, "lock_sha": FIX}}})
                 self.assertEqual(row(out["result"], 1)["outcome"], "landed")
                 self.assertEqual(self.landing(out), self.LANDS)
@@ -6999,7 +7072,7 @@ class BehindRedBeforeLockTest(unittest.TestCase):
                       "bringing the branch up to date before the lock is asked for", out["logs"])
 
     def test_a_failure_that_survives_the_sync_is_fixed_before_the_lock(self):
-        fixed = {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed the shard"}
+        fixed = {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed the shard", "tests": ["t"]}
         out = run_full(patch=self.PRE, replies={"land-sync-1-1": self.SYNCED, "land-checks-1-1": self.RED, "land-fix-1": fixed})
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
@@ -7073,7 +7146,7 @@ class BehindRedBeforeLockTest(unittest.TestCase):
         out = run_full(patch=self.PRE, replies={
             "land-sync-1-1": self.SYNCED, "land-checks-1-1": self.GREEN,
             "land-record-1-1": {"ok": True, "head": B, "checks": dict(CI_RED, head=B)},
-            "land-fix-1": {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed", "lock_released": True}})
+            "land-fix-1": {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed", "tests": ["t"], "lock_released": True}})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         fix = prompt(out["calls"], "land-fix-1")
         self.assertIn(f"The landing lock of the branch dev is held for this pull request at {B}", fix)
@@ -7106,7 +7179,7 @@ class BehindRedBeforeLockTest(unittest.TestCase):
         """Only the land-pr step's own word (red, behind, the lock held by another landing, no lock command run) syncs early."""
         own = dict(self.PRE["land-pr-1"]["own_red"], behind=False)
         out = run_full(patch={"land-pr-1": dict(self.PRE["land-pr-1"], own_red=own)},
-                       replies={"land-fix-1": OwnRedOutsideLockTest.FIXED})
+                       replies={"land-fix-1": dict(OwnRedOutsideLockTest.FIXED, tests=["t"])})
         self.assertEqual(self.landing(out), OwnRedOutsideLockTest.LANDS)
         base = [(c["label"], c.get("prompt")) for c in run()[1]]
         result, calls, _ = run(patch={"land-pr-1": {"own_red": self.PRE["land-pr-1"]["own_red"]}})
