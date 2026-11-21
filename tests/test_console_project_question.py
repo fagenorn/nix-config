@@ -1239,6 +1239,187 @@ class RecordsLaunchTest(LaunchCase):
             project_question.hook_command(self.routes, None, None))
 
 
+class DeepLaunchTest(RecordsLaunchTest):
+    """The deeper mode (#1274): opus for 1200 s, its checkout as the hook's root, the transcripts part."""
+
+    def setUp(self):
+        super().setUp()
+        self.deep_records = question_records.encode({
+            "project_id": "owner/p01", "written_at": "2026-11-17T08:00:30+00:00", "spend": None,
+            "sprints": [], "deliveries": [], "activations": [], "held_checks": [],
+            "transcripts": {"runs": []}})
+        self.ask = dataclasses.replace(self.ask, root=os.path.realpath(self.ask.root))
+        self.deep = dataclasses.replace(self.ask, deep=True, records=self.deep_records)
+
+    def test_a_deeper_session_runs_opus_for_1200_seconds(self):
+        self.start(self.fake(), ask=self.deep)
+        argv, timeout = self.calls[0][0], self.calls[0][1]
+        self.assertEqual(argv[argv.index("--model") + 1], "opus")
+        self.assertEqual(timeout, 1200)
+        outcome = self.start(self.fake(error=subprocess.TimeoutExpired("claude", 1200)), ask=self.deep)
+        self.assertEqual(outcome.outcome, project_question.TIMED_OUT)
+        self.assertIn("1200 s", outcome.reason)
+        self.start(self.fake())
+        self.assertEqual(self.calls[-1][1], 300)
+
+    def test_a_deeper_session_adds_only_its_root_to_the_hook(self):
+        self.start(self.fake(), ask=self.deep)
+        deep = json.loads(self.settings["text"])
+        self.settings = {}
+        self.start(self.fake(), ask=dataclasses.replace(self.deep, deep=False))
+        light = json.loads(self.settings["text"])
+        self.assertEqual(deep["permissions"], light["permissions"])
+        self.assertEqual(
+            self.hook_words(deep), self.hook_words(light) + [os.path.realpath(self.ask.root)])
+
+    def test_the_deeper_prompt_names_the_transcripts_part(self):
+        self.start(self.fake(), ask=self.deep)
+        deep_text = self.calls[0][0][-1]
+        index = question_records.section_lines(self.deep_records, question_records.DEEP_SECTIONS)
+        offset, limit = index["transcripts"]
+        self.assertIn(f"transcripts offset {offset} limit {limit}", deep_text)
+        self.assertIn(str(project_question.records_path(self.ask)) + " (transcripts)", deep_text)
+        self.assertIn(project_question.DEEP_TEXT.split("{")[0], deep_text)
+        self.start(self.fake(), ask=dataclasses.replace(self.deep, deep=False))
+        self.assertNotIn("transcripts", self.calls[-1][0][-1])
+
+
+class DeepHookTest(unittest.TestCase):
+    """The deeper session's generated hook reads its checkout and its records only (#1274)."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.t = Path(directory.name).resolve()
+        self.home = self.t / "home"
+        self.transcript = self.home / ".claude" / "projects" / "-x" / "s.jsonl"
+        self.root, self.other = self.t / "srv" / "p01", self.t / "srv" / "other"
+        self.state = self.t / "state" / "console"
+        settings_dir = self.state / project_question.SETTINGS_DIR
+        for folder in (self.transcript.parent, self.root, self.other, settings_dir):
+            folder.mkdir(parents=True)
+        for path in (self.transcript, self.root / "README.md", self.other / "secret.txt"):
+            path.write_text("x\n")
+        self.route = ("sqlite3", str(self.other / "console.db"), ".tables")
+        self.ask = project_question.new_ask(
+            "a" * 16, "owner/p01", str(self.root), "where does the time go?", "work",
+            (project_question.Route("db", self.route, str(self.root)),), settings_dir,
+            session_id=SESSION_ID, records="{}\n", deep=True)
+        self.sibling = settings_dir / ("b" * 16 + project_question.RECORDS_SUFFIX)
+        self.own = project_question.records_path(self.ask)
+        for path in (self.sibling, self.own):
+            path.write_text("{}\n")
+        document = project_question.settings_document(
+            self.ask.routes, None,
+            (str(project_question.private_dir(self.ask)), str(self.own), self.ask.root))
+        words = shlex.split(document["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+        self.rest = words[len(siblings.sibling_argv(project_question.HOOK_MODULE)):]
+
+    def decision(self, name, tool_input):
+        document = {"tool_name": name, "tool_input": tool_input, "cwd": str(self.root)}
+        environ = {"HOME": str(self.home), "PATH": "/bin"}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, environ, clear=True), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(document))), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(hook.main(list(self.rest)), 0)
+        wire = json.loads(out.getvalue())["hookSpecificOutput"]
+        return wire["permissionDecision"], wire["permissionDecisionReason"]
+
+    def outside(self):
+        return hook.OUTSIDE_ROOT.format(root=str(self.root), records=str(self.own))
+
+    def test_the_deeper_sessions_hook_reads_only_its_checkout_and_records(self):
+        records_denied = hook.RECORDS_DENIED.format(records=str(self.own))
+        rows = (
+            ("own records", "Read", {"file_path": str(self.own)}, ("allow", hook.ALLOWED)),
+            ("checkout file", "Read", {"file_path": str(self.root / "README.md")},
+             ("allow", hook.ALLOWED)),
+            ("another checkout", "Read", {"file_path": str(self.other / "secret.txt")},
+             ("deny", self.outside())),
+            ("another question's records", "Read", {"file_path": str(self.sibling)},
+             ("deny", records_denied)),
+            ("a transcript", "Read", {"file_path": str(self.transcript)}, ("deny", records_denied)),
+            ("a write", "Write", {"file_path": str(self.root / "x"), "content": "x"},
+             ("deny", hook.WRITE_DENIED.format(tool="Write"))),
+            ("a grep outside", "Grep", {"pattern": "x", "path": str(self.other)},
+             ("deny", self.outside())),
+            ("a grep inside", "Grep", {"pattern": "x"}, ("allow", hook.ALLOWED)),
+            ("a glob outside", "Glob", {"pattern": str(self.other) + "/*"}, ("deny", self.outside())),
+            ("a glob inside", "Glob", {"pattern": "*.md"}, ("allow", hook.ALLOWED)),
+            ("a command naming another checkout", "Bash", {"command": f"git -C {self.other} log"},
+             ("deny", self.outside())),
+            ("a git read naming a file of another checkout", "Bash",
+             {"command": f"git log {self.other}/secret.txt"}, ("deny", self.outside())),
+            ("a git read inside", "Bash", {"command": "git log --oneline"}, ("allow", hook.ALLOWED)),
+            ("the declared route", "Bash", {"command": " ".join(self.route)}, ("allow", hook.ALLOWED)),
+        )
+        for label, name, tool_input, expected in rows:
+            with self.subTest(label):
+                self.assertEqual(self.decision(name, tool_input), expected)
+
+    def test_a_bad_root_is_malformed(self):
+        private, records = str(self.state), str(self.own)
+        for root in ("rel", str(self.state / "x")):
+            with self.subTest(root=root), self.assertRaises(ValueError):
+                hook.parse_confinement(private, records, {}, root=root)
+        for count in (3, 6):
+            with self.subTest(arguments=count):
+                self.rest = [*self.rest[:2], *(["/a"] * (count - 2))]
+                self.assertEqual(self.decision("Read", {"file_path": "/a"}), ("deny", hook.MALFORMED))
+
+
+class DeepRequestTest(unittest.TestCase):
+    def test_deep_must_be_a_boolean(self):
+        body = b'{"project_id":"o/p","question":"q","deep":true}'
+        self.assertIs(project_question.parse_ask(body)[4], True)
+        self.assertIs(project_question.parse_ask(b'{"project_id":"o/p","question":"q"}')[4], False)
+        self.assertEqual(len(project_question.parse_keyed_request(body)), 4)
+        for bad in (b'"yes"', b"1", b"null"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                project_question.parse_ask(b'{"project_id":"o/p","question":"q","deep":' + bad + b"}")
+
+
+class DeepFoldTest(unittest.TestCase):
+    P = "owner/p01"
+
+    def test_an_asked_row_folds_its_deep_flag_and_session(self):
+        folded = project_question.asked_questions([
+            _asked(2, self.P, "q1", deep=True, session_id="s-1"),
+            _asked(3, self.P, "q2", deep="true", session_id=""),
+            _asked(4, self.P, "q3")])[self.P]
+        self.assertEqual(
+            folded[0], project_question.AskedQuestion(
+                "q1", "what?", "2026-11-17T10:00:02Z", 2, thread_id="q1", deep=True, session_id="s-1"))
+        self.assertEqual((folded[1].deep, folded[1].session_id), (False, None))
+        self.assertEqual((folded[2].deep, folded[2].session_id), (False, None))
+
+
+class DeepFollowUpTest(unittest.TestCase):
+    P = "owner/p01"
+
+    def test_dig_deeper_follows_only_the_last_light_answer(self):
+        light = [_asked(2, self.P, "q1", question="q"),
+                 _answered(3, self.P, "q1", outcome="answered", answer="Answer: a")]
+
+        def fold(*rows):
+            return project_question.asked_questions([*light, *rows])[self.P]
+
+        def refused(folded, text):
+            with self.assertRaises(project_question.Refused) as caught:
+                project_question.deep_follow_up(folded, "q1", text)
+            return str(caught.exception)
+
+        Turn = project_question.Turn
+        self.assertEqual(project_question.deep_follow_up(fold(), "q1", "q"), (Turn("q", "Answer: a"),))
+        self.assertEqual(refused(fold(), "other"), project_question.DEEP_STALE)
+        deeper = fold(_asked(4, self.P, "q2", question="q", thread_id="q1", deep=True),
+                      _answered(5, self.P, "q2", outcome="answered", answer="Answer: b"))
+        self.assertEqual(refused(deeper, "q"), project_question.DEEP_STALE)
+        working = fold(_asked(4, self.P, "q2", question="q", thread_id="q1"))
+        self.assertEqual(refused(working, "q"), project_question.THREAD_UNANSWERED)
+
+
 class PlatformTest(unittest.TestCase):
     def test_asker_for_each_platform(self):
         self.assertIs(project_question.asker_for("linux"), project_question.run_question)
