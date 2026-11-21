@@ -44,7 +44,7 @@
         "docs/standards"
       ],
       "architecture": [
-        "CLAUDE.md"
+        "docs/guides/architecture.md"
       ],
       "operations": [],
       "hints": [],

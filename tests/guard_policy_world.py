@@ -145,6 +145,7 @@ class GuardPolicyWorld:
                 (root / relative / "keep.md").write_text("# keep\n", "utf-8")
         for relative in contract["bindings"]["paths"]["architecture"]:
             if not (root / relative).exists():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
                 (root / relative).write_text("# architecture\n", "utf-8")
         if render:
             done = subprocess.run(
