@@ -97,6 +97,20 @@ def with_criteria(*extra, **top):
     return dict(PLAN, acceptance=PLAN["acceptance"] + list(extra), **top)
 
 
+# #1281: an evidence criterion whose verify member runs a committed script; the plan commits the script, so its lint is the one a plan-time check gives.
+SCRIPTED = criterion(EVIDENCE, text="after the first switch that includes the merge, the host holds the generated files",
+                     verify_run={"script": "scripts/count-generated"},
+                     lint=refused(("checks[0].run.script", "not_committed")))
+SCRIPTED_PLAN = with_criteria(SCRIPTED, scripts=["scripts/count-generated"])
+MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
+FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
+HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+SCRUBBED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+            "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES")
+
+
 def tasks(count, risk="standard"):
     return [{"n": n, "title": f"t{n}", "file": f"/g/task-{n}.md", "risk": risk}
             for n in range(1, count + 1)]
@@ -195,6 +209,14 @@ def schema_of(calls, label):
     if not found:
         raise AssertionError(f"no call labelled {label}: {labels(calls)}")
     return found[-1]
+
+
+def checks_of(calls):
+    """The checks the hold prompt tells the clerk to post: the JSON of its `Checks: ` line."""
+    for line in prompt(calls, "hold").splitlines():
+        if line.startswith("Checks: "):
+            return json.loads(line[len("Checks: "):])
+    raise AssertionError("no Checks payload")
 
 
 def object_branch(schema):
@@ -530,7 +552,7 @@ class HappyPathTest(unittest.TestCase):
                                                             "close-out": {"issue_state": "OPEN"}})
         self.assertEqual(result["stage"], "done")
         self.assertIn("Refs #9", prompt(calls, "pr"))
-        self.assertEqual(labels(calls)[-3:], ["merge", "hold", "close-out"])
+        self.assertEqual(labels(calls)[-4:], ["merge", "hold-draft", "hold", "close-out"])
         close = prompt(calls, "close-out")
         self.assertNotIn("gh issue close", close)
         self.assertNotIn("needs-verification", close)
@@ -5718,7 +5740,7 @@ class HoldTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee"),
                                                                "close-out": {"issue_state": "OPEN"}})
         self.assertEqual(result["stage"], "done")
-        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+        self.assertEqual(labels(calls), ["setup", "hold-draft", "hold", "close-out"])
         hold = prompt(calls, "hold")
         self.assertIn("gh pr view 42 --repo owner/repo --json mergeCommit,headRefOid", hold)
         self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
@@ -5738,6 +5760,323 @@ class HoldTest(unittest.TestCase):
         result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
                         patch={"setup": merged(42, "c0ffee")})
         self.assertEqual(result["stage"], "hold")
+
+    ASKED = dict(HUMAN["verify"], ac="AC2")
+
+    def test_a_posted_human_check_for_an_evidence_criterion_is_refused_before_the_once_run(self):
+        for issue in (9, 51):
+            with self.subTest(issue=issue):
+                posted = [{"issue": issue, "merge": self.MERGE, "checks": [self.ASKED]}]
+                result, calls = self.ship(EVIDENCE, **{"hold-draft": {"posted": posted}})
+                self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]),
+                                 ("hold", ["AC2"], [issue]))
+                self.assertIn(f"#{issue}", result["details"])
+                self.assertNotIn("hold", labels(calls))
+                self.assertNotIn("close-out", labels(calls))
+
+    def test_a_check_that_asks_the_owner_for_an_evidence_criterion_is_never_drafted_for_the_hold(self):
+        code = {"id": "AC1", "text": "works", "kind": "code"}
+        cases = (
+            (criterion(EVIDENCE, verify_kind="human", verify_run=HUMAN["verify"]["run"], verify_reason="hands"), {}),
+            (criterion(EVIDENCE, verify_run=HUMAN["verify"]["run"]), {}),
+            (criterion(EVIDENCE, verify=None), {"hold-draft": {"written": [self.ASKED]}}),
+        )
+        for n, (bad, extra) in enumerate(cases):
+            with self.subTest(case=n):
+                result, calls = run(args=DIRECT, patch=dict({"direct-impl": {"acceptance": [code, bad]}}, **extra))
+                self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]),
+                                 ("hold", ["AC2"], []))
+                self.assertIn("hold-draft", labels(calls))
+                self.assertNotIn("hold", labels(calls))
+        bad = criterion(EVIDENCE, verify=None)
+        result, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": [code, bad]}, "hold-draft": {"written": []}})
+        self.assertEqual((result["stage"], result["missing_checks"]), ("hold", ["AC2"]))
+        self.assertNotIn("hold", labels(calls))
+
+    def test_a_hold_draft_that_cannot_be_read_holds_nothing(self):
+        for patch in ({"complete": False}, {"posted": [{"issue": "9", "checks": []}]}, {"written": None}):
+            with self.subTest(patch=patch):
+                result, calls = self.ship(EVIDENCE, **{"hold-draft": patch})
+                self.assertEqual(result["stage"], "hold")
+                self.assertIn("draft", result)
+                self.assertNotIn("hold", labels(calls))
+        result, calls = self.ship(close="CLOSED")
+        self.assertNotIn("hold-draft", labels(calls))
+        self.assertEqual(result["stage"], "done")
+
+    def test_a_hold_that_makes_an_evidence_or_code_criterion_a_human_check_is_refused(self):
+        asked = self.ASKED
+        cases = (
+            ((EVIDENCE,), [asked], ["AC2"]),
+            ((EVIDENCE,), [EVIDENCE["verify"], dict(HUMAN["verify"], ac="AC1")], ["AC1"]),
+            ((EVIDENCE,), [dict(HUMAN["verify"], ac="ac2")], ["AC2"]),
+            ((EVIDENCE, HUMAN), [dict(HUMAN["verify"], ac="ac2"), dict(HUMAN["verify"], ac="ac3")], ["AC2"]),
+        )
+        for criteria, checks, expected in cases:
+            with self.subTest(checks=checks):
+                result, calls = self.ship(*criteria, hold={"block": {"v": 1, "merge": self.MERGE, "checks": checks}})
+                self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]),
+                                 ("hold", expected, [9]))
+                self.assertIn("#9", result["details"])
+                self.assertNotIn("close-out", labels(calls))
+        result, _ = self.ship(EVIDENCE, hold={"code_unmet": ["AC1"],
+                                              "block": {"v": 1, "merge": self.MERGE, "checks": [asked]}})
+        self.assertEqual(result["stage"], "code-unmet")
+
+    def test_a_split_child_that_makes_an_evidence_criterion_a_human_check_is_refused(self):
+        child = dict(self.CHILD, ac="AC2", issue=51, block={"v": 1, "merge": self.MERGE, "checks": [self.ASKED]})
+        result, calls = self.ship(HUMAN, EVIDENCE, hold={"blocks": [12], "split": [self.CHILD, child],
+                                                         "issue_state": "CLOSED", "block": None, "lint": None,
+                                                         "verify_run": None}, close="CLOSED")
+        self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]), ("hold", ["AC2"], [51]))
+        self.assertIn("#51", result["details"])
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_a_human_criterion_is_still_held_as_a_human_check(self):
+        result, calls = self.ship(EVIDENCE, HUMAN)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("human_checks", result)
+        checks = checks_of(calls)
+        self.assertEqual([c for c in checks if c["ac"] == "AC3"], [HUMAN["verify"]])
+        scripted = json.loads(json.dumps(criterion(EVIDENCE)["verify"]).replace(SHA, self.MERGE))
+        self.assertIn(scripted, checks)
+        self.assertEqual(prompt(calls, "hold").count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+
+    PROBE = dict(EVIDENCE["verify"], when={"deployed_includes": MERGE}, run={"probe": "deployed_includes", "sha": MERGE})
+    SCRIPT = dict(SCRIPTED["verify"], when={"deployed_includes": MERGE})
+    CODE = {"id": "AC1", "text": "works", "kind": "code"}
+
+    def direct(self, bad, hold=None, **patch):
+        """The direct lane, whose one evidence or human criterion carries what `bad` says."""
+        replies = {} if hold is None else {"hold": dict(self.HOLD, block={"v": 1, "merge": self.MERGE, "checks": hold})}
+        return run(args=DIRECT, replies=replies,
+                   patch=dict({"direct-impl": {"acceptance": [self.CODE, bad]}, "merge": {"merge_commit": self.MERGE},
+                               "close-out": {"issue_state": "OPEN"}}, **patch))
+
+    def test_the_hold_reports_a_criterion_it_would_not_make_a_human_check(self):
+        """#1281 AC2: every refusal names the criterion, in human_checks and in the explanation for the owner."""
+        posted = [{"issue": 51, "merge": self.MERGE, "checks": [self.ASKED]}]
+        child = dict(self.CHILD, ac="AC2", issue=52, block={"v": 1, "merge": self.MERGE, "checks": [self.ASKED]})
+        cases = (
+            self.ship(EVIDENCE, **{"hold-draft": {"posted": posted}}),
+            self.ship(EVIDENCE, hold={"block": {"v": 1, "merge": self.MERGE, "checks": [self.ASKED]}}),
+            self.ship(HUMAN, EVIDENCE, hold={"blocks": [12], "split": [self.CHILD, child], "issue_state": "CLOSED",
+                                             "block": None, "lint": None, "verify_run": None}, close="CLOSED"),
+        )
+        for n, (result, calls) in enumerate(cases):
+            with self.subTest(case=n):
+                self.assertEqual((result["stage"], result["human_checks"]), ("hold", ["AC2"]))
+                self.assertIn("AC2", result["details"])
+                self.assertNotIn("AC3", result["details"])
+                self.assertNotIn("close-out", labels(calls))
+
+    def test_a_verify_member_that_asks_the_owner_for_an_evidence_criterion_stops_before_the_hold(self):
+        for verify in ({"verify_kind": "human", "verify_run": HUMAN["verify"]["run"], "verify_reason": "hands"},
+                       {"verify_run": HUMAN["verify"]["run"]}):
+            with self.subTest(verify=verify):
+                result, calls = self.direct(criterion(EVIDENCE, **verify))
+                self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]), ("hold", ["AC2"], []))
+                self.assertIn("AC2", result["details"])
+                self.assertIn("hold-draft", labels(calls))
+                self.assertNotIn("hold", labels(calls))
+
+    def test_a_retry_whose_parent_fence_omits_a_scripted_criterion_is_refused_before_the_once_run(self):
+        plan = with_criteria(SCRIPTED, HUMAN, scripts=["scripts/count-generated"])
+        for checks in ([HUMAN["verify"]], []):
+            with self.subTest(checks=checks):
+                posted = [{"issue": 9, "merge": self.MERGE, "checks": checks}]
+                result, calls = run(replies={"plan": plan},
+                                    patch={"merge": {"merge_commit": self.MERGE}, "close-out": {"issue_state": "OPEN"},
+                                           "hold-draft": {"posted": posted}})
+                self.assertEqual((result["stage"], result["script_checks"], result["posted_holds"]), ("hold", ["AC2"], [9]))
+                self.assertNotIn("hold", labels(calls))
+        posted = [{"issue": 9, "merge": self.MERGE, "checks": [HUMAN["verify"], self.SCRIPT]}]
+        result, calls = run(replies={"plan": plan},
+                            patch={"merge": {"merge_commit": self.MERGE}, "close-out": {"issue_state": "OPEN"},
+                                   "hold-draft": {"posted": posted}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("hold", labels(calls))
+
+    def test_a_retry_whose_parent_fence_omits_an_open_criterion_is_refused_before_the_once_run(self):
+        """#1281: the once-run closes the issue on the posted fence, so a criterion it lacks (human or evidence) stops the hold first."""
+        held = json.loads(json.dumps(EVIDENCE["verify"]).replace(SHA, self.MERGE))
+        for n, (criteria, checks, expected) in enumerate((
+            ((EVIDENCE, HUMAN), [held], ["AC3"]),
+            ((EVIDENCE, HUMAN), [HUMAN["verify"]], ["AC2"]),
+            ((EVIDENCE, HUMAN), [held, dict(HUMAN["verify"], ac="ac3")], []),
+        )):
+            with self.subTest(case=n):
+                posted = [{"issue": 9, "merge": self.MERGE, "checks": checks}]
+                result, calls = self.ship(*criteria, **{"hold-draft": {"posted": posted}})
+                if expected:
+                    self.assertEqual((result["stage"], result["missing_checks"]), ("hold", expected))
+                    self.assertNotIn("hold", labels(calls))
+                    self.assertNotIn("close-out", labels(calls))
+                else:
+                    self.assertEqual(result["stage"], "done")
+        child = {"issue": 51, "merge": self.MERGE, "checks": [HUMAN["verify"]]}
+        for merge, stage in ((self.MERGE, "done"), ("e" * 40, "hold")):
+            with self.subTest(child_merge=merge):
+                posted = [{"issue": 9, "merge": self.MERGE, "checks": [held]}, dict(child, merge=merge)]
+                result, calls = self.ship(EVIDENCE, HUMAN, **{"hold-draft": {"posted": posted}})
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual("hold" in labels(calls), stage == "done")
+
+    def test_a_script_the_draft_wrote_is_held_unchanged(self):
+        bad = criterion(EVIDENCE, verify=None)
+        written = {"hold-draft": {"written": [self.SCRIPT]}}
+        for name, checks in (("probe", [self.PROBE]), ("args", [dict(self.SCRIPT, run={"script": "scripts/count-generated", "args": ["-x"]})])):
+            with self.subTest(case=name):
+                result, calls = self.direct(bad, hold=checks, **written)
+                self.assertEqual((result["stage"], result["script_checks"]), ("hold", ["AC2"]))
+                self.assertNotIn("close-out", labels(calls))
+        result, calls = self.direct(bad, hold=[self.SCRIPT], **written)
+        self.assertEqual(result["stage"], "done")
+        result, calls = self.direct(bad, **written)
+        self.assertEqual((result["stage"], checks_of(calls)), ("done", [self.SCRIPT]))
+        posted = {"hold-draft": {"written": [self.SCRIPT], "posted": [{"issue": 9, "merge": self.MERGE, "checks": [self.PROBE]}]}}
+        result, calls = self.direct(bad, **posted)
+        self.assertEqual((result["stage"], result["script_checks"], result["posted_holds"]), ("hold", ["AC2"], [9]))
+        self.assertNotIn("hold", labels(calls))
+
+    def test_a_human_criterion_is_held_only_as_a_check_that_asks_the_owner(self):
+        bad = criterion(HUMAN, verify=None)
+        result, calls = self.direct(bad, **{"hold-draft": {"written": [dict(self.PROBE, ac="AC3")]}})
+        self.assertEqual((result["stage"], result["missing_checks"]), ("hold", ["AC3"]))
+        self.assertNotIn("hold", labels(calls))
+        probe = dict(self.PROBE, ac="AC3")
+        for n, (result, calls) in enumerate((
+            self.ship(HUMAN, **{"hold-draft": {"posted": [{"issue": 9, "merge": self.MERGE, "checks": [probe]}]}}),
+            self.ship(HUMAN, hold={"block": {"v": 1, "merge": self.MERGE, "checks": [probe]}}),
+        )):
+            with self.subTest(case=n):
+                self.assertEqual((result["stage"], result["owner_checks"], result["posted_holds"]), ("hold", ["AC3"], [9]))
+                self.assertIn("AC3", result["details"])
+                self.assertNotIn("close-out", labels(calls))
+        self.assertNotIn("hold", labels(self.ship(HUMAN, **{"hold-draft": {"posted": [{"issue": 9, "merge": self.MERGE, "checks": [probe]}]}})[1]))
+        child = dict(self.CHILD, block={"v": 1, "merge": self.MERGE, "checks": [probe]})
+        result, calls = self.ship(HUMAN, hold={"blocks": [12], "split": [child], "issue_state": "CLOSED",
+                                               "block": None, "lint": None, "verify_run": None}, close="CLOSED")
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_a_command_outside_the_verification_ids_is_refused_before_the_hold(self):
+        outside = {"command": "not-a-verification-id"}
+        for n, (bad, extra) in enumerate((
+            (criterion(EVIDENCE, verify_run=outside), {}),
+            (criterion(EVIDENCE, verify=None), {"hold-draft": {"written": [dict(EVIDENCE["verify"], run=outside)]}}),
+        )):
+            with self.subTest(case=n):
+                result, calls = self.direct(bad, **extra)
+                self.assertEqual((result["stage"], result["unattended"]), ("hold", ["AC2"]))
+                self.assertIn("hold-draft", labels(calls))
+                self.assertNotIn("hold", labels(calls))
+
+    def scripted(self, checks, posted=None):
+        patch = {"merge": {"merge_commit": self.MERGE}, "close-out": {"issue_state": "OPEN"}}
+        if posted is not None:
+            patch["hold-draft"] = {"posted": posted}
+        return run(replies={"plan": SCRIPTED_PLAN,
+                            "hold": dict(self.HOLD, block={"v": 1, "merge": self.MERGE, "checks": checks})}, patch=patch)
+
+    def test_an_evidence_criterion_is_held_with_its_committed_script(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = Path(scratch).resolve()
+            home = scratch / "home"
+            (home / ".agents" / "share").mkdir(parents=True)
+            shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
+            repo = scratch / "repo"
+            shutil.copytree(FIXTURE, repo)
+            (repo / "scripts").mkdir()
+            script = repo / "scripts" / "count-generated"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+            env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(REPO_ROOT / "python"), **HERMETIC_GIT}
+            for name in SCRUBBED:
+                env.pop(name, None)
+
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], env=env, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            def lint(payload, head):
+                path = scratch / "block.json"
+                path.write_text(json.dumps({"v": 1, "merge": head, "checks": payload}), encoding="utf-8")
+                done = subprocess.run([sys.executable, "-m", "agent_tools.verification.verify_pending", "lint",
+                                       "--input", str(path), "--repo-root", str(repo)],
+                                      env=env, capture_output=True, text=True, timeout=60)
+                return done, json.loads(done.stdout)
+
+            git("init", "-q", "-b", "main")
+            git("config", "commit.gpgsign", "false")
+            git("add", "-A")
+            git("commit", "-q", "-m", "fixture")
+            head = git("rev-parse", "HEAD")
+            result, calls = run(replies={"plan": SCRIPTED_PLAN},
+                                patch={"merge": {"merge_commit": head}, "close-out": {"issue_state": "OPEN"}})
+            self.assertEqual(result["stage"], "done")
+            payload = checks_of(calls)
+            self.assertEqual([c["ac"] for c in payload], ["AC2"])
+            self.assertEqual(payload[0]["kind"], "evidence")
+            self.assertEqual(payload[0]["run"], {"script": "scripts/count-generated"})
+            self.assertFalse([c for c in payload if c["kind"] == "human"])
+            done, verdict = lint(payload, head)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertEqual(verdict["errors"], [])
+            script.chmod(0o644)
+            git("add", "-A")
+            git("commit", "-q", "-m", "drop the executable bit")
+            done, verdict = lint(payload, git("rev-parse", "HEAD"))
+            self.assertIn(("checks[0].run.script", "not_committed"),
+                          [(e["field"], e["code"]) for e in verdict["errors"]])
+
+    def test_a_scripted_evidence_criterion_held_without_its_script_is_refused(self):
+        script_check = dict(SCRIPTED["verify"], when={"deployed_includes": self.MERGE})
+        probe = {"probe": "deployed_includes", "sha": self.MERGE}
+        cases = {
+            "a": [dict(EVIDENCE["verify"], when={"deployed_includes": self.MERGE}, run=probe)],
+            "b": [dict(script_check, run={"script": "scripts/other"})],
+            "c": [dict(script_check, run={"script": "scripts/count-generated", "at": "e" * 40})],
+            "d": [dict(script_check, run={"script": "scripts/count-generated", "args": ["--all"]})],
+            "e": [script_check, dict(script_check, run=probe)],
+        }
+        for name, checks in cases.items():
+            with self.subTest(case=name):
+                result, calls = self.scripted(checks)
+                self.assertEqual((result["stage"], result["script_checks"], result["posted_holds"]),
+                                 ("hold", ["AC2"], [9]))
+                self.assertNotIn("close-out", labels(calls))
+        with self.subTest(case="f"):
+            posted = [{"issue": 9, "merge": self.MERGE,
+                       "checks": [dict(script_check, run={"script": "scripts/other"})]}]
+            result, calls = self.scripted([script_check], posted=posted)
+            self.assertEqual((result["stage"], result["script_checks"], result["posted_holds"]),
+                             ("hold", ["AC2"], [9]))
+            self.assertNotIn("hold", labels(calls))
+
+    def test_a_scripted_evidence_criterion_held_with_the_same_invocation_is_accepted(self):
+        script_check = dict(SCRIPTED["verify"], when={"deployed_includes": self.MERGE})
+        with self.subTest(case="a"):
+            result, _ = self.scripted([dict(script_check, run={"script": "scripts/count-generated", "at": self.MERGE})])
+            self.assertEqual(result["stage"], "done")
+        with self.subTest(case="b"):
+            pinned = criterion(SCRIPTED, verify_run={"script": "scripts/count-generated", "at": SHA})
+            result, _ = run(replies={"plan": with_criteria(pinned, scripts=["scripts/count-generated"]),
+                                     "hold": dict(self.HOLD, block={"v": 1, "merge": self.MERGE,
+                                                                    "checks": [script_check]})},
+                            patch={"merge": {"merge_commit": self.MERGE}, "close-out": {"issue_state": "OPEN"}})
+            self.assertEqual(result["stage"], "done")
+
+    def test_a_split_child_of_a_scripted_evidence_criterion_is_refused(self):
+        probe = dict(EVIDENCE["verify"], when={"deployed_includes": self.MERGE},
+                     run={"probe": "deployed_includes", "sha": self.MERGE})
+        child = dict(self.CHILD, ac="AC2", issue=51, block={"v": 1, "merge": self.MERGE, "checks": [probe]})
+        result, calls = run(replies={"plan": with_criteria(HUMAN, SCRIPTED, scripts=["scripts/count-generated"]),
+                                     "hold": dict(self.HOLD, blocks=[12], split=[self.CHILD, child],
+                                                  block={"v": 1, "merge": self.MERGE, "checks": []})},
+                            patch={"merge": {"merge_commit": self.MERGE}, "close-out": {"issue_state": "OPEN"}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC2"]))
+        self.assertNotIn("close-out", labels(calls))
 
 
 class NoteCloseOutTest(unittest.TestCase):
@@ -8721,7 +9060,7 @@ EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
-             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
+             "hold-draft", "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
              "look-checks-", "look-reverify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
@@ -8758,6 +9097,8 @@ SCENARIOS = (
     {"args": dict(ARGS, review_sizing=True), "replies": {"plan": dict(PLAN, tasks=tasks(4))}},
     {"replies": {"verify": VERIFY_RED}},
     {"replies": {"verify": VerifyRerunTest.OUTSIDE}},
+    # #1281: a plan with an evidence criterion drafts the hold before it posts.
+    {"replies": {"plan": with_criteria(EVIDENCE)}, "patch": {"close-out": {"issue_state": "OPEN"}}},
     {"patch": {"hold": {"release": None}}},
     {"replies": {"checks-2": {"state": "passed", "passed": ["ci"], "head": FIX, "required": ["ci-tests"]}},
      "patch": {"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}}},

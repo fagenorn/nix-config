@@ -308,7 +308,7 @@ OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
         r"|look-fix|look-fix-review|renew-look-fix|look-verify|look-reverify|fix-retest"),
     (
         LANDING,
-        r"pr|hold|merge|close-out|land-unlock|fix-ci|fix-ci-review|land-lock-\d+|land-relock-\d+|land-push-\d+|checks-\d+"
+        r"pr|hold|hold-draft|merge|close-out|land-unlock|fix-ci|fix-ci-review|land-lock-\d+|land-relock-\d+|land-push-\d+|checks-\d+"
         r"|look-pr|look-push|look-checks-\d+|look-head|look-post|look-read|look-stale|look-status"
         r"|sync-\d+|sync-resolve-\d+|sync-review-\d+|fix-sync-\d+|fix-sync-review-\d+",
     ),
