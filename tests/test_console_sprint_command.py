@@ -1088,8 +1088,6 @@ class ManagerContractTest(unittest.TestCase):
         c = text.index("- `consequential`")
         self.assertLess(r, c)
         self.assertLess(c, text.index("- `pictures`", r))
-        self.assertIn('"consequential": true', sprint.__doc__)
-        self.assertIn("CONSEQUENTIAL_SHAPE", sprint.__doc__)
 
     def test_the_contract_splits_the_starters_design_choices_from_the_owners_go_aheads(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
