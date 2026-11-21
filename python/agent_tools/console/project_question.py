@@ -56,7 +56,7 @@ from the spend part, and spend is null only when the console could not read its 
 No permission rule is added: Read is already admitted. A write that
 fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 
-Deeper mode (#1274, ADR-console-099). An `Ask` with `deep` true (`new_ask(..., deep=True)`; the page's
+Deeper mode (#1274, ADR-console-100). An `Ask` with `deep` true (`new_ask(..., deep=True)`; the page's
 Dig deeper, `parse_ask`'s optional boolean `deep`) is a deeper look at an answered question. It runs
 `DEEP_MODEL` (`opus`, `model_of`) with `DEEP_TIMEOUT_SECONDS` (1200, `timeout_of`; a timed-out run's
 reason names that figure) instead of `MODEL` and `TIMEOUT_SECONDS`. With records, its prompt lists the
@@ -71,7 +71,7 @@ A deeper session's settings differ from a light one's only by the
 hook's fifth argument, the ask's checkout root: the permission rules are the same, and the hook confines
 Read, Grep, Glob and the admitted commands to the root and the records file (`OUTSIDE_ROOT`,
 `project_question_hook`); a symlink the checkout itself holds is part of its declared content, a stated
-limit (ADR-console-099 D1).
+limit (ADR-console-100 D1).
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
 (`parse_keyed_request` also reads an optional `request_key`, ADR-console-089 D9).
