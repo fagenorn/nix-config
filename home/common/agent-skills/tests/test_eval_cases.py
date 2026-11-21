@@ -517,6 +517,22 @@ class MarkedPrSetupTest(unittest.TestCase):
         listed = self.run_cmd([gh, "pr", "list", "--repo", "fixture/tinytask", "--json", "number"], root)
         self.assertEqual(listed.stdout.strip(), '[{"number":7}]')
 
+    def test_the_shim_answers_the_checks_of_pull_request_seven(self):
+        root, _, _ = self.sandbox()
+        gh = str(root / "bin/gh")
+        watched = self.run_cmd([gh, "pr", "checks", "7", "--repo", "fixture/tinytask", "--watch"], root)
+        self.assertEqual(watched.returncode, 0, watched.stderr)
+        self.assertIn("ci\tpass", watched.stdout.splitlines())
+        fields = self.run_cmd([gh, "pr", "checks", "7", "--repo", "fixture/tinytask", "--json",
+                               "name,bucket"], root)
+        self.assertEqual(fields.returncode, 0, fields.stderr)
+        self.assertEqual(json.loads(fields.stdout), [{"name": "ci", "bucket": "pass"}])
+        rules = self.run_cmd([gh, "api", "repos/fixture/tinytask/rules/branches/main"], root)
+        self.assertEqual(rules.returncode, 0, rules.stderr)
+        self.assertEqual(json.loads(rules.stdout), [])
+        required = self.run_cmd([gh, "pr", "checks", "7", "--repo", "fixture/tinytask", "--required"], root)
+        self.assertEqual(required.returncode, 1)
+
     def test_the_shim_refuses_every_write(self):
         root, _, _ = self.sandbox()
         gh = str(root / "bin/gh")
@@ -545,6 +561,7 @@ class MarkedPrSetupTest(unittest.TestCase):
         base = [sys.executable, "-I", str(GH_SHIM), "--repo", str(repo), "--log", str(root / "bare.jsonl")]
         self.assertEqual(self.run_cmd(base + ["pr", "list"], root).stdout.strip(), "[]")
         self.assertEqual(self.run_cmd(base + ["pr", "view", "7"], root).returncode, 1)
+        self.assertEqual(self.run_cmd(base + ["pr", "checks", "7"], root).returncode, 1)
 
     def test_the_forge_claim_stand_in_logs_and_refuses(self):
         root, _, env = self.sandbox()
