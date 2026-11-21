@@ -36,6 +36,7 @@ class IdleCase(ReviveCase):
         self.arrival = 0
         self.stops = []
         self.held = []
+        self.on_listing = None
 
     def arrive(self, svc):
         """`on_track`, then forget the nudge its brief approval caused: only later sends count."""
@@ -483,6 +484,112 @@ class IdleQuotaTest(IdleCase):
                 if name == "the target loses room during the stop":
                     self.gone(svc)
                     self.assert_waits_to_wake(svc, sid)
+
+    def hooked_listing(self):
+        """A listing that runs `on_listing` once, then answers as `listed` stands."""
+        def listing():
+            hook, self.on_listing = self.on_listing, None
+            if hook is not None:
+                hook()
+            return dict(self.listed)
+        return listing
+
+    def observed(self, session_id="s-1", sid=None, status="idle", name=True, profile="work",
+                 updated_ms=None):
+        return sessions.Observation(session_id, "/srv/p01", 1, status, None,
+                                    self.name(sid or self.sid) if name else None, updated_ms,
+                                    profile)
+
+    def assert_move_ended(self, svc, sid, cancelled=True):
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+        self.assertEqual(len(self.rows("manager.started")), 1)
+        self.assertEqual(sid in svc._move_cancelled, cancelled)
+        self.assertNotIn(sid, svc._launching)
+        self.assertNotIn(MOVED, self.said(svc))
+
+    def test_a_move_whose_listing_after_the_stop_cannot_be_read_completely_starts_no_second_manager(self):
+        def registry(directories, *args, strict=False, **kwargs):
+            if not self.stops:
+                return dict(self.listed)
+            if strict:
+                raise OSError("a session file cannot be read")
+            return {}
+
+        with mock.patch.object(sessions, "read_session_registry", registry):
+            svc, sid = self.listed_out(listing=None)
+            self.poll(svc, 300)
+        self.assertEqual(len(self.stops), 1)
+        self.assert_move_ended(svc, sid)
+        self.assertIn("console: quota_move_failed " + sid, self.stderr.getvalue())
+
+    def test_a_move_starts_no_second_manager_when_the_stopped_session_or_another_one_shows_again(self):
+        def renamed(session_id, profile):
+            self.stopper(session_id, profile)
+            self.listed["s-1"] = self.observed(name=False)
+
+        def listed_in_read(svc):
+            self.listed["s-2"] = self.observed("s-2")
+
+        def folded_in_read(svc):
+            self.seen_row(svc, self.sid, "s-2")
+
+        cases = [("the stopped session is listed with no name", renamed, None),
+                 ("another session is listed during the permission read", None, listed_in_read),
+                 ("another session is folded during the permission read", None, folded_in_read)]
+        for name, stop, during in cases:
+            with self.subTest(name):
+                self.setUp()
+                svc, sid = self.listed_out(stopper=stop)
+                self.sid = sid
+                if during is not None:
+                    self.during_permission_read(svc, lambda: during(svc))
+                self.poll(svc, 300)
+                self.poll(svc, 600)
+                self.assertEqual(len(self.stops), 1)
+                self.assert_move_ended(svc, sid)
+
+    def test_a_move_whose_only_target_loses_room_before_the_stop_stops_nothing(self):
+        svc, sid = self.listed_out(listing=self.hooked_listing())
+        self.sid = sid
+        self.on_listing = lambda: svc.set_exclusion("home", True)
+        self.poll(svc, 300)
+        self.assertEqual(self.stops, [])
+        self.assert_move_ended(svc, sid)
+        self.poll(svc, 700)
+        self.assertEqual(self.nudges, [])
+        self.poll(svc, 3600)
+        self.assertEqual([n.session_id for n in self.continues()], ["s-1"])
+
+    def test_a_move_stops_nothing_when_the_manager_works_again_and_moves_once_it_is_idle(self):
+        def busy(svc):
+            self.listed["s-1"] = self.observed(status="busy", updated_ms=int((T0 + 299) * 1000))
+
+        def folded_busy(svc):
+            self.seen_row(svc, self.sid, "s-2", state="working")
+
+        for name, change in (("the listing shows it busy", busy),
+                             ("another folded session of it works", folded_busy)):
+            with self.subTest(name):
+                self.setUp()
+                svc, sid = self.listed_out(listing=self.hooked_listing())
+                self.sid = sid
+                self.on_listing = lambda: change(svc)
+                self.poll(svc, 300)
+                self.assertEqual(self.stops, [])
+                self.assert_move_ended(svc, sid, cancelled=False)
+                if change is busy:
+                    self.listed["s-1"] = self.observed()
+                    self.poll(svc, 600)
+                    self.assertEqual(len(self.stops), 1)
+                    self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+
+    def test_a_move_stops_nothing_when_the_listed_manager_is_not_on_the_sprints_profile(self):
+        svc, sid = self.listed_out(listing=self.hooked_listing())
+        self.sid = sid
+        self.on_listing = lambda: self.listed.update({"s-1": self.observed(profile="home")})
+        self.poll(svc, 300)
+        self.assertEqual(self.stops, [])
+        self.assert_move_ended(svc, sid)
 
     def test_a_listed_manager_is_not_moved_while_it_works_without_a_stopper_while_handed_to_the_owner_or_after_three_bring_backs(self):
         with self.subTest("working"):

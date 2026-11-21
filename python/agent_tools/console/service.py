@@ -1614,11 +1614,16 @@ move again. The started manager row stays, and the sprint waits to wake its sess
 or at its limit, the sprint is open, not stalled, with no open no-progress item and work to do, fewer than
 `revive.LIMIT` counted revivals sit in the window, a launcher and a stopper exist, the move was not
 cancelled and `_move_target` finds an account with room, `revive()` reserves a `_ListedMoveReservation`
-(a `_TakeoverReservation` that remembers the sessions it stopped). Its job stops every listed session
-carrying the manager's name through `_stop_one`, off the lock, reads the listing again, and launches only
-when that listing no longer shows the name, no folded session of that name is left unstopped and the move
-still holds; nothing listed to stop only releases it. Any other outcome cancels the move as #1279 does and a
-failed stop or listing writes `console: quota_move_failed <sprint_id> <reason>`. The takeover's
+(a `_TakeoverReservation` that remembers the sessions it stopped). Its job reads the conclusive listing, and just before the stop checks again under the lock that the
+move still holds, that no listed or folded session of the name works (a fresh busy reading, as
+`_working_now` judges it, or a folded state other than idle or limit releases the reservation) and that
+every listed one is on the profile the sprint's record gives (else the move is cancelled). It then stops
+every listed session carrying the manager's name through `_stop_one`, off the lock, and reads the
+conclusive listing again. It launches only when that listing shows neither the name nor a session it
+stopped, no folded session of that name is left unstopped, and the move still holds; the same is checked
+again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it.
+Any other outcome cancels the move as #1279 does and a failed stop or listing writes
+`console: quota_move_failed <sprint_id> <reason>`. The takeover's
 `manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
 sprint moved to another account and the new manager's first send is not an after-the-reset resume. A launch
 is a takeover when it was reserved by the bring-back
@@ -7209,8 +7214,19 @@ class ConsoleService:
                 return
             launch = dataclasses.replace(
                 launch, permission=self._read_permission(launch.project_id, launch.cwd))
+            listed = None
+            if isinstance(token, _ListedMoveReservation):
+                try:
+                    listed = self._conclusive_listing()
+                except Exception as error:
+                    self._move_failed(sprint_id, token, f"{type(error).__name__}: {error}")
+                    return
             with self._ingest:
-                launch = self._unexcluded_launch(launch, token, prepared_pin)
+                if listed is not None and not self._move_manager_gone(sprint_id, token, listed):
+                    self._cancel_move(sprint_id, token)
+                    launch = None
+                else:
+                    launch = self._unexcluded_launch(launch, token, prepared_pin)
                 if launch is not None:
                     self._client_live[launch.profile] += 1
             if launch is None:
@@ -7244,13 +7260,8 @@ class ConsoleService:
             self._release(sprint_id, token)
             return None
         if isinstance(token, _ListedMoveReservation):
-            now = int(self._clock() * 1000)
-            name = manager.session_name(sprint.project_id, sprint_id)
-            shown = any(o.name == name for o in (listed or {}).values())
-            if shown:
-                self._last_listed[sprint_id] = now
-            if (shown or self._unstopped_manager(sprint, token.stopped)
-                    or not self._listed_move_due(sprint, now)):
+            if (not self._move_manager_gone(sprint_id, token, listed or {})
+                    or not self._listed_move_due(sprint, int(self._clock() * 1000))):
                 self._cancel_move(sprint_id, token)
                 return None
         elif isinstance(token, _TakeoverReservation):
@@ -8149,46 +8160,102 @@ class ConsoleService:
         """Under the ingest lock: whether a folded session carrying the manager's name is not one the move stopped."""
         return any(s.session_id not in stopped for s in self._manager_sessions(sprint))
 
+    def _move_manager_gone(self, sprint_id: str, token: "_ListedMoveReservation",
+                           listed: Mapping[str, sessions.Observation]) -> bool:
+        """Under the ingest lock: whether `listed` and the folded sessions show no manager of the sprint left after its stop.
+
+        A listed session that carries the manager's name or is one the move stopped (whatever
+        name it shows now) is a manager left, and so is a folded session of that name the move did
+        not stop. Seeing the name listed marks the sprint as listed just now.
+        """
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None:
+            return False
+        name = manager.session_name(sprint.project_id, sprint_id)
+        if any(o.name == name for o in listed.values()):
+            self._last_listed[sprint_id] = int(self._clock() * 1000)
+            return False
+        return not (any(o.session_id in token.stopped for o in listed.values())
+                    or self._unstopped_manager(sprint, token.stopped))
+
+    def _move_failed(self, sprint_id: str, token: object, reason: str) -> None:
+        """End the move as cancelled and write `console: quota_move_failed <sprint_id> <reason>`."""
+        print(f"console: quota_move_failed {sprint_id} {reason}", file=sys.stderr)
+        with self._ingest:
+            self._cancel_move(sprint_id, token)
+
+    def _move_standing(self, sprint_id: str, token: "_ListedMoveReservation",
+                       listed: Mapping[str, sessions.Observation] | None = None
+                       ) -> sprints.SprintState | None:
+        """Under the ingest lock: the sprint when its move still stands, else None after ending the reservation.
+
+        The move stands while it is still due and `_move_holds`. With `listed` (the listing just
+        read) the manager must also be safe to stop: every listed session carrying its name
+        shows no fresh busy reading (`_working_now`) and every folded one is idle or at its limit
+        (else the reservation is released, the manager works), and every listed one is on the
+        profile the sprint's record gives (else the move is cancelled, the record and the listing
+        disagree).
+        """
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or not self._listed_move_due(sprint, int(self._clock() * 1000)):
+            self._release(sprint_id, token)
+            return None
+        view = capacity.capacity_view(
+            self._read_profiles() - self._removing, self._capacity, self._clock(),
+            self._signins, excluded=self._excluded, pinned=self._pinned,
+            owners=self._owners_now())
+        if not self._move_holds(view, sprint, token):
+            self._cancel_move(sprint_id, token)
+            return None
+        if listed is None:
+            return sprint
+        name = manager.session_name(sprint.project_id, sprint_id)
+        mine = [o for o in listed.values() if o.name == name]
+        if (any(self._working_now(o) for o in mine)
+                or any(s.state not in idle.IDLE_STATES for s in self._manager_sessions(sprint))):
+            self._release(sprint_id, token)
+            return None
+        if any((o.profile or sessions.DEFAULT_PROFILE) != sprint.manager.profile for o in mine):
+            self._cancel_move(sprint_id, token)
+            return None
+        return sprint
+
     def _stop_for_move(self, sprint_id: str, token: "_ListedMoveReservation"
                        ) -> Mapping[str, sessions.Observation] | None:
         """Stop the listed manager's sessions for its move, off the lock; the listing after the stop, or None.
 
-        None ends the reservation: released when the move no longer applies or nothing was listed
-        to stop (the bring-back owns a gone manager), cancelled when the move no longer holds or a
-        listing or a stop failed, which also writes `console: quota_move_failed <sprint_id> <reason>`.
+        Both listings are conclusive (a session file that cannot be read fails the move, it is
+        never taken for a manager that is gone). The move is checked under the lock before the
+        listing and again after it, just before the stop (`_move_standing`). None ends the
+        reservation: released when the move no longer applies, the manager works again or nothing
+        was listed to stop (the bring-back owns a gone manager), cancelled when the move no longer
+        holds or a listing or a stop failed, which also writes `console: quota_move_failed
+        <sprint_id> <reason>`.
         """
         with self._ingest:
-            sprint = self._sprints.get(sprint_id)
-            if sprint is None or not self._listed_move_due(sprint, int(self._clock() * 1000)):
-                self._release(sprint_id, token)
+            if self._move_standing(sprint_id, token) is None:
                 return None
-            view = capacity.capacity_view(
-                self._read_profiles() - self._removing, self._capacity, self._clock(),
-                self._signins, excluded=self._excluded, pinned=self._pinned,
-                owners=self._owners_now())
-            if not self._move_holds(view, sprint, token):
-                self._cancel_move(sprint_id, token)
-                return None
-            name = manager.session_name(sprint.project_id, sprint_id)
 
         def stop(session_id: str, profile: str) -> None:
             self._stop_one(session_id, profile)
             token.stopped.add(session_id)
 
         try:
-            listed = self._listing()
+            listed = self._conclusive_listing()
+            with self._ingest:
+                sprint = self._move_standing(sprint_id, token, listed)
+                if sprint is None:
+                    return None
+                name = manager.session_name(sprint.project_id, sprint_id)
             manager.stop_listed([name], lambda: listed, stop)
             if not token.stopped:
                 with self._ingest:
                     self._release(sprint_id, token)
                 return None
-            return self._listing()
+            return self._conclusive_listing()
         except Exception as error:
-            reason = (str(error) if isinstance(error, manager.StopFailed)
-                      else f"{type(error).__name__}: {error}")
-            print(f"console: quota_move_failed {sprint_id} {reason}", file=sys.stderr)
-            with self._ingest:
-                self._cancel_move(sprint_id, token)
+            self._move_failed(sprint_id, token, str(error) if isinstance(error, manager.StopFailed)
+                              else f"{type(error).__name__}: {error}")
             return None
 
     def _cancel_move(self, sprint_id: str, token: object) -> None:
