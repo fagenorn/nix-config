@@ -13,7 +13,6 @@ __pycache__/
 producer-report-*.json
 
 
-# A devenv ad-hoc shell (`devenv -O ... shell -- ...`, used where this repo has
-# no devenv.nix) writes its cache into the current directory.
+# The devenv shell writes its cache into .devenv/ at the root. devenv.nix,
+# devenv.yaml and devenv.lock are tracked (issue 1447); only the cache is hidden.
 .devenv/
-devenv.lock

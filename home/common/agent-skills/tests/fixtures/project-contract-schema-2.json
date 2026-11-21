@@ -74,28 +74,6 @@
         ],
         "cwd": ".",
         "env": []
-      },
-      "codex-plan-review": {
-        "argv": [
-          "codex-companion",
-          "task",
-          "--fresh",
-          "--reviewer",
-          "plan-review"
-        ],
-        "cwd": ".",
-        "env": []
-      },
-      "codex-diff-review": {
-        "argv": [
-          "codex-companion",
-          "task",
-          "--fresh",
-          "--reviewer",
-          "diff-review"
-        ],
-        "cwd": ".",
-        "env": []
       }
     },
     "workflow": {

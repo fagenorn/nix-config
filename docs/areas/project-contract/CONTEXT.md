@@ -34,6 +34,10 @@ The versioned JSON file the platform ships, listing its deprecations and migrati
 The one flake package nix-config publishes for Linux and macOS, holding the agent commands, the standards directory and the platform manifest. A project's CI fetches it and every host installs the same build; every merge to main is a revision (ADR-system-005).
 _Avoid_: platform bundle
 
+**Platform command**:
+A command the platform defines once under one id, which every ResolvedProject carries in `bindings.commands`; a contract entry under the same id replaces it (ADR-project-contract-010).
+_Avoid_: built-in command, default command
+
 **Production rules**:
 The optional `production` section of a project contract: the commands, key files and MCP tools that change the project's production, the routes that only read it, and the release profile through which a change is allowed, or the declaration that the project has no production. A contract without the section has no production rules, which is not the same as declaring no production. A rules section may name one of its changing commands as its console activation, the command the console's Activate runs (ADR-system-004).
 _Avoid_: deploy rules, production config

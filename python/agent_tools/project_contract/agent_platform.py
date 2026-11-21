@@ -7,6 +7,13 @@ through one loader and writes through one atomic writer (D37) — `adopt-project
 must not import `agent_tools.project_contract.resolve_project` (D26), and a second copy of either helper
 is the duplication the plan forbids.
 
+The platform also defines the commands every project's ResolvedProject carries:
+the two second-model review commands (`PLATFORM_COMMANDS`, issue 1450). The
+resolver adds each one the contract does not author under its id, an authored
+entry under the same id wins whole, and a caller deep-copies the table before
+mutating it. The review argv names the companion's `--reviewer` flag once, in
+`_REVIEW_ARGV`.
+
 A `deprecations` entry of `platform-manifest.json` is closed on exactly `id`,
 `kind`, `subject`, `since`, `successor` and `migration` (issue 580). `id`,
 `subject`, `successor` and `migration` are non-empty strings and `id` is
@@ -99,6 +106,16 @@ REGISTRY_ENTRY_OPTIONAL_MEMBERS = ("branch_override",)
 BRANCH_OVERRIDE_MEMBERS = ("branch", "default_branch", "reason")
 BRANCH_OVERRIDE_REASONS = ("default_contract_unresolved",)
 REGISTRY_SCHEMA_VERSION = 1
+
+# Issue 1450, ADR-project-contract-010: the two review commands every
+# ResolvedProject carries, defined once here and merged in by the resolver
+# beneath whatever the contract authors under the same id. `cwd` is relative to
+# the project root, as an authored command's is.
+_REVIEW_ARGV = ("codex-companion", "task", "--fresh", "--reviewer")
+PLATFORM_COMMANDS = {
+    "codex-plan-review": {"argv": [*_REVIEW_ARGV, "plan-review"], "cwd": ".", "env": []},
+    "codex-diff-review": {"argv": [*_REVIEW_ARGV, "diff-review"], "cwd": ".", "env": []},
+}
 
 # The closed set of compatibility reasons, kept separate from the resolver's
 # capability `REASON_CODES` (D7). `interval_verdict` names the first two;
