@@ -1063,6 +1063,15 @@ class CommittedContractTest(ResolverTestCase):
         self.assertNotIn("deploy", snapshot["bindings"])
         self.assertNotIn("deploy", snapshot["capabilities"])
 
+    def test_the_test_members_are_the_contracts_own_commands(self):
+        from agent_tools.delivery.verification_command import members
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        commands = json.loads(out)["bindings"]["commands"]
+        for m in members("test", REPO_ROOT):
+            self.assertEqual(
+                commands[m.id], {"argv": list(m.argv), "cwd": str(REPO_ROOT), "env": []}, m.id)
+
 
 def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, str]:
     """Run the resolver with `PATH` replaced by exactly `path_value`.
