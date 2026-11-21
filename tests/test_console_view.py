@@ -14,7 +14,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
 from agent_tools.console import contract_draft
-from agent_tools.console import approve, folder_trust, inbox, register
+from agent_tools.console import approve, folder_trust, inbox, register, release_card
 from agent_tools.console import spend
 from agent_tools.console import idle, view
 from agent_tools.console.deliveries import (
@@ -3424,6 +3424,17 @@ class SigninViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["inbox_items"], 3)
         self.assertEqual(shown["statement"]["sentence"], view.SIGNIN_SENTENCE)
 
+    def test_release_items_are_open_inbox_entries_after_adoptions(self):
+        shown = derive_view([state("p00", 1)], sprints={A: asked(started(A))},
+                            adoption_items=[ADOPTION_ITEM], release_items=[RELEASE_ITEM])
+        reasons = [e["reason"] for e in shown["inbox"]["open"]]
+        self.assertEqual(reasons[:2], ["adoption", "release"])
+        self.assertEqual(shown["inbox"]["open"][1], RELEASE_ITEM)
+        self.assertIsNot(shown["inbox"]["open"][1], RELEASE_ITEM)
+        self.assertEqual(shown["statement"]["inbox_items"], len(reasons))
+        alone = derive_view([], release_items=[RELEASE_ITEM])
+        self.assertEqual(alone["statement"]["inbox_items"], 1)
+
     def test_an_adoption_item_sets_its_sentence_and_needs_no_registered_project(self):
         shown = derive_view([], adoption_items=[ADOPTION_ITEM])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
@@ -3439,6 +3450,9 @@ class SigninViewTest(unittest.TestCase):
         shown = derive_view([state("p00", 1)], capacity=out())
         self.assertEqual([e for e in shown["inbox"]["open"] if e["reason"] == "signin"], [])
 
+
+RELEASE_ITEM = release_card.inbox_entries(
+    {3: release_card.Card(3, "a" * 40, "v1.2.0", "2026-11-21T08:00:00+00:00", "open")})[0]
 
 PID = "sha256:" + "a" * 64
 ASK_A = {"id": "candidate-class", "subject": ".claude/odd.md",

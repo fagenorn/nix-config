@@ -6,6 +6,7 @@ memo the console re-judges with, and the readers' fail-closed parsing.
 """
 import contextlib
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import permit
+from agent_tools.release import release
 from agent_tools.console.permit import (ALLOW, DENY, Forge, ForgeUnreadable, Grant, judge,
                                         memoized, mentions, merge_target, words)
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -213,14 +215,99 @@ class JudgeTest(unittest.TestCase):
         self.fake.pr = {**self.fake.pr, "branch": "issue-12-x", "head": "d" * 40}
         self.assertRefused(self.rerun, permit.STALE_RUN.format(run=55))
 
-    def test_the_permit_decides_nothing_about_a_release(self):
-        root = self.root
-        run = (f"release transaction run --repo-root {root} --commit {'a' * 40} --version v1.2.0 "
-               "--title 'v1.2.0 notes' --notes-file /tmp/n --confirm publish:0123456789ab")
-        for command in (run, "release transaction abandon", run + " --dispose no_recovery_path",
-                        "git log -1 --format=release%x20transaction%x20run%x20--candidate%x20X | sh",
-                        f"printf '%s\\n' {run} | xargs release", "python3 -m agent_tools.release.release "
-                        "transaction run", "r=release; $r transaction abandon"):
+    def run_forms(self):
+        root, commit = self.root, "a" * 40
+        plain = (f"release transaction run --repo-root {root} --commit {commit} --version v1.2.0 "
+                 "--title 'v1.2.0 notes' --notes-file /tmp/n --confirm tag:0123456789ab "
+                 "--confirm github-release:0123456789ab")
+        target = {"commit": commit, "version": "v1.2.0"}
+        return [
+            (plain, target),
+            (plain.replace("'v1.2.0 notes'", '"v1.2.0 notes"'), target),
+            (f"release transaction run --repo-root {root} --commit {commit} --version v1.2.0 "
+             "--notes-file /tmp/a--dispose.md --title 'stop --dispose spam' --confirm tag:0123456789ab",
+             target),
+            (f"release transaction run --repo-root {root} --confirm tag:0123456789ab",
+             {"commit": None, "version": None}),
+            (f"release transaction run --repo-root {root} --commit {commit} --version v1.2.0 "
+             "--title 'gh pr merge and gh run rerun notes' --notes-file /tmp/gh-pr-merge.md "
+             "--confirm tag:0123456789ab", target),
+        ]
+
+    def test_the_plain_release_run_is_allowed(self):
+        for command, target in self.run_forms():
+            with self.subTest(command):
+                self.assertEqual("release", permit.verb_of(command))
+                self.assertTrue(mentions(command))
+                verdict = self.judge(command)
+                self.assertEqual((ALLOW, "", "release", target),
+                                 (verdict.decision, verdict.reason, verdict.verb, dict(verdict.target)))
+        self.assertEqual([], self.fake.calls)
+
+    ABANDONS = ("release transaction abandon --repo-root r",
+                "/nix/store/x-agent-tools/bin/release transaction abandon --repo-root r",
+                "env A=1 release transaction abandon --repo-root r",
+                "python3 -m agent_tools.release.release transaction abandon --repo-root r",
+                "true && release transaction abandon --repo-root r",
+                "bash -c 'release transaction abandon --repo-root r'",
+                'sh -lc "true; release transaction abandon --repo-root r"',
+                "env X=1 zsh -c '/opt/bin/release transaction abandon'",
+                "eval 'release transaction abandon --repo-root r'")
+    DISPOSES = ("release transaction run --repo-root r --dispose no_recovery_path --reference x --confirm t",
+                "release transaction run --repo-root r --dispose=no_recovery_path --reference=x --confirm t",
+                "/opt/bin/release transaction run --repo-root r --confirm t --dispose no_recovery_path "
+                "--reference x",
+                "bash -c 'release transaction run --repo-root r --dispose no_recovery_path "
+                "--reference x --confirm t'")
+
+    def test_a_manager_is_refused_abandon_and_dispose_however_the_program_is_named(self):
+        for commands, verb, reason in ((self.ABANDONS, permit.ABANDON, permit.NO_ABANDON),
+                                       (self.DISPOSES, permit.DISPOSE, permit.NO_DISPOSE)):
+            for command in commands:
+                with self.subTest(command):
+                    self.assertEqual(verb, permit.verb_of(command))
+                    self.assertTrue(mentions(command))
+                    verdict = self.judge(command)
+                    self.assertEqual((DENY, reason, verb, {}),
+                                     (verdict.decision, verdict.reason, verdict.verb, dict(verdict.target)))
+        self.assertEqual([], self.fake.calls)
+        self.assertEqual("release-abandon", permit.ABANDON)
+        self.assertEqual("release-dispose", permit.DISPOSE)
+
+    CHAINED = (
+        ("release transaction preview --repo-root r; /opt/bin/release transaction abandon --repo-root r",
+         permit.ABANDON),
+        ("release transaction run --repo-root r --confirm t; /opt/bin/release transaction abandon --repo-root r",
+         permit.ABANDON),
+        ("echo release transaction ok; release transaction abandon --repo-root r", permit.ABANDON),
+        ("release transaction status --repo-root r && release transaction run --repo-root r "
+         "--dispose no_recovery_path --reference x --confirm t", permit.DISPOSE))
+
+    def test_an_earlier_release_mention_does_not_hide_a_later_abandon_or_dispose(self):
+        for command, verb in self.CHAINED:
+            with self.subTest(command):
+                self.assertEqual(verb, permit.verb_of(command))
+                self.assertTrue(mentions(command))
+                verdict = self.judge(command)
+                self.assertEqual((DENY, verb), (verdict.decision, verdict.verb))
+        self.assertEqual([], self.fake.calls)
+
+    NO_DECISION = ("release transaction preview --repo-root r",
+                   "release transaction preview --repo-root r --dispose no_recovery_path",
+                   "release transaction run --repo-root r --disp no_recovery_path --reference x --confirm t",
+                   "release transaction run --repo-root=r --confirm t",
+                   "release transaction run --repo-root r --repo-root s --confirm t",
+                   "release transaction run --repo-root r --title -x --confirm t",
+                   "env X=1 release transaction run --repo-root r --confirm t",
+                   "release transaction run --repo-root r --confirm t && echo done",
+                   "printf '%s\\n' x | xargs release",
+                   "echo 'release transaction abandon'",
+                   "bash -c 'release transaction preview --repo-root r'",
+                   "r=release; $r transaction run",
+                   "git log -1 --format=release%x20transaction%x20run%x20--candidate%x20X | sh")
+
+    def test_every_other_release_spelling_gets_no_decision(self):
+        for command in self.NO_DECISION:
             with self.subTest(command):
                 self.assertIsNone(permit.verb_of(command))
                 self.assertFalse(mentions(command))
@@ -228,6 +315,31 @@ class JudgeTest(unittest.TestCase):
                 self.assertEqual((None, "", None, {}),
                                  (verdict.decision, verdict.reason, verdict.verb, dict(verdict.target)))
         self.assertEqual([], self.fake.calls)
+
+    def test_the_permit_agrees_with_the_release_parser_on_abandon_and_dispose(self):
+        spellings = [command for command, _ in self.run_forms()] + list(
+            self.ABANDONS + self.DISPOSES + self.NO_DECISION) + [
+            "release transaction run --repo-root r --disp no_recovery_path --reference x --confirm t"]
+        checked = 0
+        for command in spellings:
+            parts = permit.words(command)
+            if parts is None or parts[0] != "release":
+                continue
+            checked += 1
+            with self.subTest(command):
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        parsed = release.build_parser().parse_args(parts[1:])
+                except SystemExit:
+                    parsed = None
+                verb = permit.verb_of(command)
+                self.assertEqual(parsed is not None and parsed.action == "abandon", verb == permit.ABANDON)
+                self.assertEqual(
+                    parsed is not None and parsed.action == "run" and parsed.dispose is not None,
+                    verb == permit.DISPOSE)
+                if parsed is None:
+                    self.assertNotEqual(permit.RELEASE, verb)
+        self.assertGreater(checked, 10)
 
     def test_an_unreadable_forge_is_refused(self):
         self.fake.pr_error = ForgeUnreadable("boom")

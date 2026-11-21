@@ -62,6 +62,7 @@ let
     "program-copies" = "delivery.program_copies";
     "promotion" = "delivery.promotion";
     "release" = "release.release";
+    "release-card" = "console.release_card";
     "resolve-project" = "project_contract.resolve_project";
     "skill-lint" = "skill_lint";
     "sprint" = "console.sprint";

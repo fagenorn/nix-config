@@ -25,6 +25,7 @@ class DriverCase(unittest.TestCase):
         self.clock = rs.Clock()
 
     def driver(self, project=None, **kwargs):
+        kwargs.setdefault("approvals", rs.approve_all)
         return release_driver.Driver(project or rs.project(self), clock=self.clock, **kwargs)
 
     def assertRefusal(self, code, call, *args, **kwargs):
@@ -276,6 +277,94 @@ class CollectionRefusalTest(DriverCase):
             with self.subTest(reason=reason):
                 _, result = self.run_released(reason)
                 self.assertEqual((result["state"], result["next"]), ("proving", "wait"))
+
+
+class ApprovalGateTest(DriverCase):
+    """A new candidate, or a resumed transaction created before the gate, needs an approved card."""
+    GATE = {"release_unapproved", "approval_unreadable"}
+
+    def forge(self, **kwargs):
+        self.world.verification_ready()
+        return self.driver(registry={"github-forge": rs.StatefulForge(self.world)}, **kwargs)
+
+    def run_all(self, driver):
+        shown = driver.preview(rs.candidate())
+        return driver.run(rs.candidate(), [c["token"] for c in shown["confirmations"]])
+
+    def assertNothingWritten(self, driver):
+        self.assertFalse((driver.project.common_dir / "agent-release").exists())
+        self.assertEqual((pushes(self.world), creates(self.world)), ([], []))
+
+    def test_a_new_candidate_with_no_approved_card_is_refused_and_writes_nothing(self):
+        driver = self.forge(approvals=lambda commit, version: False)
+        refusal = self.assertRefusal("release_unapproved", self.run_all, driver)
+        for word in (CANONICAL["tag"], CANONICAL["commit"], "release-card post"):
+            self.assertIn(word, refusal.detail)
+        self.assertNotIn("\n", refusal.detail)
+        self.assertNothingWritten(driver)
+
+    def test_an_unreadable_console_or_no_reader_refuses(self):
+        def unreadable(commit, version):
+            raise release_driver.ApprovalUnreadable("boom")
+        for approvals, reason in ((unreadable, "boom"), (None, "no approvals reader")):
+            with self.subTest(reason=reason):
+                driver = self.forge(approvals=approvals)
+                refusal = self.assertRefusal("approval_unreadable", self.run_all, driver)
+                self.assertIn(reason, refusal.detail)
+                self.assertNotIn("\n", refusal.detail)
+                self.assertNothingWritten(driver)
+
+    def test_only_the_candidates_own_commit_and_version_are_asked(self):
+        asked = []
+        def approvals(commit, version):
+            asked.append((commit, version))
+            return (commit, version) == (CANONICAL["commit"], "v9.9.9")
+        driver = self.forge(approvals=approvals)
+        self.assertRefusal("release_unapproved", self.run_all, driver)
+        self.assertEqual(asked, [(CANONICAL["commit"], CANONICAL["tag"])])
+
+    def test_an_approved_candidate_runs_to_done(self):
+        driver = self.forge(approvals=rs.approve_all)
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+
+    def test_confirmations_are_judged_before_the_approval(self):
+        driver = self.forge(approvals=lambda commit, version: False)
+        self.assertRefusal("confirmation_required", driver.run, rs.candidate(), [])
+
+    def test_a_resumed_transaction_runs_only_on_an_approval_of_its_own_candidate(self):
+        asked = []
+        def declined(commit, version):
+            asked.append((commit, version))
+            return False
+        driver = self.forge(approvals=declined)
+        rs.seed(driver)
+        before = driver.status()
+        tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+        self.assertRefusal("release_unapproved", driver.run, None, tokens)
+        self.assertEqual(asked, [(CANONICAL["commit"], CANONICAL["tag"])])
+        self.assertEqual(driver.status(), before)
+        self.assertEqual((pushes(self.world), creates(self.world)), ([], []))
+        approving = []
+        def approved(commit, version):
+            approving.append((commit, version))
+            return True
+        again = self.driver(driver.project, approvals=approved,
+                            registry={"github-forge": rs.StatefulForge(self.world)})
+        try:
+            again.run(None, tokens)
+        except release_driver.Refusal as refusal:
+            self.assertNotIn(refusal.code, self.GATE)
+        self.assertEqual(approving, [(CANONICAL["commit"], CANONICAL["tag"])])
+
+    def test_a_stored_authority_class_is_no_proof_of_approval(self):
+        for authority_class in ("release.approved", "approved", release_driver.AUTHORITY_CLASS):
+            with self.subTest(authority_class=authority_class):
+                driver = self.forge(approvals=lambda commit, version: False)
+                rs.seed(driver, authority_class=authority_class)
+                tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+                self.assertRefusal("release_unapproved", driver.run, None, tokens)
+                self.assertEqual((pushes(self.world), creates(self.world)), ([], []))
 
 
 class RunRefusalTest(DriverCase):
