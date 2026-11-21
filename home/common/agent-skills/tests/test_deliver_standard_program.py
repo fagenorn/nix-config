@@ -5718,7 +5718,7 @@ class ThirdFixWaveTest(unittest.TestCase):
         self.assertIn("race in expire", third)
         self.assertNotIn("race in release", third)
         # The same prompt, wave for wave: only the fix's range and the findings under re-review differ.
-        blank = lambda text: re.sub(r"Findings: \[.*?\]\. Report", "Findings: []. Report", re.sub(r"\b[def]{40}\b", "SHA", text))
+        blank = lambda text: re.sub(r"Findings: \[.*?\]\. ", "Findings: []. ", re.sub(r"\b[def]{40}\b", "SHA", text))
         self.assertEqual(blank(second), blank(third))
 
     def test_each_clause_of_the_admission_refuses_the_third_wave(self):
@@ -6536,6 +6536,218 @@ class ReviewRoundFindingsTest(unittest.TestCase):
         self.assertEqual(prompt(calls, "fix-wave").count(json.dumps(history.DECISION)), 1)
 
 
+def program_const(name):
+    found = re.search(rf"^const {name} = '([^'\\]*)'$", PROGRAM.read_text(encoding="utf-8"), re.M)
+    if found is None:
+        raise AssertionError(f"no const {name} in the program")
+    return found.group(1)
+
+
+def items(calls, label):
+    return json.loads(prompt(calls, label).split("Follow-ups: ", 1)[1].split("\n", 1)[0])
+
+
+def filings(calls):
+    return [name for name in labels(calls) if re.fullmatch(r"follow-ups-\d+", name)]
+
+
+class ScopedRoundFollowUpTest(unittest.TestCase):
+    """#1386: after the first full review only a critical finding, or one naming an unmet criterion, blocks; the rest are filed as follow-up issues."""
+
+    HARDENING = {"severity": "important", "file": "src/guard.py", "summary": "guard could also check the length", "relation": "new", "commit": H}
+    DOC = {"severity": "important", "file": "src/doc.py", "summary": "doc example is stale", "relation": "new", "commit": H}
+    SECURITY = {"severity": "critical", "file": "src/auth.py", "summary": "token written to the log", "relation": "new", "commit": H}
+    RENEW = {"severity": "important", "file": "claim.py", "summary": "race in renew", "relation": "new", "commit": "9" * 40}
+    FILED = [{"issue": 911, "file": "src/guard.py", "summary": "guard could also check the length", "commit": H}]
+
+    @staticmethod
+    def unmet(severity):
+        return {"severity": severity, "file": "src/flow.py", "summary": "AC1 has no test", "ac": "AC1", "relation": "new", "commit": H}
+
+    @staticmethod
+    def scoped(*findings, **more):
+        return dict({"verdict": "findings", "findings": list(findings), "closed": [1]}, **more)
+
+    def test_a_non_critical_scoped_finding_is_filed_and_the_delivery_lands(self):
+        cont = scoped_first_stop()
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"final-scoped": self.scoped(self.HARDENING, head=H)})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("merge", labels(calls))
+        self.assertEqual(waves(calls), [])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual(result["follow_ups"], self.FILED)
+        entries = items(calls, "follow-ups-1")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["n"], 1)
+        for needle in ("#9", "src/guard.py", H, "guard could also check the length"):
+            self.assertIn(needle, entries[0]["body"])
+        self.assertLess(labels(calls).index("follow-ups-1"), labels(calls).index("verify"))
+        self.assertEqual(schema_of(calls, "follow-ups-1")["required"], ["filed"])
+        cmd = re.search(r"forge-issue create --repo owner/repo [^\n]*?--body-file", prompt(calls, "follow-ups-1"))
+        self.assertIsNotNone(cmd)
+        self.assertNotIn("--blocked-by", cmd.group(0))
+        self.assertNotIn("--blocks", cmd.group(0))
+
+    def test_a_critical_security_finding_in_a_scoped_round_never_reaches_the_merge(self):
+        cont = scoped_first_stop()
+        result, calls = scoped_resume(cont, replies={"final-scoped": self.scoped(self.SECURITY, self.HARDENING),
+                                                     "fix-wave-review": {"verdict": "findings", "findings": [self.SECURITY]}})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertNotIn("pr", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+        self.assertIn("token written to the log", prompt(calls, "fix-wave"))
+        self.assertNotIn("guard could also check the length", prompt(calls, "fix-wave"))
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["token written to the log"])
+        self.assertEqual(result["cont"]["follow_ups"], self.FILED)
+
+    def test_a_finding_naming_an_unmet_criterion_blocks_in_every_round(self):
+        ac_item = {"type": "string"}
+        for sev in ("important", "minor"):
+            with self.subTest(round="scoped", severity=sev):
+                _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.unmet(sev)), "verify": None})
+                self.assertEqual(schema_of(calls, "final-scoped")["properties"]["findings"]["items"]["properties"]["ac"], ac_item)
+                self.assertIn("AC1 has no test", prompt(calls, "fix-wave"))
+                self.assertEqual(filings(calls), [])
+            with self.subTest(round="re-review", severity=sev):
+                result, calls = scoped_resume(scoped_first_stop(), replies={
+                    "final-scoped": self.scoped(self.SECURITY), "fix-wave-review": {"verdict": "findings", "findings": [self.unmet(sev)]}})
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertIn("AC1 has no test", [f["summary"] for f in result["cont"]["fix_findings"]])
+                self.assertEqual(filings(calls), [])
+            with self.subTest(round="full", severity=sev):
+                _, calls = run(replies={"final-1": {"verdict": "findings", "findings": [self.unmet(sev)]}, "verify": None})
+                self.assertEqual(schema_of(calls, "final-1")["properties"]["findings"]["items"]["properties"]["ac"], ac_item)
+                self.assertIn("AC1 has no test", prompt(calls, "fix-wave"))
+                self.assertEqual(filings(calls), [])
+
+    def test_a_scoped_fix_wave_review_files_its_non_critical_findings(self):
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": self.scoped(self.SECURITY), "fix-wave-review": {"verdict": "findings", "findings": [self.RENEW]}, "verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual(waves(calls), ["fix-wave", "fix-wave-review"])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual(result["cont"]["follow_ups"], [{"issue": 911, "file": "claim.py", "summary": "race in renew", "commit": "9" * 40}])
+        self.assertNotIn("fix_findings", result["cont"])
+        review = schema_of(calls, "fix-wave-review")
+        self.assertIn("changed_files", review["properties"])
+        self.assertEqual(review["properties"]["findings"]["items"]["required"], ["severity", "summary", "file", "commit"])
+
+    def test_an_unconfirmed_filing_stops_before_verify_and_the_resume_files_it_once(self):
+        both = ["guard could also check the length", "doc example is stale"]
+        for name, reply, left in (("partial", {"filed": [{"n": 1, "issue": 901}]}, ["doc example is stale"]), ("lost", None, both), ("thrown", "throw", both)):
+            with self.subTest(name):
+                stopped, calls = run(args=dict(ARGS, cont=scoped_first_stop()), replies={
+                    "final-scoped": self.scoped(self.HARDENING, self.DOC, head=H), "follow-ups-1": reply, "follow-ups-2": {"filed": []}})
+                self.assertEqual(stopped["stage"], "final-review")
+                self.assertNotIn("verify", labels(calls))
+                self.assertNotIn("merge", labels(calls))
+                self.assertEqual(waves(calls), [])
+                self.assertEqual(filings(calls), ["follow-ups-1", "follow-ups-2"])
+                self.assertEqual([f["summary"] for f in stopped["cont"]["follow_ups_pending"]], left)
+                self.assertTrue(all(f["commit"] == H for f in stopped["cont"]["follow_ups_pending"]))
+                if name == "partial":
+                    self.assertEqual(stopped["cont"]["follow_ups"], [dict(self.FILED[0], issue=901)])
+                else:
+                    self.assertNotIn("follow_ups", stopped["cont"])
+                if name == "thrown":
+                    self.assertIn("follow-ups-1", stopped["dead_agents"])
+                done, calls = run(args=dict(ARGS, cont=stopped["cont"]))
+                self.assertEqual(done["stage"], "done")
+                self.assertEqual(filings(calls), ["follow-ups-1"])
+                entries = items(calls, "follow-ups-1")
+                self.assertEqual(len(entries), len(left))
+                for entry, summary in zip(entries, left):
+                    self.assertIn(summary, entry["body"])
+                self.assertLess(labels(calls).index("follow-ups-1"), labels(calls).index("verify"))
+                self.assertLess(labels(calls).index("follow-ups-1"), labels(calls).index("merge"))
+                self.assertEqual(sorted(f["summary"] for f in done["follow_ups"]), sorted(both))
+                self.assertNotIn("follow_ups_pending", done)
+
+    def test_findings_alike_in_title_are_two_issues_and_a_shared_number_confirms_neither(self):
+        a = dict(self.HARDENING, file="src/a.py", summary="missing test for the error path")
+        b = dict(a, file="src/b.py")
+        result, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(a, b), "verify": None})
+        first, second = items(calls, "follow-ups-1")
+        self.assertNotEqual(first["title"], second["title"])
+        self.assertNotEqual(first["body"], second["body"])
+        self.assertIn("src/a.py", first["title"])
+        self.assertIn("src/b.py", second["title"])
+        self.assertEqual([(f["issue"], f["file"]) for f in result["cont"]["follow_ups"]], [(911, "src/a.py"), (912, "src/b.py")])
+        shared = {"filed": [{"n": 1, "issue": 901}, {"n": 2, "issue": 901}]}
+        stopped, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(a, b), "follow-ups-1": shared, "follow-ups-2": shared})
+        self.assertEqual(stopped["stage"], "final-review")
+        self.assertNotIn("follow_ups", stopped["cont"])
+        self.assertEqual([f["file"] for f in stopped["cont"]["follow_ups_pending"]], ["src/a.py", "src/b.py"])
+        _, again = scoped_resume(stopped["cont"], replies={"verify": None})
+        self.assertEqual([i["body"] for i in items(again, "follow-ups-1")], [i["body"] for i in items(calls, "follow-ups-1")])
+        self.assertIn("gh issue list --repo owner/repo --state all", prompt(again, "follow-ups-1"))
+
+    def test_a_minor_scoped_finding_is_filed(self):
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": self.scoped(dict(self.HARDENING, severity="minor")), "verify": None})
+        self.assertEqual(waves(calls), [])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertIn("minor", items(calls, "follow-ups-1")[0]["body"])
+        self.assertEqual(result["cont"]["follow_ups"], self.FILED)
+
+    def test_a_follow_up_names_the_commit_its_reviewer_read_it_at(self):
+        branch = ScopedReviewRoundTest()
+        found = dict(self.HARDENING, file="/r/.wt/cand/src/c.py", commit="c" * 40)
+        result, calls = branch.branch_resume(branch.branch_stop(), **{"final-scoped": self.scoped(found, closed=[])})
+        self.assertEqual([f["commit"] for f in result["cont"]["follow_ups"]], ["c" * 40])
+        self.assertIn("c" * 40, items(calls, "follow-ups-1")[0]["body"])
+        bare = {k: v for k, v in self.HARDENING.items() if k != "commit"}
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(bare), "verify": None})
+        self.assertIn("guard could also check the length", prompt(calls, "fix-wave"))
+        self.assertEqual(filings(calls), [])
+
+    def test_closures_are_reconciled_before_the_triage(self):
+        cont = ReviewRoundCapTest().second()["result"]["cont"]
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": "f" * 40}},
+                            replies={"final-scoped": self.scoped(dict(self.RENEW, commit="f" * 40)), "verify": None})
+        self.assertNotIn("round_cap", result)
+        self.assertEqual(waves(calls), [])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual(result["stage"], "verify")
+        two = [dict(SCOPED_NEW["findings"][0], commit=H, failing_input=x) for x in ("input-one", "input-two")]
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(*two, closed=[]), "verify": None})
+        self.assertIn("input-one", prompt(calls, "fix-wave"))
+        self.assertNotIn("input-two", prompt(calls, "fix-wave"))
+        self.assertIn("input-two", items(calls, "follow-ups-1")[0]["body"])
+
+    def test_every_final_reviewer_is_told_what_critical_means(self):
+        critical, blocks = program_const("CRITICAL_MEANS"), program_const("SCOPED_BLOCKS")
+        _, calls = run(replies={"final-1": SCOPED_FIRST, "verify": None})
+        for label in ("final-1", "final-codex", "fix-wave-review"):
+            self.assertIn(critical, prompt(calls, label))
+        for label in ("final-1", "fix-wave-review"):
+            self.assertNotIn(blocks, prompt(calls, label))
+        _, calls = run(args=SIZED, replies=dict(sized(1501), verify=None))
+        self.assertIn(critical, prompt(calls, "final-integration"))
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.SECURITY), "verify": None})
+        for label in ("final-scoped", "fix-wave-review"):
+            self.assertIn(critical, prompt(calls, label))
+            self.assertIn(blocks, prompt(calls, label))
+
+    def test_a_quoted_summary_reaches_the_title_without_shell_quotes(self):
+        said = "don't log \"token\" via $HOME or `env` \\ here"
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(dict(self.HARDENING, summary=said)), "verify": None})
+        entry = items(calls, "follow-ups-1")[0]
+        for char in "'\"`$\\":
+            self.assertNotIn(char, entry["title"])
+        self.assertIn("src/guard.py", entry["title"])
+        self.assertIn(said, entry["body"])
+
+    def test_filed_follow_ups_outlive_a_stop_and_are_not_filed_twice(self):
+        stopped, _ = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.SECURITY, self.HARDENING),
+                                                                 "fix-wave-review": {"verdict": "findings", "findings": [self.SECURITY]}})
+        self.assertEqual(stopped["cont"]["follow_ups"], self.FILED)
+        result, calls = scoped_resume(stopped["cont"], replies={"final-scoped": self.scoped(self.HARDENING), "verify": None})
+        self.assertEqual(filings(calls), [])
+        self.assertEqual(waves(calls), [])
+        self.assertEqual(result["cont"]["follow_ups"], self.FILED)
+
+
 class FixDiffFindingTest(unittest.TestCase):
     """#950: a finding not marked narrowing, in a file the fix wave's commits changed, is admitted to the next wave like a narrowing one."""
 
@@ -6901,7 +7113,8 @@ class FixWaveHistoryTest(unittest.TestCase):
                       "lines back.", wave)
         self.assertIn("pattern too wide again", wave)
         self.assertIn(f"{decided} Report no finding that only disputes it. tools/grader.json was judged more than once in the same place "
-                      f"before this fix; its history, oldest first: {history}. Report any still unresolved", prompt(calls, "fix-wave-review"))
+                      f"before this fix; its history, oldest first: {history}. {program_const('CRITICAL_MEANS')} {program_const('SCOPED_BLOCKS')} ", prompt(calls, "fix-wave-review"))
+        self.assertIn(" Report any still unresolved", prompt(calls, "fix-wave-review"))
 
     AMENDED = " The owner amended the plan for tools/grader.json (plan.md, Amendments): it is binding."
 
@@ -8180,7 +8393,7 @@ LOOK_CONT = {
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
-    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
+    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
              "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
@@ -8254,7 +8467,9 @@ SCENARIOS = (
     WS_SCENARIO,
     # #1370: a resume of a cont that holds the commit the last review read runs a scoped round.
     {"args": dict(ARGS, cont=dict({k: v for k, v in AMEND_CONT.items() if k != "partial"}, plan=PLAN, done=[{"n": 1, "commit": "c1"}],
-                                  review_rounds=1, reviewed={"head": "abcd"}))},
+                                  review_rounds=1, reviewed={"head": "abcd"})),
+     "replies": {"final-scoped": {"verdict": "findings", "closed": [], "findings": [
+         {"severity": "important", "file": "a.py", "summary": "could cache", "relation": "new", "commit": "a" * 40}]}}},
 )
 
 
@@ -9520,7 +9735,7 @@ class StructuredReplyTest(unittest.TestCase):
 
     def test_every_review_reply_is_read_through_the_one_wrapper(self):
         source = PROGRAM.read_text(encoding="utf-8")
-        schemas = (r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(FINDINGS\)|SYNC_REVIEW_SCHEMA\(followup\)|FINDINGS|PLAN_REVIEW"
+        schemas = (r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(SCOPED \? withItems\(FINDINGS, SCOPED_ITEM\) : FINAL_FINDINGS\)|SYNC_REVIEW_SCHEMA\(followup\)|FINDINGS|PLAN_REVIEW"
                    r"|GRADED_FINDINGS|DIRECT_FINDINGS|FINAL_SCHEMA|SCOPED_FINDINGS) \}")
         sites = [m.end() for m in re.finditer(schemas, source)]
         self.assertEqual(len(sites), 17)
@@ -9530,7 +9745,7 @@ class StructuredReplyTest(unittest.TestCase):
         self.assertEqual((tails.count(", { fileless })"), tails.count(", { ruled: true })"), tails.count(", { optional: true })")), (4, 2, 1))
         self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 17)
         # No schema that carries findings is built anywhere else: each is one of the named ones above, FINDINGS spread into it.
-        self.assertEqual(len(re.findall(r"\.\.\.(?:GRADED_)?FINDINGS,", source)), 7)
+        self.assertEqual(len(re.findall(r"\.\.\.(?:GRADED_)?FINDINGS,", source)), 6)
         self.assertEqual(source.count(", { fileless })"), 4)
         self.assertEqual(source.count("const fileless = !diffReviewed\n"), 1)
         self.assertEqual(source.count("{ ruled: true }"), 2)
