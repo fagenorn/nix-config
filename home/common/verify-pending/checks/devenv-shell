@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 1447: a commit through the project's devenv shell is signed and leaves
+# its worktree clean, and a shell leaves a fresh worktree clean.
+# verify-pending runs it from the repository root at the commit the block names.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks devenv-shell "$@"
