@@ -13,6 +13,7 @@
   },
   "engine": null,
   "fallback-audit": null,
+  "fleet-preflight": null,
   "folder-trust": null,
   "forge-claim": {
     "subcommands": {
@@ -37,6 +38,7 @@
   "look-lint": null,
   "owner-actions": null,
   "plan-amend": null,
+  "pr-green": null,
   "program-copies": null,
   "promotion": null,
   "release": null,
