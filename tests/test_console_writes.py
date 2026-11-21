@@ -143,7 +143,7 @@ class WriteRouteTest(Case):
                           "/api/register-confirm", "/api/trust-check",
                           "/api/register-cancel", "/api/owner-notice",
                           "/api/owner-notice-withdraw", "/api/project-question",
-                          "/api/activate", "/api/share-tailnet", "/api/share-colleague",
+                          "/api/project-question-delete", "/api/activate", "/api/share-tailnet", "/api/share-colleague",
                           "/api/share-remove", "/api/look-retry",
                           "/api/guest-account", "/api/guest-signin-code",
                           "/api/guest-signin-cancel", "/api/guest-account-signout",

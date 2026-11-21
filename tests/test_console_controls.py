@@ -50,14 +50,14 @@ DESK_CONTROLS: dict = {
     **_roles(PRIMARY_OR_QUIET, "approve", "send", "try-again", "signin-start", ANS_ROLE),
     **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry", "look-retry", "adoption-merge"),
     **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "start-withdraw", "progress-withdraw",
-             "acct-remove", "acct-remove-send", "share-off", "share-remove"),
+             "acct-remove", "acct-remove-send", "share-off", "share-remove", "reading-delete-send"),
     **_roles(OPTION_ONLY, "opt"),
     **_roles(
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
         "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-signout", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
         "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
-        "follow-cancel", "thread-open", "reading-close", "ask-choice", "reply-send", "undo", *ANS_PLAIN, "goal-project",
+        "follow-cancel", "thread-open", "reading-close", "reading-delete", "reading-delete-keep", "ask-choice", "reply-send", "undo", *ANS_PLAIN, "goal-project",
         "detail-open", "kept-words-dismiss", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
@@ -169,7 +169,8 @@ def desk_scenarios() -> list:
         # a thread's follow-up box under its last answer (#1178)
         [begin, {"frame": view([asking(project(0, []), thread(ASK_CHOOSE))])},
          {"open": "questions:owner/p00"}, {"click": "thread-open"}, snapshot, {"click": "follow-open"},
-         {"type": {"class": "follow-text", "text": "and then?"}}, snapshot],
+         {"type": {"class": "follow-text", "text": "and then?"}}, snapshot,
+         {"click": "reading-delete"}, snapshot],
         # a sprint block with Tell open and End the sprint opened, then a stop question
         [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
          {"open": MORE_KEY}, snapshot],

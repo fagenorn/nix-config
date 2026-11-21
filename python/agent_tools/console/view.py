@@ -8,9 +8,9 @@ line of JSON.
 
 Events: `project.registered` (payload `{"root": ...}`) sets a project, keeping
 its open work; `project.unregistered` (payload `{"root": ...}`, the root the registry
-no longer holds, #1334) removes it; a project question's asked or answered event
-(#1178) changes nothing, so a question or follow-up neither reorders projects nor resets a
-project's untouched age; any other event that names a
+no longer holds, #1334) removes it; a project question's asked, answered, keyed or deleted
+event (#1178, #1272) changes nothing, so a question, a follow-up or the deletion of a thread
+neither reorders projects nor resets a project's untouched age; any other event that names a
 project updates only that project's last sequence and time; an event naming no
 project, or a project not registered, is ignored.
 
@@ -777,7 +777,8 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import (
     Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_QUESTION_ANSWERED,
-    PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED, PROJECT_UNREGISTERED as UNREGISTERED)
+    PROJECT_QUESTION_ASKED, PROJECT_QUESTION_DELETED, PROJECT_QUESTION_KEYED,
+    PROJECT_UNREGISTERED as UNREGISTERED)
 from agent_tools.console.manager import Wait, plain_reason, quota_wait, session_name
 from agent_tools.console.movement import NUDGE_REPLY_MS, ProjectMovement, SessionMovement
 from agent_tools.console.sessions import (
@@ -1032,7 +1033,8 @@ def project_states(
                 previous.open_work if previous else 0)
         elif event.kind == UNREGISTERED:
             result.pop(project, None)
-        elif event.kind in (PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_KEYED):
+        elif event.kind in (PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_KEYED,
+                            PROJECT_QUESTION_DELETED):
             continue
         elif project in result:
             result[project] = replace(

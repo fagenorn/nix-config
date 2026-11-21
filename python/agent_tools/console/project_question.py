@@ -58,6 +58,17 @@ fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
 (`parse_keyed_request` also reads an optional `request_key`, ADR-console-089 D9).
+A credential-shaped text (#1272) is refused first, with `CREDENTIAL`, before it is stored or sent:
+`credential_shaped(text)` is true when any pattern of `CREDENTIAL_SHAPES` (known token prefixes,
+key blocks, a `Bearer` value, a JWT, a `token`/`secret`/`password`-style assignment in any case,
+quoted or not, with a real value, the console's own page token, and a long base64 run that is not
+an SRI hash or a path, a path being slash-separated parts that are each a word holding three lowercase letters in a row,
+a label of up to four characters, or a short CamelCase or acronym name such as `README`, `HTTP2` or `Vec3D`)
+searches it. The refusal text never holds any of the question's text.
+Limits (#1272): the shapes judge text as a paste gives it. A credential split by spaces or invisible
+characters, encoded (URL encoding, hex, or base64 of a token), a password shorter than eight characters
+or written with no `token`, `secret`, `password`-style name before it, or a console token with fewer
+than two capital or two small letters (about one generated token in 10^8) is not caught.
 
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
 layers each refuse on their own: `--setting-sources ""` loads no user, project or local settings,
@@ -130,6 +141,15 @@ after refusing, in this order, a `thread_id` that is not a thread's id (`THREAD_
 follow-up's own id is not one), a thread whose last question is not answered (`THREAD_UNANSWERED`)
 and a thread whose `thread_text` plus the question exceeds `MAX_THREAD_BYTES` UTF-8 bytes
 (`THREAD_TOO_LONG`): the prompt is one argv string and Linux refuses one past 131072 bytes.
+Between the last two, a thread any of whose questions or answers is credential-shaped is refused
+(`THREAD_CREDENTIAL`, #1272): the turns are the text the next session's prompt would carry.
+A `PROJECT_QUESTION_DELETED` row removes from its project's folded questions each question whose
+id is a string member of its `question_ids` list (a row with a non-string project or a
+`question_ids` that is not a list removes nothing, the rule the delete trigger enforces,
+#1272). `thread_question_ids(questions, thread_id)` returns the ids of the thread whose id is
+`thread_id`, ascending by `seq`, or refuses with `THREAD_UNKNOWN`; the service refuses a delete
+of a thread with a working question with `THREAD_WORKING`. `parse_delete_request` reads exactly
+`project_id` and `thread_id`, both non-empty strings, and returns them as a pair.
 `parse_keyed_request` reads exactly `project_id` and `question`, plus optionally a non-empty
 string `thread_id` and optionally a `request_key` (a string that fullmatches `REQUEST_KEY`, 32
 lowercase hex digits; any other is a `ValueError`), and returns
@@ -159,7 +179,8 @@ from pathlib import Path
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import manager, question_records
 from agent_tools.console.event_log import (
-    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED, Event)
+    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_DELETED,
+    PROJECT_QUESTION_KEYED, Event)
 from agent_tools.console.project_question_hook import (
     GH_READ_GROUPS, GH_READ_VERBS, GIT_READS, PLAIN_WORD, REPO_SLUG)
 from agent_tools.project_contract import resolve_project
@@ -273,8 +294,51 @@ THREAD_LEAD = (
     "answer you gave. Use them as context: the rules above still apply.\n\n"
 )
 THREAD_UNKNOWN = "this thread is not one of the project's questions"
+THREAD_WORKING = "this thread is still being answered: delete it once the answer is in"
 THREAD_UNANSWERED = "a follow-up continues a thread whose last question was answered"
 THREAD_TOO_LONG = "this thread is too long to continue: ask a new question"
+CREDENTIAL = "this looks like a password, token or key, so it was not kept or sent: take it out and ask again"
+THREAD_CREDENTIAL = (
+    "this thread holds a password, token or key, so it was not continued: delete the thread and ask again")
+
+CREDENTIAL_SHAPES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (name, re.compile(pattern, re.ASCII)) for name, pattern in (
+        ("github", r"\bgh[pousr]_[A-Za-z0-9]{36,}"),
+        ("github_pat", r"\bgithub_pat_[A-Za-z0-9_]{22,}"),
+        ("hugging_face", r"\bhf_[A-Za-z0-9]{30,}"),
+        ("sk_key", r"\bsk-[A-Za-z0-9_-]{32,}"),
+        ("age_secret_key", r"AGE-SECRET-KEY-1[0-9A-Z]{50,}"),
+        ("private_key_block", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+        ("bearer", r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"),
+        ("aws_key_id", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+        ("slack", r"\bxox[abposr]-[A-Za-z0-9-]{10,}"),
+        ("gitlab", r"\bglpat-[A-Za-z0-9_-]{20,}"),
+        ("jwt", r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+        ("assignment",
+         r"\b[A-Za-z0-9_.-]*(?i:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)(?:"
+         r"[\"']?\s*=\s*[\"'](?![$<{])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
+         r"|[\"']?\s*=\s*(?![$<{])(?![^\s\"']*[(\[])(?!(?![^\s\"']*[0-9])[^\s\"']*\.[A-Za-z_])"
+         r"(?=[^\s\"']*[0-9-])"
+         r"(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
+         r"|[\"']\s*:\s*[\"']?(?![$<{])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
+         r"|\s*:\s*[\"']?(?![$<{])(?=[^\s\"']*[0-9])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,})"),
+        ("console_token",
+         r"(?<![A-Za-z0-9_-])(?=(?:[A-Za-z0-9_-]*?[A-Z]){2})(?=(?:[A-Za-z0-9_-]*?[a-z]){2})"
+         r"[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
+        ("base64_run",
+         r"(?<![A-Za-z0-9+/=])(?<!sha1-)(?<!sha256-)(?<!sha384-)(?<!sha512-)"
+         r"(?!(?:(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*|[A-Za-z0-9+]{0,4}"
+         r"|(?=[A-Za-z0-9+]{1,10}(?![A-Za-z0-9+]))(?:[A-Z][a-z]{0,2}|[0-9][a-z]?)+)/)+"
+         r"(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*|[A-Za-z0-9+]{0,4}"
+         r"|(?=[A-Za-z0-9+]{1,10}(?![A-Za-z0-9+]))(?:[A-Z][a-z]{0,2}|[0-9][a-z]?)+)(?![A-Za-z0-9+/=]))"
+         r"(?=(?:[A-Za-z0-9+/]*?[A-Z]){2})(?=(?:[A-Za-z0-9+/]*?[a-z]){2})"
+         r"(?=(?:[A-Za-z0-9+/]*?[0-9]){2})[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])"),
+    ))
+
+
+def credential_shaped(text: str) -> bool:
+    """True when `text` looks like a password, token or key (#1272); the text is never repeated."""
+    return any(pattern.search(text) for _, pattern in CREDENTIAL_SHAPES)
 
 HEADINGS: tuple[tuple[str, str], ...] = (
     ("answer", "Answer"), ("read", "Read"), ("ran", "Ran"),
@@ -425,12 +489,16 @@ def checked_question(text: str) -> str:
     return text
 
 
-def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
+def _decode_body(body: bytes) -> object:
     try:
-        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
-                           parse_constant=reject_nonfinite_literal)
+        return json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                          parse_constant=reject_nonfinite_literal)
     except RecursionError as error:
         raise ValueError("the body is nested too deeply") from error
+
+
+def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
+    value = _decode_body(body)
     required = {"project_id", "question"}
     if not isinstance(value, dict) or not required <= set(value) <= required | {
             "thread_id", "request_key"}:
@@ -454,6 +522,18 @@ def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
 
 def parse_request(body: bytes) -> tuple[str, str, str | None]:
     return parse_keyed_request(body)[:3]
+
+
+def parse_delete_request(body: bytes) -> tuple[str, str]:
+    value = _decode_body(body)
+    if not isinstance(value, dict) or set(value) != {"project_id", "thread_id"}:
+        raise ValueError("the body must be an object of project_id and thread_id")
+    project_id, thread_id = value["project_id"], value["thread_id"]
+    if not isinstance(project_id, str) or not project_id:
+        raise ValueError("project_id must be a non-empty string")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise ValueError("thread_id must be a non-empty string")
+    return project_id, thread_id
 
 
 def thread_text(thread: Sequence[Turn]) -> str:
@@ -740,6 +820,13 @@ def asked_questions(events: Iterable[Event],
     found = {project: list(items) for project, items in known.items()} if known else {}
     for event in events:
         project, payload = event.project, event.payload
+        if event.kind == PROJECT_QUESTION_DELETED:
+            named = payload.get("question_ids")
+            if isinstance(project, str) and isinstance(named, list):
+                dropped = {name for name in named if isinstance(name, str)}
+                found[project] = [item for item in found.get(project, [])
+                                  if item.question_id not in dropped]
+            continue
         question_id = payload.get("question_id")
         if not isinstance(project, str) or not isinstance(question_id, str) or not question_id:
             continue
@@ -787,14 +874,25 @@ def threads(questions: Sequence[AskedQuestion]) -> tuple[tuple[AskedQuestion, ..
     return tuple(tuple(group) for group in ordered)
 
 
-def follow_up(questions: Sequence[AskedQuestion], thread_id: str, question: str) -> tuple[Turn, ...]:
+def _thread_of(questions: Sequence[AskedQuestion], thread_id: str) -> tuple[AskedQuestion, ...]:
     thread = next((group for group in threads(questions)
                    if (group[0].thread_id or group[0].question_id) == thread_id), None)
     if thread is None:
         raise Refused(THREAD_UNKNOWN)
+    return thread
+
+
+def thread_question_ids(questions: Sequence[AskedQuestion], thread_id: str) -> tuple[str, ...]:
+    return tuple(q.question_id for q in _thread_of(questions, thread_id))
+
+
+def follow_up(questions: Sequence[AskedQuestion], thread_id: str, question: str) -> tuple[Turn, ...]:
+    thread = _thread_of(questions, thread_id)
     if thread[-1].state != ANSWERED:
         raise Refused(THREAD_UNANSWERED)
     turns = tuple(Turn(q.question, q.answer or "") for q in thread)
+    if any(credential_shaped(turn.question) or credential_shaped(turn.answer) for turn in turns):
+        raise Refused(THREAD_CREDENTIAL)
     if len(thread_text(turns).encode("utf-8")) + len(question.encode("utf-8")) > MAX_THREAD_BYTES:
         raise Refused(THREAD_TOO_LONG)
     return turns
