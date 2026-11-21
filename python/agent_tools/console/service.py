@@ -47,6 +47,7 @@ stream `Content-Length`):
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
     POST /api/register-cancel 204, a JSON body, the page cancels a registration that was not applied yet (below)
     POST /api/project-question 204, a JSON body, the page asks a read-only question about a project (below)
+    POST /api/project-question-delete 204, a JSON body, the page deletes a question thread (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -1625,7 +1626,21 @@ sprint is open and the service not stopping; a failure also prints `console: wak
 `manager_seen_seq`) while the command ran; the reservation's end after a wake was sent, or one that could not start, also sets `_settled`, so a stop that waited out the wake defers for the resumed session. A takeover job reads the listing off the lock (one that
 raises ends the reservation and appends nothing), then launches only while the sprint is open,
 neither the fresh listing nor the folded sessions show the manager and `_revive_step` is still a
-takeover; otherwise it appends nothing. A launch is a takeover when it was reserved by the bring-back
+takeover; otherwise it appends nothing. A takeover the bring-back reserves because the manager's
+account is out (`_quota_target`: out, and the step would otherwise be a wake) carries the profile it
+chose as `target` on its `_TakeoverReservation`. The launch is prepared on that profile without
+choosing again, and with the account identity (its sign-in account and its counted reading's account
+id) and the owner's pin as they were when it was reserved. When it is prepared, and again after the
+permission read (`_unexcluded_launch`), it must pass `_move_holds`: the manager's account still out
+(`_quota_wait`, which reads the sign-in history, so a late reply from an account the profile left
+does not count), the pin and the account identity unchanged, and `_room_for_move`: another account
+than the manager's, by sign-in and by the account ids the counted readings of the target and its
+sign-in aliases carry, not a duplicate of any profile, not kept for another login's waiting sprint,
+and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not excluded). It must also
+still be scanned and not being removed. Otherwise the reservation ends, nothing is appended and the
+sprint is marked in `_move_cancelled` until the manager's account has room: no later poll decides a
+move again. The started manager row stays, and the sprint waits to wake its session after the reset
+(#1279). A launch is a takeover when it was reserved by the bring-back
 or is a retry of a stalled sprint or of a manager row that is a takeover; every manager row it writes
 (`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries
 `"takeover": true` and `"goal"`, every `manager.started` carries `"seen_after"` (the sprint's
@@ -1753,7 +1768,8 @@ exception is `console: project_question_failed <Type>: <message>` and 500 `quest
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
 once it is answered. `ask_project_question(project_id, text, thread_id=None, request_key=None)` admits a question under the ingest
-lock, in this order: no `project_asker` is `Refused` "questions are not available on this host
+lock, in this order: a credential-shaped text is `Refused` first (#1272, `project_question.CREDENTIAL`,
+before the lock and every check below, never repeating the text), no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
 question's own checks, with a `thread_id` only the follow-up checks of
 `project_question.follow_up` against the project's folded questions (an unknown thread, a thread
@@ -1781,6 +1797,25 @@ project_question_unanswered <question_id> <reason>`, and a row that cannot be ap
 the approval workers and before the server and the log close, until no accepted question is
 unanswered and then joins the question workers; the stop flag, set first, also cancels a running
 session. Nothing in this path reads the tracker or the forge.
+
+`POST /api/project-question-delete` (#1272, ADR-console-093) carries one JSON body of exactly
+`project_id` and `thread_id` (`MAX_PROJECT_QUESTION_DELETE_BYTES`, 4096), is a page write and so
+owner-only, and deletes one question thread: a body `project_question.parse_delete_request` does
+not accept is 400 `bad delete`; `project_question.Refused` is one stderr line `console:
+project_question_delete_refused <reason>` and 409 with the reason; any other exception is
+`console: project_question_delete_failed <Type>: <message>` and 500 `delete failed`; success is an
+empty `204`. `delete_question_thread(project_id, thread_id)` decides under the ingest lock, in
+this order: an unregistered project, a thread id that is not one of the project's threads, and a
+thread any of whose questions has a running session (`_project_questions_running`, the ids
+counted open until `_record_project_answer` releases them) are each `Refused`, and a refusal
+appends nothing; a question left working by a crash has no running session and is deletable. An
+accepted delete has `EventLog.delete_question_thread` remove the thread's asked and answered rows
+and write one `project_question.deleted` record holding only the question ids and the thread id,
+kept forever, and applies that record through the fold, so the published view drops the thread
+and a follow-up naming it is `THREAD_UNKNOWN`. It starts no session and reads no tracker. What
+stays: a `project_question.keyed` receipt, so a keyed re-send returns the deleted question's id
+and starts nothing, the session's own transcript outside the log, and the session's spend, which
+`_spend_questions` keeps under Questions until a restart rebuilds it from the surviving asked rows.
 """
 
 import contextlib
@@ -1914,6 +1949,8 @@ TRUST_CHECK_PATH = "/api/trust-check"
 REGISTER_CANCEL_PATH = "/api/register-cancel"
 PROJECT_QUESTION_PATH = "/api/project-question"
 PROJECT_QUESTION_THREAD = "console-project-question"
+PROJECT_QUESTION_DELETE_PATH = "/api/project-question-delete"
+MAX_PROJECT_QUESTION_DELETE_BYTES = 4096
 SHARE_TAILNET_PATH = "/api/share-tailnet"
 SHARE_COLLEAGUE_PATH = "/api/share-colleague"
 SHARE_REMOVE_PATH = "/api/share-remove"
@@ -1930,7 +1967,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     ACCOUNT_REMOVE_PATH, ACCOUNT_SIGNOUT_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, ADOPTION_MERGE_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH,
     TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
     GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH})
@@ -2349,6 +2386,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: project_question_failed {type(error).__name__}: {error}", file=sys.stderr)
             self._refuse(500, "question failed")
+            return False
+        return True
+
+    def _project_question_delete_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out a question thread's deletion; False when it was refused."""
+        body = self._json_body(MAX_PROJECT_QUESTION_DELETE_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, thread_id = project_question.parse_delete_request(body)
+        except ValueError:
+            self._refuse(400, "bad delete")
+            return False
+        try:
+            console.delete_question_thread(project_id, thread_id)
+        except project_question.Refused as error:
+            print(f"console: project_question_delete_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: project_question_delete_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "delete failed")
             return False
         return True
 
@@ -3434,6 +3494,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._project_question_request(console):
                 return
+        elif route == PROJECT_QUESTION_DELETE_PATH:
+            self.close_connection = True
+            if not self._project_question_delete_request(console):
+                return
         elif route in (APPROVE_PATH, REPLY_PATH):
             self.close_connection = True
             if not self._decision_request(console, route):
@@ -4073,7 +4137,19 @@ class _RetryReservation:
 
 
 class _TakeoverReservation:
-    """A launch reservation made by the bring-back: it runs only while the takeover is still decided."""
+    """A launch reservation made by the bring-back: it runs only while the takeover is still decided.
+
+    `target` is the profile a quota move (#1278) chose, None for every other takeover. Its launch
+    runs only there, and only while that profile is another account with room (#1279). `account`
+    is the identity of the chosen account and `pinned` the owner's pin, both as they were when the
+    move was reserved: a launch that finds either changed starts nothing.
+    """
+
+    def __init__(self, target: str | None = None, account: tuple[str | None, str | None] | None = None,
+                 pinned: str | None = None) -> None:
+        self.target = target
+        self.account = account
+        self.pinned = pinned
 
 
 MOVE_NOT_STARTED = "the manager could not be started again after its account was signed out or removed"
@@ -4243,6 +4319,7 @@ class ConsoleService:
             else project_question_dispatch)
         self._question_keys: dict[tuple[str, str], str] = {}
         self._project_questions_open = 0  # accepted questions whose answered row is not yet written
+        self._project_questions_running: set[str] = set()  # their ids: a session may still write
         self._project_question_workers: list[threading.Thread] = []
         self._probe_thread: threading.Thread | None = None
         self._nudger = nudger
@@ -4253,6 +4330,7 @@ class ConsoleService:
         self._pending: dict[str, sprints.PendingStop] = {}
         self._settled: dict[str, int] = {}
         self._quota_held: set[str] = set()
+        self._move_cancelled: set[str] = set()
         self._moved: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
@@ -5116,8 +5194,11 @@ class ConsoleService:
         turns go to the job. A `request_key` already on a folded question of the project returns
         that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089 D9); the
         check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
-        `project_question.Refused` and append and count nothing.
+        `project_question.Refused` and append and count nothing. A credential-shaped text is
+        refused first, before every other check and before the request-key replay (#1272).
         """
+        if project_question.credential_shaped(text):
+            raise project_question.Refused(project_question.CREDENTIAL)
         with self._ingest:
             if self._project_asker is None:
                 raise project_question.Refused(project_question.UNAVAILABLE_TEXT)
@@ -5153,6 +5234,7 @@ class ConsoleService:
             appended = self.log.append(rows)
             self._apply(appended)
             self._project_questions_open += 1
+            self._project_questions_running.add(question_id)
         try:
             self._project_question_dispatch(
                 lambda: self._run_project_question(
@@ -5162,6 +5244,25 @@ class ConsoleService:
                 project_question.FAILED, reason=f"{type(error).__name__}: {error}"))
             raise
         return question_id
+
+    def delete_question_thread(self, project_id: str, thread_id: str) -> None:
+        """Delete one question thread of a registered project from the log (#1272, ADR-console-093).
+
+        Under the ingest lock and in this order: an unregistered project, a thread id that is not
+        one of the project's threads and a thread any of whose questions has a running session
+        are each `project_question.Refused`, and a refusal appends nothing. An accepted delete
+        has the log remove the thread's asked and answered rows and keep one text-free
+        `project_question.deleted` record, applied through the fold so the published view drops the
+        thread. It starts no session and reads no tracker.
+        """
+        with self._ingest:
+            if project_id not in self._states:
+                raise project_question.Refused(project_question.UNREGISTERED)
+            ids = project_question.thread_question_ids(
+                self._project_questions.get(project_id, ()), thread_id)
+            if any(one in self._project_questions_running for one in ids):
+                raise project_question.Refused(project_question.THREAD_WORKING)
+            self._apply([self.log.delete_question_thread(project_id, thread_id, ids)])
 
     def _run_project_question(self, question_id: str, project_id: str, root: str, text: str,
                               profile: str, session_id: str,
@@ -5275,6 +5376,7 @@ class ConsoleService:
         finally:
             with self._ingest:
                 self._project_questions_open -= 1
+                self._project_questions_running.discard(question_id)
                 self._project_questions_done.notify_all()
 
     def _probe_profile(self, session_id: str) -> str | None:
@@ -7073,8 +7175,10 @@ class ConsoleService:
         out joins it, a sprint without work leaves it.
         """
         wait = manager.quota_wait(
-            capacity.capacity_view(self._profiles, self._capacity, self._clock()),
+            capacity.capacity_view(self._profiles, self._capacity, self._clock(), self._signins),
             sprint.manager.profile if sprint.manager else None)
+        if wait is None:
+            self._move_cancelled.discard(sprint.sprint_id)
         if wait is not None or sprint.sprint_id in self._quota_held:
             if not idle.has_work(sprint, self._waiting(sprint)):
                 self._quota_held.discard(sprint.sprint_id)
@@ -7187,9 +7291,14 @@ class ConsoleService:
             shown = any(o.name == name for o in (listed or {}).values())
             if shown:
                 self._last_listed[sprint_id] = now
-            if (shown or self._manager_listed(sprint)
-                    or self._revive_step(sprint, now) != sprints.TAKEOVER):
+            if shown or self._manager_listed(sprint):
                 self._release(sprint_id, token)
+                return None
+            if self._revive_step(sprint, now) != sprints.TAKEOVER:
+                if token.target is not None and self._quota_wait(sprint) is not None:
+                    self._cancel_move(sprint_id, token)
+                else:
+                    self._release(sprint_id, token)
                 return None
         elif not isinstance(token, _MoveReservation) and (
                 self._manager_state(sprint)[0] == sprints.STARTED
@@ -7211,11 +7320,18 @@ class ConsoleService:
         if project is None:
             self._release(sprint_id, token)
             return None
-        choice = manager.choose_profile(
-            capacity.capacity_view(self._read_profiles() - self._removing, self._capacity,
-                                   self._clock(), self._signins, excluded=self._excluded,
-                                   pinned=self._pinned, owners=self._owners_now()),
-            self._use.last, sprint.started_by, self._waiting_logins())
+        view = capacity.capacity_view(
+            self._read_profiles() - self._removing, self._capacity, self._clock(), self._signins,
+            excluded=self._excluded, pinned=self._pinned, owners=self._owners_now())
+        target = token.target if isinstance(token, _TakeoverReservation) else None
+        if target is not None:
+            if not self._move_holds(view, sprint, token):
+                self._cancel_move(sprint_id, token)
+                return None
+            choice = target
+        else:
+            choice = manager.choose_profile(
+                view, self._use.last, sprint.started_by, self._waiting_logins())
         if isinstance(choice, manager.Wait):
             self._append_manager(MANAGER_WAITING, project_id, {
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
@@ -7235,16 +7351,27 @@ class ConsoleService:
 
         `prepared_pin` is the pin in force when it was prepared. The choice is made again over the
         set and the pin now in force; with nothing to choose a wait row is appended (as
-        `_prepared_launch` does) and None returned.
+        `_prepared_launch` does) and None returned. A quota move's launch (a `target` on its token)
+        never chooses again: it is kept while `_move_holds`, else the
+        reservation ends with no row and the sprint's move is cancelled (#1279).
         """
         sprint = self._sprints.get(launch.sprint_id)
         view = capacity.capacity_view(
             self._read_profiles() - self._removing, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned, owners=self._owners_now())
-        if (launch.profile not in self._excluded and self._pinned == prepared_pin
+        if isinstance(token, _TakeoverReservation) and token.target is not None:
+            if (sprint is None or launch.profile != token.target
+                    or launch.profile in self._removing
+                    or launch.profile not in self._read_profiles()
+                    or not self._move_holds(view, sprint, token)):
+                self._cancel_move(launch.sprint_id, token)
+                return None
+            return launch
+        kept = (launch.profile not in self._excluded and self._pinned == prepared_pin
                 and launch.profile not in self._removing
                 and launch.profile in self._read_profiles()
-                and not manager.colleague_account(view, launch.profile)):
+                and not manager.colleague_account(view, launch.profile))
+        if kept:
             return launch
         if sprint is None:
             self._release(launch.sprint_id, token)
@@ -7977,7 +8104,8 @@ class ConsoleService:
         return revive.next_step(
             sprint, self._waiting(sprint),
             self._last_listed.get(sprint.sprint_id, self._revive_since_ms), now,
-            self._nudger is not None, out, out and self._room_elsewhere(sprint))
+            self._nudger is not None, out,
+            out and sprint.sprint_id not in self._move_cancelled and self._room_elsewhere(sprint))
 
     def _room_elsewhere(self, sprint: sprints.SprintState) -> bool:
         """Under the ingest lock: whether a takeover would land on another account with room (#1278).
@@ -7986,20 +8114,103 @@ class ConsoleService:
         exclusions and pin), so the decision and the launch agree. The chosen profile must not be
         the manager's, must share no account with it, and must read as having room: an unread
         profile or the launcher's last-used fallback is no reason to leave a session that only waits.
+        The accounts are also compared by the proxy account id of each profile's counted reading
+        (#1279), because a profile known only by that id has no sign-in account to group it. A late
+        reply from an account a profile left does not count.
         """
+        return self._move_target(sprint) is not None
+
+    def _quota_target(self, sprint: sprints.SprintState, now: int) -> str | None:
+        """Under the ingest lock: the profile a takeover moves to because the manager's account is out, else None."""
+        if (self._quota_wait(sprint) is not None
+                and revive.next_step(sprint, self._waiting(sprint),
+                                     self._last_listed.get(sprint.sprint_id,
+                                                           self._revive_since_ms),
+                                     now, self._nudger is not None) == sprints.WAKE):
+            return self._move_target(sprint)
+        return None
+
+    def _takeover_reservation(self, sprint: sprints.SprintState, now: int) -> "_TakeoverReservation":
+        """Under the ingest lock: the reservation of a takeover, a quota move carrying its target, account and pin."""
+        target = self._quota_target(sprint, now)
+        if target is None:
+            return _TakeoverReservation()
+        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned,
+                                      owners=self._owners_now())
+        return _TakeoverReservation(target, self._move_account(view, target), self._pinned)
+
+    def _cancel_move(self, sprint_id: str, token: object) -> None:
+        """Under the ingest lock: end a quota move that no longer holds, and keep it from being decided again.
+
+        The mark stays until the manager's account has room (`_quota_wait`), so the sprint waits
+        for the reset with its session kept to wake instead of being replaced by a later poll (#1279).
+        """
+        self._move_cancelled.add(sprint_id)
+        self._release(sprint_id, token)
+
+    def _move_holds(self, view: Mapping, sprint: sprints.SprintState,
+                    token: "_TakeoverReservation") -> bool:
+        """Under the ingest lock: whether the reserved quota move still stands (#1279).
+
+        The manager's account is still out, the owner's pin is the one in force when it was
+        reserved, the target is still the same account, and it is still another account with room.
+        """
+        return (token.target is not None and self._quota_wait(sprint) is not None
+                and self._pinned == token.pinned
+                and self._move_account(view, token.target) == token.account
+                and self._room_for_move(view, sprint, token.target))
+
+    def _move_account(self, view: Mapping, profile: str) -> tuple[str | None, str | None]:
+        """Under the ingest lock: the identity of `profile`'s account, its sign-in account and its counted reading's account id."""
+        entry = {e["profile"]: e for e in view["profiles"]}.get(profile)
+        own = capacity.counted_reading(self._capacity, profile, self._signins.get(profile))
+        return (entry["account"] if entry is not None else None,
+                own.account if own is not None else None)
+
+    def _account_ids(self, by_name: Mapping[str, Mapping], profile: str) -> set[str]:
+        """Under the ingest lock: the account ids the counted readings of `profile` and its sign-in aliases carry."""
+        entry = by_name.get(profile)
+        names = [profile, *(entry["same_account_as"] if entry is not None else ())]
+        held = (capacity.counted_reading(self._capacity, name, self._signins.get(name))
+                for name in names)
+        return {reading.account for reading in held
+                if reading is not None and reading.account is not None}
+
+    def _move_target(self, sprint: sprints.SprintState) -> str | None:
+        """Under the ingest lock: the profile a quota move would take over on, else None."""
         view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
                                       self._signins, excluded=self._excluded, pinned=self._pinned,
                                       owners=self._owners_now())
         choice = manager.choose_profile(view, self._use.last, sprint.started_by,
                                         self._waiting_logins())
+        return choice if self._room_for_move(view, sprint, choice) else None
+
+    def _room_for_move(self, view: Mapping, sprint: sprints.SprintState, choice: object) -> bool:
+        """Under the ingest lock: whether `choice` is another account with room (#1279).
+
+        The reading behind the entry may be an alias's (profiles on one sign-in share the newest),
+        so the account ids of the readings of `choice` and its aliases are compared with the
+        manager's. A duplicate of any profile is not a move, and a colleague's account kept for a
+        waiting sprint of another login is not either (the rule `manager.choose_profile` applies).
+        """
         mine = sprint.manager.profile if sprint.manager else None
         if not isinstance(choice, str) or choice == mine:
             return False
-        entries = {entry["profile"]: entry for entry in view["profiles"]}
-        chosen = entries.get(choice)
-        if chosen is None or chosen["state"] not in ("ok", "reset") or chosen["excluded"]:
+        by_name = {entry["profile"]: entry for entry in view["profiles"]}
+        chosen = by_name.get(choice)
+        if chosen is None or not manager.has_room(chosen) or chosen.get("duplicate_of") is not None:
             return False
-        return mine not in chosen["same_account_as"] and chosen.get("duplicate_of") != mine
+        if mine in chosen["same_account_as"]:
+            return False
+        starter = sprint.started_by
+        owners = {owner for name in (choice, *chosen["same_account_as"])
+                  if (owner := (by_name.get(name) or {}).get("owner")) is not None}
+        if any(login in self._waiting_logins() and login != starter for login in owners):
+            return False
+        if mine is None:
+            return True
+        return not (self._account_ids(by_name, mine) & self._account_ids(by_name, choice))
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""
@@ -8012,6 +8223,7 @@ class ConsoleService:
             now = int(self._clock() * 1000)
             for sprint_id in [key for key in self._last_listed if key not in self._sprints]:
                 del self._last_listed[sprint_id]
+            self._move_cancelled.intersection_update(self._sprints)
             for sprint_id, sprint in list(self._sprints.items()):
                 if self._manager_listed(sprint):
                     self._last_listed[sprint_id] = now
@@ -8027,7 +8239,7 @@ class ConsoleService:
                     self._nudging.add(sprint_id)
                     jobs.append((step, sprint_id))
                 elif step == sprints.TAKEOVER:
-                    self._launching[sprint_id] = _TakeoverReservation()
+                    self._launching[sprint_id] = self._takeover_reservation(sprint, now)
                     jobs.append((step, sprint_id))
         for step, sprint_id in jobs:
             try:

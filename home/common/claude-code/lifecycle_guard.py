@@ -802,6 +802,26 @@ console's Activate instead, and its refusal is the second form:
     <id>), so it runs only through the console's Activate, on the line that says
     a console change is not active on this host.
 
+A `gh run rerun` that names its repository with `--repo`, `--repo=...`, `-R`, `-R...`, `-R=...`
+or `-R` behind boolean letters of a short group (`-dR`), read as gh reads them (the word
+after `--job` or `-j` is its value, a redirection is not a word, the last flag wins;
+`HOST/OWNER/REPO` and a trailing `.git` are read, case is ignored) is a command on that
+repository alone (issue 1375): it is judged only against the rules of the project whose
+repository the run names, from any directory and with no repository lookup, so another
+project's `gh run rerun` rule never refuses a rerun of a pull-request check of this
+repository, and the named project's rule refuses it wherever the call runs, with the same
+refusal line. Only the `gh run rerun` flag grammar (`-d`, `--debug`, `--failed`, `-j`,
+`--job`, `-R`, `--repo`, `-h`, `--help`) is modelled, so every other `gh` verb keeps the
+checkout judgement above, and so does a rerun the guard cannot read exactly: no repository
+named, a `$`, backtick, pathname pattern, brace list or `~` in any word (an unquoted
+expansion may split into a later `-R`), an operator after the run in its segment (`$(...)`
+ends it), a redirection glued to a word, a flag or word outside that grammar, a value that
+is not a literal `owner/repo`, a hit read as raw text (`sh -c`, a pipeline, an unparseable
+command) and a verb matched only across an operator. Such a run is judged by the checkout and
+also against every literal repository its flags name. When several runs hit the same rule, the
+repositories they name are joined and the checkout is judged as well when any of them is not
+narrowed, so an unnamed rerun never erases a named one.
+
 Known limits: a production command reached by another name (a bare `just` that
 runs the default recipe, a script or alias), words fed on stdin, a program's own
 directory option (`env -C`, `make -C`) and a one-word command handed to a program
@@ -4200,11 +4220,150 @@ def production_parse(command):
     return commands, "\n".join(s for s, (_, _, shell, _) in zip(segments, read) if shell)
 
 
+GH_RERUN_VERB = ("gh", "run", "rerun")
+GH_RERUN_BOOLEAN_FLAGS = frozenset({"debug", "failed", "help"})
+GH_RERUN_VALUE_FLAGS = frozenset({"job", "repo"})
+GH_RERUN_BOOLEAN_LETTERS = frozenset("dh")
+GH_RERUN_VALUE_LETTERS = frozenset("jR")
+GH_EXPANSION_CHARACTERS = frozenset("$`*?[{")
+GH_REPOSITORY_PART = re.compile(r"[A-Za-z0-9._-]+")
+GH_REPOSITORY_HOST = re.compile(r"[A-Za-z0-9._:-]+")
+
+
+def gh_repository_words(run):
+    """`(words, split)`: `run`'s words after the program, as the shell hands them to gh. A
+    redirection (`>log`, `2>&1`, and the word a bare `>` takes) is not one of them, and one
+    glued to a word (`--repo>/dev/null`) ends that word; `split` is True when a word was cut
+    so, as the guard cannot tell it from a quoted `>`."""
+    words = []
+    split = False
+    skip = False
+    for word in run[1:]:
+        if skip:
+            skip = False
+            continue
+        while word:
+            redirection = REDIRECTION.fullmatch(word)
+            if redirection is not None:
+                skip = not redirection.group(1)
+                break
+            cut = min((word.index(c) for c in "<>" if c in word), default=None)
+            if cut is None:
+                words.append(word)
+                break
+            split = True
+            if cut:
+                words.append(word[:cut])
+            word = word[cut:]
+    return words, split
+
+
+def gh_rerun_selectors(words):
+    """`(values, exact)` for the words of a `gh run rerun`, after the program: the value of
+    each repository flag in order (`--repo V`, `--repo=V`, `-R V`, `-RV`, `-R=V`, and `-R`
+    behind boolean letters, `-dR V`; None for a flag with no value) and whether the flag
+    grammar of that one verb read every word. A value-taking flag (`--job`, `-j`) takes the
+    next word or the rest of its group whole, and `--` ends the flags. `exact` is False for
+    a flag the grammar does not know or a word that is not `run rerun` and at most one run
+    id; no other verb's grammar is modelled (issue 1375)."""
+    values = []
+    positional = []
+    exact = True
+    position = 0
+    while position < len(words):
+        word = words[position]
+        position += 1
+        if word == "--":
+            positional += words[position:]
+            break
+        if word.startswith("--"):
+            name, equals, value = word[2:].partition("=")
+            if name in GH_RERUN_VALUE_FLAGS:
+                if not equals:
+                    value = words[position] if position < len(words) else None
+                    position += 1
+                if name == "repo":
+                    values.append(value)
+            elif name not in GH_RERUN_BOOLEAN_FLAGS:
+                exact = False
+        elif word.startswith("-") and len(word) > 1:
+            for offset, letter in enumerate(word[1:], 1):
+                if letter in GH_RERUN_VALUE_LETTERS:
+                    value = word[offset + 1:]
+                    value = value[1:] if value.startswith("=") else value
+                    if not value:
+                        value = words[position] if position < len(words) else None
+                        position += 1
+                    if letter == "R":
+                        values.append(value)
+                    break
+                if letter not in GH_RERUN_BOOLEAN_LETTERS:
+                    exact = False
+                    break
+        else:
+            positional.append(word)
+    exact = exact and positional[:2] == ["run", "rerun"] and len(positional) <= 3
+    return values, exact
+
+
+def gh_literal_repository(value):
+    """The lower-cased `owner/repo` that `value` spells (`HOST/OWNER/REPO` and a trailing
+    `.git` are read), or None when it is not a literal one: a missing value, an expansion,
+    a pathname pattern or a brace list names whatever the shell makes of it."""
+    if not value:
+        return None
+    value = value[:-4] if value.endswith(".git") else value
+    parts = value.split("/")
+    if len(parts) < 2 or not all(GH_REPOSITORY_PART.fullmatch(part) for part in parts[-2:]):
+        return None
+    if not all(GH_REPOSITORY_HOST.fullmatch(part) for part in parts[:-2]):
+        return None
+    return f"{parts[-2]}/{parts[-1]}".lower()
+
+
+def gh_named_repository(run, cut):
+    """`(named, by_checkout)` for the `gh run rerun` run `run` (the words of the rest of its
+    segment, program first): `named` is the frozenset of lower-cased `owner/repo` slugs it
+    names and `by_checkout` is True when the checkout must be judged too.
+
+    A run the guard reads exactly names the repository its last repository flag spells (the
+    last wins, as in gh), judged by that repository alone. It is read exactly when no word
+    holds an expansion, a backtick or a pathname pattern (`$X` may split into a later `-R`),
+    no operator follows it in the segment (`$(...)` ends the run), no redirection is glued
+    to a word, and the flags and words are the `gh run rerun` grammar. Any other run names
+    every literal repository its flags spell and is judged by the checkout as well; a last
+    flag with no literal value names nothing, so it is `(frozenset(), True)` (issue 1375)."""
+    words, split = gh_repository_words(run)
+    values, exact = gh_rerun_selectors(words)
+    slugs = [gh_literal_repository(value) for value in values]
+    doubtful = (
+        cut or split or not exact
+        or any(c in word for word in words for c in GH_EXPANSION_CHARACTERS)
+        or any(word.startswith("~") for word in words)
+    )
+    if doubtful:
+        return frozenset(slug for slug in slugs if slug), True
+    if not slugs or slugs[-1] is None:
+        return frozenset(), True
+    return frozenset({slugs[-1]}), False
+
+
+def add_production_hit(hits, hit, named, by_checkout):
+    """Record `hit` in `hits`, a map of `(slug, index)` to `(named, by_checkout)`: the
+    frozenset of repositories the runs that hit it name, and whether any run is judged by
+    the checkout. The two are joined independently, so a run that names no repository
+    never erases the repository another run names."""
+    before, checkout = hits.get(hit, (frozenset(), False))
+    hits[hit] = (before | named, checkout or by_checkout)
+
+
 def production_hits(command, rules):
     """(hits, certain) for `command` against `rules`, a map of slug to its `production`
-    member: the `(slug, index into changes)` pairs the shell would run, and False for
-    `certain` when any word of either raw reading is a directory change (issue 1149 D5 to
-    D7). A mention as another program's argument never hits a one-word verb."""
+    member: the `(slug, index into changes)` pairs the shell would run, each mapped to
+    `(named, by_checkout)`: the frozenset of repositories the `gh` runs that hit it name with
+    `--repo` (issue 1375), and True when any run that hit it is judged by the checkout; and
+    False for `certain` when any word of either raw reading is a directory change (issue
+    1149 D5 to D7). A mention as another program's argument never hits a one-word verb."""
     raw = joined_continuations(command)
     verbs = {
         slug: (
@@ -4218,7 +4377,7 @@ def production_hits(command, rules):
         for words in (raw_words(raw), raw_words(raw, glued=True))
         for word in words
     )
-    hits = set()
+    hits = {}
     parsed = production_parse(command)
     if parsed is None:
         raw_texts = [raw]
@@ -4230,7 +4389,7 @@ def production_hits(command, rules):
         for slug, (changes, _) in verbs.items():
             for index, verb in enumerate(changes):
                 if production_raw_hit(text, verb):
-                    hits.add((slug, index))
+                    add_production_hit(hits, (slug, index), frozenset(), True)
     for tokens, flags, later in commands:
         later = joined_continuations(later)
         later_words = (raw_words(later), raw_words(later, glued=True))
@@ -4239,7 +4398,7 @@ def production_hits(command, rules):
                 for slug, (changes, _) in verbs.items():
                     for index, verb in enumerate(changes):
                         if production_raw_hit(value, verb):
-                            hits.add((slug, index))
+                            add_production_hit(hits, (slug, index), frozenset(), True)
         start = 0
         while start < len(tokens):
             if tokens[start][1]:
@@ -4270,29 +4429,43 @@ def production_hits(command, rules):
                             for slug, (changes, _) in verbs.items():
                                 for index, verb in enumerate(changes):
                                     if production_raw_hit(value, verb):
-                                        hits.add((slug, index))
+                                        add_production_hit(hits, (slug, index), frozenset(), True)
             for i in range(start, end):
                 name = program_name(tokens[i][0])
                 run = [token[0] for token in tokens[i:end]]
                 after = [token[0] for token in tokens[i + 1:] if not token[1]]
                 for slug, (changes, read_only) in verbs.items():
                     for index, verb in enumerate(changes):
-                        if (slug, index) in hits or name != verb[0]:
+                        if name != verb[0]:
                             continue
+                        if name != "gh" and hits.get((slug, index), (None, False))[1]:
+                            continue
+                        in_run = False
                         if len(verb) == 1:
                             matched = flags[i] or (
                                 flagged is not None and i > flagged
                                 and runner in PRODUCTION_RUNNERS
                             )
                         else:
-                            matched = words_in_order(run[1:], verb[1:]) or (
+                            in_run = words_in_order(run[1:], verb[1:])
+                            matched = in_run or (
                                 cut and any(
                                     words_in_order(after + words, verb[1:])
                                     for words in later_words
                                 )
                             )
                         if matched and not production_lifted(run, verb, read_only):
-                            hits.add((slug, index))
+                            # A `gh run rerun` that names its repository is a command on
+                            # that repository alone (issue 1375); every other reading is
+                            # judged by the checkout.
+                            narrowed = (
+                                in_run and name == "gh" and tuple(verb[:3]) == GH_RERUN_VERB)
+                            named, by_checkout = (
+                                gh_named_repository(
+                                    [token[0] for token in tokens[i:] if not token[1]],
+                                    any(token[1] for token in tokens[i:]))
+                                if narrowed else (frozenset(), True))
+                            add_production_hit(hits, (slug, index), named, by_checkout)
             start = end
     return hits, certain
 
@@ -4321,8 +4494,11 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
     Only a row whose `production` has a `changes` entry takes part. With no hit nothing
     runs; with one, `detect_repository` names the payload cwd's repository. A command that
     may change directory is judged against every declaring row, that repository first,
-    then by sorted slug; otherwise only that repository's rules refuse. Inside a row the
-    first rule in `changes` order that hits names the refusal.
+    then by sorted slug; otherwise only that repository's rules refuse. A `gh run rerun` that
+    names its repository (`--repo`, `-R`) is judged against that repository's rules from any
+    directory, and by the checkout only when some run of the command is not narrowed (issue
+    1375). Inside a row the first
+    rule in `changes` order that hits names the refusal.
     """
     rules = {
         slug: row["production"] for slug, row in rows.items()
@@ -4333,17 +4509,22 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
     hits, certain = production_hits(command, rules)
     if not hits:
         return None
-    try:
-        here = detect_repository(git_bin, cwd, timeout, strict=True)
-    except RepositoryLookupFailed as error:
-        return (f"the repository lookup {error} for a command that may change the production "
-                "of a declared project, so the guard cannot judge it")
+    here = None
+    if any(by_checkout for _, by_checkout in hits.values()):
+        try:
+            here = detect_repository(git_bin, cwd, timeout, strict=True)
+        except RepositoryLookupFailed as error:
+            return (f"the repository lookup {error} for a command that may change the "
+                    "production of a declared project, so the guard cannot judge it")
     order = [here] if here in rules else []
     if not certain:
         order += sorted(slug for slug in rules if slug != here)
-    for slug in order:
+    for slug in order + sorted(slug for slug in rules if slug not in order):
         for index, change in enumerate(rules[slug]["changes"]):
-            if (slug, index) in hits:
+            if (slug, index) not in hits:
+                continue
+            named, by_checkout = hits[(slug, index)]
+            if (by_checkout and slug in order) or slug.lower() in named:
                 return production_refusal_text(slug, change, rules[slug])
     return None
 

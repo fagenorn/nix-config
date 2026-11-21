@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import event_log, exclusion, pin, signin
 from agent_tools.console.event_log import EventLog, EventLogError
@@ -29,6 +30,13 @@ def rows(store):
         connection.close()
 
 
+def autocommit(case, store):
+    # autocommit: a refused statement must not leave a read lock behind
+    connection = sqlite3.connect(store, isolation_level=None)
+    case.addCleanup(connection.close)
+    return connection
+
+
 class EventLogTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -39,6 +47,143 @@ class EventLogTest(unittest.TestCase):
         log = EventLog(self.store, clock=clock)
         self.addCleanup(log.close)
         return log
+
+    def raw(self):
+        return autocommit(self, self.store)
+
+    def asked(self, qid, text, **extra):
+        return ("project_question.asked", "o/a",
+                {"question_id": qid, "question": text, **extra})
+
+    def answered(self, qid, text):
+        return ("project_question.answered", "o/a",
+                {"question_id": qid, "outcome": "answered", "answer": text})
+
+    def test_deleting_a_question_thread_removes_its_rows_and_text_and_keeps_a_text_free_record(self):
+        log = self.open()
+        log.append([self.asked("q1", "FIRST-QUESTION-TEXT"),
+                    self.answered("q1", "FIRST-ANSWER-TEXT"),
+                    self.asked("q2", "FOLLOW-QUESTION-TEXT", thread_id="q1"),
+                    self.answered("q2", "FOLLOW-ANSWER-TEXT"),
+                    self.asked("q3", "OTHER-QUESTION-TEXT"),
+                    ("goal.stated", "o/a", {})])
+        event = log.delete_question_thread("o/a", "q1", ["q1", "q2"])
+        log.close()
+        self.assertEqual((event.kind, event.project, event.payload),
+                         ("project_question.deleted", "o/a",
+                          {"question_ids": ["q1", "q2"], "thread_id": "q1"}))
+        self.assertEqual([r[2] for r in rows(self.store)],
+                         ["project_question.asked", "goal.stated",
+                          "project_question.deleted"])
+        data = self.store.read_bytes()
+        for marker in ("FIRST-QUESTION-TEXT", "FIRST-ANSWER-TEXT",
+                       "FOLLOW-QUESTION-TEXT", "FOLLOW-ANSWER-TEXT"):
+            self.assertNotIn(marker.encode(), data)
+        self.assertIn("OTHER-QUESTION-TEXT".encode(), data)
+
+    def test_a_raw_connection_cannot_delete_a_question_row_no_deletion_record_names(self):
+        log = self.open()
+        log.append([self.asked("q1", "x"), self.asked("q3", "y")])
+        log.delete_question_thread("o/a", "q1", ["q1"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.raw().execute(
+                "DELETE FROM events WHERE json_extract(payload, '$.question_id') = 'q3'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.raw().execute(
+                "DELETE FROM events WHERE kind = 'project_question.deleted'")
+
+    def test_a_malformed_deletion_record_authorizes_no_delete(self):
+        cases = {
+            "a string of ids": (("o/a", {"question_id": "q1", "question": "x"}),
+                                ("o/a", {"question_ids": "q1"})),
+            "an object of ids": (("o/a", {"question_id": "q1", "question": "x"}),
+                                 ("o/a", {"question_ids": {"k": "q1"}})),
+            "no project": ((None, {"question_id": "q1", "question": "x"}),
+                           (None, {"question_ids": ["q1"]})),
+            "a number for an id": (("o/a", {"question_id": 1, "question": "x"}),
+                                   ("o/a", {"question_ids": [1]})),
+            "no ids": (("o/a", {"question_id": "q1", "question": "x"}),
+                       ("o/a", {"thread_id": "q1"})),
+        }
+        for name, (row, record) in cases.items():
+            with self.subTest(name):
+                self.store = Path(self.tmp.name) / name.replace(" ", "-") / "events.sqlite3"
+                log = self.open()
+                [asked, _] = log.append([("project_question.asked", *row),
+                                         ("project_question.deleted", *record)])
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
+                    self.raw().execute("DELETE FROM events WHERE seq = ?", (asked.seq,))
+                self.assertIn("append-only", str(caught.exception))
+                self.assertIn(asked.seq, [r[0] for r in rows(self.store)])
+
+    def test_a_deletion_record_names_only_its_own_projects_rows(self):
+        log = self.open()
+        log.append([self.asked("q1", "x"),
+                    ("project_question.asked", "o/b",
+                     {"question_id": "q1", "question": "y"})])
+        log.delete_question_thread("o/a", "q1", ["q1"])
+        self.assertEqual([(r[2], r[3]) for r in rows(self.store)],
+                         [("project_question.asked", "o/b"),
+                          ("project_question.deleted", "o/a")])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.raw().execute("DELETE FROM events WHERE project = 'o/b'")
+
+    def test_a_question_row_after_the_deletion_record_is_not_deletable(self):
+        log = self.open()
+        log.append([self.asked("q1", "x")])
+        log.delete_question_thread("o/a", "q1", ["q1"])
+        log.append([self.asked("q1", "later")])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.raw().execute(
+                "DELETE FROM events WHERE kind = 'project_question.asked'")
+        self.assertEqual(len(rows(self.store)), 2)
+
+    def test_delete_question_thread_refuses_a_bad_argument_and_writes_nothing(self):
+        log = self.open()
+        log.append([self.asked("q1", "x")])
+        before = rows(self.store)
+        for args in (("", "q1", ["q1"]), ("o/a", "", ["q1"]), ("o/a", "q1", []),
+                     ("o/a", "q1", ["q1", "q1"]), ("o/a", "q1", [""])):
+            with self.subTest(args=args):
+                with self.assertRaises(ValueError):
+                    log.delete_question_thread(*args)
+                self.assertEqual(rows(self.store), before)
+
+    def test_the_log_zeroes_deleted_content_even_where_sqlite_would_not(self):
+        real = sqlite3.connect
+
+        def connect(*args, **kwargs):
+            connection = real(*args, **kwargs)
+            connection.execute("PRAGMA secure_delete = OFF")
+            return connection
+
+        with mock.patch.object(event_log.sqlite3, "connect", side_effect=connect):
+            log = self.open()
+        log.append([self.asked("q1", "ZEROED-QUESTION-TEXT"),
+                    self.answered("q1", "ZEROED-ANSWER-TEXT"),
+                    ("goal.stated", "o/a", {})])
+        log.delete_question_thread("o/a", "q1", ["q1"])
+        self.assertEqual(
+            log._connection.execute("PRAGMA secure_delete").fetchone()[0], 1)
+        log.close()
+        data = self.store.read_bytes()
+        self.assertNotIn(b"ZEROED-QUESTION-TEXT", data)
+        self.assertNotIn(b"ZEROED-ANSWER-TEXT", data)
+
+    def test_a_failed_thread_delete_deletes_nothing_and_records_nothing(self):
+        log = self.open()
+        log.append([self.asked("q1", "x"), self.answered("q1", "y")])
+        before = rows(self.store)
+        log._connection = FailingDelete(log._connection)
+        with self.assertRaises(sqlite3.OperationalError):
+            log.delete_question_thread("o/a", "q1", ["q1"])
+        self.assertEqual(rows(self.store), before)
+
+    def test_the_deletion_kind_is_kept_and_the_question_kinds_are_not(self):
+        self.assertEqual(event_log.PROJECT_QUESTION_DELETED, "project_question.deleted")
+        self.assertIn(event_log.PROJECT_QUESTION_DELETED, event_log.KEPT_KINDS)
+        self.assertNotIn(event_log.PROJECT_QUESTION_ASKED, event_log.KEPT_KINDS)
+        self.assertNotIn(event_log.PROJECT_QUESTION_ANSWERED, event_log.KEPT_KINDS)
 
     def test_append_assigns_increasing_sequence_numbers(self):
         log = self.open()
@@ -127,7 +272,7 @@ class EventLogTest(unittest.TestCase):
         self.assertEqual(rows(self.store), [])
 
     def test_an_unknown_schema_version_is_refused(self):
-        for version in (13, 12):
+        for version in (14, 13):
             with self.subTest(version=version):
                 store = Path(self.tmp.name) / f"v{version}" / "events.sqlite3"
                 store.parent.mkdir(parents=True)
@@ -260,10 +405,7 @@ class RetentionTest(unittest.TestCase):
         return log.retain()
 
     def raw(self):
-        # autocommit: a refused statement must not leave a read lock behind
-        connection = sqlite3.connect(self.store, isolation_level=None)
-        self.addCleanup(connection.close)
-        return connection
+        return autocommit(self, self.store)
 
     def cutoff(self):
         return self.raw().execute("SELECT cutoff FROM retention").fetchall()
@@ -351,7 +493,7 @@ class RetentionTest(unittest.TestCase):
         connection.close()
         log = self.open()
         raw = self.raw()
-        self.assertEqual(raw.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(raw.execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(rows(self.store), [
             (1, "2026-01-01T00:00:00.000000+00:00", "a", "o/a", "{}"),
             (2, NOW, "b", "o/a", "{}"),
@@ -382,7 +524,8 @@ class RetentionTest(unittest.TestCase):
             "sprint.messaged", "sprint.read", "sprint.answered",
             "questions.asked", "question.answered", "question.withdrawn", "look.recorded",
             "notice.posted", "notice.withdrawn",
-            "sprint.closed", "sprint.stop_requested", "manager.stopped"}))
+            "sprint.closed", "sprint.stop_requested", "manager.stopped",
+            "project_question.deleted"}))
         self.assertEqual(event_log.QUESTION_WITHDRAWN, "question.withdrawn")
         self.assertEqual((event_log.NOTICE_POSTED, event_log.NOTICE_WITHDRAWN),
                          ("notice.posted", "notice.withdrawn"))
@@ -409,7 +552,7 @@ class RetentionTest(unittest.TestCase):
                 with self.assertRaises(sqlite3.IntegrityError):
                     connection.execute(statement)
         self.assertEqual(rows(self.store), before)
-        self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 12)
 
     def test_a_version_2_store_is_migrated_and_protects_goal_rows(self):
         self.store.parent.mkdir(parents=True)
@@ -426,7 +569,7 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         expected = [
             (1, OLD, "goal.stated", "o/a", '{"goal":"g","sprint_id":"aaaaaaaaaaaaaaaa"}'),
             (2, NOW, "b", "o/a", "{}"),
@@ -447,10 +590,12 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(rows(self.store), before)
         self.assertEqual(self.cutoff(), [("",)])
 
-    def test_only_retain_issues_a_delete(self):
+    def test_only_retain_and_the_thread_delete_issue_a_delete(self):
         source = inspect.getsource(event_log)
-        self.assertEqual(len(re.findall(r"\bDELETE\s+FROM\b", source)), 1)
+        self.assertEqual(len(re.findall(r"\bDELETE\s+FROM\b", source)), 2)
         self.assertIn("DELETE FROM events", inspect.getsource(EventLog.retain))
+        self.assertIn("DELETE FROM events",
+                      inspect.getsource(EventLog.delete_question_thread))
 
     def test_a_pass_keeps_brief_rows_of_any_age(self):
         log = self.open()
@@ -481,7 +626,7 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.retain_at(log, NOW), 1)
         expected = [(1, OLD, "brief.sent", "o/a", "{}")]
         self.assertEqual(rows(self.store), expected)
@@ -516,7 +661,7 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.retain_at(log, NOW), 1)
         expected = [(1, OLD, "sprint.reported", "o/a", "{}")]
         self.assertEqual(rows(self.store), expected)
@@ -543,7 +688,7 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.retain_at(log, NOW), 2)
         self.assertEqual([row[2] for row in rows(self.store)],
                          ["sprint.messaged", "sprint.read", "sprint.answered"])
@@ -570,7 +715,7 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.retain_at(log, NOW), 2)
         self.assertEqual([row[2] for row in rows(self.store)],
                          ["sprint.closed", "sprint.stop_requested", "manager.stopped"])
@@ -608,12 +753,60 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.retain_at(log, NOW), 1)
         self.assertEqual([row[2] for row in rows(self.store)],
                          ["questions.asked", "question.answered"])
         with self.assertRaises(sqlite3.IntegrityError):
             self.raw().execute("DELETE FROM events WHERE kind = 'questions.asked'")
+
+    def test_a_version_10_store_is_migrated_and_deletes_only_named_question_rows(self):
+        self.store.parent.mkdir(parents=True)
+        connection = sqlite3.connect(self.store)
+        for statement in SCHEMA_2:
+            connection.execute(statement)
+        connection.execute("DROP TRIGGER events_no_delete")
+        connection.execute(
+            """CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+            WHEN OLD.kind IN ('brief.approved', 'brief.replied', 'brief.sent', 'goal.stated', 'goal.withdrawn', 'manager.stopped', 'notice.posted', 'notice.withdrawn', 'question.answered', 'question.withdrawn', 'questions.asked', 'sprint.answered', 'sprint.closed', 'sprint.messaged', 'sprint.read', 'sprint.reported', 'sprint.stop_requested')
+                OR NOT (OLD.at < coalesce((SELECT cutoff FROM retention WHERE id = 1), ''))
+            BEGIN SELECT RAISE(ABORT, 'the console event log is append-only'); END""")
+        connection.execute("PRAGMA user_version = 10")
+        connection.execute(
+            "INSERT INTO events (at, kind, project, payload) VALUES (?, ?, ?, ?)",
+            (NEW, "project_question.asked", "o/a",
+             json.dumps({"question_id": "q1", "question": "x"})))
+        connection.commit()
+        connection.close()
+        log = self.open()
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
+        log.delete_question_thread("o/a", "q1", ["q1"])
+        self.assertEqual([row[2] for row in rows(self.store)],
+                         ["project_question.deleted"])
+
+    def test_a_version_11_store_is_migrated_and_deletes_only_named_question_rows(self):
+        self.store.parent.mkdir(parents=True)
+        connection = sqlite3.connect(self.store)
+        for statement in SCHEMA_2:
+            connection.execute(statement)
+        connection.execute("DROP TRIGGER events_no_delete")
+        connection.execute(
+            """CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+            WHEN OLD.kind IN ('brief.approved', 'brief.replied', 'brief.sent', 'goal.stated', 'goal.withdrawn', 'look.recorded', 'manager.stopped', 'notice.posted', 'notice.withdrawn', 'question.answered', 'question.withdrawn', 'questions.asked', 'sprint.answered', 'sprint.closed', 'sprint.messaged', 'sprint.read', 'sprint.reported', 'sprint.stop_requested')
+                OR NOT (OLD.at < coalesce((SELECT cutoff FROM retention WHERE id = 1), ''))
+            BEGIN SELECT RAISE(ABORT, 'the console event log is append-only'); END""")
+        connection.execute("PRAGMA user_version = 11")
+        connection.execute(
+            "INSERT INTO events (at, kind, project, payload) VALUES (?, ?, ?, ?)",
+            (NEW, "project_question.asked", "o/a",
+             json.dumps({"question_id": "q1", "question": "x"})))
+        connection.commit()
+        connection.close()
+        log = self.open()
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
+        log.delete_question_thread("o/a", "q1", ["q1"])
+        self.assertEqual([row[2] for row in rows(self.store)],
+                         ["project_question.deleted"])
 
     def test_a_version_8_store_is_migrated_and_protects_question_withdrawals(self):
         self.store.parent.mkdir(parents=True)
@@ -634,7 +827,7 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.retain_at(log, NOW), 1)
         self.assertEqual([row[2] for row in rows(self.store)], ["question.withdrawn"])
         with self.assertRaises(sqlite3.IntegrityError):
@@ -669,7 +862,7 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.retain_at(log, NOW), 1)
         self.assertEqual([row[2] for row in rows(self.store)],
                          ["notice.posted", "notice.withdrawn"])
@@ -695,7 +888,7 @@ class RetentionTest(unittest.TestCase):
         connection.commit()
         connection.close()
         log = self.open()
-        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.retain_at(log, NOW), 1)
         self.assertEqual([row[2] for row in rows(self.store)], ["look.recorded"])
         with self.assertRaises(sqlite3.IntegrityError):

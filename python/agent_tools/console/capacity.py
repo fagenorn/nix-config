@@ -103,6 +103,9 @@ never decides what the account has left. The counted entry is the minimum by (ex
 pinned, name); choosing it never changes the reading, it only decides which profile is launched and
 drawn. Every aggregate is evaluated over the entries that are not signed out, not excluded and not
 a duplicate, so one account's allowance is counted once.
+`counted_reading(state, profile, signin)` is that profile's counted reading (the newest reading it
+holds taken under its current account, else None), and its `account` is the proxy account id the
+service compares.
 
 Each entry also carries `"owner"` (#1343, ADR-console-087 D4), always present, after
 `"duplicate_of"`: the login the optional `owners` mapping (profile to the colleague who added it)
@@ -370,6 +373,14 @@ def _current(reading: Reading, one: signin_state.SignIn | None,
     return not (left is not None and left[1] is not None and reading.account == left[1])
 
 
+def counted_reading(state: CapacityState, name: str,
+                    one: signin_state.SignIn | None) -> Reading | None:
+    """The newest reading the profile holds taken under its current account, else None."""
+    left = _left(one)
+    return max((r for r in _pool(state, name) if _current(r, one, left)),
+               key=lambda r: r.seq, default=None)
+
+
 def _of_left(reading: Reading, one: signin_state.SignIn, left: tuple[str, str | None]) -> bool:
     """Whether the reading was taken under the account the profile left."""
     if left[1] is not None:
@@ -391,8 +402,7 @@ def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
         one = signins.get(name)
         left = _left(one)
         pool = _pool(state, name)
-        counted[name] = max((r for r in pool if _current(r, one, left)), key=lambda r: r.seq,
-                            default=None)
+        counted[name] = counted_reading(state, name, one)
         if left is not None:
             left_readings.setdefault(left[0], []).extend(
                 r for r in pool if _of_left(r, one, left))

@@ -13,7 +13,7 @@ either. The cutoff is the one row of
 refuse to delete, replace or duplicate that row, and `at` is compared as text,
 which is valid for the `utc_now` format. This module issues no `UPDATE` except
 the cutoff's, no `REPLACE`, no `INSERT OR ...`, and deletes only in
-`EventLog.retain`.
+`EventLog.retain` and `EventLog.delete_question_thread`.
 
 `EventLog.retain` is the 90-day retention pass: in one transaction it moves the
 cutoff to the clock minus `RETENTION` and removes the rows older than it except
@@ -60,7 +60,20 @@ follow-up the `thread_id` it was given (#1178), the project in its project colum
 `outcome` and either `answer` or `reason`). Neither is in `KEPT_KINDS`, retention removes them like
 any other row; the spend fold reads the asked row's `session_id` and `profile`
 (`spend.question_sessions`), and `project_question.asked_questions` folds both into the desk
-view's questions (#1177); the schema version is unchanged.
+view's questions (#1177).
+
+`PROJECT_QUESTION_DELETED` (`project_question.deleted`, #1272, project in its project column, payload
+`question_ids`, the ids of the deleted thread's questions in the order given, and `thread_id`) is the
+text-free record that the owner deleted a question thread, and is in `KEPT_KINDS`.
+`EventLog.delete_question_thread` writes it and removes, in one transaction, the asked and answered
+rows of that project whose `question_id` it names. Schema 12 gives the delete trigger exactly one
+exception to its two refusals: a row of the asked or answered kind whose `question_id` is a string may
+be deleted when a deletion record with a larger sequence number, whose project is a string equal to the
+row's project and whose `question_ids` is a JSON array, holds that id as a string member; a record
+the fold ignores authorizes no delete, so a raw connection still cannot delete any other question
+row. A keyed question's receipt (`PROJECT_QUESTION_KEYED`) names only ids and is not removed by a
+deletion. The connection runs `PRAGMA secure_delete = ON`, so the
+freed pages of a deleted question or answer are zeroed instead of keeping its text.
 
 One kind is kept whole (#1271): `PROJECT_QUESTION_KEYED` (`project_question.keyed`, payload `request_key`
 and `question_id`, the project in its project column) is the receipt of a question asked under a request
@@ -178,8 +191,8 @@ and writes nothing. A payload is stored as canonical JSON (sorted keys, compact
 separators, non-ASCII kept, NaN refused), serialised before the transaction
 begins.
 
-`PRAGMA user_version` is `SCHEMA_VERSION` (11) once opened: version 0 is created
-as schema 11, versions 1, 2, 3, 4, 5, 6, 7, 8, 9 and 10 are migrated to 11 in one transaction each and
+`PRAGMA user_version` is `SCHEMA_VERSION` (12) once opened: version 0 is created
+as schema 12, versions 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 11 are migrated to 12 in one transaction each and
 keep every row, and a file at any other version raises `EventLogError` and is not
 modified. The parent directory is created with mode 0700. The connection
 is shared across threads and every use of it holds one lock.
@@ -194,7 +207,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 LOGIN_MAX = 254
 _LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 RETENTION = timedelta(days=90)
@@ -227,6 +240,7 @@ NOTICE_NUDGED = "notice.nudged"
 PROJECT_QUESTION_ASKED = "project_question.asked"
 PROJECT_QUESTION_KEYED = "project_question.keyed"
 PROJECT_QUESTION_ANSWERED = "project_question.answered"
+PROJECT_QUESTION_DELETED = "project_question.deleted"
 SPRINT_CLOSED = "sprint.closed"
 SPRINT_STOP_REQUESTED = "sprint.stop_requested"
 MANAGER_STOPPED = "manager.stopped"
@@ -265,9 +279,9 @@ SHARING_REMOVED = "sharing.removed"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # kind, the three message kinds, the three question kinds, the look record, the two notice kinds,
-# the closing kind, the stop request and the stop's completion) are never removed: not by the
-# retention pass, not by a raw connection (the delete trigger of schema 3, 4, 5, 6, 7, 8, 9, 10
-# and 11).
+# the closing kind, the stop request and the stop's completion, and the record of a deleted
+# question thread) are never removed: not by the retention pass, not by a raw connection (the
+# delete trigger of schema 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12).
 # `SPRINT_NUDGED` and `MANAGER_STOP_FAILED` are not among them, nor is any manager kind other
 # than `MANAGER_STOPPED` (`MANAGER_STARTED`, `MANAGER_FAILED`, `MANAGER_WAITING`,
 # `MANAGER_WOKEN`, `MANAGER_STALLED`, `MANAGER_NUDGED`, `MANAGER_NO_PROGRESS`), nor is
@@ -278,7 +292,8 @@ KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED,
                         QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN, LOOK_RECORDED,
                         NOTICE_POSTED, NOTICE_WITHDRAWN,
-                        SPRINT_CLOSED, SPRINT_STOP_REQUESTED, MANAGER_STOPPED})
+                        SPRINT_CLOSED, SPRINT_STOP_REQUESTED, MANAGER_STOPPED,
+                        PROJECT_QUESTION_DELETED})
 
 _APPEND_ONLY = "the console event log is append-only"
 
@@ -318,19 +333,32 @@ _RETENTION = (
         BEGIN SELECT RAISE(ABORT, '{_RETENTION_ONLY_FORWARD}'); END""",
 )
 
-# What schemas 3, 4, 5, 6, 7, 8, 9, 10 and 11 add to schema 2: the delete trigger also refuses
+# What schemas 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 add to schema 2: the delete trigger also refuses
 # every row of a kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind
 # needs no hand-edited SQL, only a re-run on an existing store (schema 4 added the
 # brief kinds, schema 5 the report kind, schema 6 the message kinds, schema 7 the closing kinds
 # and the stop's completion, schema 8 the question kinds, schema 9 the question withdrawal,
-# schema 10 the notice kinds, schema 11 the look record).
+# schema 10 the notice kinds, schema 11 the look record, schema 12 the deletion record and one exception:
+# an asked or answered question row is deletable when a later deletion record of its project names it).
 _KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
                            for kind in sorted(KEPT_KINDS))
+_QUESTION_NAMED = f"""OLD.kind IN ('{PROJECT_QUESTION_ASKED}', '{PROJECT_QUESTION_ANSWERED}')
+            AND EXISTS (SELECT 1 FROM events AS deleted,
+                    json_each(deleted.payload, '$.question_ids') AS named
+                WHERE deleted.kind = '{PROJECT_QUESTION_DELETED}'
+                    AND json_type(OLD.payload, '$.question_id') = 'text'
+                    AND typeof(deleted.project) = 'text'
+                    AND deleted.project = OLD.project
+                    AND json_type(deleted.payload, '$.question_ids') = 'array'
+                    AND named.type = 'text'
+                    AND deleted.seq > OLD.seq
+                    AND named.value = json_extract(OLD.payload, '$.question_id'))"""
 _KEPT = (
     "DROP TRIGGER events_no_delete",
     f"""CREATE TRIGGER events_no_delete BEFORE DELETE ON events
-        WHEN OLD.kind IN ({_KEPT_LITERALS})
-            OR NOT (OLD.at < coalesce((SELECT cutoff FROM retention WHERE id = 1), ''))
+        WHEN NOT ({_QUESTION_NAMED})
+            AND (OLD.kind IN ({_KEPT_LITERALS})
+                OR NOT (OLD.at < coalesce((SELECT cutoff FROM retention WHERE id = 1), '')))
         BEGIN SELECT RAISE(ABORT, '{_APPEND_ONLY}'); END""",
 )
 
@@ -399,6 +427,7 @@ class EventLog:
                                            check_same_thread=False)
         self._connection.create_function("valid_added_by", 1, _valid_added_by, deterministic=True)
         try:
+            self._connection.execute("PRAGMA secure_delete = ON")
             self._prepare()
         except BaseException:
             self._connection.close()
@@ -410,7 +439,7 @@ class EventLog:
             return
         if version == 1:
             self._transaction(self._migrate_from_1)
-        elif version in (2, 3, 4, 5, 6, 7, 8, 9, 10):
+        elif version in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
             self._transaction(self._migrate_from_2)
         elif version == 0:
             self._transaction(self._create_schema)
@@ -463,6 +492,40 @@ class EventLog:
                 return events
 
             return self._transaction(insert)
+
+    def delete_question_thread(self, project: str, thread_id: str,
+                               question_ids: Sequence[str]) -> Event:
+        """Record that a question thread was deleted and remove its question rows, in one transaction; return the record.
+
+        The record is a row of `PROJECT_QUESTION_DELETED` holding only the ids; the asked and
+        answered rows of `project` that name one of `question_ids` are then removed, and a
+        failure of either rolls both back. Anything but non-empty strings and a non-empty
+        sequence of distinct non-empty ids raises `ValueError` and writes nothing.
+        """
+        ids = list(question_ids)
+        if (not isinstance(project, str) or not project
+                or not isinstance(thread_id, str) or not thread_id
+                or not ids or len(set(ids)) != len(ids)
+                or any(not isinstance(one, str) or not one for one in ids)):
+            raise ValueError("a deleted thread needs a project, a thread id and distinct question ids")
+        payload = {"question_ids": ids, "thread_id": thread_id}
+        text = _encode(payload)
+        with self._lock:
+            at = self._clock()
+
+            def remove() -> Event:
+                cursor = self._connection.execute(
+                    "INSERT INTO events (at, kind, project, payload) VALUES (?, ?, ?, ?)",
+                    (at, PROJECT_QUESTION_DELETED, project, text))
+                self._connection.execute(
+                    "DELETE FROM events WHERE project = ? AND kind IN (?, ?) "
+                    "AND json_extract(payload, '$.question_id') IN (%s)"
+                    % ", ".join("?" * len(ids)),
+                    (project, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED, *ids))
+                return Event(cursor.lastrowid, at, PROJECT_QUESTION_DELETED, project,
+                             json.loads(text))
+
+            return self._transaction(remove)
 
     def retain(self) -> int:
         """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force, and every question key receipt, and the registry rows that say who owned a root; return how many."""
