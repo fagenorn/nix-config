@@ -541,6 +541,22 @@ class DocsTreeTest(unittest.TestCase):
         ]
         self.assertEqual(hits, [])
 
+    def test_the_light_lane_record_and_glossary_entry_are_retired(self):
+        self.assertFalse(
+            (REPO_ROOT / "docs/areas/delivery/adr/005-the-light-lane-runs-in-shadow.md").exists())
+        context = (REPO_ROOT / "docs/areas/delivery/CONTEXT.md").read_text().splitlines()
+        self.assertEqual([line for line in context if re.match(r"^\*\*Light lane\*\*:", line)], [])
+        context_map = (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text().splitlines()
+        self.assertEqual([line for line in context_map if re.match(r"^\|\s*Light lane\s*\|", line)], [])
+        hits = [
+            f"{path}:{number}"
+            for path, lines in tracked_text((".agents/artifacts/", "docs/archive/"))
+            if path != "tests/test_docs_tree.py"  # holds the literal
+            for number, line in enumerate(lines, start=1)
+            if "ADR-delivery-005" in line
+        ]
+        self.assertEqual(hits, [])
+
     def test_every_area_holds_an_adr(self):
         empty = sorted(
             d.name for d in (REPO_ROOT / "docs/areas").iterdir()

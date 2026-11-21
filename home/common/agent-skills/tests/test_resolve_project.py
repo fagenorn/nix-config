@@ -2029,8 +2029,8 @@ class LightLaneTest(ResolverTestCase):
          "contract.workflow.unsafe_path"),
         ({**VALID, "risk_paths": ["ok/*", 3]}, "/bindings/workflow/light_lane/risk_paths/1",
          "contract.workflow.unsafe_path"),
-        # COR-003: `lane-triage` matches canonical record paths against the glob
-        # unchanged, so a non-canonical glob could never match and is refused.
+        # COR-003: contract globs are matched against canonical paths unchanged,
+        # so a non-canonical glob could never match and is refused.
         ({**VALID, "risk_paths": ["./a.py"]}, "/bindings/workflow/light_lane/risk_paths/0",
          "contract.workflow.noncanonical_path"),
         ({**VALID, "risk_paths": ["ok/*", "a//b.py"]},

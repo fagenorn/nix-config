@@ -3,6 +3,7 @@
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,7 +48,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "delivery": frozenset({
         "agent_tools.console.inbox",  # look_approval
         "agent_tools.claims.forge_markers",  # look_marker, look_approval
-        "agent_tools.project_contract.resolve_project",  # lane_triage, issue_branch
+        "agent_tools.project_contract.resolve_project",  # issue_branch
     }),
     "guard": frozenset({
         "agent_tools.project_contract.adopt_inspection",  # guard_policy, contract_export
@@ -352,6 +353,29 @@ class LightLaneRetirementTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         snapshot = json.loads(done.stdout)
         self.assertNotIn("light_lane", snapshot["bindings"]["workflow"])
+
+    def test_the_lane_triage_command_is_retired(self):
+        table = (REPO_ROOT / "lib/agent-tools.nix").read_text()
+        justfile = (REPO_ROOT / "justfile").read_text()
+        timings = json.loads((PACKAGE / "delivery/suite_timings.json").read_text())
+        self.assertIsNone(re.search(r'^\s*"lane-triage"\s*=', table, re.M))
+        self.assertEqual(sorted(PACKAGE.rglob("lane_triage.py")), [])
+        self.assertFalse((REPO_ROOT / "tests/test_lane_triage.py").exists())
+        self.assertNotIn("tests/test_lane_triage.py", justfile)
+        self.assertNotIn("tests/test_lane_triage.py", timings)
+
+    def test_only_the_resolver_names_the_light_lane_binding(self):
+        named = []
+        for path in PACKAGE.rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if "light_lane" in text:
+                named.append(str(path.relative_to(REPO_ROOT)))
+        self.assertEqual(sorted(named), ["python/agent_tools/project_contract/resolve_project.py"])
 
 
 if __name__ == "__main__":

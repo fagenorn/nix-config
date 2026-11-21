@@ -66,7 +66,6 @@
 | Last looked | Console |
 | Launcher | Hosts |
 | Lifecycle verb | Guard |
-| Light lane | Delivery |
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |

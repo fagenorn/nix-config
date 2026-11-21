@@ -24,9 +24,6 @@ The work of carrying one issue from claim to merge on its own branch and worktre
 The route an issue takes to merge: the direct lane for a small concrete change, the standard lane for a specced and planned one. The triage record decides which applies.
 _Avoid_: track, tier
 
-**Light lane**:
-The project-declared reduced route for changes that a project's contract names as light. A project that declares none, or `null`, does not support it, and the verdict falls back to the standard route.
-
 **Look approval**:
 The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved`, `fix` (approved with one worded fix) or `changes`, and the console message it came from (issue 1138). It covers its head and every later head of that pull request that keeps it (issue 1211): the approved head is an ancestor, and no later commit of the pull request changed a look file other than by a clean merge of the integration branch, except one commit under a `fix` answer. The latest answer for a head decides. A delivery that lands under it ticks the look marker's box (`look-approval tick`, issue 1186). The console records an approval the owner gives on a look card; a delivery reads it (ADR-console-074).
 

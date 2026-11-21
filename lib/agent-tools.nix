@@ -54,7 +54,6 @@ let
     "forge-issue" = "claims.forge_issue";
     "guard-policy" = "guard.guard_policy";
     "issue-branch" = "delivery.issue_branch";
-    "lane-triage" = "delivery.lane_triage";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
     "owner-actions" = "claims.owner_actions";
