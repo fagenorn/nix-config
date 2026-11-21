@@ -535,13 +535,15 @@ the claim's own id when it names no issue) and
 `"to"` for a hand-off, of the project's open notices in id order.
 `claim_overlaps(entries)` is the console's reading of those entries (#1337, D5-D8): one dict per pair
 of claims of two different sprints whose paths overlap, `{"claims": [a, b], "sprints": [...],
-"files": [...], "first", "rule", "asks"}`, `a` being the claim with the lower `started`. Paths are
+"files": [...], "first", "rule"}`, `a` being the claim with the lower `started`. Paths are
 compared segment by segment (`claim_paths`, `*` never crosses a `/`, a shorter path reads as a folder);
 the rule is `OVERLAP_EARLIER` (the earlier-started slice is `first`), `OVERLAP_FAULT` (the one live-fault
 fix is `first`, even when the feature started earlier) or `OVERLAP_UNSETTLED` (both fix a live fault:
-`first` None, `asks` the later-started sprint). The console refuses nothing because of an overlap.
+`first` None; the owner's page shows it as one line (#1347) and no sprint asks). The console refuses
+nothing because of an overlap.
 `notice_block` ends with one `- overlap with "<title>" on <files>: ...` line per reading naming the
-reader's sprint, saying who lands first (or, unsettled, who asks the owner). `notice_block(entries, sprint_id,
+reader's sprint, saying who lands first (or, unsettled, that the rule cannot order them and the
+owner sees it on the page). `notice_block(entries, sprint_id,
 now_ms)` renders those entries for the manager of `sprint_id` under `NOTICE_BLOCK_HEAD`, one line
 per entry of another sprint (the sprint's own notices are left out), in the order given, and is
 `""` when no other sprint's notice is open. The four line forms are
@@ -2146,13 +2148,13 @@ def claim_overlaps(entries: Iterable[Mapping]) -> list[dict]:
         a, b = sorted(speaking, key=lambda c: (_claim_start(c), c["id"]))
         fault_a, fault_b = a.get("live_fault") is True, b.get("live_fault") is True
         if fault_a and fault_b:
-            first, rule, asks = None, OVERLAP_UNSETTLED, b["sprint_id"]
+            first, rule = None, OVERLAP_UNSETTLED
         elif fault_a != fault_b:
-            first, rule, asks = (a if fault_a else b)["id"], OVERLAP_FAULT, None
+            first, rule = (a if fault_a else b)["id"], OVERLAP_FAULT
         else:
-            first, rule, asks = a["id"], OVERLAP_EARLIER, None
+            first, rule = a["id"], OVERLAP_EARLIER
         reading = {"claims": [a["id"], b["id"]], "sprints": [a["sprint_id"], b["sprint_id"]],
-                   "files": sorted(group["files"]), "first": first, "rule": rule, "asks": asks}
+                   "files": sorted(group["files"]), "first": first, "rule": rule}
         readings.append(((_claim_start(a), _claim_start(b), a["id"], b["id"]), reading))
     return [reading for _, reading in sorted(readings, key=lambda keyed: keyed[0])]
 
@@ -2192,9 +2194,8 @@ def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str
             who, files = _one_line(titles[other]), _one_line(", ".join(reading["files"]))
             head = f'- overlap with "{who}" on {files}: '
             if reading["rule"] == OVERLAP_UNSETTLED:
-                lines.append(head + ("both fix a live fault; ask the owner which lands first"
-                                     if reading["asks"] == sprint_id else
-                                     "both fix a live fault; they ask the owner which lands first"))
+                lines.append(head + "both fix a live fault and the rule cannot order them; "
+                                    "keep working, the owner sees this overlap on the page")
             elif reading["claims"].index(reading["first"]) == reading["sprints"].index(sprint_id):
                 lines.append(head + "your slice lands first; theirs rebases")
             else:
