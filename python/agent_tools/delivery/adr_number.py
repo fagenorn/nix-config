@@ -20,22 +20,30 @@ file `NNN-<slug>.md` in a directory named `adr`, whose first line is the header 
 its own id) with `git mv` to the target number (`--to`, three digits and not `000`, or
 else one past the highest number used in the record's directory, as `next` counts it),
 and rewrites the old id to the new one in the record's header and in every citation the
-branch added. It stages only the rename, commits nothing and adds no `**Formerly:**`
-line. A `--to` that is already used is refused.
+branch added, and the old file name to the new one in every branch-added path that
+resolves to the record (relative to the file or to the root). A citation is an id the
+context-map lint reads as a whole: `ADR-<area>-NNN-NNN` is area `<area>-NNN`, not
+`<area>`. It stages only the rename, commits nothing and adds no `**Formerly:**` line.
+A `--to` that is already used is refused, and so is a record that already exists at the
+merge base or in the base commit's tree: only a record the branch itself added is
+renumbered, never one the base published.
 
 A citation is branch-added when its line is one the working tree adds relative to the
 merge base of HEAD and `--base` (committed, staged or uncommitted edits to tracked
 files), or any line of an untracked file that git does not ignore; a file anywhere in
 the repository counts, and a line from the base keeps its citation. Files that are not
 UTF-8 are left alone. Every check runs before the first change, so a refusal changes
-nothing.
+nothing. Each rewritten file is staged beside its target and moved into place by an
+atomic rename, so a full disk leaves every file as it was and a hard link is replaced,
+never written through.
 
 `renumber` prints one JSON line on stdout: `from` and `to` (the two ids), `record` (the
 new path relative to the root) and `rewritten` (the sorted root-relative paths whose
 content changed, the record at its new path).
 
 Exit 0 is done. Exit 1 refuses (`git_failed`, `shallow_history`, `numbers_exhausted`,
-`record_missing`, `record_untracked`, `header_mismatch`, `number_used`) and exit 2 is
+`record_missing`, `record_untracked`, `header_mismatch`, `record_published`,
+`number_used`, `write_failed`) and exit 2 is
 misuse (`misuse`, `not_a_repository_root`, `base_unknown`, `not_a_record`). Both write
 `{"error": {code, detail}}` to stderr and nothing to stdout. A shallow checkout is
 refused because its history cannot name every used number.
@@ -45,17 +53,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
-from agent_tools.delivery.context_map_lint import ADR_FILE_RE, ADR_HEADER_RE
+from agent_tools.delivery.context_map_lint import ADR_FILE_RE, ADR_HEADER_RE, CITATION_RE
 
 GIT_TIMEOUT = 120
 MAX_NUMBER = 999
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
-TARGET_RE = re.compile(r"\d{3}")
+TARGET_RE = re.compile(r"[0-9]{3}")
 
 
 class NumberRefusal(Exception):
@@ -68,16 +78,21 @@ class NumberRefusal(Exception):
         self.exit_code = exit_code
 
 
-def git(root: Path, *args: str) -> str:
+def run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run git on bytes: a patch or a path that is not UTF-8 must not abort the command."""
     try:
-        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
                               timeout=GIT_TIMEOUT, check=False)
     except subprocess.TimeoutExpired:
         raise NumberRefusal("git_failed", "timeout", 1) from None
+
+
+def git(root: Path, *args: str) -> str:
+    done = run_git(root, *args)
     if done.returncode != 0:
-        lines = done.stderr.strip().splitlines()
+        lines = done.stderr.decode("utf-8", "replace").strip().splitlines()
         raise NumberRefusal("git_failed", lines[-1] if lines else "", 1)
-    return done.stdout
+    return done.stdout.decode("utf-8", "surrogateescape")
 
 
 def check_repository(root: Path, base: str) -> str:
@@ -133,7 +148,8 @@ def branch_added_lines(root: Path, merge_base: str) -> dict[Path, set[int]]:
         path = root / name
         if not path.is_file() or path.is_symlink():
             continue
-        diff = git(root, "diff", "-U0", "--no-renames", "--no-ext-diff", "--no-color", merge_base, "--", name)
+        diff = git(root, "diff", "-U0", "--inter-hunk-context=0", "--no-renames", "--no-ext-diff",
+                    "--no-textconv", "--no-color", merge_base, "--", name)
         lines: set[int] = set()
         for hunk in HUNK_RE.finditer(diff):
             start = int(hunk.group(1))
@@ -155,9 +171,48 @@ def split_lines(text: str) -> list[str]:
     return re.findall(r"[^\n]*\n|[^\n]+", text)
 
 
-def rewrite(text: str, pattern: re.Pattern[str], new_id: str, lines: set[int]) -> str:
-    return "".join(pattern.sub(new_id, line) if number in lines else line
-                   for number, line in enumerate(split_lines(text), start=1))
+PATH_RE = re.compile(r"(?<![\w./~-])((?:[\w.~-]+/)*)([\w-]+(?:\.[\w-]+)*)(?![\w-])")
+
+
+def make_rewriter(root: Path, record: Path, new_record: Path, slug: str, old: str, new_id: str):
+    """A function (path, text, lines) -> text that moves the record's id and file name."""
+    def citation(match: re.Match[str]) -> str:
+        return new_id if (match.group(1), match.group(2)) == (slug, old) else match.group(0)
+
+    def link(directory: Path, match: re.Match[str]) -> str:
+        if match.group(2) != record.name:
+            return match.group(0)
+        prefix = match.group(1)
+        base = root if prefix.startswith("/") else directory
+        candidates = {Path(os.path.normpath(base / prefix.lstrip("/") / record.name)),
+                      Path(os.path.normpath(root / prefix / record.name))}
+        return prefix + new_record.name if record in candidates else match.group(0)
+
+    def rewrite(path: Path, text: str, lines: set[int]) -> str:
+        def line_text(line: str) -> str:
+            line = CITATION_RE.sub(citation, line)
+            return PATH_RE.sub(lambda match: link(path.parent, match), line)
+        return "".join(line_text(line) if number in lines else line
+                       for number, line in enumerate(split_lines(text), start=1))
+    return rewrite
+
+
+def stage_temp(source: Path, content: str) -> Path:
+    """Write `content` to a new file beside `source`, with its mode; raise OSError on failure."""
+    descriptor, name = tempfile.mkstemp(prefix=".adr-number-", dir=source.parent)
+    temp = Path(name)
+    try:
+        try:
+            view = memoryview(content.encode("utf-8"))
+            while view:
+                view = view[os.write(descriptor, view):]
+        finally:
+            os.close(descriptor)
+        os.chmod(temp, source.stat().st_mode & 0o7777)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    return temp
 
 
 def renumber(root: Path, record: Path, base: str, to: int | None) -> dict:
@@ -174,14 +229,18 @@ def renumber(root: Path, record: Path, base: str, to: int | None) -> dict:
     if name is None or record.parent.name != "adr":
         raise NumberRefusal("not_a_record", rel, 2)
     slug, old = record.parent.parent.name, name.group(1)
-    tracked = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", "--", rel],
-                             capture_output=True, text=True, timeout=GIT_TIMEOUT, check=False)
-    if tracked.returncode != 0:
+    if run_git(root, "ls-files", "--error-unmatch", "--", rel).returncode != 0:
         raise NumberRefusal("record_untracked", rel, 1)
     first = record.read_text(encoding="utf-8").split("\n", 1)[0]
     header = ADR_HEADER_RE.match(first)
     if header is None or header.group(1) != slug or header.group(2) != old:
         raise NumberRefusal("header_mismatch", rel, 1)
+    merge_base = git(root, "merge-base", "HEAD", base_sha).strip()
+    for published in (merge_base, base_sha):
+        if run_git(root, "cat-file", "-e", f"{published}:{rel}").returncode == 0:
+            raise NumberRefusal("record_published", rel, 1)
+    if to is not None and not 1 <= to <= MAX_NUMBER:
+        raise NumberRefusal("misuse", "--to must be three digits and not 000", 2)
     used = used_numbers(root, record.parent, base_sha)
     if to is None:
         new = next_number(root, record.parent, base_sha)
@@ -189,25 +248,34 @@ def renumber(root: Path, record: Path, base: str, to: int | None) -> dict:
         raise NumberRefusal("number_used", f"{to:03d}", 1)
     else:
         new = to
-    merge_base = git(root, "merge-base", "HEAD", base_sha).strip()
     added = branch_added_lines(root, merge_base)
     added.setdefault(record, set())
     added[record] = added[record] | {1}
-    pattern = re.compile(rf"\bADR-{re.escape(slug)}-{old}\b")
     new_id = f"ADR-{slug}-{new:03d}"
     target = record.with_name(f"{new:03d}{record.name[3:]}")
-    changes: dict[Path, str] = {}
+    rewrite = make_rewriter(root, record, target, slug, old, new_id)
+    changes: dict[Path, tuple[Path, str]] = {}
     for path, lines in added.items():
         try:
             text = path.read_bytes().decode("utf-8")
         except UnicodeDecodeError:
             continue
-        rewritten = rewrite(text, pattern, new_id, lines)
+        rewritten = rewrite(path, text, lines)
         if rewritten != text:
-            changes[target if path == record else path] = rewritten
-    git(root, "mv", "--", rel, target.relative_to(root).as_posix())
-    for path, content in changes.items():
-        path.write_bytes(content.encode("utf-8"))
+            changes[target if path == record else path] = (path, rewritten)
+    staged: list[tuple[Path, Path]] = []
+    try:
+        try:
+            for destination, (source, content) in changes.items():
+                staged.append((stage_temp(source, content), destination))
+        except OSError as error:
+            raise NumberRefusal("write_failed", error.strerror or str(error), 1) from None
+        git(root, "mv", "--", rel, target.relative_to(root).as_posix())
+        for temp, destination in staged:
+            os.replace(temp, destination)
+    finally:
+        for temp, _ in staged:
+            temp.unlink(missing_ok=True)
     return {"from": f"ADR-{slug}-{old}", "to": new_id, "record": target.relative_to(root).as_posix(),
             "rewritten": sorted(path.relative_to(root).as_posix() for path in changes)}
 

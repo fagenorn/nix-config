@@ -1,11 +1,14 @@
 """Tests for the adr-number command, its `next` and `renumber` subcommands (issue 1440)."""
+import errno
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.delivery import adr_number, context_map_lint
 
@@ -288,6 +291,88 @@ class RenumberTest(unittest.TestCase):
         self.assertIn("docs/guides/draft.md", json.loads(done.stdout)["rewritten"])
 
 
+    def test_a_branch_added_map_link_follows_the_renamed_file(self):
+        root = make_collision(self.tmp, synced=True)
+        with (root / MAP).open("a", encoding="utf-8") as handle:
+            handle.write("\nSee [ADR-console-012](areas/console/adr/012-branch-choice.md) and "
+                         "[the base](areas/console/adr/012-base-choice.md).\n")
+        done = run_tool(*renumber_args(root))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        last = (root / MAP).read_text(encoding="utf-8").splitlines()[-1]
+        self.assertEqual(last, "See [ADR-console-013](areas/console/adr/013-branch-choice.md) and "
+                               "[the base](areas/console/adr/012-base-choice.md).")
+        self.assertEqual(context_map_lint.check(root, root / MAP), [])
+
+    def test_a_same_named_file_in_another_area_keeps_its_link(self):
+        root = make_collision(self.tmp, synced=True)
+        write(root, "docs/guides/links.md",
+              "[mine](../areas/console/adr/012-branch-choice.md) "
+              "[other](../areas/other/adr/012-branch-choice.md).\n")
+        done = run_tool(*renumber_args(root))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((root / "docs/guides/links.md").read_text(encoding="utf-8"),
+                         "[mine](../areas/console/adr/013-branch-choice.md) "
+                         "[other](../areas/other/adr/012-branch-choice.md).\n")
+
+    def test_edits_around_a_base_citation_do_not_redirect_it_under_inter_hunk_context(self):
+        root = make_collision(self.tmp, synced=True)
+        run_git(root, "config", "diff.interHunkContext", "1")
+        lines = (root / "docs/guides/notes.md").read_text(encoding="utf-8").splitlines(keepends=True)
+        self.assertEqual(lines[2], "Base cites ADR-console-012.\n")
+        lines[1], lines[3] = "edited above\n", "edited below\n"
+        write(root, "docs/guides/notes.md", "".join(lines))
+        done = run_tool(*renumber_args(root))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        notes = (root / "docs/guides/notes.md").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(notes[1:4], ["edited above", "Base cites ADR-console-012.", "edited below"])
+        self.assertEqual(notes[-1], "Branch cites ADR-console-013.")
+
+    def test_a_longer_citation_with_the_same_prefix_is_not_rewritten(self):
+        root = make_collision(self.tmp, synced=True)
+        write(root, "docs/guides/draft.md",
+              "ADR-console-012-001 stays, ADR-console-012 moves, ADR-console-0123 stays.\n")
+        done = run_tool(*renumber_args(root))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((root / "docs/guides/draft.md").read_text(encoding="utf-8"),
+                         "ADR-console-012-001 stays, ADR-console-013 moves, ADR-console-0123 stays.\n")
+
+    def test_a_changed_latin_1_file_is_left_alone(self):
+        root = make_collision(self.tmp, synced=True)
+        legacy = "docs/guides/legacy.txt"
+        (root / legacy).write_bytes(b"caf\xe9 ADR-console-012\n")
+        commit(root, "latin-1 file")
+        with (root / legacy).open("ab") as handle:
+            handle.write(b"caf\xe9 again\n")
+        before = (root / legacy).read_bytes()
+        done = run_tool(*renumber_args(root))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((root / legacy).read_bytes(), before)
+        self.assertNotIn(legacy, json.loads(done.stdout)["rewritten"])
+        self.assertEqual((root / "docs/guides/branch-guide.md").read_text(encoding="utf-8"), "Read ADR-console-013.\n")
+
+    def test_a_full_disk_leaves_the_draft_and_the_tree_as_they_were(self):
+        root = make_collision(self.tmp, synced=True)
+        write(root, "docs/guides/draft.md", "Draft cites ADR-console-012.\n")
+        before = tree_state(root)
+        full = OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        with mock.patch.object(adr_number.os, "write", side_effect=full):
+            with self.assertRaises(adr_number.NumberRefusal) as caught:
+                adr_number.renumber(root, root / RECORDS / "012-branch-choice.md", "main", None)
+        self.assertEqual((caught.exception.code, caught.exception.exit_code), ("write_failed", 1))
+        self.assertEqual(tree_state(root), before)
+
+    def test_a_hard_linked_draft_is_replaced_never_written_through(self):
+        root = make_collision(self.tmp, synced=True)
+        outside = self.tmp / "outside.md"
+        outside.write_text("Outside cites ADR-console-012.\n", encoding="utf-8")
+        os.link(outside, root / "docs/guides/linked.md")
+        done = run_tool(*renumber_args(root))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "Outside cites ADR-console-012.\n")
+        self.assertEqual((root / "docs/guides/linked.md").read_text(encoding="utf-8"),
+                         "Outside cites ADR-console-013.\n")
+
+
 class RenumberRefusalTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -345,11 +430,38 @@ class RenumberRefusalTest(unittest.TestCase):
                 "--base", "main")
         self.refused(root, args, "header_mismatch")
 
+    def test_a_record_the_base_published_is_refused(self):
+        root = make_collision(self.tmp, synced=True)
+        base_record = root / RECORDS / "012-base-choice.md"
+        args = ("renumber", "--repo-root", str(root), "--record", str(base_record), "--base", "main")
+        self.refused(root, args, "record_published")
+
+    def test_a_record_at_the_merge_base_is_refused_even_when_the_base_dropped_it(self):
+        root = make_collision(self.tmp, synced=True)
+        run_git(root, "checkout", "-q", "main")
+        run_git(root, "rm", "-q", f"{RECORDS}/001-first.md")
+        commit(root, "drop 001")
+        run_git(root, "checkout", "-q", "feature")
+        args = ("renumber", "--repo-root", str(root), "--record", str(root / RECORDS / "001-first.md"),
+                "--base", "main")
+        self.refused(root, args, "record_published")
+
     def test_a_malformed_target_is_misuse(self):
         root = make_collision(self.tmp, synced=True)
-        for target in ("13", "000", "abc"):
+        for target in ("13", "000", "abc", "\u0660\u0660\u0660", "\uff10\uff10\uff11"):
             with self.subTest(target):
                 self.refused(root, renumber_args(root, "--to", target), "misuse", exit_code=2)
+
+
+class RenumberRangeTest(unittest.TestCase):
+    def test_a_target_outside_1_to_999_is_refused_inside_renumber(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_collision(Path(tmp).resolve(), synced=True)
+            for target in (0, 1000):
+                with self.subTest(target):
+                    with self.assertRaises(adr_number.NumberRefusal) as caught:
+                        adr_number.renumber(root, root / RECORDS / "012-branch-choice.md", "main", target)
+                    self.assertEqual((caught.exception.code, caught.exception.exit_code), ("misuse", 2))
 
 
 class CommandTableTest(unittest.TestCase):
