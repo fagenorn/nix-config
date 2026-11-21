@@ -8,7 +8,11 @@ Contract:
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
   running sprint's manager session, an outside-sprint session and one workflow run, with spend on
-  at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold;
+  at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold
+  over two sprints whose live-fault claims name one file: on the branch's console the sprint blocks
+  show the overlap line and no card asks about it; on the base commit's console (`overlap_card()`)
+  the seed also records the owner-only card the base contract had the later-started sprint send,
+  which is the before picture (#1347);
   `notice-post-open` is that fold with the owner's post control opened, and shot against a page
   that has no such control it is the same fold, which is how the before pictures are made;
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
@@ -232,7 +236,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
+from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin, view
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
@@ -2228,6 +2232,16 @@ def offers_merge() -> bool:
     return hasattr(approve.GitHubForge, "merge_pull_request")
 
 
+def overlap_card() -> bool:
+    """Whether this console is the base commit's, whose manager contract had a claim overlap's asker send the owner a card.
+
+    True on the base commit's console, whose manager contract had the later-started sprint of an
+    unsettled overlap send the owner an owner-only card: the before picture. A console whose view
+    carries `OVERLAP_UNSETTLED_TEXT` shows the overlap as one line and asks nobody.
+    """
+    return not hasattr(view, "OVERLAP_UNSETTLED_TEXT")
+
+
 def offers_account_changes() -> bool:
     """Whether this service lets an account be signed out alone (a base commit's service has no such method)."""
     return hasattr(ConsoleService, "sign_out_account")
@@ -2351,12 +2365,28 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.account("work-main", 0.4)
         seed.account("work-spare", 0.9)
     elif state in ("notices-fold", "notice-post-open"):
-        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
+        first, first_goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
+                                        report=2 * MINUTE)
         sid, goal = seed.sprint(web, "Fix the settings page", started=20 * MINUTE,
                                 report=2 * MINUTE)
+        seed.put(100, "notice.posted", web, {"sprint_id": first, "goal": first_goal, "notice": {
+            "kind": "claim", "text": "resuming an upload from its row",
+            "what": "python/agent_tools/console/page.html", "until": "the upload row lands",
+            "issue": 12, "live_fault": True}})
         seed.put(90, "notice.posted", web, {"sprint_id": sid, "goal": goal, "notice": {
             "kind": "claim", "text": "reworking the settings form",
-            "what": "python/agent_tools/console/page.html", "until": "the form lands"}})
+            "what": "python/agent_tools/console/page.html", "until": "the form lands",
+            "issue": 13, "live_fault": True}})
+        if overlap_card():
+            seed.put(60, "questions.asked", web, {
+                "sprint_id": sid, "goal": goal, "blocker": False, "questions": [{
+                    "question": "Which lands first in python/agent_tools/console/page.html: "
+                                "Add resumable uploads or Fix the settings page? "
+                                "Both fix a live fault.",
+                    "blocks": "the settings form slice",
+                    "options": ["Add resumable uploads lands first",
+                                "Fix the settings page lands first"],
+                    "recommended": "Add resumable uploads lands first", "owner_only": True}]})
         seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
             "kind": "heads-up", "text": "routes are frozen until Friday"}})
     elif state in ("ask-box", "ask-goal"):
