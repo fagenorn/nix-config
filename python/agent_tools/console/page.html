@@ -3961,6 +3961,10 @@ function startPicks(item) {
     return recommended >= 0 ? recommended : null;
   });
 }
+// The picks a card opened with on its recommendation and the owner has not touched since: an upgrade to the consequential form takes them back (#1265).
+function seededPicks(item) {
+  return item.questions.map((q) => !soleOption(item) && q.options.indexOf(q.chosen) < 0 && !consequential(item) && recommendedIndex(q) >= 0);
+}
 function answerState(item) {
   const id = itemId(item);
   let state = answers.get(id);
@@ -3968,10 +3972,14 @@ function answerState(item) {
     const picks = startPicks(item);
     const first = picks.indexOf(null);
     state = {
-      phase: "choosing", picks, q: first >= 0 ? first : 0, timer: null, reason: "", notice: "", pending: null,
+      phase: "choosing", picks, seeded: seededPicks(item), q: first >= 0 ? first : 0, timer: null, reason: "", notice: "", pending: null,
       project_id: item.project_id, key: item.key, id,
     };
     answers.set(id, state);
+  } else if (choosable(state) && consequential(item) && state.seeded.includes(true)) {
+    state.picks = state.picks.map((pick, i) => (state.seeded[i] ? null : pick));
+    state.seeded = state.seeded.map(() => false);
+    state.q = Math.max(state.picks.indexOf(null), 0);
   }
   return state;
 }
@@ -4030,6 +4038,7 @@ function redraw() {
 function choose(state, qi, oi) {
   if (!choosable(state)) return;
   state.picks[qi] = oi;
+  if (state.seeded) state.seeded[qi] = false;
   state.q = qi;
   state.phase = "choosing";
   state.reason = "";

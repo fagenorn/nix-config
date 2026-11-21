@@ -5229,6 +5229,41 @@ class PageConsequentialTest(unittest.TestCase):
         self.assertIs(field(opened, "send")["disabled"], True)
         self.assertEqual(round_posts(after), [])
 
+    def test_a_marked_question_with_a_recommendation_still_opens_with_nothing_picked(self) -> None:
+        marked = question(0, "May the release run now?", ["Run it now", "Wait for Monday"],
+                          "Run it now", consequential=True)
+        (opened, after) = render([
+            START, {"frame": frame([marked])}, {"snapshot": True}, {"key": "Enter"},
+            {"clock": 20000}, {"snapshot": True},
+        ])
+        self.assertEqual(picked(opened), [])
+        self.assertIs(field(opened, "send")["disabled"], True)
+        self.assertEqual(round_posts(after), [])
+
+    def test_an_upgrade_to_consequential_drops_the_cached_recommended_pick(self) -> None:
+        older = question(0, "May the release run now?", ["Run it now", "Wait for Monday"],
+                         "Run it now")
+        (before, after, sent) = render([
+            START, {"frame": frame([older])}, {"snapshot": True},
+            {"frame": frame([self.asked()])}, {"snapshot": True}, {"key": "Enter"},
+            {"clock": 20000}, {"snapshot": True},
+        ])
+        self.assertEqual(len(picked(before)), 1)
+        self.assertTrue(picked(before)[0].endswith("Run it now"))
+        self.assertEqual(picked(after), [])
+        self.assertIs(field(after, "send")["disabled"], True)
+        self.assertEqual(round_posts(sent), [])
+
+    def test_an_upgrade_keeps_a_pick_the_owner_made(self) -> None:
+        older = question(0, "May the release run now?", ["Run it now", "Wait for Monday"],
+                         "Run it now")
+        (after,) = render([
+            START, {"frame": frame([older])}, {"click": "opt", "nth": 1},
+            {"frame": frame([self.asked()])}, {"snapshot": True},
+        ])
+        self.assertEqual(len(picked(after)), 1)
+        self.assertTrue(picked(after)[0].endswith("Wait for Monday"))
+
     def test_a_look_card_opens_with_nothing_picked_whatever_it_recommends(self) -> None:
         open_card = question(0, "May this merge?", ["approve", "ask for changes"], "ask for changes",
                              look=look_of("open", "Choosing approve records it."))
