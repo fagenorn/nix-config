@@ -82,6 +82,7 @@ TABLE = {
     "/api/exclusion": "owner", "/api/pin": "owner", "/api/signin": "owner",
     "/api/signin-code": "owner", "/api/signin-cancel": "owner", "/api/signin-link": "owner",
     "/api/account-add": "owner", "/api/account-remove": "owner",
+    "/api/account-signout": "owner",
     "/api/register-project": "owner", "/api/plan-answer": "owner",
     "/api/plan-approve": "owner", "/api/adoption-register": "owner", "/api/adoption-merge": "owner",
     "/api/plan-defer": "owner",

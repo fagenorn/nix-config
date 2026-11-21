@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import account_remove, manager, probe, signin, signin_run, sprints
+from agent_tools.console import account_add, account_remove, manager, probe, signin, signin_run, sprints
 from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
@@ -24,6 +24,7 @@ from .test_console_account_service import Listing
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REMOVE = "/api/account-remove"
+SIGNOUT = "/api/account-signout"
 NOW = 1794000000
 LONG = "a" * 129
 
@@ -391,6 +392,99 @@ class RemoveEffectTest(Case):
         self.assertEqual(svc._sessions, before)
         self.assertEqual(self.rows("sprint.stop_requested"), [])
         self.assertEqual(self.rows("manager.stopped"), [])
+
+
+class ColleagueAccountOwnerTest(Case):
+    """The owner signs out or removes a colleague's account from the page (#1345, ADR-console-087 D3)."""
+
+    COLLEAGUE = "colleague@example.invalid"
+
+    def begin_colleague(self, **options):
+        support.profile_dir(self.store, "colleague-1")
+        return self.begin(seed=[account_add.added("colleague-1", self.COLLEAGUE)], **options)
+
+    def signout(self, profile, **headers):
+        sent = self.own(**{"Content-Type": "application/json"}) if not headers else headers
+        return support.post_page(self.svc.address, SIGNOUT, sent,
+                                 json.dumps({"profile": profile}).encode())
+
+    def test_the_owner_signs_out_a_colleagues_account(self):
+        self.begin_colleague()
+        status, _, body = self.signout("colleague-1")
+        self.assertEqual((status, body), (204, b""))
+        self.assertIn(("signout", "colleague-1"), self.calls)
+        self.assertFalse([call for call in self.calls if call[0] == "rm"])
+        (account,) = [one for one in self.view()["capacity"]["profiles"]
+                      if one["profile"] == "colleague-1"]
+        self.assertEqual((account["owner"], account["signin"]["state"]),
+                         (self.COLLEAGUE, "signed_out"))
+        self.assertEqual(self.rows("signin.acted")[-1][1], {
+            "by": "owner", "profile": "colleague-1", "action": "signout",
+            "outcome": "signed_out"})
+
+    def test_the_owner_cannot_sign_out_his_own_account_here(self):
+        self.begin_colleague()
+        before = support.log_rows(self.store)
+        status, _, body = self.signout("work")
+        self.assertEqual((status, body), (409, account_remove.NOT_COLLEAGUE.encode() + b"\n"))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.rows("signin.acted"), [])
+        self.assertEqual(support.log_rows(self.store), before)
+
+    def test_the_signout_route_follows_the_page_write_rule(self):
+        self.begin_colleague()
+        before = support.log_rows(self.store)
+        json_type = {"Content-Type": "application/json"}
+        own = self.own(**json_type)
+        body = b'{"profile": "colleague-1"}'
+        refused = (
+            ({**json_type, "X-Console-Token": own["X-Console-Token"]}, body,
+             403, b"origin refused\n"),
+            ({**json_type, "Origin": own["Origin"]}, body, 403, b"token refused\n"),
+            (own, b"{}", 400, b"bad sign-out\n"),
+            (own, b'{"profile": ""}', 400, b"bad sign-out\n"),
+            (own, b'{"profile": "colleague-1", "typed": "colleague-1"}', 400, b"bad sign-out\n"),
+            (own, b"not json", 400, b"bad sign-out\n"),
+            (own, b'{"profile": "nobody"}', 409, b"no such profile\n"))
+        for headers, payload, status, text in refused:
+            self.assertEqual(support.post_page(self.svc.address, SIGNOUT, headers, payload)[::2],
+                             (status, text), payload)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(support.log_rows(self.store), before)
+        self.svc.close()
+        self.begin(signer_out=None)
+        before = support.log_rows(self.store)
+        self.assertEqual(self.signout("colleague-1")[::2],
+                         (409, account_remove.SIGNOUT_UNAVAILABLE.encode() + b"\n"))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(support.log_rows(self.store), before)
+
+    def test_a_failed_sign_out_is_a_502_with_one_failed_row(self):
+        self.begin_colleague()
+        self.signout_error = account_remove.SignOutFailed("exited")
+        mark = len(self.rows("signin.acted"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status, _, body = self.signout("colleague-1")
+        self.assertEqual((status, body), (502, b"the account was not signed out: exited\n"))
+        self.assertEqual(self.calls, [("signout", "colleague-1")])
+        rows = self.rows("signin.acted")
+        self.assertEqual(len(rows) - mark, 1)
+        self.assertEqual(rows[-1][1], {"by": "owner", "profile": "colleague-1",
+                                       "action": "signout", "outcome": "failed"})
+        self.assertIn("console: account_signout_failed exited", err.getvalue())
+        self.assertNotIn("colleague-1", err.getvalue())
+
+    def test_the_owner_removes_a_colleagues_account_and_it_is_his_no_more(self):
+        self.begin_colleague()
+        self.assertEqual(self.remove("colleague-1")[::2], (204, b""))
+        self.assertEqual(self.rows("account.removal")[-1][1], {
+            "by": "owner", "profile": "colleague-1", "outcome": "removed", "kind": None})
+        self.assertNotIn("colleague-1", [one["profile"] for one in
+                                         self.view()["capacity"]["profiles"]])
+        self.svc.close()
+        again = self.begin()
+        self.assertNotIn("colleague-1", again._account_owners)
 
 
 class RemoveInterleavingTest(Case):

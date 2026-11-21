@@ -621,7 +621,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
                                                "/api/signin",
                                                "/api/signin-code", "/api/signin-cancel",
                                                "/api/signin-link", "/api/account-add",
-                                           "/api/account-remove",
+                                           "/api/account-remove", "/api/account-signout",
                                            "/api/register-project",
                                            "/api/plan-answer", "/api/plan-approve",
                                            "/api/adoption-register", "/api/adoption-merge", "/api/plan-defer",

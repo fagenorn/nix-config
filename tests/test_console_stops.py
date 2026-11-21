@@ -953,6 +953,29 @@ class ColleagueAccountMoveTest(StopServiceTest):
         for sid in sids:
             self.assertEqual(self.manager_of(svc, sid).profile, "work")
 
+    def test_the_owner_excludes_a_colleagues_account_and_no_new_manager_is_placed_on_it(self):
+        svc = self.begin_pool(count=0)
+        status, _, _ = support.post_page(
+            svc.address, "/api/exclusion", self.own(svc, **JSON),
+            json.dumps({"profile": "colleague-1", "excluded": True}).encode())
+        self.assertEqual(status, 204)
+        self.running_on(svc, FIRST, "zeta")
+        (call,) = self.launched()
+        self.assertEqual(call.profile, "zeta")
+        self.assertEqual(svc.session_profile(), "zeta")
+
+    def test_the_owners_sign_out_route_says_a_manager_was_not_moved(self):
+        svc = self.begin_pool()
+        self.failures = ["boom"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status, _, body = support.post_page(
+                svc.address, "/api/account-signout", self.own(svc, **JSON),
+                json.dumps({"profile": "colleague-1"}).encode())
+        self.assertEqual((status, body), (502, account_remove.NOT_MOVED.encode() + b"\n"))
+        self.assertIn("console: account_signout_failed stop_failed", err.getvalue())
+        self.assertNotIn("colleague-1", err.getvalue())
+
 
 class WithdrawStopTest(StopServiceTest):
     def withdraw(self, svc, sid, project_id="owner/p01"):

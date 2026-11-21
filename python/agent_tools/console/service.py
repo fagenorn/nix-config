@@ -243,7 +243,7 @@ route carries no token: it records observations and answers nothing (ADR-console
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
-`POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
+`POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove`, `POST /api/account-signout` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/adoption-merge`, `POST /api/plan-defer`,
 `POST /api/register-confirm`, `POST /api/trust-check`,
@@ -449,6 +449,20 @@ waits, once the mark is dropped, on every way out after the stops; a sprint is n
 profile, else `account_remove.SIGNOUT_UNAVAILABLE` or `NOT_COLLEAGUE`) runs the same moves around the
 sign-out alone and appends one `signin.acted` row of action `signout`, outcome `signed_out` or
 `failed`; a stop that failed is `account_remove.MoveFailed("stop_failed")` after that row.
+
+`POST /api/account-signout` (#1345, ADR-console-087 D3) is the owner's sign-out of a colleague's
+account alone, the account staying in the pool and his. After the page-write guard the body is JSON
+read with `MAX_REMOVE_BYTES` and `account_remove.parse_signout_request` (exactly one member,
+`profile`, a non-empty string; else 400 `bad sign-out`), then `sign_out_account(profile)` runs with
+no lock held. Refusals are 409 with the text and one stderr line `console: account_signout_refused
+<text>`, appending nothing: `account_remove.SIGNOUT_UNAVAILABLE` without a signer-out, `no such
+profile` for a profile not listed, `account_remove.NOT_COLLEAGUE` for one no colleague added (the
+owner's own account is never signed out here), the busy and running sign-in refusals of the
+removal. A failed sign-out is 502 `the account was not signed out: <kind>` and one stderr line
+`console: account_signout_failed <kind>`; a manager on the account that could not be stopped is 502
+`account_remove.NOT_MOVED` with the same line; any other exception is 500 `signing the account out
+failed` and `console: account_signout_failed <Type>`. No line names the profile, a colleague's.
+Success is an empty `204`. The colleague's managers on the account move as the removal's do.
 
 `POST /api/register-project` (#1052, ADR-console-028) runs the same checks with
 `MAX_REGISTER_BYTES` (4096) and `register.parse_register_request`: 400 `bad registration`. The
@@ -1820,6 +1834,7 @@ SIGNIN_CANCEL_PATH = "/api/signin-cancel"
 SIGNIN_LINK_PATH = "/api/signin-link"
 ACCOUNT_ADD_PATH = "/api/account-add"
 ACCOUNT_REMOVE_PATH = "/api/account-remove"
+ACCOUNT_SIGNOUT_PATH = "/api/account-signout"
 REGISTER_PATH = "/api/register-project"
 PLAN_ANSWER_PATH = "/api/plan-answer"
 PLAN_APPROVE_PATH = "/api/plan-approve"
@@ -1842,7 +1857,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
-    ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
+    ACCOUNT_REMOVE_PATH, ACCOUNT_SIGNOUT_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, ADOPTION_MERGE_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH,
     TRUST_CHECK_PATH,
     REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
@@ -2380,6 +2395,45 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: account_remove_failed {type(error).__name__}", file=sys.stderr)
             self._refuse(500, "removing the account failed")
+            return False
+        try:
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+        except OSError:
+            pass
+        return False
+
+    def _signout_request(self, console: "ConsoleService") -> bool:
+        """Carry out the owner's sign-out write; it answers itself, so this is always False."""
+        body = self._json_body(MAX_REMOVE_BYTES)
+        if body is None:
+            return False
+        try:
+            profile = account_remove.parse_signout_request(body)
+        except ValueError:
+            self._refuse(400, "bad sign-out")
+            return False
+        try:
+            console.sign_out_account(profile)
+        except sprints.Refused as error:
+            print(f"console: account_signout_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except account_remove.SignOutFailed as error:
+            print(f"console: account_signout_failed {error.kind}", file=sys.stderr)
+            self._refuse(502, f"the account was not signed out: {error.kind}")
+            return False
+        except account_remove.MoveFailed as error:
+            print(f"console: account_signout_failed {error.kind}", file=sys.stderr)
+            self._refuse(502, account_remove.NOT_MOVED)
+            return False
+        except Exception as error:
+            print(f"console: account_signout_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "signing the account out failed")
             return False
         try:
             self.send_response(204)
@@ -3310,6 +3364,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == ACCOUNT_REMOVE_PATH:
             self.close_connection = True
             if not self._removal_request(console):
+                return
+        elif route == ACCOUNT_SIGNOUT_PATH:
+            self.close_connection = True
+            if not self._signout_request(console):
                 return
         elif route == REGISTER_PATH:
             self.close_connection = True
