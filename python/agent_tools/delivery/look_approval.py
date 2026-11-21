@@ -10,6 +10,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
     look-approval status --repo <owner/name> --issue <n> --pr <n> --head <sha> [--merge-commit <sha>]
     look-approval tick --repo <owner/name> --issue <n> --pr <n> --head <sha> [--merge-commit <sha>]
     look-approval marked --repo <owner/name> --issue <n>
+    look-approval carry --repo <owner/name> --issue <n> --pr <n> --from <sha> --head <sha> --picture <path> [--picture <path> ...]
     look-approval judge            (no options; reads stdin; no network)
 
 1. `post` writes `look_marker.approval_body(...)` with `forge_markers.post`, then reads the issue's
@@ -97,6 +98,27 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    environment. A refusal (exit 1) adds, after `covers` and each only when non-empty, `candidates`
    (`[{"issue", "head", "answer"}, ...]`, the carry candidates of the failing issues) and then
    `need` (the paths a further carry run must read). An admit is unchanged.
+9. `carry` (issue 1566) records the carry line that lets the owner's approval of `--from` stand at
+   `--head` when only merges of the integration branch came in and the re-rendered pictures are
+   unchanged. `--from` and `--head` are 40 lowercase hex and different, and each `--picture` is a
+   file read whole (the ids are `look_marker.picture_id`, the digest `look_marker.picture_digest`);
+   a break of these, an unreadable file included, is a usage error (exit 2) before any `gh` call.
+   Output keys, in order: `command`, `action`, `repo`, `issue`, `pr`, `head`, `verdict`, `from` (the
+   head of the latest approval, or null), `reason` (null unless `needed`), `pictures` (the digest of
+   the given files) and `comment_id` (or null). `verdict`, decided in this order after the reads each
+   needs: `unmarked` (exit 0: nothing else read), `approved` (0: a trusted live exact `approved`
+   marker names `--head`; nothing posted), `needed` (0) with `reason` `no-approval` (no candidate or
+   one that is not an `approved` answer), `source-differs` (the candidate's head is not `--from`: the
+   command records only the interval the caller checked), `no-pictures` (the approval names none),
+   `pictures-differ` (its digest is not the given files') or, after one read of the pull request
+   and of the compares, `not-merges`; `moved` (exit 1: the pull request is not open or its head is
+   not `--head`); then `carried` (0) with the comment id of the carry line, an existing one posting
+   nothing. Otherwise one line is written with `forge_markers.write` (one post, at most one delete
+   of its own comment) and read back through the trusted authors: the own comment present is
+   `carried`, absent is `untrusted` (exit 1); a lost write names the smallest trusted live line, so
+   every writer that reports `carried` names the same one, and no such line is `untrusted`. A forge
+   error is the `status` forge error, `look_marker.Unreadable` being `payload_invalid`. `carry`
+   never posts a `look` marker and never reads the look file set.
 """
 import argparse
 import json
@@ -111,7 +133,7 @@ from agent_tools.delivery import look_marker as lm
 from agent_tools.system import forge_api
 
 COMMAND = "look-approval"
-VERBS = ("post", "status", "tick", "marked", "judge")
+VERBS = ("post", "status", "tick", "marked", "carry", "judge")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 NUMBER = re.compile(r"[0-9]+")
 USAGE = 2
@@ -156,6 +178,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = verbs.add_parser("marked")
     sub.add_argument("--repo", required=True, type=_repo)
     sub.add_argument("--issue", required=True, type=_number)
+    sub = verbs.add_parser("carry")
+    sub.add_argument("--repo", required=True, type=_repo)
+    sub.add_argument("--issue", required=True, type=_number)
+    sub.add_argument("--pr", required=True, type=_number)
+    sub.add_argument("--head", required=True)
+    sub.add_argument("--from", dest="from_head", required=True)
+    sub.add_argument("--picture", action="append", required=True)
     verbs.add_parser("judge")
     return parser
 
@@ -314,6 +343,63 @@ def tick(args: argparse.Namespace) -> int:
     return finish("ticked", 0, changed)
 
 
+def carry(args: argparse.Namespace) -> int:
+    """Record the carry line of `--from`'s approval at `--head` once only merges came in (issue 1566)."""
+    body = _issue_body(args)
+    state: dict[str, Any] = {"from": None, "reason": None, "comment_id": None}
+
+    def finish(verdict: str, code: int = 0, **found: Any) -> int:
+        state.update(found)
+        emit({"command": COMMAND, "action": "carry", "repo": args.repo, "issue": args.issue, "pr": args.pr,
+              "head": args.head, "verdict": verdict, "from": state["from"], "reason": state["reason"],
+              "pictures": args.digest, "comment_id": state["comment_id"]})
+        return code
+
+    def needed(reason: str) -> int:
+        return finish("needed", reason=reason)
+
+    if not lm.read_look(body).marked:
+        return finish("unmarked")
+    comments = forge_markers.list_comments(args.repo, args.issue)
+    exact = lm.look_answer(comments, args.issue, args.pr, args.head)
+    if exact is not None and exact.fields.get("answer") == "approved":
+        return finish("approved")
+    candidate = lm.carry_candidate(comments, args.issue, args.pr, args.head)
+    if candidate is None or candidate.answer != "approved":
+        return needed("no-approval")
+    state["from"] = candidate.head
+    if candidate.head != args.from_head:
+        return needed("source-differs")
+    if candidate.pictures is None:
+        return needed("no-pictures")
+    if candidate.pictures != args.digest:
+        return needed("pictures-differ")
+    pull = forge_api.gh_json(["api", f"repos/{args.repo}/pulls/{args.pr}"])
+    head = pull.get("head") if isinstance(pull, dict) else None
+    if not isinstance(pull, dict) or pull.get("state") != "open" or not isinstance(head, dict) \
+            or head.get("sha") != args.head:
+        return finish("moved", 1)
+    try:
+        holds = lm.settle_merges(args.from_head, args.head, _base_tip(args, pull), _reader(args.repo))
+    except lm.Unreadable as error:
+        raise forge_api.ForgeError("payload_invalid", str(error)) from None
+    if not holds:
+        return needed("not-merges")
+    if candidate.line is not None:
+        return finish("carried", comment_id=candidate.line)
+    fields = lm.carry_fields(args.issue, args.pr, args.from_head, args.head, args.digest)
+    result = forge_markers.write(args.repo, args.issue, lm.CARRY_KIND, fields,
+                                 lm.carry_sentence(args.pr, args.from_head, args.head), match=fields,
+                                 associations=lm.TRUSTED)
+    if result.won:
+        trusted = any(m.comment_id == result.own_id
+                      for m in forge_markers.list_markers(args.repo, args.issue, lm.TRUSTED))
+        return finish("carried", comment_id=result.own_id) if trusted else finish("untrusted", 1)
+    if result.winner is None:
+        return finish("untrusted", 1)
+    return finish("carried", comment_id=result.winner.comment_id)
+
+
 def _int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
@@ -383,6 +469,23 @@ def judge(stdin: str) -> int:
     return 1
 
 
+def _carry_usage(args: argparse.Namespace) -> None:
+    """The `carry` usage checks, before any `gh` call; stores the pictures' digest on `args`."""
+    for name, value in (("head", args.head), ("from", args.from_head)):
+        if not (isinstance(value, str) and lm.HEAD_PATTERN.fullmatch(value)):
+            raise UsageError(f"{name} {value!r} is not 40 lowercase hex")
+    if args.from_head == args.head:
+        raise UsageError("from and head are the same sha")
+    ids = []
+    for path in args.picture:
+        try:
+            with open(path, "rb") as handle:
+                ids.append(lm.picture_id(handle.read()))
+        except OSError as error:
+            raise UsageError(f"the picture {path!r} is unreadable: {error}") from None
+    args.digest = lm.picture_digest(ids)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     try:
@@ -392,6 +495,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "post":
             args.words = _words(args)
             lm.approval_body(args.issue, args.pr, args.head, args.answer, args.message, args.words)
+        elif args.action == "carry":
+            _carry_usage(args)
         elif args.action in ("status", "tick"):
             if not (isinstance(args.head, str) and lm.HEAD_PATTERN.fullmatch(args.head)):
                 raise UsageError(f"head {args.head!r} is not 40 lowercase hex")
@@ -400,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     except (UsageError, ValueError) as error:
         return usage_out(argv[0] if argv and argv[0] in VERBS else None, str(error))
     try:
-        return {"post": post, "status": status, "tick": tick, "marked": marked}[args.action](args)
+        return {"post": post, "status": status, "tick": tick, "marked": marked, "carry": carry}[args.action](args)
     except forge_api.ForgeError as error:
         return forge_out(args, error)
 
