@@ -60,6 +60,8 @@ const DEFAULTS = [
   // #1246: the verification of an approved head; the fast-forward reached the head the prompt names.
   [/^look-verify$/, prompt => ({ head: (/merge --ff-only ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, clean: true, merge_only: true, ahead: false, results: [{ id: 'build', status: 'pass', summary: 'ok' }] })],
   [/^look-fix$/, { ...DONE, start_head: SHA, commit: 'f1c0de' }],
+  // #1371: the retest of a push-bound fix reports the tree clean once its tests ran, unless a scenario says otherwise.
+  [/^fix-retest$/, { ...DONE, clean: true }],
   [/^land-unlock$/, { verdict: 'released' }],
   [/^land-(re)?lock-/, { renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } }],
   [/^renew-/, { verdict: 'renewed', comment_id: 7 }],

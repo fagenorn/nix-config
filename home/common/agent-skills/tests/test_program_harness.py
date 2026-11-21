@@ -34,7 +34,7 @@ PLAN4 = {
 }
 BATCH_SETUP = {
     "ok": True, "host": "h1", "slug": "owner/repo", "integration_branch": "dev", "default_branch": "main",
-    "merge_strategy": "merge", "delete_branch": True, "unset_env": [], "max_parallel": 2, "required_checks": None,
+    "merge_strategy": "merge", "delete_branch": True, "unset_env": [], "max_parallel": 2, "required_checks": None, "guards": [],
 }
 
 FIXTURE = """\

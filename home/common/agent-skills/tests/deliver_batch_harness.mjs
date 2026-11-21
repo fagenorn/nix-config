@@ -35,7 +35,7 @@ const RELEASED = (p, r) => (/return lock_released true/i.test(p) && !sameHead(r.
 const jsonAfter = (p, lead) => JSON.parse(p.slice(p.indexOf(lead) + lead.length).split('\n')[0])
 // Ordered: the first matching pattern wins. A default gets the label, the prompt and the scenario's acceptance (one copy per scenario, shared with a ready child's).
 const DEFAULTS = [
-  [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null })],
+  [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null, guards: [] })],
   [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_refs: [], open_pr: null, native: { verdict: 'read', blocked_by: [] }, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' }, lane: 'standard', why: 'x', look: { verdict: 'unmarked' } })],
   [/^acquire-/, () => ({ verdict: 'acquired', comment_id: 7 })],
   [/^renew-/, () => ({ verdict: 'renewed' })],
@@ -45,6 +45,8 @@ const DEFAULTS = [
   [/^recover-end-/, () => ({ verdict: 'ended' })],
   // #1019: the push of the clean merges a readopt found on top of the PR head lands at the head its prompt names.
   [/^readopt-push-/, (l, p) => ({ pushed: true, head: (p.match(/rev-parse HEAD prints ([0-9a-f]{40})/) || [])[1] })],
+  // #1371: the push of a reviewed sync fix before the checks of its head are polled lands at the head its prompt names.
+  [/^land-push-/, (l, p) => ({ ok: true, head: (p.match(/rev-parse HEAD prints ([0-9a-f]{40})/) || [])[1] })],
   [/^readopt-/, (l, p, ac) => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: ac })],
   [/^land-sync-review-|^land-sync-rereview-|^land-fix-review-/, () => PASS],
   // #907: a sync fix defaults to one commit, SYNC_FIXED, on top of the merge commit its prompt names.
