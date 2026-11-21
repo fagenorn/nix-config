@@ -481,6 +481,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "kind": "claim" | "heads-up" | "hand-off", "kind_text": "<text>",
                       "text": "<text>", "what": "<text>" | null, "until_text": "<text>" | null,
                       "to_text": "<text>" | null, "at": "<time>", "owner": <bool>}
+    <live fault entry> = {"id": <int>, "issue": <int>, "observed", "when", "proven",
+                          "at": "<time>", "text": "<text>"}
     <overlap entry> = {"sprints": [<earlier-started sprint id>, <other sprint id>],
                        "files": ["<path>", ...], "text": "<text>"}
     <sprint entry> = {"type": "sprint", "sprint_id", "title", "goal",
@@ -504,6 +506,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "waiting": <int>,
                       "checks": [{"project_id", "key", "issue", "question", "text"}, ...],
                       "waits": [<wait entry>, ...],
+                      "live_faults": [<live fault entry>, ...],
                       "sessions": [<session entry>, ...],
                       "messages": [<message entry>, ...],
                       "reach_text": "manager not reachable" | null,
@@ -734,6 +737,11 @@ landed gives none) whose rule is `OVERLAP_UNSETTLED`, in `claim_overlaps` order,
 is `OVERLAP_UNSETTLED_TEXT` over the two sprints' titles in that order and the files joined with
 `", "`. A settled overlap gives no entry. An overlap entry is never an inbox item and changes no
 `inbox`, count, headline, sentence or `stale` (#1347, ADR-console-091).
+Every sprint entry, running or finished, carries `live_faults`: the sprint's standing live-fault
+declarations (`open_faults`, so never a withdrawn one) in id order, `[]` when none. `text` is
+`LIVE_FAULT_TEXT` over the issue, `observed`, `when` and `proven`; `at` is the declaration's own time,
+unchanged. A live fault is never an inbox item and changes no `inbox`, count, headline, sentence or
+`stale` (#1432).
 Every entry carries `owner`, false for a sprint's notice. The project's open owner notices
 (`owner_notices`, a map from project id to its folded owner notices, default none; only
 `open_owner_notices` of them, so never a withdrawn one) join the same list, ordered by `id` with the
@@ -898,6 +906,7 @@ from agent_tools.console.sprints import (
     SprintState,
     age_text,
     claim_overlaps,
+    fault_entry,
     closing_text,
     cut,
     ended_at,
@@ -910,6 +919,7 @@ from agent_tools.console.sprints import (
     open_questions,
     pending_looks,
     project_notices,
+    open_faults,
     open_notices,
     open_owner_notices,
     progress_text,
@@ -938,6 +948,7 @@ NOTICE_OWNER_TEXT = "for you"
 NOTICE_FOR_TEXT = "for {title}"
 NOTICE_OTHER_TEXT = "for another sprint"
 NOTICE_YOU_TEXT = "You"
+LIVE_FAULT_TEXT = "Live fault in production on #{issue}: {observed}, seen {when}, proven by {proven}"
 OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a live fault in {files}; "
                           "the rule could not decide which lands first")
 ASK_WORKING_TEXT = "Working on it"
@@ -1861,6 +1872,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                     "text": CHECK_LINE_TEXT.format(question=r.item["question"])}
                    for r in checks],
         "waits": [dict(w) for w in wait_lines],
+        "live_faults": [{**fault_entry(f), "text": LIVE_FAULT_TEXT.format(
+            issue=f.issue, observed=f.observed, when=f.when, proven=f.proven)}
+                        for f in open_faults(state)],
         "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT, waits_of)
                      for s in _ordered(sessions)],
         "messages": [_message_entry(m, now_ms, minute, retry, looked, ended is not None)

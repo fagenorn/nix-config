@@ -61,6 +61,7 @@ stream `Content-Length`):
     POST /api/notices 200 application/json, a manager lists its project's open notices (below)
     POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
     POST /api/live-fault 200 application/json, a manager declares an issue a fault live in production (below)
+    POST /api/live-fault-withdraw 204, a JSON body, the page withdraws a live fault (below)
     POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
@@ -270,7 +271,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/adoption-merge`, `POST /api/plan-defer`,
 `POST /api/register-confirm`, `POST /api/trust-check`,
-`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
+`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/live-fault-withdraw`, `POST /api/project-question`, `POST /api/activate`,
 `POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code`, `POST /api/guest-signin-cancel`, `POST /api/guest-account-signout` and `POST /api/guest-account-remove` (the last five are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
@@ -1047,6 +1048,22 @@ exception is `console: live_fault_failed <Type>: <message>` and 500 `live fault 
 `fault.declared` row (project the sprint's project) `{"sprint_id", "goal", "fault": <checked>}`,
 folds, publishes and returns the row's `seq`. It nudges nobody and calls no tracker writer; a
 refusal appends and publishes nothing.
+
+The owner withdraws a live fault (#1432): `POST /api/live-fault-withdraw` (`{"project_id", "sprint_id",
+"fault"}`, at most `MAX_LIVE_FAULT_WITHDRAW_BYTES` 4096) is a page write, so it passes `_page_write`'s guard
+before any body is read (no or a foreign `Origin` 403 `origin refused`, a missing or wrong token 403 `token
+refused`, nothing appended) and is owner-only on the guest port. A body `sprints.parse_live_fault_withdrawal`
+does not accept is 400 `bad live fault withdrawal`; a `sprints.Refused` is 409 with the reason and the one
+line `console: live_fault_withdraw_refused <sprint_id> <reason>`, where `<sprint_id>` is the id the parser
+checked as 16 lowercase hex and `<reason>` a fixed `sprints.py` text: the request's `project_id`, which may
+hold any text, is never printed; any other exception is `console: live_fault_withdraw_failed <Type>:
+<message>` and 500 `live fault withdrawal failed`. Success is 204.
+`withdraw_live_fault(project_id, sprint_id, fault_id)`, under the ingest lock, takes the folded sprint
+(`NOT_OPEN` when there is none or its project is not `project_id`), then `sprints.withdrawable_fault`
+(unknown or already withdrawn), and appends exactly one `fault.withdrawn` row (project the sprint's project)
+`{"sprint_id", "goal", "fault": <id>}`, folds, publishes and returns the id. It applies no stop or end gate:
+the owner withdraws a declaration of an ended sprint too. It nudges nobody and sends no message; a refusal
+appends and publishes nothing.
 
 Owner notice nudges (#1120, ADR-console-053, D6): with a nudger, `post_owner_notice` records, still under the
 lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
@@ -1946,7 +1963,7 @@ from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
     folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     LOOK_RECORDED, PERMIT_JUDGED, PERMIT_LANDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
@@ -2018,6 +2035,7 @@ ASK_PATH = "/api/ask"
 WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
 NOTICE_PATH = "/api/notice"
 LIVE_FAULT_PATH = "/api/live-fault"
+LIVE_FAULT_WITHDRAW_PATH = "/api/live-fault-withdraw"
 NOTICES_PATH = "/api/notices"
 PERMIT_PATH = "/api/permit"
 WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
@@ -2069,7 +2087,8 @@ PAGE_WRITES: frozenset[str] = frozenset({
     ACCOUNT_REMOVE_PATH, ACCOUNT_SIGNOUT_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, ADOPTION_MERGE_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH,
     TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, LIVE_FAULT_WITHDRAW_PATH,
+    PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
     GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH})
@@ -2111,6 +2130,7 @@ MAX_ASK_BYTES = 65536
 MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_NOTICE_BYTES = 16384
 MAX_LIVE_FAULT_BYTES = 16384
+MAX_LIVE_FAULT_WITHDRAW_BYTES = 4096
 MAX_NOTICES_BYTES = 4096
 MAX_PERMIT_BYTES = 16384
 PERMIT_LANDED_SECONDS = 30 * 60
@@ -3496,6 +3516,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _live_fault_withdraw_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's withdrawal of a live fault; False when it was refused."""
+        body = self._json_body(MAX_LIVE_FAULT_WITHDRAW_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, sprint_id, fault_id = sprints.parse_live_fault_withdrawal(body)
+        except ValueError:
+            self._refuse(400, "bad live fault withdrawal")
+            return False
+        try:
+            console.withdraw_live_fault(project_id, sprint_id, fault_id)
+        except sprints.Refused as error:
+            print(f"console: live_fault_withdraw_refused {sprint_id} {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: live_fault_withdraw_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "live fault withdrawal failed")
+            return False
+        return True
+
     def _decision_request(self, console: "ConsoleService", route: str,
                           by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out an approval or a reply; False when it was refused."""
@@ -3777,6 +3820,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == OWNER_NOTICE_WITHDRAW_PATH:
             self.close_connection = True
             if not self._owner_notice_withdraw_request(console):
+                return
+        elif route == LIVE_FAULT_WITHDRAW_PATH:
+            self.close_connection = True
+            if not self._live_fault_withdraw_request(console):
                 return
         elif route == ACTIVATE_PATH:
             self.close_connection = True
@@ -9169,6 +9216,18 @@ class ConsoleService:
                 "sprint_id": sprint_id, "goal": sprint.goal, "fault": checked})])
             self._apply(appended)
             return appended[-1].seq
+
+    def withdraw_live_fault(self, project_id: str, sprint_id: str, fault_id: int) -> int:
+        """Append one `fault.withdrawn` event for a standing live fault; the fault's id."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            sprints.withdrawable_fault(sprint, fault_id)
+            appended = self.log.append([(FAULT_WITHDRAWN, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "fault": fault_id})])
+            self._apply(appended)
+            return fault_id
 
     def post_owner_notice(self, project_id: str, text: str) -> int:
         """Append one owner `notice.posted` event for the project; its seq, the notice's id."""
