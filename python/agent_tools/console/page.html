@@ -6301,9 +6301,12 @@ function renderPool(view) {
   const again = held === null ? undefined : poolButtons.find((node) => node.className.split(" ")[0] === held.role && node.dataset.number === held.number);
   if (again !== undefined) again.focus();
 }
-// The guest's own sign-out and removal, kept by account number across frames: {phase: "sending"|"failed", reason}, and the numbers whose Remove confirmation is open.
+// The guest's own sign-out and removal, kept by account number across frames: {phase: "sending"|"failed", reason}, and the
+// Remove confirmations that are open, by account number with the token of the account that was asked about: a number is
+// recycled, so a frame that brings another account under it closes the confirmation, and "Remove it" can only send the
+// token the confirmation was opened on.
 const poolChange = new Map();
-const poolRemoveOpen = new Set();
+const poolRemoveOpen = new Map();
 // One write of a pool row: its failure line is kept under the row's number until the next press or the confirmation's Cancel.
 async function poolPost(row, failure, send) {
   const current = poolChange.get(row.number);
@@ -6342,6 +6345,9 @@ function poolRemove(row) {
 const POOL_REMOVE_NOTE = "Remove your account from the pool? It is signed out first. Each manager on it moves to another account, or waits for one with room; any other session keeps running.";
 // On his own `yours` row only: Sign out posts at once, Remove asks first.
 function poolChangeControls(item, row) {
+  if (poolRemoveOpen.has(row.number) && poolRemoveOpen.get(row.number) !== row.ident) {
+    poolRemoveOpen.delete(row.number);
+  }
   const state = poolChange.get(row.number);
   const sending = state !== undefined && state.phase === "sending";
   const mark = (button) => {
@@ -6354,7 +6360,7 @@ function poolChangeControls(item, row) {
   };
   item.appendChild(mark(actionButton("pool-signout btn-quiet", "Sign out", () => poolSignOut(row))));
   item.appendChild(mark(actionButton("pool-remove btn-danger", "Remove", () => {
-    poolRemoveOpen.add(row.number);
+    poolRemoveOpen.set(row.number, row.ident);
     redraw();
   })));
   if (poolRemoveOpen.has(row.number)) {

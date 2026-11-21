@@ -18,7 +18,7 @@ from .test_console_page import (
     FAILED_LINE, asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
     look_answered, style_rules, thread, view, with_check, with_notices, with_run, with_sprints, css_declared)
 from .test_console_guest_page import (
-    GUEST, MANUAL, OPEN_OWN, SHARED_FRAME, TICK, UNSHARED_OPEN, attempt_reply, harness)
+    CHANGE_FRAME, GUEST, MANUAL, OPEN_OWN, SHARED_FRAME, TICK, UNSHARED_OPEN, attempt_reply, harness)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -54,7 +54,7 @@ DESK_CONTROLS: dict = {
     **_roles(OPTION_ONLY, "opt"),
     **_roles(
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
-        "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-remove-cancel", "acct-close",
+        "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-signout", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
         "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
         "follow-cancel", "thread-open", "reading-close", "ask-choice", "reply-send", "undo", *ANS_PLAIN, "goal-project",
@@ -73,7 +73,8 @@ DESK_CONTROLS: dict = {
 }
 # The guest page's own-account controls (#1343): drawn only on the guest door, so the desk scenarios never reach them.
 GUEST_CONTROLS: dict = {"pool-add": QUIET_ONLY, "guest-signin": PRIMARY_ONLY, "guest-code": QUIET_ONLY,
-                        "guest-cancel": QUIET_ONLY}
+                        "guest-cancel": QUIET_ONLY, "pool-signout": QUIET_ONLY, "pool-remove": DANGER_ONLY,
+                        "pool-remove-send": DANGER_ONLY, "pool-remove-cancel": QUIET_ONLY}
 GUEST_CHECKBOXES = frozenset({"guest-tick"})  # a native tick has no kind: it is neither a button nor a typed field
 SPEND_CONTROLS: dict = {"span": QUIET_ONLY}
 BARE_BUTTONS = frozenset({"cap", "pic-thumb", "sprint-check", "draft-pick", "thread-open"})
@@ -182,6 +183,13 @@ def desk_scenarios() -> list:
     approval = check_item("B", "approval")
     words = {"type": {"class": "words-text", "text": "use the reader"}}
     pinned = [{"click": "cap"}, {"click": "acct-toggle"}, {"click": "acct-pin"}]
+    colleague_cap = real_capacity(NOW_S, [
+        {"name": "work", "week": .6, "five": .5, "week_reset": NOW_S + 4 * 86400, "five_reset": NOW_S + 3600},
+        {"name": "colleague-1", "week": .3, "five": .4, "week_reset": NOW_S + 5 * 86400,
+         "five_reset": NOW_S + 3600}])
+    colleague_cap = {**colleague_cap, "profiles": [
+        {**p, "owner": "colleague@example.invalid" if p["profile"] == "colleague-1" else None}
+        for p in colleague_cap["profiles"]]}
     own_notice = with_notices(postable(project(0, [])), OWNER_W)
     drawn_notice = [
         begin, {"frame": view([own_notice])}, {"open": "notices:owner/p00"},
@@ -258,6 +266,8 @@ def desk_scenarios() -> list:
          {"click": "signin-start"},
          {"frame": frame([with_run(SIGNIN, "running", 7)])}, snapshot],
         [START, {"frame": frame([SIGNIN])}, snapshot],
+        # a colleague's account in the panel: its Sign out beside Remove (#1345)
+        [START, {"frame": {**view([]), "capacity": colleague_cap}}, {"click": "cap"}, snapshot],
         # Add account: naming, then the code phase
         [START, {"frame": V}, panel_open, {"click": "account-add-open"}, snapshot],
         [*ADD_STEPS[:2], panel_open, *ADD_STEPS[2:], snapshot],
@@ -327,9 +337,10 @@ class ControlInventoryTest(unittest.TestCase):
     def test_the_guest_page_draws_every_own_account_control_with_one_kind(self) -> None:
         start, linked = harness([*OPEN_OWN, SNAP, TICK, attempt_reply(7, MANUAL, "manual"),
                                  {"click": "guest-signin"}, SNAP], GUEST)
+        (changing,) = harness([START, {"frame": CHANGE_FRAME}, {"click": "pool-remove"}, SNAP], GUEST)
         drawn, wrong = set(), []
-        for snap in (start, linked):
-            for node, parent in _walk(snap["own_account"], None):
+        for tree, snap in (("own_account", start), ("own_account", linked), ("pool", changing)):
+            for node, parent in _walk(snap[tree], None):
                 if not _is_control(node, parent):
                     continue
                 key = role(node["cls"])

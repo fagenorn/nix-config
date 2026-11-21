@@ -9,7 +9,9 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
+from agent_tools.console import sessions
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import (
     ENDED,
@@ -23,6 +25,7 @@ from agent_tools.console.sessions import (
     SessionState,
     account_name,
     hook_entry,
+    liveness_unreadable,
     main_checkout,
     own_pid_domain,
     poll_changes,
@@ -310,6 +313,47 @@ class RegistryTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 read_session_registry([directory], alive=lambda *_: True, strict=True)
             self.assertEqual(set(read_session_registry([directory], alive=lambda *_: True)), {"s-ok"})
+
+    def test_a_strict_reading_raises_on_a_directory_it_cannot_list(self):
+        if os.geteuid() == 0:
+            self.skipTest("root lists any directory")
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "sessions"
+            directory.mkdir()
+            (directory / "10.json").write_text(json.dumps(
+                {"pid": 10, "sessionId": "s-ok", "cwd": "/srv/p00", "status": "idle"}))
+            directory.chmod(0o000)
+            try:
+                self.assertEqual(read_session_registry([directory], alive=lambda *_: True), {})
+                with self.assertRaises(PermissionError):
+                    read_session_registry([directory], alive=lambda *_: True, strict=True)
+            finally:
+                directory.chmod(0o700)
+            self.assertEqual(set(read_session_registry([directory], alive=lambda *_: True,
+                                                       strict=True)), {"s-ok"})
+
+    def test_a_strict_reading_raises_when_liveness_cannot_be_judged(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            (tmp / "proc" / "self").mkdir(parents=True)
+            (tmp / "proc" / "self" / "stat").write_text("1 (x) S")
+            kw = dict(proc=tmp / "proc", machine_id=tmp / "machine-id")
+            self.assertIs(liveness_unreadable(**kw), True)
+            (tmp / "machine-id").write_text("21b1c3eb3a554a8792391e610443b8b8\n")
+            (tmp / "proc" / "self" / "ns").mkdir()
+            os.symlink("pid:[4026532224]", tmp / "proc" / "self" / "ns" / "pid")
+            self.assertIs(liveness_unreadable(**kw), False)
+            self.assertIs(liveness_unreadable(proc=tmp / "none", machine_id=tmp / "none"), False)
+            directory = tmp / "sessions"
+            directory.mkdir()
+            (directory / "10.json").write_text(json.dumps(
+                {"pid": 10, "sessionId": "s-ok", "cwd": "/srv/p00", "status": "idle"}))
+            with mock.patch.object(sessions, "liveness_unreadable", return_value=True):
+                self.assertEqual(read_session_registry([directory]), {})
+                with self.assertRaises(OSError):
+                    read_session_registry([directory], strict=True)
+                self.assertEqual(set(read_session_registry(
+                    [directory], alive=lambda *_: True, strict=True)), {"s-ok"})
 
     def test_a_reused_pid_is_not_the_session(self):
         with tempfile.TemporaryDirectory() as raw:

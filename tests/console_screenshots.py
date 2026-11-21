@@ -96,7 +96,7 @@ Contract:
   `owner-accounts` is that desk again with the accounts panel opened (`#capacity` clicked), the last state.
   `guest-page`, `guest-steer`, `owner-actors` and `owner-accounts` also hold the pool's three accounts, `work-main` and
   `work-spare`, each with a week and a 5h window, and `colleague-1`, which COLLEAGUE added himself (an
-  `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1"}` written straight to the log) and
+  `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1", "identity": <the mark of its directory>}` written straight to the log, the identity without which his row has no token and the page no Sign out or Remove) and
   whose week is the tightest of the three (5% left against `work-spare`'s 10% and `work-main`'s 60%);
   every manager runs on `work-main`, so the guest page shows `yours`, `Account 2` and `Account 3` and
   the sprint's account, `Account 2`, and the owner's strip shows COLLEAGUE beside `colleague-1` in
@@ -226,7 +226,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
+from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
@@ -798,8 +798,11 @@ def _seed_adoption(seed: _Seed, state: str, root: str) -> None:
 
 
 def _seed_state(seed: _Seed, state: str, web_root: str = "",
-                read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> tuple[str, ...]:
-    """Seed the events of `state`; returns the sprint ids whose transcripts the state writes."""
+                read: tuple[str, str] = (READ_QUESTION, READ_ANSWER),
+                colleague_identity: str | None = None) -> tuple[str, ...]:
+    """Seed the events of `state`; returns the sprint ids whose transcripts the state writes.
+
+    `colleague_identity` is the mark of the colleague's profile directory, which his `account.added` row records."""
     web, api = PROJECTS[0], PROJECTS[1]
     if state in REGISTER_STATES:
         _seed_registration(seed, state, str(Path(web_root).parent / REGISTER_NAME))
@@ -846,7 +849,10 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         if state in ("guest-page", "guest-steer", "owner-actors", "owner-accounts"):
             seed.account("work-main", 0.4, session=0.25, week_in=3 * 86400, session_in=2 * 3600)
             seed.account("work-spare", 0.9, session=0.6, week_in=5 * 86400, session_in=4 * 3600)
-            seed.put(10 * MINUTE, event_log.ACCOUNT_ADDED, None, {"by": COLLEAGUE, "profile": "colleague-1"})
+            added = {"by": COLLEAGUE, "profile": "colleague-1"}
+            if colleague_identity is not None:
+                added["identity"] = colleague_identity
+            seed.put(10 * MINUTE, event_log.ACCOUNT_ADDED, None, added)
             seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
@@ -1068,15 +1074,21 @@ def build_fixture(root: Path, state: str, now_s: float, *,
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
-    log = EventLog(fixture.store, clock=lambda: at[0])
-    try:
-        sprint_ids = _seed_state(_Seed(log, at, now_s, console / "pictures"), state, str(projects[0]), read=read)
-    finally:
-        log.close()
+    colleague_identity = None
     if state in ("accounts-panel", "guest-page", "guest-steer", "owner-actors", "owner-accounts"):
         colleague = ("colleague-1",) if state != "accounts-panel" else ()
         for name in ("work-main", "work-spare", *colleague):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
+        if colleague:
+            # The directory's own mark: the console owns the account to the colleague only while the
+            # row's identity is the directory's, and his pool row carries a token only then.
+            colleague_identity = account_add.mark(accounts / "profiles" / "colleague-1")
+    log = EventLog(fixture.store, clock=lambda: at[0])
+    try:
+        sprint_ids = _seed_state(_Seed(log, at, now_s, console / "pictures"), state, str(projects[0]), read=read,
+                                 colleague_identity=colleague_identity)
+    finally:
+        log.close()
     if state == "manager-cannot-hear":
         _write_held_manager(fixture, now_s)
     if state == "spend-page":

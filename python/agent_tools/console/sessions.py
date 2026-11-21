@@ -324,6 +324,30 @@ def _observation(document: object,
                        optional("name"), updated if _integer(updated) else None, profile)
 
 
+def liveness_unreadable(proc: Path = Path("/proc"),
+                        machine_id: Path = Path("/etc/machine-id")) -> bool:
+    """Whether liveness is judged from `proc` here and this process's own pid domain cannot be read.
+
+    `process_matches` then calls every session dead, so a listing built on it shows no session
+    whatever is running.
+    """
+    return (proc / "self" / "stat").exists() and own_pid_domain(proc, machine_id) is None
+
+
+def _json_names(directory: Path) -> list[Path]:
+    """The `*.json` files of `directory`, sorted; a directory that is not there has none.
+
+    Unlike `Path.glob`, which swallows a permission error and shows an unreadable directory as
+    empty, this raises it (`OSError`).
+    """
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(Path(entry.path) for entry in entries
+                          if entry.name.endswith(".json") and not entry.name.startswith("."))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+
+
 def read_session_registry(
     directories: Iterable[Path],
     alive: Callable[[int, str | None, str | None], bool] = process_matches,
@@ -333,13 +357,15 @@ def read_session_registry(
 
     A directory or a file that cannot be read is skipped. With `strict` it raises instead (`OSError`,
     or `ValueError` for a file that is not JSON; a directory or a file that is not there is no
-    session), so a caller that must know a session is gone is never told so by a failed read.
+    session), so a caller that must know a session is gone is never told so by a failed read. So
+    does a liveness that cannot be judged (`liveness_unreadable`, with the default `alive`): a
+    session is then dropped as dead for no reason it could know.
     """
     result: dict[str, Observation] = {}
     for directory in directories:
         profile = profile_of(Path(directory))
         try:
-            names = sorted(Path(directory).glob("*.json"))
+            names = _json_names(Path(directory))
         except OSError:
             if strict:
                 raise
@@ -353,6 +379,8 @@ def read_session_registry(
                 if strict:
                     raise
                 continue
+            if strict and alive is process_matches and liveness_unreadable():
+                raise OSError("the pid domain of this process cannot be read")
             found = _observation(document, alive, profile)
             if found is not None and found.session_id not in result:
                 result[found.session_id] = found

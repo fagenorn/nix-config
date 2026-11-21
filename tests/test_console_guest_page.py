@@ -1408,6 +1408,18 @@ class OwnAccountChangePageTest(unittest.TestCase):
         self.assertEqual(own_writes(cancelled), [])
         self.assertEqual(own_writes(sent), [("/api/guest-account-remove", {"account": 1, "ident": "tok-1"})])
 
+    def test_a_confirmation_opened_for_one_account_does_not_survive_another_under_its_number(self) -> None:
+        replaced = {**CHANGE_FRAME, "pool": {**POOL_TIGHT, "accounts": [{**MINE, "ident": "tok-2"}, A2N, A3N]}}
+        asked, redrawn, sent = harness([
+            START, {"frame": CHANGE_FRAME}, {"click": "pool-remove"}, SNAP, {"frame": replaced}, SNAP,
+            {"respond": NO_REPLY}, {"click": "pool-remove"}, {"click": "pool-remove-send"}, SNAP], GUEST)
+        self.assertEqual(len(named(asked["pool"], "pool-remove-send")), 1)
+        for cls in ("pool-remove-note", "pool-remove-send", "pool-remove-cancel"):
+            self.assertEqual(named(redrawn["pool"], cls), [])
+        self.assertEqual(len(named(redrawn["pool"], "pool-remove")), 1)
+        self.assertEqual(own_writes(redrawn), [])
+        self.assertEqual(own_writes(sent), [("/api/guest-account-remove", {"account": 1, "ident": "tok-2"})])
+
     def test_a_refused_change_says_why_on_his_row(self) -> None:
         refused = {"respond": {"status": 409, "text": "That account is not yours."}}
         first, second = harness([

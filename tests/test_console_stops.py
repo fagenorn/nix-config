@@ -720,7 +720,19 @@ class ColleagueAccountMoveTest(StopServiceTest):
 
     def pool_stopper(self, session_id, profile):
         self.order.append(("stop", session_id, profile))
+        if self.on_stop is not None:
+            self.on_stop()
         self.stopper(session_id, profile)
+
+    def pool_listing(self):
+        if self.on_listing is not None:
+            self.on_listing()
+        return dict(self.listed)
+
+    def replace_colleague_dir(self):
+        """The owner removes the colleague's profile with the CLI and makes another of the name, which carries no mark."""
+        shutil.rmtree(self.profile_path("colleague-1"))
+        self.profile_path("colleague-1").mkdir()
 
     def pool_signer_out(self, one):
         self.order.append(("signout", one.profile))
@@ -749,12 +761,14 @@ class ColleagueAccountMoveTest(StopServiceTest):
     def begin_pool(self, count=2, others_signed_in=True, **overrides):
         """The owner's `work` and `zeta` and the colleague's `colleague-1` with `count` sprints on it."""
         self.order, self.signout_error, self.read_error = [], None, None
+        self.on_stop = self.on_listing = None
         dirs = [support.profile_dir(self.store, name) for name in ("work", "colleague-1", "zeta")]
+        identity = account_add.mark(dirs[1])
         self.store.parent.mkdir(parents=True, exist_ok=True)
         log = EventLog(self.store)
         try:
             log.append([
-                account_add.added("colleague-1", self.COLLEAGUE),
+                account_add.added("colleague-1", self.COLLEAGUE, identity=identity),
                 signin.entry("colleague-1", signin.Status("signed_in", None, "c1@corp-zq.invalid")),
                 (capacity.READING, None, {"profile": "colleague-1",
                                           **ManagerServiceTest.weekly(0.1)}),
@@ -765,11 +779,12 @@ class ColleagueAccountMoveTest(StopServiceTest):
         self.launches = support.Launches()
         options = dict(
             launcher=self.launches, profile_dirs=dirs, nudger=self.nudger,
-            listing=lambda: dict(self.listed), stopper=self.pool_stopper,
+            listing=self.pool_listing, stopper=self.pool_stopper,
             clock=lambda: self.now[0], log_clock=self.log_clock, session_poll_seconds=3600,
             probe_tick_seconds=3600, signer_out=self.pool_signer_out,
             account_remover=self.pool_remover, signin_reader=self.pool_reader)
-        svc = self.start(**{**options, **overrides})
+        self.pool_options = {**options, **overrides}
+        svc = self.start(**self.pool_options)
         self.sids = []
         for session_id in (FIRST, self.SECOND)[:count]:
             self.sids.append(self.running_on(svc, session_id, "colleague-1"))
@@ -952,7 +967,7 @@ class ColleagueAccountMoveTest(StopServiceTest):
         self.assertEqual(self.stops_in(), [])
         self.assertEqual([call.profile for call in self.launched()], ["zeta"] * 2)
 
-    def test_a_removal_waits_for_a_manager_whose_stop_is_pending_and_a_sign_out_does_not(self):
+    def test_a_removal_waits_for_a_manager_whose_stop_is_pending(self):
         svc = self.begin_pool()
         self.assertEqual(self.stop(svc, self.sids[0])[::2], (204, b""))
         rows = support.log_rows(self.store)
@@ -972,11 +987,106 @@ class ColleagueAccountMoveTest(StopServiceTest):
         self.assertEqual([call.profile for call in self.launched()], ["zeta"])
         self.assertEqual(self.order[-1], ("rm", "colleague-1"))
 
-    def test_a_sign_out_does_not_wait_for_a_pending_stop(self):
+    def test_a_sign_out_waits_for_a_manager_whose_stop_is_pending_as_a_removal_does(self):
         svc = self.begin_pool()
         self.assertEqual(self.stop(svc, self.sids[0])[::2], (204, b""))
+        rows = support.log_rows(self.store)
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.sign_out_account("colleague-1")
+        self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        self.assertEqual(svc._launching, {})
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.now[0] = T0 + 600
+        svc.finish_stops()
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": self.sids[0]}])
         svc.sign_out_account("colleague-1")
+        self.assertEqual({entry[1] for entry in self.stops_in()[1:]}, {self.SECOND})
         self.assertEqual([call.profile for call in self.launched()], ["zeta"])
+
+    def test_the_only_manager_listed_on_the_account_but_recorded_on_another_refuses_the_change(self):
+        svc = self.begin_pool(count=0)
+        svc.set_exclusion("colleague-1", True)
+        other = self.running_on(svc, FIRST, "zeta")
+        svc.set_exclusion("colleague-1", False)
+        self.before = len(self.launches.calls)
+        self.listed[FIRST] = sessions.Observation(
+            FIRST, "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", other), None,
+            "colleague-1")
+        rows = support.log_rows(self.store)
+        for act in (lambda: svc.remove_account("colleague-1", "colleague-1"),
+                    lambda: svc.sign_out_account("colleague-1")):
+            with self.assertRaises(sprints.Refused) as raised:
+                act()
+            self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        self.assertEqual(svc._launching, {})
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.assertEqual(self.manager_of(svc, other).profile, "zeta")
+
+    def test_an_account_with_a_manager_and_no_stopper_is_never_changed(self):
+        svc = self.begin_pool(count=1, stopper=None)
+        for act in (lambda: svc.remove_account("colleague-1", "colleague-1"),
+                    lambda: svc.sign_out_account("colleague-1")):
+            with self.assertRaises(sprints.Refused) as raised:
+                act()
+            self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.assertEqual(self.manager_of(svc, self.sids[0]).profile, "colleague-1")
+
+    def test_a_restart_before_a_manager_is_listed_keeps_the_settle_window_of_the_change(self):
+        svc = self.begin_pool(count=1)
+        self.listed.pop(FIRST)
+        svc.close()
+        self.now[0] += 5
+        svc = self.start(**self.pool_options)
+        self.assertEqual(svc._settled, {})
+        for act in (lambda: svc.remove_account("colleague-1", "colleague-1"),
+                    lambda: svc.sign_out_account("colleague-1")):
+            with self.assertRaises(sprints.Refused) as raised:
+                act()
+            self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.now[0] += sprints.STOP_SETTLE_MS // 1000 + 1
+        svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(self.stops_in(), [])
+        self.assertEqual([call.profile for call in self.launched()], ["zeta"])
+
+    def test_a_directory_the_owner_replaces_during_the_listing_is_never_signed_out_or_removed(self):
+        for name, act in (("removal", lambda svc: svc.remove_account("colleague-1", "colleague-1")),
+                          ("sign-out", lambda svc: svc.sign_out_account("colleague-1"))):
+            with self.subTest(change=name):
+                svc = self.begin_pool(count=1)
+                self.on_listing = self.replace_colleague_dir
+                with self.assertRaises(sprints.Refused) as raised:
+                    act(svc)
+                self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+                self.assertEqual(self.order, [])
+                self.assertEqual(self.launched(), [])
+                self.assertTrue(self.profile_path("colleague-1").is_dir())
+                self.assertEqual(self.rows("account.removal"), [])
+                self.assertEqual(svc._launching, {})
+                self.assertEqual(svc._removing, set())
+                svc.close()
+                shutil.rmtree(self.profile_path("colleague-1"))
+                self.store.unlink()
+
+    def test_a_directory_the_owner_replaces_while_the_managers_stop_is_not_removed(self):
+        svc = self.begin_pool(count=1)
+        self.on_stop = self.replace_colleague_dir
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [("signout", "colleague-1"), ("stop", FIRST, "colleague-1")])
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.assertEqual(svc._removing, set())
 
     def test_a_removal_waits_for_a_withdrawn_sprints_pending_stop(self):
         svc = self.begin_pool()

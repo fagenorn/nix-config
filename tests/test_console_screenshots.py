@@ -196,7 +196,10 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 finally:
                     log.close()
                 added = [e.payload for e in events if e.kind == "account.added"]
-                self.assertEqual(added, [{"by": shots.COLLEAGUE, "profile": "colleague-1"}])
+                self.assertEqual(added, [{
+                    "by": shots.COLLEAGUE, "profile": "colleague-1",
+                    "identity": account_add.identity(fixture.accounts / "profiles" / "colleague-1")}])
+                self.assertIsNotNone(added[0]["identity"])
                 readings = [e.payload for e in events
                             if e.kind == "signin.reading" and e.payload.get("profile") == "colleague-1"]
                 self.assertEqual([r["state"] for r in readings], ["signed_in"])
@@ -218,7 +221,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     added = [e.payload for e in log.events() if e.kind == "account.added"]
                 finally:
                     log.close()
-                self.assertEqual(added, [{"by": shots.COLLEAGUE, "profile": "colleague-1"}])
+                self.assertEqual([(a["by"], a["profile"]) for a in added], [(shots.COLLEAGUE, "colleague-1")])
 
     def test_the_guest_page_shot_opens_the_consent_only_on_a_page_that_has_it(self) -> None:
         door = "#console-door"

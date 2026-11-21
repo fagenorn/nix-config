@@ -454,15 +454,22 @@ session of the owner's own profile is not stopped. For a colleague's profile (on
 at the first block, #1345, ADR-console-087 D5) the same block also reserves, as a `_MoveReservation`,
 every started manager on it with no stop and no end, and refuses `<profile> is still being read; try
 again in a moment` (nothing marked, signed out, stopped or launched) when such a sprint is launching,
-nudged or stopping, and for a removal also when a started manager on it has a stop pending or a closing
-report to give, or a withdrawn sprint's stop is pending (`_pending`: its profile is not recorded), because
-deleting the profile would delete the session registry that stop reads. With such moves
-one conclusive listing (`sessions.read_session_registry(..., strict=True)`: a session file it cannot read
-is a failure, never a manager gone) is read off the lock before the sign-out, and only the sessions on
-that profile count: a manager's session it does not show on the profile whose `_settled` is under
-`sprints.STOP_SETTLE_MS` old refuses the same way, as does one it shows only on another profile or a
-session of another sprint's manager (recorded on another profile) shown on this one, and a listing that
-fails prints `console: manager_move_failed <Type>` and refuses the same way. After the
+nudged or stopping, and, for a sign-out and a removal alike, when a started manager on it has a stop pending or a
+closing report to give, or a withdrawn sprint's stop is pending (`_pending`: its profile is not recorded): that
+manager would keep running on the account the change leaves, and deleting the profile would delete the session
+registry that stop reads. A started manager on it with no stopper refuses the same way. One conclusive
+listing (`sessions.read_session_registry(..., strict=True)`: a directory or a session file it cannot read,
+or a liveness it cannot judge, is a failure, never a manager gone) is read off the lock before the sign-out
+for a colleague's profile, also when the record names no manager on it, and only the sessions on
+that profile count: a manager's session it does not show on the profile whose `_settled` (the console's own
+start when a restart lost it) is under `sprints.STOP_SETTLE_MS` old refuses the same way, as does one it
+shows only on another profile or a session of another sprint's manager (recorded on another profile) shown
+on this one, even when no manager is recorded on this profile, and a listing that
+fails prints `console: manager_move_failed <Type>` and refuses the same way. Each profile is also checked
+again, all together, once every profile of the change is marked and drained (`_recheck`), and the directory
+the first block verified (its identity) is asked for again right before the sign-out, before the stops and
+before the rm (`_still_bound`), so a directory the owner replaced under the name meanwhile is refused as busy
+and left as it is. After the
 sign-out (recorded `signed_out`, so no relaunch chooses the profile) each moved session shown is
 stopped directly through the stopper, and only then does the launcher's rm run; a stop that fails
 keeps that manager (`console: manager_move_failed <sprint_id> <Type>`), skips the rm and appends the
@@ -4223,6 +4230,8 @@ class ConsoleService:
         # of every account directory at the last good listing (None before one): a name now given to another
         # directory is not his (#1343).
         self._account_identities: dict[str, str] = {}
+        self._signin_generation: dict[str, int] = {}
+        self._generation_epoch = uuid.uuid4().hex[:8]
         self._identities_seen: dict[str, str | None] | None = None
         self._trust_failures: dict[tuple[str, str], dict] = {}
         self._pin_launches: pin.PinLaunches = pin.pin_launches([])
@@ -4729,7 +4738,7 @@ class ConsoleService:
                 mine = {profile for profile, owner in owners.items() if owner == login}
                 pool = guest.pool_view(
                     inputs["capacity"], self._account_numbers, mine,
-                    guest.own_tokens(self._account_numbers, self._account_identities, mine))
+                    guest.own_tokens(self._account_numbers, self._bound_identities(), mine))
                 running = guest.sprint_labels(
                     self._sprints, guest.profile_labels(self._account_numbers, mine),
                     guest.retired_labels(self._retired_numbers, self._account_numbers, mine))
@@ -5266,6 +5275,10 @@ class ConsoleService:
             if folded is not None and (folded.state, folded.ends_at, folded.account) == (
                     row[2]["state"], row[2]["ends_at"], row[2]["account"]):
                 return
+            if (status.state == "signed_out" and (folded is None or folded.state != "signed_out")
+                    or folded is not None and folded.account is not None
+                    and status.account not in (None, folded.account)):
+                self._begin_generation(profile)
             self._fold(self.log.append([row]))
             self._publish()
 
@@ -6446,7 +6459,7 @@ class ConsoleService:
             raise sprints.Refused(account_remove.NOT_COLLEAGUE)
 
     def _begin_change(self, profile: str, check: Callable[[], None], removal: bool = False
-                      ) -> tuple[bool, list[_Move]]:
+                      ) -> tuple[bool, list[_Move], str | None]:
         """Under `_adding`: check, mark the profile as being removed, drain, reserve the moves.
 
         One block of the ingest lock holds `check()`, the listed and sign-in checks, the mark and
@@ -6454,9 +6467,13 @@ class ConsoleService:
         once it ends (the owner may have replaced the directory meanwhile). For a colleague's
         profile each started manager on it is reserved (a `_MoveReservation`) and the colleague
         flag is True; a manager whose launch, nudge or stop is reserved refuses the change as busy,
-        and so does a removal while a started manager on it has a stop pending or a closing report
-        to give, or a withdrawn sprint's stop is pending (its profile is not recorded): deleting the
-        profile would delete the session registry that stop reads.
+        and so does a sign-out or a removal while a started manager on it has a stop pending or a
+        closing report to give, or a withdrawn sprint's stop is pending (its profile is not
+        recorded): that manager would keep running on the account the change leaves, and deleting
+        the profile would delete the session registry that stop reads. A started manager on it
+        when there is no stopper refuses the change as busy too. The third value is the identity
+        of the profile's directory as verified here (None when it carries none): every destructive
+        step that follows is bound to it (`_still_bound`).
         """
         with self._ingest:
             check()
@@ -6474,29 +6491,66 @@ class ConsoleService:
             if profile not in self._read_profiles():
                 raise sprints.Refused(account_remove.UNKNOWN)
             colleague = profile in self._owners_now()
-            if not colleague or self._stopper is None:
-                return colleague, []
+            bound = (self._identities_seen or {}).get(profile)
+            if not colleague:
+                return colleague, [], bound
             on_profile = [
                 sprint for sprint in self._sprints.values()
                 if sprint.manager is not None and sprint.manager.state == sprints.STARTED
                 and sprint.manager.profile == profile]
             found = [sprint for sprint in on_profile
                      if sprint.stop_at is None and sprints.ended_at(sprint) is None]
+            if self._stopper is None and on_profile:
+                raise sprints.Refused(account_remove.busy(profile))
             if any(sprint.sprint_id in self._launching or sprint.sprint_id in self._nudging
-                   or sprint.sprint_id in self._stopping for sprint in found) or (
-                    removal and (self._pending or any(
-                        self._stoppable(sprint.sprint_id) is not None for sprint in on_profile))):
+                   or sprint.sprint_id in self._stopping for sprint in found) or self._pending or any(
+                    self._stoppable(sprint.sprint_id) is not None for sprint in on_profile):
                 raise sprints.Refused(account_remove.busy(profile))
             moves = [_Move(sprint.sprint_id,
                            manager.session_name(sprint.project_id, sprint.sprint_id))
                      for sprint in found]
             for move in moves:
                 self._launching[move.sprint_id] = move.token
-            return colleague, moves
+            return colleague, moves, bound
 
-    def _read_moved(self, profile: str, moves: list[_Move]
+    def _still_bound(self, profile: str, bound: str | None) -> None:
+        """Refuse as busy unless `profile`'s directory is still the one `_begin_change` verified.
+
+        The owner can remove a profile and make it again under the name at any time, and the
+        launcher acts on a name: each destructive step asks again right before it runs, so a
+        replacement is never signed out, stopped or removed in the colleague's place. A
+        directory that carried no identity (the owner's own) binds nothing.
+        """
+        if bound is None:
+            return
+        with self._ingest:
+            if profile not in self._read_profiles() or (self._identities_seen or {}).get(
+                    profile) != bound:
+                raise sprints.Refused(account_remove.busy(profile))
+
+    def _recheck(self, plan: list, check: Callable[[str], None]) -> None:
+        """Under one ingest block, after every profile is marked and drained: check each one again.
+
+        A profile is checked last in the block that marked it, and a later profile's drain releases
+        the lock, so the owner may have replaced its directory since: it must still be listed, still
+        the verified directory, still of the same ownership and still pass `check`.
+        """
+        with self._ingest:
+            for profile, colleague, _, bound in plan:
+                check(profile)
+                if profile not in self._read_profiles():
+                    raise sprints.Refused(account_remove.UNKNOWN)
+                if ((self._identities_seen or {}).get(profile) != bound
+                        or (profile in self._owners_now()) != colleague):
+                    raise sprints.Refused(account_remove.busy(profile))
+
+    def _read_moved(self, profile: str, moves: list[_Move], colleague: bool = False
                     ) -> Mapping[str, sessions.Observation]:
         """Off the lock: the sessions on `profile` the moves are stopped from.
+
+        A colleague's profile is listed even when the record names no manager on it: a manager the
+        record puts on another profile but the listing shows here (ADR-console-087) refuses the
+        change as busy, instead of its registry being deleted under a manager nobody stops.
 
         The listing is conclusive (a session file it cannot read refuses the change as busy, so a
         manager it merely failed to read is never taken for gone). A manager not yet listed on the
@@ -6504,7 +6558,7 @@ class ConsoleService:
         and so does a session of another sprint's manager listed on this profile: the record and the
         listing disagree, so nothing is stopped or launched on a guess.
         """
-        if not moves:
+        if not moves and not (colleague and self._stopper is not None):
             return {}
         try:
             listed = self._conclusive_listing()
@@ -6518,7 +6572,10 @@ class ConsoleService:
         now = int(self._clock() * 1000)
         moved = {move.name for move in moves}
         with self._ingest:
-            settled = {move.sprint_id: self._settled.get(move.sprint_id) for move in moves}
+            # A restart loses `_settled`: a manager launched before it may not be listed yet, so
+            # the console's own start opens the window.
+            settled = {move.sprint_id: self._settled.get(move.sprint_id, self._revive_since_ms)
+                       for move in moves}
             strays = {manager.session_name(sprint.project_id, sprint.sprint_id)
                       for sprint in self._sprints.values()
                       if sprint.manager is not None and sprint.manager.state == sprints.STARTED
@@ -6529,8 +6586,7 @@ class ConsoleService:
             move.shown = move.name in names
             if not move.shown and move.name in elsewhere:
                 raise sprints.Refused(account_remove.busy(profile))
-            if (not move.shown and settled[move.sprint_id] is not None
-                    and now - settled[move.sprint_id] < sprints.STOP_SETTLE_MS):
+            if not move.shown and now - settled[move.sprint_id] < sprints.STOP_SETTLE_MS:
                 raise sprints.Refused(account_remove.busy(profile))
         return here
 
@@ -6590,12 +6646,13 @@ class ConsoleService:
                 "goal": sprint.goal}, move.token)
 
     def _change_profiles(self, profiles: Sequence[str], check: Callable[[str], None], removal: bool,
-                         act: Callable[[str, bool, list[_Move], Mapping[str, sessions.Observation]],
-                                       None]) -> None:
+                         act: Callable[[str, bool, list[_Move], Mapping[str, sessions.Observation],
+                                        str | None], None]) -> None:
         """Under `_adding`: check, mark and reserve every profile before changing any, then `act` on each.
 
         Refusals are raised before anything is changed, so a busy second profile leaves the first
-        as it was. `check(profile)` runs first in the ingest block that marks that profile. Each
+        as it was. `check(profile)` runs first in the ingest block that marks that profile and
+        again, for every profile, once all are marked (`_recheck`). Each
         mark is dropped, each reservation ended and each relaunch dispatched on every way out; a
         relaunch that could not be dispatched is `MoveFailed("launch_failed")` when nothing else
         raised.
@@ -6608,13 +6665,15 @@ class ConsoleService:
                 for profile in profiles:
                     entry: tuple[str, list[_Move]] = (profile, [])
                     held.append(entry)
-                    colleague, moves = self._begin_change(
+                    colleague, moves, bound = self._begin_change(
                         profile, lambda one=profile: check(one), removal)
                     entry[1].extend(moves)
-                    plan.append((profile, colleague, moves))
-                reads = [self._read_moved(profile, moves) for profile, _, moves in plan]
-                for (profile, colleague, moves), listed in zip(plan, reads):
-                    act(profile, colleague, moves, listed)
+                    plan.append((profile, colleague, moves, bound))
+                self._recheck(plan, check)
+                reads = [self._read_moved(profile, moves, colleague)
+                         for profile, colleague, moves, _ in plan]
+                for (profile, colleague, moves, bound), listed in zip(plan, reads):
+                    act(profile, colleague, moves, listed, bound)
             finally:
                 failed = [self._end_change(profile, moves) for profile, moves in held]
         if any(failed):
@@ -6626,14 +6685,17 @@ class ConsoleService:
 
         The caller holds neither `_adding` nor the ingest lock; the rows carry `by_login`.
         """
-        def act(profile, colleague, moves, listed):
+        def act(profile, colleague, moves, listed, bound):
+            self._still_bound(profile, bound)
             outcome, kind = self._sign_out_first(profile, by_login)
             if colleague:
                 self._record_signin(profile, signin.Status("signed_out", None),
                                     self._signin_ticket(profile))
+            self._still_bound(profile, bound)
             if self._stop_moved(moves, listed):
                 self._record_removal(profile, "remove_failed", "stop_failed", by_login)
                 raise account_remove.RemoveFailed("stop_failed")
+            self._still_bound(profile, bound)
             try:
                 self._account_remover(profile)
             except account_remove.RemoveFailed as error:
@@ -6665,7 +6727,8 @@ class ConsoleService:
         Refusals are `sprints.Refused`; a failed sign-out is `SignOutFailed` after its `failed`
         row, a manager whose stop failed is `MoveFailed` after the `signed_out` row.
         """
-        def act(profile, colleague, moves, listed):
+        def act(profile, colleague, moves, listed, bound):
+            self._still_bound(profile, bound)
             try:
                 self._signer_out(probe.Probe(profile, str(uuid.uuid4()), self._stop))
             except account_remove.SignOutFailed:
@@ -6675,12 +6738,15 @@ class ConsoleService:
             if colleague:
                 self._record_signin(profile, signin.Status("signed_out", None),
                                     self._signin_ticket(profile))
+            self._still_bound(profile, bound)
             if self._stop_moved(moves, listed):
                 raise account_remove.MoveFailed("stop_failed")
         self._change_profiles(profiles, check, False, act)
 
     def _record_signout(self, profile: str, outcome: str, by_login: str) -> None:
         with self._ingest:
+            if outcome == "signed_out":
+                self._begin_generation(profile)
             self._record_signin_action(profile, "signout", outcome, by_login)
             self._publish()
 
@@ -6771,6 +6837,27 @@ class ConsoleService:
             except signin_run.NotRunning:
                 raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT) from None
 
+    def _begin_generation(self, profile: str) -> None:
+        """Under the ingest lock: the profile was signed out or now holds another Claude account, so every token drawn before names the account that left."""
+        self._signin_generation[profile] = self._signin_generation.get(profile, 0) + 1
+
+    def _bound_identity(self, profile: str) -> str | None:
+        """Under the ingest lock: the directory identity of the profile's recorded add, with its sign-in generation.
+
+        A token over the directory alone would outlive a sign-out and a sign-in as another account
+        of the same profile (the directory and the pool number both persist); the generation, kept
+        under this process's epoch, ends it with the sign-out.
+        """
+        found = self._account_identities.get(profile)
+        if found is None:
+            return None
+        return f"{found}:{self._generation_epoch}:{self._signin_generation.get(profile, 0)}"
+
+    def _bound_identities(self) -> dict[str, str]:
+        """Under the ingest lock: `_bound_identity` of every profile with a recorded identity."""
+        return {profile: bound for profile in self._account_identities
+                if (bound := self._bound_identity(profile)) is not None}
+
     def _his_account(self, by: "guest.GuestActor", number: int, ident: str) -> list[str]:
         """Under the ingest lock: the profiles of his own holding account `number` when `ident` still names it.
 
@@ -6784,7 +6871,7 @@ class ConsoleService:
             profile for profile in self._owned_now(by, accounts)
             if self._account_numbers.get(profile) == number]
         if not targets or guest.account_token(
-                self._account_identities[profile] for profile in targets) != ident:
+                self._bound_identity(profile) for profile in targets) != ident:
             raise sprints.Refused(guest.NOT_YOUR_ACCOUNT_TEXT)
         return targets
 

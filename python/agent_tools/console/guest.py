@@ -82,9 +82,9 @@ builds it from the owner's capacity view: `POOL_MEMBERS` are `state`, `tight`, `
 neutral `label` (`Account <n>`, or `yours` on the page of a colleague holding a profile of that
 account, ADR-console-087 D4), the account's `number` (an `int`, the `<n>` of `Account <n>`, and
 the number of a `yours` row's account too: how a guest names an account in a write, #1345), its
-`ident` (a `yours` row's token, `own_tokens` of the account's profiles' recorded directory identities through
-`account_token`, else None: a number is recycled, so a destructive write sends both and acts only when the token
-still names his account), `state`, the percent left and reset of the week and the session,
+`ident` (a `yours` row's token, `own_tokens` of the account's profiles' recorded directory identities, each with its
+profile's sign-in generation, through `account_token`, else None: a number is recycled and a profile can be signed in
+again as another account, so a destructive write sends both and acts only when the token still names his account), `state`, the percent left and reset of the week and the session,
 `next_reset`, `out_until` and `in_use` (not signed out and not excluded). One row stands for one
 account: a profile whose `duplicate_of` is set (signed in to an address another profile counts) has
 no row and shares its account's label. `tight`, `all_out`, `resumes_at` and `no_reading` are the
