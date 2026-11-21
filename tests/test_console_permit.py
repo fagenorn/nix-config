@@ -312,7 +312,14 @@ class JudgeTest(unittest.TestCase):
                         "printf '%s\\n' --candidate X run transaction | tac | xargs release",
                         "xargs -a FILE release", "cat FILE | xargs release",
                         "env release", "sudo release.py", "find . -exec release {} +",
-                        "echo run transaction release | tac | sh"):
+                        "echo run transaction release | tac | sh",
+                        'git -c alias.x="!xargs release <FILE" x',
+                        'git -c alias.x="!xargs -a FILE release" x',
+                        'git -c core.pager="xargs -a FILE release" log',
+                        'git alias-x release', 'gh alias set --shell x "xargs -a F release"',
+                        'sed -n "1e xargs -a FILE release" README.md',
+                        'sed -n 1,2e\\ xargs\\ release README.md', "rg --pre 'xargs -a F release' x docs",
+                        "python3 -c \"exec(open('F').read())\" release"):
             with self.subTest(command):
                 self.assertTrue(mentions(command))
                 self.assertEqual("release", permit.verb_of(command))
@@ -323,7 +330,9 @@ class JudgeTest(unittest.TestCase):
         for command in ("release transaction status", "release transaction preview --repo-root r",
                         "sed -n 1,20p python/agent_tools/release/release.py", "git checkout release",
                         "gh release list", "echo transaction", "grep -rn release docs | wc -l",
-                        "PYTHONPATH=python python3 -m agent_tools.release.release transaction status"):
+                        "PYTHONPATH=python python3 -m agent_tools.release.release transaction status",
+                        "git log --oneline release", "sed -n 1p release.py", "gh release view v1",
+                        "rg release docs"):
             with self.subTest(command):
                 self.assertFalse(mentions(command))
 

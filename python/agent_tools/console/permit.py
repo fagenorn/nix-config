@@ -354,13 +354,54 @@ def _names_release(part: str) -> bool:
 
 _SEGMENT = re.compile(r"[;|&()\n`]")
 _ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
-_READERS = frozenset({"git", "gh", "sed", "grep", "rg", "ls", "cat", "head", "tail", "wc", "diff", "less"})
+_READERS = frozenset({"grep", "ls", "cat", "head", "tail", "wc", "diff"})
+_GIT_READS = frozenset({"status", "log", "diff", "show", "checkout", "switch", "branch", "rev-parse", "ls-files",
+                        "ls-tree", "cat-file", "blame"})
+_GIT_RUNS = ("-O", "--open-files-in-pager", "--ext-diff", "--exec", "--upload-pack", "--receive-pack")
+_GH_READS = frozenset({"release", "pr", "issue", "run", "repo", "workflow", "search", "label"})
+_RG_RUNS = ("--pre", "--hostname-bin")
+_SED_OPTION = re.compile(r"-[nErsuz]+|--(quiet|silent|regexp-extended|sandbox)")
+_SED_PRINT = re.compile(r"\d+(,\d+)?[pq]?")
+_INLINE_CODE = re.compile(r"-[a-zA-Z]*[ce]")
+_INTERPRETERS = ("python", "sh", "bash", "zsh", "dash", "ksh", "node", "perl", "ruby", "php", "lua")
 
 
-def _segment_is_release(words_: list[str]) -> bool:
+def _simple_words(segment: str) -> list[str]:
+    """The whitespace words of one simple command, past its leading assignments."""
+    found = segment.split()
+    while found and _ASSIGNMENT.match(found[0]):
+        found = found[1:]
+    return found
+
+
+def _reads_only(head: str, args: list[str]) -> bool:
+    """A reader invoked in a shape that cannot run another program: no alias, pager, `e` command or `--pre`."""
+    if head == "git":
+        return bool(args) and args[0] in _GIT_READS and not any(
+            "!" in arg or arg.startswith(_GIT_RUNS) for arg in args)
+    if head == "gh":
+        return bool(args) and args[0] in _GH_READS
+    if head == "sed":
+        options = [arg for arg in args if arg.startswith("-")]
+        rest = [arg for arg in args if not arg.startswith("-")]
+        return all(_SED_OPTION.fullmatch(option) for option in options) and bool(rest) and bool(
+            _SED_PRINT.fullmatch(rest[0]))
+    if head == "rg":
+        return not any(arg.startswith(_RG_RUNS) for arg in args)
+    return head in _READERS
+
+
+def _runs_inline_code(segment: str) -> bool:
+    """An interpreter handed a program on its command line, which may run any program a later word names."""
+    simple = _simple_words(segment)
+    return bool(simple) and os.path.basename(simple[0]).startswith(_INTERPRETERS) and any(
+        _INLINE_CODE.fullmatch(arg) for arg in simple[1:])
+
+
+def _segment_is_release(segment: str) -> bool:
     """One simple command that names the release program: a read of it, or anything that may run it."""
-    while words_ and _ASSIGNMENT.match(words_[0]):
-        words_ = words_[1:]
+    simple = _simple_words(segment)
+    words_ = [part for part in _SPLIT.split(" ".join(simple)) if part]
     if not words_ or not any(_names_release(part) for part in words_):
         return False
     head = os.path.basename(words_[0])
@@ -369,15 +410,17 @@ def _segment_is_release(words_: list[str]) -> bool:
         rest = words_[1:]
         return any(part == "transaction" and following not in _RELEASE_READS
                    for part, following in zip(rest, rest[1:]))
-    return head not in _READERS
+    return not _reads_only(head, simple[1:])
 
 
 def _is_release(command: str, parts: list[str]) -> bool:
     """Fail closed: any spelling that can reach a release run or abandon, however the shell names the program.
 
     A command naming the release program is only read when each simple command that names it is the program
-    itself or an interpreter running it with `transaction status` or `preview`, or starts with a reader
-    (`git`, `grep`, `sed`...): a wrapper such as `xargs` or `env` takes its words from a pipe or a file.
+    itself or an interpreter running it with `transaction status` or `preview`, or a reader invoked in a shape
+    that runs nothing (`git log`, `grep`, `sed -n 1,20p`...): a wrapper such as `xargs` or `env` takes its
+    words from a pipe or a file, and `git -c alias.x=!...`, `sed 1e ...` or `rg --pre` run a shell command.
+    An interpreter handed inline code (`python3 -c`) may run it from anywhere in the command.
     """
     if any(first == "transaction" and second in ("run", "abandon")
            for first, second in zip(parts, parts[1:])):
@@ -386,9 +429,8 @@ def _is_release(command: str, parts: list[str]) -> bool:
         return False
     if any(char in command for char in "$`"):
         return True
-    cleaned = re.sub(r"['\"\\]", "", command)
-    return any(_segment_is_release([part for part in _SPLIT.split(segment) if part])
-               for segment in _SEGMENT.split(cleaned))
+    segments = _SEGMENT.split(re.sub(r"['\"\\]", "", command))
+    return any(_runs_inline_code(segment) or _segment_is_release(segment) for segment in segments)
 
 
 def _verb_of(command: str) -> str | None:
