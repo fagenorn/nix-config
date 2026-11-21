@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import capacity, nudge, permission, service, sprints
+from agent_tools.console import capacity, nudge, permission, service, signin, sprints
 
 from . import console_test_support as support
 from .test_console_messages import PARTS
@@ -406,6 +406,47 @@ class IdleQuotaTest(IdleCase):
                 self.assertEqual([call.profile for call in self.launches.calls], ["work"])
                 self.assertEqual(self.revives(), [])
                 self.assertEqual(self.rows("manager.waiting"), [])
+
+    def test_two_profiles_whose_readings_carry_one_account_id_are_one_account_to_the_move(self):
+        def reading(account):
+            return (capacity.READING, None,
+                    {"profile": "home", "account": account, **self.weekly(0.1)})
+
+        def left(account):
+            return (signin.READING, None, {
+                "profile": "home", "state": "signed_in", "ends_at": None,
+                "account": "b@example.invalid", "account_seq": 0,
+                "left_account": "a@example.invalid", "left_reading": account})
+
+        cases = {
+            "same id": ([reading("acct-1")], False),
+            "other id": ([reading("acct-2")], True),
+            "late reply of the account it left, now on another": (
+                [reading("acct-2"), left("acct-1"), reading("acct-1")], True),
+            "late reply of the account it left, now on work's": (
+                [reading("acct-1"), left("acct-2"), reading("acct-2")], False),
+        }
+        for name, (home, moves) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                svc, sid = self.start_out(listed=False, readings=False)
+                self.append(svc, [(capacity.READING, None, {
+                    "profile": "work", "account": "acct-1", **self.exhausted(RESET)}), *home])
+                svc.poll_sessions()
+                self.gone(svc)
+                self.now[0] = T0 + 600
+                svc.revive()
+                self.assertEqual(len(self.queued.jobs), 1 if moves else 0)
+                if not moves:
+                    self.assertNotIn(sid, svc._launching)
+                self.drain()
+                if moves:
+                    self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+                    self.assertIs(self.launches.calls[-1].takeover, True)
+                else:
+                    self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+                    self.assertEqual(self.revives(), [])
+                    self.assertEqual(self.rows("manager.waiting"), [])
 
     def test_a_withdrawn_sprint_leaves_the_quota_mark(self):
         svc, sid = self.start_out()

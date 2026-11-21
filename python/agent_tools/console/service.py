@@ -7913,20 +7913,37 @@ class ConsoleService:
         exclusions and pin), so the decision and the launch agree. The chosen profile must not be
         the manager's, must share no account with it, and must read as having room: an unread
         profile or the launcher's last-used fallback is no reason to leave a session that only waits.
+        The accounts are also compared by the proxy account id of each profile's counted reading
+        (#1279), because a profile known only by that id has no sign-in account to group it. A late
+        reply from an account a profile left does not count.
         """
+        return self._move_target(sprint) is not None
+
+    def _move_target(self, sprint: sprints.SprintState) -> str | None:
+        """Under the ingest lock: the profile a quota move would take over on, else None."""
         view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
                                       self._signins, excluded=self._excluded, pinned=self._pinned,
                                       owners=self._owners_now())
         choice = manager.choose_profile(view, self._use.last, sprint.started_by,
                                         self._waiting_logins())
+        return choice if self._room_for_move(view, sprint, choice) else None
+
+    def _room_for_move(self, view: Mapping, sprint: sprints.SprintState, choice: object) -> bool:
+        """Under the ingest lock: whether `choice` is another account with room (#1279)."""
         mine = sprint.manager.profile if sprint.manager else None
         if not isinstance(choice, str) or choice == mine:
             return False
-        entries = {entry["profile"]: entry for entry in view["profiles"]}
-        chosen = entries.get(choice)
-        if chosen is None or chosen["state"] not in ("ok", "reset") or chosen["excluded"]:
+        chosen = {entry["profile"]: entry for entry in view["profiles"]}.get(choice)
+        if chosen is None or not manager.has_room(chosen):
             return False
-        return mine not in chosen["same_account_as"] and chosen.get("duplicate_of") != mine
+        if mine in chosen["same_account_as"] or chosen.get("duplicate_of") == mine:
+            return False
+        if mine is None:
+            return True
+        ours = capacity.counted_reading(self._capacity, mine, self._signins.get(mine))
+        theirs = capacity.counted_reading(self._capacity, choice, self._signins.get(choice))
+        return (ours is None or theirs is None or ours.account is None
+                or ours.account != theirs.account)
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""
