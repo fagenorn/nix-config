@@ -71,6 +71,7 @@
 | Limit sensing | Hosts |
 | Limit stop | Console |
 | Live fault | Console |
+| Live-fault lane | Delivery |
 | Look approval | Delivery |
 | Look file set | Delivery |
 | Look marker | Delivery |
