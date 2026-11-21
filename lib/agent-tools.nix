@@ -40,6 +40,7 @@ let
   # context-map-lint is a stable path other projects' CIs call without vendoring it (parent D15).
   commands = {
     "adopt-project" = "project_contract.adopt_project";
+    "adr-number" = "delivery.adr_number";
     "agent-model-matrix" = "agent_model_matrix";
     "artifact-budget" = "delivery.artifact_budget";
     "bypass-proof" = "console.bypass_proof";
