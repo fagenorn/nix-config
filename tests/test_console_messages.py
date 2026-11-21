@@ -613,7 +613,8 @@ class NudgeServiceTest(MessageRouteTest):
         self.queued.run_next()
         self.assertEqual(free, [True])
         path = manager.settings_path(svc._sprint_secrets, sid)
-        self.assertEqual(json.loads(path.read_text())["permissions"], {"defaultMode": "auto"})
+        self.assertEqual(json.loads(path.read_text())["permissions"],
+                         {"defaultMode": "auto", "deny": list(manager.MANAGER_DENY)})
         ((_, row),) = self.nudged()
         self.assertEqual(row["route"], "wake")
         self.assertEqual(row["permission"], {
@@ -629,7 +630,8 @@ class NudgeServiceTest(MessageRouteTest):
         self.drain()
         self.assertEqual([n.route for n in self.nudges], ["wake"])
         path = manager.settings_path(svc._sprint_secrets, sid)
-        self.assertEqual(json.loads(path.read_text())["permissions"], {"defaultMode": "auto"})
+        self.assertEqual(json.loads(path.read_text())["permissions"],
+                         {"defaultMode": "auto", "deny": list(manager.MANAGER_DENY)})
         self.assertEqual(self.notice_nudged()[-1]["route"], "wake")
         self.assertEqual(self.notice_nudged()[-1]["permission"], {
             "mode": "auto", "reason": "no production rules declared"})

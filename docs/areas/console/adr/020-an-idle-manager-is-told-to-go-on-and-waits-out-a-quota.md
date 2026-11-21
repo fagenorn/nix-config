@@ -1,6 +1,6 @@
 # ADR-console-020 — A manager idle while its sprint has work is told to go on, and waits out a quota
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-095
 - **Decided in:** #837, #839, #891, #893, #929, #974, #1278, #1279, #1381
 
 ## Context
@@ -32,7 +32,7 @@ ADR-console-017's Consequences leave "a manager that is listed but idle while wo
 - An idle nudge costs one short print-mode relay on the manager's profile; three unanswered nudges cost at most three relays per report, and then the sprint is the owner's.
 - A manager that cannot make progress shows as one inbox item with a way to push it on or end the sprint, instead of a sprint that sits quiet.
 - A restart of the console forgets that a sprint was held for the quota, so the resume sentence is not said for a wait that began before the restart; the sends themselves resume as soon as the account reads available.
-- A gone manager whose account is out is replaced when another account has room (#1278): the bring-back starts a takeover on the profile a new session would get, instead of waiting for the reset. A listed manager is left alone, and with no account that has room the sprint waits as before. The takeover is a new session: it reads the sprint's contract and records, not the old conversation.
+- A gone manager whose account is out is replaced when another account has room (#1278): the bring-back starts a takeover on the profile a new session would get, instead of waiting for the reset. A listed manager is moved too (ADR-console-095), and with no account that has room the sprint waits as before. The takeover is a new session: it reads the sprint's contract and records, not the old conversation.
 - Two profiles are one account to the move when their sign-ins name one account or the counted readings of either and of its sign-in aliases carry one account id (#1279); a profile known only by the id is not mistaken for another account with room, and a late reply from an account a profile left does not count, for the manager's own quota too. A duplicate of any profile is not a move.
 - The move is checked again at the launch (#1279). A takeover made because the manager's account is out starts only on the account it chose, and only while that account still reads as having room. The move is bound to the account it chose and to the pin in force when it was reserved, and the manager's account must still be out. If that account was removed, excluded, signed out, ran out or changed account meanwhile, or the pin moved, or the manager's quota reset, nothing starts and no other account is tried, and no later poll decides a move again until the manager's account has room. The sprint waits for the reset with its session kept to wake. Any other takeover during a quota wait is unchanged.
 - A takeover during a quota wait is unchanged: it starts a new session on the best profile.

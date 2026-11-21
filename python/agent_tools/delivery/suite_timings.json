@@ -152,6 +152,7 @@
  "tests/test_program_bridge.py": 0.5,
  "tests/test_promotion_demo.py": 0.5,
  "tests/test_console_movement.py": 0.5,
+ "tests/test_console_permit.py": 0.5,
  "home/common/agent-skills/tests/test_inprocess_cli.py": 0.4,
  "home/common/agent-skills/tests/test_skill_lint.py": 0.4,
  "tests/test_console_failed_start.py": 0.4,
