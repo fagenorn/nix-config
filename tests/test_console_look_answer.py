@@ -379,6 +379,14 @@ class LookAnswerTest(QuestionRoutes):
              "line": 'Choosing "Ask for changes" records your approval of aaaaaaa, '
                      'pull request #12, on issue #7.'})
 
+    def test_an_open_look_card_is_consequential_without_the_mark(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        question = with_pictures(svc, sid, self.secret(sid))
+        status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [question]})
+        self.assertEqual(status, 200, body)
+        self.assertIs(self.entry(svc, sid)["consequential"], True)
+
     def test_a_held_approval_is_not_shown_as_sent_or_not_picked_up(self):
         moment = {"now": 1_800_000_000.0}
         svc = self.open(clock=lambda: moment["now"])
