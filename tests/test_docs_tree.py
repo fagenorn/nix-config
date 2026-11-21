@@ -539,9 +539,9 @@ class DocsTreeTest(unittest.TestCase):
             status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                     "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
                     "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                    "ADR-console-076, ADR-console-078")
+                    "ADR-console-076, ADR-console-078, ADR-console-093")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1237, #1263, #1294, #1305"))
+        self.assertTrue(decided.endswith("#1237, #1263, #1294, #1305, #1272"))
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         console = next(row for row in context if row.startswith("The per-host loopback service"))
         self.assertIn("ADR-console-076", console)
@@ -813,7 +813,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
                          "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                         "ADR-console-076, ADR-console-078"),
+                         "ADR-console-076, ADR-console-078, ADR-console-093"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
@@ -864,7 +864,8 @@ class DocsTreeTest(unittest.TestCase):
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
                                           "ADR-console-036, ADR-console-037, ADR-console-053, "
-                                          "ADR-console-058, ADR-system-004, ADR-console-076, ADR-console-078"),
+                                          "ADR-console-058, ADR-system-004, ADR-console-076, ADR-console-078, "
+                                          "ADR-console-093"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
@@ -928,7 +929,7 @@ class DocsTreeTest(unittest.TestCase):
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
                          "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                         "ADR-console-076, ADR-console-078"),
+                         "ADR-console-076, ADR-console-078, ADR-console-093"),
                 (adr028, None)):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
@@ -1155,7 +1156,7 @@ class DocsTreeTest(unittest.TestCase):
                          "- **Status:** accepted; amended by ADR-console-038, ADR-console-040, "
                          "ADR-console-072")
         self.assertEqual(status("009-events-are-kept-for-90-days.md"),
-                         "- **Status:** accepted; amended by ADR-console-036, ADR-console-040")
+                         "- **Status:** accepted; amended by ADR-console-036, ADR-console-040, ADR-console-093")
         retention = self.doc(base + "009-events-are-kept-for-90-days.md")
         self.assertIn("schema 9", retention)
         self.assertIn("question.withdrawn", retention)

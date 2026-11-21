@@ -89,6 +89,7 @@ TABLE = {
     "/api/register-confirm": "owner", "/api/trust-check": "owner",
     "/api/register-cancel": "owner", "/api/owner-notice": "owner",
     "/api/owner-notice-withdraw": "owner", "/api/project-question": "owner",
+    "/api/project-question-delete": "owner",
     "/api/activate": "owner", "/api/share-tailnet": "owner", "/api/share-colleague": "owner",
     "/api/share-remove": "owner", "/api/look-retry": "owner",
     "/api/brief": "owner", "/api/report": "owner", "/api/close": "owner", "/api/inbox": "owner",
@@ -1636,9 +1637,9 @@ class AccessWriteTest(GuestCase):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1193, #1237, #1263, #1294, #1305"))
+        self.assertTrue(decided.endswith("#1193, #1237, #1263, #1294, #1305, #1272"))
         status = next(row for row in adr.splitlines() if row.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-076, ADR-console-078"))
+        self.assertTrue(status.endswith("ADR-console-076, ADR-console-078, ADR-console-093"))
 
 
 class ReadingServiceTest(GuestCase):

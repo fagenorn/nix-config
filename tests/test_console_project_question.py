@@ -11,10 +11,12 @@ import errno
 import io
 import json
 import os
+import random
 import shlex
 import subprocess
 import sys
 import shutil
+import string
 import tempfile
 import threading
 import time
@@ -26,7 +28,8 @@ from unittest import mock
 
 from agent_tools.console import (
     account_remove, deliveries, event_log, project_question, project_question_hook as hook, question_records, service, sessions,
-    signin, spend, sprints, view)
+    signin, spend, sprints, view,
+    write_guard)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -1406,6 +1409,23 @@ QUESTION_ROUTE = "/api/project-question"
 JSON = {"Content-Type": "application/json"}
 WHY = "owner/p01"
 
+FAKE_CREDENTIALS = {
+    "github": "gh" + "p_" + "a1b2c3" * 6,
+    "github_pat": "github" + "_pat_" + "11ab" * 6,
+    "hugging_face": "h" + "f_" + "abcd12" * 5,
+    "sk_key": "s" + "k-ant-api03-" + "ab1x" * 8,
+    "age_secret_key": "AGE-SECRET" + "-KEY-1" + "QZ7" * 18,
+    "private_key_block": "-----BEGIN OPENSSH " + "PRIVATE KEY-----",
+    "bearer": "Authorization: Bear" + "er " + "abcdefgh" * 3,
+    "aws_key_id": "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+    "slack": "xo" + "xb-" + "1234567890-abc",
+    "gitlab": "gl" + "pat-" + "x1y2" * 5,
+    "jwt": "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiIxMjM0NTY3ODkwIn0." + "dozjgNryP4J3jVmNHl0w5N",
+    "assignment": "GH_TO" + "KEN=" + "abc123def456",
+    "console_token": "Ab3dE5fG7hJ9kL1mN2pQr" + "-" + "s4T6uV8wX0yZ2aB4cD6eF",
+    "base64_run": "Zx9Qw8Er7Ty6Ui5Op4" + "As3Df2Gh1Jk0LmNb",
+}
+
 
 def wait_until(predicate):
     deadline = time.monotonic() + 5
@@ -1594,6 +1614,37 @@ class QuestionFoldTest(unittest.TestCase):
                          project_question.asked_questions(rows))
         self.assertEqual(first, before)
 
+    def test_a_deletion_row_drops_the_named_questions_of_its_project_only(self):
+        rows = [_asked(1, "o/a", "q1"),
+                _answered(2, "o/a", "q1", outcome="answered", answer="A"),
+                _asked(3, "o/a", "q2", thread_id="q1"),
+                _asked(4, "o/b", "q1"),
+                _asked(5, "o/a", "q3"),
+                _row(6, "project_question.deleted", "o/a",
+                     {"question_ids": ["q1", "q2"], "thread_id": "q1"})]
+        once = project_question.asked_questions(rows)
+        batched = project_question.asked_questions(
+            rows[3:], project_question.asked_questions(rows[:3]))
+        self.assertEqual(once, batched)
+        self.assertEqual([q.question_id for q in once["o/a"]], ["q3"])
+        self.assertEqual([q.question_id for q in once["o/b"]], ["q1"])
+
+    def test_a_malformed_deletion_row_drops_nothing(self):
+        cases = (("o/a", {"question_ids": "q1"}), (None, {"question_ids": ["q1"]}),
+                 ("o/a", {"question_ids": {"k": "q1"}}), ("o/a", {"question_ids": [1, None]}),
+                 ("o/a", {}))
+        for project, payload in cases:
+            with self.subTest(project=project, payload=payload):
+                rows = [_asked(1, "o/a", "q1"),
+                        _row(2, "project_question.deleted", project, payload)]
+                found = project_question.asked_questions(rows)
+                self.assertEqual([q.question_id for q in found["o/a"]], ["q1"])
+
+    def test_a_project_whose_every_question_is_deleted_has_no_entry(self):
+        rows = [_asked(1, "o/a", "q1"),
+                _row(2, "project_question.deleted", "o/a", {"question_ids": ["q1"]})]
+        self.assertNotIn("o/a", project_question.asked_questions(rows))
+
 
 def _ids(found):
     return [[q.question_id for q in thread] for thread in found]
@@ -1688,6 +1739,52 @@ class FollowUpTest(unittest.TestCase):
         self.assertEqual(str(caught.exception), project_question.THREAD_TOO_LONG)
         short = self.answered("x" * 1000)
         self.assertEqual(len(project_question.follow_up(short, "q1", "why?")), 1)
+
+
+class ThreadDeleteTest(unittest.TestCase):
+    P = "owner/p01"
+
+    def questions(self):
+        return project_question.asked_questions([
+            _asked(1, self.P, "q1"),
+            _answered(2, self.P, "q1", outcome="answered", answer="A"),
+            _asked(3, self.P, "q2", thread_id="q1"),
+            _asked(4, self.P, "q3")])[self.P]
+
+    def test_a_thread_names_its_questions_in_order(self):
+        qs = self.questions()
+        self.assertEqual(project_question.thread_question_ids(qs, "q1"), ("q1", "q2"))
+        self.assertEqual(project_question.thread_question_ids(qs, "q3"), ("q3",))
+
+    def test_an_unknown_thread_or_a_follow_up_id_is_refused(self):
+        for thread_id in ("q2", "nope"):
+            with self.subTest(thread_id=thread_id):
+                with self.assertRaises(project_question.Refused) as caught:
+                    project_question.thread_question_ids(self.questions(), thread_id)
+                self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
+
+
+class DeleteRequestTest(unittest.TestCase):
+    def test_a_delete_request_reads_exactly_the_project_and_the_thread(self):
+        self.assertEqual(
+            project_question.parse_delete_request(b'{"project_id":"o/a","thread_id":"q1"}'),
+            ("o/a", "q1"))
+
+    def test_any_other_delete_body_is_refused(self):
+        bodies = (b'{"project_id":"o/a"}',
+                  b'{"project_id":"o/a","thread_id":"q1","question":"x"}',
+                  b'{"project_id":"","thread_id":"q1"}', b'{"project_id":"o/a","thread_id":""}',
+                  b'{"project_id":"o/a","thread_id":3}', b'["o/a","q1"]',
+                  b'{"project_id":"o/a","project_id":"o/b","thread_id":"q1"}',
+                  b'{"project_id":"o/a","thread_id":NaN}', b"\xff", b"[" * 100000)
+        for body in bodies:
+            with self.subTest(body=body[:60]):
+                with self.assertRaises(ValueError):
+                    project_question.parse_delete_request(body)
+
+    def test_the_working_refusal_names_no_question_text(self):
+        self.assertEqual(project_question.THREAD_WORKING,
+                         "this thread is still being answered: delete it once the answer is in")
 
 
 class AnswerRulesTest(unittest.TestCase):
@@ -1914,6 +2011,22 @@ class QuestionActivityTest(unittest.TestCase):
         order = [e["project_id"] for e in _project_entries(view.derive_view(after.values()))]
         self.assertEqual(order, [self.NEW, self.OLD])
 
+    def test_deleting_a_question_thread_neither_reorders_projects_nor_resets_their_untouched_age(self):
+        events = [
+            _registered(1, self.OLD),
+            _registered(2, self.NEW),
+            _asked(3, self.OLD, "q1"),
+        ]
+        before = view.project_states(events)
+        deletion = [_row(4, event_log.PROJECT_QUESTION_DELETED, self.OLD,
+                         {"question_ids": ["q1"], "thread_id": "q1"})]
+        after = view.project_states(deletion, before)
+        self.assertEqual(after, view.project_states(events + deletion))
+        self.assertEqual(after, before)
+        self.assertEqual((after[self.OLD].last_seq, after[self.OLD].last_at), (1, "2026-11-17T10:00:01Z"))
+        order = [e["project_id"] for e in _project_entries(view.derive_view(after.values()))]
+        self.assertEqual(order, [self.NEW, self.OLD])
+
 
 class QuestionThreadViewTest(unittest.TestCase):
     P1 = "owner/p01"
@@ -1951,6 +2064,103 @@ class QuestionThreadViewTest(unittest.TestCase):
             for question in thread["questions"]:
                 self.assertEqual(set(question), QUESTION_KEYS)
         self.assertIsNone(bare["entries"][0]["questions"])
+
+
+class CredentialShapeTest(unittest.TestCase):
+    def test_each_known_prefix_and_key_shape_is_caught_by_its_own_shape_alone(self):
+        for name, token in FAKE_CREDENTIALS.items():
+            with self.subTest(name=name):
+                text = f"why does {token} fail?"
+                matched = [n for n, p in project_question.CREDENTIAL_SHAPES if p.search(text)]
+                self.assertEqual(matched, [name])
+                self.assertIs(project_question.credential_shaped(text), True)
+        self.assertEqual([n for n, _ in project_question.CREDENTIAL_SHAPES], list(FAKE_CREDENTIALS))
+        self.assertIsNotNone(write_guard._TOKEN.fullmatch(FAKE_CREDENTIALS["console_token"] + "\n"))
+
+    def test_a_password_assignment_in_any_case_or_quoting_is_caught_by_the_assignment_shape_alone(self):
+        for text in (
+            '{"password":"example123"}',
+            '{"password": "copper-harbor-lantern"}',
+            "PASSWORD=copper-harbor-lantern",
+            "password = copper-harbor-lantern",
+            "db_password: copper-harbor-9",
+            "'secret': 'lantern-harbor'",
+            "DB_PASSWORD=Tr0ub4dor.Horse99",
+            "SECRET=v2.Kq8Zr3Lm9Xp",
+            "API_TOKEN=Ab3dE.f9Gh2Jk7Lm",
+            "PASSWORD=pass.Word2024",
+        ):
+            with self.subTest(text=text):
+                matched = [n for n, p in project_question.CREDENTIAL_SHAPES if p.search(text)]
+                self.assertEqual(matched, ["assignment"])
+                self.assertIs(project_question.credential_shaped(text), True)
+
+    def test_a_base64_run_is_a_path_only_when_each_slash_separated_part_is_a_word_or_a_short_label(self):
+        key = "Ab3/Xy9Qw8Er7/Ty6Ui5Op4As3/Df2Gh1Jk0LmNb"
+        self.assertEqual(key.count("/"), 3)
+        self.assertEqual([n for n, p in project_question.CREDENTIAL_SHAPES if p.search(key)], ["base64_run"])
+        self.assertIs(project_question.credential_shaped(f"key {key} here"), True)
+        path = "ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case"
+        self.assertIs(project_question.credential_shaped(path), False)
+        self.assertIs(project_question.credential_shaped("console/" + path), False)
+        for short in (
+            "src/UI/Components/Button2Group/Item3View/Panel4.tsx",
+            "GET api/v1/Users/Profile2Settings/Avatar3Image",
+            "tests/E2E/LoginFlow2Spec/Checkout3Spec.ts",
+        ):
+            with self.subTest(short=short):
+                self.assertIs(project_question.credential_shaped(short), False)
+
+    def test_a_console_token_of_any_character_mix_is_caught(self):
+        alphabet = string.ascii_letters + string.digits + "-_"
+        generator = random.Random(1272)
+        tokens = ["AbCd" * 10 + "EfG", "Ab" * 21 + "C"]
+        tokens += ["".join(generator.choices(alphabet, k=43)) for _ in range(500)]
+        for token in tokens:
+            with self.subTest(token=token):
+                self.assertIsNotNone(write_guard._TOKEN.fullmatch(token + "\n"))
+                self.assertIs(project_question.credential_shaped(f"is {token} right?"), True)
+
+    def test_ordinary_text_with_similar_words_is_not_credential_shaped(self):
+        texts = (
+            "how do I rotate the GitHub token in HF_TOKEN?",
+            "what does the ghp_ prefix mean?",
+            "where is the AGE-SECRET-KEY kept?",
+            "is a Bearer token sent by gh?",
+            "password: is one needed for the sops file?",
+            "What does HF_TOKEN: required mean?",
+            "is GH_TOKEN=$(gh auth token) safe here?",
+            "what did commit 8d2074d161ce5682ca14e8466d58bd679a07d308 merge?",
+            "why is /nix/store/0c9bx8w5l6s2a1k3mzj4q7v9y2r8d1fh-claude-code-2.1.0 rebuilt?",
+            "why is /nix/store/0c9bx8w5l6s2a1k3mzj4q7v9y2r8d1fh-SDL2-2.30.0 rebuilt?",
+            "session 123e4567-e89b-12d3-a456-426614174000 failed",
+            "does sk-learn run here?",
+            "what does docs/areas/console/adr/062-a-follow-up-carries-its-thread say?",
+            "why does the hash sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU= mismatch?",
+            "is narHash sha512-" + "Ab1Cd2Ef3Gh4" * 7 + "== stale?",
+            "where is console/ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case defined?",
+            "what does MAX_PROJECT_QUESTION_DELETE_BYTES limit?",
+            "what does tests.test_console_project_question.QuestionDeleteServiceTest cover?",
+            "where is ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case defined?",
+            "what does the token: required mean and why is password: required?",
+            "why is the secret=true flag set?",
+            "why does token = response.json() fail here?",
+            "password = getpass.getpass()",
+            'api_key = os.environ["OPENAI"]',
+            "csrf_token = generate_csrf_token()",
+            "the access_key = whatever you configured",
+            "src/UI/Components/Button2Group/Item3View/Panel4.tsx",
+            "see src/UI/Components/Button2Group/Item3View/Panel4.tsx",
+            "GET api/v1/Users/Profile2Settings/Avatar3Image",
+            "tests/E2E/LoginFlow2Spec/Checkout3Spec.ts",
+            "see https://github.com/Org2Name/Repo3Name/blob/main/README.md",
+            "see src/math/Vec3D/Mat4x4/Quaternion.ts",
+            "see vendor/HTTP2/Server3Push/handlers/stream.go",
+            "src/codecs/MP4Box/Parser2Test/Reader.ts",
+        )
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertIs(project_question.credential_shaped(text), False)
 
 
 class QuestionCase(Case):
@@ -2003,6 +2213,9 @@ class QuestionCase(Case):
     def question_rows(self):
         return [(row[2], row[3], json.loads(row[4])) for row in support.log_rows(self.store)
                 if row[2].startswith("project_question.")]
+
+    def shown(self, svc):
+        return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
 
 
 class QuestionServiceTest(QuestionCase):
@@ -2148,10 +2361,7 @@ class QuestionServiceTest(QuestionCase):
         self.assertEqual(event_log.PROJECT_QUESTION_ANSWERED, ANSWERED_KIND)
         self.assertNotIn(ASKED, event_log.KEPT_KINDS)
         self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
-        self.assertEqual(event_log.SCHEMA_VERSION, 11)
-
-    def shown(self, svc):
-        return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
+        self.assertEqual(event_log.SCHEMA_VERSION, 12)
 
     def test_the_published_view_shows_the_question_working_then_answered(self):
         held = []
@@ -2170,6 +2380,80 @@ class QuestionServiceTest(QuestionCase):
         finally:
             while held:
                 held.pop()()
+
+    def test_a_credential_shaped_question_or_follow_up_is_refused_and_nothing_of_it_is_kept(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "what does the build check?")
+        before = self.question_rows()
+        asked_before = len(self.asked)
+        token = FAKE_CREDENTIALS["hugging_face"]
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            for args in ((WHY, f"my key is {token}"), (WHY, f"and {token}?", first)):
+                with self.subTest(args=len(args)):
+                    with self.assertRaises(project_question.Refused) as caught:
+                        svc.ask_project_question(*args)
+                    self.assertEqual(str(caught.exception), project_question.CREDENTIAL)
+        self.assertEqual(self.question_rows(), before)
+        self.assertEqual(len(self.asked), asked_before)
+        self.assertEqual(svc._project_questions_open, 0)
+        self.assertNotIn(token, errors.getvalue())
+        for path in self.store.parent.glob(self.store.name + "*"):
+            self.assertNotIn(token.encode(), path.read_bytes())
+
+    def test_a_credential_is_refused_before_every_other_refusal(self):
+        token = FAKE_CREDENTIALS["github"]
+        svc = self.start()
+        before = self.question_rows()
+
+        def refused(service, *args):
+            with self.assertRaises(project_question.Refused) as caught:
+                service.ask_project_question(*args)
+            self.assertEqual(str(caught.exception), project_question.CREDENTIAL)
+            self.assertEqual(self.question_rows(), before)
+            self.assertEqual(len(self.asked), 0)
+
+        with self.subTest(case="unregistered"):
+            refused(svc, "owner/p99", f"key {token}")
+        with self.subTest(case="too long"):
+            refused(svc, WHY, "x" * 2001 + " " + token)
+        with self.subTest(case="unknown thread"):
+            refused(svc, WHY, f"and {token}", "nope")
+        with self.subTest(case="stopping"):
+            svc._stop.set()
+            refused(svc, WHY, f"key {token}")
+        svc.close()
+        with self.subTest(case="unavailable"):
+            none = self.start(project_asker=None)
+            refused(none, WHY, f"key {token}")
+
+    def test_a_follow_up_to_a_thread_that_holds_a_credential_is_refused(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(self.store)
+        try:
+            log.append([
+                (event_log.PROJECT_QUESTION_ASKED, WHY, {
+                    "question_id": "q0", "question": "my key " + FAKE_CREDENTIALS["hugging_face"],
+                    "profile": "work", "session_id": SESSION_ID}),
+                (event_log.PROJECT_QUESTION_ANSWERED, WHY, {
+                    "question_id": "q0", "outcome": "answered", "answer": "Answer: noted."}),
+                (event_log.PROJECT_QUESTION_ASKED, WHY, {
+                    "question_id": "q5", "question": "what runs?", "profile": "work",
+                    "session_id": SESSION_ID}),
+                (event_log.PROJECT_QUESTION_ANSWERED, WHY, {
+                    "question_id": "q5", "outcome": "answered",
+                    "answer": "Answer: it echoed " + FAKE_CREDENTIALS["github"]})])
+        finally:
+            log.close()
+        svc = self.start()
+        before = self.question_rows()
+        for thread, text in (("q0", "and what about darwin?"), ("q5", "and darwin?")):
+            with self.subTest(thread=thread):
+                with self.assertRaises(project_question.Refused) as caught:
+                    svc.ask_project_question(WHY, text, thread)
+                self.assertEqual(str(caught.exception), project_question.THREAD_CREDENTIAL)
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.question_rows(), before)
 
     def test_questions_survive_a_restart(self):
         svc = self.start()
@@ -2771,6 +3055,112 @@ class QuestionThreadServiceTest(QuestionCase):
         self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
 
 
+class QuestionDeleteServiceTest(QuestionCase):
+    """The owner deletes a question thread; the log keeps a record of the ids and nothing of the text."""
+
+    def test_deleting_a_thread_removes_its_text_from_the_log_and_the_view_and_keeps_a_text_free_record(self):
+        svc = self.start()
+        self.outcome = project_question.Outcome("answered", answer="Answer: FIRST-ANSWER-TEXT")
+        first = svc.ask_project_question(WHY, "FIRST-QUESTION-TEXT?")
+        self.outcome = project_question.Outcome("answered", answer="Answer: FOLLOW-ANSWER-TEXT")
+        follow = svc.ask_project_question(WHY, "FOLLOW-QUESTION-TEXT?", first)
+        self.outcome = project_question.Outcome("answered", answer="Answer: OTHER-ANSWER-TEXT")
+        other = svc.ask_project_question(WHY, "OTHER-QUESTION-TEXT?")
+        svc.delete_question_thread(WHY, first)
+        rows = self.question_rows()
+        self.assertEqual(rows[-1], (
+            "project_question.deleted", WHY, {"question_ids": [first, follow], "thread_id": first}))
+        self.assertEqual(
+            [row for row in rows if row[2].get("question_id") in (first, follow)], [])
+        self.assertEqual([row[0] for row in rows if row[2].get("question_id") == other],
+                         [ASKED, ANSWERED_KIND])
+        self.assertEqual([t["id"] for t in self.shown(svc)["questions"]["threads"]], [other])
+        svc.close()
+        gone = (b"FIRST-QUESTION-TEXT", b"FIRST-ANSWER-TEXT", b"FOLLOW-QUESTION-TEXT",
+                b"FOLLOW-ANSWER-TEXT")
+        for path in self.store.parent.glob(self.store.name + "*"):
+            for text in gone:
+                with self.subTest(path=path.name, text=text):
+                    self.assertNotIn(text, path.read_bytes())
+        restarted = self.start()
+        self.assertEqual([t["id"] for t in self.shown(restarted)["questions"]["threads"]], [other])
+
+    def test_a_delete_names_a_registered_project_and_one_of_its_threads(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "why?")
+        follow = svc.ask_project_question(WHY, "and?", first)
+        for project, thread, reason in (
+                ("owner/p99", first, project_question.UNREGISTERED),
+                (WHY, follow, project_question.THREAD_UNKNOWN),
+                (WHY, "nope", project_question.THREAD_UNKNOWN)):
+            with self.subTest(project=project, thread=thread):
+                before = self.question_rows()
+                with self.assertRaises(project_question.Refused) as caught:
+                    svc.delete_question_thread(project, thread)
+                self.assertEqual(str(caught.exception), reason)
+                self.assertEqual(self.question_rows(), before)
+
+    def test_a_thread_still_being_answered_is_deleted_only_once_its_answer_is_in(self):
+        svc = self.start(project_question_dispatch=self.queued.append)
+        try:
+            first = svc.ask_project_question(WHY, "why?")
+            before = self.question_rows()
+            with self.assertRaises(project_question.Refused) as caught:
+                svc.delete_question_thread(WHY, first)
+            self.assertEqual(str(caught.exception), project_question.THREAD_WORKING)
+            self.assertEqual(self.question_rows(), before)
+            self.queued.pop()()
+            svc.delete_question_thread(WHY, first)
+            self.assertIsNone(self.shown(svc)["questions"])
+        finally:
+            while self.queued:
+                self.queued.pop()()
+
+    def test_a_question_left_working_by_a_crash_can_be_deleted(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(self.store)
+        try:
+            log.append([(event_log.PROJECT_QUESTION_ASKED, WHY, {
+                "question_id": "q0", "question": "LEFT-WORKING-TEXT", "profile": "work",
+                "session_id": SESSION_ID})])
+        finally:
+            log.close()
+        svc = self.start()
+        svc.delete_question_thread(WHY, "q0")
+        svc.close()
+        for path in self.store.parent.glob(self.store.name + "*"):
+            self.assertNotIn(b"LEFT-WORKING-TEXT", path.read_bytes())
+
+    def test_a_follow_up_to_a_deleted_thread_is_refused(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "why?")
+        svc.delete_question_thread(WHY, first)
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, "and?", first)
+        self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
+        self.assertEqual(len(self.asked), 1)
+
+    def test_a_keyed_question_replays_its_receipt_after_its_thread_is_deleted_and_a_restart(self):
+        key = "0123456789abcdef" * 2
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "q?", request_key=key)
+        svc.delete_question_thread(WHY, first)
+        self.assertEqual(svc.ask_project_question(WHY, "q?", request_key=key), first)
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(
+                WHY, f"key {FAKE_CREDENTIALS['github']}", request_key=key)
+        self.assertEqual(str(caught.exception), project_question.CREDENTIAL)
+        self.assertEqual(len(self.asked), 1)
+        rows = self.question_rows()
+        self.assertIn(("project_question.keyed", WHY, {"request_key": key, "question_id": first}),
+                      rows)
+        self.assertNotIn(ASKED, [row[0] for row in rows])
+        svc.close()
+        restarted = self.start()
+        self.assertEqual(restarted.ask_project_question(WHY, "q?", request_key=key), first)
+        self.assertEqual(len(self.asked), 1)
+
+
 class QuestionRequestKeyTest(QuestionCase):
     """A request may carry a key the console asks once per project (ADR-console-089 D9)."""
 
@@ -2785,6 +3175,18 @@ class QuestionRequestKeyTest(QuestionCase):
         for key in (self.KEY[:31], self.KEY.upper(), 12, None):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 project_question.parse_keyed_request(body(request_key=key))
+
+    def test_a_credential_under_a_known_request_key_is_refused(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        before = self.question_rows()
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, f"key {FAKE_CREDENTIALS['github']}",
+                                     request_key=self.KEY)
+        self.assertEqual(str(caught.exception), project_question.CREDENTIAL)
+        self.assertNotEqual(first, "")
+        self.assertEqual(self.question_rows(), before)
+        self.assertEqual(len(self.asked), 1)
 
     def test_a_repeated_key_asks_once(self):
         svc = self.start()
@@ -2901,6 +3303,19 @@ class QuestionRouteTest(QuestionCase):
                 self.assertEqual((got[0], got[2]), (status, text))
         self.assertEqual(self.asked, [])
 
+    def test_the_route_refuses_a_credential_with_409_and_keeps_nothing(self):
+        svc = self.start()
+        token = FAKE_CREDENTIALS["github"]
+        body = {"project_id": WHY, "question": f"why does {token} fail?"}
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            got = self.assert_unchanged(svc, lambda: self.post(svc, body, self.own(svc, **JSON)))
+        self.assertEqual((got[0], got[2]), (409, (project_question.CREDENTIAL + "\n").encode()))
+        self.assertEqual(self.asked, [])
+        self.assertEqual(
+            errors.getvalue(), f"console: project_question_refused {project_question.CREDENTIAL}\n")
+        self.assertNotIn(token, errors.getvalue())
+
     def test_a_question_from_the_page_is_answered_into_the_log(self):
         svc = self.start()
         status, _, body = self.post(
@@ -2940,3 +3355,49 @@ class QuestionRouteTest(QuestionCase):
             with self.subTest(method=method):
                 status, headers, _ = support.request(svc.address, method, QUESTION_ROUTE)
                 self.assertEqual((status, headers["Allow"]), (405, "POST"))
+
+
+class QuestionDeleteRouteTest(QuestionCase):
+    def post(self, svc, body, headers):
+        payload = body if isinstance(body, bytes) else json.dumps(body).encode()
+        return support.post_page(svc.address, service.PROJECT_QUESTION_DELETE_PATH, headers, payload)
+
+    def test_the_delete_route_deletes_with_204_and_refuses_what_it_cannot_read(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "why?")
+        cases = (
+            ({"project_id": WHY}, 400, b"bad delete\n"),
+            ({"project_id": WHY, "thread_id": first, "x": 1}, 400, b"bad delete\n"))
+        for body, status, text in cases:
+            with self.subTest(body=body):
+                got = self.assert_unchanged(
+                    svc, lambda: self.post(svc, body, self.own(svc, **JSON)))
+                self.assertEqual((got[0], got[2]), (status, text))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            got = self.assert_unchanged(svc, lambda: self.post(
+                svc, {"project_id": WHY, "thread_id": "nope"}, self.own(svc, **JSON)))
+        self.assertEqual((got[0], got[2]),
+                         (409, (project_question.THREAD_UNKNOWN + "\n").encode()))
+        self.assertEqual(errors.getvalue(),
+                         f"console: project_question_delete_refused {project_question.THREAD_UNKNOWN}\n")
+        status, _, body = self.post(
+            svc, {"project_id": WHY, "thread_id": first}, self.own(svc, **JSON))
+        self.assertEqual((status, body), (204, b""))
+        self.assertIsNone(self.shown(svc)["questions"])
+
+    def test_the_delete_route_is_an_owner_only_page_write_that_takes_only_post(self):
+        svc = self.start()
+        route = service.PROJECT_QUESTION_DELETE_PATH
+        self.assertIn(route, service.PAGE_WRITES)
+        self.assertIn(route, service.OWNER_ONLY)
+        self.assertNotIn(route, service.GUEST_WRITES)
+        for method in ("GET", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                status, headers, _ = support.request(svc.address, method, route)
+                self.assertEqual((status, headers["Allow"]), (405, "POST"))
+        first = svc.ask_project_question(WHY, "why?")
+        origin = f"http://127.0.0.1:{svc.address[1]}"
+        got = self.assert_unchanged(svc, lambda: self.post(
+            svc, {"project_id": WHY, "thread_id": first}, {"Origin": origin, **JSON}))
+        self.assertEqual((got[0], got[2]), (403, b"token refused\n"))

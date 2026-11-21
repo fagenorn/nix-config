@@ -1,6 +1,6 @@
 # ADR-console-009 — Events are kept for 90 days, and only the retention pass deletes
 
-- **Status:** accepted; amended by ADR-console-036, ADR-console-040
+- **Status:** accepted; amended by ADR-console-036, ADR-console-040, ADR-console-093
 - **Decided in:** #838, #861, #886, #887, #889, #891, #1089
 
 ## Context
