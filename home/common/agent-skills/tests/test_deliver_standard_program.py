@@ -1550,16 +1550,48 @@ class SmallPlanCodexSkipTest(unittest.TestCase):
         self.assertEqual(set(schema_of(calls, "final-codex")["properties"]), {"available", "verdict", "findings", "raw_summary"})
         self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "code"))
 
-    def test_a_revise_that_adds_a_security_task_runs_no_codex_plan_review(self):
-        finding = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
-        revised = dict(PLAN, tasks=tasks(2) + [dict(tasks(3)[2], risk="security")], criteria_edited=[])
-        out = run_out(replies={"plan": self.small(2), "plan-review": finding, "plan-revise": revised})
+    FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+
+    def grown(self, task_list):
+        return dict(PLAN, tasks=task_list, criteria_edited=[])
+
+    def test_an_amended_unreviewed_small_plan_keeps_the_codex_plan_review(self):
+        cont = dict(AMEND_CONT, plan=self.small(2), plan_reviewed=False, done=[])
+        out = run_out(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]))
         names = labels(out["calls"])
         self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(names.count("plan-revise"), 1)
-        self.assertNotIn("plan-codex", names)
-        self.assertEqual([l for l in out["logs"] if l.startswith("codex plan review: ")], [self.SKIP.format(2)])
-        self.assertEqual(names.count("impl-3"), 1)
+        self.assertLess(names.index("amend"), names.index("plan-codex"))
+        self.assertFalse([l for l in out["logs"] if "codex plan review: skipped" in l])
+
+    def test_a_revise_that_leaves_the_plan_small_runs_no_codex_plan_review(self):
+        out = run_out(replies={"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": self.grown(tasks(3))})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("plan-codex", labels(out["calls"]))
+
+    def test_a_revise_that_leaves_the_plan_not_small_runs_the_codex_plan_review_on_it(self):
+        added = tasks(2) + [dict(tasks(3)[2], risk="security")]
+        for name, task_list in (("security", added), ("fourth", tasks(4))):
+            with self.subTest(name):
+                out = run_out(replies={"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": self.grown(task_list)})
+                names = labels(out["calls"])
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertGreater(names.index("plan-codex"), names.index("plan-revise"))
+                self.assertIn("codex plan review: 0 blocking findings", out["logs"])
+                self.assertEqual(names.count("impl-%d" % len(task_list)), 1)
+
+    def test_the_codex_plan_review_of_a_grown_plan_stops_on_unavailable_and_on_findings(self):
+        grown = self.grown(tasks(4))
+        base = {"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": grown}
+        stopped, calls = run(replies=dict(base, **{"plan-codex": self.UNAVAILABLE}))
+        self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "plan"))
+        self.assertNotIn("impl-1", labels(calls))
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "bad"}]}
+        stopped, calls = run(replies=dict(base, **{"plan-codex": codex}))
+        self.assertEqual(stopped["stage"], "plan-review")
+        self.assertEqual([f["summary"] for f in stopped["findings"]], ["bad"])
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        self.assertNotIn("impl-1", labels(calls))
 
 
 class PlanRulesTest(unittest.TestCase):
