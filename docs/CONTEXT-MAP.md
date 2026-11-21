@@ -52,10 +52,12 @@
 | Detaching word | Guard |
 | Digest | Console |
 | Drafted contract | Console |
+| Engine | Delivery |
 | Excluded profile | Console |
 | Fleet registry | Project contract |
 | Folder trust | Console |
 | Goal | Console |
+| Grader | Delivery |
 | Guest | Console |
 | Held issue | Verification |
 | Held work | Console |
@@ -82,6 +84,7 @@
 | Not yet managed | Console |
 | Notice | Console |
 | Nudge | Console |
+| Outcome | Delivery |
 | Outside sprints | Console |
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
@@ -95,6 +98,7 @@
 | Prefix reorder | Hosts |
 | Production rule | Guard |
 | Probe | Verification |
+| Procedure | Delivery |
 | Production rules | Project contract |
 | Project contract | Project contract |
 | Project question | Console |
@@ -121,6 +125,8 @@
 | Spend page | Console |
 | Sprint | Console |
 | Stale claim | Claims |
+| Step | Delivery |
+| Stop | Delivery |
 | Suite member | Delivery |
 | Transaction | Release |
 | Triage record | Delivery |
