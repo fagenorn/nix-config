@@ -381,12 +381,15 @@ class QuestionCheckTest(unittest.TestCase):
 
     def test_spend_figure_and_cites_part(self):
         for text in ("4,200 tokens", "$38.10", "40k tokens", "12 USD", "4.2M tokens", "1.5 million tokens", "$1,200", "$3k", "$12", "$38", "$12 per issue", "~$12", "cost $12 in total", "$5 per issue", "$1.5 million",
-                     "**4,200** tokens", "**$0.42**", "`4,200` tokens"):
+                     "**4,200** tokens", "**$0.42**", "`4,200` tokens",
+                     "Planning cost about $5.", "$5 a month", "$5/issue", "$5 for the month", "$5 on planning",
+                     "Planning: $5", "$5, the most", "the $5 spent", "($5)", "**$5**"):
             with self.subTest(text=text):
                 self.assertIs(question_check.spend_figure(text), True)
         for text in (None, "Planning costs the most per issue.", "#1271 took 3 runs over 7 days",
                      "For issue #7, tokens were unavailable.", "For issue 7, tokens were unavailable.",
-                     "#7 tokens", "12,34 tokens", "$1 is a script argument", "costs $12,34", "the $1.", "$123,4"):
+                     "#7 tokens", "12,34 tokens", "$1 is a script argument", "costs $12,34", "the $1.", "$123,4",
+                     "the $1", "with $1.", "script argument $1.", "$1 as an argument", "$1abc"):
             with self.subTest(text=text):
                 self.assertIs(question_check.spend_figure(text), False)
         own = READ.format("q2")

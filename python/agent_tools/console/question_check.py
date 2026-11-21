@@ -93,8 +93,10 @@ failure or error next to `activation`, `run`, `build`, `deploy`, `production`, `
 to open`) is removed first (`_FAILED_RUN`), so `q.records.json (failed activation)` is a citation.
 
 `spend_figure(text)` is False for None, else whether the text holds a spend figure: a dollar amount
-(`$0.42`, `$1,200`, `$3k`: a complete amount, with a fraction, a comma group or a magnitude, not followed
-by a digit, `,` or `.` and a digit, so `$1` and `$12,34` are not figures), a number followed by `tokens`
+(`$0.42`, `$1,200`, `$3k`, `$12`, `$5 a month`: a complete amount, not followed by a digit, `,` or `.` and a
+digit, so `$12,34` is no figure; a lone digit is a figure unless a word character follows it, an argument
+word follows it (`$1 is a script argument`) or an article or argument noun leads into it at the end of a
+sentence (`the $1.`), since `$1` is also a shell argument), a number followed by `tokens`
 (with an optional `k`, `m`, `b`, `thousand`, `million` or `billion`) or a number followed by `dollars` or
 `usd`, with the `**bold**` or `inline code` marks the answer rules permit around the number or the unit
 (`**4,200** tokens`). A number is digits with commas only between three-digit groups and an optional fraction, and one right after `#`, a word character, `.` or `,` is
@@ -152,9 +154,15 @@ _NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 _MAGNITUDE = r"(?:[kmb]|thousand|million|billion)"
 _MARK = r"[*`]{0,2}\s?[*`]{0,2}"
 _END = r"(?![\d]|[.,]\d)"
+# A lone digit after `$` is also a shell positional argument ($1): it is a dollar amount unless a word follows it,
+# a word that names an argument follows it, or an article or argument noun leads into it at the end of a sentence.
+_SHELL_WORD = r"(?:is|as|are|argument|arguments|arg|args|parameter|param|variable|var|holds|expands|refers|means|set|passed)"
+_SHELL_LEAD = "".join(r"(?<!\b" + word + r"\s\$)(?<!\b" + word + r"\s\$\s)"
+                      for word in ("the", "with", "using", "use", "argument", "parameter", "arg", "variable", "var"))
+_LONE_DIGIT = (r"(?:" + _SHELL_LEAD + r"|(?=\d(?!\.?\s*\Z|\.(?!\d))))\d(?!\w)(?!\s+" + _SHELL_WORD + r"\b)")
 _SPEND_FIGURE = re.compile(
     r"\$\s?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+|\d{1,3}(?:,\d{3})+|\d+\s?" + _MAGNITUDE + r"\b|\d{2,}"
-    + r"|\d(?=\s+(?:per|in\s+total|total|each|across|over)\b))" + _END
+    + r"|" + _LONE_DIGIT + r")" + _END
     + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:" + _MAGNITUDE + _MARK + r")?tokens?\b"
     + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:dollars|usd)\b", re.IGNORECASE)
 _NEGATION = re.compile(r"\b(?:not?|non|excl(?:uding|udes?|uded)?|without|except(?:ing)?)\b", re.IGNORECASE)
