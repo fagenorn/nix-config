@@ -96,7 +96,10 @@ allow rule, no ask rule, no `autoMode` and no `disableAllHooks`. A launch built 
 permission carries `permission.FALLBACK`,
 so `auto`. `settings_document(env, permission)` is that content and `write_settings(path, env,
 permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a
-stopped or removed session (`service._refresh_settings`).
+stopped or removed session (`service._refresh_settings`). A manager's Bash prompt the permit does
+not decide is held by its hook for `PROMPT_HOLD_SECONDS`, polled every `PROMPT_POLL_SECONDS`, and the hook's
+`timeout` is `PROMPT_TIMEOUT` seconds (#1424); the constants live here so the cycle `sprint -> manager` stays
+whole.
 
 Runner. On macOS `run_launch` runs it with `run_in_own_group`, so a launch that times out ends the
 wrapper and the client it waits for together, not the wrapper alone. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
@@ -200,6 +203,9 @@ PERMIT_COMMAND = "sprint permit"
 LANDED_COMMAND = "sprint permit --landed"
 PERMIT_TIMEOUT = 60
 LANDED_TIMEOUT = 30
+PROMPT_HOLD_SECONDS = 600
+PROMPT_POLL_SECONDS = 2
+PROMPT_TIMEOUT = 660
 MANAGER_DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)")
 LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 
