@@ -1404,6 +1404,15 @@ def nudged(seq, sprint_id, through, ok):
     return Event(seq, at(seq), event_log.SPRINT_NUDGED, "owner/p00", payload)
 
 
+def routed(seq, sprint_id, through, ok, route, covers=None):
+    payload = {"sprint_id": sprint_id, "through": through, "route": route, "ok": ok}
+    if covers is not None:
+        payload["covers"] = covers
+    if not ok:
+        payload["reason"] = "no route"
+    return Event(seq, at(seq), event_log.SPRINT_NUDGED, "owner/p00", payload)
+
+
 def message_rows():
     return [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS),
             replied(3, SID, 1, "smaller slices"), sent(4, SID, 2, PARTS), approved(5, SID, 2),
@@ -1647,6 +1656,62 @@ class MessageFoldTest(unittest.TestCase):
         self.assertEqual((sprints.UNREACHABLE_AFTER, sprints.UNREACHABLE_TEXT,
                           sprints.RENUDGE_AFTER_MS, sprints.UNKNOWN_MESSAGE),
                          (2, "manager not reachable", 60_000, "this message is not known"))
+        self.assertEqual((sprints.UNREAD_AGAIN_MS, sprints.RELAY_AGAIN, sprints.WAKE_UNREAD,
+                          sprints.STILL_RUNNING_TEXT),
+                         (300_000, "relay_again", "wake_unread",
+                          "the manager's session did not stop for the wake"))
+
+
+class UnreadStepTest(unittest.TestCase):
+    def step(self, rows, now_ms, session=None):
+        state = message_state_of(rows)
+        if session is not None:
+            state = replace(state, manager_session=session)
+        return sprints.unread_step(state, now_ms)
+
+    def test_a_relay_counts_on_the_messages_it_covers_and_a_wake_marks_them_woken(self):
+        state = message_state_of(message_rows() + [
+            routed(7, SID, 6, True, "relay"), routed(8, SID, 6, False, "relay"),
+            routed(9, SID, 6, True, "relay", covers=[6])])
+        self.assertEqual([(m.relays, m.relayed_at) for m in state.messages],
+                         [(1, at(7)), (1, at(7)), (2, at(9))])
+        self.assertEqual([m.woken_at for m in state.messages], [None] * 3)
+        state = message_state_of(message_rows() + [
+            routed(7, SID, 6, True, "relay"), routed(8, SID, 6, True, "wake")])
+        self.assertEqual([m.woken_at for m in state.messages], [at(8)] * 3)
+        self.assertEqual([m.relays for m in state.messages], [1] * 3)
+        state = message_state_of(message_rows() + [routed(7, SID, 6, True, None)])
+        self.assertEqual([(m.relays, m.relayed_at, m.woken_at) for m in state.messages],
+                         [(0, None, None)] * 3)
+
+    def test_a_message_relayed_once_is_relayed_again_five_minutes_later_not_before(self):
+        rows = message_rows() + [routed(7, SID, 6, True, "relay")]
+        self.assertIsNone(self.step(rows, ms(7) + sprints.UNREAD_AGAIN_MS - 1))
+        self.assertEqual(self.step(rows, ms(7) + sprints.UNREAD_AGAIN_MS), sprints.RELAY_AGAIN)
+
+    def test_a_message_relayed_twice_wakes_and_never_relays_a_third_time(self):
+        rows = message_rows() + [routed(7, SID, 6, True, "relay"), routed(8, SID, 6, True, "relay")]
+        now = ms(8) + sprints.UNREAD_AGAIN_MS
+        self.assertEqual(self.step(rows, now, session="s-1"), sprints.WAKE_UNREAD)
+        self.assertIsNone(self.step(rows, now))
+
+    def test_a_read_or_woken_message_needs_no_step(self):
+        rows = message_rows() + [routed(7, SID, 6, True, "relay"), routed(8, SID, 6, True, "relay")]
+        later = ms(9) + 10 * sprints.UNREAD_AGAIN_MS
+        self.assertIsNone(self.step(rows + [read_through(9, SID, 6)], later, session="s-1"))
+        self.assertIsNone(self.step(rows + [routed(9, SID, 6, True, "wake")], later, session="s-1"))
+
+    def test_the_step_waits_out_the_last_attempt_and_stops_when_unreachable(self):
+        rows = message_rows() + [routed(7, SID, 6, True, "relay"), routed(8, SID, 6, False, "relay")]
+        self.assertIsNone(self.step(rows, ms(7) + sprints.UNREAD_AGAIN_MS))
+        self.assertEqual(self.step(rows, ms(8) + sprints.UNREAD_AGAIN_MS), sprints.RELAY_AGAIN)
+        rows = rows + [routed(9, SID, 6, False, "relay")]
+        self.assertEqual(message_state_of(rows).failed_nudges, 2)
+        self.assertIsNone(self.step(rows, ms(9) + 10 * sprints.UNREAD_AGAIN_MS))
+
+    def test_a_message_never_relayed_needs_no_step(self):
+        for rows in (message_rows(), message_rows() + [routed(7, SID, 6, False, "relay")]):
+            self.assertIsNone(self.step(rows, ms(7) + 10 * sprints.UNREAD_AGAIN_MS))
 
 
 QUESTION = {"question": "Which store keeps the checkpoints?", "blocks": "the resume slice",
