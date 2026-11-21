@@ -1056,7 +1056,29 @@ class RowTest(unittest.TestCase):
                 self.assertEqual(found["state"], "drafting")
         _, plain = self.planned_with_light_lane(self.SHADOW, state=None)
         drafting = register.fold([Event(1, "t1", register.ENDED, None, plain)])
-        self.assertIsNone(drafting.held)
+        self.assertEqual(drafting.held, ())
+
+    def test_the_saved_plan_stands_in_again_when_the_page_falls_back_to_its_row(self):
+        """Another root's registration pushes the replanned row into `before` (#1445)."""
+        _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        other = register.failed("/x/other", "failed")
+        adoptions = {PLAN_ID: {"step": "push_failed", "pull_state": None}}
+        opened = [Event(1, "t1", register.ENDED, None, row),
+                  Event(2, "t2", register.ENDED, None, other),
+                  Event(3, "t3", "project.registered", "c/other", {"root": "/x/other"})]
+        gone = Event(4, "t4", "project.unregistered", "c/other", {"root": "/x/other"})
+        cancelled = Event(4, "t4", *register.cancelled_row("/x/other", other["plan_id"], restore=True))
+        for name, last in (("unregistered", gone), ("cancelled", cancelled)):
+            with self.subTest(fall_back=name):
+                before = register.fold(opened)
+                self.assertEqual(register.shown(before, adoptions)["root"], "/x/other")
+                state = register.fold([last], before)
+                self.assertEqual(state.latest["state"], "drafting")
+                found = register.shown(state, adoptions)
+                self.assertEqual((found["state"], found["plan_id"]), ("ready", PLAN_ID))
+                self.assertEqual(register.shown(state, {})["state"], "drafting")
+                whole = register.fold([*opened, last])
+                self.assertEqual(register.shown(whole, adoptions)["state"], "ready")
 
     def test_a_ready_plan_whose_light_lane_was_none_keeps_its_plan(self):
         _, row = self.planned_with_light_lane("none", state="ready")

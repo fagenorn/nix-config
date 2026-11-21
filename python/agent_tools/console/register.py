@@ -632,7 +632,7 @@ class Fold(NamedTuple):
     latest: dict | None
     before: tuple[dict, ...]
     roots: Mapping[str, str]
-    held: tuple[dict, dict] | None = None  # (latest, the saved planned row it replaced), #1445
+    held: tuple[tuple[dict, dict], ...] = ()  # (a replanned row, the saved planned row it replaced), #1445
 
 
 def _root_of(payload: object) -> str | None:
@@ -670,6 +670,7 @@ def _row_of(event: event_log.Event) -> tuple[dict | None, dict | None]:
 
 def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
     found, before, known, held = state or Fold(None, (), {})
+    held = list(held)
     roots = dict(known)
     for event in events:
         cancelled = event_log.cancelled_registration(event)
@@ -679,7 +680,6 @@ def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
                     found, before = before[-1], before[:-1]
                 else:
                     found, before = None, ()
-                held = None
             continue
         if event.kind == PROJECT_REGISTERED:
             root = _root_of(event.payload)
@@ -694,7 +694,6 @@ def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
             before = tuple(e for e in before if e["root"] != root)
             if found is not None and found["root"] == root:
                 found, before = (before[-1], before[:-1]) if before else (None, ())
-                held = None
             continue
         if event.kind != ENDED:
             continue
@@ -704,8 +703,11 @@ def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
         if found is not None and found["root"] != row["root"]:
             before = tuple(e for e in before if e["root"] != row["root"]) + (found,)
         found = row
-        held = None if kept is None else (row, kept)
-    return Fold(found, before, roots, held)
+        if kept is not None:
+            held.append((row, kept))
+    # a replanned row stays held while it is shown or can be shown again, from `before`
+    held = [pair for pair in held if pair[0] is found or any(pair[0] is entry for entry in before)]
+    return Fold(found, before, roots, tuple(held))
 
 
 def shown(state: Fold, adoptions: Mapping[str, Mapping]) -> dict | None:
@@ -717,12 +719,11 @@ def shown(state: Fold, adoptions: Mapping[str, Mapping]) -> dict | None:
     cancel or an answer, so the saved row stands in its place and the adoption resumes as for any
     planned row.
     """
-    if state.held is None:
-        return state.latest
-    _, kept = state.held
-    adopted = adoptions.get(kept["plan_id"])
-    if adopted is not None and not plans_again(adopted["step"], adopted["pull_state"]):
-        return kept
+    for row, kept in state.held:
+        if row is state.latest:
+            adopted = adoptions.get(kept["plan_id"])
+            if adopted is not None and not plans_again(adopted["step"], adopted["pull_state"]):
+                return kept
     return state.latest
 
 
