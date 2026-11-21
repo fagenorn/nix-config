@@ -1,4 +1,4 @@
-"""Tests for the adr-number command, its `next` subcommand (issue 1440)."""
+"""Tests for the adr-number command, its `next` and `renumber` subcommands (issue 1440)."""
 import json
 import re
 import subprocess
@@ -7,11 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import adr_number
+from agent_tools.delivery import adr_number, context_map_lint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GIT = ("git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false")
 ADR_A = Path("docs/areas/a/adr")
+RECORDS = "docs/areas/console/adr"
+MAP = "docs/CONTEXT-MAP.md"
 
 
 def run_git(root, *args):
@@ -174,6 +176,180 @@ class NextNumberTest(unittest.TestCase):
         self.assertIn("add 004", run_git(root, "log", "--full-history", "--format=%s", "HEAD", "--", "docs/areas/a/adr"))
         done = next_of(root)
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "005\n", ""))
+
+
+def tree_state(root):
+    root = Path(root)
+    files = sorted((path.relative_to(root).as_posix(), path.read_bytes())
+                   for path in root.rglob("*") if path.is_file() and ".git" not in path.relative_to(root).parts)
+    return (run_git(root, "rev-parse", "HEAD"), run_git(root, "status", "--porcelain=v1", "-uall"),
+            run_git(root, "ls-files", "-s"), files)
+
+
+def make_collision(tmp, synced):
+    root = init_repo(Path(tmp) / "collision")
+    write(root, "docs/README.md", "# docs\n")
+    write(root, MAP, "## Areas\n| Area | Context file | Gist | governs |\n|---|---|---|---|\n"
+          "| Console | [CONTEXT](./areas/console/CONTEXT.md) | x | `docs/**` |\n\n"
+          "## Terms\n| Term | Area |\n|---|---|\n| Thing | Console |\n")
+    write(root, "docs/areas/console/CONTEXT.md", "---\narea: Console\nbudget: 200\n---\n\n**Thing**: a term\n")
+    write(root, f"{RECORDS}/001-first.md", "# ADR-console-001 — First\n\nBody.\n")
+    write(root, "docs/guides/notes.md", "".join(f"line {n}\n" for n in range(1, 13)))
+    commit(root, "fork")
+    run_git(root, "checkout", "-q", "-b", "feature")
+    run_git(root, "checkout", "-q", "main")
+    write(root, f"{RECORDS}/012-base-choice.md", "# ADR-console-012 — Base choice\n\nBase body.\n")
+    lines = (root / "docs/guides/notes.md").read_text(encoding="utf-8").splitlines(keepends=True)
+    lines.insert(2, "Base cites ADR-console-012.\n")
+    write(root, "docs/guides/notes.md", "".join(lines))
+    commit(root, "base record")
+    run_git(root, "checkout", "-q", "feature")
+    write(root, f"{RECORDS}/012-branch-choice.md",
+          "# ADR-console-012 — Branch choice\n\nSee ADR-console-001.\nThis record is ADR-console-012.\n")
+    with (root / "docs/guides/notes.md").open("a", encoding="utf-8") as handle:
+        handle.write("Branch cites ADR-console-012.\n")
+    write(root, "docs/guides/branch-guide.md", "Read ADR-console-012.\n")
+    write(root, "src/note.py", "# ADR-console-012 decides this.\n")
+    commit(root, "branch record")
+    if synced:
+        run_git(root, "merge", "-q", "--no-edit", "main")
+    return root
+
+
+def renumber_args(root, *extra):
+    return ("renumber", "--repo-root", str(root), "--record", str(root / RECORDS / "012-branch-choice.md"),
+            "--base", "main", *extra)
+
+
+class RenumberTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name).resolve()
+
+    def test_a_synced_collision_renumbers_the_branch_record(self):
+        root = make_collision(self.tmp, synced=True)
+        self.assertTrue(any("number 012 is already" in e for e in context_map_lint.check(root, root / MAP)))
+        head = run_git(root, "rev-parse", "HEAD")
+        base_bytes = (root / RECORDS / "012-base-choice.md").read_bytes()
+        done = run_tool(*renumber_args(root))
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertEqual(json.loads(done.stdout), {
+            "from": "ADR-console-012", "to": "ADR-console-013",
+            "record": "docs/areas/console/adr/013-branch-choice.md",
+            "rewritten": ["docs/areas/console/adr/013-branch-choice.md", "docs/guides/branch-guide.md",
+                          "docs/guides/notes.md", "src/note.py"]})
+        self.assertFalse((root / RECORDS / "012-branch-choice.md").exists())
+        index, errors = context_map_lint.index_records(root / "docs" / "areas", str)
+        self.assertEqual(errors, [])
+        self.assertEqual(index[("console", "013")], root / RECORDS / "013-branch-choice.md")
+        self.assertEqual(index[("console", "012")], root / RECORDS / "012-base-choice.md")
+        notes = (root / "docs/guides/notes.md").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(notes[2], "Base cites ADR-console-012.")
+        self.assertEqual(notes[-1], "Branch cites ADR-console-013.")
+        self.assertEqual((root / "docs/guides/branch-guide.md").read_text(encoding="utf-8"), "Read ADR-console-013.\n")
+        self.assertEqual((root / "src/note.py").read_text(encoding="utf-8"), "# ADR-console-013 decides this.\n")
+        self.assertEqual((root / RECORDS / "012-base-choice.md").read_bytes(), base_bytes)
+        self.assertIn("RM docs/areas/console/adr/012-branch-choice.md -> docs/areas/console/adr/013-branch-choice.md",
+                      run_git(root, "status", "--porcelain=v1").splitlines())
+        self.assertEqual(run_git(root, "rev-parse", "HEAD"), head)
+        self.assertEqual(context_map_lint.check(root, root / MAP), [])
+
+    def test_an_unsynced_branch_takes_one_past_the_bases_number(self):
+        root = make_collision(self.tmp, synced=False)
+        self.assertFalse((root / RECORDS / "012-base-choice.md").exists())
+        done = run_tool(*renumber_args(root))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["to"], "ADR-console-013")
+        self.assertEqual((root / "docs/guides/branch-guide.md").read_text(encoding="utf-8"), "Read ADR-console-013.\n")
+        self.assertEqual(context_map_lint.check(root, root / MAP), [])
+
+    def test_an_explicit_target_is_used(self):
+        root = make_collision(self.tmp, synced=True)
+        done = run_tool(*renumber_args(root, "--to", "020"))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["record"], "docs/areas/console/adr/020-branch-choice.md")
+        index, errors = context_map_lint.index_records(root / "docs" / "areas", str)
+        self.assertEqual(errors, [])
+        self.assertIn(("console", "020"), index)
+        self.assertEqual(context_map_lint.check(root, root / MAP), [])
+
+    def test_uncommitted_and_untracked_citations_are_rewritten(self):
+        root = make_collision(self.tmp, synced=True)
+        with (root / "docs/guides/notes.md").open("a", encoding="utf-8") as handle:
+            handle.write("Draft line cites ADR-console-012.\n")
+        write(root, "docs/guides/draft.md", "Draft cites ADR-console-012.\n")
+        done = run_tool(*renumber_args(root))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        notes = (root / "docs/guides/notes.md").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(notes[-1], "Draft line cites ADR-console-013.")
+        self.assertEqual(notes[2], "Base cites ADR-console-012.")
+        self.assertEqual((root / "docs/guides/draft.md").read_text(encoding="utf-8"), "Draft cites ADR-console-013.\n")
+        self.assertIn("docs/guides/draft.md", json.loads(done.stdout)["rewritten"])
+
+
+class RenumberRefusalTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name).resolve()
+
+    def refused(self, root, args, code, exit_code=1):
+        before = tree_state(root)
+        done = run_tool(*args)
+        self.assertEqual((done.returncode, done.stdout, error_code(done)), (exit_code, "", code))
+        self.assertEqual(tree_state(root), before)
+
+    def test_a_target_number_ever_used_is_refused(self):
+        root = make_collision(self.tmp, synced=False)
+        run_git(root, "checkout", "-q", "main")
+        write(root, f"{RECORDS}/005-gone.md", "# ADR-console-005 — Gone\n")
+        commit(root, "add 005")
+        run_git(root, "rm", "-q", f"{RECORDS}/005-gone.md")
+        commit(root, "drop 005")
+        run_git(root, "checkout", "-q", "feature")
+        run_git(root, "merge", "-q", "--no-edit", "main")
+        for target in ("005", "012", "001"):
+            with self.subTest(target):
+                self.refused(root, renumber_args(root, "--to", target), "number_used")
+
+    def test_a_missing_record_is_refused(self):
+        root = make_collision(self.tmp, synced=True)
+        args = ("renumber", "--repo-root", str(root), "--record", str(root / RECORDS / "014-none.md"),
+                "--base", "main")
+        self.refused(root, args, "record_missing")
+
+    def test_a_shallow_history_is_refused(self):
+        root = make_collision(self.tmp, synced=True)
+        shallow = self.tmp / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", "--no-single-branch", "--branch", "feature",
+                        f"file://{root}", str(shallow)], check=True, capture_output=True, text=True)
+        shallow = shallow.resolve()
+        self.assertEqual(run_git(shallow, "rev-parse", "--is-shallow-repository").strip(), "true")
+        args = ("renumber", "--repo-root", str(shallow), "--record", str(shallow / RECORDS / "012-branch-choice.md"),
+                "--base", "origin/main")
+        self.refused(shallow, args, "shallow_history")
+
+    def test_an_untracked_record_is_refused(self):
+        root = make_collision(self.tmp, synced=True)
+        write(root, f"{RECORDS}/015-loose.md", "# ADR-console-015 — Loose\n")
+        args = ("renumber", "--repo-root", str(root), "--record", str(root / RECORDS / "015-loose.md"),
+                "--base", "main")
+        self.refused(root, args, "record_untracked")
+
+    def test_a_header_that_does_not_name_the_record_is_refused(self):
+        root = make_collision(self.tmp, synced=True)
+        write(root, f"{RECORDS}/014-odd.md", "# ADR-console-016 — Odd\n")
+        commit(root, "odd record")
+        args = ("renumber", "--repo-root", str(root), "--record", str(root / RECORDS / "014-odd.md"),
+                "--base", "main")
+        self.refused(root, args, "header_mismatch")
+
+    def test_a_malformed_target_is_misuse(self):
+        root = make_collision(self.tmp, synced=True)
+        for target in ("13", "000", "abc"):
+            with self.subTest(target):
+                self.refused(root, renumber_args(root, "--to", target), "misuse", exit_code=2)
 
 
 class CommandTableTest(unittest.TestCase):
