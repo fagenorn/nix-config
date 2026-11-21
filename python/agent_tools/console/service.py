@@ -454,8 +454,9 @@ sign-out alone and appends one `signin.acted` row of action `signout`, outcome `
 account alone, the account staying in the pool and his. After the page-write guard the body is JSON
 read with `MAX_REMOVE_BYTES` and `account_remove.parse_signout_request` (exactly one member,
 `profile`, a non-empty string; else 400 `bad sign-out`), then `sign_out_account(profile)` runs with
-no lock held. Refusals are 409 with the text and one stderr line `console: account_signout_refused
-<text>`, appending nothing: `account_remove.SIGNOUT_UNAVAILABLE` without a signer-out, `no such
+no lock held. Refusals are 409 with the text and one fixed stderr line `console:
+account_signout_refused` (the text can name the profile, so it stays out of the line), appending
+nothing: `account_remove.SIGNOUT_UNAVAILABLE` without a signer-out, `no such
 profile` for a profile not listed, `account_remove.NOT_COLLEAGUE` for one no colleague added (the
 owner's own account is never signed out here), the busy and running sign-in refusals of the
 removal. A failed sign-out is 502 `the account was not signed out: <kind>` and one stderr line
@@ -2420,7 +2421,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         try:
             console.sign_out_account(profile)
         except sprints.Refused as error:
-            print(f"console: account_signout_refused {error}", file=sys.stderr)
+            print("console: account_signout_refused", file=sys.stderr)
             self._refuse(409, str(error))
             return False
         except account_remove.SignOutFailed as error:

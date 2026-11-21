@@ -475,6 +475,20 @@ class ColleagueAccountOwnerTest(Case):
         self.assertIn("console: account_signout_failed exited", err.getvalue())
         self.assertNotIn("colleague-1", err.getvalue())
 
+    def test_a_refused_sign_out_names_no_profile_on_stderr(self):
+        stub = types.SimpleNamespace(running=lambda: frozenset({"colleague-1"}),
+                                     close=lambda: None)
+        self.begin_colleague(runs=lambda on_end: stub)
+        before = support.log_rows(self.store)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status, _, body = self.signout("colleague-1")
+        self.assertEqual(
+            (status, body), (409, account_remove.running("colleague-1").encode() + b"\n"))
+        self.assertEqual(err.getvalue(), "console: account_signout_refused\n")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(support.log_rows(self.store), before)
+
     def test_the_owner_removes_a_colleagues_account_and_it_is_his_no_more(self):
         self.begin_colleague()
         self.assertEqual(self.remove("colleague-1")[::2], (204, b""))
