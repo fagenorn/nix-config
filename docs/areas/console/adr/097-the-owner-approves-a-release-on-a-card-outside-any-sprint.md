@@ -21,6 +21,6 @@ ADR-console-094 removed the release from the manager permit because a permit tha
 
 - Posting approves nothing: only the owner's answer on the page does.
 - The approval is as strong as the page-write guard of ADR-console-008. A process of the owner's uid that holds the page token or writes the store could forge it, as it could any owner answer today.
-- An approval older than 90 days lapses at read time, whether or not retention has run.
+- An approval older than 90 days lapses at read time, whether or not retention has run, and the console treats a card that old as closed: it takes no answer, a post of its pair gets a fresh card and the page does not list it.
 - The page lists only open cards, so a re-post of an approved pair offers nothing to click; the skill then asks in chat.
 - Related: ADR-console-008, ADR-console-094.

@@ -25,12 +25,16 @@ redirection, an expansion, a glob, a comment, a tilde, a brace, a newline outsid
 `mentions(command)` is True when, after deleting every quote and backslash and splitting on
 whitespace and on `;|&()<>$`, the backtick, `,`, `[`, `]`, `{` and `}`, some word whose basename is `gh` is followed by `pr
 merge` or `run rerun`. Only the literal form is ever granted: every other spelling that `mentions` is
-`DENY` with `ALONE`, never undecided. `release_operation(command)` also reads the release command,
+`DENY` with `ALONE`, never undecided. The literal plain release run is recognized first, before any
+argument text is scanned, so a title or a notes path that spells `gh pr merge` is still a release run.
+`release_operation(command)` also reads the release command,
 under any program name (a bare `release`, any path whose basename is `release`, `python3 -m
 agent_tools.release.release`, behind `env` or inside a chain): `abandon` is `ABANDON` and a `run` with a
 `--dispose` or `--dispose=` word is `DISPOSE`, both always `DENY` for a manager (the lead abandons on the
 owner's word and disposes on the owner's yes to a token). A literal command is judged on its words, so a
-value is never an option: `--notes-file /tmp/a--dispose.md` is an ordinary run. The plain run is
+value is never an option: `--notes-file /tmp/a--dispose.md` is an ordinary run. The one word read
+as a command line is a shell wrapper's body (the word after a `-c` style flag, or after `eval`): an
+abandon or a dispose inside it is `ABANDON` or `DISPOSE`. The plain run is
 `RELEASE` only as the literal shape above and only as the first command. Every other run spelling (a
 preview, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a repeated flag, a
 value beginning with `-`, a wrapper, text built at run time and piped to a shell) gets no decision and
@@ -333,6 +337,7 @@ def words(command: str) -> list[str] | None:
 
 
 _SPLIT = re.compile(r"[\s;|&()<>$`,\[\]{}]+")
+_SHELL_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 
 
 def release_target(command: str) -> dict | None:
@@ -354,10 +359,8 @@ def release_target(command: str) -> dict | None:
     return target
 
 
-def release_operation(command: str) -> str | None:
-    """`RELEASE`, `ABANDON` or `DISPOSE` when the command runs the release command that way, else None."""
-    literal = words(command)
-    parts = literal if literal is not None else _SPLIT.split(re.sub(r"['\"\\]", "", command))
+def _release_verb(parts: list[str], literal: bool, command: str) -> str | None:
+    """The release verb the word list `parts` runs; `RELEASE` only for a literal command's first words."""
     for index, part in enumerate(parts):
         if (os.path.basename(part) != "release" and part != "agent_tools.release.release"
                 or parts[index + 1:index + 2] != ["transaction"] or len(parts) <= index + 2):
@@ -368,12 +371,35 @@ def release_operation(command: str) -> str | None:
         if verb == "run" and any(
                 word == "--dispose" or word.startswith("--dispose=") for word in parts[index + 3:]):
             return DISPOSE
-        if literal is not None and index == 0 and verb == "run" and release_target(command) is not None:
+        if literal and index == 0 and verb == "run" and release_target(command) is not None:
             return RELEASE
     return None
 
 
+def _wrapper_bodies(literal: list[str]) -> list[str]:
+    """The words a shell would run as a command line: the word after a `-c` style flag or `eval`."""
+    return [word for before, word in zip(literal, literal[1:])
+            if _SHELL_FLAG.fullmatch(before) or os.path.basename(before) == "eval"]
+
+
+def release_operation(command: str) -> str | None:
+    """`RELEASE`, `ABANDON` or `DISPOSE` when the command runs the release command that way, else None."""
+    literal = words(command)
+    if literal is None:
+        return _release_verb(_SPLIT.split(re.sub(r"['\"\\]", "", command)), False, command)
+    found = _release_verb(literal, True, command)
+    if found is not None:
+        return found
+    for body in _wrapper_bodies(literal):
+        inner = _release_verb(_SPLIT.split(re.sub(r"['\"\\]", "", body)), False, body)
+        if inner in (ABANDON, DISPOSE):
+            return inner
+    return None
+
+
 def _verb_of(command: str) -> str | None:
+    if release_target(command) is not None:
+        return RELEASE
     parts = _SPLIT.split(re.sub(r"['\"\\]", "", command))
     for index, part in enumerate(parts):
         name, rest = os.path.basename(part), parts[index + 1:index + 3]

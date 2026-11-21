@@ -173,6 +173,35 @@ class SyncRunTest(SyncCase):
         self.assertEqual(refusal, "confirmation_stale")
 
 
+class SyncApprovalTest(SyncCase):
+    """A bare run of a finished release writes the sync, so it asks the console like any run."""
+
+    def test_a_bare_run_finishes_a_pending_sync_only_on_an_approved_card(self):
+        self.world.sync_ready(create_exit=1, create_stdout="", create_stderr="gh: connection reset")
+        driver = self.driver()
+        rs.release(driver, rs.candidate())
+        before, asked = self.mutations(), []
+        self.world.sync_ready(branch_tip=MERGED)
+        def declined(commit, version):
+            asked.append((commit, version))
+            return False
+        driver.approvals = declined
+        for _ in range(2):
+            with self.assertRaises(release_driver.Refusal) as caught:
+                driver.run(None, [])
+            self.assertEqual(caught.exception.code, "release_unapproved")
+        self.assertEqual(asked, [(CANONICAL["commit"], CANONICAL["tag"])] * 2)
+        self.assertEqual(self.mutations(), before)
+        driver.approvals = None
+        with self.assertRaises(release_driver.Refusal) as caught:
+            driver.run(None, [])
+        self.assertEqual(caught.exception.code, "approval_unreadable")
+        self.assertEqual(self.mutations(), before)
+        self.assertEqual(driver.status()["release"]["state"], "succeeded")
+        driver.approvals = rs.approve_all
+        self.assertEqual(driver.run(None, [])["sync"], DONE)
+
+
 class SyncLookupTest(SyncCase):
     """Issue 998: one failed lookup is read again, and a run that still fails is finished by the
     next one, which opens the pull request or finds the one opened by hand."""

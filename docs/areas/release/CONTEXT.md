@@ -28,7 +28,7 @@ The durable record that a transaction step took effect, kept in the transaction 
 _Avoid_: log entry
 
 **Release approval**:
-The console's record that the owner approved one candidate, the pair of a commit and a version, as an approved release card of the last 90 days. The release run refuses a new candidate, or a release created before the gate, until one exists, and a release it created resumes without asking again (ADR-release-016).
+The console's record that the owner approved one candidate, the pair of a commit and a version, as an approved release card of the last 90 days. The release run refuses a candidate until one exists, a resumed release's stored candidate and a finished release's sync rerun included (ADR-release-016).
 _Avoid_: permit, chat approval
 
 **Release profile**:

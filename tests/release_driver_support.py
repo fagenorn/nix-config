@@ -59,7 +59,7 @@ def approve_all(commit, version) -> bool:
     return True
 
 
-def seed(driver, ordinal=1, *, authority_class=release_driver.ADMITTED_CLASS,
+def seed(driver, ordinal=1, *, authority_class=release_driver.AUTHORITY_CLASS,
          **overrides) -> str:
     """Create a transaction directly, as `run` would, and return its id."""
     store = driver.store(create=True)

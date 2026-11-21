@@ -5,10 +5,12 @@ Run: just agent-workflow-tests
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.console import guest, release_card, service
+from agent_tools.console import event_log, guest, release_card, service
 
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -159,6 +161,28 @@ class ReleaseCardRouteTest(Case):
         for path in (service.RELEASE_CARD_PATH, service.RELEASE_ANSWER_PATH):
             status, headers, _ = support.request(svc.address, "GET", path)
             self.assertEqual((status, headers["Allow"]), (405, "POST"))
+
+    def test_a_card_past_the_retention_window_takes_no_answer_and_a_post_gets_a_fresh_card(self):
+        now = [time.time()]
+        stamp = lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat(timespec="microseconds")
+        svc = support.service(self, self.store, self.registry, clock=lambda: now[0],
+                              log_clock=stamp)
+        approved = json.loads(self.lead_post(svc)[2])["card"]
+        self.assertEqual(self.answer(svc, approved, "approve")[0], 204)
+        open_card = json.loads(self.lead_post(svc, OTHER, "v1.3.0")[2])["card"]
+        self.assertEqual(len(self.release_items(svc)), 1)
+        now[0] += (event_log.RETENTION + timedelta(days=1)).total_seconds()
+        late = self.answer(svc, open_card, "approve")
+        self.assertEqual((late[0], late[2]), (409, release_card.NOT_OPEN.encode() + b"\n"))
+        fresh = json.loads(self.lead_post(svc)[2])
+        self.assertEqual(fresh["state"], "open")
+        self.assertGreater(fresh["card"], open_card)
+        again = json.loads(self.lead_post(svc, OTHER, "v1.3.0")[2])
+        self.assertEqual(again, {"card": again["card"], "state": "open"})
+        self.assertGreater(again["card"], fresh["card"])
+        self.assertEqual(len(self.posted_rows()), 4)
+        self.assertEqual(self.answer(svc, fresh["card"], "approve")[0], 204)
+        self.assertEqual([item["card"] for item in self.release_items(svc)], [again["card"]])
 
     def test_a_restarted_console_shows_the_same_cards(self):
         first = self.start()

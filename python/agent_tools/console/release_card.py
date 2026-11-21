@@ -17,8 +17,12 @@ Fold (`cards`). A posted row counts only when its payload is exactly `{commit, v
 when its payload is exactly `{card, answer}` (a row with a `by` member counts for nothing, so a
 guest's answer approves nothing), `card` names a folded card whose state is `OPEN` and `answer` is
 in `ANSWERS`; it sets that card to `APPROVED` or `DECLINED`. Every other row, and a second answer,
-changes nothing. `cards` never mutates the mapping it is given. `standing` is the newest card of a
-pair that is `OPEN` or `APPROVED`; `approved` is true only for a card of exactly that commit and
+changes nothing. `cards` never mutates the mapping it is given. `live(cards, now)` keeps the cards
+posted not before `cutoff(now)`, the string `now - event_log.RETENTION` that `EventLog.retain`
+compares, which is the card a release run may rely on: the console uses it when it posts, answers
+and lists, so a card past the cutoff takes no answer, is never returned for a repost and is not
+listed. `standing` is the newest card of a pair that is `OPEN` or `APPROVED`; `approved` is true
+only for a card of exactly that commit and
 version whose state is `APPROVED`. `inbox_entries` lists one `inbox_item` of reason `release` per
 `OPEN` card in `card_id` order, keyed `release/<card_id>`, headed `Approve release <version> at
 <first 12 of the commit>`, with the `card`, `commit`, `version`, a null `project_id`, `answered`
@@ -28,9 +32,10 @@ Host store. `host_store()` is `.agents/state/console/events.sqlite3` under the h
 database names for this user, never the caller's `$HOME`: the console's launchd job runs with that
 home, so a release run from any sandboxed or redirected home still reads the host console's store.
 `store_cards(store, now)` opens it read-only (`file:` URI, `mode=ro`, `PRAGMA query_only = ON`),
-never creates a missing store, refuses a `PRAGMA user_version` below `event_log.SCHEMA_VERSION`,
-selects only the two card kinds whose `at` is not before `now - event_log.RETENTION` (the string
-`EventLog.retain` compares), in `seq` order, skips a payload that is not a JSON object, and turns a
+never creates a missing store, refuses a `PRAGMA user_version` other than `event_log.SCHEMA_VERSION`
+(an older store is unmigrated and a newer one, left by a later console build, is not read by this
+one), selects only the two card kinds whose `at` is not before `cutoff(now)`, in `seq` order, skips
+a payload that is not a JSON object, and turns a
 missing file, `sqlite3.Error` and `OSError` into `Unreadable`. A row retention would remove never
 counts, even when the console has not run its retention pass.
 
@@ -191,6 +196,17 @@ def inbox_entries(cards: Mapping[int, Card]) -> list[dict]:
             if card.state == OPEN]
 
 
+def cutoff(now: datetime) -> str:
+    """The `at` string before which a row is past retention, as `EventLog.retain` compares it."""
+    return (now - event_log.RETENTION).astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def live(cards: Mapping[int, Card], now: datetime) -> dict[int, Card]:
+    """The cards posted inside the retention window ending at `now`."""
+    oldest = cutoff(now)
+    return {number: card for number, card in cards.items() if card.at >= oldest}
+
+
 def host_store() -> Path:
     """The host console's event store, under the password database's home and never `$HOME`."""
     return (Path(pwd.getpwuid(os.getuid()).pw_dir) / ".agents" / "state" / "console"
@@ -200,20 +216,18 @@ def host_store() -> Path:
 def store_cards(store: Path, now: datetime | None = None) -> dict[int, Card]:
     """The cards the store holds inside the retention window; `Unreadable` when it cannot be read."""
     now = now or datetime.now(timezone.utc)
-    cutoff = (now - event_log.RETENTION).astimezone(timezone.utc).isoformat(
-        timespec="microseconds")
     try:
         connection = sqlite3.connect(f"{Path(store).resolve().as_uri()}?mode=ro", uri=True)
         try:
             connection.execute("PRAGMA query_only = ON")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version < event_log.SCHEMA_VERSION:
+            if version != event_log.SCHEMA_VERSION:
                 raise sqlite3.DatabaseError(
                     f"store schema is {version}, this build reads {event_log.SCHEMA_VERSION}")
             found = connection.execute(
                 "SELECT seq, at, kind, project, payload FROM events "
                 "WHERE kind IN (?, ?) AND at >= ? ORDER BY seq",
-                (event_log.RELEASE_CARD_POSTED, event_log.RELEASE_CARD_ANSWERED, cutoff)
+                (event_log.RELEASE_CARD_POSTED, event_log.RELEASE_CARD_ANSWERED, cutoff(now))
             ).fetchall()
         finally:
             connection.close()

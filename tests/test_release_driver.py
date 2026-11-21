@@ -332,13 +332,13 @@ class ApprovalGateTest(DriverCase):
         driver = self.forge(approvals=lambda commit, version: False)
         self.assertRefusal("confirmation_required", driver.run, rs.candidate(), [])
 
-    def test_a_transaction_from_before_the_gate_resumes_only_on_an_approval_of_its_own_candidate(self):
+    def test_a_resumed_transaction_runs_only_on_an_approval_of_its_own_candidate(self):
         asked = []
         def declined(commit, version):
             asked.append((commit, version))
             return False
         driver = self.forge(approvals=declined)
-        rs.seed(driver, authority_class=release_driver.AUTHORITY_CLASS)
+        rs.seed(driver)
         before = driver.status()
         tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
         self.assertRefusal("release_unapproved", driver.run, None, tokens)
@@ -357,19 +357,14 @@ class ApprovalGateTest(DriverCase):
             self.assertNotIn(refusal.code, self.GATE)
         self.assertEqual(approving, [(CANONICAL["commit"], CANONICAL["tag"])])
 
-    def test_a_transaction_admitted_under_the_gate_resumes_without_asking(self):
-        asked = []
-        def declined(commit, version):
-            asked.append((commit, version))
-            return False
-        driver = self.forge(approvals=declined)
-        rs.seed(driver)
-        tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
-        try:
-            driver.run(None, tokens)
-        except release_driver.Refusal as refusal:
-            self.assertNotIn(refusal.code, self.GATE)
-        self.assertEqual(asked, [])
+    def test_a_stored_authority_class_is_no_proof_of_approval(self):
+        for authority_class in ("release.approved", "approved", release_driver.AUTHORITY_CLASS):
+            with self.subTest(authority_class=authority_class):
+                driver = self.forge(approvals=lambda commit, version: False)
+                rs.seed(driver, authority_class=authority_class)
+                tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+                self.assertRefusal("release_unapproved", driver.run, None, tokens)
+                self.assertEqual((pushes(self.world), creates(self.world)), ([], []))
 
 
 class RunRefusalTest(DriverCase):

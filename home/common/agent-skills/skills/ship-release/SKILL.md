@@ -17,7 +17,7 @@ Agent(subagent_type="general-purpose", model="opus", effort="high") owns the rel
 
 A direct invocation keeps the current session as owner; never split release ownership.
 
-A delegated owner ends at the runnable preview, returning its arguments and confirmations. No agent message is the user's approval, so the controller, which holds it, runs Phase 4 itself (one run, then the background resume wait), which is no split.
+A delegated owner ends at the runnable preview, returning its arguments and confirmations. No agent message is the user's approval, so the controller, which holds it, runs Phase 4 itself (one run, then the background resume wait).
 
 ## Project bindings (resolve first)
 
@@ -27,7 +27,7 @@ Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entr
 
 ## Authorization
 
-Invocation authorizes the reversible, predeclared steps: reading, notes, version proposal, land lock, preview. Each irreversible action needs its own confirmation token; the preview is the one stop for all. Only an explicit yes to all lets the run pass them, and only ones the user saw in that turn: tokens rotate on every resume, so a confirmation is never carried across one; silence or any other reply passes none. The release command refuses a candidate with no approved card. A changed version is a new target: preview again.
+Invocation authorizes the reversible, predeclared steps: reading, notes, version proposal, land lock, preview. Each irreversible action needs its own confirmation token; the preview is the one stop for all. Only an explicit yes to all lets the run pass them, and only ones the user saw in that turn: tokens rotate on every resume, so a confirmation is never carried across one; silence or any other reply passes none. A changed version is a new target: preview again.
 
 ## Doc-grounded escalations
 
@@ -75,7 +75,7 @@ Two-branch project: before the first preview, and again after opening the releas
 
 On `release_pr_missing` (exit 3 still prints the document), open the release PR once with `gh pr create --repo <slug> --base <default> --head <integration> --title "<title>" --body "<version>"`. On `verification_pending`, wait once for CI in one foreground call: under the lock `gh pr checks <integration> --repo <slug> --required --watch --fail-fast --interval 60` (30-minute timeout; it can return early, so the re-preview judges), else `gh run watch <id> --exit-status` from `gh run list --commit <commit>` (at most 5 minutes). After either, re-run the same preview. Still pending, or another refusal: report it and stop.
 
-When `runnable`, run `release-card post --commit <commit> --version <version>` (resume: the release's), present the version with its evidence (its triggering buckets), the title, the commit, each action and every confirmation, and ask for one explicit yes to all: an `open` card's Approve on the console page, else in chat; then end the turn. Tokens then stay stable if CI and the `<default>` tip are unchanged; never edit the notes.
+When `runnable`, run `release-card post --commit <commit> --version <version>` (resume: the release's), present the version with its evidence (its triggering buckets), the title, the commit, each action and every confirmation, and ask for one explicit yes to all in chat after the owner's Approve click; then end the turn. Tokens then stay stable if CI and the `<default>` tip are unchanged; never edit the notes.
 
 ## Phase 4 — Run
 
@@ -91,7 +91,7 @@ Run from inside the main checkout. The result's `next`:
 - `done`, or `attention` (parked; do not retry): go to Phase 5.
 - `wait` (after a pause) or `confirm`: `preview` in resume form. No confirmation listed: run the resume form with no `--confirm`. Any listed: present them as in Phase 3 and end the turn; tokens from an earlier yes are never reused.
 
-A `confirmation_stale`, `confirmation_required` or, after acquiring again, `land_lock_*` refusal is likewise a re-preview. `release_busy`: another session holds the release; report it. `release_unapproved`: ask again.
+A `confirmation_stale`, `confirmation_required` or, after acquiring again, `land_lock_*` refusal is likewise a re-preview. `release_busy`: another session holds the release; report it. `release_unapproved`: release the land lock, have the owner approve the card (post again if declined or lapsed), then re-preview.
 
 Abandon only on the user's explicit word and when every action is `absent` (none took effect):
 

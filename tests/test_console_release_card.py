@@ -115,6 +115,18 @@ class ShapeTest(unittest.TestCase):
                 release_card.parse_answer(body)
 
 
+class LiveTest(unittest.TestCase):
+    def test_live_keeps_the_cards_posted_inside_the_retention_window_only(self):
+        start = datetime.fromisoformat(A)
+        found = release_card.cards([posted(1), answered(2, {"card": 1, "answer": "approve"})])
+        for days, kept in ((89, True), (91, False)):
+            with self.subTest(days=days):
+                live = release_card.live(found, start + timedelta(days=days))
+                self.assertEqual(sorted(live), [1] if kept else [])
+        self.assertEqual(release_card.cutoff(start + event_log.RETENTION), A)
+        self.assertEqual(sorted(found), [1])
+
+
 class StoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -139,6 +151,21 @@ class StoreTest(unittest.TestCase):
         connection.close()
         with self.assertRaises(release_card.Unreadable):
             release_card.store_cards(older)
+
+    def test_a_store_of_a_newer_schema_than_this_build_reads_is_unreadable(self):
+        path = self.tmp / "events.sqlite3"
+        log = EventLog(path)
+        (row,) = log.append([release_card.posted_row(COMMIT, VERSION)])
+        log.append([release_card.answered_row(row.seq, release_card.APPROVE)])
+        log.close()
+        self.assertTrue(release_card.approved(release_card.store_cards(path), COMMIT, VERSION))
+        connection = sqlite3.connect(path)
+        connection.execute(f"PRAGMA user_version = {event_log.SCHEMA_VERSION + 1}")
+        connection.commit()
+        connection.close()
+        with self.assertRaises(release_card.Unreadable) as caught:
+            release_card.store_cards(path)
+        self.assertIn(f"schema is {event_log.SCHEMA_VERSION + 1}", str(caught.exception))
 
     def test_an_approval_older_than_the_retention_window_does_not_count(self):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)

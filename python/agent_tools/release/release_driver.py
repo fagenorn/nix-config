@@ -86,15 +86,15 @@ Run (D6, D7, D14, D20, D21). `run` re-derives the plan as `preview` does and wri
 until it passes: a refused plan raises its refusal, a token outside the recomputed set refuses
 `confirmation_stale`, and a missing one `confirmation_required` (all-or-nothing). It then
 asks the approval gate (ADR-release-016), before the land lock, the store, `_adopt` and the
-create are touched. The gate applies to a new candidate and to a resumed transaction whose
-created event's authority class is not `release.approved` (one created before the gate); it
-calls `approvals(commit, version)` once with the plan's candidate (the stored one on a resume)
-and refuses `release_unapproved` when it answers False, or `approval_unreadable` when it raises
-`ApprovalUnreadable` or the driver has no `approvals` reader (the reason `no approvals reader`),
-each in one line. A resume of a `release.approved` transaction, `preview`, the finished-release
-reprint, `abandon` and `dispose` never ask. The driver imports no console module: its caller
-supplies the reader. It then creates the transaction (mode `new`) with authority class
-`release.approved`, acquires custody as executor `release-driver` with a
+create are touched. The gate applies to every `run` that goes on to write: a new candidate, a
+resumed transaction (whatever its stored fields say, which are no proof of approval) and the
+bare `run` of a finished release whose sync is read and finished again. It calls
+`approvals(commit, version)` once with the plan's candidate (the stored one on a resume or a
+finished release) and refuses `release_unapproved` when it answers False, or
+`approval_unreadable` when it raises `ApprovalUnreadable` or the driver has no `approvals`
+reader (the reason `no approvals reader`), each in one line. `preview`, `status`, `abandon`
+and `dispose` never ask. The driver imports no console module: its caller supplies the reader.
+It then creates the transaction (mode `new`), acquires custody as executor `release-driver` with a
 900000 ms TTL and issues one grant per token (`release-irreversible`, actor `operator`, kind
 `human`) and, when the plan has a non-irreversible action, `release-scope:<acquisition
 ordinal>` (`release-scope`). It renews custody before each phase and each action, so a lapsed
@@ -216,9 +216,8 @@ with no action in flight, so a renewal would give up the custody the disposition
 every action now reads `satisfied` it gives custody up and refuses `recovered` (resume it
 with no candidate), so a release that has since recovered is never sealed `failed`. It issues
 one grant
-named by the token (actor `operator`, kind `human`, authority class the transaction's
-own, the created event's: `release.approved` for a release `run` created and `release` for one
-created before the gate) and calls `dispose_failed` with `{ground, reference, occurred_at: null,
+named by the token (actor `operator`, kind `human`, authority class `release`, the
+transaction's) and calls `dispose_failed` with `{ground, reference, occurred_at: null,
 successor: null, units: []}`. A core refusal (an action `in_progress` or `unknown` after the
 inspection is `effect_uncertain`; a grant that is not a human's at the class is
 `human_required` or `authority_class_mismatch`) gives custody up and refuses `dispose_refused`
@@ -267,7 +266,6 @@ SCHEMA_VERSION = 1
 KEY_SCHEMA = "release/v1"
 EXECUTOR_ID = "release-driver"
 AUTHORITY_CLASS = "release"
-ADMITTED_CLASS = "release.approved"
 CUSTODY_TTL_MS = 900_000
 STORE_MODE = 0o700
 OPENINGS = ("lease_acquired", "lease_reacquired")
@@ -700,6 +698,7 @@ class Driver:
             raise Refusal("confirmation_stale", "not confirmations of this release: "
                           + ", ".join(dict.fromkeys(confirmations)))
         transaction = current[1]
+        self._require_approval(transaction.subject["candidate"])
         ending = "done" if transaction.state == "succeeded" else "attention"
         return {**self._result(transaction, ending), "legacy": None, "lock": None,
                 "sync": self._synced(transaction, self._router())}
@@ -765,7 +764,7 @@ class Driver:
         missing = [action for given, action in listed.items() if given not in supplied]
         if missing:
             raise Refusal("confirmation_required", "confirm: " + ", ".join(missing))
-        self._require_approval(plan)
+        self._require_approval(plan.candidate)
         router = self._router()
         lock = None
         if self.sync is not None and plan.transaction is None:
@@ -785,13 +784,10 @@ class Driver:
         drive = _Drive(self, plan, store, router, custody, acquisition, transaction, lock)
         return {**drive.run(supplied), "legacy": legacy}
 
-    def _require_approval(self, plan: _Plan) -> None:
-        """Refuse a new candidate, or a resumed transaction created before the gate, unless the
-        console records an approved release card of its exact commit and version."""
-        if (plan.transaction is not None
-                and plan.transaction.events[0]["authority_class"] == ADMITTED_CLASS):
-            return
-        commit, version = plan.candidate["commit"], plan.candidate["version"]
+    def _require_approval(self, candidate: Mapping[str, Any]) -> None:
+        """Refuse unless the console records an approved release card of the candidate's exact
+        commit and version; nothing the transaction store holds stands in for that record."""
+        commit, version = candidate["commit"], candidate["version"]
         try:
             if self.approvals is None:
                 raise ApprovalUnreadable("no approvals reader")
@@ -828,7 +824,7 @@ class Driver:
                 creation_key(self.project.project_id, self.profile_id, plan.ordinal),
                 inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
                 proof=inputs["proof"], recovery=inputs["recovery"],
-                authority_class=ADMITTED_CLASS,
+                authority_class=AUTHORITY_CLASS,
                 rerun_denied=self._rerun_denied())
         except (CreationConflict, LeaseUnavailable, TransactionBusy) as error:
             raise Refusal("release_busy", str(error)) from error
@@ -928,8 +924,7 @@ class Driver:
                               "now reads satisfied, so it is not disposed: resume it with no "
                               "candidate")
             store.issue_grant(custody, grant_id=expected, actor=OPERATOR,
-                              actor_kind=DISPOSE_ACTOR_KIND,
-                              authority_class=held.events[0]["authority_class"])
+                              actor_kind=DISPOSE_ACTOR_KIND, authority_class=AUTHORITY_CLASS)
             disposed = store.dispose_failed(custody, grant_id=expected, disposition={
                 "ground": ground, "reference": reference, "occurred_at": None,
                 "successor": None, "units": []})

@@ -114,6 +114,19 @@ class DriverLegacyTest(unittest.TestCase):
             if file.is_file():
                 self.assertNotIn(b"headSha", file.read_bytes())
 
+    def test_a_refused_approval_leaves_a_completed_file_and_no_store(self):
+        driver = self.driver()
+        driver.approvals = lambda commit, version: False
+        path = write(driver.project.root, {**STATE, "tag": "v0.9.0", "deployState": "none"})
+        before = path.read_bytes()
+        shown = driver.preview(rs.candidate())
+        tokens = [c["token"] for c in shown["confirmations"]]
+        with self.assertRaises(release_driver.Refusal) as caught:
+            driver.run(rs.candidate(), tokens)
+        self.assertEqual(caught.exception.code, "release_unapproved")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((driver.project.common_dir / "agent-release").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

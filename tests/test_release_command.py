@@ -418,19 +418,68 @@ class ApprovalCommandTest(CandidateCommandCase):
         code, result, err = self.run_with(tokens)
         self.assertEqual((code, result["state"]), (0, "succeeded"), err)
 
-    def test_a_release_admitted_on_an_approval_resumes_after_the_card_is_gone(self):
+    def parked(self):
+        """Run an approved release until it parks; returns its status release member."""
         self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
         self.world.invoke_ready(guard_exit=1)
         self.world.not_found("gh", ROWS["tag.ref"]["argv"][1:])
         self.world.not_found("gh", ROWS["release.view"]["argv"][1:])
         code, result, err = self.run_with(self.tokens())
         self.assertEqual((code, result["next"]), (0, "attention"), err)
-        self.host_store.unlink()
+        return self.status()
+
+    def status(self):
+        code, document, err = self.run_release("transaction", "status")
+        self.assertEqual(code, 0, err)
+        release = document["release"]
+        return release["state"], [(a["name"], a["status"]) for a in release["actions"]]
+
+    def resume(self):
         code, resume, err = self.run_release("transaction", "preview")
+        self.assertEqual(code, 0, err)
         confirms = [part for c in resume["confirmations"] for part in ("--confirm", c["token"])]
-        code, result, err = self.run_in_process("transaction", "run", *confirms, cwd=self.root)
-        self.assertNotIn(result.get("error", {}).get("code"),
-                         ("release_unapproved", "approval_unreadable"), err)
+        return self.run_in_process("transaction", "run", *confirms, cwd=self.root)
+
+    def test_a_parked_release_resumes_only_while_the_console_approves_its_candidate(self):
+        parked = self.parked()
+        self.host_store.unlink()
+        code, document, err = self.resume()
+        self.assertEqual((code, document["error"]["code"]), (3, "approval_unreadable"), err)
+        self.assertEqual(self.status(), parked)
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.DECLINE)
+        code, document, err = self.resume()
+        self.assertEqual((code, document["error"]["code"]), (3, "release_unapproved"), err)
+        self.assertEqual(self.status(), parked)
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
+        code, result, err = self.resume()
+        self.assertEqual((code, result["next"]), (0, "attention"), err)
+        self.assertNotIn("error", result)
+
+    def test_a_missing_passwd_entry_breaks_only_the_run(self):
+        tokens = self.tokens()
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
+
+        def main(*args):
+            out = io.StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"HOME": str(self.home)}))
+                stack.enter_context(mock.patch.object(
+                    release_card.pwd, "getpwuid", side_effect=KeyError("uid not found")))
+                stack.enter_context(contextlib.chdir(self.root))
+                stack.enter_context(contextlib.redirect_stdout(out))
+                code = release.main([*args, "--repo-root", str(self.root)])
+            return code, json.loads(out.getvalue())
+
+        code, document = main("transaction", "status")
+        self.assertEqual(code, 0, document)
+        code, document = main("transaction", "abandon")
+        self.assertNotEqual(document.get("error", {}).get("code"), "approval_unreadable", document)
+        confirms = [part for token in tokens for part in ("--confirm", token)]
+        code, document = main("transaction", "run", *self.candidate(), *confirms)
+        self.assertEqual((code, document["error"]["code"]), (3, "approval_unreadable"), document)
+        self.assertIn("uid not found", document["error"]["detail"])
+        self.assertNotIn("\n", document["error"]["detail"])
+        self.assertFalse(self.store_exists())
 
 
 class ParserCommandTest(ReleaseCommandCase):

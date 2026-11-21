@@ -763,7 +763,8 @@ rule as every route, any `Origin` is 403 `origin refused`, a media type other th
 `release_card.parse_post` refuses (anything but `{"commit", "version"}` of a release candidate's
 pattern) 400 `bad release card`. Under the ingest lock it answers 200
 `{"card": <int>, "state": "open" | "approved"}`: the standing card of the pair
-(`release_card.standing`, nothing appended) when one is open or approved, else it appends one
+(`release_card.standing`, nothing appended) when one is open or approved and posted inside the
+retention window (`release_card.live`: the cards the release command still reads), else it appends one
 `release_card.posted` row, folds and publishes it and answers its `seq` as `open`. Posting approves
 nothing, and each refusal appends nothing. Any other exception is `console: release_card_failed
 <Type>: <message>` and 500 `release card failed`.
@@ -773,12 +774,14 @@ release card. It is an owner-only page write (`OWNER_ONLY`; in neither `GUEST_WR
 `MANAGER_WRITES`), so `write_guard.refusal` runs first (no or a foreign `Origin` 403 `origin refused`,
 no or a wrong token 403 `token refused`), then the same JSON and length checks with
 `MAX_RELEASE_ANSWER_BYTES` (1024) and `release_card.parse_answer` (`{"card", "answer"}`, `answer`
-`approve` or `decline`): 400 `bad release answer`. Under the ingest lock the folded card must exist and
-be open, else 409 `release_card.NOT_OPEN` with one stderr line `console: release_answer_refused
+`approve` or `decline`): 400 `bad release answer`. Under the ingest lock the folded card must exist, be open and be
+posted inside the retention window (`release_card.live`), else 409 `release_card.NOT_OPEN` with one stderr line `console: release_answer_refused
 <words>`; otherwise it appends one `release_card.answered` row, folds and publishes it, and the answer
 is an empty `204`. The first answer wins: a later one is 409. Each refusal appends nothing. The
 cards are folded (`release_card.cards`) at construction and on every append, so a restart shows the
-same cards, and the view lists the open ones through `release_items`.
+same cards, and the view lists the open live ones through `release_items`; a card past the window is
+never answered, never returned for a repost and never listed, between its expiry and the daily
+retention pass, so the lead gets a fresh card.
 
 `POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
 `application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
@@ -4941,7 +4944,8 @@ class ConsoleService:
             adoption_items=approve.inbox_entries(
                 self._adoptions,
                 shown_root=None if self._registration is None else self._registration["root"]),
-            release_items=release_card.inbox_entries(self._release_cards),
+            release_items=release_card.inbox_entries(
+                release_card.live(self._release_cards, self._now())),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),
@@ -5140,7 +5144,8 @@ class ConsoleService:
     def post_release_card(self, commit: str, version: str) -> tuple[int, str]:
         """The standing card of the pair as `(card, state)`, else a new open one; see the module docstring."""
         with self._ingest:
-            standing = release_card.standing(self._release_cards, commit, version)
+            standing = release_card.standing(
+                release_card.live(self._release_cards, self._now()), commit, version)
             if standing is not None:
                 return standing.card_id, standing.state
             (appended,) = self.log.append([release_card.posted_row(commit, version)])
@@ -5150,7 +5155,7 @@ class ConsoleService:
     def answer_release_card(self, card_id: int, answer: str) -> None:
         """Record the owner's answer to an open release card; see the module docstring."""
         with self._ingest:
-            found = self._release_cards.get(card_id)
+            found = release_card.live(self._release_cards, self._now()).get(card_id)
             if found is None or found.state != release_card.OPEN:
                 raise release_card.Refused(release_card.NOT_OPEN)
             self._apply(self.log.append([release_card.answered_row(card_id, answer)]))

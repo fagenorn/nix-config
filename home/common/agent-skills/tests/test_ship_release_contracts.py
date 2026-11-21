@@ -245,6 +245,9 @@ class ShipReleaseContractsTest(unittest.TestCase):
         phase3 = self.skill.split("## Phase 3", 1)[1].split("\n## ", 1)[0]
         self.assertEqual(len(spans), 1)
         self.assertIn(spans[0], phase3)
+        self.assertIn("in chat after the owner's Approve click", phase3)
+        phase4 = self.skill.split("## Phase 4", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("`release_unapproved`: release the land lock, have the owner approve the card", phase4)
         argv = shlex.split(spans[0].replace("<commit>", "a" * 40).replace("<version>", "v1.2.3"))
         args = release_card.build_parser().parse_args(argv[1:])
         self.assertEqual((args.command, args.commit, args.version), ("post", "a" * 40, "v1.2.3"))

@@ -131,7 +131,7 @@ class DisposeTest(DisposeCase):
         grant = next(e for e in after.events
                      if e["type"] == "grant_issued" and e["grant_id"] == token)
         self.assertEqual((grant["actor_kind"], grant["authority_class"], grant["fence"]),
-                         ("human", release_driver.ADMITTED_CLASS, disposed["fence"]))
+                         ("human", "release", disposed["fence"]))
         for name in ("tag", "github-release", "deploy"):
             action_id = next(v["action_id"] for v in after.actions if v["name"] == name)
             latest = [e for e in after.events if e["type"] == "action_inspected"
@@ -240,9 +240,11 @@ class DisposeRefusalTest(DisposeCase):
                 self.assertRefusal(code, self.driver.dispose, ground, reference, ["dispose:x"])
         self.assertStillParked(tid, events)
 
-    def test_a_grant_that_is_not_a_human_is_refused_by_the_core(self):
+    def test_a_grant_that_is_not_a_human_at_the_release_class_is_refused_by_the_core(self):
         tid = self.parked()
-        for member, value, reason in (("DISPOSE_ACTOR_KIND", "agent", "human_required"),):
+        for member, value, reason in (("DISPOSE_ACTOR_KIND", "agent", "human_required"),
+                                      ("AUTHORITY_CLASS", "release:other",
+                                       "authority_class_mismatch")):
             with self.subTest(reason=reason), mock.patch.object(release_driver, member, value):
                 refusal = self.assertRefusal("dispose_refused", self.driver.dispose,
                                              GROUND, WHY, [self.token()])

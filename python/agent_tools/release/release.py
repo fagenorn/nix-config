@@ -55,12 +55,13 @@ it, refuses `dispose_invalid`. A driver refusal prints
 a resolver refusal is untouched with exit 2, and any other failure keeps the `release`
 command's `resolver_failure` envelope (D18).
 
-`run` of a new candidate, or of a release created before the approval gate, is refused
-(`release_unapproved`, or `approval_unreadable` when the records cannot be read) unless an
-approved release card of the console records the candidate's exact commit and version
-(ADR-release-016). The command reads the host console's store at `release_card.host_store()` on
-this host, never `$HOME`. Options are never abbreviated: an abbreviation is an unrecognized
-argument and exits 2 before anything runs.
+`run` is refused (`release_unapproved`, or `approval_unreadable` when the records cannot be
+read) unless an approved release card of the console records the candidate's exact commit and
+version, a resume's stored candidate included (ADR-release-016). The command reads the host
+console's store at `release_card.host_store()` on this host, never `$HOME`, and looks it up only
+when `run` asks: `status`, `preview`, `abandon` and `dispose` work where the passwd lookup
+fails. Options are never abbreviated: an abbreviation is an unrecognized argument and exits 2
+before anything runs.
 """
 
 import argparse
@@ -290,13 +291,15 @@ def _project(snapshot: dict[str, Any], root: Path) -> Project:
                    contract=load_contract(root))
 
 
-def console_approvals(store: Path) -> Callable[[str, str], bool]:
-    """An `approvals` reader over the console store at `store`, read afresh on each call."""
+def console_approvals(store_of: Callable[[], Path]) -> Callable[[str, str], bool]:
+    """An `approvals` reader over the console store `store_of()` names, resolved and read afresh
+    on each call, so a verb that never asks never looks the store up; a store that cannot be
+    named or read is `ApprovalUnreadable`."""
     def approvals(commit: str, version: str) -> bool:
         try:
-            cards = release_card.store_cards(store)
-        except release_card.Unreadable as error:
-            raise ApprovalUnreadable(str(error)) from error
+            cards = release_card.store_cards(store_of())
+        except (release_card.Unreadable, KeyError, OSError) as error:
+            raise ApprovalUnreadable(" ".join(str(error).split())) from error
         return release_card.approved(cards, commit, version)
     return approvals
 
@@ -309,7 +312,7 @@ def command_transaction(args: argparse.Namespace) -> int:
     if args.action in ("run", "abandon"):
         require_cwd(root, Path.cwd())
     driver = Driver(project, profile_id=args.profile,
-                    approvals=console_approvals(release_card.host_store()))
+                    approvals=console_approvals(release_card.host_store))
     if args.action == "status":
         return emit_json(driver.status())
     if args.action == "abandon":

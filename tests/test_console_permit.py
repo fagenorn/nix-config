@@ -229,6 +229,9 @@ class JudgeTest(unittest.TestCase):
              target),
             (f"release transaction run --repo-root {root} --confirm tag:0123456789ab",
              {"commit": None, "version": None}),
+            (f"release transaction run --repo-root {root} --commit {commit} --version v1.2.0 "
+             "--title 'gh pr merge and gh run rerun notes' --notes-file /tmp/gh-pr-merge.md "
+             "--confirm tag:0123456789ab", target),
         ]
 
     def test_the_plain_release_run_is_allowed(self):
@@ -245,11 +248,17 @@ class JudgeTest(unittest.TestCase):
                 "/nix/store/x-agent-tools/bin/release transaction abandon --repo-root r",
                 "env A=1 release transaction abandon --repo-root r",
                 "python3 -m agent_tools.release.release transaction abandon --repo-root r",
-                "true && release transaction abandon --repo-root r")
+                "true && release transaction abandon --repo-root r",
+                "bash -c 'release transaction abandon --repo-root r'",
+                'sh -lc "true; release transaction abandon --repo-root r"',
+                "env X=1 zsh -c '/opt/bin/release transaction abandon'",
+                "eval 'release transaction abandon --repo-root r'")
     DISPOSES = ("release transaction run --repo-root r --dispose no_recovery_path --reference x --confirm t",
                 "release transaction run --repo-root r --dispose=no_recovery_path --reference=x --confirm t",
                 "/opt/bin/release transaction run --repo-root r --confirm t --dispose no_recovery_path "
-                "--reference x")
+                "--reference x",
+                "bash -c 'release transaction run --repo-root r --dispose no_recovery_path "
+                "--reference x --confirm t'")
 
     def test_a_manager_is_refused_abandon_and_dispose_however_the_program_is_named(self):
         for commands, verb, reason in ((self.ABANDONS, permit.ABANDON, permit.NO_ABANDON),
@@ -292,6 +301,8 @@ class JudgeTest(unittest.TestCase):
                    "env X=1 release transaction run --repo-root r --confirm t",
                    "release transaction run --repo-root r --confirm t && echo done",
                    "printf '%s\\n' x | xargs release",
+                   "echo 'release transaction abandon'",
+                   "bash -c 'release transaction preview --repo-root r'",
                    "r=release; $r transaction run",
                    "git log -1 --format=release%x20transaction%x20run%x20--candidate%x20X | sh")
 
