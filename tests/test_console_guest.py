@@ -555,6 +555,11 @@ class ScopeTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(result[name], reset)
 
+    def test_a_guest_view_carries_no_prompt_item(self):
+        self.assertEqual(guest.OWNER_ONLY_INPUTS["prompt_items"], ())
+        result = guest.scoped({"prompt_items": [{"sprint_id": "x"}]}, frozenset())
+        self.assertEqual(result["prompt_items"], ())
+
     def test_an_unclassified_input_is_refused(self):
         with self.assertRaisesRegex(ValueError, "new_member"):
             guest.scoped({"now_ms": 1, "new_member": 2}, frozenset())

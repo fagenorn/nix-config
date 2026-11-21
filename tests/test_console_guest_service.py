@@ -99,6 +99,7 @@ TABLE = {
     "/api/withdraw-notice": "owner", "/api/live-fault": "owner", "/api/picture": "owner", "/api/permit": "owner",
     "/api/hooks": "owner", "/api/readings": "owner",
     "/api/release-card": "owner", "/api/release-answer": "owner", "/spend": "owner",
+    "/api/permission-prompt": "owner", "/api/permission-answer": "owner",
     "/api/sprint-status": "owner", "/api/profile": "owner", "/api/excluded": "owner",
     "/": "guest", "/api/state": "guest", "/api/stream": "guest", "/api/whoami": "guest",
     "/api/picture/": "guest",

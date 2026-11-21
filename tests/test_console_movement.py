@@ -10,7 +10,7 @@ import dataclasses
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -18,7 +18,7 @@ from agent_tools.console import movement, view
 from agent_tools.console.movement import (
     LocalReading, ProcessStat, ProjectMovement, PullMovement, PullRequest, SessionMovement,
     SessionReading, SessionTarget, descendant_cpu, process_table, read_sessions, session_held,
-    session_output_ms)
+    session_output_ms, transcript_turn_ms)
 from agent_tools.system.forge_api import ForgeError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_view import (
@@ -425,6 +425,64 @@ class SessionOutputTest(unittest.TestCase):
             for bad in ("../s1", "a/b", "", "s\x001", ".", ".."):
                 self.assertIsNone(session_output_ms([a], bad), bad)
             self.assertIsNone(session_output_ms([Path(tmp) / "missing"], "s1"))
+
+
+def stamped(kind, seconds):
+    stamp = datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="seconds")
+    return json.dumps({"type": kind, "timestamp": stamp, "role": "user"}) + "\n"
+
+
+class TranscriptTurnTest(unittest.TestCase):
+    T1, T2, T3, T4, T5, T6, T7, T8 = (1_800_000_000 + n * 10 for n in range(1, 9))
+
+    def test_the_turn_is_the_newest_user_or_assistant_record_of_the_session_and_its_agents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            own = projects / "-srv-p00" / "s1.jsonl"
+            own.parent.mkdir(parents=True)
+            own.write_text(
+                stamped("assistant", self.T1) + stamped("progress", self.T3)
+                + stamped("system", self.T4) + stamped("user", self.T2) + "not json\n"
+                + json.dumps({"type": "user"}) + "\n" + "[1]\n"
+                + json.dumps({"type": "user", "timestamp": "2026-11-21T10:00:00"}) + "\n")
+            self.assertEqual(transcript_turn_ms([projects], "s1"), self.T2 * 1000)
+            agent = projects / "-srv-p00" / "s1" / "subagents" / "agent-x.jsonl"
+            agent.parent.mkdir(parents=True)
+            agent.write_text(stamped("user", self.T5) + stamped("progress", self.T6))
+            self.assertEqual(transcript_turn_ms([projects], "s1"), self.T5 * 1000)
+            with own.open("a") as handle:
+                handle.write(stamped("user", self.T7))
+            self.assertEqual(transcript_turn_ms([projects], "s1"), self.T7 * 1000)
+            for none in ("s2", "", "..", ".", "a/b", "s\x001"):
+                self.assertIsNone(transcript_turn_ms([projects], none), none)
+
+    def test_a_record_nested_too_deeply_to_parse_is_skipped_and_the_rest_still_counts(self):
+        # R5: the parser's RecursionError must not abort the poll for every later session.
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            own = projects / "-srv-p00" / "s1.jsonl"
+            own.parent.mkdir(parents=True)
+            deep = '{"type": "user", "timestamp": "x", "n": ' + "[" * 200_000 + "]" * 200_000 + "}\n"
+            own.write_text(stamped("user", self.T1) + deep + stamped("assistant", self.T2))
+            self.assertEqual(transcript_turn_ms([projects], "s1"), self.T2 * 1000)
+            with own.open("a") as handle:
+                handle.write(deep + stamped("user", self.T3))
+            self.assertEqual(transcript_turn_ms([projects], "s1"), self.T3 * 1000)
+            only = projects / "-srv-p00" / "s2.jsonl"
+            only.write_text(deep)
+            self.assertIsNone(transcript_turn_ms([projects], "s2"))
+
+    def test_a_replaced_transcript_is_read_again_from_its_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            own = projects / "-srv-p00" / "s1.jsonl"
+            own.parent.mkdir(parents=True)
+            own.write_text(stamped("user", self.T7) + stamped("assistant", self.T7))
+            self.assertEqual(transcript_turn_ms([projects], "s1"), self.T7 * 1000)
+            replacement = own.with_name("new")
+            replacement.write_text(stamped("user", self.T8 - 40))
+            os.replace(replacement, own)
+            self.assertEqual(transcript_turn_ms([projects], "s1"), (self.T8 - 40) * 1000)
 
 
 HELD = {"type": "system", "subtype": "informational", "level": "warning",

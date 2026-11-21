@@ -117,6 +117,12 @@ carries payload `commit`, `version`, with a null project column, and `RELEASE_CA
 `decline`); an owner's row carries no `by`. Neither is in `KEPT_KINDS`: retention removes them like any
 other row, and the reader ignores rows outside the window.
 
+Three rows record a manager's held Bash permission prompt and its end (#1424): `PROMPT_ASKED`
+(`prompt.asked`, payload `sprint_id`, `session_id`, `command` and optionally `description`, under the
+sprint's project), `PROMPT_ANSWERED` (`prompt.answered`, payload `prompt`, the asked row's `seq`, and
+`answer`, `allow` or `refuse`) and `PROMPT_CLOSED` (`prompt.closed`, payload `prompt` and `reason`,
+`expired` or `ended`). None is in `KEPT_KINDS`: retention removes them like any other row.
+
 One kind is kept in part (#1010): `SIGNIN_READING` (`signin.reading`) is not in `KEPT_KINDS`, but the
 retention pass leaves the newest row of each profile (by sequence number, the profile being the
 payload's `profile`) in place whatever its age, and also the newest row of each profile whose
@@ -287,6 +293,9 @@ PERMIT_JUDGED = "permit.judged"
 PERMIT_LANDED = "permit.landed"
 RELEASE_CARD_POSTED = "release_card.posted"
 RELEASE_CARD_ANSWERED = "release_card.answered"
+PROMPT_ASKED = "prompt.asked"
+PROMPT_ANSWERED = "prompt.answered"
+PROMPT_CLOSED = "prompt.closed"
 SHARING_TAILNET = "sharing.tailnet"
 SHARING_COLLEAGUE = "sharing.colleague"
 SHARING_REMOVED = "sharing.removed"

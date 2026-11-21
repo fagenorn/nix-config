@@ -50,6 +50,18 @@ the time of the row, except that a hook that keeps the state and a row that leav
 is (a rename, a move) keep the `state_ms` already held. `last_at` moves on every such row; `state_ms`
 moves only when the state is asserted afresh. `session.profile` leaves it as it is.
 
+Moving on (#1424): a waiting state is cleared by a `user` or `assistant` record of the session or of
+its agents (`movement.transcript_turn_ms`) stamped after the state (`moved_on`): the service reads the
+transcripts of the sessions `waiting_snapshot` lists, outside its lock, and appends one `session.seen`
+row with state `working` and `turn_ms`, carrying no `name` or `profile` so that it never names a
+manager session again. The fold keeps `turn_ms` as `cleared_ms` (any other row keeps the known one),
+and `poll_changes` ignores a registry reading whose `updatedAt` is not newer than the larger of
+`hook_ms` and `cleared_ms`, so an unchanged `waiting` reading never sets the wait again. A wait a poll
+first read from the registry is dated by the registry's `updatedAt` while it still shows that wait (`moved_on`'s
+`registry_ms`), not by the poll's row, so a turn between the two clears it. Why: a
+refused prompt sends no hook that moves the state, and a workflow agent's prompt is folded under the
+manager's session id while the manager's own transcript is silent until the call returns.
+
 Registry mapping (`registry_state`): `busy` is working, `idle` is idle,
 `waiting` is waiting_permission when `waitingFor` is `permission prompt` and
 waiting_answer otherwise; any other status (`shell` included) says nothing. An
@@ -116,8 +128,8 @@ ENDED = "ended"
 
 STATE_TEXT = {
     WORKING: "working",
-    WAITING_ANSWER: "waiting for an answer in its terminal",
-    WAITING_PERMISSION: "waiting for a permission in its terminal",
+    WAITING_ANSWER: "waiting for an answer",
+    WAITING_PERMISSION: "waiting for a permission",
     IDLE: "idle",
     LIMIT: "stopped on a usage limit",
 }
@@ -166,6 +178,7 @@ class SessionState:
     hook_ms: int | None
     profile: str | None = None
     state_ms: int | None = None
+    cleared_ms: int | None = None
 
 
 def _text(value: object) -> bool:
@@ -445,7 +458,7 @@ def session_states(
             result[session_id] = SessionState(
                 session_id, payload["repo"], cwd, hook_transition(kind, payload, previous),
                 known.name if known else None, event.seq, event.at, hook_ms,
-                known.profile if known else None, state_ms)
+                known.profile if known else None, state_ms, known.cleared_ms if known else None)
         elif event.kind == SEEN:
             cwd, state = payload.get("cwd"), payload.get("state")
             if not isinstance(cwd, str) or not _repo_member(payload) or state not in STATES:
@@ -457,9 +470,11 @@ def session_states(
             if not isinstance(profile, str):
                 profile = known.profile if known else None
             state_ms = known.state_ms if known and known.state == state else at_ms(event.at)
+            turn = payload.get("turn_ms")
+            cleared = turn if _integer(turn) else known.cleared_ms if known else None
             result[session_id] = SessionState(
                 session_id, payload["repo"], cwd, state, name, event.seq, event.at,
-                known.hook_ms if known else None, profile, state_ms)
+                known.hook_ms if known else None, profile, state_ms, cleared)
         elif event.kind == PROFILE:
             profile = payload.get("profile")
             if known is not None and isinstance(profile, str):
@@ -486,6 +501,10 @@ def poll_changes(
             payload["profile"] = obs.profile
         changes.append((SEEN, project_of(repo), payload))
 
+    def newest(known: SessionState) -> int | None:
+        marks = [m for m in (known.hook_ms, known.cleared_ms) if m is not None]
+        return max(marks) if marks else None
+
     for session_id in sorted(observations):
         obs = observations[session_id]
         known = states.get(session_id)
@@ -494,8 +513,8 @@ def poll_changes(
             changes.append((PROFILE, None, {"session_id": session_id, "profile": obs.profile}))
         if known is None:
             seen(obs, reading or IDLE, repo_of(obs.cwd), None)
-        elif known.hook_ms is not None and (obs.updated_ms is None
-                                            or obs.updated_ms <= known.hook_ms):
+        elif newest(known) is not None and (obs.updated_ms is None
+                                            or obs.updated_ms <= newest(known)):
             continue
         elif known.state == ENDED:
             seen(obs, reading or IDLE, repo_of(obs.cwd), known)
@@ -512,3 +531,40 @@ def poll_changes(
     for session_id in sorted(missing & absent):
         changes.append((GONE, project_of(states[session_id].repo), {"session_id": session_id}))
     return changes, frozenset(missing - absent)
+
+
+def waiting_snapshot(states: Mapping[str, SessionState]) -> dict[str, int]:
+    """Each waiting session whose wait has a time, with the `last_seq` it was read at."""
+    return {sid: st.last_seq for sid, st in states.items()
+            if st.state in _WAITING and st.state_ms is not None}
+
+
+def moved_on(
+    states: Mapping[str, SessionState],
+    turns: Mapping[str, tuple[int, int]],
+    project_of: Callable[[str | None], str | None],
+    registry_ms: Mapping[str, int] | None = None,
+) -> list[tuple[str, str | None, dict]]:
+    """The `session.seen` rows that put a waiting session back to working (#1424).
+
+    `turns` maps a session id to the `last_seq` it was snapshotted at and the time of its newest
+    transcript turn. A session is corrected only while it still waits at that `last_seq` and the turn
+    is newer than its wait. The wait began at `state_ms` or, when `registry_ms` holds the registry's
+    `updatedAt` of the same wait, at the earlier of the two: a row the poll wrote when it first read
+    the registry carries the poll's time, which a turn between the wait and that poll must not lose to.
+    The row names no session and no profile.
+    """
+    changes: list[tuple[str, str | None, dict]] = []
+    for session_id in sorted(turns):
+        known = states.get(session_id)
+        seq, turn = turns[session_id]
+        if (known is None or known.state not in _WAITING or known.last_seq != seq
+                or known.state_ms is None):
+            continue
+        waiting_since = min(known.state_ms, (registry_ms or {}).get(session_id, known.state_ms))
+        if turn <= waiting_since:
+            continue
+        changes.append((SEEN, project_of(known.repo), {
+            "session_id": session_id, "cwd": known.cwd, "repo": known.repo,
+            "state": WORKING, "turn_ms": turn}))
+    return changes
