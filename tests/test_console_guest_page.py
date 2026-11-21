@@ -22,7 +22,7 @@ from .test_console_guest import at, guest_inputs
 from .test_console_inbox import C1, approve, comment_node, decision, issue_node
 from .test_console_inbox import page as tracker_page, read as tracker_read
 from .test_console_page import (
-    ACTIVATION, APPROVED_TEXT, APPROVING_TEXT, BRIEF, CHECK, CHECK_ITEM, DONE_SPRINT, F3, HANDOFF_W, HARNESS,
+    ACTIVATION, APPROVED_TEXT, APPROVING_TEXT, BRIEF, CHECK, CHECK_ITEM, DONE_SPRINT, F3, FAULT_ENTRY, HANDOFF_W, HARNESS,
     HEADSUP_W, NOW_S, OWNER_W, PAGE, REPORTED, SENT_TEXT, SPRINT, START, UNDATED_WAIT,
     box_open, full, has_class, message_entry, nodes, posted, project, question, real_capacity, role, view,
     with_check, with_notices, with_sprints)
@@ -479,6 +479,16 @@ class GuestPageTest(unittest.TestCase):
         snap = page_of(elsewhere, GUEST_STEPS)
         self.assertIsNone(snap["spend_link"])
         self.assertIsNone(snap["sharing_open"])
+
+    def test_a_guest_sees_the_live_fault_and_no_withdraw(self) -> None:
+        frame = {**OWNER_FRAME, "entries": [
+            {**e, "sprints": [{**OWNER_SPRINT, "live_faults": [FAULT_ENTRY]}]} if e["project_id"] == "owner/p01" else e
+            for e in OWNER_FRAME["entries"]]}
+        snap = page_of(GUEST, [START, {"frame": frame}])
+        owner = page_of(PAGE.read_bytes(), [START, {"frame": frame}])
+        self.assertIn(FAULT_ENTRY["text"], sprint_text(snap))
+        self.assertEqual(named(snap["projects"], "live-fault-withdraw"), [])
+        self.assertEqual(len(named(owner["projects"], "live-fault-withdraw")), 1)
 
     def test_the_guest_reads_every_sprint_sentence_as_the_owner_s(self) -> None:
         self.assertTrue(SENTENCES)
