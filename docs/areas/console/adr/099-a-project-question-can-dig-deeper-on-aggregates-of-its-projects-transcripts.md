@@ -1,4 +1,4 @@
-# ADR-console-097 — A project question can dig deeper, on aggregates of its project's transcripts
+# ADR-console-099 — A project question can dig deeper, on aggregates of its project's transcripts
 
 - **Status:** accepted
 - **Decided in:** #1274
