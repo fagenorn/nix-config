@@ -2091,7 +2091,7 @@ class CredentialShapeTest(unittest.TestCase):
                 self.assertEqual(matched, ["assignment"])
                 self.assertIs(project_question.credential_shaped(text), True)
 
-    def test_a_base64_run_is_a_path_only_when_every_slash_separated_part_is_a_word(self):
+    def test_a_base64_run_is_a_path_only_when_each_slash_separated_part_is_a_word_or_a_short_label(self):
         key = "Ab3/Xy9Qw8Er7/Ty6Ui5Op4As3/Df2Gh1Jk0LmNb"
         self.assertEqual(key.count("/"), 3)
         self.assertEqual([n for n, p in project_question.CREDENTIAL_SHAPES if p.search(key)], ["base64_run"])
@@ -2099,6 +2099,13 @@ class CredentialShapeTest(unittest.TestCase):
         path = "ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case"
         self.assertIs(project_question.credential_shaped(path), False)
         self.assertIs(project_question.credential_shaped("console/" + path), False)
+        for short in (
+            "src/UI/Components/Button2Group/Item3View/Panel4.tsx",
+            "GET api/v1/Users/Profile2Settings/Avatar3Image",
+            "tests/E2E/LoginFlow2Spec/Checkout3Spec.ts",
+        ):
+            with self.subTest(short=short):
+                self.assertIs(project_question.credential_shaped(short), False)
 
     def test_a_console_token_of_any_character_mix_is_caught(self):
         alphabet = string.ascii_letters + string.digits + "-_"
@@ -2133,6 +2140,15 @@ class CredentialShapeTest(unittest.TestCase):
             "where is ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case defined?",
             "what does the token: required mean and why is password: required?",
             "why is the secret=true flag set?",
+            "why does token = response.json() fail here?",
+            "password = getpass.getpass()",
+            'api_key = os.environ["OPENAI"]',
+            "csrf_token = generate_csrf_token()",
+            "the access_key = whatever you configured",
+            "src/UI/Components/Button2Group/Item3View/Panel4.tsx",
+            "see src/UI/Components/Button2Group/Item3View/Panel4.tsx",
+            "GET api/v1/Users/Profile2Settings/Avatar3Image",
+            "tests/E2E/LoginFlow2Spec/Checkout3Spec.ts",
         )
         for text in texts:
             with self.subTest(text=text):
