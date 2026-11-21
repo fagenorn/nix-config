@@ -44,6 +44,10 @@ export const meta = {
 // holder and the child's cont (slimmed), the claim held and the row left stopped. The owner decides the approach and relaunches with that
 // cont in conts and the decision: the cont keeps the marker, the child's first fix wave and its re-review get the decision as binding,
 // and a relaunch that brings none stops in the child before any agent and is this owner action again. A stop also marked diverging is the not-converging row below instead.
+// #1370: so is a fix-wave-review stop that carries round_cap ({rounds, findings}: the delivery's review rounds, one full and two scoped, left findings open):
+// reported with reason round-cap, the rounds, the findings left open (bounded), the claim holder and the child's cont (slimmed), the claim held and the row
+// left stopped. The owner decides, then relaunches with that cont in conts and a decision or amend; a relaunch that brings neither stops in the child before
+// any agent and is this owner action again. A stop also marked oscillating is the fix-oscillating action instead, and one marked diverging the not-converging row.
 // #1139: an issue marked as needing the owner's look (its facts carry look {verdict}, read by look-approval marked) is never landed by the batch: its ready
 // child (look {verdict, covers}) is resumed once in mode ship with the ready cont, inside the same slot, and stops at awaiting-look. That row is
 // {issue, outcome: awaiting-look, pr, head, reason}; it is reported in owner_actions with reason awaiting-look, the pr, the head, the pictures when
@@ -566,6 +570,7 @@ const enqueue = (branch, fn) => {
 }
 const LAND_OA = [] // owner-actions the landings posted
 const OSCILLATING = {} // #1000: by issue, what a fix-oscillating owner action carries
+const ROUND_CAPPED = {} // #1370: by issue, what a round-cap owner action carries
 const DIVERGING = {} // #940: by issue, what a not-converging row's owner action carries for whoever takes the work over
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
 // #992: incomplete is the verdict of a review that could not finish; readReview() in land() reads every reply of this schema.
@@ -2081,7 +2086,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
       // #1139: nor does a PR land as it stands unless its issue's look marker was read and found absent (fail closed): a marked issue, or one whose marker was not read, goes through its child.
       const lookPending = !(isObj(f.look) && f.look.verdict === 'unmarked')
-      if (ro.ok === true && !amendPending && !lookPending) {
+      // #1370: nor does a capped delivery: the review round cap is enforced in the child, so a cont holding round_cap goes through it, never to a landing with findings still open.
+      const capHeld = !!(CONTS[n] && isObj(CONTS[n].round_cap))
+      if (ro.ok === true && !amendPending && !lookPending && !capHeld) {
         if (!readoptUsable(ro)) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
           return
@@ -2258,6 +2265,12 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           .map(x => ({ ...(Number.isInteger(x.round) ? { round: x.round } : {}), ...(Number.isInteger(x.wave) ? { wave: x.wave } : {}), ...(Array.isArray(x.findings) ? { findings: x.findings.filter(nonEmpty).slice(0, FINDINGS_MAX).map(oneLine) } : {}), ...(nonEmpty(x.notes) ? { notes: oneLine(x.notes) } : {}), ...(nonEmpty(x.range) ? { range: oneLine(x.range) } : {}) }))
         OSCILLATING[n] = { file: oneLine(r.oscillating.file), rounds: hist, claim: 'held', holder: HOLDER, cont: r.cont }
       }
+      if (!closedMeanwhile && r.stage === 'fix-wave-review' && isObj(r.round_cap) && isPosInt(r.round_cap.rounds) && isObj(r.cont)) {
+        // The child bounds the findings it carries; the same bounds are applied again here, in the entry and in its cont (as the not-converging row does).
+        const findings = (Array.isArray(r.cont.fix_findings) ? r.cont.fix_findings : []).filter(isObj).slice(0, FINDINGS_MAX)
+          .map(x => Object.fromEntries(['severity', 'file', 'summary', 'failing_input'].filter(k => nonEmpty(x[k])).map(k => [k, oneLine(x[k])])))
+        ROUND_CAPPED[n] = { rounds: r.round_cap.rounds, findings, claim: 'held', holder: HOLDER, cont: { ...r.cont, ...(findings.length ? { fix_findings: findings } : {}) } }
+      }
       if (!closedMeanwhile && r.stage === 'verify-unrelated' && isObj(r.unrelated) && nonEmpty(r.unrelated.test)) UNRELATED[n] = { test: oneLine(r.unrelated.test), ...(nonEmpty(r.unrelated.evidence) ? { evidence: oneLine(r.unrelated.evidence) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
       rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
       return
@@ -2307,9 +2320,11 @@ const parked = table.filter(r => r.outcome === 'stopped' && PARKED[r.issue] && r
 const conflicted = table.filter(r => r.outcome === 'stopped' && r.stage === 'plan-review' && RULES_CONFLICT[r.issue]).map(r => r.issue)
 // #1000: nor can a file two fixes in a row each drew a new finding in: the owner decides the approach.
 const oscillating = table.filter(r => r.outcome === 'stopped' && r.stage === 'fix-wave-review' && OSCILLATING[r.issue]).map(r => r.issue)
+// #1370: nor can a delivery whose review rounds are spent with findings still open: the owner decides.
+const capped = table.filter(r => r.outcome === 'stopped' && r.stage === 'fix-wave-review' && ROUND_CAPPED[r.issue] && !OSCILLATING[r.issue]).map(r => r.issue)
 // #1139: nor can a marked issue's delivery waiting for the owner's look: the owner's answer resumes it.
 const awaiting = table.filter(r => r.outcome === 'awaiting-look' && AWAITING[r.issue]).map(r => r.issue)
-const open = table.filter(r => !FINAL.includes(r.outcome) && !awaiting.includes(r.issue) && !cycle.includes(r.issue) && !oscillating.includes(r.issue) && !unrelated.includes(r.issue) && !conflicted.includes(r.issue) && !parked.includes(r.issue)).map(r => r.issue)
+const open = table.filter(r => !FINAL.includes(r.outcome) && !awaiting.includes(r.issue) && !cycle.includes(r.issue) && !oscillating.includes(r.issue) && !capped.includes(r.issue) && !unrelated.includes(r.issue) && !conflicted.includes(r.issue) && !parked.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
 // The lead copies the relaunch into the next run's args, so a forwarded cont carries only what a resume reads from it. A resumed child's setup
 // step reads every contract field fresh and takes from cont.setup only the members below (the claim holder, the delivery's location and
@@ -2351,7 +2366,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` 
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...awaiting.map(n => ({ issue: n, reason: 'awaiting-look', ...AWAITING[n], cont: slimCont(AWAITING[n].cont) })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...conflicted.map(n => ({ issue: n, reason: 'rules-conflict', ...RULES_CONFLICT[n], cont: slimCont(RULES_CONFLICT[n].cont) })), ...parked.map(n => ({ issue: n, ...PARKED[n], cont: slimCont(PARKED[n].cont) })), ...oscillating.map(n => ({ issue: n, reason: 'fix-oscillating', ...OSCILLATING[n], cont: slimCont(OSCILLATING[n].cont) })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...awaiting.map(n => ({ issue: n, reason: 'awaiting-look', ...AWAITING[n], cont: slimCont(AWAITING[n].cont) })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...conflicted.map(n => ({ issue: n, reason: 'rules-conflict', ...RULES_CONFLICT[n], cont: slimCont(RULES_CONFLICT[n].cont) })), ...parked.map(n => ({ issue: n, ...PARKED[n], cont: slimCont(PARKED[n].cont) })), ...oscillating.map(n => ({ issue: n, reason: 'fix-oscillating', ...OSCILLATING[n], cont: slimCont(OSCILLATING[n].cont) })), ...capped.map(n => ({ issue: n, reason: 'round-cap', ...ROUND_CAPPED[n], cont: slimCont(ROUND_CAPPED[n].cont) })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }
