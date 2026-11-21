@@ -25,7 +25,7 @@ from . import accounts_sandbox, host_readings, test_verify_pending_units as unit
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PORT = 27184
-LAUNCHER = re.compile(r"^/nix/store/[0-9a-z]{32}-agent-tools-console$")
+LAUNCHER = re.compile(r"^/nix/store/[0-9a-z]{32}-agent-platform/bin/console$")
 
 
 def check_command(case, command, home, tailscale=None):

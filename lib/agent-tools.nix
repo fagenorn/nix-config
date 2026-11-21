@@ -1,7 +1,8 @@
-# The agent_tools package (python/): one interpreter environment, a build-time
-# import of every module and one isolated launcher per command-table row.
-# `commands` is the only command-to-module mapping (#175 D4, D11; parent D2,
-# D10, D13).
+# The platform package (ADR-system-005): the agent_tools package (python/) in one
+# interpreter environment with a build-time import of every module, one isolated
+# launcher per command-table row, the standards directory and the platform
+# manifest. `commands` is still the only command-to-module mapping (#175 D4, D11;
+# parent D2, D10, D13).
 { pkgs }:
 let
   inherit (pkgs) lib;
@@ -24,7 +25,7 @@ let
     )
   );
 
-  package = python.pkgs.buildPythonPackage {
+  pythonPackage = python.pkgs.buildPythonPackage {
     pname = project.name;
     inherit (project) version;
     pyproject = true;
@@ -33,7 +34,7 @@ let
     pythonImportsCheck = modules;
   };
 
-  env = python.withPackages (_: [ package ]);
+  env = python.withPackages (_: [ pythonPackage ]);
 
   # A row maps a command to its module path under agent_tools, and the module is named for the command:
   # its last segment is the command with each "-" replaced by "_".
@@ -70,29 +71,17 @@ let
     "verify-pending" = "verification.verify_pending";
   };
 
-  # A launcher script: bash under `-p`, which ignores BASH_ENV and the functions
-  # an environment exports, so neither can run in place of its two lines (issue
-  # 377, where the lifecycle guard's row check execs the guard-policy launcher).
-  launcherScript =
-    name: text:
-    pkgs.writeTextFile {
-      name = "agent-tools-${name}";
-      executable = true;
-      text = ''
-        #!${pkgs.runtimeShell} -p
-        ${text}
-      '';
-      checkPhase = ''
-        ${pkgs.stdenv.shellDryRun} "$target"
-      '';
-    };
-
   # -I drops every PYTHON* variable, the working directory and the user site.
   # nixpkgs' sitecustomize still reads the NIX_PYTHON* variables under -I, and
   # this environment's python3 sets none of them, so the launcher clears them.
+  # The shebang is bash under `-p`, which ignores BASH_ENV and the functions an
+  # environment exports, so neither can run in place of the launcher's lines
+  # (issue 377, where the lifecycle guard's row check execs the guard-policy
+  # launcher). The root export points resolve-project at the package's own
+  # manifest, so no home configuration is read (#1439).
   # A row whose module does not exist fails evaluation rather than building a
   # launcher that can only fail at run time (D14).
-  launcher =
+  checkedModule =
     name: path:
     let
       module = "agent_tools.${path}";
@@ -102,10 +91,38 @@ let
     assert lib.assertMsg (
       lib.last (lib.splitString "." path) == lib.replaceStrings [ "-" ] [ "_" ] name
     ) "agent-tools: command ${name} runs ${module}, which is not named for it";
-    launcherScript name ''
+    module;
+
+  writeLauncher =
+    name: path:
+    let
+      module = checkedModule name path;
+    in
+    ''
+      cat > "$out/bin/${name}" <<EOF
+      #!${pkgs.runtimeShell} -p
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${env}/bin/python3 -I -m ${module} "$@"'';
+      export AGENT_PLATFORM_ROOT=$out/share/agent-platform
+      exec ${env}/bin/python3 -I -m ${module} "\$@"
+      EOF
+      chmod 0555 "$out/bin/${name}"
+      ${pkgs.stdenv.shellDryRun} "$out/bin/${name}"
+    '';
+
+  package =
+    pkgs.runCommand "agent-platform"
+      {
+        passthru = {
+          launchers = lib.mapAttrs (name: _: "${package}/bin/${name}") commands;
+          inherit python;
+        };
+      }
+      ''
+        mkdir -p "$out/bin" "$out/share/agent-platform"
+        cp ${../home/common/agent-skills/platform-manifest.json} "$out/share/agent-platform/platform-manifest.json"
+        cp -R ${../home/common/agent-skills/standards} "$out/share/agent-platform/standards"
+        chmod -R u+w "$out/share/agent-platform"
+        ${lib.concatStrings (lib.mapAttrsToList writeLauncher commands)}
+      '';
 in
-{
-  launchers = lib.mapAttrs launcher commands;
-}
+package

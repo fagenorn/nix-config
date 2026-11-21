@@ -5368,7 +5368,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         script = row_check.read_text(encoding="utf-8")
         self.assertRegex(script, r'\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n')
         self.assertRegex(script, r'export PATH="/nix/store/\S+-git-[^:"]+/bin:')
-        self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-guard-policy derive "\$@"\n')
+        self.assertRegex(script, r'exec /nix/store/[0-9a-z]{32}-agent-platform/bin/guard-policy derive "\$@"\n')
         launcher = Path(script.split("exec ", 1)[1].split(" ", 1)[0])
         self.assertRegex(launcher.read_text(encoding="utf-8"), r'\A#!/nix/store/\S+/bin/\S+ -p\n')
 
@@ -6708,7 +6708,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         look_check = Path(wrapper.split("--look-bin ", 1)[1].split(" ", 1)[0])
         script = look_check.read_text(encoding="utf-8")
         self.assertRegex(script, r"\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n")
-        self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-look-approval judge "\$@"\n')
+        self.assertRegex(script, r'exec /nix/store/[0-9a-z]{32}-agent-platform/bin/look-approval judge "\$@"\n')
 
     def test_the_merge_commit_text_reaches_the_look_gate_on_the_release_arm(self):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
