@@ -948,6 +948,90 @@ class NotConvergingTest(unittest.TestCase):
         self.assertEqual(result["relaunch"]["conts"], {"1": self.CONT})
 
 
+class RoundCapTest(unittest.TestCase):
+    """#1370: a child stopped at the review round cap waits for the owner and is not relaunched."""
+
+    FINDINGS = [{"severity": "important", "file": "claim.py", "summary": "race in steal"}]
+    REASON = ("fix-wave-review: the review round cap is reached after 3 rounds (one full and two scoped); an owner decision is needed "
+              "on the 1 finding(s) still open: race in steal")
+    CAP = {"rounds": 3, "findings": ["race in steal"]}
+
+    def stop(self, n=1, **more):
+        return dict({"stage": "fix-wave-review", "fix_waves": 2, "round_cap": self.CAP, "reason": self.REASON,
+                     "cont": dict(reviewed(n), fix_waves=2, review_rounds=3, reviewed={"head": SHA}, round_cap=self.CAP,
+                                  fix_findings=self.FINDINGS)}, **more)
+
+    def test_a_round_capped_child_is_an_owner_action_and_is_not_relaunched(self):
+        other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), children={"1": self.stop(), "2": other})
+        row = result["table"][0]
+        self.assertEqual((row["outcome"], row["stage"], row["reason"]), ("stopped", "fix-wave-review", self.REASON))
+        self.assertEqual(result["relaunch"]["issues"], [2])
+        self.assertEqual(list(result["relaunch"]["conts"]), ["2"])
+        (action,) = [a for a in result["owner_actions"] if a["issue"] == 1]
+        self.assertEqual({k: action[k] for k in ("reason", "rounds", "findings", "claim", "holder")},
+                         {"reason": "round-cap", "rounds": 3, "findings": self.FINDINGS, "claim": "held", "holder": HOLDER})
+        self.assertEqual(action["cont"]["review_rounds"], 3)
+        self.assertEqual(action["cont"]["round_cap"], self.CAP)
+        self.assertEqual(action["cont"]["fix_findings"], action["findings"])
+        self.assertEqual(sorted(action["cont"]["setup"]), ["branch", "holder", "plan_dir", "worktree", "worktree_path"])
+        self.assertFalse([c for c in calls if c["label"].startswith("release-1")])
+
+    def test_alone_it_leaves_no_relaunch(self):
+        result, _, _ = run(children={"1": self.stop()})
+        self.assertIsNone(result["relaunch"])
+        self.assertEqual([a["reason"] for a in result["owner_actions"]], ["round-cap"])
+
+    def test_a_stop_also_marked_oscillating_or_diverging_is_that_action_only(self):
+        for name, more, reason in (("oscillating", {"oscillating": {"file": "claim.py", "rounds": []}}, "fix-oscillating"),
+                                   ("diverging", {"diverging": {"file": "claim.py", "waves": 4}}, "not-converging")):
+            with self.subTest(name):
+                result, _, _ = run(children={"1": self.stop(**more)})
+                self.assertEqual([a["reason"] for a in result["owner_actions"]], [reason])
+
+    def test_a_closed_issue_is_no_owner_action(self):
+        closed, _, _ = run(children={"1": self.stop()}, replies={"settle-1": {"state": "CLOSED", "release": "released"}})
+        self.assertEqual(closed["table"][0]["outcome"], "closed")
+        self.assertEqual(closed["owner_actions"], [])
+        failed, _, _ = run(children={"1": self.stop()}, replies={"settle-1": {"state": "CLOSED", "release": "error"}})
+        self.assertEqual(failed["table"][0]["outcome"], "stopped")
+        self.assertEqual(failed["owner_actions"], [])
+        self.assertIn("1", failed["relaunch"]["conts"])
+
+    def test_a_capped_cont_with_an_accepted_open_pr_goes_through_its_child_before_any_landing(self):
+        facts = {"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}}
+        result, calls = run(args=dict(ARGS, conts={"1": self.stop()["cont"]}), patch=facts, children={"1": self.stop()})[:2]
+        ls = labels(calls)
+        self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
+        self.assertFalse([name for name in ls if name.startswith("land-")])
+        self.assertEqual([a["reason"] for a in result["owner_actions"]], ["round-cap"])
+        self.assertNotEqual(row(result, 1)["outcome"], "landed")
+        with self.subTest("a cont with no cap marker still lands as it stands"):
+            _, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts)
+            self.assertNotIn("child-1", labels(calls))
+
+    def test_a_marker_without_rounds_stays_an_open_row(self):
+        lost = {"stage": "fix-wave", "fix_waves": 1, "reason": "fix-wave: lost", "cont": dict(reviewed(1), review_rounds=3)}
+        stops = [("marker %r" % (m,), self.stop(round_cap=m)) for m in (None, {}, {"rounds": 0}, "3")]
+        for name, stop in stops + [("a lost wave", lost)]:
+            with self.subTest(name):
+                result, _, _ = run(children={"1": stop})
+                self.assertIn("1", result["relaunch"]["conts"])
+                self.assertEqual(result["owner_actions"], [])
+
+    def test_the_findings_are_bounded(self):
+        many = [{"severity": "important", "file": "claim.py", "summary": f"race {i} " + "x" * 900, "extra": "dropped"} for i in range(14)]
+        stop = self.stop()
+        stop["cont"] = dict(stop["cont"], fix_findings=many)
+        result, _, _ = run(children={"1": stop})
+        (action,) = result["owner_actions"]
+        self.assertEqual(len(action["findings"]), 10)
+        for finding in action["findings"]:
+            self.assertTrue(set(finding) <= {"severity", "file", "summary", "failing_input"}, finding)
+            self.assertLessEqual(len(finding["summary"]), 300)
+        self.assertEqual(action["cont"]["fix_findings"], action["findings"])
+
+
 class ContTest(unittest.TestCase):
     def test_an_interrupted_task_resumes_through_its_forwarded_cont(self):
         cont = {"setup": {"holder": HOLDER, "branch": "issue-1-x"}, "lane": "direct", "plan": None,
