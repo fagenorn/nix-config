@@ -894,6 +894,22 @@ class RowTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 register.ended(bad)
 
+    def test_a_ready_plan_saved_with_a_retired_draft_record_is_marked_for_planning_again(self):
+        retired = {"field": "co-authored-by", "label": "co-author lines in commits", "value": "yes",
+                   "source": "owner", "options": [], "text": False, "reason": None,
+                   "ask": "Should its commits carry co-author lines?"}
+        current = draft_fields()
+        saved = register.summary("/srv/a", plan_doc(state="ready"), draft=[*current, retired])
+        found = register.latest([Event(1, "t1", register.ENDED, None, saved)])
+        self.assertIs(found["replan"], True)
+        self.assertEqual(found["plan_id"], saved["plan_id"])
+        self.assertEqual([f["field"] for f in found["draft"]], [f["field"] for f in current])
+        for row in (register.summary("/srv/a", plan_doc(state="ready"), draft=current),
+                    register.summary("/srv/a", plan_doc(state="ready"))):
+            with self.subTest(draft=row["draft"]):
+                self.assertNotIn(
+                    "replan", register.latest([Event(1, "t1", register.ENDED, None, row)]))
+
     def test_a_drafting_row_asks_the_open_fields(self):
         fields = draft_fields()
         row = register.drafting("/x/sample-app", fields)
@@ -982,7 +998,7 @@ class RowTest(unittest.TestCase):
             "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
             "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
         shown = register.view_entry(None, {**register.drafting("/x/sample-app", full), "at": "t"})
-        self.assertEqual(shown["draft_more"], "and 22 more settings at their usual values")
+        self.assertEqual(shown["draft_more"], "and 21 more settings at their usual values")
 
     def test_the_draft_id_follows_the_values(self):
         one = draft_fields()

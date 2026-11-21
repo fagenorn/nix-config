@@ -232,6 +232,11 @@ MERGE_MEMBERS = ("strategy", "delete_branch")
 # never inserts it.
 MERGE_OPTIONAL_MEMBERS = ("required_checks",)
 COMMIT_MEMBERS = ("co_authored_by", "signed")
+# Issue 1449 (decided in #1430): attribution is decided only by the generated
+# Claude Code settings, so nothing reads or asks for a co-author setting.
+# Schema 2 still requires the member, so a writer of a schema-2 contract writes
+# it with this value; the schema-3 migration (#1453) deletes it.
+RETIRED_COMMIT_MEMBERS: dict[str, bool] = {"co_authored_by": False}
 # Issue 1249 / ADR-project-contract-008: the id of the `bindings.commands`
 # entry the adoption commit runs through. Absent means the commit runs git
 # alone, and the resolver never inserts it.
