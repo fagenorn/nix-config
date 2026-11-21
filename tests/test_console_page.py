@@ -11802,6 +11802,22 @@ class PageLiveFaultTest(unittest.TestCase):
         (fail,) = of_class(line, "span", "fail")
         self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
 
+    def test_a_refused_withdraw_of_a_finished_sprint_shows_its_reason_on_the_row_a_frame_replaced(self) -> None:
+        ended = {**ended_sprint("b", 60_000), "live_faults": [FAULT_ENTRY]}
+        (snap,) = render([
+            START, {"frame": with_sprints([ended])}, {"hold": True},
+            {"click": "live-fault-withdraw"},
+            {"frame": with_sprints([{**ended, "title": "Sprint b again"}])},
+            {"release": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"snapshot": True},
+        ])
+        (row,) = of_class(snap["projects"], "li", "finished-line")
+        (fault,) = of_class(row, "li", "live-fault")
+        (fail,) = of_class(fault, "span", "fail")
+        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+        (button,) = [n for n in nodes(fault) if n["tag"] == "button"]
+        self.assertIs(button["disabled"], False)
+
     def test_an_ended_sprints_live_fault_stays_on_its_finished_line_and_the_owner_withdraws_it(self) -> None:
         ended = {**ended_sprint("b", 60_000), "live_faults": [FAULT_ENTRY]}
         (snap,) = render([

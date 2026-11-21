@@ -526,6 +526,12 @@ class SprintCommandTest(Case):
             (sid, {k: v for k, v in FAULT.items() if k != "proven"},
              "the live fault has no valid proven"),
             (sid, {**FAULT, "proven": "  "}, "the live fault has no valid proven"),
+            (sid, {**FAULT, "observed": "\u200b\u200b", "when": "\u200b", "proven": "\u200b \u200b"},
+             "the live fault has no valid observed"),
+            (sid, {**FAULT, "when": "\u200b"}, "the live fault has no valid when"),
+            (sid, {**FAULT, "proven": "\u200b"}, "the live fault has no valid proven"),
+            (sid, {**FAULT, "observed": "saved form \ud800 dropped"},
+             "the live fault has no valid observed"),
             (sid, {**FAULT, "issue": 99}, ours),
             (unreported, FAULT, ours),
             (latest, FAULT, ours),
@@ -555,6 +561,16 @@ class SprintCommandTest(Case):
             stdin=json.dumps(FAULT)))
         self.assertEqual((got.returncode, got.stdout, got.stderr), (2, "", (
             "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n")))
+
+    def test_live_fault_exits_two_for_a_fault_file_nested_too_deeply(self):
+        svc = self.open()
+        sid = self.reported_sprint(svc)
+        deep = "[" * 100000 + "]" * 100000
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "live-fault", "--sprint", sid, "--secret-file", self.secret_file(sid),
+            "--fault-file", "-", "--port", self.port(svc), stdin=deep))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertEqual(got.stderr, "sprint: cannot read -: the live fault is nested too deeply\n")
 
     def test_notice_posts_and_another_sprint_of_the_project_lists_it(self):
         svc = self.open()

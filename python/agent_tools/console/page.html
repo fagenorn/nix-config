@@ -830,6 +830,7 @@ const stops = new Map();
 const retries = new Map();
 const faultWithdrawals = new Map();
 const latestSprints = new Map();
+const latestFinished = new Map();
 const tellDrafts = new Map();
 const tells = new Map();
 const tellOpen = new Set();
@@ -5344,6 +5345,18 @@ function closingReport(sprint) {
   if (tracker !== null) box.appendChild(tracker);
   return box;
 }
+// A finished sprint's fault lines redrawn on the row now on the page, from the latest view: a frame may have replaced the row while a withdraw was pending.
+function redrawFinished(id) {
+  const latest = latestFinished.get(id);
+  if (latest === undefined) return;
+  for (const row of document.querySelectorAll("li.finished-line")) {
+    if (row.dataset.sprintId !== id) continue;
+    const list = Array.from(row.children).find((child) => child.className === "sprint-checks");
+    if (list === undefined) continue;
+    list.replaceChildren();
+    liveFaultLines(list, latest.sprint, latest.projectId, () => redrawFinished(id));
+  }
+}
 function finishedLine(sprint, projectId) {
   const item = el("li", "finished-line");
   item.dataset.sprintId = sprint.sprint_id;
@@ -5367,11 +5380,8 @@ function finishedLine(sprint, projectId) {
   item.appendChild(fold);
   if (Array.isArray(sprint.live_faults) && sprint.live_faults.length > 0) {
     const faults = el("ul", "sprint-checks");
-    const draw = () => {
-      faults.replaceChildren();
-      liveFaultLines(faults, sprint, projectId, draw);
-    };
-    draw();
+    latestFinished.set(sprint.sprint_id, { sprint, projectId });
+    liveFaultLines(faults, sprint, projectId, () => redrawFinished(sprint.sprint_id));
     item.appendChild(faults);
   }
   return item;
@@ -5545,6 +5555,9 @@ function drawProjects(view) {
   }
   for (const id of [...latestSprints.keys()]) {
     if (!live.has(id)) latestSprints.delete(id);
+  }
+  for (const id of [...latestFinished.keys()]) {
+    if (!live.has(id)) latestFinished.delete(id);
   }
   for (const id of [...tells.keys()]) {
     if (!live.has(id)) tells.delete(id);

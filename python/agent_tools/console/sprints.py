@@ -524,8 +524,8 @@ has kind, text, what, until, issue and live_fault; a heads-up kind and text; a h
 stripped, or raises `Refused` at the first failure, in this order: not an object
 (`NOTICE_NOT_OBJECT`); `kind` missing or not in `NOTICE_KINDS` (`NOTICE_KIND`); a key outside the
 kind's members (`NOTICE_EXTRA`, one fixed text per kind that never carries the key); then `text`,
-then a claim's `what`, then its `until`: not a string, empty after stripping, or holding a line
-break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
+then a claim's `what`, then its `until`: not a string, without a visible character, holding an
+unpaired surrogate or holding a line break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
 `MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then, for a claim, `issue`
 (optional; an int of at least 1, not a bool) and `live_fault` (optional; a bool), each refused as
 `NOTICE_MEMBER`; then a hand-off's `to`, which is `"owner"` or a sprint id (`NOTICE_MEMBER`).
@@ -629,8 +629,9 @@ issue of its sprint is faulty in production (`event_log.FAULT_DECLARED`, `FAULT_
 `checked_fault(fault)` refuses at the first failure, in order: not an object (`FAULT_NOT_OBJECT`); a
 key other than issue, observed, when and proven (`FAULT_EXTRA`, never naming the key); an `issue`
 that is not an int of at least 1 (`FAULT_MEMBER`); then `observed`, `when` and `proven`, each one
-line of text (not a string, empty after stripping or holding a line break is `FAULT_MEMBER`; over
-`MAX_FAULT_OBSERVED_CHARS` (400), `MAX_FAULT_WHEN_CHARS` (140) or `MAX_FAULT_PROVEN_CHARS` (400)
+line of text (not a string, without a visible character (whitespace and invisible format characters
+such as a zero-width space do not count), holding an unpaired surrogate or holding a line break is
+`FAULT_MEMBER`; over `MAX_FAULT_OBSERVED_CHARS` (400), `MAX_FAULT_WHEN_CHARS` (140) or `MAX_FAULT_PROVEN_CHARS` (400)
 after stripping is `FAULT_TOO_LONG`); it returns the four members, texts stripped.
 `declarable_fault(state, fault)` refuses, in order: a sprint that takes no notice (`ALREADY_STOPPING`,
 `ENDED`); `checked_fault`; an issue not among the issues of the sprint's latest report
@@ -728,6 +729,7 @@ import os
 import posixpath
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -1985,9 +1987,22 @@ def open_notices(state: SprintState) -> tuple[Notice, ...]:
                         key=lambda notice: notice.notice_id))
 
 
+def _visible(value: str) -> bool:
+    """True when the text holds a character that is neither whitespace nor an invisible format one."""
+    return any(not char.isspace() and unicodedata.category(char) != "Cf" for char in value)
+
+
+def _encodable(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _notice_line(value: object) -> bool:
-    return (isinstance(value, str) and bool(value.strip()) and "\n" not in value
-            and "\r" not in value)
+    return (isinstance(value, str) and _visible(value) and _encodable(value)
+            and "\n" not in value and "\r" not in value)
 
 
 def claim_parts(what: str) -> tuple[str, ...]:

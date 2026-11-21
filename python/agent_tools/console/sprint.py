@@ -449,6 +449,8 @@ def read_object(name: str, what: str) -> dict:
         text = sys.stdin.read() if name == "-" else Path(name).read_text()
         value = json.loads(text, object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise Unreadable(f"sprint: cannot read {name}: the {what} is nested too deeply") from error
     except (OSError, ValueError) as error:
         raise Unreadable(f"sprint: cannot read {name}: {error}") from error
     if not isinstance(value, dict):
