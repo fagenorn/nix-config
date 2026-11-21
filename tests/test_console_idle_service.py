@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 import json
 import os
+import shutil
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -447,6 +448,70 @@ class IdleQuotaTest(IdleCase):
                     self.assertEqual([c.profile for c in self.launches.calls], ["work"])
                     self.assertEqual(self.revives(), [])
                     self.assertEqual(self.rows("manager.waiting"), [])
+
+    def test_a_quota_move_whose_account_stops_having_room_before_the_launch_starts_nothing_and_waits_to_wake(self):
+        def remove(svc, dirs):
+            shutil.rmtree(dirs["home"])
+
+        def exclude(svc, dirs):
+            svc.set_exclusion("home", True)
+
+        def out(svc, dirs):
+            self.append(svc, [(capacity.READING, None,
+                               {"profile": "home", **self.exhausted(RESET)})])
+
+        def signed_out(svc, dirs):
+            self.append(svc, [signin.entry("home", signin.Status("signed_out", None))])
+
+        cases = [
+            ("removed before the launch", True, remove, "drain"),
+            ("excluded during the permission read", True, exclude, "read"),
+            ("out during the permission read", True, out, "read"),
+            ("signed out during the permission read", True, signed_out, "read"),
+            ("removed before the launch, nothing else has room", False, remove, "drain"),
+            ("excluded during the permission read, nothing else has room", False, exclude,
+             "read"),
+        ]
+        for name, spare, change, when in cases:
+            with self.subTest(name):
+                self.setUp()
+                dirs = (self.profiles(work=None, home=None, spare=None) if spare
+                        else self.profiles(work=None, home=None))
+                svc = self.begin(profile_dirs=list(dirs.values()))
+                sid = self.arrive(svc)
+                self.assertEqual(self.launches.calls[0].profile, "work")
+                self.out_readings(svc)
+                if spare:
+                    self.append(svc, [(capacity.READING, None,
+                                       {"profile": "spare", **self.weekly(0.5)})])
+                svc.poll_sessions()
+                self.gone(svc)
+                self.now[0] = T0 + 600
+                svc.revive()
+                self.assertEqual(len(self.queued.jobs), 1)
+                self.assertIsInstance(svc._launching[sid], service._TakeoverReservation)
+                if when == "drain":
+                    change(svc, dirs)
+                else:
+                    reader, acted = svc._permission_reader, []
+
+                    def acting(project_id, root, reader=reader, acted=acted, change=change):
+                        if not acted:
+                            acted.append(True)
+                            change(svc, dirs)
+                        return reader(project_id, root)
+
+                    svc._permission_reader = acting
+                self.drain()
+                self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+                self.assertEqual(self.revives(), [])
+                self.assertEqual(self.rows("manager.waiting"), [])
+                self.assertEqual(len(self.rows("manager.started")), 1)
+                self.assertNotIn(sid, svc._launching)
+                self.poll(svc, 3600)
+                self.assertEqual(self.revives(), [
+                    nudge.Nudge(sid, "revive", self.name(sid), "s-1", "work", "/srv/p01")])
+                self.assertEqual([c.profile for c in self.launches.calls], ["work"])
 
     def test_a_withdrawn_sprint_leaves_the_quota_mark(self):
         svc, sid = self.start_out()

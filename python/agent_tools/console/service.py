@@ -1595,7 +1595,15 @@ sprint is open and the service not stopping; a failure also prints `console: wak
 `manager_seen_seq`) while the command ran; the reservation's end after a wake was sent, or one that could not start, also sets `_settled`, so a stop that waited out the wake defers for the resumed session. A takeover job reads the listing off the lock (one that
 raises ends the reservation and appends nothing), then launches only while the sprint is open,
 neither the fresh listing nor the folded sessions show the manager and `_revive_step` is still a
-takeover; otherwise it appends nothing. A launch is a takeover when it was reserved by the bring-back
+takeover; otherwise it appends nothing. A takeover the bring-back reserves because the manager's
+account is out (`_quota_target`: out, and the step would otherwise be a wake) carries the profile it
+chose as `target` on its `_TakeoverReservation`. The launch is prepared on that profile without
+choosing again. When it is prepared, and again after the permission read (`_unexcluded_launch`), it
+must pass `_room_for_move`: another account than the manager's, by sign-in and by the account id of
+its counted reading, and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not
+excluded). It must also still be scanned, not being removed, not a colleague's, with the pin
+unchanged. Otherwise the reservation ends and nothing is appended. The started manager row stays,
+and the sprint waits to wake its session after the reset (#1279). A launch is a takeover when it was reserved by the bring-back
 or is a retry of a stalled sprint or of a manager row that is a takeover; every manager row it writes
 (`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries
 `"takeover": true` and `"goal"`, every `manager.started` carries `"seen_after"` (the sprint's
@@ -4005,7 +4013,14 @@ class _RetryReservation:
 
 
 class _TakeoverReservation:
-    """A launch reservation made by the bring-back: it runs only while the takeover is still decided."""
+    """A launch reservation made by the bring-back: it runs only while the takeover is still decided.
+
+    `target` is the profile a quota move (#1278) chose, None for every other takeover. Its launch
+    runs only there, and only while that profile is another account with room (#1279).
+    """
+
+    def __init__(self, target: str | None = None) -> None:
+        self.target = target
 
 
 MOVE_NOT_STARTED = "the manager could not be started again after its account was signed out or removed"
@@ -7138,11 +7153,18 @@ class ConsoleService:
         if project is None:
             self._release(sprint_id, token)
             return None
-        choice = manager.choose_profile(
-            capacity.capacity_view(self._read_profiles() - self._removing, self._capacity,
-                                   self._clock(), self._signins, excluded=self._excluded,
-                                   pinned=self._pinned, owners=self._owners_now()),
-            self._use.last, sprint.started_by, self._waiting_logins())
+        view = capacity.capacity_view(
+            self._read_profiles() - self._removing, self._capacity, self._clock(), self._signins,
+            excluded=self._excluded, pinned=self._pinned, owners=self._owners_now())
+        target = token.target if isinstance(token, _TakeoverReservation) else None
+        if target is not None:
+            if not self._room_for_move(view, sprint, target):
+                self._release(sprint_id, token)
+                return None
+            choice = target
+        else:
+            choice = manager.choose_profile(
+                view, self._use.last, sprint.started_by, self._waiting_logins())
         if isinstance(choice, manager.Wait):
             self._append_manager(MANAGER_WAITING, project_id, {
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
@@ -7162,16 +7184,24 @@ class ConsoleService:
 
         `prepared_pin` is the pin in force when it was prepared. The choice is made again over the
         set and the pin now in force; with nothing to choose a wait row is appended (as
-        `_prepared_launch` does) and None returned.
+        `_prepared_launch` does) and None returned. A quota move's launch (a `target` on its token)
+        never chooses again: it is kept while it is still another account with room, else the
+        reservation ends with no row (#1279).
         """
         sprint = self._sprints.get(launch.sprint_id)
         view = capacity.capacity_view(
             self._read_profiles() - self._removing, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned, owners=self._owners_now())
-        if (launch.profile not in self._excluded and self._pinned == prepared_pin
+        kept = (launch.profile not in self._excluded and self._pinned == prepared_pin
                 and launch.profile not in self._removing
                 and launch.profile in self._read_profiles()
-                and not manager.colleague_account(view, launch.profile)):
+                and not manager.colleague_account(view, launch.profile))
+        if isinstance(token, _TakeoverReservation) and token.target is not None:
+            if sprint is None or not kept or not self._room_for_move(view, sprint, launch.profile):
+                self._release(launch.sprint_id, token)
+                return None
+            return launch
+        if kept:
             return launch
         if sprint is None:
             self._release(launch.sprint_id, token)
@@ -7919,6 +7949,16 @@ class ConsoleService:
         """
         return self._move_target(sprint) is not None
 
+    def _quota_target(self, sprint: sprints.SprintState, now: int) -> str | None:
+        """Under the ingest lock: the profile a takeover moves to because the manager's account is out, else None."""
+        if (self._quota_wait(sprint) is not None
+                and revive.next_step(sprint, self._waiting(sprint),
+                                     self._last_listed.get(sprint.sprint_id,
+                                                           self._revive_since_ms),
+                                     now, self._nudger is not None) == sprints.WAKE):
+            return self._move_target(sprint)
+        return None
+
     def _move_target(self, sprint: sprints.SprintState) -> str | None:
         """Under the ingest lock: the profile a quota move would take over on, else None."""
         view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
@@ -7971,7 +8011,8 @@ class ConsoleService:
                     self._nudging.add(sprint_id)
                     jobs.append((step, sprint_id))
                 elif step == sprints.TAKEOVER:
-                    self._launching[sprint_id] = _TakeoverReservation()
+                    self._launching[sprint_id] = _TakeoverReservation(
+                        self._quota_target(sprint, now))
                     jobs.append((step, sprint_id))
         for step, sprint_id in jobs:
             try:
