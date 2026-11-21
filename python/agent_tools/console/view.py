@@ -340,6 +340,13 @@ with its recommendation picked, as before. On a consequential card the question'
 `recommended_index` are null and `badge_index` (an `int`, present only there) names the option that
 carries the Recommended badge, so a page still open from before the mark preselects nothing.
 
+`release` (#1377) is null for a question that carries no release. For one that does it is
+`{commit, version, title, confirmations, approve_index, line}`: the release the approve option lets the
+sprint's manager run, `approve_index` the index of that option among the logged options and `line` is
+`RELEASE_APPROVES`, built only from this member and the option's text, never from the question or its
+context, so a question that names another version cannot change what the owner reads as approved. A
+release question is `consequential` and `owner_only`, as the round check requires.
+
 `look` (#1260) is null for a question that carries no look. For one that does, `approve_index` is the index
 among the logged options of the option that approves the head (the page never starts that option picked, so
 an approval is always the owner's own choice), and `state` is `open`
@@ -2090,6 +2097,24 @@ def _look_entry(question: Question) -> dict | None:
             "approve_index": approve}
 
 
+# The line a release card shows (#1377): built only from the card's `release` member and the
+# approving option's text, never from the manager's question or context.
+RELEASE_APPROVES = ('Choosing "{option}" lets this sprint\'s manager run release {version}, "{title}", '
+                    "at commit {commit} with confirmations {confirmations}.")
+
+
+def _release_entry(question: Question) -> dict | None:
+    release = question.release
+    if release is None:
+        return None
+    line = RELEASE_APPROVES.format(
+        option=cut(release.approve, MAX_OPTION_CHARS), version=release.version, title=release.title,
+        commit=release.commit[:12], confirmations=", ".join(release.confirmations))
+    approve = question.options.index(release.approve) if release.approve in question.options else None
+    return {"commit": release.commit, "version": release.version, "title": release.title,
+            "confirmations": list(release.confirmations), "approve_index": approve, "line": line}
+
+
 def _question_entry(sprint: SprintState, question: Question) -> dict:
     ask = cut(question.question, MAX_ASK_CHARS)
     context = question.context
@@ -2112,6 +2137,7 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "needs_words_index": [i for i, option in enumerate(question.options)
                                                  if option in question.needs_words]}],
             "pictures": _picture_entries(question.pictures), "look": _look_entry(question),
+            "release": _release_entry(question),
             "items": [], "answers": [], "answered": answered, "waiting_since": question.at,
             "started_by": sprint.started_by}
     if question.owner_only:

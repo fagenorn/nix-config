@@ -5089,6 +5089,39 @@ def retry_posts(snap: dict) -> list:
     return [p for p in snap["posts"] if p["url"] == "/api/look-retry"]
 
 
+RELEASE_LINE = ('Choosing "Run it" lets this sprint\'s manager run release v1.3.0, "v1.3.0 notes", '
+                "at commit " + "a" * 12 + " with confirmations publish:0123456789ab.")
+
+
+def release_of(line: str | None) -> dict | None:
+    if line is None:
+        return None
+    return {"commit": "a" * 40, "version": "v1.3.0", "title": "v1.3.0 notes",
+            "confirmations": ["publish:0123456789ab"], "approve_index": 0, "line": line}
+
+
+class PageReleaseTest(unittest.TestCase):
+    def test_a_release_question_shows_its_release_line_in_the_lead_and_the_list(self) -> None:
+        options = ["Run it", "Hold"]
+        asked = question(1, "Run release v1.2.0?", options, "Hold", release=release_of(RELEASE_LINE))
+        (snap,) = render([START, {"frame": frame([asked])}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        (line,) = [n for n in nodes(lead) if has_class(n, "release-line")]
+        self.assertEqual(line["tag"], "p")
+        self.assertEqual(full(line), RELEASE_LINE)
+        (listed,) = render([START, {"frame": frame([Q0, asked])}, {"snapshot": True}])
+        (row,) = rows_of(listed)
+        (rowline,) = [n for n in nodes(row) if has_class(n, "release-line")]
+        self.assertEqual(full(rowline), RELEASE_LINE)
+
+    def test_a_question_without_a_release_shows_no_release_line(self) -> None:
+        for name, fields in (("null", {"release": None}), ("absent", {})):
+            with self.subTest(name):
+                asked = question(0, "May the reader change?", ["yes", "no"], "no", **fields)
+                (snap,) = render([START, {"frame": frame([Q0, asked])}, {"snapshot": True}])
+                self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "release-line")], [])
+
+
 class PageLookTest(unittest.TestCase):
     def test_a_moved_look_question_shows_why_nothing_was_recorded(self) -> None:
         asked = question(0, "May this merge?", ["approve", "ask for changes"], "approve",
