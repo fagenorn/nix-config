@@ -101,6 +101,7 @@ _NUMBER = re.compile(r"[1-9][0-9]*")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _SEPARATORS = " \t"
 _DOUBLE_QUOTED_BARRED = "$`\\!"
+_CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 _RELEASE_FLAGS = ("--repo-root", "--commit", "--version", "--title", "--notes-file", "--confirm",
                   "--profile")
 _CANDIDATE_FLAGS = ("--commit", "--version", "--title", "--notes-file")
@@ -281,6 +282,8 @@ def words(command: str) -> list[str] | None:
             if close < 0:
                 return None
             word = command[i + 1:close]
+            if _CONTROL.search(word):
+                return None
             if char == '"' and any(bad in word for bad in _DOUBLE_QUOTED_BARRED):
                 return None
             i = close + 1

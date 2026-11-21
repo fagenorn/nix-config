@@ -157,6 +157,14 @@ class JudgeTest(unittest.TestCase):
                 self.assertRefused(self.release.replace("'v1.2.0 notes'", title), permit.ALONE)
         self.assertRefused(self.release.replace("/tmp/n", "~/n"), permit.ALONE)
 
+    def test_a_control_character_inside_a_quoted_word_is_refused_not_raised(self):
+        for quote in ("'", '"'):
+            for bad in ("\x00", "\n", "\x1b", "\x7f"):
+                with self.subTest(quote=quote, bad=repr(bad)):
+                    value = f"{quote}a{bad}b{quote}"
+                    self.assertIsNone(words(f"x {value}"))
+                    self.assertRefused(self.release.replace(self.root, value, 1), permit.ALONE)
+
     def test_quoted_titles_in_the_grammar_pass(self):
         self.assertEqual(["x", "--title", "v1.2.0: fixes (#12)"],
                          words("x --title 'v1.2.0: fixes (#12)'"))
