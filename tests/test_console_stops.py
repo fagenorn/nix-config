@@ -12,12 +12,15 @@ import time
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import console, manager, nudge, service, sessions, signin, sprints
+from agent_tools.console import (
+    account_add, account_remove, capacity, console, manager, nudge, service, sessions, signin,
+    sprints)
 from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import GOAL_TEXT, JSON, PARTS
+from .test_console_manager_service import ManagerServiceTest
 from .test_console_reports import REPORT
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -704,6 +707,251 @@ class StopServiceTest(Case):
         (entry,) = project["finished_sprints"]["sprints"]
         self.assertEqual((entry["sprint_id"], entry["state"], entry["ended_at"]),
                          (sid, "done", reported))
+
+
+class ColleagueAccountMoveTest(StopServiceTest):
+    """Signing a colleague's account out or removing it restarts each manager on it (#1345, ADR-console-087 D5)."""
+
+    COLLEAGUE = "colleague@example.invalid"
+    SECOND = "s-2bbbbbbbb"
+
+    def profile_path(self, name):
+        return self.store.parent.parent / "accounts" / "profiles" / name
+
+    def pool_stopper(self, session_id, profile):
+        self.order.append(("stop", session_id, profile))
+        self.stopper(session_id, profile)
+
+    def pool_signer_out(self, one):
+        self.order.append(("signout", one.profile))
+        if self.signout_error is not None:
+            raise self.signout_error
+
+    def pool_remover(self, name):
+        self.order.append(("rm", name))
+        shutil.rmtree(self.profile_path(name))
+
+    def pool_reader(self, one):
+        if self.read_error is not None:
+            raise self.read_error
+        return signin.Status("signed_in", None)
+
+    def running_on(self, svc, session_id, profile):
+        """A sprint whose manager is started, briefed, approved and listed on `profile`."""
+        sid = svc.state_goal("owner/p01", GOAL_TEXT)
+        svc.send_brief(sid, self.secret(sid), PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        self.listed[session_id] = sessions.Observation(
+            session_id, "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", sid), None,
+            profile)
+        return sid
+
+    def begin_pool(self, count=2, others_signed_in=True, **overrides):
+        """The owner's `work` and `zeta` and the colleague's `colleague-1` with `count` sprints on it."""
+        self.order, self.signout_error, self.read_error = [], None, None
+        dirs = [support.profile_dir(self.store, name) for name in ("work", "colleague-1", "zeta")]
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        try:
+            log.append([
+                account_add.added("colleague-1", self.COLLEAGUE),
+                signin.entry("colleague-1", signin.Status("signed_in", None, "c1@corp-zq.invalid")),
+                (capacity.READING, None, {"profile": "colleague-1",
+                                          **ManagerServiceTest.weekly(0.1)}),
+                *(signin.entry(name, signin.Status("signed_out", None))
+                  for name in ("work", "zeta"))])
+        finally:
+            log.close()
+        self.launches = support.Launches()
+        options = dict(
+            launcher=self.launches, profile_dirs=dirs, nudger=self.nudger,
+            listing=lambda: dict(self.listed), stopper=self.pool_stopper,
+            clock=lambda: self.now[0], log_clock=self.log_clock, session_poll_seconds=3600,
+            probe_tick_seconds=3600, signer_out=self.pool_signer_out,
+            account_remover=self.pool_remover, signin_reader=self.pool_reader)
+        svc = self.start(**{**options, **overrides})
+        self.sids = []
+        for session_id in (FIRST, self.SECOND)[:count]:
+            self.sids.append(self.running_on(svc, session_id, "colleague-1"))
+        self.assertEqual([call.profile for call in self.launches.calls],
+                         ["colleague-1"] * count)
+        self.before = len(self.launches.calls)
+        if others_signed_in:
+            svc._apply(svc.log.append([
+                signin.entry("work", signin.Status("signed_in", None, "w@corp-zq.invalid")),
+                signin.entry("zeta", signin.Status("signed_in", None, "z@corp-zq.invalid")),
+                (capacity.READING, None, {"profile": "work", **ManagerServiceTest.weekly(0.5)}),
+                (capacity.READING, None, {"profile": "zeta", **ManagerServiceTest.weekly(0.3)})]))
+        return svc
+
+    def launched(self):
+        return self.launches.calls[self.before:]
+
+    def manager_of(self, svc, sid):
+        return svc._sprints[sid].manager
+
+    def stops_in(self, order=None):
+        return [entry for entry in (self.order if order is None else order)
+                if entry[0] == "stop"]
+
+    def test_removing_a_colleagues_account_moves_both_its_managers_to_the_pools_choice(self):
+        svc = self.begin_pool()
+        svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(self.order[0], ("signout", "colleague-1"))
+        self.assertEqual(self.order[-1], ("rm", "colleague-1"))
+        self.assertEqual(set(self.order[1:-1]), {("stop", FIRST, "colleague-1"),
+                                                 ("stop", self.SECOND, "colleague-1")})
+        self.assertEqual([(call.profile, call.takeover) for call in self.launched()],
+                         [("zeta", True)] * 2)
+        for sid in self.sids:
+            self.assertEqual(self.manager_of(svc, sid).state, sprints.STARTED)
+            self.assertEqual(self.manager_of(svc, sid).profile, "zeta")
+
+    def test_signing_out_a_colleagues_account_moves_both_its_managers_and_keeps_it_his(self):
+        svc = self.begin_pool()
+        svc.sign_out_account("colleague-1")
+        self.assertEqual(self.order[0], ("signout", "colleague-1"))
+        self.assertEqual(set(self.order[1:]), {("stop", FIRST, "colleague-1"),
+                                               ("stop", self.SECOND, "colleague-1")})
+        self.assertEqual(len(self.order), 3)
+        self.assertEqual([(call.profile, call.takeover) for call in self.launched()],
+                         [("zeta", True)] * 2)
+        for sid in self.sids:
+            self.assertEqual(self.manager_of(svc, sid).profile, "zeta")
+        (account,) = [one for one in view_of(svc)["capacity"]["profiles"]
+                      if one["profile"] == "colleague-1"]
+        self.assertEqual((account["owner"], account["signin"]["state"]),
+                         (self.COLLEAGUE, "signed_out"))
+        self.assertEqual(self.rows("signin.acted")[-1], {
+            "by": "owner", "profile": "colleague-1", "action": "signout",
+            "outcome": "signed_out"})
+
+    def test_with_no_other_account_signed_in_each_moved_manager_waits(self):
+        svc = self.begin_pool(others_signed_in=False)
+        svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(self.launched(), [])
+        waiting = self.rows("manager.waiting")
+        self.assertEqual(sorted(row["sprint_id"] for row in waiting), sorted(self.sids))
+        for row in waiting:
+            self.assertEqual((row["until"], row["takeover"], row["goal"]),
+                             (None, True, svc._sprints[row["sprint_id"]].goal))
+
+    def test_a_manager_whose_stop_fails_keeps_the_account_and_is_not_launched_twice(self):
+        svc = self.begin_pool()
+        self.failures = ["boom"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), \
+                self.assertRaises(account_remove.RemoveFailed) as raised:
+            svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(raised.exception.kind, "stop_failed")
+        self.assertNotIn(("rm", "colleague-1"), self.order)
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        (call,) = self.launched()
+        self.assertEqual(call.profile, "zeta")
+        failed_session = self.order[1][1]
+        by_session = {FIRST: self.sids[0], self.SECOND: self.sids[1]}
+        failed, other = by_session[failed_session], by_session[
+            self.SECOND if failed_session == FIRST else FIRST]
+        self.assertEqual(self.manager_of(svc, failed).profile, "colleague-1")
+        self.assertEqual(self.manager_of(svc, other).profile, "zeta")
+        started = [row["sprint_id"] for row in self.rows("manager.started")]
+        self.assertEqual(started.count(failed), 1)
+        self.assertEqual(self.rows("account.removal")[-1], {
+            "by": "owner", "profile": "colleague-1", "outcome": "remove_failed",
+            "kind": "stop_failed"})
+        self.assertIn(f"console: manager_move_failed {failed} StopFailed", err.getvalue())
+        self.assertNotIn("colleague-1", err.getvalue())
+        self.assertNotIn(self.COLLEAGUE, err.getvalue())
+
+    def test_a_sign_out_whose_stop_fails_says_a_manager_was_not_moved(self):
+        svc = self.begin_pool()
+        self.failures = ["boom"]
+        with contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(account_remove.MoveFailed) as raised:
+            svc.sign_out_account("colleague-1")
+        self.assertEqual(raised.exception.kind, "stop_failed")
+        self.assertEqual(self.rows("signin.acted")[-1]["outcome"], "signed_out")
+        (call,) = self.launched()
+        self.assertEqual(call.profile, "zeta")
+
+    def test_a_failed_sign_out_moves_nothing(self):
+        svc = self.begin_pool()
+        self.signout_error = account_remove.SignOutFailed("exited")
+        with self.assertRaises(account_remove.SignOutFailed):
+            svc.sign_out_account("colleague-1")
+        self.assertEqual(self.order, [("signout", "colleague-1")])
+        self.assertEqual(self.launched(), [])
+        self.assertEqual(svc._launching, {})
+        self.assertEqual(self.rows("signin.acted")[-1]["outcome"], "failed")
+
+    def test_a_queued_nudge_refuses_the_change_and_changes_nothing(self):
+        svc = self.begin_pool()
+        with svc._ingest:
+            svc._nudging.add(self.sids[1])
+        rows = support.log_rows(self.store)
+        for act in (lambda: svc.remove_account("colleague-1", "colleague-1"),
+                    lambda: svc.sign_out_account("colleague-1")):
+            with self.assertRaises(sprints.Refused) as raised:
+                act()
+            self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        for sid in self.sids:
+            self.assertEqual(self.manager_of(svc, sid).profile, "colleague-1")
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.assertEqual(self.rows("account.removal"), [])
+        self.assertEqual(self.rows("signin.acted"), [])
+        self.assertEqual(svc._launching, {})
+        self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_a_manager_not_yet_listed_refuses_the_change_until_it_is_listed(self):
+        svc = self.begin_pool()
+        late = self.listed.pop(FIRST)
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        self.assertEqual(svc._launching, {})
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.listed[FIRST] = late
+        svc.remove_account("colleague-1", "colleague-1")
+        self.assertLess(self.order.index(("stop", FIRST, "colleague-1")),
+                        self.order.index(("rm", "colleague-1")))
+        self.assertEqual([call.profile for call in self.launched()], ["zeta"] * 2)
+
+    def test_a_manager_long_gone_from_the_listing_is_relaunched_without_a_stop(self):
+        svc = self.begin_pool()
+        self.listed.pop(FIRST)
+        self.now[0] += sprints.STOP_SETTLE_MS // 1000 + 1
+        svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual({entry[1] for entry in self.stops_in()}, {self.SECOND})
+        self.assertEqual([call.profile for call in self.launched()], ["zeta"] * 2)
+
+    def test_a_colleagues_failed_sign_out_and_status_read_name_no_profile(self):
+        svc = self.begin_pool()
+        self.signout_error = account_remove.SignOutFailed("exited")
+        self.read_error = signin.StatusFailed("unavailable")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(account_remove.SignOutFailed):
+            svc.remove_account("colleague-1", "colleague-1")
+        self.assertIn("console: signin_remove_read_failed unavailable", err.getvalue())
+        self.assertNotIn("colleague-1", err.getvalue())
+
+    def test_removing_the_owners_own_account_moves_nothing(self):
+        svc = self.begin_pool(count=0)
+        svc.set_exclusion("colleague-1", True)
+        svc.set_exclusion("zeta", True)
+        sids = [self.running_on(svc, FIRST, "work"), self.running_on(svc, self.SECOND, "work")]
+        svc.set_exclusion("colleague-1", False)
+        svc.set_exclusion("zeta", False)
+        self.assertEqual([call.profile for call in self.launches.calls], ["work"] * 2)
+        self.before = len(self.launches.calls)
+        svc.remove_account("work", "work")
+        self.assertEqual(self.stops_in(), [])
+        self.assertEqual(self.launched(), [])
+        for sid in sids:
+            self.assertEqual(self.manager_of(svc, sid).profile, "work")
 
 
 class WithdrawStopTest(StopServiceTest):
