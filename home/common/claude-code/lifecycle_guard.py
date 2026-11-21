@@ -793,6 +793,19 @@ console's Activate instead, and its refusal is the second form:
     <id>), so it runs only through the console's Activate, on the line that says
     a console change is not active on this host.
 
+A `gh` run that names its repository with `--repo`, `--repo=...`, `-R` or `-R...` (the
+last wins; `HOST/OWNER/REPO` and a trailing `.git` are read, case is ignored) is a command
+on that repository alone (issue 1375): a verb of two or more words that the run itself
+spells out (`gh run rerun 9 --failed --repo fagenorn/nix-config`) is judged only against
+the rules of the project whose repository the run names, from any directory and with no
+repository lookup, so another project's `gh run rerun` rule never refuses a rerun of a
+pull-request check of this repository, and the named project's rule refuses it wherever
+the call runs, with the same refusal line. A run that names no repository, a value with
+`$` or a backtick, a hit read as raw text (`sh -c`, a pipeline, an unparseable command)
+and a verb matched only across an operator keep the checkout judgement above. When several
+runs hit the same rule, one that is not narrowed keeps it unnarrowed and otherwise the
+repositories they name are joined.
+
 Known limits: a production command reached by another name (a bare `just` that
 runs the default recipe, a script or alias), words fed on stdin, a program's own
 directory option (`env -C`, `make -C`) and a one-word command handed to a program
@@ -4168,11 +4181,46 @@ def production_parse(command):
     return commands, "\n".join(s for s, (_, _, shell, _) in zip(segments, read) if shell)
 
 
+def gh_named_repository(run):
+    """The `owner/repo` slug, lower-cased, that the `gh` run `run` names with `--repo`,
+    `--repo=...`, `-R` or `-R...` (the last one wins, as in gh), else None. A value that
+    holds `$` or a backtick, or does not end in `owner/repo` (`HOST/OWNER/REPO` and a
+    trailing `.git` are read), names nothing the guard can tell, so it is None (issue 1375)."""
+    value = None
+    words = run[1:]
+    for position, word in enumerate(words):
+        if word == "--repo" or word == "-R":
+            value = words[position + 1] if position + 1 < len(words) else None
+        elif word.startswith("--repo="):
+            value = word[len("--repo="):]
+        elif word.startswith("-R") and not word.startswith("--"):
+            value = word[2:]
+    if not value or "$" in value or "`" in value:
+        return None
+    value = value[:-4] if value.endswith(".git") else value
+    parts = value.split("/")
+    if len(parts) < 2 or not parts[-1] or not parts[-2]:
+        return None
+    return f"{parts[-2]}/{parts[-1]}".lower()
+
+
+def add_production_hit(hits, hit, named):
+    """Record `hit` in `hits`, a map of `(slug, index)` to None (judged by the checkout) or
+    the frozenset of repositories the runs that hit it name. A hit read any other way, or by
+    a run that names no repository, stays None."""
+    if hit in hits:
+        before = hits[hit]
+        named = None if before is None or named is None else before | named
+    hits[hit] = named
+
+
 def production_hits(command, rules):
     """(hits, certain) for `command` against `rules`, a map of slug to its `production`
-    member: the `(slug, index into changes)` pairs the shell would run, and False for
-    `certain` when any word of either raw reading is a directory change (issue 1149 D5 to
-    D7). A mention as another program's argument never hits a one-word verb."""
+    member: the `(slug, index into changes)` pairs the shell would run, each mapped to None
+    or, for a `gh` run that names its repository with `--repo`, the frozenset of the
+    repositories its runs name (issue 1375), and False for `certain` when any word of
+    either raw reading is a directory change (issue 1149 D5 to D7). A mention as another
+    program's argument never hits a one-word verb."""
     raw = joined_continuations(command)
     verbs = {
         slug: (
@@ -4186,7 +4234,7 @@ def production_hits(command, rules):
         for words in (raw_words(raw), raw_words(raw, glued=True))
         for word in words
     )
-    hits = set()
+    hits = {}
     parsed = production_parse(command)
     if parsed is None:
         raw_texts = [raw]
@@ -4198,7 +4246,7 @@ def production_hits(command, rules):
         for slug, (changes, _) in verbs.items():
             for index, verb in enumerate(changes):
                 if production_raw_hit(text, verb):
-                    hits.add((slug, index))
+                    add_production_hit(hits, (slug, index), None)
     for tokens, flags, later in commands:
         later = joined_continuations(later)
         later_words = (raw_words(later), raw_words(later, glued=True))
@@ -4207,7 +4255,7 @@ def production_hits(command, rules):
                 for slug, (changes, _) in verbs.items():
                     for index, verb in enumerate(changes):
                         if production_raw_hit(value, verb):
-                            hits.add((slug, index))
+                            add_production_hit(hits, (slug, index), None)
         start = 0
         while start < len(tokens):
             if tokens[start][1]:
@@ -4238,29 +4286,38 @@ def production_hits(command, rules):
                             for slug, (changes, _) in verbs.items():
                                 for index, verb in enumerate(changes):
                                     if production_raw_hit(value, verb):
-                                        hits.add((slug, index))
+                                        add_production_hit(hits, (slug, index), None)
             for i in range(start, end):
                 name = program_name(tokens[i][0])
                 run = [token[0] for token in tokens[i:end]]
                 after = [token[0] for token in tokens[i + 1:] if not token[1]]
                 for slug, (changes, read_only) in verbs.items():
                     for index, verb in enumerate(changes):
-                        if (slug, index) in hits or name != verb[0]:
+                        if (slug, index) in hits and hits[(slug, index)] is None:
                             continue
+                        if name != verb[0]:
+                            continue
+                        in_run = False
                         if len(verb) == 1:
                             matched = flags[i] or (
                                 flagged is not None and i > flagged
                                 and runner in PRODUCTION_RUNNERS
                             )
                         else:
-                            matched = words_in_order(run[1:], verb[1:]) or (
+                            in_run = words_in_order(run[1:], verb[1:])
+                            matched = in_run or (
                                 cut and any(
                                     words_in_order(after + words, verb[1:])
                                     for words in later_words
                                 )
                             )
                         if matched and not production_lifted(run, verb, read_only):
-                            hits.add((slug, index))
+                            # A `gh` run that names its repository is a command on that
+                            # repository alone (issue 1375); every other reading is judged
+                            # by the checkout.
+                            named = gh_named_repository(run) if in_run and name == "gh" else None
+                            add_production_hit(
+                                hits, (slug, index), None if named is None else frozenset({named}))
             start = end
     return hits, certain
 
@@ -4289,8 +4346,10 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
     Only a row whose `production` has a `changes` entry takes part. With no hit nothing
     runs; with one, `detect_repository` names the payload cwd's repository. A command that
     may change directory is judged against every declaring row, that repository first,
-    then by sorted slug; otherwise only that repository's rules refuse. Inside a row the
-    first rule in `changes` order that hits names the refusal.
+    then by sorted slug; otherwise only that repository's rules refuse. A `gh` run that
+    names its repository (`--repo`, `-R`) is judged only against that repository's rules,
+    from any directory, with no repository lookup (issue 1375). Inside a row the first
+    rule in `changes` order that hits names the refusal.
     """
     rules = {
         slug: row["production"] for slug, row in rows.items()
@@ -4301,17 +4360,25 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
     hits, certain = production_hits(command, rules)
     if not hits:
         return None
-    try:
-        here = detect_repository(git_bin, cwd, timeout, strict=True)
-    except RepositoryLookupFailed as error:
-        return (f"the repository lookup {error} for a command that may change the production "
-                "of a declared project, so the guard cannot judge it")
+    here = None
+    if any(named is None for named in hits.values()):
+        try:
+            here = detect_repository(git_bin, cwd, timeout, strict=True)
+        except RepositoryLookupFailed as error:
+            return (f"the repository lookup {error} for a command that may change the "
+                    "production of a declared project, so the guard cannot judge it")
     order = [here] if here in rules else []
     if not certain:
         order += sorted(slug for slug in rules if slug != here)
-    for slug in order:
+    for slug in order + sorted(slug for slug in rules if slug not in order):
         for index, change in enumerate(rules[slug]["changes"]):
-            if (slug, index) in hits:
+            if (slug, index) not in hits:
+                continue
+            named = hits[(slug, index)]
+            if named is None:
+                if slug in order:
+                    return production_refusal_text(slug, change, rules[slug])
+            elif slug.lower() in named:
                 return production_refusal_text(slug, change, rules[slug])
     return None
 
