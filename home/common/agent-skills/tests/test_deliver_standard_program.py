@@ -6766,6 +6766,91 @@ class ScopedRoundFollowUpTest(unittest.TestCase):
         self.assertEqual(waves(calls), [])
         self.assertEqual(result["cont"]["follow_ups"], self.FILED)
 
+    def test_a_reworded_re_report_of_a_first_review_finding_blocks_whatever_its_relation(self):
+        """The re-review may call a still-open finding new; the report in its file stands for it, never filed."""
+        reworded = {"severity": "important", "file": "claim.py", "summary": "race in steal is still open on the retry path", "relation": "new", "commit": H}
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "findings": [], "closed": []},
+            "fix-wave-review": {"verdict": "findings", "findings": [reworded]}, "verify": None})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual(filings(calls), [])
+        self.assertNotIn("verify", labels(calls))
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], [reworded["summary"]])
+        self.assertNotIn("follow_ups", result["cont"])
+
+    def test_one_wave_finding_absorbs_one_report_and_the_others_are_filed(self):
+        repeat = {"severity": "important", "file": "claim.py", "summary": "race in steal", "relation": "new", "commit": H}
+        other = {"severity": "important", "file": "claim.py", "summary": "race in renew", "relation": "narrowing", "commit": H}
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "findings": [], "closed": []},
+            "fix-wave-review": {"verdict": "findings", "findings": [repeat, other]}, "verify": None})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["race in steal"])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual([f["summary"] for f in result["cont"]["follow_ups"]], ["race in renew"])
+
+    def test_a_minor_repeat_of_a_critical_or_unmet_criterion_finding_still_blocks(self):
+        for name, wave, repeat in (("critical", self.SECURITY, dict(self.SECURITY, severity="minor")),
+                                   ("unmet criterion", self.unmet("important"), dict(self.unmet("important"), severity="minor", ac=None))):
+            with self.subTest(name):
+                repeat = {k: v for k, v in repeat.items() if v is not None}
+                result, calls = scoped_resume(scoped_first_stop(), replies={
+                    "final-scoped": self.scoped(wave), "fix-wave-review": {"verdict": "findings", "findings": [repeat]}, "verify": None})
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertNotIn("verify", labels(calls))
+                self.assertEqual(filings(calls), [])
+                kept = [f for f in result["cont"]["fix_findings"] if f["summary"] == wave["summary"]]
+                self.assertEqual([(f["severity"], f.get("ac")) for f in kept], [(wave["severity"], wave.get("ac"))])
+
+    def test_a_minor_repeat_of_an_ordinary_finding_is_still_dropped(self):
+        repeat = {"severity": "minor", "file": "claim.py", "summary": "race in steal", "relation": "new", "commit": H}
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "findings": [], "closed": []},
+            "fix-wave-review": {"verdict": "findings", "findings": [repeat]}, "verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual(filings(calls), [])
+
+    def test_the_independent_codex_review_reports_an_unmet_criterion_at_any_severity(self):
+        item = schema_of(run(args=SIZED, replies=dict(sized(1501), verify=None))[1], "final-codex")["properties"]["findings"]["items"]
+        self.assertEqual(item["properties"]["ac"], {"type": "string"})
+        codex = {"available": True, "verdict": "findings", "findings": [self.unmet("minor")], "raw_summary": ""}
+        _, calls = run(args=SIZED, replies=dict(sized(1501), **{"final-codex": codex, "verify": None}))
+        self.assertIn("AC1 has no test", prompt(calls, "fix-wave"))
+        style = {"severity": "minor", "file": "src/flow.py", "summary": "style", "relation": "new"}
+        _, calls = run(args=SIZED, replies=dict(sized(1501), **{"final-codex": dict(codex, findings=[style]), "verify": None}))
+        self.assertEqual(waves(calls), [])
+
+    def test_the_filing_clerk_is_told_only_to_use_tools_it_has(self):
+        clerk = (REPO_ROOT / "home/common/claude-code/agents/clerk.md").read_text(encoding="utf-8")
+        tools = {t.strip() for t in re.search(r"^tools:\s*(.+)$", clerk, re.M).group(1).split(",")}
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.HARDENING), "verify": None})
+        text = prompt(calls, "follow-ups-1")
+        named = set(re.findall(r"\b([A-Z][A-Za-z]+) tool\b", text))
+        self.assertLessEqual(named, tools)
+
+    def test_the_recovery_lookup_is_complete_before_an_issue_is_created_again(self):
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.HARDENING), "verify": None})
+        text = prompt(calls, "follow-ups-1")
+        lookups = re.findall(r"gh issue list [^\n]*?--limit (\d+)", text)
+        self.assertEqual(lookups, ["1000", "1000"])
+        self.assertLess(text.index("--limit 1000"), text.index("forge-issue create"))
+
+    def test_two_findings_that_differ_only_past_the_clip_are_two_follow_ups(self):
+        head = "x" * 300
+        a = dict(self.HARDENING, failing_input=head + "-first")
+        b = dict(self.HARDENING, failing_input=head + "-second")
+        result, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(a, b), "verify": None})
+        entries = items(calls, "follow-ups-1")
+        self.assertEqual(len(entries), 2)
+        self.assertNotEqual(entries[0]["body"], entries[1]["body"])
+        self.assertEqual(len(result["cont"]["follow_ups"]), 2)
+        self.assertEqual(len({f["key"] for f in result["cont"]["follow_ups"]}), 2)
+        _, calls = scoped_resume(result["cont"], replies={"final-scoped": self.scoped(a, closed=[]), "verify": None})
+        self.assertEqual(filings(calls), [])
+        again = dict(self.HARDENING, failing_input=head + "-first")
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(a, again), "verify": None})
+        self.assertEqual(len(items(calls, "follow-ups-1")), 1)
+
 
 class FixDiffFindingTest(unittest.TestCase):
     """#950: a finding not marked narrowing, in a file the fix wave's commits changed, is admitted to the next wave like a narrowing one."""

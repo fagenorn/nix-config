@@ -471,6 +471,8 @@ const SCOPED_ITEM = { ...FINAL_ITEM, properties: { ...FINAL_ITEM.properties, com
 const FINAL_FINDINGS = withItems(FINDINGS, FINAL_ITEM)
 const FINDINGS_HEAD = { ...FINAL_FINDINGS, properties: { ...FINAL_FINDINGS.properties, head: FULL_SHA }, required: [...FINDINGS.required, 'head'] }
 const SCOPED_FINDINGS = withItems({ ...FINDINGS, properties: { ...FINDINGS.properties, closed: { type: 'array', items: { type: 'integer' } }, head: { type: 'string' } } }, SCOPED_ITEM)
+// final-codex reports unmet criteria by ac like the other final reviewers.
+const FINAL_CODEX = { ...CODEX, properties: { ...CODEX.properties, findings: FINAL_FINDINGS.properties.findings } }
 const FOLLOW_UPS = { type: 'object', properties: { filed: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer', minimum: 1 }, issue: { type: 'integer', minimum: 1 } }, required: ['n', 'issue'] } } }, required: ['filed'] }
 // #1386 (owner, 21 Nov): what critical means to every final reviewer, and what a scoped round blocks on.
 const CRITICAL_MEANS = 'A finding is critical only when it is a security defect, a data loss, or an acceptance criterion of the issue that is not met; every other blocking finding is important.'
@@ -730,21 +732,42 @@ const markReviewed = head => { if (head) reviewed = { head: normSha(head), ...br
 // (pending); both ride through every stop. An entry needs a file, a summary and the full sha its reviewer read it at.
 const fullSha = v => typeof v === 'string' && SHA_RE.test(normSha(v))
 const textOf = v => (typeof v === 'string' && v.trim() ? clip(v) : '')
+// A finding's identity is read from its full fields, before clip: one whose text a clip shortened carries key, a hash of the full file, summary and failing input,
+// so two findings that differ only past the clip stay two (an unclipped one is its own identity).
+const hashOf = s => {
+  let a = 0xdeadbeef
+  let b = 0x41c6ce57
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    a = Math.imul(a ^ c, 2654435761)
+    b = Math.imul(b ^ c, 1597334677)
+  }
+  a = Math.imul(a ^ (a >>> 16), 2246822507) ^ Math.imul(b ^ (b >>> 13), 3266489909)
+  b = Math.imul(b ^ (b >>> 16), 2246822507) ^ Math.imul(a ^ (a >>> 13), 3266489909)
+  return (4294967296 * (2097151 & b) + (a >>> 0)).toString(36)
+}
+const keyOf = f => {
+  if (typeof f.key === 'string' && f.key) return f.key
+  const full = [f.file, f.summary, f.failing_input].map(v => (typeof v === 'string' ? v.trim() : ''))
+  return full.some(v => v.length > REASON_MAX) ? hashOf(full.join('\n')) : ''
+}
 const followUpOf = (f, filed) => {
   if (!isEntry(f) || !textOf(f.file) || !textOf(f.summary) || !fullSha(f.commit)) return null
-  const rest = { file: textOf(f.file), summary: textOf(f.summary), ...(textOf(f.failing_input) ? { failing_input: textOf(f.failing_input) } : {}), commit: normSha(f.commit) }
+  const key = keyOf(f)
+  const rest = { file: textOf(f.file), summary: textOf(f.summary), ...(textOf(f.failing_input) ? { failing_input: textOf(f.failing_input) } : {}), commit: normSha(f.commit), ...(key ? { key } : {}) }
   if (filed) return Number.isInteger(f.issue) && f.issue > 0 ? { issue: f.issue, ...rest } : null
   return ['critical', 'important', 'minor'].includes(f.severity) ? { severity: f.severity, ...rest } : null
 }
 let followUps = (CONT && Array.isArray(CONT.follow_ups) ? CONT.follow_ups : []).map(f => followUpOf(f, true)).filter(Boolean)
 let pending = (CONT && Array.isArray(CONT.follow_ups_pending) ? CONT.follow_ups_pending : []).map(f => followUpOf(f, false)).filter(Boolean)
 let followUpCalls = 0
-const followUpKey = f => `${textOf(f.file)}\n${clip(String(f.summary))}\n${textOf(f.failing_input)}`
+const followUpKey = f => (f.key ? `${textOf(f.file)}\n${f.key}` : `${textOf(f.file)}\n${clip(String(f.summary))}\n${textOf(f.failing_input)}`)
 // #1386: the follow-up issues of the findings a scoped round does not block on: one clerk call files one issue per entry. The program builds each
 // title (no shell quote character in it) and body; an entry is confirmed only by exactly one issue number of its own, so a lost, partial or shared
 // reply leaves it pending, and the gate before Verify files it again.
 const titleOf = f => `Follow-up of #${ISSUE}: ${f.file}: ${f.summary}`.replace(/['"`$\\]/g, '').replace(/\s+/g, ' ').slice(0, 120)
-const bodyOf = f => [`Follow-up of #${ISSUE}: a scoped review round of its delivery raised this ${f.severity} finding, which does not block that delivery.`, '', `File: ${f.file}`, `Commit: ${f.commit}`, `Finding: ${f.summary}`, ...(f.failing_input ? [`Failing input: ${f.failing_input}`] : [])].join('\n')
+const bodyOf = f => [`Follow-up of #${ISSUE}: a scoped review round of its delivery raised this ${f.severity} finding, which does not block that delivery.`, '', `File: ${f.file}`, `Commit: ${f.commit}`, `Finding: ${f.summary}`, ...(f.failing_input ? [`Failing input: ${f.failing_input}`] : []), ...(f.key ? [`Identity: ${f.key}`] : [])].join('\n')
+const LOOKUP_LIMIT = 1000
 const fileFollowUps = async list => {
   const m = ++followUpCalls
   const entries = list.map((f, i) => ({ n: i + 1, title: titleOf(f), body: bodyOf(f) }))
@@ -752,8 +775,9 @@ const fileFollowUps = async list => {
   try {
     r = await call(`Issue #${ISSUE} of ${SLUG}. A review round after the first full review raised the findings below, which do not block the merge: file one follow-up issue for each, changing nothing in any worktree.
 Follow-ups: ${JSON.stringify(entries)}
-First run once ${UNSET}gh issue list --repo ${SLUG} --state all --search "Follow-up of #${ISSUE} in:title" --limit 200 --json number,body
-Then, for each entry in order: when an issue of that list has a body equal to the entry's body (trailing whitespace aside), return that issue for the entry and file nothing. Otherwise write the entry's body exactly, as given, to a new file outside any work tree with the Write tool and run alone forge-issue create --repo ${SLUG} --title '<the entry's title>' --body-file <that file>, the title being one single-quoted argument exactly as given (it holds no quote, dollar sign, backtick or backslash) and no blocking-edge flag, since the body names the parent.
+First run once ${UNSET}gh issue list --repo ${SLUG} --state all --search "Follow-up of #${ISSUE} in:title" --limit ${LOOKUP_LIMIT} --json number,body
+When that list holds ${LOOKUP_LIMIT} issues it may be cut short: then, before creating any issue, look for each entry on its own with ${UNSET}gh issue list --repo ${SLUG} --state all --search "<the entry's title> in:title" --limit ${LOOKUP_LIMIT} --json number,body, and leave out an entry whose own list also holds ${LOOKUP_LIMIT} issues instead of creating it.
+Then, for each entry in order: when an issue of that list has a body equal to the entry's body (trailing whitespace aside), return that issue for the entry and file nothing. Otherwise write the entry's body exactly, as given (its \\n are line breaks), to a new file outside any work tree with a shell command (a heredoc whose delimiter is quoted), then run alone forge-issue create --repo ${SLUG} --title '<the entry's title>' --body-file <that file>, the title being one single-quoted argument exactly as given (it holds no quote, dollar sign, backtick or backslash) and no blocking-edge flag, since the body names the parent.
 Return filed: one {n, issue} per entry you filed or found, leaving out one you could not file or confirm.
 ${RULES}`, { label: `follow-ups-${m}`, phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: FOLLOW_UPS })
   } catch (e) {
@@ -1969,9 +1993,9 @@ ${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', mode
   } else log(`final review: ${lines} changed lines, above ${SIZED_CHUNK_LINES}; keeping the task chunks`)
 }
 const codexP = REVIEW_CODE ? call(`${CTX}
-${PLAN_REF} Acceptance criteria: ${ACS}. Pass this definition to Codex with those criteria, as the caller's input: ${CRITICAL_MEANS}
+${PLAN_REF} Acceptance criteria: ${ACS}. Pass this definition to Codex with those criteria, as the caller's input: ${CRITICAL_MEANS} Set ac on a finding that names an unmet criterion, at any severity.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE}
-${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
+${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: FINAL_CODEX }) : Promise.resolve(null)
 const finals = await parallel(groups.map((g, gi) => () => readReview(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it). ${VERIFY_OWNED} ${CRITICAL_MEANS} Report Important or Critical findings only. Do not edit anything.${isCommit(tip) ? '' : HEAD_ASK}`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINAL_SCHEMA })))
@@ -1988,8 +2012,8 @@ const codexR = await codexP
 finalFindings = finals.flatMap(blockingOf)
 if (REVIEW_CODE) {
   if (!codexR || !codexR.available) return codexStop('code', codexR)
-  finalFindings = finalFindings.concat(findingsOf(codexR).map(f => ({ ...f, source: 'codex' })))
-  log(`codex review: ${findingsOf(codexR).length} blocking findings`)
+  finalFindings = finalFindings.concat(blockingOf(codexR).map(f => ({ ...f, source: 'codex' })))
+  log(`codex review: ${blockingOf(codexR).length} blocking findings`)
 }
 let integ = null
 if (integP) {
@@ -2088,20 +2112,35 @@ if (finalFindings.length) {
   const DECIDED = !RESUMED ? '' : oscDecision !== null ? ` The owner decided the approach for ${RESUMED.file}, and the decision is binding: ${JSON.stringify(oscDecision)}.` : amendApplied ? ` The owner amended the plan for ${RESUMED.file} (plan.md, Amendments): it is binding.` : ''
   const FOLLOW = oscDecision !== null ? 'follow that decision' : 'follow that amendment'
   let waveFindings = finalFindings
-  // #1386: a scoped round's re-review blocks on a report that stands for one of the wave's findings (at most one each, or one marked narrowing in its file), a critical one and one
+  // #1386: a scoped round's re-review blocks on a report that stands for one of the wave's findings (one each: its exact repeat, else one in its file), a critical one and one
   // naming an unmet criterion; the other reports are filed. The full round's re-review keeps its rule.
   const rereviewed = async (rv, wave) => {
     const reports = rv.findings.filter(isEntry)
-    const matched = new Set()
-    for (const w of wave) {
-      const j = reports.findIndex((f, at) => !matched.has(at) && findingKey(f) === findingKey(w))
-      if (j >= 0) matched.add(j)
+    // Each wave finding is stood for by at most one report, and each report stands for at most one: an exact repeat first, then, for a finding left without one,
+    // a report in its file (marked narrowing first), whatever its relation, since a reviewer may reword a finding it still holds.
+    const stands = new Map()
+    const open = []
+    wave.forEach((w, i) => {
+      const j = reports.findIndex((f, at) => !stands.has(at) && findingKey(f) === findingKey(w))
+      if (j >= 0) stands.set(j, w)
+      else open.push(i)
+    })
+    for (const i of open) {
+      const w = wave[i]
+      if (!fileOf(w)) continue
+      const same = reports.map((f, at) => at).filter(at => !stands.has(at) && fileOf(reports[at]) === fileOf(w))
+      const j = same.find(at => reports[at].relation === 'narrowing')
+      if (j !== undefined || same.length) stands.set(j !== undefined ? j : same[0], w)
     }
-    // A report marked narrowing on a wave finding's file is the same kind of defect as that finding, reworded or reached another way: it stands for it.
-    const waveFiles = wave.map(fileOf).filter(Boolean)
-    for (const [at, f] of reports.entries()) if (f.relation === 'narrowing' && fileOf(f) && waveFiles.includes(fileOf(f))) matched.add(at)
-    const held = reports.filter((f, at) => matched.has(at) && (f.severity !== 'minor' || namesAc(f)))
-    return held.concat(await triage(reports.filter((f, at) => !matched.has(at))))
+    // A report that stands for a wave finding blocks, as an important or critical one always did. A minor repeat of a critical finding or one naming a criterion
+    // keeps the finding's severity and ac: it is still open until a review resolves it. A minor repeat of any other finding is dropped, as it was.
+    const held = [...stands.keys()].sort((x, y) => x - y).flatMap(at => {
+      const f = reports[at]
+      const w = stands.get(at)
+      if (f.severity !== 'minor' || namesAc(f)) return [f]
+      return w.severity === 'critical' || namesAc(w) ? [{ ...f, severity: w.severity, ...(namesAc(w) ? { ac: w.ac } : {}) }] : []
+    })
+    return held.concat(await triage(reports.filter((f, at) => !stands.has(at))))
   }
   let afterFirst = 0
   let regressions = 0
