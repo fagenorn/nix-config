@@ -1812,6 +1812,40 @@ FIRST = question_entry(0, "Which store keeps the checkpoints?", ["sqlite", "file
 SECOND = question_entry(1, "May the reader change?", ["yes", "no"], "no", "the reader slice")
 
 
+class SprintUnreadLineTest(unittest.TestCase):
+    """The sprint line says a delivered, unread message waits to be read (#1379)."""
+
+    base = reported(started(A), R)
+    baseline = entry(line(base, R + 4 * MIN))["now_text"]
+
+    @staticmethod
+    def msg(**fields):
+        return Message(9, "text", T0, None, "hi", **fields)
+
+    def shown(self, sprint_state, records=None):
+        return entry(line(sprint_state, R + 4 * MIN, records))["now_text"]
+
+    def test_a_delivered_unread_message_reads_waiting_for_the_manager_to_read_it(self):
+        sprint_state = dataclasses.replace(self.base, messages=(self.msg(delivered_at=T0),))
+        shown = self.shown(sprint_state)
+        self.assertEqual(shown, "waiting for the manager to read your message")
+        self.assertNotEqual(self.baseline, shown)
+
+    def test_a_read_or_undelivered_message_keeps_the_stage_phrase(self):
+        for label, message in (("read", self.msg(delivered_at=T0, read_at=T0)),
+                               ("undelivered", self.msg())):
+            with self.subTest(label):
+                sprint_state = dataclasses.replace(self.base, messages=(message,))
+                self.assertEqual(self.shown(sprint_state), self.baseline)
+
+    def test_a_waiting_item_still_comes_before_the_unread_line(self):
+        waiting = reported(started(A), R, issues=((12, "building"),), inbox=(40,))
+        records = {("p00", "k2"): open_item("p00", "k2", 40)}
+        sprint_state = dataclasses.replace(waiting, messages=(self.msg(delivered_at=T0),))
+        self.assertEqual(self.shown(sprint_state, records), "waiting for your decision on the tracker")
+        self.assertEqual(self.shown(waiting, records), "waiting for your decision on the tracker")
+
+
 class QuestionViewTest(unittest.TestCase):
     def test_each_open_question_is_one_inbox_item_with_its_recommendation(self):
         shown = derive_view([state("p00", 1)], sprints={A: asked(started(A))})

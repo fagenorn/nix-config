@@ -290,7 +290,11 @@ repeated decision, which `_folded_brief` ignores, makes none. `sprint.read` with
 `last_nudge_ok`; `ok` true sets `delivered_at` on every message up to `through` without one and
 resets `failed_nudges` (when the row carries `covers`, a list of ids, on exactly the listed messages
 instead: a message released after the nudge began, a look approval the console had held, was not told
-of), `ok` false adds one to it. `sprint.answered` with an int `message` naming one
+of), `ok` false adds one to it. An `ok` row whose `route` is `"relay"` also adds one to `relays`
+and sets `relayed_at` (the row's `at`) on the same messages (a message already relayed twice keeps
+both, so later traffic never moves its wake), and one whose `route` is `"wake"` sets
+`woken_at` on them (the latest row wins); a failed row, a null route or any other route changes
+none of the three. `sprint.answered` with an int `message` naming one
 of the sprint's messages and a string `reply` sets that message's `reply` and `reply_at` (the latest
 row wins). Every other such row changes nothing, and a withdrawn sprint keeps nothing.
 
@@ -308,8 +312,15 @@ launcher was still returning, so it names the new manager and is kept.
 `message_state(message, now_ms)` is the first that holds of: `REPLIED` when `reply` is set,
 `PICKED_UP` when `read_at` is set, `NOT_PICKED_UP` when `now_ms` is not None and at least
 `NOT_PICKED_UP_AFTER_MS` have passed since the message's `at`, else `SENT`; `delivered_at` never
-changes the shown state, it only feeds the service's re-nudge. `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
-true once `failed_nudges` reaches `UNREACHABLE_AFTER`. `checked_message(text)` refuses
+changes the shown state, it only feeds the service's re-nudge, and `relays`, `relayed_at` and
+`woken_at` feed its escalation likewise. `unread(state)` is the messages without `read_at` and not
+held, in id order; `unreachable(state)` is true once `failed_nudges` reaches `UNREACHABLE_AFTER`.
+`unread_step(state, now_ms)` is pure and decides what a message that was relayed and is still unread
+needs, the first of these that holds: None when `unreachable(state)`; None when `last_nudge_at` is
+less than `UNREAD_AGAIN_MS` before `now_ms` and failed (`last_nudge_ok` false); of the unread messages with no `woken_at` and a
+`relayed_at` at least `UNREAD_AGAIN_MS` old, `WAKE_UNREAD` when one has `relays` of 2 or more and
+`manager_session` is set, else `RELAY_AGAIN` when one has exactly 1 relay, else None.
+`STILL_RUNNING_TEXT` is the reason a wake gives up when the manager's session did not stop. `checked_message(text)` refuses
 `EMPTY_MESSAGE` for a blank text and `MESSAGE_TOO_LONG` above `MAX_MESSAGE_CHARS`, and returns the
 text unchanged. `parse_message(body)` reads the owner's write and returns `(project_id, sprint_id,
 text)`; `parse_inbox_request(body)` reads the manager's `{"sprint_id", "secret"}` and returns
@@ -838,6 +849,7 @@ NOW_NO_PROGRESS_TEXT = "waiting for you: the manager has stopped making progress
 NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
 NOW_WAIT_TEXT = "waiting until"
 NOW_PAUSED_TEXT = "paused: {reason}"
+NOW_UNREAD_TEXT = "waiting for the manager to read your message"
 NOW_STARTING_TEXT = "starting the work"
 NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
 NOW_QUIET_TEXT = "last seen {phrase}"
@@ -977,6 +989,9 @@ NOT_AN_OPTION = "choose one of the question's options"
 UNREACHABLE_TEXT = "manager not reachable"
 UNREACHABLE_AFTER = 2
 RENUDGE_AFTER_MS = 60_000
+UNREAD_AGAIN_MS = 300_000
+RELAY_AGAIN, WAKE_UNREAD = "relay_again", "wake_unread"
+STILL_RUNNING_TEXT = "the manager's session did not stop for the wake"
 MESSAGE_APPROVED = "approved"
 MESSAGE_CHANGES = "changes"
 MESSAGE_TEXT = "text"
@@ -1114,6 +1129,9 @@ class Message:
     held: bool = False
     words: str | None = None
     by: str | None = None
+    relays: int = 0
+    relayed_at: str | None = None
+    woken_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1933,6 +1951,23 @@ def unreachable(state: SprintState) -> bool:
     return state.failed_nudges >= UNREACHABLE_AFTER
 
 
+def unread_step(state: SprintState, now_ms: int) -> str | None:
+    """Return `RELAY_AGAIN`, `WAKE_UNREAD` or None: what an unread, once relayed message needs now."""
+    if unreachable(state):
+        return None
+    if (state.last_nudge_at is not None and not state.last_nudge_ok
+            and now_ms - _ms(state.last_nudge_at) < UNREAD_AGAIN_MS):
+        return None
+    due = [message for message in unread(state)
+           if message.woken_at is None and message.relayed_at is not None
+           and now_ms - _ms(message.relayed_at) >= UNREAD_AGAIN_MS]
+    if state.manager_session is not None and any(message.relays >= 2 for message in due):
+        return WAKE_UNREAD
+    if any(message.relays == 1 for message in due):
+        return RELAY_AGAIN
+    return None
+
+
 def open_questions(state: SprintState) -> tuple[Question, ...]:
     if state.stopped_at is not None or state.closing is not None:
         return ()
@@ -2513,6 +2548,18 @@ def _landed_claims(state: SprintState, at: str) -> SprintState:
         and notice.ended_at is None else notice for notice in state.notices))
 
 
+def _nudged_message(message: Message, at: str, route: object) -> Message:
+    if message.delivered_at is None:
+        message = replace(message, delivered_at=at)
+    if route == "relay":
+        if message.relays >= 2:
+            return message
+        return replace(message, relays=message.relays + 1, relayed_at=at)
+    if route == "wake":
+        return replace(message, woken_at=at)
+    return message
+
+
 def _folded_message(state: SprintState, event: Event) -> SprintState:
     payload = event.payload
     if event.kind == SPRINT_MESSAGED:
@@ -2536,10 +2583,10 @@ def _folded_message(state: SprintState, event: Event) -> SprintState:
             covered = (set(covers) if isinstance(covers, list) and all(_id(item) for item in covers)
                        else None)
             if ok:
+                route = payload.get("route")
                 messages = tuple(
-                    replace(message, delivered_at=event.at)
-                    if (message.message_id <= through and message.delivered_at is None
-                        and not message.held
+                    _nudged_message(message, event.at, route)
+                    if (message.message_id <= through and not message.held
                         and (covered is None or message.message_id in covered)) else message
                     for message in messages)
             return replace(state, messages=messages, last_nudge_at=event.at, last_nudge_ok=ok,

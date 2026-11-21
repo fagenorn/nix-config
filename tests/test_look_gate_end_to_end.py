@@ -9,13 +9,21 @@ is stale, and an approval of the new head posts and merges.
 
 Run: just agent-workflow-tests
 """
+import re
+import shlex
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from .look_gate_world import (MARKED, REFUSAL, SLUG, LookGateWorld, StepFailure, mutant_guard,
+from .look_gate_world import (MARKED, PROGRAMS, REFUSAL, SLUG, LookGateWorld, StepFailure, mutant_guard,
                               play_scenario)
+from .program_bridge import run_program
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "home/common/agent-skills/tests"))
+from clerk_tools import outside_clerk_tools  # noqa: E402
+
+WORDS = "make the \"heading\" bold:\nit costs $5 and `x` and 'y' \\ done \u00e9\n\n"
 
 
 class LookGateEndToEndTest(unittest.TestCase):
@@ -33,6 +41,44 @@ class LookGateEndToEndTest(unittest.TestCase):
     def test_the_six_steps_hold_on_a_throwaway_repository(self):
         out = play_scenario(self)
         self.assertEqual(out["approve"]["result"]["stage"], "done")
+
+    def fix_answer(self, world, action, labels, prompts, words=WORDS):
+        """Run the owner's fix answer against the awaiting-look stop of `world`, recording each step's label and prompt."""
+        def actor(message):
+            labels.append(message["label"])
+            prompts[message["label"]] = message["prompt"]
+            return world.actor(message)
+
+        return run_program(PROGRAMS / "deliver-standard.js", {
+            "repo_root": str(world.clone), "issue": MARKED, "batch_id": "h1-20261116-1200", "mode": "ship",
+            "cont": action["cont"], "look": {"answer": "fix", "head": action["head"], "words": words}}, actor)
+
+    def test_a_fix_answer_records_the_owners_exact_words_with_the_clerks_tools_and_reaches_the_fix_round(self):
+        out = play_scenario(self, through=2)
+        world, action = out["world"], out["batch"]["result"]["owner_actions"][0]
+        prompts, labels = {}, []
+        run = self.fix_answer(world, action, labels, prompts)
+        self.assertIsNone(run["error"])
+        self.assertIn("look-post", labels)
+        self.assertLess(labels.index("look-post"), labels.index("look-fix"))
+        self.assertEqual(outside_clerk_tools(prompts["look-post"]), set())
+        words_file = Path(shlex.split(re.search(r"--words-file ([^\n]*)", prompts["look-post"]).group(1))[0])
+        self.assertEqual(words_file.read_bytes(), WORDS.encode("utf-8"))
+        self.assertIn("answer=fix", str(world.look_comments()[-1]["body"]).split("\n", 1)[0])
+
+    def test_a_failed_words_write_records_no_approval_and_runs_no_fix(self):
+        out = play_scenario(self, through=2)
+        world, action = out["world"], out["batch"]["result"]["owner_actions"][0]
+        before = len(world.look_comments())
+        world.break_decoder()
+        prompts, labels = {}, []
+        run = self.fix_answer(world, action, labels, prompts)
+        self.assertIsNone(run["error"])
+        self.assertEqual(run["result"]["stage"], "look-approve")
+        self.assertIn("look-post", labels)
+        for label in ("look-fix", "merge"):
+            self.assertNotIn(label, labels)
+        self.assertEqual(len(world.look_comments()), before, "a failed write still recorded an approval")
 
     def test_the_actor_merges_nothing_the_guard_refuses(self):
         world = LookGateWorld(self)

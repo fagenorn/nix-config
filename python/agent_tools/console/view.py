@@ -641,7 +641,8 @@ permission, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_S
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
-wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock), `NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); with no merge refusal shown, a wait signal that alone moves the sprint
+wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock), `NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); an unread message the console delivered (`sprints.unread`, `delivered_at` set,
+#1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
 (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
 whose signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
 (`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
@@ -846,6 +847,7 @@ from agent_tools.console.sprints import (
     NOW_STAGE_TEXT,
     NOW_STALLED_TEXT,
     NOW_STARTING_TEXT,
+    NOW_UNREAD_TEXT,
     NOW_STOPPING_TEXT,
     NOW_WAIT_TEXT,
     ON_TRACK,
@@ -910,6 +912,7 @@ from agent_tools.console.sprints import (
     stated_hold,
     takes_notices,
     takes_questions,
+    unread,
     unreachable,
 )
 from agent_tools.verification import verify_owner
@@ -1710,6 +1713,8 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_QUOTA_TEXT
     if hold is not None:
         return NOW_PAUSED_TEXT.format(reason=hold[1]) if hold[0] == PAUSED else NOW_WAIT_TEXT
+    if any(message.delivered_at is not None for message in unread(state)):
+        return NOW_UNREAD_TEXT
     reason = merge_refused(state)
     if wait is not None and reason is None:
         return wait
