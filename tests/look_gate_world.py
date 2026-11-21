@@ -300,7 +300,7 @@ class LookGateWorld:
     def _setup_batch(self, message, match):
         return {"ok": True, "host": "h1", "slug": SLUG, "integration_branch": "main",
                 "default_branch": "main", "merge_strategy": "merge", "delete_branch": True,
-                "unset_env": [], "max_parallel": 2, "required_checks": None}
+                "unset_env": [], "max_parallel": 2, "required_checks": None, "guards": []}
 
     def _setup_standard(self, message, match):
         issue = message["issue"]
