@@ -84,11 +84,11 @@ watches a manager's session (a plain `printf`, no interpreter start). A `PreTool
 `PostToolUse` command hook, each with matcher `Bash` and no `if` filter, run `PERMIT_COMMAND`
 (`sprint permit`, `PERMIT_TIMEOUT` 60 seconds) and `LANDED_COMMAND` (`sprint permit --landed`,
 `LANDED_TIMEOUT` 30 seconds): the console judges each Bash call of the session and allows only the
-sprint's own merge, rerun and approved release (ADR-console-094); an `if` filter would let a
+sprint's own merge and rerun (ADR-console-094); an `if` filter would let a
 spelling it missed fall to the owner's global `gh pr merge` allow. The third member is
 `"permissions": {"defaultMode": <mode>, "deny": [...]}`, the mode the launch's `Permission` chose
-for the project (ADR-console-060, #1151) and the `MANAGER_DENY` rules (an `--admin` merge,
-`release transaction abandon`, a `--dispose` release run) that block in every mode; there is no
+for the project (ADR-console-060, #1151) and the `MANAGER_DENY` rule (an `--admin` merge)
+that blocks in every mode; there is no
 allow rule, no ask rule, no `autoMode` and no `disableAllHooks`. A launch built without a
 permission carries `permission.FALLBACK`,
 so `auto`. `settings_document(env, permission)` is that content and `write_settings(path, env,
@@ -197,8 +197,7 @@ PERMIT_COMMAND = "sprint permit"
 LANDED_COMMAND = "sprint permit --landed"
 PERMIT_TIMEOUT = 60
 LANDED_TIMEOUT = 30
-MANAGER_DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)",
-                "Bash(release transaction run *--dispose*)")
+MANAGER_DENY = ("Bash(gh pr merge *--admin*)",)
 LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 
 OUT_OF_TIME_TEXT = "this run has no time left for the next stop or removal"
@@ -509,7 +508,7 @@ def launcher_for(platform: str) -> Callable[[Launch], None] | None:
 
 
 def settings_document(env: Mapping[str, str], permission: permissions.Permission) -> dict:
-    """The settings a manager's session runs under: its environment, no isolation guard, no prompts, the mode, the permit hooks and the deny rules."""
+    """The settings a manager's session runs under: its environment, no isolation guard, no prompts, the mode, the permit hooks and the deny rule."""
     refusal = json.dumps({"hookSpecificOutput": {
         "hookEventName": "PermissionRequest",
         "decision": {"behavior": "deny", "message": REFUSAL}}})

@@ -192,8 +192,7 @@ class CommandTest(Case):
         self.assertEqual(manager.launch_tools("win32"), ())
 
 
-DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)",
-        "Bash(release transaction run *--dispose*)")
+DENY = ("Bash(gh pr merge *--admin*)",)
 
 
 class RunTest(Case):

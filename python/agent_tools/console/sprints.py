@@ -314,9 +314,6 @@ console did about a look card's approval:
                                       "line": <str>, "pair"?: "before" | "after"}],
                                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>,
                                                 "approve": <str>},
-                                      "release"?: {"commit": <40 hex>, "version": <str>,
-                                                   "title": <str>, "confirmations": [<str>],
-                                                   "approve": <str>},
                                       "replaces"?: {"round": <int>, "index": <int>}}]}
     question.withdrawn {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
                         "question": <str>}
@@ -336,9 +333,6 @@ The round the manager sends (inside the ask request) and the owner's answer (the
                     "recommended": "<exact text of one option>",
                     "look": {"issue": <int >= 1>, "pr": <int >= 1>, "head": "<40 lowercase hex>",
                              "approve": "<exact text of one option>"},
-                    "release": {"commit": "<40 lowercase hex>", "version": "<one plain word>",
-                                "title": "<one line>", "confirmations": ["<token>", ...],
-                                "approve": "<exact text of one option>"},
                     "needs_words": ["<exact text of an option>", ...],
                     "pictures": [{"picture": "<id>", "line": "<one line>",
                                   "pair": "before" | "after"}, ...],
@@ -356,7 +350,7 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
 a key outside `question, context, blocks, options, recommended, needs_words, owner_only,
-consequential, pictures, look, release, replaces`),
+consequential, pictures, look, replaces`),
 `QUESTION_MEMBER` for
 `question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
@@ -367,20 +361,11 @@ over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `
 (`recommended` not a string whose strip equals one stripped option), then (#1260) `LOOK_SHAPE`
 (`look` present and not an object of exactly `issue` and `pr`, each an int that is not a bool and
 at least 1, `head`, 40 lowercase hex, and `approve`, a string) and `LOOK_APPROVE` (`approve`
-whose strip equals no stripped option), then (#1377) `RELEASE_WITH_LOOK` (both `look` and `release`),
-`RELEASE_SHAPE` (`release` present and not an object of exactly `commit`, 40 lowercase hex,
-`version`, 1 to 64 characters of `[A-Za-z0-9_./:@%+=,-]` beginning with neither `-` nor `=`,
-`title`, 1 to `MAX_LINE_CHARS` characters with none of `'`, `"`, `$`, backtick, `\\`, `!`, a line
-break or another control character but a tab, `confirmations`, one to 16 distinct strings each
-matching `^[A-Za-z0-9_.-]{1,64}:[0-9a-f]{12}$`, and `approve`, a string) and `RELEASE_APPROVE`
-(`approve` whose strip equals no stripped option), then `NEEDS_WORDS_SHAPE`
+whose strip equals no stripped option), then `NEEDS_WORDS_SHAPE`
 (`needs_words` present and not a non-empty list of strings whose strips are each one stripped
 option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in `needs_words`: choosing it
-records the approval and takes no words, so the owner could never approve) and (#1377)
-`RELEASE_APPROVE_WORDS` (the release's `approve` is also in `needs_words`), then `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`),
-then `CONSEQUENTIAL_SHAPE` (`consequential` present and not `true`), then (#1377)
-`RELEASE_OWNER_ONLY` (a `release` on a question that is not both `owner_only` and `consequential`),
-then `REPLACES_SHAPE`
+records the approval and takes no words, so the owner could never approve), then `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`),
+then `CONSEQUENTIAL_SHAPE` (`consequential` present and not `true`), then `REPLACES_SHAPE`
 (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
 and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
@@ -424,9 +409,8 @@ order.
 keys, plus an optional `"dry_run"` that must be `true`) and returns `(sprint_id, secret, round,
 dry_run)`, `round` an object whose keys are a subset of
 `questions, blocker`; `parse_round_answer(body)` reads the page's body, one or both of `choice` and
-`text` and optionally (#1377) `release`, an object of exactly `commit`, `version`, `title` and
-`confirmations` (a list of strings): what the page showed of a release card. It returns
-`(project_id, sprint_id, round_id, index, choice, text, release)` with an absent one None; `parse_look_retry(body)` reads the page's retry of a look card's approval, exactly
+`text`, and returns `(project_id, sprint_id, round_id, index, choice, text)` with an absent one
+None; `parse_look_retry(body)` reads the page's retry of a look card's approval, exactly
 `{"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>}`, and returns
 `(project_id, sprint_id, round_id, index)`. All three are `ValueError` on anything else, a
 repeated key, NaN or nesting too deep.
@@ -440,9 +424,7 @@ checked question is then added with `round_id` the row's `seq`, its `index` and 
 gave none) and `owner_only`
 (`Question.owner_only`, false unless the round marked it: a question only the console's owner
 answers, #1263) and `consequential` (`Question.consequential`, false unless the round marked it: the
-page opens its card with nothing picked, #1265) and `release` (`Question.release`, a
-`QuestionRelease` of the row's `commit`, `version`, `title`, `confirmations` as a tuple and
-`approve`, #1377). Each checked
+page opens its card with nothing picked, #1265). Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
 matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
@@ -471,14 +453,7 @@ for) sets `look_state` to `"posting"` (and `look_message` to the row's `seq`, `l
 `sprint.nudged` watermark marks it read or delivered, so the approval reaches the manager only after
 the console has posted it; the `repo` must equal the `look_repo` the `questions.asked` row bound to the
 card when it was issued (`QuestionLook.repo`; a card without one accepts the logged repo), else the answer is an
-ordinary one; any other answer to a look question is an ordinary answer (`look_state` None, not held).
-An answer to a question with a `release` whose row has no `by` member at all (a present `by`, even
-malformed, which `actor_of` reads as the owner, approves nothing), no `words` member and a `chosen`
-equal to `release.approve` and `release_seen` true (the console sets it only when the page echoed the
-card's exact release, so a page that never showed the release approves nothing) appends that
-`QuestionRelease` to `SprintState.approved_releases`, in answer order and once; any other answer to it is an ordinary answer and changes nothing there, and a
-withdrawn question takes no answer. A `brief.sent` row that applies, with a higher version, clears
-`approved_releases` (#1377). A `look.recorded` row names a question by its `round` and `index`: `posted`
+ordinary one; any other answer to a look question is an ordinary answer (`look_state` None, not held). A `look.recorded` row names a question by its `round` and `index`: `posted`
 applies when `look_state` is `"posting"` or `"failed"` and `message` is the held answer's id
 (`look_state` `"posted"`, `look_comment` the `comment_id`, the message no longer held, so the next
 read marks it once), `failed` under the same conditions (`look_state` `"failed"`, `look_reason`,
@@ -886,15 +861,6 @@ LOOK_SHAPE = "question {n}'s look is not an object of issue, pr, head and approv
 LOOK_APPROVE = "question {n}'s look approve is not one of its options"
 LOOK_APPROVE_WORDS = ("question {n}'s look approve is also in its needs_words: choosing it records the "
                       "approval and takes no words, so no answer could approve")
-RELEASE_SHAPE = ("question {n}'s release is not an object of commit, version, title, confirmations "
-                 "and approve")
-RELEASE_APPROVE = "question {n}'s release approve is not one of its options"
-RELEASE_OWNER_ONLY = "question {n} is a release card and must be owner_only and consequential"
-RELEASE_APPROVE_WORDS = ("question {n}'s release approve is also in its needs_words: choosing it "
-                         "takes no words, so no answer could approve")
-RELEASE_STALE = ("This release card was shown by an older page, so it cannot approve the release: "
-                 "reload the console and read the card again.")
-RELEASE_WITH_LOOK = "question {n} has both a look and a release: a card is one or the other"
 LOOK_PAIR = ('question {n} is a look card and needs a picture marked "pair": "before" and one '
              'marked "pair": "after": attach the pictures with pictures')
 REPLACES_SHAPE = "question {n}'s replaces is not an object of round and index"
@@ -1131,15 +1097,6 @@ class QuestionLook:
 
 
 @dataclass(frozen=True)
-class QuestionRelease:
-    commit: str
-    version: str
-    title: str
-    confirmations: tuple[str, ...]
-    approve: str
-
-
-@dataclass(frozen=True)
 class Question:
     round_id: int
     index: int
@@ -1170,7 +1127,6 @@ class Question:
     answered_by: str | None = None
     owner_only: bool = False
     consequential: bool = False
-    release: QuestionRelease | None = None
 
 
 @dataclass(frozen=True)
@@ -1223,7 +1179,6 @@ class SprintState:
     notices: tuple[Notice, ...] = ()
     permission: Permission | None = None
     started_by: str | None = None
-    approved_releases: tuple[QuestionRelease, ...] = ()
     delivered: frozenset[int] = frozenset()
 
     @property
@@ -1336,22 +1291,13 @@ def _count(value: object, least: int) -> int:
     return value
 
 
-def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str | None,
-                                             dict | None]:
+def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str | None]:
     value = _decoded(body)
     base = {"project_id", "sprint_id", "round", "question"}
     if (not isinstance(value, dict)
-            or set(value) - {"release"} not in (base | {"choice"}, base | {"text"},
-                                                base | {"choice", "text"})):
+            or set(value) not in (base | {"choice"}, base | {"text"}, base | {"choice", "text"})):
         raise ValueError("the body must be an object of project_id, sprint_id, round, question "
                          "and one or both of choice and text")
-    release = value.get("release")
-    if "release" in value and not (
-            isinstance(release, dict) and set(release) == {"commit", "version", "title", "confirmations"}
-            and all(isinstance(release[key], str) for key in ("commit", "version", "title"))
-            and isinstance(release["confirmations"], list)
-            and all(isinstance(token, str) for token in release["confirmations"])):
-        raise ValueError("release must be an object of commit, version, title and confirmations")
     project_id = value["project_id"]
     if not isinstance(project_id, str) or not project_id:
         raise ValueError("project_id must be a non-empty string")
@@ -1360,7 +1306,7 @@ def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str
         raise ValueError("text must be a string")
     choice = _count(value["choice"], 0) if "choice" in value else None
     return (project_id, _sprint_id(value["sprint_id"]), _count(value["round"], 1),
-            _count(value["question"], 0), choice, text, release)
+            _count(value["question"], 0), choice, text)
 
 
 def parse_look_retry(body: bytes) -> tuple[str, str, int, int]:
@@ -1618,7 +1564,7 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
                                                                 "options", "recommended",
                                                                 "needs_words", "owner_only",
                                                                 "consequential", "pictures",
-                                                                "look", "release", "replaces"}:
+                                                                "look", "replaces"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1658,14 +1604,6 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
             raise Refused(LOOK_SHAPE.format(n=n))
         if look["approve"].strip() not in stripped:
             raise Refused(LOOK_APPROVE.format(n=n))
-    release = question.get("release")
-    if "release" in question:
-        if "look" in question:
-            raise Refused(RELEASE_WITH_LOOK.format(n=n))
-        if not _release_mark(release):
-            raise Refused(RELEASE_SHAPE.format(n=n))
-        if release["approve"].strip() not in stripped:
-            raise Refused(RELEASE_APPROVE.format(n=n))
     needs_words = question.get("needs_words")
     if "needs_words" in question:
         kept = ([word.strip() for word in needs_words if isinstance(word, str)]
@@ -1676,15 +1614,10 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
             raise Refused(NEEDS_WORDS_SHAPE.format(n=n))
         if "look" in question and look["approve"].strip() in kept:
             raise Refused(LOOK_APPROVE_WORDS.format(n=n))
-        if "release" in question and release["approve"].strip() in kept:
-            raise Refused(RELEASE_APPROVE_WORDS.format(n=n))
     if "owner_only" in question and question["owner_only"] is not True:
         raise Refused(OWNER_ONLY_SHAPE.format(n=n))
     if "consequential" in question and question["consequential"] is not True:
         raise Refused(CONSEQUENTIAL_SHAPE.format(n=n))
-    if "release" in question and not (question.get("owner_only") is True
-                                      and question.get("consequential") is True):
-        raise Refused(RELEASE_OWNER_ONLY.format(n=n))
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
@@ -1710,11 +1643,6 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
     if "look" in question:
         checked["look"] = {"issue": look["issue"], "pr": look["pr"], "head": look["head"],
                            "approve": look["approve"].strip()}
-    if "release" in question:
-        checked["release"] = {"commit": release["commit"], "version": release["version"],
-                              "title": release["title"],
-                              "confirmations": list(release["confirmations"]),
-                              "approve": release["approve"].strip()}
     if "replaces" in question:
         checked["replaces"] = {"round": replaces["round"], "index": replaces["index"]}
     return checked
@@ -1728,32 +1656,6 @@ def _look_mark(look: object) -> bool:
             and _id(look["issue"]) and look["issue"] >= 1 and _id(look["pr"]) and look["pr"] >= 1
             and isinstance(look["head"], str) and HEAD.fullmatch(look["head"]) is not None
             and isinstance(look["approve"], str))
-
-
-# What a release command can carry (#1377): a version is one plain word that is no flag, a title
-# single-quotes with nothing inside the shell acts on, and a confirmation is a release token.
-RELEASE_VERSION = re.compile(r"[A-Za-z0-9_./:@%+,][A-Za-z0-9_./:@%+=,-]{0,63}")
-RELEASE_TITLE = re.compile(r"[^'\"$`\\!\x00-\x08\x0a-\x1f\x7f]{1,%d}" % MAX_LINE_CHARS)
-RELEASE_CONFIRMATION = re.compile(r"[A-Za-z0-9_.-]{1,64}:[0-9a-f]{12}")
-MAX_RELEASE_CONFIRMATIONS = 16
-
-
-def _release_mark(release: object) -> bool:
-    if not (isinstance(release, dict)
-            and set(release) == {"commit", "version", "title", "confirmations", "approve"}):
-        return False
-    confirmations = release["confirmations"]
-    return (isinstance(release["commit"], str) and HEAD.fullmatch(release["commit"]) is not None
-            and isinstance(release["version"], str)
-            and RELEASE_VERSION.fullmatch(release["version"]) is not None
-            and isinstance(release["title"], str)
-            and RELEASE_TITLE.fullmatch(release["title"]) is not None
-            and isinstance(confirmations, list)
-            and 1 <= len(confirmations) <= MAX_RELEASE_CONFIRMATIONS
-            and all(isinstance(token, str) and RELEASE_CONFIRMATION.fullmatch(token)
-                    for token in confirmations)
-            and len(set(confirmations)) == len(confirmations)
-            and isinstance(release["approve"], str))
 
 
 def _replaces_mark(mark: object) -> bool:
@@ -2401,7 +2303,7 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
             return replace(state,
                            brief=Brief(version, parts, event.at, NONE, None, None,
                                        _read_back_pictures("brief", logged)),
-                           report=None if superseded else state.report, approved_releases=())
+                           report=None if superseded else state.report)
         return state
     if brief is None or version != brief.version or brief.decision != NONE:
         return state
@@ -2578,9 +2480,6 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                needs_words=tuple(row.get("needs_words", ())),
                                owner_only=row.get("owner_only", False) is True,
                                consequential=row.get("consequential", False) is True,
-                               release=(QuestionRelease(**{**row["release"], "confirmations":
-                                                           tuple(row["release"]["confirmations"])})
-                                        if "release" in row else None),
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
@@ -2616,14 +2515,8 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                            look_message=event.seq if held else None,
                            look_repo=payload["look"]["repo"] if held else None)
         questions = (*state.questions[:position], answered, *state.questions[position + 1:])
-        release = question.release
-        approved = state.approved_releases
-        if (release is not None and "by" not in payload and "words" not in payload
-                and payload.get("release_seen") is True
-                and chosen == release.approve and release not in approved):
-            approved = (*approved, release)
         return _with_message(
-            replace(state, questions=questions, approved_releases=approved),
+            replace(state, questions=questions),
             Message(event.seq, MESSAGE_ANSWER, event.at, None, answer, question=question.question,
                     round_id=round_id, chosen=chosen, held=held, words=words, by=actor_of(payload)))
     return state

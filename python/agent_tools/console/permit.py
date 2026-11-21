@@ -1,16 +1,14 @@
 """The permit judge: which Bash commands a manager's session may run (#1377, ADR-console-094).
 
-A manager's session may run exactly three commands, and `judge(command, grant, forge)` decides each
+A manager's session may run exactly two commands, and `judge(command, grant, forge)` decides each
 one without touching the network, the clock or a file beyond the injected `Forge` readers and
 `os.path.realpath`. Everything it needs about the sprint is in the `Grant`.
 
-The three shapes (D3), judged only over the literal-word grammar of `words`:
+The two shapes (D3), judged only over the literal-word grammar of `words`:
 
 1. Merge: `gh pr merge <n> --repo <slug> --<strategy> --match-head-commit <40 lowercase hex>`, then
    `--delete-branch` exactly when `grant.delete_branch` is true. `<n>` is digits with no leading zero.
 2. Rerun: `gh run rerun <id> --failed --repo <slug>`.
-3. Release: `release transaction run` with `--repo-root`, the four candidate flags `--commit
-   --version --title --notes-file`, at least one `--confirm`, and optionally `--profile`; nothing else.
 
 `words(command)` is a small scanner, not `shlex` (which accepts expansions and comments the shell
 would act on). It splits on spaces and tabs only. A word is a plain run of `[A-Za-z0-9_./:@%+=,-]`
@@ -21,13 +19,9 @@ redirection, an expansion, a glob, a comment, a tilde, a brace, a newline outsid
 
 `mentions(command)` is True when, after deleting every quote and backslash and splitting on
 whitespace and on `;|&()<>$`, the backtick, `,`, `[`, `]`, `{` and `}`, some word whose basename is `gh` is followed by `pr
-merge` or `run rerun`, or the release verb is reached. The release verb fails closed: it is reached
-by the words `transaction run` or `transaction abandon` side by side, however the program is named or
-reached (`xargs release`, `r=release; $r ...`, `runpy.run_module(...)`); by a word that is the `release`
-program, `release.py` or the module `agent_tools.release.release` (alone, glued to `-m` or assigned,
-`r=release`) beside any `$` or backtick anywhere in the command; or by such a word followed later by
-`transaction` and a word other than `status` or `preview`. Only the `release` executable's own literal
-form is ever granted: every other spelling that `mentions` is `DENY` with `ALONE`, never undecided.
+merge` or `run rerun`. Only the literal form is ever granted: every other spelling that `mentions` is
+`DENY` with `ALONE`, never undecided. A release is not granted here (ADR-console-094): the permit
+decides nothing about one, so a command that runs a release gets no decision from it.
 
 `judge` returns a `Verdict`. A command that `mentions` no granted verb gets `Verdict(None, "", None, {})`
 and no reader is called. A command that does is `ALLOW` only in a granted shape and `DENY` otherwise,
@@ -48,22 +42,15 @@ never None. The checks run in this order, the first that applies deciding:
   run's latest attempt, all pages, whose conclusion is not `success`: a failed rerun also runs the
   skipped dependents of a failed job) or one not named by `read_required(slug, base)` is
   `NOT_CHECK_RUN`. Else `ALLOW` with target `{"run", "pr"}`.
-- Release: `abandon`, or `--dispose` or `--reference`, is `OWNERS_RELEASE_STEP`. A flag outside the
-  six above, a flag with no value, or a repeated flag other than `--confirm` is `NOT_GRANTED`; none
-  of the four candidate flags is `RESUME`; some but not all is `NOT_GRANTED`; a `--repo-root` that is
-  not an absolute path (the console's working directory is not the manager's) or whose real path
-  differs from `grant.root`'s is `WRONG_ROOT`; no `--confirm` is `NOT_GRANTED`; no
-  `ReleaseApproval` with the same commit, version and title and exactly the `--confirm` values as
-  its confirmations is `NO_CARD`. Else `ALLOW` with target `{"commit", "version"}`.
 - A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`.
 
-`Verdict.payload()` is `{"verb", "decision", "reason", "target"}`; `verb` is `merge`, `rerun` or
-`release`. `merge_target(command, grant)` is `{"pr", "head"}` when the command is exactly the granted
+`Verdict.payload()` is `{"verb", "decision", "reason", "target"}`; `verb` is `merge` or
+`rerun`. `merge_target(command, grant)` is `{"pr", "head"}` when the command is exactly the granted
 merge shape and None otherwise. `NOT_ACTIVE`, `NOT_MANAGER` and `MOVED` are the reasons the console
 itself gives (the sprint is not active, the caller is not its manager, the sprint changed between
 the first judgement and the second).
 
-`verb_of(command)` is the verb `mentions` found (`merge`, `rerun` or `release`), None when it found none.
+`verb_of(command)` is the verb `mentions` found (`merge` or `rerun`), None when it found none.
 
 `memoized(forge)` caches each reader's result, or the `ForgeUnreadable` it raised, by its arguments;
 its `.frozen()` is a `Forge` over the same cache that raises `ForgeUnreadable("not read before")`
@@ -89,7 +76,7 @@ ALLOW = "allow"
 DENY = "deny"
 
 ALONE = "This command runs only alone, spelled exactly as the permitted form, with no operator, expansion or wrapper."
-NOT_GRANTED = "The permit grants only the exact merge, rerun and release forms, and this one differs."
+NOT_GRANTED = "The permit grants only the exact merge and rerun forms, and this one differs."
 ADMIN = "An administrator merge is never permitted."
 OTHER_REPO = "The command names another repository than this sprint's project."
 NOT_OWN_PR = "Pull request {pr} is not this sprint's own pull request."
@@ -99,16 +86,12 @@ NOT_OWN_RUN = "Run {run} is not a check run of this sprint's own pull request."
 STALE_RUN = "Run {run} is not at the head of its pull request."
 NOT_CHECK_RUN = "Run {run} would rerun a job that is not a required check."
 STALE_HEAD = "Pull request {pr} is not at the head the merge names."
-NO_CARD = "No release card the owner approved names commit {commit} at version {version} with this preview."
-RESUME = "A release resume names no release, so no approved card covers it."
-OWNERS_RELEASE_STEP = "Abandoning or disposing of a release is the owner's step."
-WRONG_ROOT = "The release runs in another repository root than this project's, or names it by a relative path."
 FORGE_UNREADABLE = "The forge could not be read to judge this command: {reason}"
 NOT_ACTIVE = "This sprint is not active."
 NOT_MANAGER = "Only the sprint's manager session may run this command."
 MOVED = "The sprint changed while the command was judged."
 
-MERGE, RERUN, RELEASE = "merge", "rerun", "release"
+MERGE, RERUN = "merge", "rerun"
 ACTIONS_APP, ANY_APP = 15368, -1
 
 _PLAIN = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
@@ -117,21 +100,10 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 _SEPARATORS = " \t"
 _DOUBLE_QUOTED_BARRED = "$`\\!"
 _CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
-_RELEASE_FLAGS = ("--repo-root", "--commit", "--version", "--title", "--notes-file", "--confirm",
-                  "--profile")
-_CANDIDATE_FLAGS = ("--commit", "--version", "--title", "--notes-file")
 
 
 class ForgeUnreadable(Exception):
     """A forge read failed or answered a malformed reply; `str(error)` is the fixed reason."""
-
-
-@dataclass(frozen=True)
-class ReleaseApproval:
-    commit: str
-    version: str
-    title: str
-    confirmations: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -143,7 +115,6 @@ class Grant:
     branch_pattern: str | None
     issues: frozenset[int]
     others: frozenset[int]
-    releases: frozenset[ReleaseApproval]
 
 
 @dataclass(frozen=True)
@@ -340,97 +311,6 @@ def words(command: str) -> list[str] | None:
 
 
 _SPLIT = re.compile(r"[\s;|&()<>$`,\[\]{}]+")
-_RELEASE_PROGRAMS = ("release", "release.py")
-_RELEASE_MODULE = "agent_tools.release.release"
-_RELEASE_READS = ("status", "preview")
-
-
-def _names_release(part: str) -> bool:
-    """A word that is the release program, its script or its module, alone, glued to `-m` or assigned (`r=release`)."""
-    name = os.path.basename(part.rpartition("=")[2])
-    module = part[2:] if part.startswith("-m") else part
-    return name in _RELEASE_PROGRAMS or module == _RELEASE_MODULE
-
-
-_SEGMENT = re.compile(r"[;|&()\n`]")
-_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
-_READERS = frozenset({"grep", "ls", "cat", "head", "tail", "wc", "diff"})
-_GIT_READS = frozenset({"status", "log", "diff", "show", "checkout", "switch", "branch", "rev-parse", "ls-files",
-                        "ls-tree", "cat-file", "blame"})
-_GIT_RUNS = ("-O", "--open-files-in-pager", "--ext-diff", "--exec", "--upload-pack", "--receive-pack")
-_GH_READS = frozenset({"release", "pr", "issue", "run", "repo", "workflow", "search", "label"})
-_RG_RUNS = ("--pre", "--hostname-bin")
-_SED_OPTION = re.compile(r"-[nErsuz]+|--(quiet|silent|regexp-extended|sandbox)")
-_SED_PRINT = re.compile(r"\d+(,\d+)?[pq]?")
-_INLINE_CODE = re.compile(r"-[a-zA-Z]*[ce]")
-_INTERPRETERS = ("python", "sh", "bash", "zsh", "dash", "ksh", "node", "perl", "ruby", "php", "lua")
-
-
-def _simple_words(segment: str) -> list[str]:
-    """The whitespace words of one simple command, past its leading assignments."""
-    found = segment.split()
-    while found and _ASSIGNMENT.match(found[0]):
-        found = found[1:]
-    return found
-
-
-def _reads_only(head: str, args: list[str]) -> bool:
-    """A reader invoked in a shape that cannot run another program: no alias, pager, `e` command or `--pre`."""
-    if head == "git":
-        return bool(args) and args[0] in _GIT_READS and not any(
-            "!" in arg or arg.startswith(_GIT_RUNS) for arg in args)
-    if head == "gh":
-        return bool(args) and args[0] in _GH_READS
-    if head == "sed":
-        options = [arg for arg in args if arg.startswith("-")]
-        rest = [arg for arg in args if not arg.startswith("-")]
-        return all(_SED_OPTION.fullmatch(option) for option in options) and bool(rest) and bool(
-            _SED_PRINT.fullmatch(rest[0]))
-    if head == "rg":
-        return not any(arg.startswith(_RG_RUNS) for arg in args)
-    return head in _READERS
-
-
-def _runs_inline_code(segment: str) -> bool:
-    """An interpreter handed a program on its command line, which may run any program a later word names."""
-    simple = _simple_words(segment)
-    return bool(simple) and os.path.basename(simple[0]).startswith(_INTERPRETERS) and any(
-        _INLINE_CODE.fullmatch(arg) for arg in simple[1:])
-
-
-def _segment_is_release(segment: str) -> bool:
-    """One simple command that names the release program: a read of it, or anything that may run it."""
-    simple = _simple_words(segment)
-    words_ = [part for part in _SPLIT.split(" ".join(simple)) if part]
-    if not words_ or not any(_names_release(part) for part in words_):
-        return False
-    head = os.path.basename(words_[0])
-    if _names_release(words_[0]) or (
-            head.startswith("python") and any(_names_release(part) for part in words_[1:4])):
-        rest = words_[1:]
-        return any(part == "transaction" and following not in _RELEASE_READS
-                   for part, following in zip(rest, rest[1:]))
-    return not _reads_only(head, simple[1:])
-
-
-def _is_release(command: str, parts: list[str]) -> bool:
-    """Fail closed: any spelling that can reach a release run or abandon, however the shell names the program.
-
-    A command naming the release program is only read when each simple command that names it is the program
-    itself or an interpreter running it with `transaction status` or `preview`, or a reader invoked in a shape
-    that runs nothing (`git log`, `grep`, `sed -n 1,20p`...): a wrapper such as `xargs` or `env` takes its
-    words from a pipe or a file, and `git -c alias.x=!...`, `sed 1e ...` or `rg --pre` run a shell command.
-    An interpreter handed inline code (`python3 -c`) may run it from anywhere in the command.
-    """
-    if any(first == "transaction" and second in ("run", "abandon")
-           for first, second in zip(parts, parts[1:])):
-        return True
-    if not any(_names_release(part) for part in parts):
-        return False
-    if any(char in command for char in "$`"):
-        return True
-    segments = _SEGMENT.split(re.sub(r"['\"\\]", "", command))
-    return any(_runs_inline_code(segment) or _segment_is_release(segment) for segment in segments)
 
 
 def _verb_of(command: str) -> str | None:
@@ -441,11 +321,11 @@ def _verb_of(command: str) -> str | None:
             return MERGE
         if name == "gh" and rest == ["run", "rerun"]:
             return RERUN
-    return RELEASE if _is_release(command, parts) else None
+    return None
 
 
 def verb_of(command: str) -> str | None:
-    """`merge`, `rerun` or `release` when `mentions(command)`, else None."""
+    """`merge` or `rerun` when `mentions(command)`, else None."""
     return _verb_of(command)
 
 
@@ -548,48 +428,6 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
     return _allow(RERUN, {"run": run_id, "pr": number})
 
 
-def _release_flags(parts: list[str]) -> dict[str, list[str]] | None:
-    """The flag values of a `release transaction run`, None for a flag outside the set, with no value or repeated."""
-    flags: dict[str, list[str]] = {}
-    rest = parts[3:]
-    index = 0
-    while index < len(rest):
-        flag = rest[index]
-        if flag not in _RELEASE_FLAGS or index + 1 >= len(rest) or rest[index + 1].startswith("--"):
-            return None
-        if flag in flags and flag != "--confirm":
-            return None
-        flags.setdefault(flag, []).append(rest[index + 1])
-        index += 2
-    return flags
-
-
-def _judge_release(parts: list[str], grant: Grant) -> Verdict:
-    if parts[2] == "abandon" or any(
-            part in ("--dispose", "--reference") or part.startswith(("--dispose=", "--reference="))
-            for part in parts):
-        return _deny(RELEASE, OWNERS_RELEASE_STEP)
-    flags = _release_flags(parts)
-    if flags is None:
-        return _deny(RELEASE, NOT_GRANTED)
-    named = [flag for flag in _CANDIDATE_FLAGS if flag in flags]
-    if not named:
-        return _deny(RELEASE, RESUME)
-    if len(named) != len(_CANDIDATE_FLAGS) or "--repo-root" not in flags:
-        return _deny(RELEASE, NOT_GRANTED)
-    root = flags["--repo-root"][0]
-    if not os.path.isabs(root) or os.path.realpath(root) != os.path.realpath(grant.root):
-        return _deny(RELEASE, WRONG_ROOT)
-    if "--confirm" not in flags:
-        return _deny(RELEASE, NOT_GRANTED)
-    commit, version, title = flags["--commit"][0], flags["--version"][0], flags["--title"][0]
-    confirmations = frozenset(flags["--confirm"])
-    if not any(card.commit == commit and card.version == version and card.title == title
-               and card.confirmations == confirmations for card in grant.releases):
-        return _deny(RELEASE, NO_CARD.format(commit=commit, version=version))
-    return _allow(RELEASE, {"commit": commit, "version": version})
-
-
 _OPENING = {MERGE: ["gh", "pr", "merge"], RERUN: ["gh", "run", "rerun"]}
 
 
@@ -605,8 +443,6 @@ def judge(command: str, grant: Grant, forge: Forge) -> Verdict:
             return _judge_merge(parts, grant, forge)
         if parts[:3] == _OPENING[RERUN]:
             return _judge_rerun(parts, grant, forge)
-        if parts[:2] == ["release", "transaction"] and parts[2:3] in (["run"], ["abandon"]):
-            return _judge_release(parts, grant)
     except ForgeUnreadable as error:
         return _deny(verb, FORGE_UNREADABLE.format(reason=error))
     return _deny(verb, ALONE)

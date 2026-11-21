@@ -57,7 +57,6 @@ from agent_tools.console.sprints import (
     Question,
     QuestionLook,
     QuestionPicture,
-    QuestionRelease,
     Report,
     SprintState,
     cut,
@@ -1803,7 +1802,7 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
                            "recommended": recommended,
                            "recommended_index": options.index(recommended),
                            "needs_words_index": []}],
-            "pictures": [], "look": None, "release": None,
+            "pictures": [], "look": None,
             "items": [], "answers": [], "answered": False, "waiting_since": T0,
             "started_by": None}
 
@@ -1868,30 +1867,6 @@ class QuestionViewTest(unittest.TestCase):
                     self.assertIs(entries[0]["consequential"], True)
                 else:
                     self.assertNotIn("consequential", entries[0])
-
-    def test_a_release_card_shows_the_release_its_approve_option_runs(self):
-        release = QuestionRelease("a" * 40, "v1.3.0", "v1.3.0 notes", ("publish:0123456789ab",), "Run it")
-        state_ = asked(started(A))
-        first, *rest = state_.questions
-        state_ = dataclasses.replace(state_, questions=(
-            dataclasses.replace(first, question="Run release v1.2.0?", options=("Run it", "Hold"),
-                                recommended="Hold", owner_only=True, consequential=True,
-                                release=release), *rest))
-        (found, other, *_) = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
-        line = view.RELEASE_APPROVES.format(
-            option="Run it", version="v1.3.0", title="v1.3.0 notes", commit="a" * 12,
-            confirmations="publish:0123456789ab")
-        self.assertEqual(found["release"]["line"], line)
-        self.assertNotIn("v1.2.0", found["release"]["line"])
-        self.assertEqual(found["release"]["approve_index"], 0)
-        self.assertEqual(found["release"]["commit"], "a" * 40)
-        self.assertEqual(found["release"]["version"], "v1.3.0")
-        self.assertEqual(found["release"]["title"], "v1.3.0 notes")
-        self.assertEqual(found["release"]["confirmations"], ["publish:0123456789ab"])
-        self.assertIs(found["consequential"], True)
-        self.assertIs(found["owner_only"], True)
-        self.assertIsNone(found["questions"][0]["recommended_index"])
-        self.assertIsNone(other["release"])
 
     def test_a_consequential_card_hides_its_recommendation_from_a_page_that_preselects_it(self):
         # A page from before the mark preselects `recommended_index`, or `recommended` by text,

@@ -131,7 +131,6 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
 .card .look-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
-.card .release-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -3628,13 +3627,6 @@ function lookLine(node, item) {
   const look = lookOf(item);
   if (look !== null && typeof look.line === "string") node.appendChild(el("p", "look-line", look.line));
 }
-function releaseOf(item) {
-  return isQuestion(item) && item.release !== null && typeof item.release === "object" ? item.release : null;
-}
-function releaseLine(node, item) {
-  const release = releaseOf(item);
-  if (release !== null && typeof release.line === "string") node.appendChild(el("p", "release-line", release.line));
-}
 function isLookCard(item) {
   return item.answered === true && lookOf(item) !== null;
 }
@@ -4061,12 +4053,7 @@ function begin(item, state, pending) {
   return true;
 }
 function roundBody(item, answer) {
-  const body = { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
-  const release = releaseOf(item);
-  if (release !== null) {
-    body.release = { commit: release.commit, version: release.version, title: release.title, confirmations: release.confirmations };
-  }
-  return body;
+  return { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
 }
 // A plan's answer replans it and replaces every one of its questions, so one answer at a time stands for a plan until a frame shows its outcome.
 function planBusy(item, state) {
@@ -4752,7 +4739,6 @@ function leadItem(item) {
   if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   lookLine(card, item);
-  releaseLine(card, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) card.appendChild(gallery);
@@ -4795,7 +4781,6 @@ function itemLine(item) {
   if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   lookLine(line, item);
-  releaseLine(line, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) line.appendChild(gallery);

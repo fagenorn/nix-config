@@ -35,7 +35,6 @@ from .test_console_sprints import REPORT
 from .test_console_guest_service import COLLEAGUE, TAILNET, GuestCase
 from .test_console_permit import FakeForge, HEAD, SHA
 from .test_console_reports import CLOSING
-from .test_console_sprints import RELEASE, RELEASE_QUESTION
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -1557,8 +1556,6 @@ PERMIT = "/api/permit"
 SLUG = "o/r"
 MERGE = f"gh pr merge 7 --repo {SLUG} --merge --match-head-commit {SHA} --delete-branch"
 ROOT = "/srv/p01"
-SHOWN_RELEASE = {"commit": RELEASE["commit"], "version": RELEASE["version"], "title": RELEASE["title"],
-                 "confirmations": RELEASE["confirmations"]}
 RELEASE_RUN = (f"release transaction run --repo-root {ROOT} --commit {'a' * 40} --version v1.2.0 "
                "--title 'v1.2.0 notes' --notes-file /tmp/n --confirm publish:0123456789ab")
 
@@ -1622,31 +1619,16 @@ class PermitCase(Case):
     def judge(self, svc, sid, command, session="s-1", call="t-1"):
         return svc.permit(sid, self.secret(sid), session, call, command)
 
-    def approve_release(self, svc, sid):
-        round_id, _ = svc.ask_questions(sid, self.secret(sid), {"questions": [RELEASE_QUESTION]})
-        svc.answer_question("owner/p01", sid, round_id, 0, 0, None, SHOWN_RELEASE)
-        return round_id
-
 
 class PermitServiceTest(PermitCase):
-    def test_a_release_run_with_no_approved_card_is_refused(self):
+    def test_the_console_decides_nothing_about_a_release_run(self):
         svc, sid = self.boot()
-        verdict = self.judge(svc, sid, RELEASE_RUN)
-        self.assertEqual((verdict.decision, verdict.reason), (
-            "deny", permit.NO_CARD.format(commit="a" * 40, version="v1.2.0")))
-        (row,) = self.rows("permit.judged")
-        self.assertEqual((row["decision"], row["session_id"], row["repo"], row["verb"]),
-                         ("deny", "s-1", SLUG, "release"))
-        self.assertEqual(row["sprint_id"], sid)
-
-    def test_a_release_run_the_owner_approved_is_allowed(self):
-        svc, sid = self.boot()
-        self.approve_release(svc, sid)
-        self.assertEqual(self.judge(svc, sid, RELEASE_RUN).decision, "allow")
-        other = RELEASE_RUN.replace("publish:0123456789ab", "publish:ba9876543210")
-        verdict = self.judge(svc, sid, other)
-        self.assertEqual((verdict.decision, verdict.reason), (
-            "deny", permit.NO_CARD.format(commit="a" * 40, version="v1.2.0")))
+        piped = "git log -1 --format=release%x20transaction%x20run%x20--candidate%x20X | sh"
+        for command in (RELEASE_RUN, "release transaction abandon", piped):
+            with self.subTest(command=command[:30]):
+                verdict = self.judge(svc, sid, command)
+                self.assertEqual((verdict.decision, verdict.reason, verdict.verb), (None, "", None))
+        self.assertEqual(self.rows("permit.judged"), [])
 
     def test_the_sprints_delivered_reported_pull_request_merges(self):
         svc, sid = self.boot()
@@ -1788,40 +1770,19 @@ class PermitServiceTest(PermitCase):
         self.assertEqual(self.judge(svc, sid, MERGE).decision, "deny")
         self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", MERGE))
 
-    def test_a_sprint_a_done_report_ended_refuses_even_a_retained_release_approval(self):
+    def test_a_sprint_a_done_report_ended_refuses_a_merge(self):
         svc, sid = self.boot()
-        self.approve_release(svc, sid)
-        self.assertEqual(self.judge(svc, sid, RELEASE_RUN).decision, "allow")
+        self.assertEqual(self.judge(svc, sid, MERGE).decision, "allow")
         svc.send_report(sid, self.secret(sid), {**issues_report(12), "phase": "done"})
         self.assertIsNotNone(sprints.ended_at(svc._sprints[sid]))
-        for command in (RELEASE_RUN, MERGE):
-            with self.subTest(command=command[:20]):
-                verdict = self.judge(svc, sid, command)
-                self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.NOT_ACTIVE))
+        verdict = self.judge(svc, sid, MERGE)
+        self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.NOT_ACTIVE))
 
     def test_a_merge_after_the_delivery_run_was_cleaned_up_is_still_allowed(self):
         svc, sid = self.boot()
         self.clean_up(svc, "s-1")
         self.assertEqual(svc._deliveries, {})
         self.assertEqual(self.judge(svc, sid, MERGE).decision, "allow")
-
-    def test_a_release_pick_from_a_page_that_never_showed_it_approves_nothing(self):
-        svc, sid = self.boot()
-        round_id, _ = svc.ask_questions(sid, self.secret(sid), {"questions": [RELEASE_QUESTION]})
-        for shown in (None, {**SHOWN_RELEASE, "version": "v9.9.9"}):
-            with self.subTest(shown=shown), self.assertRaises(sprints.Refused) as caught:
-                svc.answer_question("owner/p01", sid, round_id, 0, 0, None, shown)
-            self.assertEqual(str(caught.exception), sprints.RELEASE_STALE)
-        self.assertEqual(svc._sprints[sid].approved_releases, ())
-        svc.answer_question("owner/p01", sid, round_id, 0, 1, None)
-        self.assertEqual(svc._sprints[sid].approved_releases, ())
-        self.assertEqual(self.judge(svc, sid, RELEASE_RUN).decision, "deny")
-
-    def test_a_release_pick_the_page_showed_approves(self):
-        svc, sid = self.boot()
-        self.approve_release(svc, sid)
-        self.assertEqual(len(svc._sprints[sid].approved_releases), 1)
-        self.assertEqual(self.judge(svc, sid, RELEASE_RUN).decision, "allow")
 
     def post(self, svc, body, **headers):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()

@@ -57,7 +57,7 @@ stream `Content-Length`):
     POST /api/notice 200 application/json, a manager posts one notice for its project (below)
     POST /api/notices 200 application/json, a manager lists its project's open notices (below)
     POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
-    POST /api/permit 200 application/json, the console judges a manager session's merge, rerun or release (below)
+    POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
@@ -320,11 +320,7 @@ stop_failed <Type>: <message>` and 500 `stop failed`; success is an empty `204`.
 `sprints.Refused` is one stderr line `console: round_answer_refused <reason>` and 409 with the
 reason, a `ForgeError` (the read of a look card's pull request, below) is 502 with
 `answer.tracker_words`, any other exception is `console: round_answer_failed <Type>: <message>` and 500 `round
-answer failed`; success is an empty `204`. A body may carry `release` (#1377), the `commit`, `version`,
-`title` and `confirmations` the page showed of a release card; choosing the card's approve option with
-no words and no matching `release` is refused 409 `sprints.RELEASE_STALE` (an older page never showed
-the release), and a matching one adds `release_seen` to the answer row, without which the fold approves
-nothing. `POST /api/look-retry` (#1260) runs the same checks with
+answer failed`; success is an empty `204`. `POST /api/look-retry` (#1260) runs the same checks with
 `MAX_LOOK_RETRY_BYTES` (4096) and `sprints.parse_look_retry`: 400 `bad look retry`, `sprints.Refused` is one
 stderr line `console: look_retry_refused <reason>` and 409 with the reason, a `ForgeError` or `answer.Refused`
 from the post is 502 with the plain reason recorded for it (`tracker_words`, or the refusal's text), any other
@@ -1036,7 +1032,7 @@ checks the secret (`_manager_sprint`), returns no decision (`decision` None, no 
 `manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
 delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery
 run the console has since cleaned up still counts; `others`: the issues the newest report of every other
-open sprint of the project lists; `releases`: the owner-approved release cards) and, off the lock,
+open sprint of the project lists) and, off the lock,
 the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge binding
 (`merge_binding_of`), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the
 lock again takes the sprint, its checks and the grant afresh and judges once more over the memo's
@@ -8493,18 +8489,14 @@ class ConsoleService:
             return permit.Verdict(permit.DENY, permit.NOT_GRANTED, verb, {})
         return None
 
-    def _permit_sets(self, sprint: sprints.SprintState) -> tuple[frozenset[int], frozenset[int],
-                                                                frozenset[permit.ReleaseApproval]]:
-        """Under the ingest lock: the issues the sprint may merge, its siblings' issues, its approved releases."""
+    def _permit_sets(self, sprint: sprints.SprintState) -> tuple[frozenset[int], frozenset[int]]:
+        """Under the ingest lock: the issues the sprint may merge and its siblings' issues."""
         reported = {number for number, _ in sprint.report.issues} if sprint.report else set()
         others = {number for key, other in self._sprints.items()
                   if key != sprint.sprint_id and other.project_id == sprint.project_id
                   and sprints.takes_questions(other) and other.report is not None
                   for number, _ in other.report.issues}
-        releases = frozenset(
-            permit.ReleaseApproval(card.commit, card.version, card.title, frozenset(card.confirmations))
-            for card in sprint.approved_releases)
-        return frozenset(reported & sprint.delivered), frozenset(others), releases
+        return frozenset(reported & sprint.delivered), frozenset(others)
 
     def _permit_reads(self, root: str | None) -> tuple[str | None, str | None, str | None, bool]:
         """Off the lock: the project's slug, branch pattern, merge strategy and whether a merge deletes its branch."""
@@ -8578,7 +8570,7 @@ class ConsoleService:
             return False
         slug, _, strategy, delete_branch = self._permit_reads(root)
         target = permit.merge_target(command, permit.Grant(
-            slug, root, strategy, delete_branch, None, frozenset(), frozenset(), frozenset()))
+            slug, root, strategy, delete_branch, None, frozenset(), frozenset()))
         if target is None:
             return False
         key = (sprint_id, session_id, tool_use_id, slug, target["pr"], target["head"])
@@ -8631,7 +8623,7 @@ class ConsoleService:
             "recommended": asked.recommended, "differs": chosen != asked.recommended, **extra})
 
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
-                        choice: int | None, text: str | None, release: dict | None = None, *,
+                        choice: int | None, text: str | None, *,
                         by: "guest.GuestActor | None" = None) -> int:
         """Append one `question.answered` event, a message to the manager; its id."""
         slot = (sprint_id, round_id, index)
@@ -8656,13 +8648,6 @@ class ConsoleService:
             else:
                 chosen, said = None, sprints.checked_message(text)
             extra = {} if words is None else {"words": words}
-            card = asked.release
-            if card is not None and chosen == card.approve and words is None:
-                shown = {"commit": card.commit, "version": card.version, "title": card.title,
-                         "confirmations": list(card.confirmations)}
-                if release != shown:
-                    raise sprints.Refused(sprints.RELEASE_STALE)
-                extra["release_seen"] = True
             look = asked.look
             plain = look is None or chosen != look.approve or words is not None
             if plain:

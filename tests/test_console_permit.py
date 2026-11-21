@@ -1,7 +1,7 @@
 """The permit judge: which Bash commands a manager's session may run (#1377, ADR-console-094).
 
 `permit.judge` is pure over a `Grant` and injected forge readers, so every case here fakes the readers
-and calls it directly: the three granted shapes, each refusal reason, the literal-word grammar, the
+and calls it directly: the two granted shapes, each refusal reason, the literal-word grammar, the
 memo the console re-judges with, and the readers' fail-closed parsing.
 """
 import contextlib
@@ -13,9 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import permit
-from agent_tools.console.permit import (ALLOW, DENY, Forge, ForgeUnreadable, Grant,
-                                        ReleaseApproval, judge, memoized, mentions,
-                                        merge_target, words)
+from agent_tools.console.permit import (ALLOW, DENY, Forge, ForgeUnreadable, Grant, judge,
+                                        memoized, mentions, merge_target, words)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
@@ -56,20 +55,12 @@ class JudgeTest(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self.addCleanup(os.rmdir, self.root)
-        self.approval = ReleaseApproval(
-            "a" * 40, "v1.2.0", "v1.2.0 notes",
-            frozenset({"publish:0123456789ab", "tag:ba9876543210"}))
         self.grant = Grant(
             slug="o/r", root=self.root, strategy="merge", delete_branch=True,
-            branch_pattern="issue-<num>-<slug>", issues=frozenset({12}), others=frozenset({13}),
-            releases=frozenset({self.approval}))
+            branch_pattern="issue-<num>-<slug>", issues=frozenset({12}), others=frozenset({13}))
         self.fake = FakeForge()
         self.merge = f"gh pr merge 7 --repo o/r --merge --match-head-commit {SHA} --delete-branch"
         self.rerun = "gh run rerun 55 --failed --repo o/r"
-        self.release = (
-            f"release transaction run --repo-root {self.root} --commit {'a' * 40} --version v1.2.0 "
-            "--title 'v1.2.0 notes' --notes-file /tmp/n --confirm publish:0123456789ab "
-            "--confirm tag:ba9876543210")
 
     def judge(self, command, grant=None):
         return judge(command, grant or self.grant, self.fake.forge())
@@ -106,15 +97,15 @@ class JudgeTest(unittest.TestCase):
 
     def test_a_merge_without_a_granted_project_or_strategy_is_refused(self):
         for name, grant in {
-            "no slug": Grant(None, self.root, "merge", True, None, frozenset(), frozenset(), frozenset()),
-            "no strategy": Grant("o/r", self.root, None, True, None, frozenset(), frozenset(), frozenset()),
+            "no slug": Grant(None, self.root, "merge", True, None, frozenset(), frozenset()),
+            "no strategy": Grant("o/r", self.root, None, True, None, frozenset(), frozenset()),
         }.items():
             with self.subTest(name):
                 self.assertRefused(self.merge, permit.NOT_GRANTED, grant)
 
     def test_a_merge_that_keeps_no_branch_follows_the_projects_binding(self):
         grant = Grant("o/r", self.root, "squash", False, "issue-<num>-<slug>",
-                      frozenset({12}), frozenset(), frozenset())
+                      frozenset({12}), frozenset())
         command = f"gh pr merge 7 --repo o/r --squash --match-head-commit {SHA}"
         self.assertEqual(ALLOW, self.judge(command, grant).decision)
         self.assertRefused(command + " --delete-branch", permit.NOT_GRANTED, grant)
@@ -157,11 +148,10 @@ class JudgeTest(unittest.TestCase):
                 self.assertRefused(command, permit.ALONE)
         self.assertEqual([], self.fake.calls)
 
-    def test_shell_active_release_arguments_are_refused(self):
-        for title in ('"$(id)"', '"a`b`"', "a*", "{a,b}", "x'y'", '"a!b"', "v1 #c"):
-            with self.subTest(title):
-                self.assertRefused(self.release.replace("'v1.2.0 notes'", title), permit.ALONE)
-        self.assertRefused(self.release.replace("/tmp/n", "~/n"), permit.ALONE)
+    def test_shell_active_arguments_are_refused(self):
+        for word in ('"$(id)"', '"a`b`"', "a*", "{a,b}", "x'y'", '"a!b"', "#c", "~/n"):
+            with self.subTest(word):
+                self.assertRefused(self.merge + " " + word, permit.ALONE)
 
     def test_a_control_character_inside_a_quoted_word_is_refused_not_raised(self):
         for quote in ("'", '"'):
@@ -169,7 +159,7 @@ class JudgeTest(unittest.TestCase):
                 with self.subTest(quote=quote, bad=repr(bad)):
                     value = f"{quote}a{bad}b{quote}"
                     self.assertIsNone(words(f"x {value}"))
-                    self.assertRefused(self.release.replace(self.root, value, 1), permit.ALONE)
+                    self.assertRefused(self.merge.replace("--repo o/r", f"--repo {value}"), permit.ALONE)
 
     def test_quoted_titles_in_the_grammar_pass(self):
         self.assertEqual(["x", "--title", "v1.2.0: fixes (#12)"],
@@ -222,119 +212,21 @@ class JudgeTest(unittest.TestCase):
         self.fake.pr = {**self.fake.pr, "branch": "issue-12-x", "head": "d" * 40}
         self.assertRefused(self.rerun, permit.STALE_RUN.format(run=55))
 
-    def test_an_approved_release_run_is_allowed(self):
-        verdict = self.judge(self.release)
-        self.assertEqual(ALLOW, verdict.decision)
-        self.assertEqual("release", verdict.verb)
-        self.assertEqual({"commit": "a" * 40, "version": "v1.2.0"}, dict(verdict.target))
-        self.assertEqual([], self.fake.calls)
-        swapped = self.release.replace(
-            "--confirm publish:0123456789ab --confirm tag:ba9876543210",
-            "--confirm tag:ba9876543210 --confirm publish:0123456789ab")
-        self.assertEqual(ALLOW, self.judge(swapped).decision)
-        self.assertEqual(ALLOW, self.judge(self.release + " --profile p").decision)
-
-    def test_a_release_run_with_no_approved_card_is_refused(self):
-        self.assertRefused(self.release.replace("v1.2.0 --title", "v1.3.0 --title"),
-                           permit.NO_CARD.format(commit="a" * 40, version="v1.3.0"))
-        bare = Grant("o/r", self.root, "merge", True, None, frozenset(), frozenset(), frozenset())
-        self.assertRefused(self.release, permit.NO_CARD.format(commit="a" * 40, version="v1.2.0"),
-                           bare)
-
-    def test_a_changed_preview_at_the_same_release_is_refused(self):
-        cases = (
-            self.release.replace("publish:0123456789ab", "publish:ffffffffffff"),
-            self.release.replace(" --confirm tag:ba9876543210", ""),
-            self.release.replace("--title 'v1.2.0 notes'", "--title other"),
-            self.release + " --confirm extra:000000000000",
-        )
-        for command in cases:
+    def test_the_permit_decides_nothing_about_a_release(self):
+        root = self.root
+        run = (f"release transaction run --repo-root {root} --commit {'a' * 40} --version v1.2.0 "
+               "--title 'v1.2.0 notes' --notes-file /tmp/n --confirm publish:0123456789ab")
+        for command in (run, "release transaction abandon", run + " --dispose no_recovery_path",
+                        "git log -1 --format=release%x20transaction%x20run%x20--candidate%x20X | sh",
+                        f"printf '%s\\n' {run} | xargs release", "python3 -m agent_tools.release.release "
+                        "transaction run", "r=release; $r transaction abandon"):
             with self.subTest(command):
+                self.assertIsNone(permit.verb_of(command))
+                self.assertFalse(mentions(command))
                 verdict = self.judge(command)
-                self.assertEqual((DENY, permit.NO_CARD.format(
-                    commit="a" * 40, version="v1.2.0")), (verdict.decision, verdict.reason))
-
-    def test_a_release_resume_abandon_or_dispose_is_refused(self):
-        self.assertRefused(f"release transaction run --repo-root {self.root} --confirm t",
-                           permit.RESUME)
-        self.assertRefused("release transaction abandon", permit.OWNERS_RELEASE_STEP)
-        self.assertRefused("release transaction run --dispose no_recovery_path --reference x",
-                           permit.OWNERS_RELEASE_STEP)
-        self.assertRefused(self.release + " --reference x", permit.OWNERS_RELEASE_STEP)
-
-    def test_a_release_run_elsewhere_or_with_extra_flags_is_refused(self):
-        self.assertRefused(self.release.replace(self.root, "/elsewhere"), permit.WRONG_ROOT)
-        relative = os.path.relpath(self.root)
-        self.assertFalse(os.path.isabs(relative))
-        self.assertRefused(self.release.replace(self.root, relative), permit.WRONG_ROOT)
-        self.assertRefused(self.release + " --force", permit.NOT_GRANTED)
-        self.assertRefused(self.release + f" --commit {'a' * 40}", permit.NOT_GRANTED)
-        self.assertRefused(self.release.replace(" --version v1.2.0", ""), permit.NOT_GRANTED)
-        self.assertRefused(self.release.replace(" --confirm publish:0123456789ab"
-                                                " --confirm tag:ba9876543210", ""), permit.NOT_GRANTED)
-        self.assertRefused(self.release + " --profile", permit.NOT_GRANTED)
-
-    def test_a_release_root_is_compared_after_resolving_links(self):
-        link = Path(tempfile.mkdtemp()) / "link"
-        self.addCleanup(os.rmdir, link.parent)
-        link.symlink_to(self.root)
-        self.addCleanup(link.unlink)
-        self.assertEqual(ALLOW, self.judge(self.release.replace(self.root, str(link))).decision)
-
-    def test_the_release_module_entry_points_are_judged_and_never_granted(self):
-        run = self.release.removeprefix("release ")
-        for prefix in ("python3 -m agent_tools.release.release", "python -m agent_tools.release.release",
-                       "PYTHONPATH=python python3 -m agent_tools.release.release",
-                       "python3 -magent_tools.release.release", "python3 -m 'agent_tools.release.release'",
-                       "python3 python/agent_tools/release/release.py"):
-            command = f"{prefix} {run}"
-            with self.subTest(prefix):
-                self.assertTrue(mentions(command))
-                self.assertEqual("release", permit.verb_of(command))
-                self.assertRefused(command, permit.ALONE)
-        for command in ("python3 -m agent_tools.release.release transaction preview --repo-root r",
-                        "python3 -m agent_tools.release.release_driver", "python3 -m agent_tools.sprint"):
-            with self.subTest(command):
-                self.assertFalse(mentions(command))
+                self.assertEqual((None, "", None, {}),
+                                 (verdict.decision, verdict.reason, verdict.verb, dict(verdict.target)))
         self.assertEqual([], self.fake.calls)
-
-    def test_an_indirect_release_run_is_judged_and_refused_not_left_undecided(self):
-        run = self.release.removeprefix("release ")
-        for command in (f"printf '%s\\n' {run} | xargs release",
-                        f"r=release; $r {run}",
-                        f"python3 -c 'import runpy; runpy.run_module(\"agent_tools.release.release\", "
-                        f"run_name=\"__main__\")' {run}",
-                        f"python3 -c \"import agent_tools.release.release as r; r.main(['transaction','run'])\"",
-                        f"r=release; $r transaction abandon",
-                        f"x=transaction; release $x run",
-                        f"release transaction $verb --repo-root {self.root}",
-                        f"echo {run}",
-                        "printf '%s\\n' --candidate X run transaction | tac | xargs release",
-                        "xargs -a FILE release", "cat FILE | xargs release",
-                        "env release", "sudo release.py", "find . -exec release {} +",
-                        "echo run transaction release | tac | sh",
-                        'git -c alias.x="!xargs release <FILE" x',
-                        'git -c alias.x="!xargs -a FILE release" x',
-                        'git -c core.pager="xargs -a FILE release" log',
-                        'git alias-x release', 'gh alias set --shell x "xargs -a F release"',
-                        'sed -n "1e xargs -a FILE release" README.md',
-                        'sed -n 1,2e\\ xargs\\ release README.md', "rg --pre 'xargs -a F release' x docs",
-                        "python3 -c \"exec(open('F').read())\" release"):
-            with self.subTest(command):
-                self.assertTrue(mentions(command))
-                self.assertEqual("release", permit.verb_of(command))
-                self.assertRefused(command, permit.ALONE)
-        self.assertEqual([], self.fake.calls)
-
-    def test_release_words_that_reach_no_run_or_abandon_are_not_mentioned(self):
-        for command in ("release transaction status", "release transaction preview --repo-root r",
-                        "sed -n 1,20p python/agent_tools/release/release.py", "git checkout release",
-                        "gh release list", "echo transaction", "grep -rn release docs | wc -l",
-                        "PYTHONPATH=python python3 -m agent_tools.release.release transaction status",
-                        "git log --oneline release", "sed -n 1p release.py", "gh release view v1",
-                        "rg release docs"):
-            with self.subTest(command):
-                self.assertFalse(mentions(command))
 
     def test_an_unreadable_forge_is_refused(self):
         self.fake.pr_error = ForgeUnreadable("boom")
@@ -356,7 +248,7 @@ class JudgeTest(unittest.TestCase):
 
     def test_mentions_reads_through_quotes_and_paths(self):
         for command in ("gh 'pr' merge 7", "/usr/bin/gh pr merge 7", "x;gh run rerun 1",
-                        "release transaction run", 'rel"ease" transaction abandon'):
+                        "(gh pr merge 7)"):
             with self.subTest(command):
                 self.assertTrue(mentions(command))
         for command in ("gh pr view 7", "gh pr", "release transaction preview", "git status"):
