@@ -343,7 +343,8 @@ class LookGateWorld:
                 "claim": {"verdict": "free", "by": None}, "merged_refs": [], "open_pr": None,
                 "native": {"verdict": "read", "blocked_by": []}, "blockers": [],
                 "decision": {"verdict": "none", "comment_id": None, "questions": [], "decisions": ""},
-                "lane": "standard", "why": "x", "look": self.look_of(issue)}
+                "lane": "standard", "why": "x", "look": self.look_of(issue),
+                "live_fault": {"verdict": "none"}}
 
     def _commit(self, message, match):
         issue = message["issue"]

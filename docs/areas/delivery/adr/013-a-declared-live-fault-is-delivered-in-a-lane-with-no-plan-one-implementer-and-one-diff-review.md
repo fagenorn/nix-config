@@ -1,4 +1,4 @@
-# ADR-delivery-012 — A declared live fault is delivered in a lane with no plan, one implementer and one diff review
+# ADR-delivery-013 — A declared live fault is delivered in a lane with no plan, one implementer and one diff review
 
 - **Status:** accepted
 - **Decided in:** #1433
