@@ -90,6 +90,7 @@
 | Pinned profile | Console |
 | Plan question | Console |
 | Plan-gated floor | Guard |
+| Platform command | Project contract |
 | Platform manifest | Project contract |
 | Platform package | Project contract |
 | Prefix reorder | Hosts |
