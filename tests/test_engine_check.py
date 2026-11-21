@@ -137,6 +137,37 @@ def _outcome_not_required(schema: dict) -> None:
     schema["required"].remove("status")
 
 
+def _add_orphan(toy: dict) -> None:
+    toy["steps"].append({"id": "orphan", "stage": "building", "kind": "command",
+                         "command": "diff-scope", "in": ["draft.summary"],
+                         "on": {"ok": "done", "failed": "done"}})
+
+
+def _claim_reaches_done_only_through_exhausted(child: dict) -> None:
+    claim = step(child, "claim")
+    claim["on"] = {outcome: "child-stop" for outcome in claim["on"]}
+    claim["on"]["exhausted"] = "done"
+
+
+def _add_enum_outcome(schema: dict) -> None:
+    schema["properties"]["status"]["enum"].append("abandoned")
+
+
+def _without(target: Callable[[dict], dict], key: str) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        del target(toy)[key]
+    return change
+
+
+def _unbound_the_loop(toy: dict) -> None:
+    for step_id in ("draft", "review", "tally"):
+        del step(toy, step_id)["max_visits"]
+
+
+def _pass_set_with_maybe(toy: dict) -> None:
+    step(toy, "review")["members"][0]["pass"] = ["approve", "maybe"]
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -200,6 +231,41 @@ CASES = [
     Case("missing_child_procedure",
          editing("toy", _set(lambda toy: step(toy, "children"), "procedure", "toy-nope")),
          [("toy", "children", "missing_procedure")]),
+    Case("unreachable_step", editing("toy", _add_orphan),
+         [("toy", "orphan", "unreachable_step")]),
+    Case("unreachable_done",
+         editing("toy", _set(lambda toy: step(toy, "children")["on"], "done", "needs-owner")),
+         [("toy", None, "unreachable_done")]),
+    Case("done_only_through_an_impossible_exhausted",
+         editing("toy-child", _claim_reaches_done_only_through_exhausted),
+         [("toy-child", None, "unreachable_done")]),
+    Case("reply_enum_outcome_unmapped", _editing_draft_reply(_add_enum_outcome),
+         [("toy", "draft", "unmapped_outcome")]),
+    Case("command_verdict_unmapped",
+         editing("toy-child", _without(lambda toy: step(toy, "claim")["on"], "stale")),
+         [("toy-child", "claim", "unmapped_outcome")]),
+    Case("grader_outcome_unmapped",
+         editing("toy", _without(lambda toy: step(toy, "tally")["on"], "revise")),
+         [("toy", "tally", "unmapped_outcome")]),
+    Case("exhausted_unmapped_on_a_cycle",
+         editing("toy", _without(lambda toy: step(toy, "review")["on"], "exhausted")),
+         [("toy", "review", "unmapped_outcome")]),
+    Case("group_blocked_unmapped",
+         editing("toy", _without(lambda toy: step(toy, "review")["on"], "blocked")),
+         [("toy", "review", "unmapped_outcome")]),
+    Case("child_stop_unmapped",
+         editing("toy", _without(lambda toy: step(toy, "children")["on"], "child-stop")),
+         [("toy", "children", "unmapped_outcome")]),
+    Case("cycle_without_a_bound", editing("toy", _unbound_the_loop),
+         [("toy", "draft", "unbounded_cycle")]),
+    Case("exhausted_reenters_its_loop",
+         editing("toy", _set(lambda toy: step(toy, "draft")["on"], "exhausted", "review")),
+         [("toy", "draft", "unbounded_cycle")]),
+    Case("outcome_the_step_cannot_produce",
+         editing("toy", _set(lambda toy: step(toy, "draft")["on"], "maybe", "review")),
+         [("toy", "draft", "unknown_outcome")]),
+    Case("pass_set_outcome_the_member_cannot_produce", editing("toy", _pass_set_with_maybe),
+         [("toy", "review", "unknown_outcome")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -281,6 +347,15 @@ class RefusalTableTest(unittest.TestCase):
     def test_every_defect_has_a_table_case(self):
         self.assertEqual({d for c in CASES for _, _, d in c.expected},
                          set(procedure_check.DEFECTS))
+
+
+class GraphTest(unittest.TestCase):
+    def test_exhausted_may_be_mapped_off_a_cycle(self):
+        directory = broken_copy(editing(
+            "toy-child", _set(lambda child: step(child, "claim")["on"], "exhausted", "child-stop")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
 
 
 class RoleTest(unittest.TestCase):

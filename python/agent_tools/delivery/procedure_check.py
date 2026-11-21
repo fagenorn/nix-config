@@ -65,6 +65,18 @@ outcomes; `reply_properties` and `reply_required`: the reply schema's member
 names and `required` names; `child_stops`: the child's stop names, only when
 the child loaded with no phase A refusal), and `keep_alive`, the keep-alive
 command's outcomes or `None`.
+
+Phase C (graph, only on a file with no phase A refusal and no `unknown_target`;
+the steps in order, `unreachable_done` first): `unreachable_step` (a step the
+walk of `flow_graph` from the first step does not reach; a group member is
+reached when its group is), `unreachable_done` (no reachable step has an `on`
+entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
+`unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle
+of `step_graph` also produces `exhausted`, any step may map it, and a group
+member's `pass` entries are checked at the group) and `unbounded_cycle` (a
+cycle among steps with no `max_visits`, refused at its first step, or a step
+on a cycle whose `exhausted` target re-enters the loop). An outcome check whose
+reference failed phase B is skipped for that step.
 """
 
 from __future__ import annotations
@@ -87,7 +99,10 @@ ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
 DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_stage", "duplicate_step", "unknown_target", "unknown_command",
            "undeclared_verdicts", "unknown_role", "missing_prompt", "missing_reply",
-           "invalid_reply", "unknown_grader", "missing_procedure")
+           "invalid_reply", "unknown_grader", "missing_procedure",
+           "unreachable_step", "unreachable_done", "unmapped_outcome",
+           "unknown_outcome", "unbounded_cycle")
+EXHAUSTED = "exhausted"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -613,4 +628,155 @@ def check_directory(directory: Path,
             continue
         found, resolved[name] = check_references(name, doc, directory, commands, child_stops)
         refusals.extend(found)
+        if not any(r.defect == "unknown_target" for r in found):
+            refusals.extend(check_graph(name, doc, resolved[name]))
     return CheckResult(tuple(p.stem for p in files), tuple(refusals), resolved)
+
+
+
+def outcomes_of(step: dict, resolved: Resolved) -> tuple[str, ...] | None:
+    """The outcomes a step can produce but `exhausted`; `None` when unresolved."""
+    kind = step["kind"]
+    if kind == "group":
+        return ("pass", "blocked")
+    known = resolved.steps[step["id"]]
+    if kind == "call":
+        return None if known.child_stops is None else ("done",) + tuple(known.child_stops)
+    return known.outcomes
+
+
+def _members_of(procedure: dict) -> set[str]:
+    return {member["step"] for item in procedure["steps"] if item["kind"] == "group"
+            for member in item["members"]}
+
+
+def step_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """Non-member step -> the step targets of its `on` entries but `exhausted`."""
+    members = _members_of(procedure)
+    ids = {item["id"] for item in procedure["steps"]} - members
+    return {item["id"]: tuple(target for outcome, target in item["on"].items()
+                              if outcome != EXHAUSTED and target in ids)
+            for item in procedure["steps"] if item["id"] not in members}
+
+
+def _reach(graph: Mapping[str, tuple[str, ...]], start: str) -> set[str]:
+    """The nodes reachable from `start` by one or more edges."""
+    seen: set[str] = set()
+    pending = list(graph.get(start, ()))
+    while pending:
+        node = pending.pop()
+        if node not in seen:
+            seen.add(node)
+            pending.extend(graph.get(node, ()))
+    return seen
+
+
+def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
+    """The steps in a strongly connected set of two or more, or with a self-edge."""
+    return frozenset(node for node in graph if node in _reach(graph, node))
+
+
+def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """Steps and stops -> where control can go, `done` and dead `exhausted` left out."""
+    members = _members_of(procedure)
+    cyclic = on_cycle(step_graph(procedure))
+    graph: dict[str, tuple[str, ...]] = {}
+    for item in procedure["steps"]:
+        if item["id"] in members:
+            continue
+        graph[item["id"]] = tuple(
+            target for outcome, target in item["on"].items()
+            if target != "done" and (outcome != EXHAUSTED or item["id"] in cyclic))
+    for name, stop in procedure["stops"].items():
+        graph[name] = (stop["reenter"],)
+    return graph
+
+
+def _check_reachability(procedure: dict, found: _Findings) -> None:
+    members = _members_of(procedure)
+    graph = flow_graph(procedure)
+    cyclic = on_cycle(step_graph(procedure))
+    entry = procedure["steps"][0]["id"]
+    reached = {entry} | _reach(graph, entry)
+    group_of = {member["step"]: item["id"] for item in procedure["steps"]
+                if item["kind"] == "group" for member in item["members"]}
+    reaches_done = any(
+        item["id"] in reached and item["id"] not in members
+        and any(target == "done" and (outcome != EXHAUSTED or item["id"] in cyclic)
+                for outcome, target in item["on"].items())
+        for item in procedure["steps"])
+    if not reaches_done:
+        found.add("unreachable_done", "no reachable step has an on entry to done.")
+    for item in procedure["steps"]:
+        owner = group_of.get(item["id"], item["id"])
+        if owner not in reached:
+            found.add("unreachable_step",
+                      f"no path from the first step reaches {item['id']!r}.", item["id"])
+
+
+def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> None:
+    cyclic = on_cycle(step_graph(procedure))
+    by_id = {item["id"]: item for item in procedure["steps"]}
+    members = _members_of(procedure)
+    for item in procedure["steps"]:
+        label = item["id"]
+        produced = outcomes_of(item, resolved)
+        if produced is None:
+            continue
+        if item["kind"] == "group":
+            for member in item["members"]:
+                member_outcomes = outcomes_of(by_id[member["step"]], resolved)
+                if member_outcomes is None:
+                    continue
+                stray = [o for o in member["pass"] if o not in member_outcomes]
+                if stray:
+                    found.add("unknown_outcome",
+                              f"member {member['step']!r} cannot produce {', '.join(map(repr, stray))}.",
+                              label)
+        if label in members:
+            continue
+        producible = set(produced) | ({EXHAUSTED} if label in cyclic else set())
+        unmapped = [o for o in sorted(producible, key=(*produced, EXHAUSTED).index)
+                    if o not in item["on"]]
+        if unmapped:
+            found.add("unmapped_outcome",
+                      f"on does not map {', '.join(map(repr, unmapped))}.", label)
+        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED]
+        if unknown:
+            found.add("unknown_outcome",
+                      f"on maps {', '.join(map(repr, unknown))}, which the step cannot produce.", label)
+
+
+def _check_cycles(procedure: dict, found: _Findings) -> None:
+    graph = step_graph(procedure)
+    bounded = {item["id"] for item in procedure["steps"] if "max_visits" in item}
+    unbounded = {node: tuple(t for t in targets if t not in bounded)
+                 for node, targets in graph.items() if node not in bounded}
+    refused: dict[str, str] = {}
+    looping = on_cycle(unbounded)
+    order = [item["id"] for item in procedure["steps"]]
+    for node in order:
+        loop = {other for other in looping if other == node
+                or (other in _reach(unbounded, node) and node in _reach(unbounded, other))}
+        if node in looping and node == next(other for other in order if other in loop):
+            refused[node] = "it is on a cycle in which no step declares max_visits."
+    for item in procedure["steps"]:
+        label = item["id"]
+        target = item["on"].get(EXHAUSTED) if "on" in item else None
+        if (label in on_cycle(graph) and label not in refused and target in graph
+                and (target == label or label in _reach(graph, target))):
+            refused[label] = f"its exhausted target {target!r} re-enters the loop it ends."
+    for item in procedure["steps"]:
+        if item["id"] in refused:
+            found.add("unbounded_cycle", refused[item["id"]], item["id"])
+
+
+def check_graph(name: str, doc: dict, resolved: Resolved) -> list[Refusal]:
+    """Phase C, graph part: reachability, outcomes and cycles, F7 and F11."""
+    found = _Findings(name)
+    _check_reachability(doc, found)
+    _check_outcomes(doc, resolved, found)
+    _check_cycles(doc, found)
+    position = {item["id"]: index for index, item in enumerate(doc["steps"])}
+    return sorted(found.refusals,
+                  key=lambda r: (-1 if r.step is None else position[r.step]))
