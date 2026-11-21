@@ -14,6 +14,7 @@ PR = 41
 SHA = "c" * 40
 PULL = f"repos/{REPO}/pulls/{PR}"
 PROTECTION = f"repos/{REPO}/branches/main/protection/required_status_checks"
+RULES = f"repos/{REPO}/rules/branches/main?per_page=100"
 RUNS = f"repos/{REPO}/commits/{SHA}/check-runs?per_page=100"
 STATUSES = f"repos/{REPO}/commits/{SHA}/statuses?per_page=100"
 
@@ -29,7 +30,14 @@ def status(context, state="success", updated="2026-11-21T12:45:00Z"):
     return {"context": context, "state": state, "updated_at": updated}
 
 
-def checks(runs=(), statuses=(), required=("ci",), required_checks=None):
+def ruleset(*contexts):
+    """The branch rules of one ruleset requiring each (context, integration_id) of `contexts`."""
+    return {"type": "required_status_checks", "ruleset_source_type": "Repository", "ruleset_id": 3,
+            "parameters": {"required_status_checks": [
+                {"context": c, **({"integration_id": a} if a is not None else {})} for c, a in contexts]}}
+
+
+def checks(runs=(), statuses=(), required=("ci",), required_checks=None, rules=()):
     """The canned reads of one pull request; any read not listed fails the test."""
     gets = {
         PULL: {"head": {"sha": SHA}, "base": {"ref": "main"}},
@@ -39,6 +47,7 @@ def checks(runs=(), statuses=(), required=("ci",), required_checks=None):
     pages = {
         RUNS: [{"total_count": len(runs), "check_runs": list(runs)}],
         STATUSES: [list(statuses)],
+        RULES: [list(rules)],
     }
     return gets, pages
 
@@ -152,6 +161,36 @@ class PrGreenStateTest(unittest.TestCase):
         self.assertEqual((other[0], other[1]["missing"]), ("pending", ["ci"]))
         own = state_of([run("ci", app_id=15368)], required_checks=bound)
         self.assertEqual((own[0], own[1]["missing"]), ("green", []))
+
+    def test_a_check_only_a_ruleset_requires_is_missing_when_it_never_ran(self):
+        rules = [{"type": "pull_request", "parameters": {}}, ruleset(("lint", None))]
+        state, report = state_of([run("ci")], required=("ci",), rules=rules)
+        self.assertEqual((state, report["missing"], report["green_at"]), ("pending", ["lint"], None))
+        state, report = state_of([run("ci"), run("lint")], required=("ci",), rules=rules)
+        self.assertEqual((state, report["missing"]), ("green", []))
+
+    def test_a_ruleset_check_bound_to_an_app_needs_that_app(self):
+        rules = [ruleset(("lint", 15368))]
+        other = state_of([run("ci"), run("lint", app_id=99)], rules=rules)
+        self.assertEqual((other[0], other[1]["missing"]), ("pending", ["lint"]))
+        own = state_of([run("ci"), run("lint", app_id=15368)], rules=rules)
+        self.assertEqual((own[0], own[1]["missing"]), ("green", []))
+
+    def test_a_malformed_rules_listing_is_a_forge_error(self):
+        for bad in ([{"not": "a page"}], [[ruleset(("lint", "x"))]]):
+            gets, pages = checks([run("ci")])
+            pages[RULES] = bad
+            get, paged = patched(gets, pages)
+            with self.subTest(bad=bad), get, paged, self.assertRaises(forge_api.ForgeError):
+                verify_checks.pr_green_state(REPO, PR)
+
+    def test_a_required_check_that_concluded_skipped_or_neutral_is_met(self):
+        for conclusion in ("skipped", "neutral"):
+            with self.subTest(conclusion=conclusion):
+                state, report = state_of([run("ci", conclusion)], required=("ci",))
+                self.assertEqual((state, report["missing"], report["pending"]), ("green", [], []))
+                state, report = state_of([run("ci"), run("lint", conclusion)], rules=[ruleset(("lint", None))])
+                self.assertEqual((state, report["missing"]), ("green", []))
 
     def test_no_check_at_all_is_pending(self):
         state, report = state_of([], [], required=())

@@ -8602,6 +8602,7 @@ class LiveLaneTest(unittest.TestCase):
             "red at another head": {"live-impl": dict(reply, fault_test=with_ft(red={"head": "e" * 40}))},
             "green at another head": {"live-impl": dict(reply, fault_test=with_ft(green={"head": "e" * 40}))},
             "no name": {"live-impl": dict(reply, fault_test=with_ft(name=""))},
+            "nothing committed": {"live-impl": dict(reply, commit=LIVE_START, fault_test=with_ft(green={"head": LIVE_START}))},
         }
         for name, replies in cases.items():
             with self.subTest(case=name):
@@ -8615,6 +8616,21 @@ class LiveLaneTest(unittest.TestCase):
                 self.assertEqual(result["cont"]["live_fault"]["final"], "live-evidence")
         result, _ = run(args=ARGS, patch=LIVE_PATCH)
         self.assertEqual(result["stage"], "done")
+
+    def test_a_committed_reply_without_criteria_is_final_and_asks_no_second_implementer(self):
+        without = {k: v for k, v in LIVE_IMPL_REPLY.items() if k != "acceptance"}
+        for name, reply in (("empty", dict(LIVE_IMPL_REPLY, acceptance=[])), ("absent", without)):
+            with self.subTest(reply=name):
+                stopped, calls = run(args=ARGS, patch=LIVE_PATCH, replies={"live-impl": reply})
+                self.assertEqual(stopped["stage"], "live-bound")
+                self.assertIn("no acceptance criteria", stopped["reason"])
+                self.assertIn("rerun with lane standard and no cont", stopped["reason"])
+                self.assertNotIn("partial", stopped["cont"])
+                self.assertEqual(stopped["cont"]["live_fault"]["final"], "live-bound")
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": SHA, "live_fault": DECLARED}})
+                self.assertEqual(result["stage"], "live-bound")
+                self.assertIn("already stopped at live-bound", result["reason"])
+                self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], [])
 
     def test_a_final_live_stop_does_not_resume(self):
         stopped, _ = run(args=ARGS, patch=LIVE_PATCH, replies={"live-impl": dict(LIVE_IMPL_REPLY, fault_test=with_ft(red={"exit": 0}))})
@@ -8650,9 +8666,24 @@ class LiveLaneTest(unittest.TestCase):
         self.assertEqual(result["stage"], "live-review")
         self.assertNotIn("live-review-again", labels(calls))
         self.assertEqual(result["lost_reviews"], ["live-review"])
-        self.assertNotIn("final", result["cont"]["live_fault"])
+        self.assertIn("rerun with lane standard and no cont", result["reason"])
+        self.assertEqual(result["cont"]["live_fault"]["final"], "live-review")
+        resumed, calls = run(args=dict(ARGS, cont=result["cont"]), patch={"setup": {"head": SHA, "live_fault": DECLARED}})
+        self.assertEqual(resumed["stage"], "live-review")
+        self.assertIn("already stopped at live-review", resumed["reason"])
+        self.assertFalse([c["label"] for c in calls if c["agentType"] in ("reviewer", "reviewer-lite")])
         result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **{"live-review": {"head": "e" * 40}}))
         self.assertEqual(result["stage"], "live-bound")
+
+    def test_a_reviewer_that_answered_nothing_is_the_one_step_a_resume_runs_again(self):
+        stopped, _ = run(args=ARGS, patch=LIVE_PATCH, replies={"live-review": None})
+        self.assertEqual(stopped["stage"], "live-review")
+        self.assertEqual(stopped["dead_agents"], ["live-review"])
+        self.assertNotIn("final", stopped["cont"]["live_fault"])
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": SHA, "live_fault": DECLARED}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([c["label"] for c in calls if c["agentType"] in ("reviewer", "reviewer-lite")], ["live-review"])
+        self.assertNotIn("live-impl", labels(calls))
 
     def test_a_live_stop_resumes_in_the_live_lane(self):
         stopped, _ = run(args=ARGS, patch=LIVE_PATCH, replies={"verify": None})
@@ -8727,13 +8758,14 @@ class LiveSizeTest(unittest.TestCase):
         self.refusal(patch, refused_with("the diff touches authentication in src/auth.py"))
 
     def test_80_lines_outside_tests_in_3_files_pass(self):
-        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized(("src/a.py", 50, 30), ("tests/test_a.py", 300, 0), ("src/b.py", 0, 0))))
+        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized(("src/a.py", 50, 30), ("tests/test_harm.py", 300, 0), ("src/b.py", 0, 0))))
         self.assertEqual(result["stage"], "done")
 
     def test_test_lines_do_not_count(self):
         for path in ("tests/x.py", "pkg/__tests__/x.js", "spec/x_spec.rb", "test_x.py", "x_test.go", "src/x.test.ts", "src/x.spec.js"):
             with self.subTest(path=path):
-                result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized((path, 500, 0), ("src/fix.py", 10, 0))))
+                impl = dict(LIVE_IMPL_REPLY, fault_test=with_ft(file=path))
+                result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized((path, 500, 0), ("src/fix.py", 10, 0))), replies={"live-impl": impl})
                 self.assertEqual(result["stage"], "done")
         self.refusal(live_sized(("src/testing.py", 500, 0), ("src/fix.py", 10, 0)),
                      refused_with("the diff changes 510 lines outside tests, over the live lane's 80"))
@@ -8780,8 +8812,25 @@ class LiveSizeTest(unittest.TestCase):
         self.refusal(live_sized(("tests/helper.py", 0, 50), ("src/helper.py", 50, 0), ("src/fix.py", 31, 0)),
                      refused_with("the diff changes 81 lines outside tests, over the live lane's 80"))
 
+    def test_paths_spelled_differently_are_distinct_files(self):
+        self.refusal(live_sized(("a", 1, 0), (" a", 1, 0), ("b", 1, 0), ("tests/test_harm.py", 1, 0)),
+                     refused_with("the diff changes 4 files, over the live lane's 3"))
+
+    def test_a_test_the_diff_does_not_change_is_no_evidence(self):
+        result, calls = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized(("src/fix.py", 5, 2))))
+        self.assertEqual(result["stage"], "live-evidence")
+        self.assertEqual(result["reason"], "live-evidence: the change carries no test shown failing before it and passing after it: "
+                         "the test file tests/test_harm.py is not a path the diff changes; "
+                         "deliver the fault in an ordinary delivery: rerun with lane standard and no cont")
+        self.assertEqual(result["cont"]["live_fault"]["final"], "live-evidence")
+        self.assertNotIn("live-review", labels(calls))
+        self.assertNotIn("verify", labels(calls))
+        impl = dict(LIVE_IMPL_REPLY, fault_test=with_ft(file="./tests/test_harm.py"))
+        result, _ = run(args=ARGS, patch=LIVE_PATCH, replies={"live-impl": impl})
+        self.assertEqual(result["stage"], "done")
+
     def test_a_path_listed_twice_counts_once(self):
-        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized(("src/a.py", 30, 0), ("src/a.py", 30, 0), ("tests/test_a.py", 5, 0), ("src/b.py", 1, 0))))
+        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **live_sized(("src/a.py", 30, 0), ("src/a.py", 30, 0), ("tests/test_harm.py", 5, 0), ("src/b.py", 1, 0))))
         self.assertEqual(result["stage"], "done")
         self.refusal(live_sized(("src/a.py", 41, 0), ("src/a.py", 40, 0)),
                      refused_with("the diff changes 81 lines outside tests, over the live lane's 80"))
@@ -8790,6 +8839,7 @@ class LiveSizeTest(unittest.TestCase):
         result, calls = run(args=ARGS, patch=dict(LIVE_PATCH, **{"live-size": {"head": "e" * 40}}))
         self.assertEqual(result["stage"], "live-bound")
         self.assertIn(f"the diff was measured at {'e' * 40}, not the delivered commit {SHA}", result["reason"])
+        self.assertIn("deliver the fault in an ordinary delivery: rerun with lane standard and no cont", result["reason"])
         self.assertNotIn("live-review", labels(calls))
 
 
@@ -8847,9 +8897,15 @@ class LiveReviewTest(unittest.TestCase):
         self.assertEqual(result["stage"], "live-review")
 
     def test_a_finding_naming_a_criterion_the_review_never_graded_blocks(self):
-        result, calls = self.live(dict(HARD, ac="AC9"))
+        reply = dict(live_reply(dict(HARD, ac="AC1")), acceptance=[])
+        result, calls = run(args=ARGS, patch=LIVE_PATCH, replies={"live-review": reply})
         self.assertEqual(result["stage"], "live-review")
         self.assertEqual(filings(calls), [])
+
+    def test_a_finding_naming_no_criterion_of_the_issue_is_filed(self):
+        result, calls = self.live(dict(HARD, ac="AC9"))
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
 
     def test_an_ungraded_code_criterion_blocks(self):
         result, _ = self.live(met=False)
@@ -8864,6 +8920,23 @@ class LiveReviewTest(unittest.TestCase):
         self.assertEqual([{k: f[k] for k in ("issue", "file", "summary", "commit")} for f in result["cont"]["follow_ups"]],
                          [{"issue": 911, "file": "src/fix.py", "summary": "rename the helper", "commit": SHA}])
         self.assertEqual([f["severity"] for f in result["findings"]], ["critical"])
+
+    def test_a_follow_up_left_unfiled_beside_a_critical_finding_is_filed_by_the_resume(self):
+        stopped, calls = self.live(CRIT, MINOR, replies={"follow-ups-1": {"filed": []}})
+        self.assertEqual(stopped["stage"], "live-review")
+        self.assertEqual(stopped["cont"]["live_fault"]["final"], "live-review")
+        self.assertEqual([f["summary"] for f in stopped["cont"]["follow_ups_pending"]], ["rename the helper"])
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=LIVE_RESUME)
+        self.assertEqual(result["stage"], "live-review")
+        self.assertIn("already stopped at live-review", result["reason"])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual([f["summary"] for f in result["cont"]["follow_ups"]], ["rename the helper"])
+        self.assertNotIn("follow_ups_pending", result["cont"])
+        for label in ("live-impl", "live-size", "live-review", "verify"):
+            self.assertNotIn(label, labels(calls))
+        again, calls = run(args=dict(ARGS, cont=result["cont"]), patch=LIVE_RESUME)
+        self.assertEqual(again["stage"], "live-review")
+        self.assertEqual(filings(calls), [])
 
     def test_beyond_items_are_filed_as_follow_ups(self):
         result, calls = run(args=ARGS, patch=BEYOND_PATCH)
@@ -9588,7 +9661,7 @@ class LiveBindingTest(unittest.TestCase):
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
-    (CLERK, ("setup", "acquire", "worktree", "renew-", "live-size", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
+    (CLERK, ("setup", "acquire", "worktree", "renew-", "live-size", "live-green", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
              "hold-draft", "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
              "look-checks-", "look-reverify")),
@@ -13821,6 +13894,15 @@ class LiveTimingTest(unittest.TestCase):
         over = self.whole_hour("2026-11-21T13:10:01Z")
         self.assertEqual(over["seconds"], 3601)
         self.assertIs(over["within_hour"], False)
+
+    def test_a_microsecond_decides_the_hour(self):
+        for green_at, seconds, within in (("2026-11-21T13:10:00.000001Z", 3600.000001, False),
+                                          ("2026-11-21T13:09:59.999999Z", 3599.999999, True),
+                                          ("2026-11-21T13:10:00.000000Z", 3600, True)):
+            with self.subTest(green_at=green_at):
+                member = self.whole_hour(green_at)
+                self.assertAlmostEqual(member["seconds"], seconds, places=6)
+                self.assertIs(member["within_hour"], within)
 
     def test_a_green_time_before_the_declaration_is_null(self):
         member = self.whole_hour("2026-11-21T11:00:00Z")

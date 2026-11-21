@@ -428,9 +428,9 @@ def _required_checks(repo: str, base: str) -> list[Requirement]:
 
 
 def _context_met(requirement: Requirement, runs: Sequence[object], statuses: Sequence[object],
-                 merged_at: datetime | None) -> bool:
-    """Met by a successful run, or for an unbound check a latest successful status, each completed no
-    later than `merged_at` (no time bound when it is None)."""
+                 merged_at: datetime | None, passed: Sequence[str] = ("success",)) -> bool:
+    """Met by a run concluding in `passed`, or for an unbound check a latest successful status, each
+    completed no later than `merged_at` (no time bound when it is None)."""
     context, app_id = requirement
     for run in runs:
         if not isinstance(run, dict) or run.get("name") != context:
@@ -438,7 +438,7 @@ def _context_met(requirement: Requirement, runs: Sequence[object], statuses: Seq
         app = run.get("app")
         if app_id is not None and not (isinstance(app, dict) and app.get("id") == app_id):
             continue
-        if (run.get("status") == "completed" and run.get("conclusion") == "success"
+        if (run.get("status") == "completed" and run.get("conclusion") in passed
                 and (merged_at is None
                      or _forge_time(run.get("completed_at"), "check run completed_at") <= merged_at)):
             return True
@@ -494,6 +494,28 @@ _RUN_PASSED = ("success", "neutral", "skipped")
 _STATUS_STATES = ("success", "failure", "error", "pending")
 
 
+def _ruleset_checks(repo: str, base: str) -> set[Requirement]:
+    """The checks the active rulesets of `base` require, `integration_id` being the app binding
+    (absent or null is any app); classic branch protection is read apart, by `_required_checks`."""
+    pages = forge_api.api_pages(f"repos/{repo}/rules/branches/{base}?per_page=100")
+    if not all(isinstance(page, list) for page in pages):
+        raise _invalid("rules page is not a list")
+    found: set[Requirement] = set()
+    for rule in (rule for page in pages for rule in page):
+        if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+            continue
+        parameters = rule.get("parameters")
+        listed = parameters.get("required_status_checks") if isinstance(parameters, dict) else None
+        for entry in listed or []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("context"), str):
+                continue
+            app_id = entry.get("integration_id")
+            if app_id is not None and not _is_int(app_id):
+                raise _invalid("ruleset required check integration_id is not an integer or null")
+            found.add((entry["context"], app_id))
+    return found
+
+
 def _stamp(moment: datetime) -> str:
     """An RFC 3339 UTC string of `moment`, keeping any fraction of a second."""
     utc = moment.astimezone(timezone.utc)
@@ -507,7 +529,8 @@ def pr_green_state(repo: str, pr: int) -> tuple[str, dict]:
 
     Failed: a completed check run concluded outside success, neutral and skipped, or the latest
     status of a context is failure or error. Pending: a run not completed, the latest status of a
-    context pending, a required check not met at the head (no time bound), or no run and no status
+    context pending, a required check not met at the head (no time bound; classic protection and
+    the active rulesets both count, and a neutral or skipped run meets it), or no run and no status
     at all. Green otherwise, at the latest run completion or latest status update."""
     pull = forge_api.api_get(f"repos/{repo}/pulls/{pr}")
     head = pull.get("head") if isinstance(pull, dict) else None
@@ -516,7 +539,7 @@ def pr_green_state(repo: str, pr: int) -> tuple[str, dict]:
     ref = base.get("ref") if isinstance(base, dict) else None
     if not isinstance(sha, str) or not sha or not isinstance(ref, str) or not ref:
         raise _invalid(f"pull request {pr} has no head sha and base ref")
-    required = _required_checks(repo, ref)
+    required = {*_required_checks(repo, ref), *_ruleset_checks(repo, ref)}
     runs = _counted_pages(forge_api.api_pages(
         f"repos/{repo}/commits/{sha}/check-runs?per_page=100"), "check_runs", "check-run listing")
     status_pages = forge_api.api_pages(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
@@ -549,7 +572,7 @@ def pr_green_state(repo: str, pr: int) -> tuple[str, dict]:
             failing.add(context)
         elif state == "pending":
             pending.add(context)
-    missing = sorted({r[0] for r in required if not _context_met(r, runs, statuses, None)})
+    missing = sorted({r[0] for r in required if not _context_met(r, runs, statuses, None, _RUN_PASSED)})
     if not runs and not statuses:
         pending.add("no check run or status")
     state = "failed" if failing else "pending" if pending or missing else "green"

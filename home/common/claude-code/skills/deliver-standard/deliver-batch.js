@@ -2074,8 +2074,8 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
     laneName = f.lane
     return true
   }
-  if (CONTS[n]) laneName = CONTS[n].lane || 'standard'
-  else if (!readopt) {
+  // #1433: whatever else the issue holds (a saved continuation, an open PR on its branch), a declared or unreadable live fault is left out; only a landing already merged is closed out as before.
+  if (!mergedReadopt(n, f)) {
     const lf = f.live_fault
     const verdict = isObj(lf) ? lf.verdict : null
     if (verdict !== 'none' && verdict !== 'no-sprint') {
@@ -2083,8 +2083,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
       rows[n] = { issue: n, outcome: 'live-fault', reason }
       return
     }
-    if (!(await chooseLane())) return
   }
+  if (CONTS[n]) laneName = CONTS[n].lane || 'standard'
+  else if (!readopt && !(await chooseLane())) return
   rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
 
   // A dependent waits for each in-batch blocker's final row before it asks for a slot: it holds no slot and no claim meanwhile.

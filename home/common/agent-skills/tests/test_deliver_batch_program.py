@@ -477,10 +477,26 @@ class LiveFaultIntakeTest(unittest.TestCase):
                          ["declared", "none", "no-sprint", "error"])
         self.assertNotIn("live_fault", facts["schema"]["required"])
 
-    def test_a_declared_issue_with_a_cont_keeps_its_lane(self):
+    def test_a_declared_issue_with_a_cont_is_left_out(self):
         facts = {"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}, "live_fault": {"verdict": "declared"}}}
         result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts)
-        self.assertIn("acquire-1", labels(calls))
+        self.assertEqual(row(result, 1)["reason"], LIVE_ROW)
+        self.assertLeftOut(result, calls)
+
+    def test_a_declared_issue_with_an_open_pull_request_on_its_branch_is_left_out(self):
+        own = {"claim": {"verdict": "held_by", "by": HOLDER}, "open_pr": OPEN_PR}
+        for fault in ({"verdict": "declared"}, {"verdict": "error", "detail": "console down"}):
+            for conts in ({}, {"1": reviewed(1)}):
+                with self.subTest(fault=fault["verdict"], cont=bool(conts)):
+                    result, calls, _ = run(args=dict(ARGS, conts=conts), patch={"facts-1": dict(own, live_fault=fault)},
+                                           replies={"readopt-1": UNACCEPTED})
+                    self.assertLeftOut(result, calls)
+                    self.assertNotIn("readopt-1", labels(calls))
+                    self.assertNotIn("land-pr-1", labels(calls))
+
+    def test_a_merged_landing_is_still_closed_out_beside_a_declaration(self):
+        facts = {"facts-1": dict(landing(41), claim={"verdict": "held_by", "by": HOLDER}, live_fault={"verdict": "declared"})}
+        result, _, _ = run(args=dict(ARGS, conts={"1": dict(reviewed(1), pr=41)}), patch=facts)
         self.assertNotEqual(row(result, 1)["outcome"], "live-fault")
 
     def test_only_the_declared_issue_of_a_batch_is_left_out(self):

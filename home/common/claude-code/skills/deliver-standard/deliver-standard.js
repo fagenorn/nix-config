@@ -961,8 +961,8 @@ const keptDecisions = () => decisions.filter(d => !(decisionPending && d === new
 const blockedKept = () => !!blocked && (LANE !== 'standard' || !!plan) && !taskLog.some(d => d.n === blocked.task)
 // #1246: why an owner's approval was not recorded, naming the approved head and the head found; once set, every later stop's reason starts with it.
 let lookWhy = null
-// #1433: a live stop that names the ordinary delivery as its way on is final: its cont says so, and a resume stops at once. A live-review stop is final only when it carries findings; any other stop keeps the mark its cont came with.
-const liveFinalOf = (stage, extra) => (LIVE_FINAL.includes(stage) && (stage !== 'live-review' || !!(extra && extra.findings)) ? stage
+// #1433: a live stop that names the ordinary delivery as its way on is final: its cont says so, and a resume stops at once. A live-review stop is final only when it carries findings or the review answered with no usable review; any other stop keeps the mark its cont came with.
+const liveFinalOf = (stage, extra) => (LIVE_FINAL.includes(stage) && (stage !== 'live-review' || !!(extra && extra.findings) || LOST.includes('live-review')) ? stage
   : CONT && isEntry(CONT.live_fault) && LIVE_FINAL.includes(CONT.live_fault.final) ? CONT.live_fault.final : null)
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
@@ -1067,11 +1067,15 @@ let landRelease = null
 let landedCommit = null
 // #1433: the declaration the live-fault lane's pull request names; it holds no quote, dollar sign, backtick or backslash.
 const LIVE_LINE = () => `Live-fault lane: declaration ${LIVE_REC.id} of sprint ${LIVE_REC.sprint_id} for issue #${LIVE_REC.issue}, declared ${LIVE_REC.at}`
-// #1433: the seconds from the declaration to the green time, cut to milliseconds, or null when either is unreadable or green is before the declaration.
+// #1433: the seconds from the declaration to the green time, kept to the microsecond (the first-use verifier compares them unrounded), or null when either is unreadable or green is before the declaration.
 const secondsBetween = (declaredAt, greenAt) => {
-  const ms = v => (typeof v === 'string' ? Date.parse(v.replace(/(\.\d{3})\d+/, '$1')) : NaN)
-  const d = ms(declaredAt), g = ms(greenAt)
-  return Number.isFinite(d) && Number.isFinite(g) && g >= d ? (g - d) / 1000 : null
+  const us = v => {
+    const m = typeof v === 'string' ? /^([^.]*?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$/.exec(v.trim()) : null
+    const whole = m ? Date.parse(m[1] + (m[3] || '')) : NaN
+    return Number.isFinite(whole) ? BigInt(whole) * 1000n + BigInt(((m[2] || '') + '000000').slice(0, 6)) : null
+  }
+  const d = us(declaredAt), g = us(greenAt)
+  return d !== null && g !== null && g >= d ? Number(g - d) / 1e6 : null
 }
 const LIVE_GREEN = { type: 'object', properties: { state: { enum: ['green', 'failed', 'pending', 'error'] }, head: FULL_SHA, green_at: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['state'] }
 // The timing is reported, never a gate: an unread, failed or pending green time still lands the delivery.
@@ -1303,16 +1307,24 @@ ${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'look-read', phase: 'Shi
 }
 
 // ---------------- Live-fault gate (#1433) ----------------
+let LIVE_ENDED = null
 // The live lane acts on the declaration it started under, before any agent: first hit wins. A stop here before the claim was validated keeps claim_incomplete, so its resume finishes the claim.
 if (LANE === 'live') {
   const unreadWhy = LIVE_RAW === undefined || LIVE_RAW === null ? 'the setup returned no live_fault' : isEntry(LIVE_RAW) && LIVE_RAW.verdict === 'error' ? (present(LIVE_RAW.detail) ? String(LIVE_RAW.detail).slice(0, 80) : 'the read failed') : 'the read was no usable live_fault'
   const liveStop = (stage, details) => { if (!CONT) claimIncomplete = true; return stop(stage, { details }) }
   const seen = CONT && isEntry(CONT.live_fault) ? CONT.live_fault : null
-  if (seen && LIVE_FINAL.includes(seen.final)) return liveStop(seen.final, `this live-fault delivery already stopped at ${seen.final}; ${LIVE_WAY}`)
-  if (LIVE_UNREAD) return liveStop('live-fault', `the live-fault declaration of issue #${ISSUE} could not be read (${unreadWhy}); resume once the console answers, or ${LIVE_WAY}`)
-  if (!LIVE) return liveStop('live-fault', `issue #${ISSUE} has no standing live-fault declaration (${LIVE_RAW.verdict}); ${LIVE_WAY}`)
-  if (seen && !liveSame(seen, LIVE)) return liveStop('live-fault', `the live-fault declaration this delivery started under (${seen.id}) was withdrawn or replaced; ${LIVE_WAY}`)
-  if (MODE === 'plan') return liveStop('live-fault', `issue #${ISSUE} is a declared live fault and the live-fault lane has no plan mode: run it in ready or ship mode`)
+  if (seen && LIVE_FINAL.includes(seen.final)) {
+    const ended = () => liveStop(seen.final, `this live-fault delivery already stopped at ${seen.final}; ${LIVE_WAY}`)
+    // The final stop ends the delivery, not the filing: a follow-up it left unconfirmed is filed again first, once the agents' rules exist.
+    if (!pending.length) return ended()
+    LIVE_ENDED = ended
+  }
+  if (!LIVE_ENDED) {
+    if (LIVE_UNREAD) return liveStop('live-fault', `the live-fault declaration of issue #${ISSUE} could not be read (${unreadWhy}); resume once the console answers, or ${LIVE_WAY}`)
+    if (!LIVE) return liveStop('live-fault', `issue #${ISSUE} has no standing live-fault declaration (${LIVE_RAW.verdict}); ${LIVE_WAY}`)
+    if (seen && !liveSame(seen, LIVE)) return liveStop('live-fault', `the live-fault declaration this delivery started under (${seen.id}) was withdrawn or replaced; ${LIVE_WAY}`)
+    if (MODE === 'plan') return liveStop('live-fault', `issue #${ISSUE} is a declared live fault and the live-fault lane has no plan mode: run it in ready or ship mode`)
+  }
 }
 
 const RS = setup.review_state || {}
@@ -1368,6 +1380,12 @@ ${RULES_FOR(setup.worktree_path)}`, { label: 'worktree', phase: 'Setup', agentTy
 
 const W = setup.worktree
 let RULES = RULES_FOR(W)
+if (LIVE_ENDED) {
+  const again = pending
+  pending = []
+  await fileFollowUps(again)
+  return LIVE_ENDED()
+}
 // The nested renew instruction a folded prompt starts with.
 const RENEW_FIRST = `First renew the claim: run, alone and exactly, forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch} (it prints one JSON line) and return its verdict (error, with detail, on exit 1 or 2), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
 // Grades a renew result. null = renewed; else the stop to return.
@@ -1638,7 +1656,7 @@ const EVIDENCE_REREVIEW = ' These findings are acceptance criteria the review di
 
 // #1433: the live-fault lane's one implementer returns the test it ran twice: failing at start_head, passing at its commit.
 const RUN = { type: 'object', properties: { command: { type: 'string' }, exit: { type: 'integer' }, head: FULL_SHA, failed: STRS, passed: STRS, output: { type: 'string' } }, required: ['command', 'exit', 'head'] }
-// #1433: a finding of the live-fault review blocks only when it is critical, names a criterion the review did not grade met with evidence, is an ungraded code criterion, or cannot be filed; every other finding is a follow-up issue, as is each item the implementer left out.
+// #1433: a finding of the live-fault review blocks only when it is critical, names a criterion of the issue the review did not grade met with evidence, is an ungraded code criterion, or cannot be filed; every other finding is a follow-up issue, as is each item the implementer left out.
 const LIVE_FINDING_LEAD = f => `Follow-up of #${ISSUE}: the live-fault lane's diff review raised this ${f.severity} finding, which does not block that delivery.`
 const LIVE_BEYOND_LEAD = `Follow-up of #${ISSUE}: the live-fault lane left this out of the fix, which stops the harm and nothing more.`
 const metWithEvidence = (review, id) => (Array.isArray(review.acceptance) ? review.acceptance : []).some(x => isEntry(x) && x.id === id && x.met === true && typeof x.evidence === 'string' && x.evidence.trim() !== '')
@@ -1646,7 +1664,7 @@ const liveSplit = (review, criteria) => {
   const blocking = []
   const filed = []
   for (const f of review.findings.filter(isEntry)) {
-    const entry = f.severity === 'critical' || (namesAc(f) && !metWithEvidence(review, f.ac)) ? null : followUpOf({ ...f, lead: LIVE_FINDING_LEAD(f) }, false)
+    const entry = f.severity === 'critical' || (namesAc(f) && criteria.some(a => a.id === f.ac) && !metWithEvidence(review, f.ac)) ? null : followUpOf({ ...f, lead: LIVE_FINDING_LEAD(f) }, false)
     if (entry) filed.push(entry)
     else blocking.push(f)
   }
@@ -1675,7 +1693,7 @@ const liveMeasured = size => isEntry(size) && size.measured === true && Array.is
 // null, or the one reason a measured diff is refused; the first check that fails wins.
 const liveRefusal = size => {
   const rows = new Map()
-  for (const f of size.files) { const k = f.path.trim(); rows.set(k, (rows.get(k) || 0) + f.added + f.deleted) }
+  for (const f of size.files) rows.set(f.path, (rows.get(f.path) || 0) + f.added + f.deleted)
   let lines = 0
   for (const [k, n] of rows) if (!isTestPath(k)) lines += n
   if (lines > LIVE_MAX_LINES) return `the diff changes ${lines} lines outside tests, over the live lane's ${LIVE_MAX_LINES}`
@@ -1700,6 +1718,7 @@ const faultTestProblem = impl => {
   if (!Array.isArray(green.passed) || !green.passed.includes(ft.name)) return 'the runner did not report the test passed'
   if (!sameSha(red.head, impl.start_head)) return 'the first run was not at start_head'
   if (!sameSha(green.head, impl.commit)) return 'the second run was not at the commit'
+  if (sameSha(impl.commit, impl.start_head)) return 'the implementer committed nothing: its commit is start_head, so the two runs show no change'
   return null
 }
 
@@ -1784,13 +1803,14 @@ Re-review only these previously reported findings against the fix: ${span(fix)};
     impl = await call(`${CTX}
 Deliver issue #${ISSUE} in the live-fault lane: no plan; you are its one implementer. The issue is a declared live fault, as the owner's sprint recorded it: ${JSON.stringify({ observed: LIVE.observed, when: LIVE.when, proven: LIVE.proven })}.
 Make the smallest change that stops the harm, and nothing more. A schema, a query, a decision record or any follow-through is never part of it: list each in beyond as {file, summary}, and it is filed as a follow-up issue. The change is at most 80 changed lines outside tests and at most 3 files in all, tests included; it never touches authentication, authorization, secrets, credentials or a permission or command guard: when the fix needs more or touches one, change nothing and return status blocked with the reason in notes.
-Work in this order. First write one test that reproduces the harm, and run it before you change any other file, with a command that selects that test alone: it must fail, and the runner must report it failed. Return the command, its exit status, the failed test names and the failure line as fault_test.red, with head the output of git -C ${W} rev-parse HEAD at that run, which is start_head; commit nothing before that run. Then make the change and commit the test and the change. Then, with a clean tree, run the same command again at the committed head: it must pass, and the runner must report it passed. When it fails, fix, commit again and run the same command again. Return that run as fault_test.green (command, exit status, the passed test names), with head the commit. Return fault_test with name, file, red and green.
+Work in this order. First write one test that reproduces the harm, and run it before you change any other file, with a command that selects that test alone: it must fail, and the runner must report it failed. Return the command, its exit status, the failed test names and the failure line as fault_test.red, with head the output of git -C ${W} rev-parse HEAD at that run, which is start_head; commit nothing before that run. Then make the change and commit the test and the change. Then, with a clean tree, run the same command again at the committed head: it must pass, and the runner must report it passed. When it fails, fix, commit again and run the same command again. Return that run as fault_test.green (command, exit status, the passed test names), with head the commit. Return fault_test with name, file (its path from the worktree root, as git diff prints it), red and green.
 Return acceptance (the issue's criteria; ${KIND_GUIDE}) and beyond. ${NO_VERIFY_AC} ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure every test was seen failing first; of the removals, make only those not already made against the final result; start_head is the head before this task's first commit.` : ''}
 ${RULES}`, { label: 'live-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: LIVE_IMPL })
     if (impl && impl.status === 'blocked') return stop('live-bound', { details: `the live-fault implementer returned blocked: ${clip(typeof impl.notes === 'string' ? impl.notes : '').slice(0, 100)}; ${LIVE_WAY}` })
     if (!implDone(impl)) return haltTask(1, 'task', { task: { n: 1 }, impl })
-    if (!Array.isArray(impl.acceptance) || !impl.acceptance.length) return haltTask(1, 'task', { task: { n: 1 }, impl, details: 'no acceptance criteria' })
+    // The commit exists: asking again would be a second implementer, so a reply without criteria is final here, never a partial task.
+    if (!Array.isArray(impl.acceptance) || !impl.acceptance.length) { partial = undefined; return liveBound(`the live-fault implementer committed ${impl.commit} and returned no acceptance criteria, and asking again would be a second implementer`) }
     const problem = faultTestProblem(impl)
     if (problem !== null) {
       partial = undefined
@@ -1819,12 +1839,16 @@ Read git -C ${W} diff --no-renames ${RANGE} and return sensitive: one {path, why
 On a non-zero exit, return measured false. Run nothing else and change nothing.
 ${RULES}`, { label: 'live-size', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'medium', schema: LIVE_SIZE })
     if (!liveMeasured(size)) return stop('live-size', { details: 'the live-fault diff could not be measured' })
-    if (!sameSha(size.head, d1.commit)) return stop('live-bound', { details: `the diff was measured at ${typeof size.head === 'string' ? size.head : 'no head'}, not the delivered commit ${d1.commit}` })
+    if (!sameSha(size.head, d1.commit)) return liveBound(`the diff was measured at ${typeof size.head === 'string' ? size.head : 'no head'}, not the delivered commit ${d1.commit}`)
     const refusal = liveRefusal(size)
     if (refusal !== null) return stop('live-refused', { details: `${refusal}; ${LIVE_WAY}` })
+    // The evidence test must be one this diff changes: a run of a test the diff leaves alone shows nothing about this change.
+    const testFile = d1.fault_test.file.trim().replace(/^\.\//, '')
+    if (!size.files.some(f => f.path === testFile)) return stop('live-evidence', { details: `the change carries no test shown failing before it and passing after it: the test file ${testFile} is not a path the diff changes; ${LIVE_WAY}` })
     const review = await readReview(`${CTX}
 lane: live. Review git -C ${W} diff ${RANGE} for issue #${ISSUE}, the fix of the live fault ${JSON.stringify({ observed: LIVE.observed, when: LIVE.when, proven: LIVE.proven })}: it must stop the harm and nothing more. Acceptance criteria: ${ACS}. The implementer's failing-then-passing test: ${JSON.stringify(d1.fault_test)}. Confirm the test is in the diff and that the failure line of its first run is the observed harm. Return head (git -C ${W} rev-parse HEAD). ${KNOW} ${CRITICAL_MEANS} ${COMMIT_ASK(d1.commit)} Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a code criterion that is not met, or has no evidence, is an Important finding, and criteria of other kinds are not findings (grade them and give what you observed). Do not edit anything.`, { label: 'live-review', phase: 'Final review', agentType: 'reviewer', schema: LIVE_FINDINGS }, { once: true })
-    if (!review) return stop('live-review', { review: null })
+    // An answered review that was no review is spent (the lane asks once): that stop is final. A reviewer that answered nothing is the one step a resume runs again.
+    if (!review) return LOST.includes('live-review') ? stop('live-review', { review: null, details: `the live-fault review answered with no usable review, and asking again would be a second reviewer; ${LIVE_WAY}` }) : stop('live-review', { review: null })
     if (!sameSha(review.head, d1.commit)) return stop('live-bound', { details: `the review read ${typeof review.head === 'string' ? review.head : 'no head'}, not the delivered commit ${d1.commit}; ${LIVE_WAY}` })
     liveReview = review
     liveSplitOf = liveSplit(review, plan.acceptance)
