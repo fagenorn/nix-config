@@ -63,6 +63,7 @@ let
     "owner-actions" = "claims.owner_actions";
     "plan-amend" = "delivery.plan_amend";
     "program-copies" = "delivery.program_copies";
+    "pr-green" = "verification.pr_green";
     "promotion" = "delivery.promotion";
     "release" = "release.release";
     "release-card" = "console.release_card";

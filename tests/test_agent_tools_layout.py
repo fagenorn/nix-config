@@ -34,6 +34,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.release.release_profile",  # release_card
         "agent_tools.release.transaction_history",  # movement
         "agent_tools.release.transaction_storage",  # movement
+        "agent_tools.verification.verify_checks",  # live_fault_check
         "agent_tools.verification.verify_answer",  # answer, inbox, service
         "agent_tools.verification.verify_owner",  # view
         "agent_tools.verification.verify_wait",  # inbox
