@@ -184,7 +184,7 @@ PHASE_LABELS: tuple[tuple[str, str], ...] = (
     ("task review", r"review-\d+|rereview-\d+(?:-\d+)*|fix-\d+(?:-\d+)*|direct-review"
                     r"|direct-review-full|direct-codex|direct-rereview|direct-fix|fix-ci"
                     r"|fix-ci-review"),
-    ("final review", r"final-\d+|final-codex|final-integration|renew-final-review|diff-size"),
+    ("final review", r"final-\d+|final-codex|final-integration|final-scoped|renew-final-review|diff-size"),
     ("fix wave", r"fix-wave|fix-wave-\d+|fix-wave-review|fix-wave-review-\d+"),
     ("verify", r"verify|verify-\d+|verify-rerun-\d+|verify-fix-\d+|verify-fix-review-\d+"),
     ("close-out", r"close-out|close-out-\d+|hold|land-unlock(?:-\d+)*"),
