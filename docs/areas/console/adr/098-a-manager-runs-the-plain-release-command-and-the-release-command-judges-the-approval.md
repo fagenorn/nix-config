@@ -1,11 +1,11 @@
-# ADR-console-096 — A manager runs the plain release command and the release command judges the approval
+# ADR-console-098 — A manager runs the plain release command and the release command judges the approval
 
 - **Status:** accepted
 - **Decided in:** #1401
 
 ## Context
 
-ADR-console-094 removed the release from the manager permit (its D1 list names no release) because a permit that judges the text of a shell command cannot name every spelling that runs a release. ADR-console-095 and ADR-release-016 move the approval into the release command: `release transaction run` refuses a candidate with no release card the owner approved on the console, whoever calls it and however it is spelled. With that guarantee the permit no longer decides whether a release may run, so the owner's list of 094 D1 (the merge, the rerun) gains the plain release run, and D3 (exact shapes) gains the release shape.
+ADR-console-094 removed the release from the manager permit (its D1 list names no release) because a permit that judges the text of a shell command cannot name every spelling that runs a release. ADR-console-097 and ADR-release-016 move the approval into the release command: `release transaction run` refuses a candidate with no release card the owner approved on the console, whoever calls it and however it is spelled. With that guarantee the permit no longer decides whether a release may run, so the owner's list of 094 D1 (the merge, the rerun) gains the plain release run, and D3 (exact shapes) gains the release shape.
 
 ## Decision
 
@@ -23,4 +23,4 @@ ADR-console-094 removed the release from the manager permit (its D1 list names n
 - An abandon or dispose spelling the scan cannot see (text built at run time and piped to a shell) also falls to that classifier, as a merge spelling does. The release command's own guarantee is that only the exact `abandon` and `--dispose` words reach those paths.
 - The lifecycle guard is unchanged and gains no release rule; the plain run passes it in a production-declaring repository.
 - Each decision is a `permit.judged` row with verb `release`, `release-abandon` or `release-dispose`; `permit.landed` stays merge only.
-- Related: ADR-console-094, ADR-console-095, ADR-release-016.
+- Related: ADR-console-094, ADR-console-097, ADR-release-016.

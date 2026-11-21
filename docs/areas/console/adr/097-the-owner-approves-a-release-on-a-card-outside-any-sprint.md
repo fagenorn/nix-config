@@ -1,4 +1,4 @@
-# ADR-console-095 — The owner approves a release on a card outside any sprint
+# ADR-console-097 — The owner approves a release on a card outside any sprint
 
 - **Status:** accepted
 - **Decided in:** #1401

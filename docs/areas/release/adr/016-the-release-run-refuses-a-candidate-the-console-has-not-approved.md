@@ -9,7 +9,7 @@
 confirmation token of the preview was supplied. A token proves the caller previewed the plan;
 it does not prove the owner wanted that commit released at that version, and a yes in a chat
 is no record the command can read. The console now holds a release card outside any sprint
-(ADR-console-095): the lead posts the pair of a commit and a version, and the owner approves
+(ADR-console-097): the lead posts the pair of a commit and a version, and the owner approves
 or declines it on the page. Nothing yet made the release command depend on that answer, so the
 removal of the release from the manager's permit (ADR-console-094) left the command itself
 unguarded.

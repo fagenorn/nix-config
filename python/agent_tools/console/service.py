@@ -755,7 +755,7 @@ an empty `204`. A plan in `_deferred` gets no apply card until the shown plan id
 work line is unchanged. It runs nothing else. Any other exception is
 `console: plan_defer_failed <Type>: <message>`, then its traceback, and 500 `deferring failed`.
 
-`POST /api/release-card` (#1401, ADR-console-095) is the lead's post of a release card
+`POST /api/release-card` (#1401, ADR-console-097) is the lead's post of a release card
 (`release_card`), an owner-port route that is not a page write: loopback `Host` and the owner-peer
 rule as every route, any `Origin` is 403 `origin refused`, a media type other than
 `application/json` 415 `json only`, any `Transfer-Encoding` or a length that is not digits 411
@@ -768,7 +768,7 @@ pattern) 400 `bad release card`. Under the ingest lock it answers 200
 nothing, and each refusal appends nothing. Any other exception is `console: release_card_failed
 <Type>: <message>` and 500 `release card failed`.
 
-`POST /api/release-answer` (#1401, ADR-console-095) is the owner's Approve release or Decline on a
+`POST /api/release-answer` (#1401, ADR-console-097) is the owner's Approve release or Decline on a
 release card. It is an owner-only page write (`OWNER_ONLY`; in neither `GUEST_WRITES` nor
 `MANAGER_WRITES`), so `write_guard.refusal` runs first (no or a foreign `Origin` 403 `origin refused`,
 no or a wrong token 403 `token refused`), then the same JSON and length checks with
@@ -1045,7 +1045,7 @@ nothing folds it. A notice nudge is never retried after its own attempt, counts 
 `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
-Permit (#1377, #1401, ADR-console-094, ADR-console-096): `POST /api/permit` is a manager write dispatched beside `/api/notices`
+Permit (#1377, #1401, ADR-console-094, ADR-console-098): `POST /api/permit` is a manager write dispatched beside `/api/notices`
 through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
 `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
 a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
@@ -1554,7 +1554,34 @@ failure is `console: renudge_failed <Type>: <message>`), reserves under the lock
 unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
 message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS` before
 `self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
-(row times are compared as epoch milliseconds). The WAKE route (#949) first asks the `full_listing`
+(row times are compared as epoch milliseconds).
+
+Unread after a relay (#1379, ADR-console-096): a sprint `renudge()` did not reserve by that rule is
+asked `sprints.unread_step(sprint, now)`. `RELAY_AGAIN` reserves it and dispatches the ordinary message
+nudge (so a manager listed meanwhile gets a relay and a gone one a wake); `WAKE_UNREAD` reserves it and
+dispatches `_dispatch_unread_wake` after the lock. `_unread_wake` decides the step again under the lock
+(a sprint no longer nudgeable, a project gone, no `manager_session` or another step drops the
+reservation with no row), reads the running listing off the lock and, for a listed manager, goes on only
+while the listing shows exactly one session of that name, the stored `manager_session` on the manager's
+profile (a replacement session, a second one or another profile gets nothing: nothing is stopped), the step
+still holds under the lock (a message the manager read meanwhile gets nothing) and it is idle by
+`idle.IDLE_STATES`, by that fresh listing (`sessions.registry_state`) and by its folded session
+(`_manager_session`): a manager working, or waiting at a permission or an answer prompt, gets
+nothing and no row, so a pending prompt is never lost to a stop. It then stops that one session through
+`_stop_one` (`manager.stop_listed`; with no stopper, or a session the listing still shows after the stop,
+the reason is `sprints.STILL_RUNNING_TEXT`; a `manager.StopFailed` gives its text), reads the full
+listing and settings as the WAKE route does (`_wake_settings`), drops the reservation when the profile
+is out of quota, refreshes the settings file, reads the conclusive listing again (`_conclusive_listing`;
+one that cannot be read is a failed wake) and sends one WAKE with `NUDGE_TEXT` only when it shows no
+session of that name and, for a manager that was not stopped, the step still holds. A wake that sends
+nothing releases its reservation and, like one that records a row, dispatches the nudge a message
+sent while it ran asked for (`_nudge_again`, as `_nudge` does), whatever the count of failures. It appends one
+`sprint.nudged` row with route `wake` and `covers` the unread ids, carrying the mode it wrote; a
+dispatch that raises is the row `the wake could not start: <Type>: <message>`. Every failure counts in
+`failed_nudges`, and the nudger, listing, full listing and stopper are never called with the ingest lock
+held.
+
+The WAKE route (#949) first asks the `full_listing`
 seam (`nudge.full_lister_for(sys.platform)`, called `full_listing(profile, cwd)` with the manager row's
 profile and the project's root; None means every wake is bare and no read is made) which sessions the
 profile's full listing shows, stopped ones included: `_wake_settings` gives `Nudge.settings` None
@@ -1669,7 +1696,23 @@ and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not exclu
 still be scanned and not being removed. Otherwise the reservation ends, nothing is appended and the
 sprint is marked in `_move_cancelled` until the manager's account has room: no later poll decides a
 move again. The started manager row stays, and the sprint waits to wake its session after the reset
-(#1279). A launch is a takeover when it was reserved by the bring-back
+(#1279). A listed manager waiting on quota is moved too (#1378, ADR-console-095): when it is idle
+or at its limit, the sprint is open, not stalled, with no open no-progress item and work to do, fewer than
+`revive.LIMIT` counted revivals sit in the window, a launcher and a stopper exist, the move was not
+cancelled and `_move_target` finds an account with room, `revive()` reserves a `_ListedMoveReservation`
+(a `_TakeoverReservation` that remembers the sessions it stopped). Its job reads the conclusive listing, and just before the stop checks again under the lock that the
+move still holds, that no listed or folded session of the name works (a fresh busy reading, as
+`_working_now` judges it, or a folded state other than idle or limit releases the reservation) and that
+every listed one is on the profile the sprint's record gives (else the move is cancelled). It then stops
+every listed session carrying the manager's name through `_stop_one`, off the lock, and reads the
+conclusive listing again. It launches only when that listing shows neither the name nor a session it
+stopped, no folded session of that name is left unstopped, and the move still holds; the same is checked
+again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it.
+Any other outcome cancels the move as #1279 does and a failed stop or listing writes
+`console: quota_move_failed <sprint_id> <reason>`. The takeover's
+`manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
+sprint moved to another account and the new manager's first send is not an after-the-reset resume. A launch
+is a takeover when it was reserved by the bring-back
 or is a retry of a stalled sprint or of a manager row that is a takeover; every manager row it writes
 (`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries
 `"takeover": true` and `"goal"`, every `manager.started` carries `"seen_after"` (the sprint's
@@ -1693,14 +1736,19 @@ movement and the sprint's `_settled`, the last launch, nudge or wake), `run_ms` 
 latest movement of a run of that session that has not ended: the larger `moved_ms` of its
 `_deliveries` rows and of `_run_moves`, which `poll_deliveries` rebuilds each poll with the journal
 mtime of every unended run it read, whether or not the run names an issue; a manager with such a
-run is not nudged until it has been still for `idle.RUN_STILL_MS`, 30 minutes, #974), the sprint's
+run is not nudged until it has been still for `idle.RUN_STILL_MS`, 30 minutes, #974) and `run_wait`
+(`_run_wait`: whether such a run reads a wait the movement reading shows, `view.fresh_wait` of
+`view.wait_signals` of the sprint over the project's `_movement` narrowed to the issues of the
+session's runs in `_deliveries`: CI on its pull request, a committing delivery, a release step or
+the land lock seen within the quiet window; a manager whose run reads one is neither nudged nor
+given up on, however long the run has been still, #1381), the sprint's
 waiting count and its quota; a sprint not out whose manager row is not `started` or whose manager is seen
 `working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides:
 `GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
 null), `NUDGE` reserves the sprint in `_nudging` and dispatches `_idle_nudge` after the lock.
 `_idle_nudge(sprint_id, forced)` decides again under the lock (`_idle_due`), reads the listing off
 the lock (a manager not listed sends nothing and appends nothing: the bring-back owns a gone
-manager), decides once more under the lock (the quota recheck) and sends nothing when the fresh listing's reading of the manager shows it `working` (`_working_now`: a reading not newer than the session's newest hook does not count), calls the nudger off the lock with a
+manager), decides once more under the lock (the quota recheck, bound to the listed session: a folded manager session with another id sends nothing, #1381) and sends nothing when the fresh listing's reading of the manager shows it `working` (`_working_now`: a reading not newer than the session's newest hook does not count), calls the nudger off the lock with a
 `continue` route `nudge.Nudge` to the lowest listed session, and appends one `manager.nudged
 {sprint_id, goal, session_id, ok[, reason][, resumed]}` while the sprint is open and the service not
 stopping (a failure also prints `console: idle_nudge_failed <sprint_id> <reason>`). A dispatch
@@ -1886,9 +1934,10 @@ from agent_tools.console.event_log import (
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
 from agent_tools.console.view import (
-    INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    is_waiting, offers_activate, project_for, project_states, read_states, registry_changes,
-    sprint_absent_managers, sprint_nudge_replies, sprint_sessions_of, sprint_waiting)
+    INBOX_CHANGED, ReadState, derive_view, encode_view, fresh_wait, health_change, inbox_changes,
+    inbox_records, is_waiting, offers_activate, project_for, project_states, read_states,
+    registry_changes, sprint_absent_managers, sprint_nudge_replies, sprint_sessions_of,
+    sprint_waiting, wait_signals)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -4235,6 +4284,19 @@ class _TakeoverReservation:
         self.target = target
         self.account = account
         self.pinned = pinned
+
+
+class _ListedMoveReservation(_TakeoverReservation):
+    """The quota move of a listed manager (#1378): its session is stopped first, then the takeover runs only on `target`.
+
+    `stopped` holds the ids of the sessions this move stopped, so a session still carrying the
+    manager's name that it did not stop keeps the launch from starting a second manager.
+    """
+
+    def __init__(self, target: str, account: tuple[str | None, str | None],
+                 pinned: str | None) -> None:
+        super().__init__(target, account, pinned)
+        self.stopped: set[str] = set()
 
 
 MOVE_NOT_STARTED = "the manager could not be started again after its account was signed out or removed"
@@ -7244,11 +7306,14 @@ class ConsoleService:
 
     def _manager_session(self, sprint: sprints.SprintState) -> sessions.SessionState | None:
         """The folded session a listed manager is: the lowest session id carrying its name, or None."""
+        return min(self._manager_sessions(sprint), key=lambda s: s.session_id, default=None)
+
+    def _manager_sessions(self, sprint: sprints.SprintState) -> Iterable[sessions.SessionState]:
+        """The folded sessions of the sprint's project that carry its manager's name and have not ended."""
         name = manager.session_name(sprint.project_id, sprint.sprint_id)
-        return min((s for s in self._sessions.values()
-                    if s.name == name and s.state != sessions.ENDED and s.repo is not None
-                    and project_for(s.repo, self._states) == sprint.project_id),
-                   key=lambda s: s.session_id, default=None)
+        return (s for s in self._sessions.values()
+                if s.name == name and s.state != sessions.ENDED and s.repo is not None
+                and project_for(s.repo, self._states) == sprint.project_id)
 
     def _manager_listed(self, sprint: sprints.SprintState) -> bool:
         """Whether a listed session of the sprint's project carries the sprint's manager name."""
@@ -7343,7 +7408,11 @@ class ConsoleService:
             return
         try:
             listed = None
-            if isinstance(token, _TakeoverReservation):
+            if isinstance(token, _ListedMoveReservation):
+                listed = self._stop_for_move(sprint_id, token)
+                if listed is None:
+                    return
+            elif isinstance(token, _TakeoverReservation):
                 try:
                     listed = self._listing()
                 except Exception as error:
@@ -7357,8 +7426,19 @@ class ConsoleService:
                 return
             launch = dataclasses.replace(
                 launch, permission=self._read_permission(launch.project_id, launch.cwd))
+            listed = None
+            if isinstance(token, _ListedMoveReservation):
+                try:
+                    listed = self._conclusive_listing()
+                except Exception as error:
+                    self._move_failed(sprint_id, token, f"{type(error).__name__}: {error}")
+                    return
             with self._ingest:
-                launch = self._unexcluded_launch(launch, token, prepared_pin)
+                if listed is not None and not self._move_manager_gone(sprint_id, token, listed):
+                    self._cancel_move(sprint_id, token)
+                    launch = None
+                else:
+                    launch = self._unexcluded_launch(launch, token, prepared_pin)
                 if launch is not None:
                     self._client_live[launch.profile] += 1
             if launch is None:
@@ -7391,7 +7471,12 @@ class ConsoleService:
                 or sprint.closing is not None):
             self._release(sprint_id, token)
             return None
-        if isinstance(token, _TakeoverReservation):
+        if isinstance(token, _ListedMoveReservation):
+            if (not self._move_manager_gone(sprint_id, token, listed or {})
+                    or not self._listed_move_due(sprint, int(self._clock() * 1000))):
+                self._cancel_move(sprint_id, token)
+                return None
+        elif isinstance(token, _TakeoverReservation):
             now = int(self._clock() * 1000)
             name = manager.session_name(sprint.project_id, sprint_id)
             shown = any(o.name == name for o in (listed or {}).values())
@@ -7509,6 +7594,9 @@ class ConsoleService:
             marks = ({"takeover": True, "goal": self._sprints[launch.sprint_id].goal}
                      if launch.takeover else {})
             if reason is None:
+                if isinstance(token, _ListedMoveReservation):
+                    marks["moved"] = True
+                    self._quota_held.discard(launch.sprint_id)
                 self._append_manager(MANAGER_STARTED, launch.project_id, {
                     "sprint_id": launch.sprint_id, "profile": launch.profile,
                     "session_name": launch.session_name, "seen_after": launch.seen_after,
@@ -8051,7 +8139,7 @@ class ConsoleService:
         """Nudge again the managers whose message went unread and undelivered for a minute."""
         if self._nudger is None:
             return
-        due, noticed = [], []
+        due, noticed, woken = [], [], []
         with self._ingest:
             now = int(self._clock() * 1000)
             for sprint_id in list(self._notice_due):
@@ -8062,19 +8150,146 @@ class ConsoleService:
                 if (found is None or sprint_id in self._nudging
                         or sprints.unreachable(sprint)):
                     continue
-                if not any(message.delivered_at is None
-                           and now - _epoch_ms(message.at) >= sprints.RENUDGE_AFTER_MS
-                           for message in found[1]):
+                if any(message.delivered_at is None
+                       and now - _epoch_ms(message.at) >= sprints.RENUDGE_AFTER_MS
+                       for message in found[1]):
+                    if sprint.last_nudge_at is not None and \
+                            now - _epoch_ms(sprint.last_nudge_at) < sprints.RENUDGE_AFTER_MS:
+                        continue
+                    self._nudging.add(sprint_id)
+                    due.append(sprint_id)
                     continue
-                if sprint.last_nudge_at is not None and \
-                        now - _epoch_ms(sprint.last_nudge_at) < sprints.RENUDGE_AFTER_MS:
-                    continue
-                self._nudging.add(sprint_id)
-                due.append(sprint_id)
+                step = sprints.unread_step(sprint, now)
+                if step == sprints.RELAY_AGAIN:
+                    self._nudging.add(sprint_id)
+                    due.append(sprint_id)
+                elif step == sprints.WAKE_UNREAD:
+                    self._nudging.add(sprint_id)
+                    woken.append(sprint_id)
         for sprint_id in noticed:
             self._dispatch_notice_nudge(sprint_id)
         for sprint_id in due:
             self._dispatch_nudge(sprint_id)
+        for sprint_id in woken:
+            self._dispatch_unread_wake(sprint_id)
+
+    def _dispatch_unread_wake(self, sprint_id: str) -> None:
+        """Hand a reserved sprint's wake for an unread message to the dispatcher; one that cannot start is a failed wake."""
+        try:
+            self._dispatch(lambda: self._unread_wake(sprint_id))
+        except Exception as error:
+            reason = f"the wake could not start: {type(error).__name__}: {error}"
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._settled[sprint_id] = int(self._clock() * 1000)
+                self._record_nudge(sprint_id, None, nudge.WAKE, reason)
+
+    def _wake_still_due(self, sprint_id: str) -> bool:
+        """Under the ingest lock: whether the sprint still needs the wake for an unread message."""
+        found = self._nudgeable(sprint_id)
+        return (found is not None and found[0].manager_session is not None
+                and sprints.unread_step(found[0], int(self._clock() * 1000)) == sprints.WAKE_UNREAD)
+
+    def _wake_dropped(self, sprint_id: str, heard: set[int]) -> None:
+        """Off the ingest lock: end a wake that sent and recorded nothing, still dispatching a message that arrived meanwhile."""
+        with self._ingest:
+            self._nudging.discard(sprint_id)
+            again, follow = self._wake_follow(sprint_id, heard)
+        self._dispatch_follow(sprint_id, again, follow)
+
+    def _wake_follow(self, sprint_id: str, heard: set[int]) -> tuple[bool, bool]:
+        """Under the ingest lock, the reservation just released: `(again, follow)` as the ordinary nudge decides them."""
+        wanted = sprint_id in self._nudge_again
+        self._nudge_again.discard(sprint_id)
+        found = self._nudgeable(sprint_id)
+        if wanted and found is not None and not self._stop.is_set() \
+                and any(message.message_id not in heard for message in found[1]):
+            self._nudging.add(sprint_id)
+            return True, False
+        return False, self._notice_follow(sprint_id)
+
+    def _dispatch_follow(self, sprint_id: str, again: bool, follow: bool) -> None:
+        if again:
+            self._dispatch_nudge(sprint_id)
+        elif follow:
+            self._dispatch_notice_nudge(sprint_id)
+
+    def _unread_wake(self, sprint_id: str) -> None:
+        """Stop the manager's listed session and wake it in place for a message it left unread; the reservation ends here (ADR-console-096)."""
+        heard: set[int] = set()
+        with self._ingest:
+            found = self._nudgeable(sprint_id)
+            sprint = None if found is None else found[0]
+            project = None if sprint is None else self._states.get(sprint.project_id)
+            if (sprint is None or project is None or sprint.manager_session is None
+                    or sprints.unread_step(sprint, int(self._clock() * 1000)) != sprints.WAKE_UNREAD):
+                self._nudging.discard(sprint_id)
+                again, follow = self._wake_follow(sprint_id, heard)
+            else:
+                again = follow = None
+                name = manager.session_name(sprint.project_id, sprint_id)
+                profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
+                through = found[1][-1].message_id
+                heard = {message.message_id for message in found[1]}
+        if again is not None:
+            self._dispatch_follow(sprint_id, again, follow)
+            return
+        reason, listing_failed, written, stopped = None, None, None, False
+        try:
+            listed = self._listing()
+            observed = [o for o in listed.values() if o.name == name]
+            if observed:
+                with self._ingest:
+                    sprint = self._sprints.get(sprint_id)
+                    folded = None if sprint is None else self._manager_session(sprint)
+                    # one session, the one the wake resumes, on the manager's profile, idle, and the
+                    # answer still unread: anything else stops nothing (a replacement session, a read inbox)
+                    ours = (len(observed) == 1 and observed[0].session_id == known
+                            and observed[0].profile in (None, profile))
+                    due = (ours and self._wake_still_due(sprint_id)
+                           and sessions.registry_state(observed[0]) in idle.IDLE_STATES
+                           and (folded is None or folded.state in idle.IDLE_STATES))
+                if not due:
+                    self._wake_dropped(sprint_id, heard)
+                    return
+                if self._stopper is None:
+                    reason = sprints.STILL_RUNNING_TEXT
+                else:
+                    try:
+                        manager.stop_listed([name], lambda: {known: dataclasses.replace(observed[0], profile=profile)},
+                                            self._stop_one)
+                        stopped = True
+                    except manager.StopFailed as error:
+                        reason = str(error)
+                if reason is None and self._listed_ids(name):
+                    reason = sprints.STILL_RUNNING_TEXT
+            if reason is None:
+                settings, listing_failed = self._wake_settings(sprint_id, known, profile, cwd)
+                with self._ingest:
+                    held = self._held_for_quota(sprint_id)
+                if held:
+                    self._wake_dropped(sprint_id, heard)
+                    return
+                written = self._refresh_settings(sprint_id, cwd)
+                shown = self._conclusive_listing()  # fresh and conclusive: the manager may have restarted meanwhile
+                with self._ingest:
+                    running = any(o.name == name for o in shown.values())
+                    gone = not stopped and not self._wake_still_due(sprint_id)
+                if running or gone:
+                    self._wake_dropped(sprint_id, heard)
+                    return
+                self._send_nudge(nudge.Nudge(
+                    sprint_id, nudge.WAKE, name, known, profile, cwd, settings))
+        except Exception as error:
+            reason = (str(error) if isinstance(error, nudge.NudgeFailed)
+                      else f"{type(error).__name__}: {error}")
+        with self._ingest:
+            self._nudging.discard(sprint_id)
+            self._settled[sprint_id] = int(self._clock() * 1000)
+            self._record_nudge(sprint_id, through, nudge.WAKE, reason, listing_failed, written,
+                               sorted(heard))
+            again, follow = self._wake_follow(sprint_id, heard)
+        self._dispatch_follow(sprint_id, again, follow)
 
     def stop_sprint(self, project_id: str, sprint_id: str) -> None:
         """Append the owner's stop request for an open sprint and nudge its manager with the stop message."""
@@ -8246,6 +8461,142 @@ class ConsoleService:
                                       owners=self._owners_now())
         return _TakeoverReservation(target, self._move_account(view, target), self._pinned)
 
+    def _listed_move_due(self, sprint: sprints.SprintState, now: int) -> bool:
+        """Under the ingest lock: whether a listed manager of the sprint waits on quota and may be moved (#1378).
+
+        Everything the move needs but the session's own state: a launcher and a stopper, a started
+        manager on an open sprint that is not stalled and has no open no-progress item, work to do,
+        fewer than `revive.LIMIT` counted revivals in the window, an account that is out and no
+        cancelled move for it.
+        """
+        return (self._launcher is not None and self._stopper is not None
+                and sprint.manager is not None and sprint.manager.state == sprints.STARTED
+                and sprint.stop_at is None and sprint.stopped_at is None
+                and sprint.closing is None and sprint.stalled is None
+                and sprint.no_progress_at is None
+                and revive.has_work(sprint, self._waiting(sprint))
+                and revive.counted(sprint, now) < revive.LIMIT
+                and self._quota_wait(sprint) is not None
+                and sprint.sprint_id not in self._move_cancelled)
+
+    def _listed_move_reservation(self, sprint: sprints.SprintState,
+                                 now: int) -> "_ListedMoveReservation | None":
+        """Under the ingest lock: the reservation moving a listed, idle manager off an account that is out, else None."""
+        if not self._listed_move_due(sprint, now):
+            return None
+        session = self._manager_session(sprint)
+        if session is None or session.state not in idle.IDLE_STATES:
+            return None
+        target = self._move_target(sprint)
+        if target is None:
+            return None
+        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned,
+                                      owners=self._owners_now())
+        return _ListedMoveReservation(target, self._move_account(view, target), self._pinned)
+
+    def _unstopped_manager(self, sprint: sprints.SprintState, stopped: set[str]) -> bool:
+        """Under the ingest lock: whether a folded session carrying the manager's name is not one the move stopped."""
+        return any(s.session_id not in stopped for s in self._manager_sessions(sprint))
+
+    def _move_manager_gone(self, sprint_id: str, token: "_ListedMoveReservation",
+                           listed: Mapping[str, sessions.Observation]) -> bool:
+        """Under the ingest lock: whether `listed` and the folded sessions show no manager of the sprint left after its stop.
+
+        A listed session that carries the manager's name or is one the move stopped (whatever
+        name it shows now) is a manager left, and so is a folded session of that name the move did
+        not stop. Seeing the name listed marks the sprint as listed just now.
+        """
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None:
+            return False
+        name = manager.session_name(sprint.project_id, sprint_id)
+        if any(o.name == name for o in listed.values()):
+            self._last_listed[sprint_id] = int(self._clock() * 1000)
+            return False
+        return not (any(o.session_id in token.stopped for o in listed.values())
+                    or self._unstopped_manager(sprint, token.stopped))
+
+    def _move_failed(self, sprint_id: str, token: object, reason: str) -> None:
+        """End the move as cancelled and write `console: quota_move_failed <sprint_id> <reason>`."""
+        print(f"console: quota_move_failed {sprint_id} {reason}", file=sys.stderr)
+        with self._ingest:
+            self._cancel_move(sprint_id, token)
+
+    def _move_standing(self, sprint_id: str, token: "_ListedMoveReservation",
+                       listed: Mapping[str, sessions.Observation] | None = None
+                       ) -> sprints.SprintState | None:
+        """Under the ingest lock: the sprint when its move still stands, else None after ending the reservation.
+
+        The move stands while it is still due and `_move_holds`. With `listed` (the listing just
+        read) the manager must also be safe to stop: every listed session carrying its name
+        shows no fresh busy reading (`_working_now`) and every folded one is idle or at its limit
+        (else the reservation is released, the manager works), and every listed one is on the
+        profile the sprint's record gives (else the move is cancelled, the record and the listing
+        disagree).
+        """
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or not self._listed_move_due(sprint, int(self._clock() * 1000)):
+            self._release(sprint_id, token)
+            return None
+        view = capacity.capacity_view(
+            self._read_profiles() - self._removing, self._capacity, self._clock(),
+            self._signins, excluded=self._excluded, pinned=self._pinned,
+            owners=self._owners_now())
+        if not self._move_holds(view, sprint, token):
+            self._cancel_move(sprint_id, token)
+            return None
+        if listed is None:
+            return sprint
+        name = manager.session_name(sprint.project_id, sprint_id)
+        mine = [o for o in listed.values() if o.name == name]
+        if (any(self._working_now(o) for o in mine)
+                or any(s.state not in idle.IDLE_STATES for s in self._manager_sessions(sprint))):
+            self._release(sprint_id, token)
+            return None
+        if any((o.profile or sessions.DEFAULT_PROFILE) != sprint.manager.profile for o in mine):
+            self._cancel_move(sprint_id, token)
+            return None
+        return sprint
+
+    def _stop_for_move(self, sprint_id: str, token: "_ListedMoveReservation"
+                       ) -> Mapping[str, sessions.Observation] | None:
+        """Stop the listed manager's sessions for its move, off the lock; the listing after the stop, or None.
+
+        Both listings are conclusive (a session file that cannot be read fails the move, it is
+        never taken for a manager that is gone). The move is checked under the lock before the
+        listing and again after it, just before the stop (`_move_standing`). None ends the
+        reservation: released when the move no longer applies, the manager works again or nothing
+        was listed to stop (the bring-back owns a gone manager), cancelled when the move no longer
+        holds or a listing or a stop failed, which also writes `console: quota_move_failed
+        <sprint_id> <reason>`.
+        """
+        with self._ingest:
+            if self._move_standing(sprint_id, token) is None:
+                return None
+
+        def stop(session_id: str, profile: str) -> None:
+            self._stop_one(session_id, profile)
+            token.stopped.add(session_id)
+
+        try:
+            listed = self._conclusive_listing()
+            with self._ingest:
+                sprint = self._move_standing(sprint_id, token, listed)
+                if sprint is None:
+                    return None
+                name = manager.session_name(sprint.project_id, sprint_id)
+            manager.stop_listed([name], lambda: listed, stop)
+            if not token.stopped:
+                with self._ingest:
+                    self._release(sprint_id, token)
+                return None
+            return self._conclusive_listing()
+        except Exception as error:
+            self._move_failed(sprint_id, token, str(error) if isinstance(error, manager.StopFailed)
+                              else f"{type(error).__name__}: {error}")
+            return None
+
     def _cancel_move(self, sprint_id: str, token: object) -> None:
         """Under the ingest lock: end a quota move that no longer holds, and keep it from being decided again.
 
@@ -8333,6 +8684,12 @@ class ConsoleService:
             for sprint_id, sprint in list(self._sprints.items()):
                 if self._manager_listed(sprint):
                     self._last_listed[sprint_id] = now
+                    if (sprint_id not in self._launching and sprint_id not in self._nudging
+                            and sprint_id not in self._stopping):
+                        moved = self._listed_move_reservation(sprint, now)
+                        if moved is not None:
+                            self._launching[sprint_id] = moved
+                            jobs.append((sprints.TAKEOVER, sprint_id))
                     continue
                 if sprint_id in self._launching or sprint_id in self._nudging:
                     continue
@@ -8455,6 +8812,17 @@ class ConsoleService:
         moved += [ms for (sid, _), ms in self._run_moves.items() if sid == session.session_id]
         return max(moved) if moved else None
 
+    def _run_wait(self, sprint: sprints.SprintState, session: sessions.SessionState | None,
+                  now_ms: int) -> bool:
+        """Under the ingest lock: whether a run of the session still in progress reads a wait of
+        ADR-console-050 or ADR-console-061 inside the quiet window (#1381)."""
+        if session is None or self._run_moved(session) is None:
+            return False
+        issues = {issue.issue for (sid, _), state in self._deliveries.items()
+                  if sid == session.session_id for issue in state.issues}
+        waits = wait_signals(sprint, self._movement.get(sprint.project_id), issues=issues)
+        return fresh_wait(waits, now_ms) is not None
+
     def nudge_idle(self) -> None:
         """Tell each idle manager whose sprint has work to go on, and give up after too many tries (#929)."""
         if self._nudger is None:
@@ -8477,7 +8845,8 @@ class ConsoleService:
                         or (session is not None and session.state == sessions.WORKING)):
                     self._quota_held.discard(sprint_id)
                 step = idle.next_step(sprint, waiting, session, self._active_ms(sprint, session),
-                                      quota is not None, now, run_ms=self._run_moved(session))
+                                      quota is not None, now, run_ms=self._run_moved(session),
+                                      run_wait=self._run_wait(sprint, session, now))
                 if step == idle.GIVE_UP:
                     status = sprint.report.status if sprint.report is not None else None
                     self._apply(self.log.append([(MANAGER_NO_PROGRESS, sprint.project_id, {
@@ -8518,17 +8887,25 @@ class ConsoleService:
                 self._record_idle(
                     sprint_id, "" if sprint is None else sprint.manager_session or "", reason)
 
-    def _idle_due(self, sprint_id: str, forced: bool) -> tuple[sprints.SprintState, str] | None:
-        """Under the ingest lock: the open sprint and its project's root while an idle nudge is still the step."""
+    def _idle_due(self, sprint_id: str, forced: bool,
+                  selected: str | None = None) -> tuple[sprints.SprintState, str] | None:
+        """Under the ingest lock: the open sprint and its project's root while an idle nudge is still the step.
+
+        `selected` is the session the fresh listing chose to nudge: a folded manager session that is a
+        different one is not the one being sent to, so nothing is due (the next poll decides again).
+        """
         sprint = self._sprints.get(sprint_id)
         project = None if sprint is None else self._states.get(sprint.project_id)
         if sprint is None or project is None:
             return None
         session = self._manager_session(sprint)
+        if selected is not None and session is not None and session.session_id != selected:
+            return None
+        now = int(self._clock() * 1000)
         step = idle.next_step(
             sprint, self._waiting(sprint), session, self._active_ms(sprint, session),
-            self._quota_wait(sprint) is not None, int(self._clock() * 1000), forced,
-            self._run_moved(session))
+            self._quota_wait(sprint) is not None, now, forced, self._run_moved(session),
+            run_wait=self._run_wait(sprint, session, now))
         return (sprint, project.root) if step == idle.NUDGE else None
 
     def _working_now(self, observed: sessions.Observation) -> bool:
@@ -8562,7 +8939,7 @@ class ConsoleService:
                 return
             session_id = listed[0].session_id
             with self._ingest:
-                if (self._idle_due(sprint_id, forced) is None
+                if (self._idle_due(sprint_id, forced, session_id) is None
                         or self._working_now(listed[0])):
                     self._nudging.discard(sprint_id)
                     return

@@ -10,13 +10,17 @@ environment (the caller passes every time in milliseconds), and `sprints` does n
 `has_work(state, waiting)` says whether the sprint needs its manager: `view.sprint_state(state,
 None, waiting)[0]` is `STARTING` or `ON_TRACK`. It is quota-blind (three arguments) on purpose.
 
-`next_step(state, waiting, session, active_ms, out, now_ms, forced=False, run_ms=None)` returns
+`next_step(state, waiting, session, active_ms, out, now_ms, forced=False, run_ms=None,
+run_wait=False)` returns
 `NUDGE`, `GIVE_UP` or `None` (do nothing). `session` is the manager's session (`sessions.SessionState`) or
 None, `active_ms` the latest time, other than the session's own `last_at`, that shows the manager
 active (the last movement of a run of its session, kept after the run ends, or the console's last
 launch, nudge or wake of the sprint) or None, `out` whether the manager's profile is out of quota,
 `run_ms` the latest movement of a delivery run of the manager's session that is still in progress
-(ended or unseen runs do not count) or None (#974).
+(ended or unseen runs do not count) or None (#974). `run_wait` is whether an in-progress run of the
+manager's session reads a wait the console reads (CI on its pull request, a committing delivery, a
+release step or the land lock, ADR-console-050 and ADR-console-061, seen within the quiet window)
+(#1381).
 The first rule that matches wins:
 
 1. The sprint has no manager, the manager's state is not `STARTED`, the sprint is stalled or
@@ -26,8 +30,10 @@ The first rule that matches wins:
 4. `out`: `None`, forced or not.
 5. Unless `forced`: `now_ms - max(session.last_at, active_ms or 0)` is under `IDLE_AFTER_MS`:
    `None`.
-6. Unless `forced`: `run_ms` is set and under `RUN_STILL_MS` old: `None`. A manager waiting on its
-   own delivery is waiting on purpose, and one step of a delivery can run long with no journal row.
+6. Unless `forced`: `run_ms` is set and either under `RUN_STILL_MS` old or `run_wait` is true:
+   `None`. A manager waiting on its own delivery is waiting on purpose; one step of a delivery can
+   run long with no journal row, and a delivery waiting on CI, a commit, a release step or the land
+   lock waits however long that takes, so neither a nudge nor the give-up of rule 8 follows.
 7. Unless `forced`: `idle_nudged_at` is set and `NUDGE_EVERY_MS` have not passed since it: `None`.
 8. `idle_nudges >= LIMIT`: `GIVE_UP`.
 9. `NUDGE`.
@@ -61,7 +67,7 @@ def has_work(state: SprintState, waiting: int) -> bool:
 
 def next_step(state: SprintState, waiting: int, session: SessionState | None,
               active_ms: int | None, out: bool, now_ms: int, forced: bool = False,
-              run_ms: int | None = None) -> str | None:
+              run_ms: int | None = None, run_wait: bool = False) -> str | None:
     manager = state.manager
     if (manager is None or manager.state != sprints.STARTED or state.stalled is not None
             or state.no_progress_at is not None):
@@ -75,7 +81,7 @@ def next_step(state: SprintState, waiting: int, session: SessionState | None,
     if not forced:
         if now_ms - max(sprints._ms(session.last_at), active_ms or 0) < IDLE_AFTER_MS:
             return None
-        if run_ms is not None and now_ms - run_ms < RUN_STILL_MS:
+        if run_ms is not None and (run_wait or now_ms - run_ms < RUN_STILL_MS):
             return None
         if state.idle_nudged_at is not None \
                 and now_ms - sprints._ms(state.idle_nudged_at) < NUDGE_EVERY_MS:

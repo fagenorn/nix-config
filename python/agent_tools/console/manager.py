@@ -85,13 +85,13 @@ watches a manager's session (a plain `printf`, no interpreter start). A `PreTool
 (`sprint permit`, `PERMIT_TIMEOUT` 60 seconds) and `LANDED_COMMAND` (`sprint permit --landed`,
 `LANDED_TIMEOUT` 30 seconds): the console judges each Bash call of the session and allows only the
 sprint's own merge and rerun (ADR-console-094) and the plain `release transaction run`, never abandon
-or dispose (ADR-console-096); an `if` filter would let a
+or dispose (ADR-console-098); an `if` filter would let a
 spelling it missed fall to the owner's global `gh pr merge` allow. The third member is
 `"permissions": {"defaultMode": <mode>, "deny": [...]}`, the mode the launch's `Permission` chose
 for the project (ADR-console-060, #1151) and the `MANAGER_DENY` rules (an `--admin` merge, and a
 `release transaction abandon`, which is defence in depth beside the permit's own denial) that block in
 every mode; no rule names a release run or a `--dispose`, since the permit judges those from the parsed
-words (ADR-console-096); there is no
+words (ADR-console-098); there is no
 allow rule, no ask rule, no `autoMode` and no `disableAllHooks`. A launch built without a
 permission carries `permission.FALLBACK`,
 so `auto`. `settings_document(env, permission)` is that content and `write_settings(path, env,
