@@ -22,13 +22,13 @@ import threading
 import time
 import unittest
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
     account_remove, deliveries, event_log, project_question, project_question_hook as hook, question_records, service, sessions,
-    signin, spend, sprints, view,
+    signin, spend, sprints, transcript_digest, view,
     write_guard)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
@@ -2966,6 +2966,172 @@ class QuestionRecordsServiceTest(QuestionCase):
         self.assertEqual(self.asked, [])
         self.assertTrue(self.question_rows()[-1][2]["reason"].startswith(
             "the project's contract could not be resolved"))
+
+
+class QuestionDeepServiceTest(QuestionRecordsServiceTest):
+    """A deeper question is admitted, given its project's transcript aggregates and its spend read (#1274)."""
+
+    NOW = 1_800_000_000.0
+
+    def today(self):
+        return datetime.fromtimestamp(self.NOW, timezone.utc).date()
+
+    def deep_service(self, **kwargs):
+        sessions_dir = self.store.parent.parent / "sessions"
+        kwargs.setdefault("session_dirs", [sessions_dir])
+        kwargs.setdefault("clock", lambda: self.NOW)
+        return self.arrange(**kwargs)
+
+    def message_line(self, mid, cwd, tokens, session="s1"):
+        return json.dumps({
+            "type": "assistant", "sessionId": session, "cwd": cwd,
+            "timestamp": f"{self.today().isoformat()}T10:00:00.000Z",
+            "message": {"id": mid, "model": "claude-sonnet-4-6", "content": [],
+                        "usage": {"input_tokens": tokens}}}) + "\n"
+
+    def write_agent(self, svc, run, agent, cwd, tokens):
+        directory = svc._projects_dirs()[0] / "-srv" / "s1" / "subagents" / "workflows" / run
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"agent-{agent}.jsonl"
+        path.write_text(self.message_line(f"m-{run}-{agent}", cwd, tokens))
+        os.utime(path, (self.NOW, self.NOW))
+
+    def figures(self, value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from self.figures(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from self.figures(item)
+        else:
+            yield value
+
+    def test_a_deeper_question_is_asked_deep_and_its_row_says_so(self):
+        svc = self.arrange()
+        svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertIs(self.asked[-1][0].deep, True)
+        self.assertIs(self.question_rows()[-2][2]["deep"], True)
+        svc.ask_project_question(WHY, "where does money go?")
+        self.assertIs(self.asked[-1][0].deep, False)
+        self.assertNotIn("deep", self.question_rows()[-2][2])
+
+    def test_a_deeper_questions_records_hold_only_its_own_projects_transcripts(self):
+        svc = self.deep_service()
+        self.write_agent(svc, "wf_a", "a1", "/srv/p01/.worktrees/a", 100)
+        self.write_agent(svc, "wf_a", "a2", "/srv/p00", 900)
+        self.write_agent(svc, "wf_b", "b1", "/srv/p00", 800)
+        with mock.patch.object(
+                sessions, "main_checkout",
+                lambda cwd: "/srv/p01" if cwd.startswith("/srv/p01") else "/srv/p00"):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        part = json.loads(self.asked[-1][0].records)["transcripts"]
+        self.assertEqual(sum(item["tokens"] for item in part["scripts"]), 100)
+        self.assertEqual([item["issue"] for item in part["issues"]], [7])
+        for other in (900, 800):
+            self.assertNotIn(other, list(self.figures(part)))
+
+    def test_a_light_question_reads_no_transcript(self):
+        svc = self.arrange()
+        with mock.patch.object(transcript_digest, "project_runs", mock.Mock()) as read:
+            _ask, records = self.records_of(svc)
+        read.assert_not_called()
+        self.assertIsNone(records["transcripts"])
+
+    def test_the_read_starts_at_the_later_of_the_window_and_the_owners_first_day(self):
+        svc = self.deep_service()
+        window = (self.today() - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
+        later = (self.today() - timedelta(days=3)).isoformat()
+        for owned, expected in ((None, window), (later, later)):
+            with self.subTest(owned=owned):
+                with mock.patch.object(transcript_digest, "project_runs",
+                                       mock.Mock(return_value=())) as read, \
+                        mock.patch.object(question_records, "owner_since", return_value=owned):
+                    svc.ask_project_question(WHY, f"q {owned}", deep=True)
+                read.assert_called_once()
+                self.assertEqual(read.call_args.args[3], expected)
+
+    def test_the_transcript_read_holds_no_lock(self):
+        svc = self.deep_service()
+        held = []
+
+        def read(*args, **kwargs):
+            held.append(svc._ingest.locked())
+            return ()
+
+        with mock.patch.object(transcript_digest, "project_runs", side_effect=read):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertEqual(held, [False])
+
+    def test_unreadable_transcripts_fail_the_question_and_an_empty_tree_does_not(self):
+        svc = self.deep_service()
+        failure = transcript_digest.TranscriptsUnreadable("x")
+        with mock.patch.object(transcript_digest, "project_runs", side_effect=failure), \
+                contextlib.redirect_stderr(io.StringIO()):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertEqual(self.asked, [])
+        answered = self.question_rows()[-1][2]
+        self.assertEqual(answered["outcome"], "failed")
+        self.assertTrue(answered["reason"].startswith(
+            project_question.RECORDS_FAILED.split("{detail}")[0]))
+        with mock.patch.object(transcript_digest, "project_runs", return_value=()):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        ask, _cancel = self.asked[-1]
+        self.assertEqual(json.loads(ask.records)["transcripts"]["runs"], 0)
+
+    def test_a_stale_dig_deeper_confirmation_asks_nothing(self):
+        svc = self.arrange()
+        first = svc.ask_project_question(WHY, "q")
+        svc.ask_project_question(WHY, "q", first, "1" * 32, deep=True)
+        rows = len(self.question_rows())
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, "q", first, "2" * 32, deep=True)
+        self.assertEqual(str(caught.exception), project_question.DEEP_STALE)
+        other = svc.ask_project_question(WHY, "r")
+        rows = len(self.question_rows())
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, "not r", other, "3" * 32, deep=True)
+        self.assertEqual(str(caught.exception), project_question.DEEP_STALE)
+        self.assertEqual(len(self.question_rows()), rows)
+        self.assertEqual(len(self.asked), 3)
+
+    def test_a_deeper_session_runs_opus_under_the_deep_settings(self):
+        svc = self.arrange()
+        svc.ask_project_question(WHY, "where does time go?", deep=True)
+        ask, _cancel = self.asked[-1]
+        command = project_question.launch_command(ask, "linux")
+        self.assertEqual(command[command.index("--model") + 1], "opus")
+        project_question._write_settings(ask)
+        document = json.loads(ask.settings.read_text())
+        hook_command = document["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertEqual(shlex.split(hook_command)[-1], os.path.realpath(ask.root))
+
+    def test_a_deeper_answers_session_spend_is_read_when_it_ends(self):
+        sessions_dir = self.store.parent.parent / "sessions"
+        path = sessions_dir.parent / "projects" / "-srv-p01" / f"{SESSION_ID}.jsonl"
+
+        def writer(ask, cancel):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.message_line("msg_q1", "/srv/p01", 40, session=SESSION_ID))
+            os.utime(path, (self.NOW, self.NOW))
+            return self.outcome
+
+        svc = self.arrange(session_dirs=[sessions_dir], clock=lambda: self.NOW,
+                           project_asker=writer)
+        svc.ask_project_question(WHY, "where does time go?", deep=True)
+        day = json.loads(svc.view_bytes)["spend"]["days"][-1]
+        self.assertEqual(day["session"][SESSION_ID]["input"], 40)
+
+    def test_a_non_boolean_deep_is_a_bad_question(self):
+        svc = self.start()
+        post = lambda body: support.post_page(
+            svc.address, QUESTION_ROUTE, self.own(svc, **JSON), json.dumps(body).encode())
+        got = self.assert_unchanged(
+            svc, lambda: post({"project_id": WHY, "question": "q", "deep": "yes"}))
+        self.assertEqual((got[0], got[2]), (400, b"bad question\n"))
+        self.assertEqual(self.asked, [])
+        status, _, body = post({"project_id": WHY, "question": "q", "deep": True})
+        self.assertEqual((status, body), (204, b""))
+        self.assertIs(self.question_rows()[-2][2]["deep"], True)
 
 
 class QuestionLifecycleTest(QuestionCase):
