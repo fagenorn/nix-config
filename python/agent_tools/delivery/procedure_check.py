@@ -77,8 +77,9 @@ entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
 of `step_graph` also produces `exhausted`, any step may map it, and a group
 member's `pass` entries are checked at the group) and `unbounded_cycle` (a
 cycle among steps with no `max_visits`, refused at its first step, or a step
-on a cycle whose `exhausted` target re-enters the loop, or a loop of `exhausted`
-entries alone, which never ends once every bound is spent). An outcome check whose
+on a cycle whose `exhausted` target re-enters the loop, or a loop through the
+`exhausted` entries of steps on a cycle, alone or mixed with ordinary entries,
+which never ends once every bound is spent; refused at its first step). An outcome check whose
 reference failed phase B is skipped for that step.
 
 Phase C, data flow (after the graph checks; in step order, the header's
@@ -888,6 +889,7 @@ def _check_cycles(procedure: dict, found: _Findings) -> None:
                  for node, targets in graph.items() if node not in bounded}
     refused: dict[str, str] = {}
     order = [item["id"] for item in procedure["steps"]]
+    by_id = {item["id"]: item for item in procedure["steps"]}
     for node in _loop_heads(unbounded, order):
         refused[node] = "it is on a cycle in which no step declares max_visits."
     for item in procedure["steps"]:
@@ -896,10 +898,18 @@ def _check_cycles(procedure: dict, found: _Findings) -> None:
         if (label in on_cycle(graph) and label not in refused and target in graph
                 and (target == label or label in _reach(graph, target))):
             refused[label] = f"its exhausted target {target!r} re-enters the loop it ends."
-    handed_over = {item["id"]: (item["on"][EXHAUSTED],) for item in procedure["steps"]
-                   if item["id"] in graph and item["on"].get(EXHAUSTED) in graph}
-    for node in _loop_heads(handed_over, order):
-        refused.setdefault(node, "its exhausted outcomes hand control around a loop that never ends.")
+    live = on_cycle(graph)
+    spent = {node: targets + ((by_id[node]["on"][EXHAUSTED],)
+                              if node in live and by_id[node]["on"].get(EXHAUSTED) in graph else ())
+             for node, targets in graph.items()}
+    for node in order:
+        target = by_id[node]["on"].get(EXHAUSTED) if node in live else None
+        if target not in graph or node not in _reach(spent, target) | {target}:
+            continue
+        loop = {other for other in spent if other == node
+                or (other in _reach(spent, node) and node in _reach(spent, other))}
+        if not loop & refused.keys():
+            refused[node] = "its exhausted outcomes hand control around a loop that never ends."
     for item in procedure["steps"]:
         if item["id"] in refused:
             found.add("unbounded_cycle", refused[item["id"]], item["id"])

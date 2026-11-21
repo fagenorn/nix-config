@@ -212,6 +212,20 @@ def _two_exhausted_steps_hand_over(child: dict) -> None:
     child["stops"]["child-stop"]["reenter"] = "a"
 
 
+def _exhausted_and_ordinary_edges_loop(child: dict) -> None:
+    def make(own: str, ok: str, exhausted: str | None, bound: bool) -> dict:
+        on = {"ok": ok, "failed": "done"}
+        if exhausted is not None:
+            on["exhausted"] = exhausted
+        item = {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
+                "in": ["run.item"], "on": on}
+        if bound:
+            item["max_visits"] = 1
+        return item
+    child["steps"] = [make("a", "a", "b", True), make("b", "b", "c", True), make("c", "a", None, False)]
+    child["stops"]["child-stop"]["reenter"] = "a"
+
+
 def _exhausted_stop(toy: dict) -> None:
     toy["stops"]["exhausted"] = {"need": "retry", "reenter": "draft"}
 
@@ -350,6 +364,9 @@ CASES = [
          [("toy-child", None, "unreadable_procedure")]),
     Case("exhausted_steps_hand_over_to_each_other",
          editing("toy-child", _two_exhausted_steps_hand_over),
+         [("toy-child", "a", "unbounded_cycle")]),
+    Case("exhausted_and_ordinary_edges_loop_for_ever",
+         editing("toy-child", _exhausted_and_ordinary_edges_loop),
          [("toy-child", "a", "unbounded_cycle")]),
     Case("step_id_with_a_trailing_newline", editing("toy", _entry_id_with_newline),
          [("toy", "scope\n", "invalid_field")]),
