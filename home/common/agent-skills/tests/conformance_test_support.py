@@ -127,7 +127,7 @@ def make_root(tmp: Path) -> Path:
                    "hints", "rejections"):
         for entry in paths[member]:
             target = root / entry
-            if target.exists():  # `architecture` names CLAUDE.md, already copied
+            if target.exists():  # a member that names an already copied file
                 continue
             if target.suffix:
                 target.parent.mkdir(parents=True, exist_ok=True)
