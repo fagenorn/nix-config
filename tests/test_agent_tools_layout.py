@@ -1,6 +1,11 @@
 """The agent_tools layout rule: subpackages are the docs areas, imports follow one table."""
 
 import ast
+import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from collections.abc import Mapping
@@ -330,6 +335,23 @@ class LayoutRuleTest(unittest.TestCase):
             area_packages(AREAS_DIR),
             frozenset({"claims", "console", "delivery", "guard", "hosts", "project_contract",
                        "release", "system", "verification"}))
+
+
+class LightLaneRetirementTest(unittest.TestCase):
+    def test_the_repository_contract_declares_no_light_lane(self):
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".agents" / "share").mkdir(parents=True)
+        manifest = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
+        (home / ".agents" / "share" / "platform-manifest.json").write_bytes(manifest.read_bytes())
+        env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(REPO_ROOT / "python")}
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
+             "--repo-root", str(REPO_ROOT)],
+            env=env, text=True, stdin=subprocess.DEVNULL, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        snapshot = json.loads(done.stdout)
+        self.assertNotIn("light_lane", snapshot["bindings"]["workflow"])
 
 
 if __name__ == "__main__":

@@ -111,17 +111,6 @@
       "review": {
         "plan": "codex-plan-review",
         "code": "codex-diff-review"
-      },
-      "light_lane": {
-        "mode": "shadow",
-        "budget_minutes": 90,
-        "risk_paths": [
-          "home/common/claude-code/lifecycle_guard.py",
-          "python/agent_tools/release/transaction_*.py",
-          "python/agent_tools/project_contract/resolve_project.py",
-          "python/agent_tools/delivery/lane_triage.py",
-          ".agents/project.json"
-        ]
       }
     }
   },
