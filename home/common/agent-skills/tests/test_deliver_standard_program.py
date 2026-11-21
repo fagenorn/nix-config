@@ -9481,6 +9481,99 @@ LOOK_CONT = {
     "look": {"pr": 42, "head": SHA},
     "final_reviewed": {"head": "c0ffee"},
 }
+LIVE_RED = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
+LIVE_RECORD = {"id": 5, "sprint_id": "0123456789abcdef", "issue": 9, "at": DECLARED["fault"]["at"]}
+LIVE_CONT = dict(LOOK_CONT, lane="live", live_fault=LIVE_RECORD,
+                 plan={"status": "planned", "plan_root": None, "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+                       "tasks": [{"n": 1, "title": "live", "file": None, "risk": "standard"}]},
+                 done=[{"n": 1, "commit": SHA, "review_rounds": 0, "reviewer": "reviewer", "reviewed_head": SHA, "fault_test": FT}])
+
+
+def live(patch):
+    """LIVE_PATCH with `patch` merged over it, one level deep."""
+    merged_patch = copy.deepcopy(LIVE_PATCH)
+    for key, value in patch.items():
+        merged_patch[key] = dict(merged_patch.get(key, {}), **value) if isinstance(value, dict) else value
+    return merged_patch
+
+
+class LiveBindingTest(unittest.TestCase):
+    """#1433: the live-fault lane verifies, opens and merges its one reviewed commit, or stops: no later step dispatches a second implementer or reviewer."""
+
+    SCENARIOS = {
+        "failed verification": {"args": ARGS, "patch": LIVE_PATCH, "replies": {"verify": LIVE_RED, "verify-rerun-1": LIVE_RED}},
+        "another verify head": {"args": ARGS, "patch": live({"verify": {"head": "e" * 40}})},
+        "behind": {"args": ARGS, "patch": live({"pr": {"checks": {"state": "behind", "head": SHA}}})},
+        "red check": {"args": ARGS, "patch": live({"pr": {"checks": RED}})},
+        "early conflict": {"args": ARGS, "patch": live({"pr": {"probe": {"conflicted": True, "tree": "e" * 40, "files": ["a.py"]}, "lock": None, "checks": None}})},
+        "owner changes": {"args": dict(ARGS, cont=LIVE_CONT, look={"answer": "changes", "words": "make the label bold"}),
+                          "patch": {"setup": {"look": MARKED, "head": SHA, "live_fault": DECLARED}}},
+        "clean": {"args": ARGS, "patch": LIVE_PATCH},
+    }
+
+    def go(self, name):
+        return run(**self.SCENARIOS[name])
+
+    def test_a_failed_verification_stops_without_a_fix(self):
+        result, calls = self.go("failed verification")
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertIn("a fix would be a second implementer", result["reason"])
+        self.assertFalse([l for l in labels(calls) if l.startswith(("verify-fix", "ws-check"))], labels(calls))
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], ["live-impl"])
+        self.assertEqual(result["cont"]["live_fault"]["final"], "live-bound")
+
+    def test_a_verification_at_another_head_stops(self):
+        result, calls = self.go("another verify head")
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertIn("not the delivered commit", result["reason"])
+        self.assertNotIn("pr", result)
+        self.assertNotIn("pr", labels(calls))
+
+    def test_a_behind_pull_request_stops_without_a_sync(self):
+        result, calls = self.go("behind")
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertIn("behind", result["reason"])
+        self.assertFalse([l for l in labels(calls) if l.startswith("sync-")], labels(calls))
+        self.assertNotIn("merge", labels(calls))
+        self.assertNotIn("lock_unreleased", result)
+
+    def test_a_red_check_stops_without_a_ci_fix(self):
+        result, calls = self.go("red check")
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertNotIn("fix-ci", labels(calls))
+        self.assertNotIn("fix-ci-review", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+        self.assertNotIn("lock_unreleased", result)
+
+    def test_a_conflict_found_before_the_lock_stops_without_a_resolution(self):
+        result, calls = self.go("early conflict")
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertFalse([l for l in labels(calls) if l.startswith("sync-")], labels(calls))
+        self.assertNotIn("lock_unreleased", result)
+
+    def test_an_owner_changes_answer_stops_without_a_look_fix(self):
+        result, calls = self.go("owner changes")
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertNotIn("look-fix", labels(calls))
+        self.assertNotIn("renew-look-fix", labels(calls))
+
+    def test_the_pr_evidence_names_the_live_review(self):
+        _, calls = self.go("clean")
+        self.assertIn("live-fault lane review: one reviewer, no plan", prompt(calls, "pr"))
+        self.assertNotIn("configured independent review", prompt(calls, "pr"))
+        _, calls = run(args=ARGS)
+        self.assertIn("configured independent review", prompt(calls, "pr"))
+
+    def test_no_live_scenario_dispatches_a_second_implementer_or_reviewer(self):
+        for name in self.SCENARIOS:
+            with self.subTest(scenario=name):
+                _, calls = self.go(name)
+                implementers = [c["label"] for c in calls if c["agentType"] == "implementer"]
+                reviewers = [c["label"] for c in calls if c["agentType"] in ("reviewer", "reviewer-lite")]
+                self.assertIn(implementers, ([], ["live-impl"]))
+                self.assertIn(reviewers, ([], ["live-review"]))
+
+
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (

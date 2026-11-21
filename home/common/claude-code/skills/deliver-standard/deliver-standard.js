@@ -970,6 +970,10 @@ const stop = (stage, extra) => {
   return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, ...(LANE === 'live' && LIVE_REC ? { live_fault: { ...LIVE_REC, ...(liveFinal ? { final: liveFinal } : {}) } } : {}), plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(plan && !planReviewed && codexSkipped ? { codex_plan_skipped: true } : {}), ...(plan && !planReviewed && codexOwed ? { codex_plan_owed: true } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(carried.length && capMark ? { round_cap: capMark } : {}), ...(dropped > 0 && carried.length ? { fix_findings_dropped: dropped } : {}), ...(reviewRounds > 0 ? { review_rounds: reviewRounds } : {}), ...(reviewRounds > 0 && reviewed ? { reviewed } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), ...(pending.length ? { follow_ups_pending: pending } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(untested ? { untested } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
+// #1433: the live-fault lane's bound stop: the delivered commit is the one head every later step reads, and a step that would need a second implementer or reviewer stops here, final, naming the ordinary delivery as its way on.
+const liveCommit = () => taskLog.find(d => d.n === 1).commit
+const liveBound = (details, extra) => stop('live-bound', { ...extra, details: details + '; ' + LIVE_WAY })
+
 // #1425: the plan directory is a checkout path and may hold spaces, quotes or shell metacharacters, so the clerk's two commands name it shell-quoted
 // (bare when every character is plain, else in single quotes with each embedded one written '\'').
 const shq = text => /^[A-Za-z0-9_\/.:@%+=,-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`
@@ -2755,6 +2759,7 @@ const base64Utf8 = text => {
 }
 // A look marker the setup could not read is neither marked nor unmarked: a fix answer stops here, before the head check, the approval and the fix round.
 if (!LOOK_READ && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') return LOOK_UNREAD()
+if (LANE === 'live' && LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === 'fix')) return liveBound('the owner asked for a change at the look, and a fix would be a second implementer')
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') {
   const hd = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
@@ -2805,6 +2810,11 @@ if (verify) {
   if (!complete(verify, VERIFY)) verify = null
 }
 verify = await rerunOnce(verify, 1)
+if (LANE === 'live' && verify) {
+  if (!sameSha(verify.head, liveCommit())) return liveBound(`the verification read ${typeof verify.head === 'string' ? verify.head : 'no head'}, not the delivered commit ${liveCommit()}`)
+  const failed = verifyProblems(verify)
+  if (failed.length) return liveBound(`the verification failed at ${liveCommit()} (${failed.map(p => p.id).join(', ')}), and a fix would be a second implementer`, { verify })
+}
 let vRounds = 0
 while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
@@ -3001,6 +3011,8 @@ ${lockMaybe && !sameSha(lockMaybe, lockSha) ? RELEASE_AGAIN(lockMaybe) : ''}${RU
 // that made a commit and its review (the release of the lock, when the fix step did not report it).
 // #1371: a committed fix with no test command recorded is refused before its review and its push, and its commit is carried in cont.
 const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false, rerun = false, schema = IMPL, committed = null }) => {
+  // #1433: the live-fault lane has no second implementer: its caller stops, bound, before any fix or review.
+  if (LANE === 'live') return { fix: null, ok: false, bound: true }
   const fix = await call(fixPrompt, { label, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema })
   if (noteUntested(stage, fix, expected)) return { fix, ok: false, details: UNTESTED }
   if (!implDone(fix) || !sameSha(fix.start_head, expected)) return { fix, ok: false }
@@ -3012,7 +3024,7 @@ const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, reb
   return { fix, review, moved, ok: true }
 }
 // #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call. #1246: a function, so its Evidence names the results of verify as it is when the call is made (an approved head's verification replaces them).
-const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
+const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : LANE === 'live' ? 'live-fault lane review: one reviewer, no plan' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
 const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is read back
 // (look-approval status, #1260: the owner records it where they answered; this program never posts one) only for the head the owner saw, when that is the pull request head. #1246: a head that is not the verified head is verified first (a look-verify step), and recorded only when it
@@ -3149,6 +3161,7 @@ ${RULES}`, { label: `land-lock-${k}`, phase: 'Ship', agentType: 'clerk', model: 
   // #1018: with prelock, the pr call read a failed check at a head behind ${INT} while another landing held the lock: the same sync
   // step (and, on a conflict, the same resolution and review) runs before the lock is asked for, and spends none of that budget either.
   const syncRound = async (early, prelock = false) => {
+    if (LANE === 'live') return liveBound(`the branch is behind ${INT} or conflicts with it, and a sync merge would be a second implementer`, { pr: PR })
     if (!early && !prelock && !raced) {
       if (contended >= 2) return stop('sync-contention', { pr: PR, syncs })
       contended++
@@ -3297,6 +3310,7 @@ ${RULES}`, { label: 'look-push', phase: 'Ship', agentType: 'clerk', model: DEFAU
         if (checksFixes >= 1) return stop('checks', { pr: PR, failing: rd.failing, checks: ck })
         checksFixes++
         const w = await ciFix(ck, rd.failing, 'unasked')
+        if (w.bound) return liveBound(`a check failed at ${expected}, and a fix would be a second implementer`, { pr: PR })
         if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
         if (w.rerun) {
           reran = true
@@ -3369,6 +3383,7 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
       if (checksFixes >= 1) return unheld(stop('checks', { pr: PR, failing: failingNames, checks: ck }))
       checksFixes++
       const w = await ciFix(ck, failingNames, 'unasked')
+      if (w.bound) return unheld(liveBound(`a check failed at ${expected}, and a fix would be a second implementer`, { pr: PR }))
       if (!w.ok) return unheld(stop('checks-fix', { pr: PR, checks: ck, fix: w.fix, ...(w.details ? { details: w.details } : {}) }))
       if (w.rerun) reran = true
       else {
@@ -3488,6 +3503,7 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
       // #1001: no sync has changed the head under the lock, so the red check is the branch's own: its fix goes outside the lock.
       const first = lockSyncs === 0
       const w = await ciFix(ck, failingNames, first ? 'first' : 'held')
+      if (w.bound) return liveBound(`a check failed at ${expected}, and a fix would be a second implementer`, { pr: PR })
       if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix, ...(w.details ? { details: w.details } : {}) })
       // #818: the failed jobs were rerun at the unchanged head. The loop polls again; checksFixes still ends a second red poll at the checks stop.
       // #986: that next poll alone may rerun a stale gate (STALE_RERUN).
