@@ -2565,7 +2565,17 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         [(n["poster"], n["kind"], n["text"], n["owner"]) for n in web["notices"]],
                         [("You", "heads-up", "routes are frozen until Friday", True),
                          ("Fix the settings page", "claim", "reworking the settings form",
+                          False),
+                         ("Add resumable uploads", "claim", "resuming an upload from its row",
                           False)])
+                    self.assertEqual(
+                        [o["text"] for o in web["overlaps"]],
+                        ["Add resumable uploads and Fix the settings page both fix a live fault "
+                         "in python/agent_tools/console/page.html; the rule could not decide "
+                         "which lands first"])
+                    self.assertFalse(shots.overlap_card())
+                    self.assertEqual(
+                        [i for i in view["inbox"]["open"] if i.get("reason") == "question"], [])
                 elif state in ("ask-box", "ask-goal"):
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
                     threads = web["questions"]["threads"]
