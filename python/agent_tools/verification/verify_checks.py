@@ -32,6 +32,27 @@ limited to `ssh:file`, so no URL rewrite reaches the network. It exits 0 when me
 on a usage or fixture error, writes only to a temporary directory, and S's owner must be an
 authorized owner in the installed guard policy.
 
+`devenv-shell --probe commit|clean [--repo-root R] [--timeout-seconds N]` (`verify_checks.devenv_shell`,
+issue 1447) is met when a commit made through the project's devenv shell is signed and leaves its
+worktree clean (`commit`), or when a shell leaves a fresh worktree clean (`clean`). It never runs
+in R: it makes a detached scratch worktree of R's `HEAD` in a temporary directory and removes
+exactly that registration afterwards (no `git worktree prune`, so every other registration
+survives), leaving R's HEAD, branch, index and status unchanged. Every git call and every shell
+runs under the caller's environment without the eight repository-location names
+(`GIT_DIR`, `GIT_WORK_TREE`, ...), so `HOME`, `PATH`, the git configuration and the ssh agent reach
+the shell and an inherited redirect cannot point git at the caller's branch. The `commit` probe
+runs `devenv shell -- git commit --allow-empty -m probe`; its report names the exit, whether a new
+commit exists, whether its header carries a signature, the porcelain status read before the
+worktree is removed, and the worktree's `core.hooksPath` read outside the shell and, when the
+commit shell exited 0, inside a second shell run (a difference is `hooks_changed`). The reason is
+the first that applies: `devenv_missing`, `timeout`, `shell_failed`, then for `commit`
+`no_commit`, `unsigned`, `dirty`, `hooks_changed`, for `clean` `dirty`; it is null exactly when
+met. Each shell runs in its own process group bounded by `--timeout-seconds` (1 to 300, the
+contract's commit-environment bound), and its group is killed with SIGKILL once it ends, so
+nothing it started outlives it; a SIGTERM, SIGHUP or SIGINT to the check kills the live shell's
+group and exits 128 plus the signal after the worktree is removed. It exits 0 when met, 1 when
+not and 2 on a usage or fixture error.
+
 `cutover-manifest [--repo-root R] [--branch B] [--main-ref REV]` (`verify_checks.cutover_manifest`,
 issue 579, C4.a) is met (0, `green`)
 when the manifest at the tip of origin's candidate branch is a major-2 manifest whose `removals`
@@ -813,6 +834,144 @@ def managed_pre_push_hook(slug: str, *, git_bin: str,
                            else type(error).__name__) from error
     report["met"] = all(report[key] for key in
                         ("managed", "refused", "remote_unchanged", "control_admitted"))
+    return (0 if report["met"] else 1), report
+
+
+DEVENV_SHELL_TIMEOUT_SECONDS = 300
+DEVENV_SHELL_REPOSITORY_ENV = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
+DEVENV_SHELL_TERMINATION = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+DEVENV_SHELL_TAIL_LINES = 5
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _devenv_run(argv: list[str], cwd: Path, env: Mapping[str, str], stdout: Path, log: Path,
+                timeout: float, live: set[int]) -> tuple[int | None, float]:
+    """One shell run in its own process group: (exit or None on timeout, elapsed seconds)."""
+    started = time.monotonic()
+    try:
+        with open(stdout, "ab") as out, open(log, "ab") as err:
+            proc = subprocess.Popen(argv, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=err, process_group=0)
+            live.add(proc.pid)
+            try:
+                try:
+                    code: int | None = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    code = None
+            finally:
+                _kill_group(proc.pid)
+                proc.wait()
+                live.discard(proc.pid)
+    except OSError as error:
+        raise FixtureError(f"{argv[0]}: {type(error).__name__}") from error
+    return code, round(time.monotonic() - started, 1)
+
+
+def _tail(log: Path) -> list[str]:
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines() if log.exists() else []
+    return lines[-DEVENV_SHELL_TAIL_LINES:]
+
+
+def _config_hooks_path(worktree: Path, env: Mapping[str, str]) -> str | None:
+    done = _git(worktree, "config", "--get", "core.hooksPath", environ=env)
+    return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+def devenv_shell(probe: str, repo_root: Path, *, devenv_bin: str | None,
+                 environ: Mapping[str, str], timeout: float) -> tuple[int, dict]:
+    """Met when a commit through the devenv shell is signed and clean, or a shell leaves a clean tree.
+
+    Raises FixtureError when the scratch worktree cannot be made or driven, GitError when git fails."""
+    commit = probe == "commit"
+    report: dict = {"probe": probe, "exit": None, "elapsed_seconds": 0.0}
+    if commit:
+        report.update(new_commit=False, signed=False)
+    report["status"] = []
+    if commit:
+        report["hooks_path"] = {"outside": None, "inside": None}
+    report.update(output_tail=[], reason=None, met=False)
+    if devenv_bin is None:
+        report["reason"] = "devenv_missing"
+        return 1, report
+    env = {key: value for key, value in environ.items() if key not in DEVENV_SHELL_REPOSITORY_ENV}
+    live: set[int] = set()
+
+    def terminate(signum: int, _frame: object) -> None:
+        for pgid in list(live):
+            _kill_group(pgid)
+        raise SystemExit(128 + signum)
+
+    previous = {signum: signal.signal(signum, terminate) for signum in DEVENV_SHELL_TERMINATION}
+    try:
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="verify-devenv-shell-"))
+        except OSError as error:
+            raise FixtureError(f"mkdtemp: {type(error).__name__}") from error
+        worktree = tmp / "wt"
+        try:
+            sha = _git_ok(repo_root, "rev-parse", "HEAD", environ=env).strip()
+            added = _git(repo_root, "worktree", "add", "--detach", str(worktree), sha,
+                         environ=env)
+            if added.returncode != 0:
+                detail = added.stderr.strip().splitlines()
+                raise FixtureError(f"git worktree add failed: {detail[0] if detail else added.returncode}")
+            log = tmp / "shell.log"
+            outside = _config_hooks_path(worktree, env) if commit else None
+            argv = ([devenv_bin, "shell", "--", "git", "commit", "--allow-empty", "-m", "probe"]
+                    if commit else [devenv_bin, "shell", "--", "true"])
+            code, report["elapsed_seconds"] = _devenv_run(
+                argv, worktree, env, log, log, timeout, live)
+            report["exit"] = code
+            report["status"] = _git_ok(worktree, "status", "--porcelain",
+                                       environ=env).splitlines()
+            report["output_tail"] = _tail(log)
+            hooks_changed = False
+            if commit:
+                head = _git_ok(worktree, "rev-parse", "HEAD", environ=env).strip()
+                report["new_commit"] = head != sha
+                if report["new_commit"]:
+                    header = _git_ok(worktree, "cat-file", "commit", "HEAD",
+                                     environ=env).split("\n\n", 1)[0]
+                    report["signed"] = any(line.startswith(("gpgsig ", "gpgsig-sha256 "))
+                                           for line in header.splitlines())
+                report["hooks_path"]["outside"] = outside
+                if code == 0:
+                    hooks_out = tmp / "hooks.out"
+                    inside_code, _ = _devenv_run(
+                        [devenv_bin, "shell", "--", "git", "config", "--get", "core.hooksPath"],
+                        worktree, env, hooks_out, log, timeout, live)
+                    lines = [line for line in hooks_out.read_text(
+                        encoding="utf-8", errors="replace").splitlines() if line.strip()]
+                    report["hooks_path"]["inside"] = lines[-1] if lines else None
+                    hooks_changed = (inside_code not in (0, 1)
+                                     or report["hooks_path"]["inside"] != outside)
+        finally:
+            _git(repo_root, "worktree", "remove", "--force", str(worktree), environ=env)
+            shutil.rmtree(tmp, ignore_errors=True)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    if report["exit"] is None:
+        report["reason"] = "timeout"
+    elif report["exit"] != 0:
+        report["reason"] = "shell_failed"
+    elif commit and not report["new_commit"]:
+        report["reason"] = "no_commit"
+    elif commit and not report["signed"]:
+        report["reason"] = "unsigned"
+    elif report["status"]:
+        report["reason"] = "dirty"
+    elif hooks_changed:
+        report["reason"] = "hooks_changed"
+    report["met"] = report["reason"] is None
     return (0 if report["met"] else 1), report
 
 
@@ -2628,6 +2787,17 @@ def _merge_sha(value: str) -> str:
     return value
 
 
+def _devenv_timeout(value: str) -> int:
+    try:
+        seconds = int(value)
+    except ValueError:
+        seconds = 0
+    if not 1 <= seconds <= DEVENV_SHELL_TIMEOUT_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"must be an integer from 1 to {DEVENV_SHELL_TIMEOUT_SECONDS}")
+    return seconds
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify-checks")
     checks = parser.add_subparsers(dest="check", required=True)
@@ -2640,6 +2810,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "managed-pre-push-hook",
         help="issue 672: the managed pre-push hook refuses an agent default-branch push")
     hook.add_argument("--slug", type=_repo, required=True)
+    devenv = checks.add_parser(
+        "devenv-shell",
+        help="issue 1447: a commit through the devenv shell is signed and leaves a clean worktree")
+    devenv.add_argument("--probe", choices=("commit", "clean"), required=True)
+    devenv.add_argument("--repo-root", type=Path, default=Path("."))
+    devenv.add_argument("--timeout-seconds", type=_devenv_timeout,
+                        default=DEVENV_SHELL_TIMEOUT_SECONDS)
     for name, help_text in (
             ("cutover-manifest", "issue 579 C4.a: the candidate's removals were main's deprecations"),
             ("cutover-preflight", "issue 579 C4.b: the bridge and the candidate judge the fleet"),
@@ -2860,6 +3037,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = managed_pre_push_hook(args.slug, git_bin=git_bin, environ=os.environ)
         except FixtureError as error:
             print(f"verify-checks: fixture_error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "devenv-shell":
+        devenv_bin = shutil.which("devenv", path=os.environ.get("PATH"))
+        try:
+            code, report = devenv_shell(args.probe, args.repo_root, devenv_bin=devenv_bin,
+                                        environ=os.environ, timeout=args.timeout_seconds)
+        except (FixtureError, GitError) as error:
+            print(f"verify-checks: fixture_error: {str(error).splitlines()[0]}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))
         return code

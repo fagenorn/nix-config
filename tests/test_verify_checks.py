@@ -8,6 +8,7 @@ import json
 import os
 import pwd
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -4056,3 +4057,340 @@ exit 0
 
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/owner-services"), "100755")
+
+
+FAKE_DEVENV = f"""#!{sys.executable}
+import json, os, subprocess, sys, time
+from pathlib import Path
+
+state = Path(os.environ["DEVENV_SHELL_FIXTURE"])
+with open(state / "devenv.jsonl", "a", encoding="utf-8") as log:
+    log.write(json.dumps({{
+        "argv": sys.argv[1:], "cwd": os.getcwd(), "pid": os.getpid(),
+        "home": os.environ.get("HOME"),
+        "git_config_global": os.environ.get("GIT_CONFIG_GLOBAL"),
+        "git_dir": os.environ.get("GIT_DIR"),
+        "git_index_file": os.environ.get("GIT_INDEX_FILE")}}) + "\\n")
+if sys.argv[1:3] != ["shell", "--"]:
+    sys.exit(64)
+(Path.cwd() / ".devenv").mkdir(exist_ok=True)
+(Path.cwd() / ".devenv" / "state").write_text("x", encoding="utf-8")
+if (state / "stray").exists():
+    (Path.cwd() / "stray.txt").write_text("x", encoding="utf-8")
+if (state / "fail").exists():
+    print("shell broke")
+    sys.exit(3)
+if (state / "nocommit").exists():
+    sys.exit(0)
+if (state / "sleep").exists():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    (state / "grandchild.pid").write_text(str(child.pid), encoding="utf-8")
+    time.sleep(60)
+env = dict(os.environ)
+if (state / "hooks").exists():
+    env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath",
+               GIT_CONFIG_VALUE_0="/dev/null")
+sys.exit(subprocess.run(sys.argv[3:], env=env).returncode)
+"""
+FAKE_KEYGEN = f"""#!{sys.executable}
+import sys
+
+if "-Y" in sys.argv and "sign" in sys.argv:
+    with open(sys.argv[-1] + ".sig", "w", encoding="utf-8") as sig:
+        sig.write("-----BEGIN SSH SIGNATURE-----\\nZmFrZQ==\\n-----END SSH SIGNATURE-----\\n")
+"""
+
+
+class DevenvShellWorld:
+    """A repository, a fake `devenv` and a fake ssh signer under one private environment."""
+
+    def __init__(self, test_case):
+        scratch = tempfile.TemporaryDirectory()
+        test_case.addCleanup(scratch.cleanup)
+        self.tmp = Path(scratch.name).resolve()
+        for name in ("bin", "state", "home"):
+            (self.tmp / name).mkdir()
+        self.state = self.tmp / "state"
+        for name, text in (("devenv", FAKE_DEVENV), ("fake-ssh-keygen", FAKE_KEYGEN)):
+            script = self.tmp / "bin" / name
+            script.write_text(text, encoding="utf-8")
+            script.chmod(0o755)
+        (self.tmp / "key").write_text("dummy", encoding="utf-8")
+        self.gitconfig = self.tmp / "gitconfig"
+        self.set_signing(True)
+        self.env = {
+            **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+            "HOME": str(self.tmp / "home"), "GIT_CONFIG_GLOBAL": str(self.gitconfig),
+            "GIT_CONFIG_NOSYSTEM": "1", "DEVENV_SHELL_FIXTURE": str(self.state),
+            "PATH": f"{self.tmp / 'bin'}:{os.environ['PATH']}",
+            "PYTHONPATH": str(ROOT / "python")}
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.repo)], env=self.env, check=True)
+        (self.repo / ".gitignore").write_text(".devenv/\n", encoding="utf-8")
+        self.git("add", ".gitignore")
+        self.git("commit", "-q", "-m", "base")
+        self.base = self.git("rev-parse", "HEAD").strip()
+
+    def set_signing(self, enabled):
+        self.gitconfig.write_text(
+            f"[user]\n\tname = Probe\n\temail = probe@example.invalid\n"
+            f"\tsigningkey = {self.tmp / 'key'}\n[gpg]\n\tformat = ssh\n"
+            f"[gpg \"ssh\"]\n\tprogram = {self.tmp / 'bin' / 'fake-ssh-keygen'}\n"
+            f"[commit]\n\tgpgsign = {'true' if enabled else 'false'}\n", encoding="utf-8")
+
+    def run(self, argv, env=None):
+        return subprocess.run(argv, cwd=ROOT, env=env or self.env, capture_output=True,
+                              text=True, timeout=60)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), *args], env=self.env,
+                              capture_output=True, text=True, check=True).stdout
+
+    def check(self, probe, *extra, env=None):
+        return self.run([str(ROOT / CHECKS / "devenv-shell"), "--probe", probe,
+                         "--repo-root", str(self.repo), *extra], env)
+
+    @staticmethod
+    def report(result):
+        return json.loads(result.stdout)
+
+    def calls(self):
+        log = self.state / "devenv.jsonl"
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def flag(self, name):
+        (self.state / name).write_text("", encoding="utf-8")
+
+    def worktrees(self):
+        return [line for line in self.git("worktree", "list", "--porcelain").splitlines()
+                if line.startswith("worktree ")]
+
+
+def process_is_gone(pid, seconds=5):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+class DevenvShellCheckTest(unittest.TestCase):
+    def setUp(self):
+        self.world = DevenvShellWorld(self)
+
+    def test_a_signed_commit_through_the_shell_is_met(self):
+        world = self.world
+        result = world.check("commit")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = world.report(result)
+        self.assertEqual(sorted(report), [
+            "elapsed_seconds", "exit", "hooks_path", "met", "new_commit", "output_tail",
+            "probe", "reason", "signed", "status"])
+        self.assertEqual(report["probe"], "commit")
+        self.assertEqual(report["exit"], 0)
+        self.assertIs(report["new_commit"], True)
+        self.assertIs(report["signed"], True)
+        self.assertEqual(report["status"], [])
+        self.assertEqual(report["hooks_path"], {"outside": None, "inside": None})
+        self.assertIsNone(report["reason"])
+        self.assertIs(report["met"], True)
+        self.assertIsInstance(report["elapsed_seconds"], float)
+        self.assertIsInstance(report["output_tail"], list)
+        calls = world.calls()
+        self.assertEqual([call["argv"] for call in calls], [
+            ["shell", "--", "git", "commit", "--allow-empty", "-m", "probe"],
+            ["shell", "--", "git", "config", "--get", "core.hooksPath"]])
+        self.assertEqual(calls[0]["cwd"], calls[1]["cwd"])
+        self.assertNotEqual(calls[0]["cwd"], str(world.repo))
+        for call in calls:
+            self.assertEqual(call["home"], world.env["HOME"])
+            self.assertEqual(call["git_config_global"], world.env["GIT_CONFIG_GLOBAL"])
+        self.assertEqual(len(world.worktrees()), 1)
+        self.assertEqual(world.git("rev-parse", "HEAD").strip(), world.base)
+        self.assertEqual(world.git("status", "--porcelain"), "")
+        self.assertFalse(Path(calls[0]["cwd"]).exists())
+
+    def test_an_unsigned_commit_through_the_shell_is_not_met(self):
+        self.world.set_signing(False)
+        result = self.world.check("commit")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = self.world.report(result)
+        self.assertIs(report["new_commit"], True)
+        self.assertIs(report["signed"], False)
+        self.assertEqual(report["reason"], "unsigned")
+        self.assertIs(report["met"], False)
+
+    def test_a_shell_that_makes_no_commit_is_not_met(self):
+        self.world.flag("nocommit")
+        result = self.world.check("commit")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = self.world.report(result)
+        self.assertEqual(report["exit"], 0)
+        self.assertIs(report["new_commit"], False)
+        self.assertIs(report["signed"], False)
+        self.assertEqual(report["reason"], "no_commit")
+
+    def test_a_failing_shell_is_not_met(self):
+        self.world.flag("fail")
+        result = self.world.check("commit")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = self.world.report(result)
+        self.assertEqual(report["exit"], 3)
+        self.assertEqual(report["reason"], "shell_failed")
+        self.assertIn("shell broke", report["output_tail"])
+        self.assertEqual(len(self.world.calls()), 1)
+
+    def test_a_signed_commit_that_leaves_a_file_behind_is_not_met(self):
+        world = self.world
+        world.flag("stray")
+        result = world.check("commit")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = world.report(result)
+        self.assertIs(report["new_commit"], True)
+        self.assertIs(report["signed"], True)
+        self.assertEqual(report["status"], ["?? stray.txt"])
+        self.assertEqual(report["reason"], "dirty")
+        self.assertIs(report["met"], False)
+        self.assertEqual(len(world.worktrees()), 1)
+        self.assertEqual(world.git("status", "--porcelain"), "")
+
+    def test_a_shell_that_overrides_the_hooks_path_is_not_met(self):
+        self.world.flag("hooks")
+        result = self.world.check("commit")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = self.world.report(result)
+        self.assertIs(report["signed"], True)
+        self.assertEqual(report["status"], [])
+        self.assertEqual(report["hooks_path"], {"outside": None, "inside": "/dev/null"})
+        self.assertEqual(report["reason"], "hooks_changed")
+
+    def test_an_inherited_repository_redirect_cannot_reach_the_callers_branch(self):
+        world = self.world
+        staged = world.git("ls-files", "-s")
+        redirect = {**world.env, "GIT_DIR": str(world.repo / ".git"),
+                    "GIT_WORK_TREE": str(world.repo),
+                    "GIT_INDEX_FILE": str(world.repo / ".git" / "index")}
+        result = world.check("commit", env=redirect)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for call in world.calls():
+            self.assertIsNone(call["git_dir"])
+            self.assertIsNone(call["git_index_file"])
+        self.assertEqual(world.git("rev-parse", "HEAD").strip(), world.base)
+        self.assertEqual(world.git("rev-list", "--count", "HEAD").strip(), "1")
+        self.assertEqual(world.git("ls-files", "-s"), staged)
+        self.assertEqual(world.git("status", "--porcelain"), "")
+        self.assertEqual(len(world.worktrees()), 1)
+
+    def test_a_shell_past_the_bound_is_not_met_and_its_processes_end(self):
+        world = self.world
+        world.flag("sleep")
+        started = time.monotonic()
+        result = world.check("commit", "--timeout-seconds", "1")
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = world.report(result)
+        self.assertIsNone(report["exit"])
+        self.assertEqual(report["reason"], "timeout")
+        grandchild = int((world.state / "grandchild.pid").read_text(encoding="utf-8"))
+        self.assertTrue(process_is_gone(grandchild))
+        self.assertTrue(process_is_gone(world.calls()[0]["pid"]))
+        self.assertEqual(len(world.worktrees()), 1)
+
+    def test_a_terminated_check_ends_its_shell_and_removes_its_worktree(self):
+        world = self.world
+        world.flag("sleep")
+        proc = subprocess.Popen(
+            [str(ROOT / CHECKS / "devenv-shell"), "--probe", "commit",
+             "--repo-root", str(world.repo)],
+            cwd=ROOT, env=world.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            pid_file = world.state / "grandchild.pid"
+            deadline = time.monotonic() + 20
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(pid_file.exists())
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=20)
+            self.assertEqual(proc.returncode, 128 + signal.SIGTERM)
+            self.assertTrue(process_is_gone(int(pid_file.read_text(encoding="utf-8"))))
+            self.assertTrue(process_is_gone(world.calls()[0]["pid"]))
+            self.assertEqual(len(world.worktrees()), 1)
+            self.assertFalse(Path(world.calls()[0]["cwd"]).exists())
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+
+    def test_a_timeout_past_the_bound_is_refused(self):
+        for value in ("301", "0"):
+            with self.subTest(value=value):
+                result = self.world.check("commit", "--timeout-seconds", value)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("--timeout-seconds", result.stderr)
+                self.assertEqual(self.world.calls(), [])
+                self.assertEqual(len(self.world.worktrees()), 1)
+
+    def test_no_devenv_on_path_is_not_met(self):
+        world = self.world
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("git is not installed")
+        system = world.tmp / "sys"
+        system.mkdir()
+        (system / "git").symlink_to(git)
+        (system / "python3").symlink_to(sys.executable)
+        result = world.check("commit", env={**world.env, "PATH": str(system)})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = world.report(result)
+        self.assertEqual(report["reason"], "devenv_missing")
+        self.assertIsNone(report["exit"])
+        self.assertIs(report["met"], False)
+        self.assertEqual(world.calls(), [])
+        self.assertEqual(len(world.worktrees()), 1)
+
+    def test_a_shell_that_leaves_the_checkout_clean_is_met(self):
+        world = self.world
+        result = world.check("clean")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = world.report(result)
+        self.assertEqual(report["probe"], "clean")
+        self.assertEqual(report["exit"], 0)
+        self.assertEqual(report["status"], [])
+        self.assertIsNone(report["reason"])
+        self.assertIs(report["met"], True)
+        self.assertEqual(sorted(report), [
+            "elapsed_seconds", "exit", "met", "output_tail", "probe", "reason", "status"])
+        self.assertEqual([call["argv"] for call in world.calls()], [["shell", "--", "true"]])
+
+    def test_a_shell_that_dirties_the_checkout_is_not_met(self):
+        world = self.world
+        world.flag("stray")
+        result = world.check("clean")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = world.report(result)
+        self.assertEqual(report["status"], ["?? stray.txt"])
+        self.assertEqual(report["reason"], "dirty")
+        self.assertEqual(len(world.worktrees()), 1)
+        self.assertEqual(world.git("status", "--porcelain"), "")
+
+    def test_an_unrelated_worktree_registration_survives(self):
+        world = self.world
+        other = world.tmp / "other"
+        world.git("worktree", "add", "--detach", str(other))
+        shutil.rmtree(other)
+        result = world.check("clean")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"worktree {other}", world.worktrees())
+
+    def test_the_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/devenv-shell"), "100755")
+        result = self.world.run([str(ROOT / CHECKS / "devenv-shell")])
+        self.assertEqual(result.returncode, 2)
