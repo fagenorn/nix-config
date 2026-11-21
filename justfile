@@ -208,6 +208,7 @@ agent-workflow-tests *args:
     tests/test_console_release_card.py \
     tests/test_console_release_card_service.py \
     tests/test_console_prompt_card.py \
+    tests/test_console_prompt_card_service.py \
     tests/test_console_view.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
