@@ -2117,7 +2117,8 @@ if (finalFindings.length) {
   const rereviewed = async (rv, wave) => {
     const reports = rv.findings.filter(isEntry)
     // Each wave finding is stood for by at most one report, and each report stands for at most one: an exact repeat first, then, for a finding left without one,
-    // a report in its file (marked narrowing first), whatever its relation, since a reviewer may reword a finding it still holds.
+    // a report in its file (marked narrowing first), whatever its relation, since a reviewer may reword a finding it still holds. A minor report that names no
+    // criterion and is not marked narrowing is a note of its own, not a rewording of a blocker: it never stands for one, and triage files it.
     const stands = new Map()
     const open = []
     wave.forEach((w, i) => {
@@ -2128,7 +2129,7 @@ if (finalFindings.length) {
     for (const i of open) {
       const w = wave[i]
       if (!fileOf(w)) continue
-      const same = reports.map((f, at) => at).filter(at => !stands.has(at) && fileOf(reports[at]) === fileOf(w))
+      const same = reports.map((f, at) => at).filter(at => !stands.has(at) && fileOf(reports[at]) === fileOf(w) && (reports[at].severity !== 'minor' || namesAc(reports[at]) || reports[at].relation === 'narrowing'))
       const j = same.find(at => reports[at].relation === 'narrowing')
       if (j !== undefined || same.length) stands.set(j !== undefined ? j : same[0], w)
     }

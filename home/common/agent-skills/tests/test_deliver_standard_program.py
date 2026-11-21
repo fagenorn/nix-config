@@ -6810,6 +6810,17 @@ class ScopedRoundFollowUpTest(unittest.TestCase):
         self.assertEqual(result["stage"], "verify")
         self.assertEqual(filings(calls), [])
 
+    def test_an_unrelated_minor_report_in_a_critical_findings_file_is_filed_not_upgraded(self):
+        """A fix wave resolves a critical finding; the re-review adds a minor note of its own in the same file: it is filed, never carried as the critical one."""
+        for name, wave in (("critical", self.SECURITY), ("unmet criterion", self.unmet("important"))):
+            with self.subTest(name):
+                note = {"severity": "minor", "file": wave["file"], "summary": "a docstring typo in an unrelated helper", "relation": "new", "commit": H}
+                result, calls = scoped_resume(scoped_first_stop(), replies={
+                    "final-scoped": self.scoped(wave), "fix-wave-review": {"verdict": "findings", "findings": [note]}, "verify": None})
+                self.assertEqual(result["stage"], "verify")
+                self.assertEqual(filings(calls), ["follow-ups-1"])
+                self.assertEqual([e["title"].endswith(note["summary"]) for e in items(calls, "follow-ups-1")], [True])
+
     def test_the_independent_codex_review_reports_an_unmet_criterion_at_any_severity(self):
         item = schema_of(run(args=SIZED, replies=dict(sized(1501), verify=None))[1], "final-codex")["properties"]["findings"]["items"]
         self.assertEqual(item["properties"]["ac"], {"type": "string"})
