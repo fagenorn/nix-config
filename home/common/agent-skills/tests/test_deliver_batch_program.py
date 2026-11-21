@@ -431,6 +431,66 @@ class IntakeLaneTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "closed")
 
 
+LIVE_ROW = "a declared live fault is delivered alone: run deliver-standard for it with lane live"
+LIVE_UNREAD = "its live-fault declaration could not be read"
+
+
+class LiveFaultIntakeTest(unittest.TestCase):
+    """#1433: a declared or unreadable live fault is left out of the batch and delivered alone with lane live."""
+
+    def assertLeftOut(self, result, calls, n=1):
+        self.assertEqual(row(result, n)["outcome"], "live-fault")
+        self.assertNotIn(f"acquire-{n}", labels(calls))
+        self.assertNotIn(f"child-{n}", labels(calls))
+        self.assertNotIn(n, (result["relaunch"] or {}).get("issues", []))
+
+    def test_a_declared_live_fault_is_left_out_of_the_batch(self):
+        result, calls, _ = run(patch={"facts-1": {"live_fault": {"verdict": "declared"}}})
+        self.assertEqual(row(result, 1)["reason"], LIVE_ROW)
+        self.assertLeftOut(result, calls)
+
+    def test_an_unreadable_declaration_leaves_the_issue_out(self):
+        for fault in ({"verdict": "error", "detail": "console down\nagain"}, None, "yes"):
+            with self.subTest(fault=fault):
+                result, calls, _ = run(patch={"facts-1": {"live_fault": fault}})
+                self.assertTrue(row(result, 1)["reason"].startswith(LIVE_UNREAD), row(result, 1))
+                self.assertLeftOut(result, calls)
+        result, _, _ = run(patch={"facts-1": {"live_fault": {"verdict": "error", "detail": "console down\nagain"}}})
+        self.assertEqual(row(result, 1)["reason"], f"{LIVE_UNREAD} (console down again): deliver it alone once the declaration reads")
+
+    def test_no_sprint_or_no_declaration_delivers_as_before(self):
+        for verdict in ("none", "no-sprint"):
+            with self.subTest(verdict=verdict):
+                result, calls, _ = run(patch={"facts-1": {"live_fault": {"verdict": verdict}}})
+                self.assertIn("child-1", labels(calls))
+                first = next(c for c in calls if c["label"] == "child-1")
+                self.assertEqual(first["args"]["lane"], "standard")
+                self.assertNotEqual(row(result, 1)["outcome"], "live-fault")
+
+    def test_the_facts_step_reads_the_declaration(self):
+        _, calls, _ = run()
+        text = prompt(calls, "facts-1")
+        self.assertIn("sprint recap", text)
+        self.assertIn("sprint: no sprint id", text)
+        facts = next(c for c in calls if c["label"] == "facts-1")
+        self.assertEqual(facts["schema"]["properties"]["live_fault"]["properties"]["verdict"]["enum"],
+                         ["declared", "none", "no-sprint", "error"])
+        self.assertNotIn("live_fault", facts["schema"]["required"])
+
+    def test_a_declared_issue_with_a_cont_keeps_its_lane(self):
+        facts = {"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}, "live_fault": {"verdict": "declared"}}}
+        result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts)
+        self.assertIn("acquire-1", labels(calls))
+        self.assertNotEqual(row(result, 1)["outcome"], "live-fault")
+
+    def test_only_the_declared_issue_of_a_batch_is_left_out(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-2": {"live_fault": {"verdict": "declared"}}})
+        self.assertIn("child-1", labels(calls))
+        self.assertNotEqual(row(result, 1)["outcome"], "live-fault")
+        self.assertLeftOut(result, calls, 2)
+        self.assertEqual(row(result, 2)["reason"], LIVE_ROW)
+
+
 class AlreadyFixedTest(unittest.TestCase):
     def test_already_fixed_symptom_skips_lane_claim_and_child(self):
         result, calls, _ = run(patch={"facts-1": {"already_fixed": FIXED}})

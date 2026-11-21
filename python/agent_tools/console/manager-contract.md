@@ -128,6 +128,7 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
 3. The owner's page shows each declaration on the sprint's line with its evidence, and the owner may withdraw it there. `sprint recap` lists the declarations still standing under `live_faults`; an issue no longer listed there is not a live fault.
 4. Once a live fault is declared, scope changes go to the follow-up issue, never into the fix: the fix stops the harm and nothing more, and anything else a message or a delivery brings up (a schema, a query, a decision record, follow-through) is cut as a follow-up issue with the `to-issues` skill, never added to the fix's issue or to the brief.
 5. Mark each claim of a declared issue `"live_fault": true`, as Notices says.
+6. Deliver a declared issue alone with the deliver-standard skill and `lane: live`. A deliver-batch run leaves it out with a row saying so. When that delivery refuses its diff, stops on a critical finding or stops at `live-bound`, its reason names the way on: follow it.
 
 ## Notices
 
