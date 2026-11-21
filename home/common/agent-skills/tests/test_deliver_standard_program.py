@@ -197,6 +197,14 @@ def schema_of(calls, label):
     return found[-1]
 
 
+def checks_of(calls):
+    """The checks the hold prompt tells the clerk to post: the JSON of its `Checks: ` line."""
+    for line in prompt(calls, "hold").splitlines():
+        if line.startswith("Checks: "):
+            return json.loads(line[len("Checks: "):])
+    raise AssertionError("no Checks payload")
+
+
 def object_branch(schema):
     """A nested schema, read through the object branch of a nullable anyOf."""
     if "anyOf" in schema:
@@ -530,7 +538,7 @@ class HappyPathTest(unittest.TestCase):
                                                             "close-out": {"issue_state": "OPEN"}})
         self.assertEqual(result["stage"], "done")
         self.assertIn("Refs #9", prompt(calls, "pr"))
-        self.assertEqual(labels(calls)[-3:], ["merge", "hold", "close-out"])
+        self.assertEqual(labels(calls)[-4:], ["merge", "hold-draft", "hold", "close-out"])
         close = prompt(calls, "close-out")
         self.assertNotIn("gh issue close", close)
         self.assertNotIn("needs-verification", close)
@@ -5718,7 +5726,7 @@ class HoldTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee"),
                                                                "close-out": {"issue_state": "OPEN"}})
         self.assertEqual(result["stage"], "done")
-        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+        self.assertEqual(labels(calls), ["setup", "hold-draft", "hold", "close-out"])
         hold = prompt(calls, "hold")
         self.assertIn("gh pr view 42 --repo owner/repo --json mergeCommit,headRefOid", hold)
         self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
@@ -5738,6 +5746,87 @@ class HoldTest(unittest.TestCase):
         result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
                         patch={"setup": merged(42, "c0ffee")})
         self.assertEqual(result["stage"], "hold")
+
+    ASKED = dict(HUMAN["verify"], ac="AC2")
+
+    def test_a_posted_human_check_for_an_evidence_criterion_is_refused_before_the_once_run(self):
+        for issue in (9, 51):
+            with self.subTest(issue=issue):
+                posted = [{"issue": issue, "merge": self.MERGE, "checks": [self.ASKED]}]
+                result, calls = self.ship(EVIDENCE, **{"hold-draft": {"posted": posted}})
+                self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]),
+                                 ("hold", ["AC2"], [issue]))
+                self.assertIn(f"#{issue}", result["details"])
+                self.assertNotIn("hold", labels(calls))
+                self.assertNotIn("close-out", labels(calls))
+
+    def test_a_check_that_asks_the_owner_for_an_evidence_criterion_is_never_drafted_for_the_hold(self):
+        code = {"id": "AC1", "text": "works", "kind": "code"}
+        cases = (
+            (criterion(EVIDENCE, verify_kind="human", verify_run=HUMAN["verify"]["run"], verify_reason="hands"), {}),
+            (criterion(EVIDENCE, verify_run=HUMAN["verify"]["run"]), {}),
+            (criterion(EVIDENCE, verify=None), {"hold-draft": {"written": [self.ASKED]}}),
+        )
+        for n, (bad, extra) in enumerate(cases):
+            with self.subTest(case=n):
+                result, calls = run(args=DIRECT, patch=dict({"direct-impl": {"acceptance": [code, bad]}}, **extra))
+                self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]),
+                                 ("hold", ["AC2"], []))
+                self.assertIn("hold-draft", labels(calls))
+                self.assertNotIn("hold", labels(calls))
+        bad = criterion(EVIDENCE, verify=None)
+        result, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": [code, bad]}, "hold-draft": {"written": []}})
+        self.assertEqual((result["stage"], result["missing_checks"]), ("hold", ["AC2"]))
+        self.assertNotIn("hold", labels(calls))
+
+    def test_a_hold_draft_that_cannot_be_read_holds_nothing(self):
+        for patch in ({"complete": False}, {"posted": [{"issue": "9", "checks": []}]}, {"written": None}):
+            with self.subTest(patch=patch):
+                result, calls = self.ship(EVIDENCE, **{"hold-draft": patch})
+                self.assertEqual(result["stage"], "hold")
+                self.assertIn("draft", result)
+                self.assertNotIn("hold", labels(calls))
+        result, calls = self.ship(close="CLOSED")
+        self.assertNotIn("hold-draft", labels(calls))
+        self.assertEqual(result["stage"], "done")
+
+    def test_a_hold_that_makes_an_evidence_or_code_criterion_a_human_check_is_refused(self):
+        asked = self.ASKED
+        cases = (
+            ((EVIDENCE,), [asked], ["AC2"]),
+            ((EVIDENCE,), [EVIDENCE["verify"], dict(HUMAN["verify"], ac="AC1")], ["AC1"]),
+            ((EVIDENCE,), [dict(HUMAN["verify"], ac="ac2")], ["AC2"]),
+            ((EVIDENCE, HUMAN), [dict(HUMAN["verify"], ac="ac2"), dict(HUMAN["verify"], ac="ac3")], ["AC2"]),
+        )
+        for criteria, checks, expected in cases:
+            with self.subTest(checks=checks):
+                result, calls = self.ship(*criteria, hold={"block": {"v": 1, "merge": self.MERGE, "checks": checks}})
+                self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]),
+                                 ("hold", expected, [9]))
+                self.assertIn("#9", result["details"])
+                self.assertNotIn("close-out", labels(calls))
+        result, _ = self.ship(EVIDENCE, hold={"code_unmet": ["AC1"],
+                                              "block": {"v": 1, "merge": self.MERGE, "checks": [asked]}})
+        self.assertEqual(result["stage"], "code-unmet")
+
+    def test_a_split_child_that_makes_an_evidence_criterion_a_human_check_is_refused(self):
+        child = dict(self.CHILD, ac="AC2", issue=51, block={"v": 1, "merge": self.MERGE, "checks": [self.ASKED]})
+        result, calls = self.ship(HUMAN, EVIDENCE, hold={"blocks": [12], "split": [self.CHILD, child],
+                                                         "issue_state": "CLOSED", "block": None, "lint": None,
+                                                         "verify_run": None}, close="CLOSED")
+        self.assertEqual((result["stage"], result["human_checks"], result["posted_holds"]), ("hold", ["AC2"], [51]))
+        self.assertIn("#51", result["details"])
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_a_human_criterion_is_still_held_as_a_human_check(self):
+        result, calls = self.ship(EVIDENCE, HUMAN)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("human_checks", result)
+        checks = checks_of(calls)
+        self.assertEqual([c for c in checks if c["ac"] == "AC3"], [HUMAN["verify"]])
+        scripted = json.loads(json.dumps(criterion(EVIDENCE)["verify"]).replace(SHA, self.MERGE))
+        self.assertIn(scripted, checks)
+        self.assertEqual(prompt(calls, "hold").count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
 
 
 class NoteCloseOutTest(unittest.TestCase):
@@ -8721,7 +8810,7 @@ EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
-             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
+             "hold-draft", "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
              "look-checks-", "look-reverify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
@@ -8758,6 +8847,8 @@ SCENARIOS = (
     {"args": dict(ARGS, review_sizing=True), "replies": {"plan": dict(PLAN, tasks=tasks(4))}},
     {"replies": {"verify": VERIFY_RED}},
     {"replies": {"verify": VerifyRerunTest.OUTSIDE}},
+    # #1281: a plan with an evidence criterion drafts the hold before it posts.
+    {"replies": {"plan": with_criteria(EVIDENCE)}, "patch": {"close-out": {"issue_state": "OPEN"}}},
     {"patch": {"hold": {"release": None}}},
     {"replies": {"checks-2": {"state": "passed", "passed": ["ci"], "head": FIX, "required": ["ci-tests"]}},
      "patch": {"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}}},

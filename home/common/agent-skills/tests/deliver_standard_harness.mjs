@@ -37,10 +37,17 @@ const PLAN = {
   acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }],
   tasks: [{ n: 1, title: 'one', file: 'task-1.md', risk: 'security' }],
 }
-// A hold reply covers every non-code criterion the prompt lists, as a real hold block does.
+// A hold reply posts the checks the prompt gives it (its Checks line, #1281), as a real hold does; a prompt without one gets a check for every non-code criterion it lists.
 const openChecks = prompt => {
+  const given = /^Checks: (\[.*\])$/m.exec(prompt)
+  if (given) return JSON.parse(given[1])
   const m = /Criteria: (\[.*\])/.exec(prompt)
   return (m ? JSON.parse(m[1]) : []).filter(a => a.kind !== 'code').map(a => ({ ac: a.id, kind: a.kind }))
+}
+// #1281: the draft writes a check for each criterion the prompt lists without a verify member.
+const unverified = prompt => {
+  const m = /Criteria without a verify member: (\[.*\])/.exec(prompt)
+  return (m ? JSON.parse(m[1]) : []).map(a => ({ ac: a.id, kind: a.kind }))
 }
 // Ordered: the first matching pattern wins.
 const DEFAULTS = [
@@ -102,6 +109,7 @@ const DEFAULTS = [
   [/^pr$/, { pr: 42, head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: SHA, required: ['ci'], passed: ['ci'] } }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'], passed: ['ci'], renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
+  [/^hold-draft$/, prompt => ({ complete: true, merge: SHA, posted: [], written: unverified(prompt) })],
   [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held', release: { verdict: 'released' } })],
   // #1186: an approved marked delivery's close-out call also carries the look tick, which answers ticked.
   [/^close-out$/, prompt => ({ issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok', ...(prompt.includes('look-approval tick') ? { look_tick: { verdict: 'ticked', ticked: 1 } } : {}) })],
