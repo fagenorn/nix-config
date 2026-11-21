@@ -848,6 +848,20 @@ const deleteOpen = new Set();
 const deletePosts = new Map();
 // The console's refusal of a credential-shaped question, compared whole with the refusal text; the page judges no shape.
 const CREDENTIAL_REFUSAL = "this looks like a password, token or key, so it was not kept or sent: take it out and ask again";
+// While the stream's first frame after a break is drawn, an accepted question that frame does not carry was deleted meanwhile.
+let settleBroken = false;
+// A credential refusal drops the refused paste from its draft: a draft that still is the paste goes, one the owner added to keeps what is not the paste, one the owner replaced stays.
+function dropRefusedPaste(drafts, key, text) {
+  const typed = drafts.get(key);
+  if (typed === undefined || !typed.value.includes(text)) return;
+  const rest = typed.value.replace(text, "").trim();
+  if (!/[\p{L}\p{N}]/u.test(rest)) drafts.delete(key);
+  else drafts.set(key, { value: rest, start: rest.length, end: rest.length });
+}
+// Drops the accepted submissions flagged when the stream broke that the frame just drawn still does not carry.
+function dropBroken(sent) {
+  sent.list = sent.list.filter((submission) => submission.broke !== true);
+}
 let reading = null;
 let readingReveal = null;
 let sprintRedraw = 0;
@@ -2395,8 +2409,7 @@ async function postAsk(projectId, entry) {
     askReconcile(projectId, askLatest.get(projectId));
   } else {
     if (reason === CREDENTIAL_REFUSAL) {
-      const typed = askDrafts.get(projectId);
-      if (typed !== undefined && typed.value === text) askDrafts.delete(projectId);
+      dropRefusedPaste(askDrafts, projectId, text);
       state.text = "";
     }
     state.phase = "failed";
@@ -2671,6 +2684,10 @@ async function postFollowUp(projectId, thread, chosen) {
     followSent.get(key).list.push({ text, at: state.at, phase: "sent" });
     followReconcile(key, followLatest.get(key));
   } else {
+    if (reason === CREDENTIAL_REFUSAL) {
+      if (!choice) dropRefusedPaste(followDrafts, key, text);
+      state.text = "";
+    }
     state.phase = "failed";
     state.reason = reason;
   }
@@ -5342,8 +5359,10 @@ function drawProjects(view) {
     if (!asked.has(id)) askPosts.delete(id);
   }
   for (const id of [...askSent.keys()]) {
-    if (asked.has(id)) askReconcile(id, askLatest.get(id));
-    else askSent.delete(id);
+    if (asked.has(id)) {
+      askReconcile(id, askLatest.get(id));
+      if (settleBroken) dropBroken(askSent.get(id));
+    } else askSent.delete(id);
   }
   for (const id of [...askLatest.keys()]) {
     if (!asked.has(id)) askLatest.delete(id);
@@ -5364,8 +5383,10 @@ function drawProjects(view) {
     if (!followLatest.has(key)) deletePosts.delete(key);
   }
   for (const key of [...followSent.keys()]) {
-    if (followLatest.has(key)) followReconcile(key, followLatest.get(key));
-    else followSent.delete(key);
+    if (followLatest.has(key)) {
+      followReconcile(key, followLatest.get(key));
+      if (settleBroken) dropBroken(followSent.get(key));
+    } else followSent.delete(key);
   }
   renderReading(view);
   if (view.project_count === 0) {
@@ -6827,9 +6848,22 @@ document.addEventListener("keydown", (event) => {
 });
 const conn = document.getElementById("conn");
 const source = new EventSource("/api/stream");
-source.addEventListener("view", (event) => render(JSON.parse(event.data)));
+source.addEventListener("view", (event) => {
+  settleBroken = true;
+  try {
+    render(JSON.parse(event.data));
+  } finally {
+    settleBroken = false;
+  }
+});
 source.onopen = () => { conn.textContent = ""; };
-source.onerror = () => { conn.textContent = "Reconnecting…"; };
+source.onerror = () => {
+  conn.textContent = "Reconnecting…";
+  // What was accepted before the break is in the log the next frame reads: a row it lacks was deleted in another tab.
+  for (const sent of [...askSent.values(), ...followSent.values()]) {
+    for (const submission of sent.list) submission.broke = true;
+  }
+};
 </script>
 </body>
 </html>

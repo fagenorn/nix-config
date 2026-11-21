@@ -180,7 +180,10 @@ class PageTest(unittest.TestCase):
         # #1338 the page is 68280 bytes against the 66560 the cap before it held.
         # Raised from 68 KB by #1345: the guest pool's Sign out and Remove controls, their confirmation and their
         # redraws (about 0.9 KB compressed) did not fit the 281 bytes the cap had left.
-        self.assertLess(len(gzip.compress(self.data, 9)), 71680)
+        # Raised from 70 KB by #1272: the thread delete control, the credential refusal's draft cleanup in both
+        # editors and the settling of accepted questions after a stream break (about 1 KB compressed) did not fit
+        # the 100 bytes the cap had left.
+        self.assertLess(len(gzip.compress(self.data, 9)), 72704)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -1611,7 +1614,7 @@ class PageAskTest(unittest.TestCase):
                 [p["url"] for p in snap["posts"] if p["url"] == "/api/project-question"],
                 ["/api/project-question"])
 
-    def test_an_edit_made_while_a_credential_refusal_was_pending_is_kept(self) -> None:
+    def test_a_credential_refusal_drops_the_paste_from_a_draft_that_only_gained_punctuation(self) -> None:
         paste = "my key is " + "h" + "f_" + "abcd12" * 5
         (snap,) = render([
             self.begin, {"frame": view([asking(project(0, []))])}, {"click": "ask-open"},
@@ -1619,8 +1622,23 @@ class PageAskTest(unittest.TestCase):
             {"append": {"class": "ask-text", "text": " ?"}},
             {"release": {"status": 409, "text": project_question.CREDENTIAL + "\n"}},
             {"snapshot": True}])
-        self.assertEqual(self.found(snap, "ask-text")[0]["value"], paste + " ?")
+        self.assertEqual(self.found(snap, "ask-text")[0]["value"], "")
         self.assertEqual(full(self.found(snap, "ask-reason")[0]), project_question.CREDENTIAL)
+
+    def test_a_credential_refusal_keeps_what_the_owner_wrote_besides_the_paste_or_instead_of_it(self) -> None:
+        paste = "my key is " + "h" + "f_" + "abcd12" * 5
+        added, replaced = render([
+            self.begin, {"frame": view([asking(project(0, []))])}, {"click": "ask-open"},
+            {"type": {"class": "ask-text", "text": paste}}, {"hold": True}, {"click": "ask-send"},
+            {"append": {"class": "ask-text", "text": " and why is the build slow?"}},
+            {"release": {"status": 409, "text": project_question.CREDENTIAL + "\n"}},
+            {"snapshot": True},
+            {"type": {"class": "ask-text", "text": paste}}, {"hold": True}, {"click": "ask-send"},
+            {"type": {"class": "ask-text", "text": "what is live?"}},
+            {"release": {"status": 409, "text": project_question.CREDENTIAL + "\n"}},
+            {"snapshot": True}])
+        self.assertEqual(self.found(added, "ask-text")[0]["value"], "and why is the build slow?")
+        self.assertEqual(self.found(replaced, "ask-text")[0]["value"], "what is live?")
 
     def test_a_typed_question_its_selection_and_focus_survive_a_streamed_frame(self) -> None:
         (snap,) = render([
@@ -1697,6 +1715,31 @@ class PageAskTest(unittest.TestCase):
         self.assertIs(streamed["reading"]["hidden"], False)
         (fold,) = [n for n in nodes(answered["projects"]) if n["key"] == "questions:owner/p00"]
         self.assertFalse(fold["open"])
+
+    def test_a_question_accepted_before_a_stream_break_and_deleted_elsewhere_stops_working(self) -> None:
+        empty = {"frame": view([asking(project(0, []))])}
+        working, gone = render([
+            *self.sent({"click": "ask-send"}, empty, {"snapshot": True},
+                       {"stream_break": True}, {"stream_open": True}, empty, {"snapshot": True})])
+        self.assertEqual([full(r["children"][1]) for r in self.found(working, "ask")], ["Working on it"])
+        self.assertEqual(self.found(gone, "ask"), [])
+        self.assertNotIn(self.question, json.dumps(gone["projects"]))
+
+    def test_a_question_accepted_before_a_stream_break_and_carried_after_it_shows_once(self) -> None:
+        row = ask(id="q1")
+        (snap,) = render([
+            *self.sent({"click": "ask-send"}, {"stream_break": True}, {"stream_open": True},
+                       {"frame": view([asking(project(0, []), thread(row))])}, {"snapshot": True})])
+        self.assertEqual(self.found(snap, "ask"), [])
+        self.assertEqual(len(self.read(snap, "ask")), 1)
+
+    def test_a_question_accepted_after_a_stream_break_keeps_working_until_its_row_comes(self) -> None:
+        (snap,) = render([
+            self.begin, {"frame": view([asking(project(0, []))])}, {"stream_break": True},
+            {"click": "ask-open"}, {"type": {"class": "ask-text", "text": self.question}},
+            {"click": "ask-send"}, {"stream_open": True}, {"frame": view([asking(project(0, []))])},
+            {"snapshot": True}])
+        self.assertEqual([full(r["children"][1]) for r in self.found(snap, "ask")], ["Working on it"])
 
     def test_a_second_question_sent_before_the_first_is_shown_keeps_its_working_row(self) -> None:
         second = "which credentials are required?"
@@ -2209,6 +2252,40 @@ class PageFollowUpTest(unittest.TestCase):
         self.assertEqual(json.loads(post["body"]),
                          {"project_id": "owner/p00", "question": text, "thread_id": "q4"})
         self.assertIn("X-Console-Token", post["headers"])
+
+    def test_a_credential_refusal_of_a_follow_up_clears_the_paste_and_survives_a_redraw(self) -> None:
+        paste = "the key is " + "h" + "f_" + "abcd12" * 5
+        refuse = {"respond": {"status": 409, "text": project_question.CREDENTIAL + "\n"}}
+        frame = {"frame": view([asking(project(0, []), thread(ASK_ANSWERED))])}
+        refused, redrawn, replaced = render([
+            *self.opened(), {"click": "follow-open"}, {"type": {"class": "follow-text", "text": paste}},
+            refuse, {"click": "follow-send"}, {"snapshot": True}, frame, {"snapshot": True},
+            {"type": {"class": "follow-text", "text": paste}}, {"hold": True}, {"click": "follow-send"},
+            {"type": {"class": "follow-text", "text": "and darwin?"}},
+            {"release": {"status": 409, "text": project_question.CREDENTIAL + "\n"}},
+            {"snapshot": True}])
+        for snap in (refused, redrawn):
+            self.assertEqual(self.found(snap["reading"], "follow-text")[0]["value"], "")
+            self.assertEqual(full(self.found(snap["reading"], "follow-reason")[0]), project_question.CREDENTIAL)
+            self.assertNotIn("abcd12", json.dumps(snap["reading"]))
+        self.assertEqual(self.found(replaced["reading"], "follow-text")[0]["value"], "and darwin?")
+
+    def test_a_follow_up_accepted_before_a_stream_break_and_deleted_elsewhere_stops_working(self) -> None:
+        text = "and darwin?"
+        same = {"frame": view([asking(project(0, []), thread(ASK_ANSWERED))])}
+        carried = {"frame": view([asking(project(0, []), thread(ASK_ANSWERED, ask(id="q8", question=text)))])}
+        working, gone, later, shown = render([
+            *self.opened(), {"click": "follow-open"}, {"type": {"class": "follow-text", "text": text}},
+            {"click": "follow-send"}, same, {"snapshot": True},
+            {"stream_break": True}, {"stream_open": True}, same, {"snapshot": True},
+            {"click": "follow-open"}, {"type": {"class": "follow-text", "text": "and linux?"}},
+            {"click": "follow-send"}, {"stream_break": True}, {"stream_open": True}, carried,
+            {"snapshot": True}, {"snapshot": True}])
+        self.assertEqual(full(self.found(working["reading"], "ask")[-1]["children"][1]), "Working on it")
+        self.assertEqual(len(self.found(gone["reading"], "ask")), 1)
+        self.assertNotIn(text, json.dumps(gone["reading"]))
+        self.assertEqual(
+            [full(r["children"][0]).startswith(text) for r in self.found(shown["reading"], "ask")], [False, True])
 
     def test_text_typed_while_a_follow_up_is_sending_is_kept_as_the_new_draft(self) -> None:
         (sent,) = render([

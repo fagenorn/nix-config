@@ -60,12 +60,13 @@ fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 (`parse_keyed_request` also reads an optional `request_key`, ADR-console-089 D9).
 A credential-shaped text (#1272) is refused first, with `CREDENTIAL`, before it is stored or sent:
 `credential_shaped(text)` is true when any pattern of `CREDENTIAL_SHAPES` (known token prefixes,
-key blocks, a `Bearer` value, a JWT, a `TOKEN`/`SECRET`/`PASSWORD`-style assignment with a real
-value, the console's own page token, and a long base64 run that is not an SRI hash or a path)
+key blocks, a `Bearer` value, a JWT, a `token`/`secret`/`password`-style assignment in any case,
+quoted or not, with a real value, the console's own page token, and a long base64 run that is not
+an SRI hash or a path, a path being slash-separated words each holding three lowercase letters in a row)
 searches it. The refusal text never holds any of the question's text.
 Limits (#1272): the shapes judge text as a paste gives it. A credential split by spaces or invisible
 characters, encoded (URL encoding, hex, or base64 of a token), a password shorter than eight characters
-or written with no `TOKEN`, `SECRET`, `PASSWORD`-style name before it, or a console token with fewer
+or written with no `token`, `secret`, `password`-style name before it, or a console token with fewer
 than two capital or two small letters (about one generated token in 10^8) is not caught.
 
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
@@ -313,14 +314,16 @@ CREDENTIAL_SHAPES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
         ("gitlab", r"\bglpat-[A-Za-z0-9_-]{20,}"),
         ("jwt", r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
         ("assignment",
-         r"\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|ACCESS_KEY)\s*[=:]\s*[\"']?"
-         r"(?![$<{])(?=[^\s\"']*[0-9])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"),
+         r"\b[A-Za-z0-9_.-]*(?i:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)(?:"
+         r"[\"']?\s*=\s*[\"']?(?![$<{])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
+         r"|[\"']\s*:\s*[\"']?(?![$<{])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
+         r"|\s*:\s*[\"']?(?![$<{])(?=[^\s\"']*[0-9])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,})"),
         ("console_token",
          r"(?<![A-Za-z0-9_-])(?=(?:[A-Za-z0-9_-]*?[A-Z]){2})(?=(?:[A-Za-z0-9_-]*?[a-z]){2})"
          r"[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
         ("base64_run",
          r"(?<![A-Za-z0-9+/=])(?<!sha1-)(?<!sha256-)(?<!sha384-)(?<!sha512-)"
-         r"(?!(?:[A-Za-z0-9+=]*/){3})(?=(?:[A-Za-z0-9+/]*?[A-Z]){2})(?=(?:[A-Za-z0-9+/]*?[a-z]){2})"
+         r"(?!(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*/)+[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*(?![A-Za-z0-9+/=]))(?=(?:[A-Za-z0-9+/]*?[A-Z]){2})(?=(?:[A-Za-z0-9+/]*?[a-z]){2})"
          r"(?=(?:[A-Za-z0-9+/]*?[0-9]){2})[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])"),
     ))
 

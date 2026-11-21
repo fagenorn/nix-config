@@ -5,6 +5,7 @@
 // {focused, clock}, then clock, focus, blur, hide, pagehide. The owner's
 // answer adds {key, ctrlKey?, altKey?, metaKey?, target?} (a keydown on the
 // document; target is the tag name of the focused element, default none),
+// {stream_break: true} and {stream_open: true} call the stream's onerror and onopen,
 // follow: true (the target is the focused element, else a BODY as a browser reports),
 // {click: "<class>"} (the click listeners of the first attached element with
 // that class; none throws), {respond: {status, text}} (queues the answer of
@@ -516,6 +517,10 @@ async function run() {
       if (!fold) throw new Error("no details with key " + step.close);
       fold.open = false;
       for (const fn of fold.listeners.toggle || []) fn({ type: "toggle", target: fold });
+    } else if ("stream_break" in step) {
+      sources[0].onerror();
+    } else if ("stream_open" in step) {
+      sources[0].onopen();
     } else if ("clock" in step) {
       state.clock = step.clock;
       runDueTimers();

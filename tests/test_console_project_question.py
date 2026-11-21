@@ -2011,6 +2011,22 @@ class QuestionActivityTest(unittest.TestCase):
         order = [e["project_id"] for e in _project_entries(view.derive_view(after.values()))]
         self.assertEqual(order, [self.NEW, self.OLD])
 
+    def test_deleting_a_question_thread_neither_reorders_projects_nor_resets_their_untouched_age(self):
+        events = [
+            _registered(1, self.OLD),
+            _registered(2, self.NEW),
+            _asked(3, self.OLD, "q1"),
+        ]
+        before = view.project_states(events)
+        deletion = [_row(4, event_log.PROJECT_QUESTION_DELETED, self.OLD,
+                         {"question_ids": ["q1"], "thread_id": "q1"})]
+        after = view.project_states(deletion, before)
+        self.assertEqual(after, view.project_states(events + deletion))
+        self.assertEqual(after, before)
+        self.assertEqual((after[self.OLD].last_seq, after[self.OLD].last_at), (1, "2026-11-17T10:00:01Z"))
+        order = [e["project_id"] for e in _project_entries(view.derive_view(after.values()))]
+        self.assertEqual(order, [self.NEW, self.OLD])
+
 
 class QuestionThreadViewTest(unittest.TestCase):
     P1 = "owner/p01"
@@ -2061,6 +2077,29 @@ class CredentialShapeTest(unittest.TestCase):
         self.assertEqual([n for n, _ in project_question.CREDENTIAL_SHAPES], list(FAKE_CREDENTIALS))
         self.assertIsNotNone(write_guard._TOKEN.fullmatch(FAKE_CREDENTIALS["console_token"] + "\n"))
 
+    def test_a_password_assignment_in_any_case_or_quoting_is_caught_by_the_assignment_shape_alone(self):
+        for text in (
+            '{"password":"example123"}',
+            '{"password": "copper-harbor-lantern"}',
+            "PASSWORD=copper-harbor-lantern",
+            "password = copper-harbor-lantern",
+            "db_password: copper-harbor-9",
+            "'secret': 'lantern-harbor'",
+        ):
+            with self.subTest(text=text):
+                matched = [n for n, p in project_question.CREDENTIAL_SHAPES if p.search(text)]
+                self.assertEqual(matched, ["assignment"])
+                self.assertIs(project_question.credential_shaped(text), True)
+
+    def test_a_base64_run_is_a_path_only_when_every_slash_separated_part_is_a_word(self):
+        key = "Ab3/Xy9Qw8Er7/Ty6Ui5Op4As3/Df2Gh1Jk0LmNb"
+        self.assertEqual(key.count("/"), 3)
+        self.assertEqual([n for n, p in project_question.CREDENTIAL_SHAPES if p.search(key)], ["base64_run"])
+        self.assertIs(project_question.credential_shaped(f"key {key} here"), True)
+        path = "ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case"
+        self.assertIs(project_question.credential_shaped(path), False)
+        self.assertIs(project_question.credential_shaped("console/" + path), False)
+
     def test_a_console_token_of_any_character_mix_is_caught(self):
         alphabet = string.ascii_letters + string.digits + "-_"
         generator = random.Random(1272)
@@ -2091,6 +2130,9 @@ class CredentialShapeTest(unittest.TestCase):
             "where is console/ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case defined?",
             "what does MAX_PROJECT_QUESTION_DELETE_BYTES limit?",
             "what does tests.test_console_project_question.QuestionDeleteServiceTest cover?",
+            "where is ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case defined?",
+            "what does the token: required mean and why is password: required?",
+            "why is the secret=true flag set?",
         )
         for text in texts:
             with self.subTest(text=text):
