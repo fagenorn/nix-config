@@ -1646,7 +1646,7 @@ waiting count and its quota; a sprint not out whose manager row is not `started`
 null), `NUDGE` reserves the sprint in `_nudging` and dispatches `_idle_nudge` after the lock.
 `_idle_nudge(sprint_id, forced)` decides again under the lock (`_idle_due`), reads the listing off
 the lock (a manager not listed sends nothing and appends nothing: the bring-back owns a gone
-manager), decides once more under the lock (the quota recheck) and sends nothing when the fresh listing's reading of the manager shows it `working` (`_working_now`: a reading not newer than the session's newest hook does not count), calls the nudger off the lock with a
+manager), decides once more under the lock (the quota recheck, bound to the listed session: a folded manager session with another id sends nothing, #1381) and sends nothing when the fresh listing's reading of the manager shows it `working` (`_working_now`: a reading not newer than the session's newest hook does not count), calls the nudger off the lock with a
 `continue` route `nudge.Nudge` to the lowest listed session, and appends one `manager.nudged
 {sprint_id, goal, session_id, ok[, reason][, resumed]}` while the sprint is open and the service not
 stopping (a failure also prints `console: idle_nudge_failed <sprint_id> <reason>`). A dispatch
@@ -8357,13 +8357,20 @@ class ConsoleService:
                 self._record_idle(
                     sprint_id, "" if sprint is None else sprint.manager_session or "", reason)
 
-    def _idle_due(self, sprint_id: str, forced: bool) -> tuple[sprints.SprintState, str] | None:
-        """Under the ingest lock: the open sprint and its project's root while an idle nudge is still the step."""
+    def _idle_due(self, sprint_id: str, forced: bool,
+                  selected: str | None = None) -> tuple[sprints.SprintState, str] | None:
+        """Under the ingest lock: the open sprint and its project's root while an idle nudge is still the step.
+
+        `selected` is the session the fresh listing chose to nudge: a folded manager session that is a
+        different one is not the one being sent to, so nothing is due (the next poll decides again).
+        """
         sprint = self._sprints.get(sprint_id)
         project = None if sprint is None else self._states.get(sprint.project_id)
         if sprint is None or project is None:
             return None
         session = self._manager_session(sprint)
+        if selected is not None and session is not None and session.session_id != selected:
+            return None
         now = int(self._clock() * 1000)
         step = idle.next_step(
             sprint, self._waiting(sprint), session, self._active_ms(sprint, session),
@@ -8402,7 +8409,7 @@ class ConsoleService:
                 return
             session_id = listed[0].session_id
             with self._ingest:
-                if (self._idle_due(sprint_id, forced) is None
+                if (self._idle_due(sprint_id, forced, session_id) is None
                         or self._working_now(listed[0])):
                     self._nudging.discard(sprint_id)
                     return

@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import capacity, movement, nudge, permission, service, signin, sprints
+from agent_tools.console import capacity, movement, nudge, permission, service, sessions, signin, sprints
 
 from . import console_test_support as support
 from .test_console_messages import PARTS
@@ -159,10 +159,32 @@ class IdleServiceTest(IdleCase):
         self.now[0] = T0 + 1600
         self.append(svc, [("delivery.seen", "owner/p01",
                            {**self.RUN_SEEN, "moved_ms": int((T0 + 1600) * 1000)})])
-        for seconds in range(2100, 7801, 600):
+        for seconds in range(2100, 7501, 600):
             self.poll_waiting(svc, seconds, "ci")
         self.assertEqual(len(self.continues()), 3)
         self.assertEqual(self.rows("manager.no_progress"), [])
+        # The last CI reading is at T0+7500; it ages out fifteen minutes later, at T0+8400.
+        self.poll(svc, 8399.999)
+        self.assertEqual(self.rows("manager.no_progress"), [])
+        self.assertEqual(len(self.continues()), 3)
+        self.poll(svc, 8400)
+        self.assertEqual(len(self.continues()), 3)
+        self.assertEqual(len(self.rows("manager.no_progress")), 1)
+
+    def test_a_nudge_is_judged_on_the_session_the_fresh_listing_selects(self):
+        svc, sid = self.idle_service()
+        self.listed.clear()
+        self.listed["s-2"] = sessions.Observation(
+            "s-2", "/srv/p01", 1, "idle", None, self.name(sid), None)
+        self.now[0] = T0 + 200
+        self.append(svc, [("session.seen", "owner/p01", {
+            "session_id": "s-2", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+            "name": self.name(sid)}),
+            ("delivery.seen", "owner/p01", {**self.RUN_SEEN, "session_id": "s-2"})])
+        self.poll_waiting(svc, 2000, "ci")
+        self.assertEqual(self.continues(), [])
+        self.assertEqual(self.rows("manager.nudged"), [])
+        self.assertEqual(svc._nudging, set())
 
     def test_a_wait_that_appears_before_the_dispatched_nudge_runs_sends_nothing(self):
         svc, sid = self.idle_service()
