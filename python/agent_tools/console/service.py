@@ -173,8 +173,8 @@ sharing switch, the read tailnet name the request was admitted under, the access
 question marked `owner_only`); success is an empty `204`.
 A guest's row carries `"by": <login>`, an owner's carries none; no refusal body or stderr line names a login.
 
-Three more guest writes (#1343, ADR-console-087), the members of `GUEST_ACCOUNT_WRITES` (`POST /api/guest-account`,
-`/api/guest-signin-code` and `/api/guest-signin-cancel`), are taken the same way by `_guest_write` and are page
+Five more guest writes (#1343, #1345, ADR-console-087), the members of `GUEST_ACCOUNT_WRITES` (`POST /api/guest-account`,
+`/api/guest-signin-code`, `/api/guest-signin-cancel`, `/api/guest-account-signout` and `/api/guest-account-remove`), are taken the same way by `_guest_write` and are page
 writes: on the owner's port they pass `_page_write`'s guard and are then `404` `not found`, the body unread and nothing
 appended. The add reads `{"consent": <bool>}` with, when the page presses Sign in again for a link it lacks, the shown
 `"attempt"` (`MAX_ACCOUNT_BYTES`, 400 `bad account`; `false` is 409 `guest.CONSENT_TEXT` before anything else; with an
@@ -204,6 +204,21 @@ start 502 `the sign-in could not start: <kind>`, anything else 500. Stderr lines
 `console: guest_signin_refused <reason>` (reason one of `consent`, `access`, `no_run`, `busy`, `unavailable`), `console:
 guest_account_failed <kind or Type>` and `console: guest_signin_failed <Type>`; the status read and the trust grant of his profile
 print no profile name. No line names a login, a profile, a link or a code.
+The sign-out and the removal (#1345) read `{"account": <number>}` (`MAX_ACCOUNT_BYTES`, `account_remove.parse_guest_request`,
+400 `bad account`), the number his pool row carries. Without a signer-out (and, for a removal, an account remover and a
+sign-in reader) the refusal is `guest.CHANGE_UNAVAILABLE_TEXT` before any lock is taken. In one ingest block, with no `_adding`,
+the access and epoch are checked and the targets are the profiles of his own (`_owned_now`, over a listing read afresh) that hold
+that number; none (another colleague's account, the owner's, an unknown number, an unreadable listing) is 409
+`guest.NOT_YOUR_ACCOUNT_TEXT` with nothing run or appended. Each target, by name and with the ingest lock released, goes to
+`_sign_out_profile` or `_remove_profile` with `by.login` and a check, `_still_his`, that the core runs in the ingest block that
+marks the profile, under `_adding`: access and epoch, then the profile still his, listed now and still holding the number, so a
+directory the owner replaced while the request waited is refused there and left untouched. The moves of managers on his profile
+are those of the owner's sign-out and removal. A refusal is 409 with `guest.account_text`; `SignOutFailed` is 502 `the account
+could not be signed out: <kind>`, `RemoveFailed` 502 `the account could not be removed: <kind>`, `MoveFailed` 502
+`account_remove.NOT_MOVED`, anything else 500 `changing the account failed`; success is an empty `204`. Stderr lines are `console:
+guest_account_change_refused <reason>` and `console: guest_account_change_failed <kind or Type>`; the status read after a failed
+sign-out during his removal prints no profile name. No answer or line names a login or a profile. `/api/exclusion` stays owner-only
+on the guest door, his own profile included.
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -248,7 +263,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/adoption-register`, `POST /api/adoption-merge`, `POST /api/plan-defer`,
 `POST /api/register-confirm`, `POST /api/trust-check`,
 `POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
-`POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code` and `POST /api/guest-signin-cancel` (the last three are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code`, `POST /api/guest-signin-cancel`, `POST /api/guest-account-signout` and `POST /api/guest-account-remove` (the last five are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -1854,6 +1869,8 @@ MAX_SHARE_BYTES = 4096
 GUEST_ACCOUNT_PATH = "/api/guest-account"
 GUEST_SIGNIN_CODE_PATH = "/api/guest-signin-code"
 GUEST_SIGNIN_CANCEL_PATH = "/api/guest-signin-cancel"
+GUEST_ACCOUNT_SIGNOUT_PATH = "/api/guest-account-signout"
+GUEST_ACCOUNT_REMOVE_PATH = "/api/guest-account-remove"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
@@ -1863,7 +1880,8 @@ PAGE_WRITES: frozenset[str] = frozenset({
     TRUST_CHECK_PATH,
     REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
-    GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH})
+    GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
+    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1931,7 +1949,9 @@ GUEST_READS: frozenset[str] = frozenset({PAGE_PATH, STATE_PATH, STREAM_PATH, WHO
 GUEST_WRITES: frozenset[str] = frozenset({GOAL_PATH, APPROVE_PATH, REPLY_PATH, ROUND_ANSWER_PATH,
                                           MESSAGE_PATH})
 GUEST_ACCOUNT_WRITES: frozenset[str] = frozenset({GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH,
-                                                  GUEST_SIGNIN_CANCEL_PATH})
+                                                  GUEST_SIGNIN_CANCEL_PATH,
+                                                  GUEST_ACCOUNT_SIGNOUT_PATH,
+                                                  GUEST_ACCOUNT_REMOVE_PATH})
 OWNER_ONLY: frozenset[str] = ((PAGE_WRITES - GUEST_WRITES - GUEST_ACCOUNT_WRITES) | MANAGER_WRITES
                               | frozenset(POST_LIMITS) | OWNER_READS)
 ROUTES: frozenset[str] = (OWNER_ONLY | GUEST_WRITES | GUEST_ACCOUNT_WRITES | GUEST_READS
@@ -3676,8 +3696,47 @@ class GuestHandler(ConsoleHandler):
             return False
         return True
 
+    def _guest_change_request(self, console: "ConsoleService", route: str,
+                              by: "guest.GuestActor") -> bool:
+        """Carry out a colleague's sign-out or removal of his own account; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_ACCOUNT_BYTES)
+        if body is None:
+            return False
+        try:
+            number = account_remove.parse_guest_request(body)
+        except ValueError:
+            self._refuse(400, "bad account")
+            return False
+        try:
+            if route == GUEST_ACCOUNT_SIGNOUT_PATH:
+                console.guest_sign_out(by, number)
+            else:
+                console.guest_remove(by, number)
+        except sprints.Refused as error:
+            print(f"console: guest_account_change_refused {guest.account_reason(str(error))}",
+                  file=sys.stderr)
+            self._refuse(409, guest.account_text(str(error)))
+            return False
+        except account_remove.SignOutFailed as error:
+            print(f"console: guest_account_change_failed {error.kind}", file=sys.stderr)
+            self._refuse(502, f"the account could not be signed out: {error.kind}")
+            return False
+        except account_remove.RemoveFailed as error:
+            print(f"console: guest_account_change_failed {error.kind}", file=sys.stderr)
+            self._refuse(502, f"the account could not be removed: {error.kind}")
+            return False
+        except account_remove.MoveFailed as error:
+            print(f"console: guest_account_change_failed {error.kind}", file=sys.stderr)
+            self._refuse(502, account_remove.NOT_MOVED)
+            return False
+        except Exception as error:
+            print(f"console: guest_account_change_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "changing the account failed")
+            return False
+        return True
+
     def _guest_write(self, route: str, policy: "guest.Policy", login: str, epoch: int):
-        """One of the eight guest writes (#1263, #1343): the owner's guard shape, the guest token and origin."""
+        """One of the ten guest writes (#1263, #1343, #1345): the owner's guard shape, the guest token and origin."""
         console = self.server.console
         refusal = write_guard.refusal(
             policy.name, self.headers.get_all("Origin") or [],
@@ -3691,6 +3750,8 @@ class GuestHandler(ConsoleHandler):
             done = self._guest_account_request(console, by)
         elif route in (GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH):
             done = self._guest_signin_request(console, route, by)
+        elif route in (GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH):
+            done = self._guest_change_request(console, route, by)
         elif route == GOAL_PATH:
             done = self._goal_request(console, route, by)
         elif route in (APPROVE_PATH, REPLY_PATH):
@@ -6607,6 +6668,41 @@ class ConsoleService:
                 self._cancel_locked(profile, runs, by.login)
             except signin_run.NotRunning:
                 raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT) from None
+
+    def _still_his(self, by: "guest.GuestActor", profile: str, number: int) -> None:
+        """Under the ingest lock: refuse unless `profile` is still his, listed now, and still holds `number`."""
+        self._guest_account_refusal(by)
+        accounts = self._scan_accounts()
+        if (accounts is None or profile not in self._owned_now(by, accounts)
+                or self._account_numbers.get(profile) != number):
+            raise sprints.Refused(guest.NOT_YOUR_ACCOUNT_TEXT)
+
+    def _his_targets(self, by: "guest.GuestActor", number: int) -> list[str]:
+        """The profiles of his own account `number`, by name; empty refuses with the fixed text."""
+        with self._ingest:
+            self._guest_account_refusal(by)
+            accounts = self._scan_accounts()
+            targets = [] if accounts is None else [
+                profile for profile in self._owned_now(by, accounts)
+                if self._account_numbers.get(profile) == number]
+        if not targets:
+            raise sprints.Refused(guest.NOT_YOUR_ACCOUNT_TEXT)
+        return targets
+
+    def guest_sign_out(self, by: "guest.GuestActor", number: int) -> None:
+        """Sign out his own account `number` (and move the managers on it); refusals carry only fixed texts."""
+        if self._signer_out is None:
+            raise sprints.Refused(guest.CHANGE_UNAVAILABLE_TEXT)
+        for profile in self._his_targets(by, number):
+            self._sign_out_profile(profile, by.login, lambda p=profile: self._still_his(by, p, number))
+
+    def guest_remove(self, by: "guest.GuestActor", number: int) -> None:
+        """Remove his own account `number` (and move the managers on it); refusals carry only fixed texts."""
+        if (self._signer_out is None or self._account_remover is None
+                or self._signin_reader is None):
+            raise sprints.Refused(guest.CHANGE_UNAVAILABLE_TEXT)
+        for profile in self._his_targets(by, number):
+            self._remove_profile(profile, by.login, lambda p=profile: self._still_his(by, p, number))
 
     def expire_signins(self) -> list[str]:
         """End every sign-in run past its deadline; the profiles ended."""

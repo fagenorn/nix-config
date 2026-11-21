@@ -101,6 +101,7 @@ TABLE = {
     "/api/picture/": "guest",
     "/api/guest-account": "guest-account", "/api/guest-signin-code": "guest-account",
     "/api/guest-signin-cancel": "guest-account",
+    "/api/guest-account-signout": "guest-account", "/api/guest-account-remove": "guest-account",
 }
 
 
