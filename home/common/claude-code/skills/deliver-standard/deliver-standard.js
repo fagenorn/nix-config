@@ -1117,6 +1117,12 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold-draft', phase: 'Ship', agentTyp
       }
     }
     if (scriptIds.length) return stop('hold', { pr: PR, draft, script_checks: scriptIds, posted_holds: scriptIssues, details: SCRIPT_REFUSED(scriptIds, scriptIssues) })
+    // The same once-run closes the issue on the parent's posted fence, so every open criterion must be in it; a human criterion may be absent only when a posted fence of another issue for this merge holds it (a split child).
+    const parentFence = posted.find(e => e.issue === ISSUE)
+    if (parentFence) {
+      const absent = openCriteria.filter(a => !parentFence.checks.some(c => c && upId(c.ac) === upId(a.id)) && !(a.kind === 'human' && posted.some(e => e.issue !== ISSUE && e.merge === mergeSha && e.checks.some(c => c && upId(c.ac) === upId(a.id))))).map(a => a.id)
+      if (absent.length) return stop('hold', { pr: PR, draft, missing_checks: absent })
+    }
   }
   const held = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Hold the issue's acceptance after the merge, by ~/.agents/standards/acceptance-planning.md (its "Linting a hold" section is the procedure).${noHold ? ' Nothing of this issue is held: post, edit and run nothing beyond the steps below.' : ` Skip the posting steps an earlier attempt already finished (an existing hold comment with a verify fence, the label, a split issue already filed and held for that criterion), but never skip the evidence you return: lint and verify_run are always fresh results of this attempt, so on such a retry take block from the posted verify fence${answered.length ? ' after step 6 has removed every check the owner\'s look approval answers' : ''}, lint that block with verify-pending lint as step 6 says, run the once-run, and return all three.`} Each command in its own Bash call:
 ${lock ? RELEASE_FIRST(lock.sha, lock.maybe) : ''}1. Run git -C ${REPO} fetch origin. Merge commit: ${merged}${mergeCommit ? '' : ' (and read headRefOid, the PR head)'}.${indirect} Confirm git -C ${REPO} cat-file -e <merge commit>^{commit} succeeds and return the result as merge_commit_local; if it fails, stop here. Criteria: ${JSON.stringify(acceptance)}

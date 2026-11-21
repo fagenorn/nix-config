@@ -5897,6 +5897,31 @@ class HoldTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertIn("hold", labels(calls))
 
+    def test_a_retry_whose_parent_fence_omits_an_open_criterion_is_refused_before_the_once_run(self):
+        """#1281: the once-run closes the issue on the posted fence, so a criterion it lacks (human or evidence) stops the hold first."""
+        held = json.loads(json.dumps(EVIDENCE["verify"]).replace(SHA, self.MERGE))
+        for n, (criteria, checks, expected) in enumerate((
+            ((EVIDENCE, HUMAN), [held], ["AC3"]),
+            ((EVIDENCE, HUMAN), [HUMAN["verify"]], ["AC2"]),
+            ((EVIDENCE, HUMAN), [held, dict(HUMAN["verify"], ac="ac3")], []),
+        )):
+            with self.subTest(case=n):
+                posted = [{"issue": 9, "merge": self.MERGE, "checks": checks}]
+                result, calls = self.ship(*criteria, **{"hold-draft": {"posted": posted}})
+                if expected:
+                    self.assertEqual((result["stage"], result["missing_checks"]), ("hold", expected))
+                    self.assertNotIn("hold", labels(calls))
+                    self.assertNotIn("close-out", labels(calls))
+                else:
+                    self.assertEqual(result["stage"], "done")
+        child = {"issue": 51, "merge": self.MERGE, "checks": [HUMAN["verify"]]}
+        for merge, stage in ((self.MERGE, "done"), ("e" * 40, "hold")):
+            with self.subTest(child_merge=merge):
+                posted = [{"issue": 9, "merge": self.MERGE, "checks": [held]}, dict(child, merge=merge)]
+                result, calls = self.ship(EVIDENCE, HUMAN, **{"hold-draft": {"posted": posted}})
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual("hold" in labels(calls), stage == "done")
+
     def test_a_script_the_draft_wrote_is_held_unchanged(self):
         bad = criterion(EVIDENCE, verify=None)
         written = {"hold-draft": {"written": [self.SCRIPT]}}
