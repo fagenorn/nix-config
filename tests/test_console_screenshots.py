@@ -1034,8 +1034,9 @@ def uncovered(moved, rows) -> list[str]:
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifty_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 50)
+    def test_the_set_is_fifty_one_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 51)
+        self.assertEqual(shots.STATES[shots.STATES.index("notice-post-open") + 1], "live-fault")
         self.assertEqual(shots.STATES[-8:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors", "owner-accounts"))
@@ -1176,6 +1177,30 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         self.assertLess(order.index(wanted), order.index("shot"))
                     else:
                         self.assertNotIn(wanted, page.waits)
+
+    def test_the_live_fault_shot_waits_for_its_line_where_the_service_declares_them(self) -> None:
+        wanted = (".sprint-checks .live-fault", ".live-fault-withdraw")
+        for width in (1440, 480):
+            for declared in (True, False):
+                with self.subTest(width=width, declared=declared), \
+                        tempfile.TemporaryDirectory() as tmp, \
+                        mock.patch.object(shots, "declares_live_faults", return_value=declared):
+                    browser, page = fake_browser(set())
+                    order = []
+                    page.screenshot = lambda path, full_page: order.append("shot")
+                    wait = page.wait_for_selector
+                    page.wait_for_selector = lambda s: (wait(s), order.append(s))
+                    shots._shoot(browser, "http://console.test/", "live-fault", width, Path(tmp))
+                    for selector in wanted:
+                        if declared:
+                            self.assertIn(selector, page.waits)
+                            self.assertLess(order.index(selector), order.index("shot"))
+                        else:
+                            self.assertNotIn(selector, page.waits)
+
+    def test_the_live_fault_withdraw_is_not_jargon(self) -> None:
+        self.assertIn("button.live-fault-withdraw", shots.JARGON_COUNT)
+        self.assertIn("button.notice-withdraw", shots.JARGON_COUNT)
 
     def test_the_owner_accounts_shot_opens_the_panel_and_waits_for_sign_out_where_the_service_offers_it(
             self) -> None:
@@ -2576,6 +2601,20 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertFalse(shots.overlap_card())
                     self.assertEqual(
                         [i for i in view["inbox"]["open"] if i.get("reason") == "question"], [])
+                elif state == "live-fault":
+                    self.assertEqual([s["title"] for s in running], ["Fix the settings page"])
+                    faults = running[0]["live_faults"]
+                    self.assertEqual(len(faults), 1)
+                    self.assertIsInstance(faults[0]["id"], int)
+                    self.assertIsInstance(faults[0]["at"], str)
+                    self.assertEqual(faults, [{
+                        "id": faults[0]["id"], "issue": 12,
+                        "observed": shots.LIVE_FAULT_OBSERVED, "when": shots.LIVE_FAULT_WHEN,
+                        "proven": shots.LIVE_FAULT_PROVEN, "at": faults[0]["at"],
+                        "text": "Live fault in production on #12: saving the settings form "
+                                "drops the billing address, seen 12:10 UTC today, proven by a "
+                                "saved form read back from the production database"}])
+                    self.assertEqual(view["statement"]["inbox_items"], 0)
                 elif state in ("ask-box", "ask-goal"):
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
                     threads = web["questions"]["threads"]
