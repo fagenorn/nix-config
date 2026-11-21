@@ -93,6 +93,14 @@
     let
       inherit (self) outputs;
 
+      # The platform package a project's CI fetches; every merge to main is a revision (ADR-system-005).
+      platformPkgs =
+        system:
+        if system == "aarch64-darwin" then
+          inputs.nixpkgs-darwin.legacyPackages.${system}
+        else
+          inputs.nixpkgs.legacyPackages.${system};
+
       myvars = import ./vars;
       stateVersion = "25.05";
       libx = import ./lib {
@@ -106,6 +114,10 @@
     in
     {
 
+      packages = inputs.nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" ] (system: {
+        agent-platform = import ./lib/agent-tools.nix { pkgs = platformPkgs system; };
+      });
+
       checks = inputs.nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" ] (
         system:
         let
@@ -117,6 +129,12 @@
             inherit pkgs;
             omlxSource = inputs.omlx-tap;
             inherit (configure) modelSettings serverSettings steering;
+          };
+          agent-platform = import ./lib/agent-platform-check.nix {
+            inherit pkgs;
+            platform = self.packages.${system}.agent-platform;
+            standards = ./home/common/agent-skills/standards;
+            manifest = ./home/common/agent-skills/platform-manifest.json;
           };
           # Required through the `Nix Eval` job: the global agent corpus stays project-agnostic.
           agnostic-lint = pkgs.runCommand "agnostic-lint" { nativeBuildInputs = [ pkgs.python3 ]; } ''

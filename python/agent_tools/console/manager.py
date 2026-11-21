@@ -235,7 +235,9 @@ _PLAIN_TABLE = (
     ("secret is missing", SECRET_TEXT),
 )
 
-_DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV)
+# `AGENT_PLATFORM_ROOT` is the console launcher's own package root: a session's commands set it
+# again through their launchers, and a source-run child must read `$HOME`'s manifest (ADR-system-005).
+_DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV, "AGENT_PLATFORM_ROOT")
 
 
 def plain_reason(reason: str | None) -> str:

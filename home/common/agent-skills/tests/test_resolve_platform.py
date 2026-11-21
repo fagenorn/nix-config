@@ -27,6 +27,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.project_contract import agent_platform
 from agent_tools.system import semver
@@ -283,6 +284,106 @@ class ManifestGateTest(ResolverTestCase):
             "repair_id": "platform.manifest.missing",
             "violations": [{"pointer": "", "message":
                             "the installed platform manifest was not found"}]}})
+
+
+class PlatformRootTest(ResolverTestCase):
+    """ADR-system-005: a launcher-named root supplies the manifest and the
+    standards, and never falls back to `HOME`."""
+
+    MISSING = {"error": {
+        "code": "resolver_failure",
+        "repair_id": "platform.manifest.missing",
+        "violations": [{"pointer": "", "message":
+                        "the installed platform manifest was not found"}]}}
+
+    def environment(self, **values: str) -> dict[str, str]:
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("AGENT_PLATFORM_ROOT", "HOME")}
+        env["PYTHONPATH"] = str(REPO_ROOT / "python")
+        env.update(values)
+        return env
+
+    def platform_status(self, env: dict[str, str], *extra: str,
+                        cwd: Path | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project",
+             "platform-status", *extra],
+            capture_output=True, text=True, timeout=60, env=env,
+            cwd=None if cwd is None else str(cwd))
+
+    def make_dir(self) -> Path:
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        return Path(raw.name).resolve()
+
+    def make_platform_root(self, manifest: dict | None = None) -> Path:
+        root = self.make_dir()
+        (root / "platform-manifest.json").write_text(
+            json.dumps(committed_manifest() if manifest is None else manifest),
+            encoding="utf-8")
+        return root
+
+    def test_a_named_root_supplies_the_manifest_without_home(self):
+        root = self.make_platform_root()
+        proc = self.platform_status(self.environment(AGENT_PLATFORM_ROOT=str(root)))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(json.loads(proc.stdout)["platform"]["manifest_path"],
+                         str((root / "platform-manifest.json").resolve()))
+
+    def test_a_named_root_without_a_manifest_never_falls_back_to_home(self):
+        self.set_manifest(COMMITTED)
+        proc = self.platform_status(self.environment(
+            HOME=str(self.home), AGENT_PLATFORM_ROOT=str(self.make_dir())))
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertEqual(json.loads(proc.stdout), self.MISSING)
+
+    def test_a_relative_root_refuses_as_a_missing_manifest(self):
+        self.set_manifest(COMMITTED)
+        cwd = self.make_platform_root_under_relative()
+        proc = self.platform_status(self.environment(
+            HOME=str(self.home), AGENT_PLATFORM_ROOT="relative/root"), cwd=cwd)
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertEqual(json.loads(proc.stdout), self.MISSING)
+
+    def make_platform_root_under_relative(self) -> Path:
+        cwd = self.make_dir()
+        relative = cwd / "relative" / "root"
+        relative.mkdir(parents=True)
+        (relative / "platform-manifest.json").write_text(
+            json.dumps(committed_manifest()), encoding="utf-8")
+        return cwd
+
+    def test_an_empty_root_reads_the_home_manifest(self):
+        self.set_manifest(COMMITTED)
+        proc = self.platform_status(self.environment(
+            HOME=str(self.home), AGENT_PLATFORM_ROOT=""))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(
+            json.loads(proc.stdout)["platform"]["manifest_path"],
+            str((self.home / ".agents/share/platform-manifest.json").resolve()))
+
+    def test_the_standards_directory_follows_the_root(self):
+        root = "/nix/store/x-agent-platform/share/agent-platform"
+        with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": root, "HOME": "/home/t"}):
+            self.assertEqual(agent_platform.standards_dir(), Path(root) / "standards")
+            self.assertEqual(agent_platform.manifest_path(),
+                             Path(root) / "platform-manifest.json")
+        with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": "", "HOME": "/home/t"}):
+            self.assertEqual(agent_platform.standards_dir(),
+                             Path("/home/t/.agents/standards"))
+
+    def test_an_explicit_manifest_ignores_the_root(self):
+        root = self.make_platform_root({**committed_manifest(), "platform_version": "9.0.0"})
+        other = self.make_dir() / "other.json"
+        other.write_text(json.dumps(committed_manifest()), encoding="utf-8")
+        proc = self.platform_status(self.environment(
+            HOME=str(self.home), AGENT_PLATFORM_ROOT=str(root)), "--manifest", str(other))
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        platform = json.loads(proc.stdout)["platform"]
+        self.assertEqual(platform["manifest_path"], str(other.resolve()))
+        self.assertEqual(platform["platform_version"],
+                         committed_manifest()["platform_version"])
 
 
 class ManifestLifecycleArrayTest(ResolverTestCase):

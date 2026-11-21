@@ -945,14 +945,23 @@ class MemberEnvironmentTest(unittest.TestCase):
         environment = suite_runner.member_environment(parent, self.cache)
         self.assertNotIn("PYTHONDONTWRITEBYTECODE", environment)
 
+    def test_an_inherited_platform_root_is_dropped(self):
+        parent = {**self.parent,
+                  "AGENT_PLATFORM_ROOT": "/nix/store/x-agent-platform/share/agent-platform"}
+        environment = suite_runner.member_environment(parent, self.cache)
+        self.assertNotIn("AGENT_PLATFORM_ROOT", environment)
+        self.assertIn("AGENT_PLATFORM_ROOT", parent)
+
     def test_only_the_git_and_bytecode_variables_change_and_the_parent_is_untouched(self):
         parent = {**self.parent, "GIT_CONFIG_PARAMETERS": "'user.name'='Inherited'",
                   "PYTHONPYCACHEPREFIX": str(self.scratch / "foreign"),
-                  "PYTHONDONTWRITEBYTECODE": "1"}
+                  "PYTHONDONTWRITEBYTECODE": "1",
+                  "AGENT_PLATFORM_ROOT": "/nix/store/x-agent-platform/share/agent-platform"}
         before = dict(parent)
         environment = suite_runner.member_environment(parent, self.cache)
         self.assertEqual(parent, before)
-        changed = ("GIT_CONFIG_PARAMETERS", "PYTHONPYCACHEPREFIX", "PYTHONDONTWRITEBYTECODE")
+        changed = ("GIT_CONFIG_PARAMETERS", "PYTHONPYCACHEPREFIX", "PYTHONDONTWRITEBYTECODE",
+                   "AGENT_PLATFORM_ROOT")
         self.assertEqual({key: value for key, value in environment.items() if key not in changed},
                          {key: value for key, value in before.items() if key not in changed})
 

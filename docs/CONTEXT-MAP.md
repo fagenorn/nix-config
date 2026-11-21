@@ -90,6 +90,7 @@
 | Plan question | Console |
 | Plan-gated floor | Guard |
 | Platform manifest | Project contract |
+| Platform package | Project contract |
 | Prefix reorder | Hosts |
 | Production rule | Guard |
 | Probe | Verification |
