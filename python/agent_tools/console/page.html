@@ -259,6 +259,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .pool-account b { font-weight: 600; color: var(--text); }
 .pool-status { color: var(--ov2); }
 .pool-yours b { color: var(--lav); }
+.pool-remove-box { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; padding-left: 16px; color: var(--sub1); }
+.pool-remove-box p { flex-basis: 100%; margin: 0; }
 .cap-owner, .acct-owner { color: var(--ov2); overflow-wrap: anywhere; margin-right: 6px; }
 .own-account { margin-bottom: 24px; font-size: .8125rem; color: var(--sub0); }
 .guest-account { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
@@ -6233,7 +6235,10 @@ function poolWindow(cls, left, name, reset) {
   if (typeof reset === "string") parts.push(", resets ", timeEl("weekday", reset, ""));
   return phrase("span", cls, ...parts);
 }
+// The change buttons the last pool drawing made, so the one that held the focus can take it back.
+let poolButtons = [];
 function renderPool(view) {
+  poolButtons = [];
   const box = document.getElementById("pool");
   if (box === null) return;
   if (view.pool === null || typeof view.pool !== "object" || !Array.isArray(view.pool.accounts)) {
@@ -6278,12 +6283,89 @@ function renderPool(view) {
         item.appendChild(poolWindow("pool-week", row.week_left, "week", row.week_reset));
         item.appendChild(poolWindow("pool-session", row.five_hour_left, "session", row.five_hour_reset));
       }
+      if (row.label === "yours" && Number.isInteger(row.number) && row.number > 0) poolChangeControls(item, row);
       list.appendChild(item);
     }
     nodes.push(list);
   }
+  const active = document.activeElement;
+  const held = active !== null && active.dataset !== undefined && active.dataset.number !== undefined
+    ? { role: active.className.split(" ")[0], number: active.dataset.number } : null;
   box.replaceChildren(...nodes);
   box.hidden = false;
+  const again = held === null ? undefined : poolButtons.find((node) => node.className.split(" ")[0] === held.role && node.dataset.number === held.number);
+  if (again !== undefined) again.focus();
+}
+// The guest's own sign-out and removal, kept by account number across frames: {phase: "sending"|"failed", reason}, and the numbers whose Remove confirmation is open.
+const poolChange = new Map();
+const poolRemoveOpen = new Set();
+// One write of a pool row: its failure line is kept under the row's number until the next press or the confirmation's Cancel.
+async function poolPost(row, failure, send) {
+  const current = poolChange.get(row.number);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  poolChange.set(row.number, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await send();
+    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (poolChange.get(row.number) !== state) return;
+  if (reason === null) {
+    poolChange.delete(row.number);
+    poolRemoveOpen.delete(row.number);
+  } else {
+    state.phase = "failed";
+    state.reason = failure + reason;
+  }
+  redraw();
+}
+function poolSignOut(row) {
+  return poolPost(row, "Could not sign out: ", () => fetch("/api/guest-account-signout", {
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({account: row.number}),
+  }));
+}
+function poolRemove(row) {
+  return poolPost(row, "Could not remove: ", () => fetch("/api/guest-account-remove", {
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({account: row.number}),
+  }));
+}
+const POOL_REMOVE_NOTE = "Remove your account from the pool? It is signed out first. Each manager on it moves to another account, or waits for one with room; any other session keeps running.";
+// On his own `yours` row only: Sign out posts at once, Remove asks first.
+function poolChangeControls(item, row) {
+  const state = poolChange.get(row.number);
+  const sending = state !== undefined && state.phase === "sending";
+  const mark = (button) => {
+    button.dataset.number = String(row.number);
+    // aria-disabled, not disabled: the focus must stay restorable.
+    if (sending) button.setAttribute("aria-disabled", "true");
+    markBusy(button, sending);
+    poolButtons.push(button);
+    return button;
+  };
+  item.appendChild(mark(actionButton("pool-signout btn-quiet", "Sign out", () => poolSignOut(row))));
+  item.appendChild(mark(actionButton("pool-remove btn-danger", "Remove", () => {
+    poolRemoveOpen.add(row.number);
+    redraw();
+  })));
+  if (poolRemoveOpen.has(row.number)) {
+    const box = el("div", "pool-remove-box");
+    box.appendChild(el("p", "pool-remove-note", POOL_REMOVE_NOTE));
+    box.appendChild(mark(actionButton("pool-remove-send btn-danger", "Remove it", () => poolRemove(row))));
+    box.appendChild(mark(actionButton("pool-remove-cancel btn-quiet", "Cancel", () => {
+      const now = poolChange.get(row.number);
+      if (now !== undefined && now.phase === "sending") return;
+      poolRemoveOpen.delete(row.number);
+      poolChange.delete(row.number);
+      redraw();
+    })));
+    item.appendChild(box);
+  }
+  if (state !== undefined && state.phase === "failed") item.appendChild(el("span", "fail", state.reason));
 }
 const GUEST_CONSENT = "Your sign-in is kept on the owner's host under the owner's user, so any process the owner runs can use it.";
 const GUEST_LOOPBACK = "This sign-in can only finish on the owner's machine, so it cannot finish from here. Cancel it and tell the owner.";

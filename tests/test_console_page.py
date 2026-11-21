@@ -177,7 +177,9 @@ class PageTest(unittest.TestCase):
         # Raised from 65 KB by #1343: the guest page's own-account form (consent, tick, sign-in, link, code box and
         # their redraws, about 2.1 KB compressed) did not fit the room the 65 KB cap had left, and merged with
         # #1338 the page is 68280 bytes against the 66560 the cap before it held.
-        self.assertLess(len(gzip.compress(self.data, 9)), 69632)
+        # Raised from 68 KB by #1345: the guest pool's Sign out and Remove controls, their confirmation and their
+        # redraws (about 0.9 KB compressed) did not fit the 281 bytes the cap had left.
+        self.assertLess(len(gzip.compress(self.data, 9)), 71680)
 
     def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
@@ -335,7 +337,8 @@ class PageTest(unittest.TestCase):
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
              "/api/activate", "/api/look-retry", "/api/share-tailnet", "/api/share-colleague",
              "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
-             "/api/guest-signin-cancel", "/api/adoption-merge", "/api/account-signout"},
+             "/api/guest-signin-cancel", "/api/adoption-merge", "/api/account-signout",
+             "/api/guest-account-signout", "/api/guest-account-remove"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -344,7 +347,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 51)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 53)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
