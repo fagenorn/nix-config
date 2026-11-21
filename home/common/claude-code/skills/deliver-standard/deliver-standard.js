@@ -62,6 +62,9 @@ export const meta = {
 // A marked delivery runs no land command before the owner answers: after verify it pushes the branch and opens or reuses the pull request in a look-pr call (the pr call's PR text and
 // probe, no lock), syncs a branch that is behind the integration branch outside any lock (a conflict resolved and reviewed first), pushes the synced head in a look-push call and stops at
 // awaiting-look { issue, pr, head, reason, covers, pictures? (the before/after pictures verify wrote), flaky?, outside_fixes?, ways, cont } with cont.look = {pr, head}; it holds no lock and merges nothing.
+// #1373: every awaiting-look stop, the look path's and an answer re-ask's, follows a look-checks-<k> wait (renew, no lock, no push, bound to the pull request head read after the watch, then the base's ancestry) that read every
+// check passed and every required name passing. The look path syncs and pushes on a behind answer (twice at most, then sync-contention), spends the one red-check fix on a failed one (fix-ci, fix-ci-review, look-push, so a second
+// red poll stops at checks), and verifies a moved head again (look-reverify) and waits on the forge once more before the stop; a re-ask only waits. An approve of the unmoved approved head reuses the pull request and pushes nothing.
 // A read with neither verdict stops at stage look after verify (in ship and ready mode alike), and ready mode reports look: {verdict, covers}.
 // A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place as the plan numbered it (cont.look_acs), never by the plan's wording), so no owner check is posted for it (#1356). A landing that leaves a criterion out first makes a read-only look-stale call: when a hold posted earlier still checks that criterion on a split child, or on the issue with nothing else left to hold, it stops at hold with look_checks, and a reply it cannot read stops at hold too; a check on the issue with another criterion still open is removed in place by the hold. A replay after the PR merged stops at look when the setup's look read failed, and always reads the merged head: the approval is always read again with look-approval status for the merged PR and head, never taken from a cont (which may hold another PR's), and anything but approved holds the look criterion and ticks nothing; the landing commit is resolved first (a PR merged indirectly has none on the pull) and both status and tick name it with --merge-commit. The look-stale read must say complete, and a hold of this issue with recorded results is never rewritten (its block version would change); a split child's returned fence naming an answered criterion stops the landing.
 //
@@ -2218,6 +2221,55 @@ const lookStop = (pr, sha) => {
   const shown = picturesOf(verify || verified)
   return { ...stop('awaiting-look', { issue: ISSUE, pr, head: sha, covers: COVERS, ...(shown.length ? { pictures: shown } : {}), ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ways: LOOK_WAYS }), reason: lookWhy ? `${lookWhy}; ${LOOK_REASON}` : LOOK_REASON }
 }
+// #1008: the minutes a checks poll waits for the first check to be reported on a head (gh pr checks --watch returns at once while
+// none is, so quick pending answers would spend the pending waits before the runs register); TRAIN_NO_CHECKS_MIN in deliver-batch.js,
+// and the wait sentence is the same text there.
+const NO_CHECKS_MIN = 5
+// The pending polls a wait spends before it stops at checks-pending: the landing's and the look's alike.
+const PENDING_WAITS = 3
+// #1373: the checks the owner's look waits for. behind is the base's ancestry of the head read after the watch (the base can move during it).
+const LOOK_CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending'] }, head: FULL_SHA, behind: { type: 'boolean' }, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head', 'behind'] }
+// The look's own wait, never CHECKS_WAIT: it pushes nothing (a head another writer pushed is read as it is), answers from one read of the pull request made after the watch, and reports the base's ancestry of that head after that read.
+const LOOK_CHECKS_WAIT = (pr, sha) => `for the checks of PR #${pr} at the head ${sha}, changing nothing. 1. Wait once with ${UNSET}gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes): that is this poll's one deadline, so never run it a second time here, whether it returned early, returned with a check still pending or timed out; this program polls again. Its list can be partial, so its output is never the answer. While no check is reported on the pull request at all, do not answer yet: read ${UNSET}gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link about once a minute, running alone timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and answer pending only when none is reported ${NO_CHECKS_MIN} minutes after your first read. 2. Then read the pull request once: ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid,statusCheckRollup. head is its headRefOid (the full sha), even when it is not ${sha}. Its rollup names no app, so read the app of each check run from the check runs of that same head, once: ${UNSET}gh api repos/${SLUG}/commits/<its headRefOid>/check-runs --paginate (each run's name, status, conclusion, started_at and app.id). Answer from these two reads alone and read nothing again. 3. Collect the required checks from both sources and never one in place of the other: the required_status_checks rules of ${UNSET}gh api repos/${SLUG}/rules/branches/${INT} (each with its integration_id when it names one) and the required_status_checks checks of classic branch protection, ${UNSET}gh api repos/${SLUG}/branches/${INT}/protection (each with its app_id when it names one). Return their union as required, always, even as an empty list (an empty list only when neither source lists any; a reply with no required is read as pending). 4. Classify from the reads of step 2: the check runs from the check-runs read (a run's app is its app.id), the commit statuses from the rollup (a status names no app, so it counts only for a required name that names none). Take the newest run (the latest started_at) of each pair of check name and app. A required check is judged by its runs of the app its rule or protection entry names (any app when it names none): a newer run of another app never replaces that app's run, so a green run of another app never hides a failed run of the required app and never counts as the required check passing. A check run whose status is not completed (COMPLETED in the rollup), or a status whose state is PENDING or EXPECTED, is pending; a check run whose conclusion is success, neutral or skipped (any case), or a status whose state is SUCCESS, has passed; any other conclusion, or a status whose state is FAILURE or ERROR, has failed. 5. Then run git -C ${W} fetch origin and return behind true when git -C ${W} merge-base --is-ancestor origin/${INT} <that headRefOid> fails (the base moved past the head, during the wait or before it), else false. Return state passed only when that read shows no check pending, failed or cancelled, with required and passed (every name passing at that head, of the required app for a required name); failed when any check failed, required or not, with failing (every failed name) and details (for each failed check, the last 60 lines of its failed log: ${UNSET}gh run view <run id> --repo ${SLUG} --log-failed); otherwise pending, with pending (the names still running) and the observed state when the wait ran out.`
+const namesOf = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string' && x !== '') : [])
+// The required names no passing run covers (a passed reply that leaves one out proves nothing for it).
+const missingOf = ck => namesOf(ck.required).filter(x => !namesOf(ck.passed).includes(x))
+// A required list the reply omits is a list nobody read: a required build that has not reported is invisible in it, so a passed reply without one proves nothing.
+const unproven = ck => !Array.isArray(ck.required) || missingOf(ck).length > 0
+const lookRead = ck => {
+  const failing = namesOf(ck.failing)
+  const pending = [...new Set([...namesOf(ck.pending), ...missingOf(ck)])]
+  const state = ck.state === 'failed' || failing.length ? 'failed' : ck.state !== 'passed' || pending.length || unproven(ck) || !namesOf(ck.passed).length ? 'pending' : 'passed'
+  return { state, failing, pending }
+}
+let lookPolls = 0
+let lookWaits = 0
+// One poll of the look wait: a stop row when the claim was lost, the reply is unusable or names another head, else null and the reply.
+const lookPoll = async (pr, sha, stale) => {
+  const label = `look-checks-${++lookPolls}`
+  const ck = await recall(() => call(`${CTX}
+${RENEW_FIRST}
+Then wait ${LOOK_CHECKS_WAIT(pr, sha)}${stale ? ` ${STALE_RERUN(UNSET, SLUG)}` : ''}
+Issue #${ISSUE} waits for the owner's look at the head ${sha} before it merges: run no lock command, push nothing and merge nothing.
+${RULES}`, { label, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(stale ? WITH_STALE(LOOK_CHECKS) : LOOK_CHECKS) }), r => r.renew)
+  const lost = ck ? renewed(ck.renew, label) : null
+  const row = lost || (!complete(ck, LOOK_CHECKS) ? stop('checks', { pr, checks: null }) : !sameSha(ck.head, sha) ? stop('head-moved', { pr, expected: sha, head: ck.head }) : null)
+  return { ck, row }
+}
+// #1373: an answer re-ask shows the pull request head as it is, so it only waits for that head's checks: no push, no sync, no fix.
+const lookWaitStop = async (pr, sha) => {
+  for (;;) {
+    const { ck, row } = await lookPoll(pr, sha, false)
+    if (row) return row
+    const rd = lookRead(ck)
+    if (rd.state === 'failed') return stop('checks', { pr, failing: rd.failing, checks: ck })
+    if (rd.state === 'pending') {
+      if (++lookWaits >= PENDING_WAITS) return stop('checks-pending', { pr, pending: rd.pending, checks: ck })
+      continue
+    }
+    return lookStop(pr, fuller(sha, ck.head))
+  }
+}
 const LOOK_HEAD_SCHEMA = { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] }
 // #1246: the verification of an approved head the verified record does not name: what the worktree reached, whether it is only clean merges of the integration branch past the verified head, and the verification.
 const LOOK_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' }, ahead: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only', 'ahead'] }
@@ -2237,7 +2289,7 @@ ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK
   if (lostLook) return lostLook
   if (!complete(hd, LOOK_HEAD_SCHEMA) || !SHA_RE.test(hd.head)) return stop('look-approve', { result: hd })
   if (hd.state !== 'OPEN') return stop('look-approve', { details: `PR #${lookAt.pr} is ${hd.state}, not open, so the approval of ${LOOK_ANSWER.head} was not recorded` })
-  if (!sameSha(hd.head, LOOK_ANSWER.head) || !sameSha(LOOK_ANSWER.head, lookAt.head)) return lookStop(lookAt.pr, hd.head)
+  if (!sameSha(hd.head, LOOK_ANSWER.head) || !sameSha(LOOK_ANSWER.head, lookAt.head)) return lookWaitStop(lookAt.pr, hd.head)
   const posted = await call(`${CTX}
 Record the owner's look approval of issue #${ISSUE} of ${SLUG} with one fix. First write the owner's words, the JSON string ${JSON.stringify(LOOK_ANSWER.words)} decoded, exactly as the whole content of ${FIX_WORDS_FILE} with the Write tool. Then run alone and exactly: look-approval post --repo ${SLUG} --issue ${ISSUE} --pr ${lookAt.pr} --head ${LOOK_ANSWER.head} --answer fix --message ${LOOK_ANSWER.message || String(setup.holder).split('/').pop()} --words-file ${FIX_WORDS_FILE}
 It prints one JSON line. Return its verdict, comment_id and any detail. Run nothing else.
@@ -2320,11 +2372,7 @@ const PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head:
 const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] }
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind'] }, head: FULL_SHA, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const PUSH_SCHEMA = { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] }
-// #1008: the minutes a checks poll waits for the first check to be reported on a head (gh pr checks --watch returns at once while
-// none is, so quick pending answers would spend the pending waits before the runs register); TRAIN_NO_CHECKS_MIN in deliver-batch.js,
-// and the wait sentence is the same text there.
-const NO_CHECKS_MIN = 5
-const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) and, whenever that reply lists no required status checks, from classic branch protection; none only when neither lists any. A head with no check reported at all is pending, never passed: runs can register minutes after a push. While no check is reported on head, do not answer yet: read the list again about once a minute, running alone timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and answer pending only when none is reported ${NO_CHECKS_MIN} minutes after your first read of the list. Return passed only when no check on head is pending, failing or cancelled, with required and passed (every name passing at head; a passed answer naming none is read as pending). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
+const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) and, whenever that reply lists no required status checks, from classic branch protection. Return required always, even as an empty list (an empty list only when neither lists any): a passed answer that leaves it out is not trusted. A head with no check reported at all is pending, never passed: runs can register minutes after a push. While no check is reported on head, do not answer yet: read the list again about once a minute, running alone timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and answer pending only when none is reported ${NO_CHECKS_MIN} minutes after your first read of the list. Return passed only when no check on head is pending, failing or cancelled, with required and passed (every name passing at head; a passed answer naming none is read as pending). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'conflicted', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, head: FULL_SHA, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
   type: 'object',
@@ -2374,7 +2422,6 @@ let expected = verify.head
 let head = expected
 let syncs = 0
 let round = 0
-const PENDING_WAITS = 3
 // #1008: a passed reply that names no passing check is a head no check has reported on yet (runs register up to minutes after a
 // push), so it is read as pending and counts against the pending waits. This program reads no required checks from the contract,
 // and the contract cannot declare an empty list anyway, so the rule has no opt-out.
@@ -2478,7 +2525,7 @@ const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal =
   return { fix, review, moved, ok: true }
 }
 // #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call. #1246: a function, so its Evidence names the results of verify as it is when the call is made (an approved head's verification replaces them).
-const prOpen = () => `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
+const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
 const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is read back
 // (look-approval status, #1260: the owner records it where they answered; this program never posts one) only for the head the owner saw, when that is the pull request head. #1246: a head that is not the verified head is verified first (a look-verify step), and recorded only when it
@@ -2503,7 +2550,7 @@ ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK
   if (hd.state !== 'OPEN') return stop('look-approve', { details: `${NOT_RECORDED}: PR #${P} is ${hd.state}, not open, at head ${hd.head}` })
   if (!sameSha(hd.head, A)) {
     lookWhy = `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head}`
-    return lookStop(P, hd.head)
+    return lookWaitStop(P, hd.head)
   }
   let recordable = sameSha(A, V0)
   if (!recordable) {
@@ -2556,7 +2603,7 @@ Then, ${PROBE(W, INT)}
 Then return behind: true when git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails (the head is behind ${INT}), else false. Issue #${ISSUE} waits for the owner's look before it merges: run no lock command, wait for no check and merge nothing.
 ${RULES}`, { label: 'look-pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), behind: { type: 'boolean' } }) }) : call(`${CTX}
 ${RENEW_FIRST}
-${prOpen()}
+${prOpen(MARKED && approvedHead && sameSha(approvedHead, expected) ? lookAt.pr : null)}
 Then, ${PROBE(W, INT)}
 ${OWN_RED(W, '<the PR number>', expected)}
 Otherwise take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
@@ -2712,7 +2759,7 @@ When the failure has no cause in the code (an infrastructure, cache or network e
   if (LOOK_STOP) {
     const stopped = early ? await syncRound(early) : prR.behind === true ? await syncRound(null, true) : null
     if (stopped) return stopped
-    if (!sameSha(expected, readyHead)) {
+    const lookPush = async () => {
       const pu = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then push the branch ${setup.branch} of PR #${PR} at the head ${expected}: run alone git -C ${W} push origin ${setup.branch}, then return head (git -C ${W} rev-parse HEAD, the full sha).
@@ -2722,6 +2769,68 @@ ${RULES}`, { label: 'look-push', phase: 'Ship', agentType: 'clerk', model: DEFAU
       if (lost) return lost
       if (!sameSha(pu.head, expected)) return stop('head-moved', { pr: PR, expected, head: pu.head })
       expected = fuller(expected, pu.head)
+      return null
+    }
+    if (!sameSha(expected, readyHead)) {
+      const pushed = await lookPush()
+      if (pushed) return pushed
+    }
+    // #1373: the stop waits for the checks of the head the owner will see, outside any lock. A red one gets the delivery's one fix; a base that moved
+    // during the wait is synced and pushed (twice at most); the wait then reads the new head again.
+    for (;;) {
+      const stalePoll = reran
+      const { ck, row } = await lookPoll(PR, expected, stalePoll)
+      if (row) return row
+      expected = fuller(expected, ck.head)
+      head = expected
+      const rd = lookRead(ck)
+      if (ck.behind !== true && rd.state === 'pending') {
+        if (++lookWaits >= PENDING_WAITS) return stop('checks-pending', { pr: PR, pending: rd.pending, checks: ck })
+        continue
+      }
+      reran = false
+      if (ck.behind === true) {
+        if (contended >= 2) return stop('sync-contention', { pr: PR, syncs })
+        contended++
+        const prior = expected
+        const s = await syncRound(null, true)
+        if (s) return s
+        if (!sameSha(expected, prior)) {
+          const pushed = await lookPush()
+          if (pushed) return pushed
+        }
+        continue
+      }
+      if (rd.state === 'failed') {
+        // #986: every failing check was a gate on an old result and the poll reran it: not a red poll, asked once after the one rerun.
+        if (stalePoll && staleOf(ck).length) {
+          log(`${'look-checks-' + lookPolls} reran ${staleOf(ck).length === 1 ? 'a stale gate run' : `${staleOf(ck).length} stale gate runs`} (${staleOf(ck).join(', ')}); polling once more`)
+          continue
+        }
+        if (checksFixes >= 1) return stop('checks', { pr: PR, failing: rd.failing, checks: ck })
+        checksFixes++
+        const w = await ciFix(ck, rd.failing, 'unasked')
+        if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
+        if (w.rerun) {
+          reran = true
+          continue
+        }
+        if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: ck, review: w.review })
+        expected = w.fix.commit
+        head = expected
+        const pushed = await lookPush()
+        if (pushed) return pushed
+        continue
+      }
+      // #1373: a head a fix or a sync moved is verified before the owner sees it, so the stop, its verified record and its pictures name one head. The verification runs after the poll's forge read, so the wait reads the forge again (the pull request head, its checks, the base's ancestry) before the stop.
+      if (!sameSha(verify.head, expected)) {
+        const rv = await call(`${CTX}\nThe branch of PR #${PR} moved to the head ${expected} after its verification at ${verify.head}; verify that head before the owner looks at it.\n${verifyBody}`, { label: 'look-reverify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+        if (!complete(rv, VERIFY) || !sameSha(rv.head, expected)) return stop('verify', { pr: PR, verify: rv, problems: [{ id: '?', summary: `the verification of ${expected} returned no usable reply for it` }] })
+        if (verifyProblems(rv).length) return stop('verify', { pr: PR, verify: rv, problems: verifyProblems(rv) })
+        verify = { head: fuller(expected, rv.head), clean: true, results: rv.results, ...(picturesOf(rv).length ? { pictures: picturesOf(rv) } : {}) }
+        continue
+      }
+      break
     }
     return lookStop(PR, expected)
   }
@@ -2874,7 +2983,7 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
     head = expected
     const failingNames = Array.isArray(ck.failing) ? ck.failing : []
     const pendingNames = Array.isArray(ck.pending) ? ck.pending : []
-    const state = ck.state === 'behind' ? 'behind' : ck.state === 'failed' || failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length || noCheckYet(ck) ? 'pending' : ck.state
+    const state = ck.state === 'behind' ? 'behind' : ck.state === 'failed' || failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length || noCheckYet(ck) || (MARKED && unproven(ck)) ? 'pending' : ck.state
     if (state === 'pending') {
       if (++pendingWaits >= PENDING_WAITS) return stop('checks-pending', { pr: PR, pending: pendingNames, checks: ck })
       continue

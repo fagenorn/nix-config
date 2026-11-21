@@ -49,7 +49,7 @@ export const meta = {
 // left stopped. The owner decides, then relaunches with that cont in conts and a decision or amend; a relaunch that brings neither stops in the child before
 // any agent and is this owner action again. A stop also marked oscillating is the fix-oscillating action instead, and one marked diverging the not-converging row.
 // #1139: an issue marked as needing the owner's look (its facts carry look {verdict}, read by look-approval marked) is never landed by the batch: its ready
-// child (look {verdict, covers}) is resumed once in mode ship with the ready cont, inside the same slot, and stops at awaiting-look. That row is
+// child (look {verdict, covers}) is resumed once in mode ship with the ready cont, after its slot is released (#1373: that resume waits for the pull request's checks, as a landing waits outside the slot), and stops at awaiting-look. That row is
 // {issue, outcome: awaiting-look, pr, head, reason}; it is reported in owner_actions with reason awaiting-look, the pr, the head, the pictures when
 // the child made any, the claim holder and the child's cont (slimmed), the claim held, and it is not relaunched: the owner's answer resumes it through
 // deliver-standard with that cont and this batch id. A re-adopted PR lands as it stands only when its facts read look unmarked; marked, or a marker
@@ -2112,6 +2112,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     }
 
     let r = null
+    let lookShip = false
     let threw = ''
     // #912: a thrown call logs its error whole and keeps its reason for the row; it reads laneName when called.
     const child = async mode => {
@@ -2147,14 +2148,16 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           r = await child('ready')
         }
       }
-      // #1139: a marked issue's ready child is resumed once in ship mode, inside this slot: the push and the PR, then the stop at awaiting-look.
-      if (r && r.stage === 'ready' && !terminalChild(r) && isObj(r.look) && r.look.verdict === 'marked' && isObj(r.cont)) {
-        CONTS[n] = r.cont
-        r = await child('ship')
-      }
+      lookShip = !!(r && r.stage === 'ready' && !terminalChild(r) && isObj(r.look) && r.look.verdict === 'marked' && isObj(r.cont))
       if (terminalChild(r)) trip(`child-${n}`)
     } finally {
       release()
+    }
+    // #1139: a marked issue's ready child is resumed once in ship mode: the push and the PR, the wait for its checks (#1373) and the stop at awaiting-look, outside the slot, as a landing waits for CI outside it.
+    if (lookShip) {
+      CONTS[n] = r.cont
+      r = await child('ship')
+      if (terminalChild(r)) trip(`child-${n}`)
     }
 
     if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: threw || `child-${n} returned nothing` }; return }
