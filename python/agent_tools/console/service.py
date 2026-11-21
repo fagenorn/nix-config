@@ -1618,7 +1618,9 @@ unreadable, again only after it read successfully in between) and `console: jour
 
 Spend (#1134): the thread named `SPEND_THREAD`, started by `start()`, calls `poll_spend()` every
 `spend_seconds` (`SPEND_SECONDS`), the first poll `spend_seconds` after `start()`; construction never
-reads a transcript, so the view's `spend` is null until that poll. `poll_spend()` reads the session,
+reads a transcript, so the view's `spend` is null until that poll; a question job that finds no view runs
+one spend read itself (#1357), the spend loop, that read and a direct `poll_spend()` hold one lock so they
+never read at once, and a job that finds a view once it holds the lock reads nothing. `poll_spend()` reads the session,
 session-subagent and workflow agent transcripts under the `projects` directory beside each of
 `session_dirs()` (see `spend.py`), and on darwin the keepalive ping log (`ping_log()`), outside the
 ingest lock, then builds the spend view and publishes it under that lock; it appends nothing to the
@@ -1668,7 +1670,7 @@ model, flags, settings and cap are a first question's (ADR-console-062). Its job
 `project_question.reach_of`; a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then gathers the project's own
-records (`question_records.project_records`, ADR-console-089) after the reach and before the
+records (`question_records.project_records`, ADR-console-089, first reading spend when no poll has yet) after the reach and before the
 session, under the ingest lock and only while the project still holds the root the question was asked in; a gathering that raises (a root taken by another project included) is a `failed` answer with one stderr line `console:
 project_question_records_failed <question_id> <Type>: <message>` and starts no session; then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
@@ -4060,6 +4062,7 @@ class ConsoleService:
         self._use = manager.ProfileUse({}, {})
         self._spend = spend.SpendReader(repo_of=repo_of)
         self._spend_view: dict | None = None
+        self._spend_lock = threading.Lock()
         self._spend_profiles: dict[str, str] = {}
         self._spend_questions: dict[str, str] = {}
         self._absent: frozenset[str] = frozenset()
@@ -4968,8 +4971,12 @@ class ConsoleService:
         that finishes while the records are gathered shows either before or after, never half of each.
         That section also rechecks that `project_id` still holds `root`: a checkout path taken by another
         project since the question was admitted would put the next owner's activations after the cutoff,
-        so the gathering raises and the question is a failed answer.
+        so the gathering raises and the question is a failed answer. A question asked before the first
+        spend poll reads the spend view first through the console's own poll (#1357, ADR-console-090),
+        and spend stays null only when that read failed.
         """
+        if self._spend_view is None:
+            self._spend_step(only_without_view=True)
         with self._ingest:
             held_state = self._states.get(project_id)
             if held_state is None or held_state.root != root:
@@ -8550,6 +8557,10 @@ class ConsoleService:
 
     def poll_spend(self) -> None:
         """Read the transcripts, rebuild the spend view and publish it; see the module docstring."""
+        with self._spend_lock:
+            self._poll_spend()
+
+    def _poll_spend(self) -> None:
         projects_dirs: list[Path] = []
         for directory in self._session_dirs():
             projects = Path(directory).parent / "projects"
@@ -8558,6 +8569,10 @@ class ConsoleService:
         today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
         since = (today - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
         self._spend.read(projects_dirs, since, self._ping_log())
+        if self._spend.roots_unreadable and self._spend_view is None:
+            # A cold start whose only transcript roots cannot be listed knows no spend: publishing the empty totals
+            # would show 30 zero days, so the view stays absent and the records' spend stays null.
+            raise OSError("the transcript directories cannot be listed")
         snapshot = self._spend.snapshot()
         with self._ingest:
             self._spend_view = spend.spend_view(
@@ -8566,9 +8581,11 @@ class ConsoleService:
                 profiles=self._spend_profiles, questions=self._spend_questions)
             self._publish()
 
-    def _spend_step(self) -> None:
+    def _spend_step(self, *, only_without_view: bool = False) -> None:
         try:
-            self.poll_spend()
+            with self._spend_lock:
+                if not (only_without_view and self._spend_view is not None):
+                    self._poll_spend()
         except Exception as error:
             print(f"console: spend_poll_failed {type(error).__name__}: {error}",
                   file=sys.stderr)

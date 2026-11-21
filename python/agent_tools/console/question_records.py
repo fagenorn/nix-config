@@ -69,11 +69,20 @@ are the console's record of why a production run failed. Newest first.
 Held checks. An inbox item whose `reason` starts with `HELD_PREFIX` or equals `inbox.REVIEW_REASON`;
 a tracker `decision` item is not one. `waiting_since` and `answered_at` are the `InboxRecord`'s own
 attributes. Ordered by `(waiting_since, key)`.
+
+Sections (ADR-console-090). `SECTIONS` names the five top-level members a session reads alone, in the
+order the prompt lists them. `section_lines(text)` gives, for each of them that `encode` wrote as a
+top-level member of `text`, `(offset, limit)` for Read: `offset` is the 1-based number of the line that
+starts the member (exactly one space, then `"<name>": `) and `limit` the lines up to, not including, the
+next top-level member or the closing brace. Lines are counted by `text.split("\n")`, never
+`splitlines()`: `encode` keeps U+2028, U+2029 and U+0085 raw inside a string and Read counts only LF.
+It reads no JSON, never raises for any `str`, and gives a name that is not present no key.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -146,6 +155,25 @@ def figure(tokens: spend_module.Tokens) -> dict:
 
 def encode(records: Mapping) -> str:
     return json.dumps(records, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+SECTIONS = ("spend", "sprints", "deliveries", "activations", "held_checks")
+_MEMBER = re.compile(r' "([^"]+)": ')
+
+
+def section_lines(text: str) -> dict[str, tuple[int, int]]:
+    lines = text.split("\n")
+    found: dict[str, tuple[int, int]] = {}
+    opened: tuple[str, int] | None = None
+    for number, line in enumerate(lines, 1):
+        if opened is not None and (line.startswith(' "') or line == "}"):
+            name, start = opened
+            if name in SECTIONS:
+                found[name] = (start, number - start)
+            opened = None
+        if opened is None and (match := _MEMBER.match(line)):
+            opened = (match.group(1), number)
+    return found
 
 
 def _total(parts: Iterable[spend_module.Tokens]) -> spend_module.Tokens:

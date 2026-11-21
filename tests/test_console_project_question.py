@@ -25,7 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    account_remove, deliveries, event_log, project_question, project_question_hook as hook, service, sessions,
+    account_remove, deliveries, event_log, project_question, project_question_hook as hook, question_records, service, sessions,
     signin, spend, sprints, view)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
@@ -1072,15 +1072,36 @@ class RecordsLaunchTest(LaunchCase):
             "its held checks",
             "Read it with Read, or Grep it",
             "why a delivery or production run failed",
-            "name it under Read when you use it",
+            "name it under Read with the parts you read",
         ):
             with self.subTest(part):
                 self.assertIn(part, text)
+        self.assertNotIn(project_question.SECTIONS_TEXT.split("{")[0], text)
         self.assertEqual(
             text, project_question.prompt(self.ask.question, self.routes, records=path))
         self.assertLess(text.index(path), text.index(project_question.QUESTION_MARK))
 
-    def test_the_records_file_is_private_and_removed_and_only_the_hook_words_change(self):
+    def test_the_prompt_gives_each_records_section_its_offset_and_limit(self):
+        doc = {"project_id": "owner/p01", "written_at": "2026-11-17T08:00:30+00:00",
+               "spend": None, "sprints": [], "deliveries": [], "activations": [],
+               "held_checks": []}
+        expected = set(doc) - {"project_id", "written_at"}
+        text = question_records.encode(doc)
+        self.ask = dataclasses.replace(self.ask, records=text)
+        prompt_text = project_question.launch_command(self.ask, "linux")[-1]
+        index = question_records.section_lines(text)
+        self.assertEqual(set(index), expected)
+        path = str(project_question.records_path(self.ask))
+        for name in sorted(expected):
+            offset, limit = index[name]
+            with self.subTest(name):
+                self.assertIn(f"{name} offset {offset} limit {limit}", prompt_text)
+        self.assertIn(path + " (spend)", prompt_text)
+        self.assertEqual(prompt_text, project_question.prompt(
+            self.ask.question, self.routes, records=path,
+            sections=question_records.section_lines(text)))
+
+    def test_the_records_file_is_private_kept_for_an_answer_and_only_the_hook_words_change(self):
         self.start(self.fake(act=self.capture))
         self.assertEqual(self.seen, {"text": self.records, "mode": 0o600})
         self.assertEqual(project_question.records_path(self.ask).parent, self.ask.settings.parent)
@@ -1097,6 +1118,31 @@ class RecordsLaunchTest(LaunchCase):
                 str(self.state), str(project_question.records_path(self.ask))])
         self.assertFalse(project_question.records_path(self.ask).exists())
         self.assertFalse(self.ask.settings.exists())
+
+    def test_the_records_file_of_an_answered_question_is_kept_private_and_any_other_outcome_removes_it(self):
+        path = project_question.records_path(self.ask)
+        self.assertEqual(self.start(self.fake()).outcome, project_question.ANSWERED)
+        self.assertEqual((path.read_text(), path.stat().st_mode & 0o777), (self.records, 0o600))
+        self.assertFalse(self.ask.settings.exists())
+        for name, run in (("timed out", self.fake(error=subprocess.TimeoutExpired("claude", 1))),
+                          ("failed exit", self.fake(code=1)), ("unreadable", self.fake(stdout=b"not json"))):
+            with self.subTest(name):
+                path.write_text("stale")
+                self.assertNotEqual(self.start(run).outcome, project_question.ANSWERED)
+                self.assertFalse(path.exists())
+                self.assertFalse(self.ask.settings.exists())
+
+    def test_writing_a_records_file_removes_the_kept_ones_older_than_ninety_days_only(self):
+        self.settings_dir.mkdir(parents=True)
+        now = time.time()
+        old, fresh, other = (self.settings_dir / name for name in (
+            "o" * 16 + project_question.RECORDS_SUFFIX, "f" * 16 + project_question.RECORDS_SUFFIX, "x.settings.json"))
+        for path, age in ((old, 91 * 86400), (fresh, 89 * 86400), (other, 365 * 86400)):
+            path.write_text("kept")
+            os.utime(path, (now - age, now - age))
+        self.start(self.fake())
+        self.assertEqual((old.exists(), fresh.exists(), other.exists()), (False, True, True))
+        self.assertTrue(project_question.records_path(self.ask).exists())
 
     def test_two_overlapping_questions_each_read_only_their_own_records(self):
         asks = {}
@@ -1157,7 +1203,7 @@ class RecordsLaunchTest(LaunchCase):
                     self.assertEqual(
                         seen[name],
                         ("deny", hook.WRITE_DENIED.format(tool=name.capitalize())), name)
-            self.assertFalse(project_question.records_path(own).exists())
+            self.assertEqual(project_question.records_path(own).read_text(), own.records)
             self.assertFalse(own.settings.exists())
 
     def fake_for(self, act):
@@ -2251,11 +2297,160 @@ class QuestionRecordsServiceTest(QuestionCase):
                 _ask, records = self.records_of(svc)
                 self.assertIs(records["deliveries"][0]["live"], False)
 
-    def test_before_the_first_spend_read_the_records_hold_null_spend(self):
-        svc = self.arrange(with_spend=False)
+    def test_a_question_before_the_first_spend_poll_gets_its_projects_spend(self):
+        now = datetime(2026, 11, 17, 12, tzinfo=timezone.utc).timestamp()
+        sessions = self.store.parent.parent / "sessions"
+        run = sessions.parent / "projects" / "-srv-p01" / "s-1" / "subagents" / "workflows" / "wf_a"
+        run.mkdir(parents=True)
+        journal = run / "journal.jsonl"
+        journal.write_text(json.dumps(
+            {"type": "started", "agentId": "a1", "label": "impl-1", "phase": "Tasks"}) + "\n")
+        agent = run / "agent-a1.jsonl"
+        agent.write_text(json.dumps(
+            {"type": "assistant", "sessionId": "s-1", "cwd": "/srv/p01",
+             "timestamp": "2026-11-17T10:00:00.000Z",
+             "message": {"id": "msg_r1", "model": "claude-sonnet-4-6",
+                         "usage": {"input_tokens": 40}}}) + "\n")
+        for path in (journal, agent):
+            os.utime(path, (now, now))
+        svc = self.arrange(with_spend=False, session_dirs=[sessions], clock=lambda: now)
         _ask, records = self.records_of(svc)
+        held = records["spend"]
+        self.assertIsNotNone(held)
+        self.assertEqual(held["days"][-1]["day"], "2026-11-17")
+        self.assertEqual(held["days"][-1]["tokens"], 40)
+        self.assertEqual([(r["run_id"], r["tokens"]) for r in held["runs"]], [("wf_a", 40)])
+        self.assertEqual(held["runs"][0]["phases"]["implement"]["tokens"], 40)
+        self.assertEqual(list(held["runs"][0]["days"]), ["2026-11-17"])
+        self.assertEqual(held["runs"][0]["days"]["2026-11-17"]["tokens"], 40)
+        self.assertEqual([i["issue"] for i in held["issues"]], [7])
+
+    def test_the_jobs_spend_read_runs_under_the_spend_lock_and_only_without_a_view(self):
+        svc = self.arrange(with_spend=False)
+        held = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            held.append(svc._spend_lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            self.records_of(svc)
+            self.records_of(svc)
+        self.assertEqual(held, [True])
+
+    def test_a_direct_poll_spend_runs_under_the_spend_lock(self):
+        svc = self.arrange(with_spend=False)
+        held = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            held.append(svc._spend_lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            svc.poll_spend()
+        self.assertEqual(held, [True])
+
+    def test_questions_started_together_before_the_first_poll_share_one_spend_read(self):
+        threads = []
+
+        def dispatch(job):
+            thread = threading.Thread(target=job)
+            threads.append(thread)
+            thread.start()
+
+        svc = self.arrange(with_spend=False, project_question_dispatch=dispatch)
+
+        class Recording:
+            lock = svc._spend_lock
+            attempts = []
+            both = threading.Event()
+
+            def __enter__(self):
+                self.attempts.append(1)
+                if len(self.attempts) == 2:
+                    self.both.set()
+                self.lock.acquire()
+
+            def __exit__(self, *exc):
+                self.lock.release()
+
+            def locked(self):
+                return self.lock.locked()
+
+        svc._spend_lock = Recording()
+        entered, release = threading.Event(), threading.Event()
+        reads = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            reads.append(1)
+            if len(reads) == 1:
+                entered.set()
+                release.wait(5)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            svc.ask_project_question(WHY, "what costs the most tokens per issue?")
+            self.assertTrue(entered.wait(5))
+            svc.ask_project_question("owner/p00", "what costs the most tokens per issue?")
+            self.assertTrue(svc._spend_lock.both.wait(5))
+            release.set()
+            for thread in threads:
+                thread.join(timeout=5)
+        self.assertEqual(reads, [1])
+        self.assertEqual(len(self.asked), 2)
+        for ask, _cancel in self.asked:
+            self.assertIsNotNone(json.loads(ask.records)["spend"])
+
+    def test_a_spend_read_that_fails_leaves_null_spend_and_the_rest_written(self):
+        svc = self.arrange(with_spend=False)
+        stderr = io.StringIO()
+        with mock.patch.object(svc._spend, "read", side_effect=OSError(5, "boom")), \
+                contextlib.redirect_stderr(stderr):
+            ask, records = self.records_of(svc)
         self.assertIsNone(records["spend"])
         self.assertTrue(records["deliveries"])
+        self.assertTrue(any(line.startswith("console: spend_poll_failed OSError")
+                            for line in stderr.getvalue().splitlines()))
+        self.assertIs(ask, self.asked[-1][0])
+
+    def test_a_cold_start_whose_transcript_root_cannot_be_listed_leaves_null_spend_not_zero_days(self):
+        svc = self.arrange(with_spend=False)
+        root = Path("/accounts/profiles/work")
+
+        def denied(directory):
+            raise PermissionError(13, "denied")
+
+        svc._spend = spend.SpendReader(scandir=denied)
+        stderr = io.StringIO()
+        with mock.patch.object(svc, "_session_dirs", return_value=[root / "sessions"]), \
+                contextlib.redirect_stderr(stderr):
+            ask, records = self.records_of(svc)
+        self.assertIsNone(records["spend"])
+        self.assertIsNone(svc._spend_view)
+        self.assertTrue(any(line.startswith("console: spend_poll_failed OSError")
+                            for line in stderr.getvalue().splitlines()))
+        self.assertTrue(records["deliveries"])
+
+    def test_a_warm_service_whose_transcript_root_cannot_be_listed_keeps_its_spend_view(self):
+        svc = self.arrange()
+        before = svc._spend_view
+        root = Path("/accounts/profiles/work")
+
+        def denied(directory):
+            raise PermissionError(13, "denied")
+
+        svc._spend = spend.SpendReader(scandir=denied)
+        with mock.patch.object(svc, "_session_dirs", return_value=[root / "sessions"]):
+            svc.poll_spend()
+        self.assertIsNotNone(svc._spend_view)
+
+    def test_the_support_service_reads_no_host_ping_log(self):
+        svc = self.arrange(with_spend=False)
+        self.assertIsNot(svc._ping_log, spend.default_ping_log)
+        self.assertIsNone(svc._ping_log())
 
     def test_records_that_cannot_be_gathered_answer_failed_without_a_session(self):
         svc = self.arrange()
@@ -2502,7 +2697,8 @@ class QuestionThreadServiceTest(QuestionCase):
             self.assertEqual(follow_argv[follow_argv.index(flag) + 1], value)
         self.assertEqual(follow_argv[-1], project_question.prompt(
             "and which host is deployed?", ROUTES, follow_ask.thread, repo="owner/p01",
-            records=str(project_question.records_path(follow_ask))))
+            records=str(project_question.records_path(follow_ask)),
+            sections=question_records.section_lines(follow_ask.records)))
         self.assertIn("Earlier question: what does the build check?\n"
                       "Earlier answer: Answer: it builds.\n", follow_argv[-1])
         self.assertEqual(_thread_ids(svc), [[first, follow]])

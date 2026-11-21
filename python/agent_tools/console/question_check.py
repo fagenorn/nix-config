@@ -64,7 +64,13 @@ Order of one run:
    seconds have passed since the run began. After a post the view is read again before it is trusted.
 7. Verdicts: not found or `working` is `pending` (`refused` when its post was refused); `failed` and
    `timed_out` are `failed`; `answered` is `grounded` or `ungrounded`. An answer is grounded iff its
-   `answer` is a non-blank string and `cites(read_text, question_id + RECORDS_SUFFIX)` holds (P5).
+   `answer` is a non-blank string and `cites(read_text, question_id + RECORDS_SUFFIX)` holds (P5); the
+   cost question's (`QUESTIONS[1]`) answer is also grounded only when `spend_figure(answer, spend_figures(records
+   text))` holds and `cites_part(read_text, question_id + RECORDS_SUFFIX, SPEND_PART)` holds, so a cost answer
+   that quotes no figure of its own records' spend section, or does not cite the spend part of its own file, is
+   `ungrounded` (ADR-console-090). The records text is the question's own retained file,
+   `<state dir>/project-question-settings/<question id>.records.json` (the console keeps it for an answered
+   question, `project_question.RECORDS_KEPT_SECONDS`); a file that cannot be read leaves the answer `ungrounded`.
 8. Status, first match wins: any `failed` or `ungrounded` is `not_met`, exit 1; any `pending` or
    `refused` is `waiting`, 75; else `met`, 0. A usage or setup error is 2.
 9. The result file is written whenever step 3 found the project. Stdout is exactly one JSON line with
@@ -89,7 +95,31 @@ failure or error next to `activation`, `run`, `build`, `deploy`, `production`, `
 `step`, `test`, `switch`, `delivery`, `release`, `commit` or `merge`, unless `to` follows, as in `run failed
 to open`) is removed first (`_FAILED_RUN`), so `q.records.json (failed activation)` is a citation.
 
-The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key` and `revision`.
+`spend_figures(records)` is the set of spend values the records text prints: parsed as JSON, every number under
+a `tokens` key (an int) of its `spend` member, at any depth, as its digits, and every number under a `dollars`
+key as `$` and two decimals (`$0.42`, `$38.10`); text that is no JSON, or has no `spend` object, gives the empty
+set. `spend_figure(text, figures)` is False for None, else whether the text quotes one of them: it finds each
+number in the text (digits with commas only between three-digit groups, an optional fraction, not inside a longer
+word or number, an optional `$` before it) and holds a token count when a number with no `$` and no fraction,
+commas dropped, is in `figures`, and a dollar amount when a number with `$` and a fraction, commas dropped, is.
+The shape of the prose around a figure is never judged (ADR-console-090: the session is told to quote each
+figure exactly as the records print it). Stated limits, not defects: a number of the answer that is no spend
+figure but equals a spend value passes, and a figure the session reformats (rounded, `1.2M`, converted or
+reworded) is no figure.
+
+`cites_part(read_text, name, part)`
+is True iff `cites(read_text, name)` holds and some occurrence of `name` in the Read text, at the start
+of a line or after whitespace, `/`, a backquote, a quote, `(`, `[`, `<` or `*`, is followed by optional
+closing backquotes, quotes or asterisks, an optional line range (`:120-400`) and optional whitespace and then a
+parenthesized group one of whose words equals `part` (case-insensitively; the group is split at whitespace and
+at `,`, `;`, `:`, `/`, `&` and the brackets and marks around a word, and every word must be a section name of
+`question_records.SECTIONS`, `held`, `checks`, `offset`, `limit`, `part`, `parts`, `section`, `sections`, `only`,
+`and`, `line`, `lines` or a number, so `spend offset 3 limit 40` marks the spend part and a group with any
+other word, `excluding`, `not`, `skipped`, `but` or `unread`, marks none, as in `deliveries only, spend skipped`), so the part is bound to the citation of the
+question's own file: `<path> (deliveries), old-profile.md (spend)` does not cite the spend part.
+
+The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key`, `revision` and `records` (a question id to its
+records text, None when unreadable).
 """
 
 import argparse
@@ -105,7 +135,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.console import manager_check, project_question, service, view
+from agent_tools.console import manager_check, project_question, question_records, service, view
 
 QUESTIONS = (
     "What shipped, and what is live, in the last 7 days?",
@@ -130,6 +160,17 @@ _FAILED_RUN = re.compile(
     r"|(?:fail(?:ed|s|ure)?|errors?)\s+(?:activation|run|build|deploy\w*|production|check|job|workflow|step"
     r"|test|switch|delivery|release|commit|merge)s?)\b", re.IGNORECASE)
 _LINE_SUFFIX = re.compile(r":[0-9][0-9,-]*$")
+SPEND_PART = "spend"
+# A figure in an answer: a number (commas only between three-digit groups, an optional fraction), not part of a
+# longer word or number, with an optional `$` before it. Judged only by membership in the records' spend values.
+_AMOUNT = re.compile(r"(?<![\w.,])(\$\s?)?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?!\w)")
+# The words a parenthesized group may hold besides the part it marks: the records' section names, the prompt's
+# `offset`/`limit` pair and numbers. Any other word (`excluding`, `skipped`, `but`, `unread`) can say the part
+# was not read, so a group that holds one marks no part.
+_PART_WORDS = frozenset((*question_records.SECTIONS, "held", "checks", "offset", "limit", "part", "parts",
+                         "section", "sections", "only", "and", "line", "lines"))
+_PART_NUMBER = re.compile(r"[\d,.-]+")
+_PART_SPLIT = re.compile(r"[\s,;:/&()\[\]<>`'\"*]+")
 _EXIT = {"met": 0, "not_met": 1, "waiting": NOT_YET}
 
 
@@ -149,12 +190,78 @@ def cites(read_text: str | None, name: str) -> bool:
         _FAILED_READ.search(_FAILED_RUN.sub(" ", clause)) for clause in clauses[named[0]:])
 
 
+def spend_figures(records: str | None) -> frozenset[str]:
+    """The spend values the records print: each token count as its digits, each dollar amount as `$` and two places."""
+    try:
+        spend = json.loads(records)["spend"] if records is not None else None
+    except (ValueError, TypeError, KeyError, RecursionError):
+        return frozenset()
+    found: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for name, value in node.items():
+                number = isinstance(value, (int, float)) and not isinstance(value, bool)
+                if number and name == "tokens" and isinstance(value, int):
+                    found.add(str(value))
+                elif number and name == "dollars":
+                    found.add(f"${value:.2f}")
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(spend)
+    return frozenset(found)
+
+
+def spend_figure(text: str | None, figures: frozenset[str]) -> bool:
+    """Whether `text` quotes a figure of `figures`, a token count or a two-place dollar amount as the records print it."""
+    if text is None:
+        return False
+    for found in _AMOUNT.finditer(text):
+        number = found.group(2).replace(",", "")
+        if found.group(1) is None and found.group(3) is None and number in figures:
+            return True
+        if found.group(1) is not None and found.group(3) is not None and f"${number}{found.group(3)}" in figures:
+            return True
+    return False
+
+
+def cites_part(read_text: str | None, name: str, part: str) -> bool:
+    """Whether the Read section cites `name` and marks `part` in the parentheses right after that citation."""
+    if not cites(read_text, name):
+        return False
+    body = read_text.removeprefix(view.ASK_READ_TEXT.format(text=""))
+    pattern = re.compile(r"(?:^|(?<=[\s/`'\"(\[<*]))" + re.escape(name)
+                         + r"[*`'\"]*(?::[0-9][0-9,-]*)?[*`'\"]*\s*\(([^)]*)\)", re.MULTILINE)
+    return any(_marks(found.group(1), part) for found in pattern.finditer(body))
+
+
+def _marks(group: str, part: str) -> bool:
+    words = [word.casefold() for word in _PART_SPLIT.split(group) if word]
+    return part.casefold() in words and all(
+        word in _PART_WORDS or _PART_NUMBER.fullmatch(word) for word in words)
+
+
 def _names(clause: str, name: str) -> bool:
     for token in _TOKEN_SPLIT.split(clause):
         token = _LINE_SUFFIX.sub("", token.rstrip(".:"))
         if token.rsplit("/", 1)[-1] == name:
             return True
     return False
+
+
+def _records_reader(state_dir: Path):
+    """The reader of a question's retained records text under the console's settings directory, None when unreadable."""
+    def read(question_id: str) -> str | None:
+        try:
+            return (state_dir / project_question.SETTINGS_DIR / (question_id + project_question.RECORDS_SUFFIX)
+                    ).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+    return read
 
 
 def _git_revision() -> str | None:
@@ -237,14 +344,17 @@ def _locked(state_file: Path):
         os.close(descriptor)
 
 
-def _verdict(shown: dict | None, refused: bool) -> str:
+def _verdict(shown: dict | None, refused: bool, records=None) -> str:
+    """`records` is the cost question's reader of a question's records text (None: any answer needs no spend figure)."""
     state = shown.get("state") if shown else None
     if state in ("failed", "timed_out"):
         return "failed"
     if state == "answered":
         answer = shown.get("answer")
-        if (isinstance(answer, str) and answer.strip()
-                and cites(shown.get("read_text"), str(shown.get("id")) + project_question.RECORDS_SUFFIX)):
+        name = str(shown.get("id")) + project_question.RECORDS_SUFFIX
+        if (isinstance(answer, str) and answer.strip() and cites(shown.get("read_text"), name)
+                and (records is None or (spend_figure(answer, spend_figures(records(str(shown.get("id")))))
+                                         and cites_part(shown.get("read_text"), name, SPEND_PART)))):
             return "grounded"
         return "ungrounded"
     return "refused" if refused else "pending"
@@ -259,7 +369,7 @@ def _status(verdicts: list[str]) -> str:
 
 
 def main(argv: list[str] | None = None, *, state=None, post=None, now=None, sleep=None,
-         new_key=None, revision=None) -> int:
+         new_key=None, revision=None, records=None) -> int:
     args = build_parser().parse_args(argv)
     state_dir = manager_check._state_dir()
     token_file = args.token_file or state_dir / "page-token"
@@ -272,6 +382,7 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
     sleep = sleep or time.sleep
     new_key = new_key or (lambda: secrets.token_hex(16))
     revision = revision or _git_revision
+    records = records or _records_reader(state_dir)
     started = now()
 
     def finish(status: str, code: int | None = None, **more) -> int:
@@ -357,7 +468,8 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
         if fresh is not None and _project_entry(fresh, args.project) is not None:
             current, entry, stale = fresh, _project_entry(fresh, args.project), False
 
-    verdicts = [_verdict(_shown(entry, keys[text]), posts.get(text, "").startswith("refused"))
+    verdicts = [_verdict(_shown(entry, keys[text]), posts.get(text, "").startswith("refused"),
+                         records=records if text == QUESTIONS[1] else None)
                 for text in texts]
     return _finish_result(finish, result_file, args.project, rev, now, _status(verdicts), texts, keys,
                           verdicts, posts, entry)
