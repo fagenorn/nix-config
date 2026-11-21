@@ -11,7 +11,6 @@ Run: just agent-workflow-tests
 import json
 import os
 import plistlib
-import re
 import shlex
 import subprocess
 import tempfile
@@ -25,13 +24,12 @@ from . import accounts_sandbox, host_readings, test_verify_pending_units as unit
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PORT = 27184
-LAUNCHER = re.compile(r"^/nix/store/[0-9a-z]{32}-agent-tools-console$")
 
 
-def check_command(case, command, home, tailscale=None):
-    """The command's words; `tailscale` is the client path a host reads Serve status from (#1237, #1299)."""
+def check_command(case, command, home, launcher, tailscale=None):
+    """The command's words; the first word is `launcher`, the console launcher of the platform package the host installs (from the host's own reading), `tailscale` the client path a host reads Serve status from (#1237, #1299)."""
     words = shlex.split(command)
-    case.assertRegex(words[0], LAUNCHER)
+    case.assertEqual(words[0], launcher)
     case.assertEqual(words[1:5], ["--port", str(PORT), "--guest-socket",
                                   f"{home}/.agents/state/console/guest/guest.sock"])
     rest = words[5:]
@@ -75,7 +73,7 @@ class LinuxUnit(unittest.TestCase):
 
     def test_the_port_is_the_consoles_fixed_port(self):
         self.assertEqual(PORT, service.DEFAULT_PORT)
-        check_command(self, self.got["command"], self.got["home"],
+        check_command(self, self.got["command"], self.got["home"], self.got["launcher"],
                       "/mnt/c/Program Files/Tailscale/tailscale.exe")
 
     def test_the_service_runs_the_console_command_and_restarts_it_on_exit(self):
@@ -137,13 +135,15 @@ class DarwinAgent(unittest.TestCase):
                 yield self.got[host], self.plist[host]
 
     def test_the_agent_runs_the_console_command_after_the_nix_volume_is_mounted(self):
-        for got, plist in self.hosts():
-            command = got["command"]
-            check_command(self, command, got["home"], got["tailscaleClient"])
-            self.assertEqual(got["daemonCommand" if got["atBoot"] else "agentCommand"], command)
-            self.assertEqual(plist["ProgramArguments"],
-                             ["/bin/sh", "-c", f"/bin/wait4path /nix/store && exec {command}"])
-            self.assertNotIn("Program", plist)
+        for host in self.HOSTS:
+            with self.subTest(host=host):
+                got, plist = self.got[host], self.plist[host]
+                command = got["command"]
+                check_command(self, command, got["home"], got["launcher"], got["tailscaleClient"])
+                self.assertEqual(got["daemonCommand" if got["atBoot"] else "agentCommand"], command)
+                self.assertEqual(plist["ProgramArguments"],
+                                 ["/bin/sh", "-c", f"/bin/wait4path /nix/store && exec {command}"])
+                self.assertNotIn("Program", plist)
 
     def test_only_a_mac_with_the_tailscale_daemon_reads_its_client(self):
         daemon = self.got["eleven-m5"]

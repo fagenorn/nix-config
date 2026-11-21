@@ -710,6 +710,22 @@ class StubTest(Case):
         self.assertEqual(raised.exception.code, 2)
 
 
+class FixtureContractTest(unittest.TestCase):
+    def test_an_unsupported_review_role_adds_no_command(self):
+        contract = json.loads(Path(CONTRACT).read_text("utf-8"))
+        contract["bindings"]["workflow"]["review"]["plan"] = None
+        original = {"argv": ["make", "null"], "cwd": ".", "env": []}
+        contract["bindings"]["commands"]["null"] = original
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "project.json"
+            source.write_text(json.dumps(contract), encoding="utf-8")
+            built = register_check._contract(source, "fixture/target")
+        # The fixture is written as JSON, where a `None` key becomes the id "null".
+        commands = json.loads(json.dumps(built))["bindings"]["commands"]
+        self.assertEqual(commands["null"], original)
+        self.assertIn(built["bindings"]["workflow"]["review"]["code"], commands)
+
+
 class WrapperTest(unittest.TestCase):
     def test_the_wrapper_runs_the_module(self):
         done = subprocess.run([str(WRAPPER), "--url", "http://127.0.0.1:1"], cwd=ROOT,
