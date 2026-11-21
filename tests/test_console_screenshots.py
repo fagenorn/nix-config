@@ -64,6 +64,7 @@ def fake_browser(present):
             self.mutations = []
             self.unbreakable = set()
             self.media = []
+            self.viewports = []
             self.cdp = []
             self.fresh_mutation = False
             page = self
@@ -82,6 +83,9 @@ def fake_browser(present):
 
         def emulate_media(self, **kw):
             self.media.append(kw)
+
+        def set_viewport_size(self, size):
+            self.viewports.append(size)
 
         def goto(self, url):
             pass
@@ -232,6 +236,13 @@ MOVED: tuple[Moved, ...] = (
           ".notice", "color", BOTH, ("palette-notices",),
           via="a colour written as rgb(), hex, a token, a name, a color-mix() or hsl() is one "
               "painted colour that palette-notices refuses after normalisation"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
+          ".notice", "background-image", BOTH, ("palette-notices-gradient",),
+          via="a colour painted by a gradient's stops is one painted colour that the palette "
+              "refuses after normalisation"),
+    Moved(f"{PAGE}::PageTest::test_peach_marks_only_needs_you", "body", "background-image", BOTH,
+          ("peach-only-needs-gradient",),
+          via="the rendered page is read for peach in the stops of every element's gradient"),
     Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
           ".notice-long", "color", BOTH, ("palette-notices",),
           via="a painted colour that palette-notices refuses after normalisation"),
@@ -446,8 +457,8 @@ MOVED += (
       for prop, read in (("display", "display"), ("list-style", "list-style-type"),
                          ("list-style-type", "list-style-type"))),
     moved(_ARROW, ".line.notices summary::-webkit-details-marker", "display", BOTH,
-          "disclosure-notices-display",
-          via="the marker is the summary's own arrow, read as the summary's list-item display"),
+          "disclosure-notices-marker-display",
+          via="the marker's own display is read from the cascade, no engine resolves its style"),
     moved(_ARROW, ".notices-project", "margin-left", BOTH, "notices-project-margin-left"),
     moved(_THREAD, ".thread-open", "display", BOTH, "thread-open-display"),
     moved(_THREAD, ".thread-first", "flex", BOTH, "thread-first-flex"),
@@ -468,11 +479,11 @@ MOVED += (
     moved(_ANSWER_SIZE, ".ask-answer p", "font", BOTH, "answer-type-font"),
     moved(_ANSWER_SIZE, ".ask-answer li", "font-size", BOTH, "answer-type-li-font-size"),
     moved(_ANSWER_SIZE, ".ask-answer li", "font", BOTH, "answer-type-li-font"),
-    *(moved(_ANSWER_SIZE, selector, prop, BOTH, row,
-            via="" if selector.endswith(" .md-list") else "the list kinds inherit like the list")
-      for selector in (".ask-answer .md-list", ".ask-answer ul.md-list", ".ask-answer ol.md-list")
+    *(moved(_ANSWER_SIZE, ".ask-answer .md-list", prop, BOTH, row)
       for prop, row in (("font-size", "answer-type-list-font-size"),
                         ("font", "answer-type-list-font"))),
+    *(moved(_ANSWER_SIZE, f".ask-answer {kind}.md-list", prop, BOTH, f"answer-type-{kind}-{key}")
+      for kind in ("ul", "ol") for prop, key in (("font-size", "font-size"), ("font", "font"))),
     moved(_BREAKS, ".ask-answer p", "white-space", BOTH, "answer-type-white-space"),
     moved(_BLOCKS, ".held.blocks", "white-space", BOTH, "held-blocks-white-space"),
     moved(_BLOCKS, ".held.blocks", "overflow", BOTH, "held-blocks-overflow"),
@@ -666,8 +677,12 @@ MOVED += (
           "row-gap-padding-top-same"),
     moved(_ROW_GAP, ".brief-row", "padding-bottom", WIDE, "row-gap-padding-bottom",
           "row-gap-padding-bottom-same"),
+    moved(_ROW_GAP, ".brief-row", "padding-left", WIDE, "row-gap-padding-left",
+          "row-gap-padding-left-same"),
+    moved(_ROW_GAP, ".brief-row", "padding-right", WIDE, "row-gap-padding-right",
+          "row-gap-padding-right-same"),
     moved(_ROW_GAP, ".rest > li.row", "padding", WIDE, "row-gap-padding-top-same",
-          "row-gap-padding-bottom-same",
+          "row-gap-padding-bottom-same", "row-gap-padding-left-same", "row-gap-padding-right-same",
           via="the registration row's padding is what the brief row is read against"),
     moved(_ROW_GAP, ".card.lead + .brief-row", "margin-top", WIDE, "row-gap-lead-brief-margin-top"),
     moved(_ROW_GAP, ".card.lead + .rest", "margin-top", WIDE, "row-gap-lead-rest-margin-top"),
@@ -705,7 +720,8 @@ MOVED += (
                               (".pic-thumb img", ("thumb-img-background-color",
                                                   "thumb-img-background-image")))),
     moved(_PAIR_ROW, ".pic-pair", "display", WIDE, "pics-pair-display-1440"),
-    moved(_PAIR_ROW, ".pic-pair", "flex-direction", WIDE, "pics-pair-direction-1440"),
+    moved(_PAIR_ROW, ".pic-pair", "flex-direction", (1440, 1180, 900), "pics-pair-direction-1440",
+          "pics-pair-direction-1180", "pics-pair-direction-900"),
     moved(_PAIR_ROW, ".pic-pair .pic", "flex", WIDE, "pics-pair-pic-flex-1440"),
     moved(_VIEWER_PAIR, ".viewer-pair", "display", BOTH, "viewer-pair-display"),
     moved(_VIEWER_PAIR, ".viewer-pair", "flex", BOTH, "viewer-pair-display",
@@ -1850,6 +1866,22 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertNotIn("button.pic-thumb", page.clicks)
         self.assertEqual((shot.style, shot.checked, shot.broke), ((), (), ()))
 
+    def test_a_between_width_row_is_read_in_the_widest_shot_after_resizing_to_it(self) -> None:
+        rows = tuple(style_row(name, states=("live-several",), widths=widths)
+                     for name, widths in (("wide", (1440,)), ("mid", (900,)), ("high", (1180,)),
+                                          ("narrow", (480,))))
+        for width, checked, sizes in ((1440, ("wide", "high", "mid"), [1180, 900]),
+                                      (480, ("narrow",), [])):
+            with self.subTest(width=width), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(set())
+                with mock.patch.object(shots, "STYLE_CHECKS", rows):
+                    shot = shots._shoot(browser, "http://console.test/", "live-several", width,
+                                        Path(tmp))
+                self.assertEqual(shot.checked, checked)
+                self.assertEqual([size["width"] for size in page.viewports], sizes)
+        self.assertEqual(shots.BETWEEN_WIDTHS, (1180, 900))
+        self.assertFalse(set(shots.BETWEEN_WIDTHS) & set(shots.WIDTHS))
+
     def test_a_real_answer_shot_skips_the_fixture_rows(self) -> None:
         rows = (style_row("a", states=("question-read",)),
                 style_row("b", states=("question-read",), fixture=True))
@@ -2607,6 +2639,15 @@ class ScreenshotStyleTableTest(unittest.TestCase):
                        if set(row.states) & {"guest-page", "guest-steer"})
         self.assertEqual([name for name in named if not name.startswith("guest-")], [])
 
+    def test_each_guest_row_reads_both_guest_pages_at_both_widths(self) -> None:
+        guest = {row.name: row for row in shots.STYLE_CHECKS if row.name.startswith("guest-")}
+        self.assertEqual(sorted(guest), ["guest-tick-height", "guest-tick-width",
+                                         "guest-top-hidden-display"])
+        for name, row in guest.items():
+            with self.subTest(name):
+                self.assertEqual(set(row.states), {"guest-page", "guest-steer"})
+                self.assertEqual(set(row.widths), set(shots.WIDTHS))
+
     def test_every_style_check_is_well_formed(self) -> None:
         names = [row.name for row in shots.STYLE_CHECKS]
         self.assertEqual(len(names), len(set(names)))
@@ -2615,7 +2656,7 @@ class ScreenshotStyleTableTest(unittest.TestCase):
             with self.subTest(row.name):
                 self.assertRegex(row.name, r"^[a-z0-9-]+$")
                 self.assertTrue(row.states and set(row.states) <= set(shots.STATES))
-                self.assertTrue(row.widths and set(row.widths) <= set(shots.WIDTHS))
+                self.assertTrue(row.widths and set(row.widths) <= set(shots.STYLE_WIDTHS))
                 self.assertIn(row.want, shots.WANTS)
                 self.assertTrue("{" in row.broken and "}" in row.broken)
                 if row.probe:
@@ -2767,8 +2808,8 @@ class ScreenshotStyleTableTest(unittest.TestCase):
 
 
 class ScreenshotStyleTest(unittest.TestCase):
-    def styled(self, html, rows, mutation=None, only=None):
-        """Load `html` alone in one 1440x900 Chromium page and return the style misses."""
+    def styled(self, html, rows, mutation=None, only=None, width=1440):
+        """Load `html` alone in one `width`x900 Chromium page and return the style misses."""
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -2779,7 +2820,7 @@ class ScreenshotStyleTest(unittest.TestCase):
             except Error as err:
                 self.skipTest(f"no Chromium to launch: {err}")
             try:
-                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                page = browser.new_page(viewport={"width": width, "height": 900})
                 page.set_content(html)
                 found = shots.read_style(page, rows, mutation=mutation, only=only)
                 self.last_leftover = page.evaluate(
@@ -3183,6 +3224,123 @@ class ScreenshotStyleTest(unittest.TestCase):
         self.assertEqual(self.styled(faint, [row("4.5", selector=".f", pseudo="::placeholder")]),
                          ("c: .f::placeholder contrast is 1.94",))
 
+    def on_the_page(self, body, names, *, width=1440, change=(), extra="", mutation=None):
+        """The misses of the table's rows `names` on `body` under the page's own style block, with
+        each `(old, new)` of `change` replaced in it and `extra` rules after it."""
+        text = (Path(shots.__file__).resolve().parents[1]
+                / "python/agent_tools/console/page.html").read_text(encoding="utf-8")
+        style = re.search(r"(?s)<style>(.*?)</style>", text).group(1)
+        for old, new in change:
+            self.assertIn(old, style)
+            style = style.replace(old, new)
+        rows = [row for name in names for row in shots.STYLE_CHECKS if row.name == name]
+        self.assertEqual([row.name for row in rows], list(names))
+        return self.styled(f"<style>{style}\n{extra}</style>{body}", rows, width=width,
+                           mutation=mutation)
+
+    def test_the_gallery_pair_is_read_at_both_widths_between_the_two_it_is_shot_at(self) -> None:
+        body = ('<div class="pics"><div class="pic-pair"><div class="pic">a</div>'
+                '<div class="pic">b</div></div></div>')
+        for at in shots.BETWEEN_WIDTHS:
+            name = f"pics-pair-direction-{at}"
+            with self.subTest(at=at):
+                self.assertEqual(self.on_the_page(body, [name], width=at), ())
+                self.assertEqual(
+                    self.on_the_page(body, [name], width=at, change=((
+                        "@media (max-width: 480px) {\n  .pic-pair {",
+                        "@media (max-width: 1180px) {\n  .pic-pair {"),)),
+                    (f"{name}: .pic-pair flex-direction is column",))
+
+    def test_the_brief_row_is_read_on_all_four_sides_of_its_padding(self) -> None:
+        names = [f"row-gap-padding-{side}{kind}" for kind in ("", "-same")
+                 for side in ("top", "bottom", "left", "right")]
+        body = '<div id="inbox"></div>'
+        self.assertEqual(self.on_the_page(body, names), ())
+        self.assertEqual(
+            self.on_the_page(body, names, extra=".brief-row { padding: 12px 24px }"),
+            tuple(f"row-gap-padding-{side}{kind}: .brief-row padding-{side} is 24px"
+                  for kind in ("", "-same") for side in ("left", "right")))
+
+    def test_each_answer_list_kind_is_read_on_a_rendered_list_of_its_kind(self) -> None:
+        body = '<div id="reading"><div class="ask-answer"><p>x</p></div></div>'
+        names = [f"answer-type-{kind}-{key}" for kind in ("ul", "ol") for key in ("font-size", "font")]
+        self.assertEqual(self.on_the_page(body, names), ())
+        for kind in ("ul", "ol"):
+            with self.subTest(kind=kind):
+                misses = self.on_the_page(body, names, extra=f".ask-answer {kind}.md-list "
+                                                             "{ font: 20px serif }")
+                self.assertEqual(
+                    sorted(miss.split(":")[0] for miss in misses),
+                    [f"answer-type-{kind}-font", f"answer-type-{kind}-font-size"])
+
+    def test_the_notices_marker_is_read_on_its_own_declared_display(self) -> None:
+        body = ('<ul id="list"><li class="line notices"><details><summary>Notices</summary>'
+                '</details></li></ul>')
+        name = "disclosure-notices-marker-display"
+        marker = ".line.notices summary::-webkit-details-marker { display: revert; }"
+        self.assertEqual(self.on_the_page(body, [name]), ())
+        self.assertEqual(
+            self.on_the_page(body, [name], change=((marker, ""),)),
+            (f"{name}: .line.notices summary::-webkit-details-marker display is none",))
+        row = next(row for row in shots.STYLE_CHECKS if row.name == name)
+        self.assertEqual(self.on_the_page(body, [name], mutation=row.broken),
+                         (f"{name}: .line.notices summary::-webkit-details-marker display is none",))
+        # the summary's own list-item display is the other row's, and it is not enough
+        self.assertEqual(self.on_the_page(body, ["disclosure-notices-display"],
+                                          change=((marker, ""),)), ())
+
+    def test_declared_takes_the_winning_rule_of_a_pseudo_element(self) -> None:
+        def read(css, width=1440):
+            row = style_row("d", selector=".a", prop="display", want="declared", value="revert",
+                            pseudo="::-webkit-details-marker")
+            return self.styled(f'<style>{css}</style><p class="a">x</p>', [row], width=width)
+
+        marker = "::-webkit-details-marker"
+        self.assertEqual(read(f".a{marker} {{ display: revert }}"), ())
+        self.assertEqual(read(f"p.a{marker}, .b{marker} {{ display: none }}"
+                              f".a{marker} {{ display: revert }}"),
+                         ("d: .a::-webkit-details-marker display is none",))
+        self.assertEqual(read(f".a{marker} {{ display: revert }} p{marker} {{ display: none }}"), ())
+        self.assertEqual(read(f".a{marker} {{ display: revert }} .a{marker} {{ display: none }}"),
+                         ("d: .a::-webkit-details-marker display is none",))
+        self.assertEqual(read(f".a{marker} {{ display: revert }} p{marker} {{ display: none }}"
+                              f".a{marker} {{ color: red }} #x{marker} {{ display: none }}"), ())
+        self.assertEqual(read(f"p{marker} {{ display: none !important }}"
+                              f".a{marker} {{ display: revert }}"),
+                         ("d: .a::-webkit-details-marker display is none",))
+        wide = f"@media (min-width: 1000px) {{ .a{marker} {{ display: none }} }}"
+        self.assertEqual(read(f".a{marker} {{ display: revert }}{wide}"),
+                         ("d: .a::-webkit-details-marker display is none",))
+        self.assertEqual(read(f".a{marker} {{ display: revert }}{wide}", width=900), ())
+        self.assertEqual(read(""), ("d: .a::-webkit-details-marker display is (none)",))
+
+    def test_a_colour_painted_by_a_gradient_is_a_painted_colour(self) -> None:
+        for name, body, mutation_target in (
+                ("palette-notices-gradient",
+                 '<ul id="list"><li class="line notices"><p class="notice">x</p></li></ul>',
+                 "p.notice"),
+                ("peach-only-needs-gradient", '<div class="top-in">x</div>', "div.top-in")):
+            with self.subTest(name):
+                row = next(row for row in shots.STYLE_CHECKS if row.name == name)
+                self.assertEqual(self.on_the_page(body, [name]), ())
+                (miss,) = self.on_the_page(body, [name], mutation=row.broken)
+                self.assertRegex(miss, rf"^{name}: {mutation_target} background-image is "
+                                       r"rgb\(245, 169, 127\)$")
+
+    def test_a_colour_the_page_cannot_read_as_rgb_is_a_named_miss(self) -> None:
+        def row(name, value, **kw):
+            return style_row(name, **{"selector": ".t", "prop": "color", "want": "contrast",
+                                      "value": value, **kw})
+
+        html = ('<style>.f::placeholder { color: oklch(0.5 0.1 200); opacity: 1 }</style>'
+                '<input class="f" placeholder="x" style="background: none">'
+                '<p class="t" style="color: #939ab7; background: #1e2030">x</p>')
+        misses = self.styled(html, [row("c", "4.5", selector=".f", pseudo="::placeholder"),
+                                    row("d", "99")])
+        self.assertEqual(len(misses), 2)
+        self.assertRegex(misses[0], r"^c: \.f::placeholder contrast is unreadable oklch\(")
+        self.assertEqual(misses[1], "d: .t contrast is 5.79")
+
     def sandboxed_capture(self, **kw):
         try:
             from playwright.sync_api import Error, sync_playwright
@@ -3200,8 +3358,9 @@ class ScreenshotStyleTest(unittest.TestCase):
         taken = self.sandboxed_capture(mutate=True)
         self.assertEqual([(s.path.name, s.style) for s in taken if s.style], [])
         for shot in taken:
+            read_at = (shot.width, *(shots.BETWEEN_WIDTHS if shot.width == shots.WIDTHS[0] else ()))
             expected = {r.name for r in shots.STYLE_CHECKS
-                        if shot.state in r.states and shot.width in r.widths}
+                        if shot.state in r.states and set(read_at) & set(r.widths)}
             with self.subTest(shot.path.name):
                 self.assertEqual(set(shot.checked), expected)
                 self.assertEqual(set(shot.broke), set(shot.checked))

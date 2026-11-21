@@ -141,7 +141,7 @@ Contract:
   a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
   picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
   card opens on the plan's own first line and its draft shows nothing.
-  `WIDTHS` are the two viewport widths each is shot at. `capture`
+  `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 92 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
@@ -254,6 +254,10 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors",
           "owner-accounts")
 WIDTHS = (1440, 480)
+# The widths in between a row may also name: they take no picture, a row at one is read in the
+# 1440 shot's page after its own rows, with the viewport resized to it.
+BETWEEN_WIDTHS = (1180, 900)
+STYLE_WIDTHS = (*WIDTHS, *BETWEEN_WIDTHS)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
 GOAL_OVER_CHARS = 2100
@@ -512,7 +516,10 @@ class StyleCheck:
     (disabled, busy, pressed, picked, hovered, active or focused) with a bare scratch element of
     its kind on those properties, only the borders for a bare control, and wants each to be at
     least 32px tall; `contrast` wants the WCAG ratio of the colour (of `pseudo`) against the first
-    opaque background behind it to be at least `value`.
+    opaque background behind it to be at least `value` (a colour the page cannot read as RGB is a
+    named miss, `unreadable <colour>`); `declared` wants the value the CSSOM cascade gives `prop`
+    of the `pseudo` rules matching the subject (for a pseudo-element no engine resolves) to be
+    `value`. A width in `BETWEEN_WIDTHS` is read in the 1440 shot's page, resized to it.
     """
     name: str
     states: tuple[str, ...]
@@ -539,7 +546,7 @@ STYLE_STEPS: dict[str, tuple[str, ...]] = {"look-card": ("button.pic-thumb",)}
 WANTS = frozenset({"equals", "in", "not", "starts", "min", "max", "same_as", "gt",
                    "none_peach", "palette", "tokens", "distinct", "sizes_shared", "fills",
                    "largest_type", "right_edge", "hugs", "track_max", "tracks", "alpha_max",
-                   "opaque", "follows_shape", "kind_look", "contrast"})
+                   "opaque", "follows_shape", "kind_look", "contrast", "declared"})
 PALETTE = {
     "--base": "rgb(36, 39, 58)", "--mantle": "rgb(30, 32, 48)", "--s0": "rgb(54, 58, 79)",
     "--s1": "rgb(73, 77, 100)", "--s2": "rgb(91, 96, 120)", "--text": "rgb(202, 211, 245)",
@@ -593,11 +600,18 @@ def _colour(name, state, selector, token, probe="", host="body", widths=(1440,),
 STYLE_CHECKS: tuple[StyleCheck, ...] = (
     StyleCheck("peach-only-needs", _EVERY_STATE, _BOTH, "body", "color", "none_peach", _NEEDS,
                ".top-in { border-top: 2px solid rgb(245, 169, 127) !important }"),
+    # A colour painted by a gradient's stops is as prohibited as one painted flat (#1313).
+    StyleCheck("peach-only-needs-gradient", _EVERY_STATE, _BOTH, "body", "background-image",
+               "none_peach", _NEEDS,
+               ".top-in { background-image: linear-gradient(rgb(245, 169, 127), rgb(36, 39, 58)) !important }"),
     StyleCheck("runs-not-red", ("live-several", "waiting-its-turn"), (1440,),
                ".run, .runs, .moved, .quiet", "color", "not", PALETTE["--red"],
                ".run, .runs, .moved, .quiet { color: rgb(237, 135, 150) !important }", every=True),
     StyleCheck("palette-notices", ("notices-fold",), _BOTH, ".line.notices", "color", "palette",
                "notices", ".notice-label { color: rgb(183, 189, 248) !important }"),
+    StyleCheck("palette-notices-gradient", ("notices-fold",), _BOTH, ".line.notices",
+               "background-image", "palette", "notices",
+               ".notice { background-image: linear-gradient(var(--peach), var(--base)) !important }"),
     StyleCheck("palette-accounts", ("accounts-panel",), _BOTH, "#accounts", "color", "palette",
                "desk", "#accounts { background-color: rgb(1, 2, 3) !important }"),
     StyleCheck("sizes-accounts", ("accounts-panel",), (1440,), "#accounts", "font-size",
@@ -911,6 +925,9 @@ STYLE_CHECKS += (
       for prop, want, value, bad in (
           ("display", "equals", "list-item", "block"),
           ("list-style-type", "in", "disclosure-closed|disclosure-open", "none"))),
+    # No engine resolves the marker's own style, so its declared display is read from the cascade.
+    _row("disclosure-notices-marker-display", "notices-fold", ".line.notices summary", "display",
+         "declared", "revert", "none", pseudo="::-webkit-details-marker"),
     _row("thread-open-display", "questions-open", ".thread-open", "display", "equals", "flex",
          "block"),
     _row("thread-summary-display", "questions-open", ".line.questions > details > summary",
@@ -943,6 +960,14 @@ STYLE_CHECKS += (
          "20px serif", fixture=True),
     _row("answer-type-list-font", "question-read", ".ask-answer .md-list", "font", "same_as",
          ".ask-answer", "20px serif", fixture=True),
+    # Each list kind is read on its own rendered subject, since the canonical answer holds a
+    # bulleted list only (#1313).
+    *(_row(f"answer-type-{kind}-{key}", "question-read", f".ask-answer {kind}.md-list", prop,
+           "same_as", ".ask-answer", bad, host="#reading",
+           probe=f'<div class="ask-answer" data-style-probe><{kind} class="md-list"><li>x</li>'
+                 f'</{kind}></div>')
+      for kind in ("ul", "ol")
+      for key, prop, bad in (("font-size", "font-size", "30px"), ("font", "font", "20px serif"))),
     *(_row(f"digest-lines-{name}-{prop}", _NOTHING, f"{list_} li", prop, want, value, bad,
            probe='<div data-style-probe><ul class="digest"><li><time class="at">x</time>'
                  '<span class="said">y</span></li></ul><ul class="earlier-list"><li>'
@@ -1077,14 +1102,13 @@ STYLE_CHECKS += (
                ".head .wait { margin-left: 0 !important }", probe=_REST_HEAD, host="#inbox"),
     _row("rest-head-wait-margin-left", _NOTHING, ".head .wait", "margin-left", "min", "0", "-5px",
          widths=(1440,), probe=_REST_HEAD, host="#inbox"),
-    _row("row-gap-padding-top", _NOTHING, ".brief-row", "padding-top", "equals", "12px", "30px",
-         widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
-    _row("row-gap-padding-bottom", _NOTHING, ".brief-row", "padding-bottom", "equals", "12px",
-         "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
+    *(_row(f"row-gap-padding-{side}", _NOTHING, ".brief-row", f"padding-{side}", "equals", gap,
+           "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox")
+      for side, gap in (("top", "12px"), ("bottom", "12px"), ("left", "0px"), ("right", "0px"))),
     *(_row(f"row-gap-padding-{side}-same", _NOTHING, ".brief-row", f"padding-{side}", "same_as",
            ".rest > li.row", "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox",
            compare_probe=_REST_ROW, compare_host="#inbox")
-      for side in ("top", "bottom")),
+      for side in ("top", "bottom", "left", "right")),
     _row("row-gap-lead-brief-margin-top", _NOTHING, ".card.lead + .brief-row", "margin-top",
          "equals", "12px", "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
     _row("row-gap-lead-rest-margin-top", _NOTHING, ".card.lead + .rest", "margin-top", "equals",
@@ -1130,6 +1154,8 @@ STYLE_CHECKS += (
     _wide("pics-pair-align-items", _LOOK, ".pic-pair", "align-items", "equals", "flex-start",
           "stretch"),
     _narrow("pics-pair-direction", _LOOK, ".pic-pair", "flex-direction", "equals", "column", "row"),
+    *(_row(f"pics-pair-direction-{at}", _LOOK, ".pic-pair", "flex-direction", "equals", "row",
+           "column", widths=(at,)) for at in BETWEEN_WIDTHS),
     _narrow("pics-pair-align-items", _LOOK, ".pic-pair", "align-items", "equals", "stretch",
             "flex-start"),
     _wide("pics-pair-pic-flex", _LOOK, ".pic-pair .pic", "flex", "equals", "1 1 0px", "0 0 auto"),
@@ -1547,6 +1573,8 @@ STYLE_READING = r"""((rows) => {
     }
     if (s.outlineStyle !== 'none') out.push(['outline-color', s.outlineColor]);
     out.push(['text-decoration-color', s.textDecorationColor]);
+    const image = s.getPropertyValue('background-image');
+    if (image !== 'none') for (const colour of image.match(COLOURS) || []) out.push(['background-image', colour]);
     if (s.getPropertyValue('column-rule-style') !== 'none') {
       out.push(['column-rule-color', s.getPropertyValue('column-rule-color')]);
     }
@@ -1567,6 +1595,47 @@ STYLE_READING = r"""((rows) => {
     return out;
   };
   const rendered = (node) => node.getClientRects().length > 0;
+  // The specificity of one selector as a number: ids, then classes, attributes and pseudo-classes,
+  // then tags (a functional pseudo-class counts as one class, whatever it holds).
+  const specificity = (selector) => {
+    const text = selector.replace(/\[[^\]]*\]/g, '.a');
+    const ids = (text.match(/#[\w-]+/g) || []).length;
+    const classes = (text.match(/\.[\w-]+|:(?!:)[\w-]+/g) || []).length;
+    const tags = (text.replace(/[#.:][\w-]+/g, ' ').match(/(?:^|[\s>+~])[a-zA-Z][\w-]*/g) || []).length;
+    return ids * 10000 + classes * 100 + tags;
+  };
+  // The value the cascade gives `prop` of `node`'s `pseudo`, read from the CSSOM: no engine
+  // resolves the style of a legacy pseudo-element it ignores, so the winning rule is the one with
+  // the highest importance, then specificity, then order, among the rules that apply at this width.
+  const declared = (node, pseudo, prop) => {
+    let best = null, order = 0;
+    const walk = (rules) => {
+      for (const rule of rules) {
+        if (rule.media && !window.matchMedia(rule.media.mediaText).matches) continue;
+        if (rule.selectorText !== undefined) {
+          const value = rule.style.getPropertyValue(prop);
+          for (const part of rule.selectorText.split(',')) {
+            const text = part.trim();
+            if (!value || !text.endsWith(pseudo)) continue;
+            const base = text.slice(0, text.length - pseudo.length).trim();
+            let hit = false;
+            try { hit = node.matches(base); } catch (error) { hit = false; }
+            if (!hit) continue;
+            const key = [rule.style.getPropertyPriority(prop) === 'important' ? 1 : 0,
+                         specificity(base), order++];
+            if (best === null || key[0] > best.key[0] || (key[0] === best.key[0]
+                && (key[1] > best.key[1] || (key[1] === best.key[1] && key[2] > best.key[2])))) {
+              best = {key, value};
+            }
+          }
+        } else if (rule.cssRules) {
+          walk(rule.cssRules);
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) walk(sheet.cssRules);
+    return best === null ? '(none)' : best.value;
+  };
   const scopeOf = (row) => {
     const roots = row.probe ? probes(row.name) : onPage(row.selector);
     const found = new Set();
@@ -1818,10 +1887,19 @@ STYLE_READING = r"""((rows) => {
         got = Math.round(width * 100) / 100 + 'px';
         ok = width <= range.getBoundingClientRect().width + 1;
       } else if (row.want === 'contrast') {
-        const lights = [luminance(rgbOf(getComputedStyle(node, pseudo).color)), luminance(backdrop(node))];
-        const ratio = (Math.max(...lights) + 0.05) / (Math.min(...lights) + 0.05);
-        got = ratio.toFixed(2);
-        ok = ratio >= parseFloat(row.value);
+        const text = getComputedStyle(node, pseudo).color;
+        const colour = rgbOf(text);
+        if (colour === null) {
+          got = 'unreadable ' + text;
+        } else {
+          const lights = [luminance(colour), luminance(backdrop(node))];
+          const ratio = (Math.max(...lights) + 0.05) / (Math.min(...lights) + 0.05);
+          got = ratio.toFixed(2);
+          ok = ratio >= parseFloat(row.value);
+        }
+      } else if (row.want === 'declared') {
+        got = declared(node, row.pseudo, row.prop);
+        ok = got === row.value;
       } else if (row.want === 'equals') ok = same(got, row.value);
       else if (row.want === 'in') ok = row.value.split('|').some((member) => same(got, member));
       else if (row.want === 'not') ok = !same(got, row.value);
@@ -3127,13 +3205,24 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
                 if page.query_selector(selector) is not None:
                     page.click(selector)
                     page.evaluate(STYLE_SETTLE)
-            rows = [row for row in STYLE_CHECKS
-                    if state in row.states and width in row.widths and (canonical or not row.fixture)]
-            if rows:
-                style = read_style(page, rows)
-                checked = tuple(row.name for row in rows)
+            reads = [(width, [row for row in STYLE_CHECKS
+                              if state in row.states and width in row.widths
+                              and (canonical or not row.fixture)])]
+            if width == WIDTHS[0]:
+                reads += [(between, [row for row in STYLE_CHECKS
+                                     if state in row.states and between in row.widths
+                                     and (canonical or not row.fixture)])
+                          for between in BETWEEN_WIDTHS]
+            for at, rows in reads:
+                if not rows:
+                    continue
+                if at != width:
+                    page.set_viewport_size({"width": at, "height": HEIGHT})
+                    page.evaluate(STYLE_SETTLE)
+                style += read_style(page, rows)
+                checked += tuple(row.name for row in rows)
                 if mutate:
-                    broke = tuple(
+                    broke += tuple(
                         row.name for row in rows
                         if any(miss.startswith(row.name + ": ") for miss in read_style(
                             page, rows, mutation=row.broken, only=row.name)))
