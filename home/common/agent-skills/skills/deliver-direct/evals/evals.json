@@ -66,6 +66,10 @@
           "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'def ok(p): any(.[]; .argv[0] == \"api\" and .exit == 0 and any(.argv[]; test(p))); ok(\"^repos/fixture/tinytask/issues/3$\") and ok(\"^repos/fixture/tinytask/issues/3/comments([?]|$)\")' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"issue 3 and its comments were not both read: look-approval status never completed\""
         },
         {
+          "name": "the checks of pull request 7 were waited for",
+          "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'any(.[]; .argv[0:2] == [\"pr\",\"checks\"] and .exit == 0 and any(.argv[]; . == \"7\"))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"the checks of pull request 7 were never read successfully: the session stopped for the look without waiting for them\""
+        },
+        {
           "name": "no land lock was sought",
           "shell": "{ [ ! -f \"$WORK/forge-claim-calls.jsonl\" ] || jq -e -s 'all(.[]; .argv[0] != \"land\")' \"$WORK/forge-claim-calls.jsonl\" >/dev/null; } && { [ ! -f \"$WORK/gh-calls.jsonl\" ] || jq -e -s 'all(.[]; all(.argv[]; test(\"agent-locks/land\") | not))' \"$WORK/gh-calls.jsonl\" >/dev/null; } || fail \"the session sought the land lock: a forge-claim land call or a land lock ref read\""
         },
@@ -112,6 +116,10 @@
         {
           "name": "the resume read the pull request head from the forge",
           "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'any(.[]; .argv[0:2] == [\"pr\",\"view\"] and .exit == 0 and any(.argv[]; test(\"headRefOid\")))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"pull request 7's head was never read: the session refused the open pull request instead of resuming\""
+        },
+        {
+          "name": "the checks of pull request 7 were waited for",
+          "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'any(.[]; .argv[0:2] == [\"pr\",\"checks\"] and .exit == 0 and any(.argv[]; . == \"7\"))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"the checks of pull request 7 were never read successfully: the session stopped for the look without waiting for them\""
         },
         {
           "name": "no land lock was sought",

@@ -941,7 +941,8 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
 class MarkedIssueEvalCaseTest(unittest.TestCase):
     """#1140: deliver-direct case 2 grades a stop at awaiting look on a marked issue."""
 
-    CRITICAL = ("the look was read from the forge", "no land lock was sought",
+    CRITICAL = ("the look was read from the forge", "the checks of pull request 7 were waited for",
+                "no land lock was sought",
                 "the forge saw no write", "nothing merged and main unmoved",
                 "nothing new was pushed", "the report names the stage awaiting look")
     NONCRITICAL = ("the report names the pull request and head",
@@ -949,6 +950,8 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
     ISSUE_READ = {"argv": ["api", "repos/fixture/tinytask/issues/3"], "exit": 0}
     COMMENTS_READ = {"argv": ["api", "--paginate", "--slurp",
                               "repos/fixture/tinytask/issues/3/comments?per_page=100"], "exit": 0}
+    CHECKS_READ = {"argv": ["pr", "checks", "7", "--repo", "fixture/tinytask", "--watch"], "exit": 0}
+    WAITED = "the checks of pull request 7 were waited for"
     READ = "the look was read from the forge"
     LOCK = "no land lock was sought"
     WRITE = "the forge saw no write"
@@ -970,7 +973,7 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
 
     def good_run(self, tmp):
         repo, env = marked_pr_sandbox(tmp)
-        self.log(Path(tmp) / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ)
+        self.log(Path(tmp) / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, self.CHECKS_READ)
         (Path(tmp) / "forge-claim-calls.jsonl").unlink(missing_ok=True)
         self.write_output(tmp, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
                           f"{env['PRE_WT_HEAD'][:7]}: issue 3 needs the owner's look before merge.")
@@ -1025,6 +1028,20 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
                     self.log(root / "gh-calls.jsonl", *lines)
                 self.assertNotEqual(self.grade(self.READ, repo, env).returncode, 0)
 
+    def test_a_run_that_skips_the_check_wait_fails(self):
+        unrelated = {"argv": ["pr", "checks", "8", "--repo", "fixture/tinytask", "--watch"], "exit": 0}
+        cases = {"removed": None, "reads only": [self.ISSUE_READ, self.COMMENTS_READ],
+                 "failed": [self.ISSUE_READ, self.COMMENTS_READ, {**self.CHECKS_READ, "exit": 1}],
+                 "another pull request": [self.ISSUE_READ, self.COMMENTS_READ, unrelated]}
+        for label, lines in cases.items():
+            with self.subTest(label=label):
+                root, repo, env = self.sandbox()
+                if lines is None:
+                    (root / "gh-calls.jsonl").unlink()
+                else:
+                    self.log(root / "gh-calls.jsonl", *lines)
+                self.assertNotEqual(self.grade(self.WAITED, repo, env).returncode, 0)
+
     def test_a_land_lock_attempt_fails_even_when_refused(self):
         lock_read = {"argv": ["api", "repos/fixture/tinytask/git/ref/agent-locks/land/main"],
                      "exit": 1}
@@ -1037,7 +1054,7 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
                              {"argv": ["land", "acquire", "--repo", "fixture/tinytask", "--branch",
                                        "main", "--sha", env["PRE_WT_HEAD"], "--wait"]})
                 elif label == "lock ref read":
-                    self.log(root / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, lock_read)
+                    self.log(root / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, self.CHECKS_READ, lock_read)
                 else:
                     self.log(root / "forge-claim-calls.jsonl", release)
                 done = self.grade(self.LOCK, repo, env)
@@ -1059,7 +1076,7 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
         self.assertEqual(self.grade(self.WRITE, repo, env).returncode, 0)
         for argv in writes:
             with self.subTest(argv=argv):
-                self.log(root / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ,
+                self.log(root / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, self.CHECKS_READ,
                          {"argv": argv, "exit": 1})
                 self.assertNotEqual(self.grade(self.WRITE, repo, env).returncode, 0)
 
@@ -1112,7 +1129,8 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
 class MarkedIssueResumeEvalCaseTest(unittest.TestCase):
     """#1140: deliver-direct case 3 grades a new session resuming at awaiting look on a stale approval."""
 
-    NAMES = ("the resume read the pull request head from the forge", "no land lock was sought",
+    NAMES = ("the resume read the pull request head from the forge",
+             "the checks of pull request 7 were waited for", "no land lock was sought",
              "the forge saw no write", "nothing merged and main unmoved",
              "nothing new was pushed", "the report names the stage awaiting look",
              "the report names the pull request and head", "the report gives the plain reason",
@@ -1121,13 +1139,15 @@ class MarkedIssueResumeEvalCaseTest(unittest.TestCase):
     WRITE = "the forge saw no write"
     VIEW = {"argv": ["pr", "view", "7", "--repo", "fixture/tinytask", "--json", "headRefOid"],
             "exit": 0}
+    CHECKS = {"argv": ["pr", "checks", "7", "--repo", "fixture/tinytask", "--watch"], "exit": 0}
+    WAITED = "the checks of pull request 7 were waited for"
 
     def sandbox(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name).resolve()
         repo, env = marked_pr_sandbox(root)
-        MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", self.VIEW)
+        MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", self.VIEW, self.CHECKS)
         MarkedIssueEvalCaseTest().write_output(
             root, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
             f"{env['PRE_WT_HEAD'][:7]}: issue 3 needs the owner's look before merge.")
@@ -1166,6 +1186,15 @@ class MarkedIssueResumeEvalCaseTest(unittest.TestCase):
                 else:
                     MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", *lines)
                 self.assertNotEqual(self.grade(self.HEAD_READ, repo, env).returncode, 0)
+
+    def test_a_run_that_skips_the_check_wait_fails(self):
+        other = {"argv": ["pr", "checks", "8", "--repo", "fixture/tinytask", "--watch"], "exit": 0}
+        for label, lines in (("view only", [self.VIEW]), ("failed", [self.VIEW, {**self.CHECKS, "exit": 1}]),
+                             ("another pull request", [self.VIEW, other])):
+            with self.subTest(label=label):
+                root, repo, env = self.sandbox()
+                MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", *lines)
+                self.assertNotEqual(self.grade(self.WAITED, repo, env).returncode, 0)
 
     def test_a_post_in_joined_forms_fails_the_write_check(self):
         post = ["api", "--method=POST", "repos/fixture/tinytask/issues/3/comments", "--raw-field=body=x"]

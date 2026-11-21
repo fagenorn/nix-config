@@ -10143,7 +10143,7 @@ class LookStopTest(unittest.TestCase):
     def test_a_marked_branch_behind_its_base_is_synced_and_pushed_before_the_stop(self):
         result, calls = run(patch={"setup": {"look": MARKED}, "look-pr": {"behind": True}, "sync-1": {"merge_commit": D, "head": D}})
         got = labels(calls)
-        self.assertEqual(got[got.index("look-pr") + 1:], ["sync-1", "look-push", "look-checks-1", "look-reverify"])
+        self.assertEqual(got[got.index("look-pr") + 1:], ["sync-1", "look-push", "look-checks-1", "look-reverify", "look-checks-2"])
         self.assertIn("at the head " + D, prompt(calls, "look-push"))
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], D)
@@ -10234,6 +10234,52 @@ class LookChecksTest(unittest.TestCase):
         text.index("git -C /r/.wt/w-issue-9-x merge-base --is-ancestor origin/dev", r)
         self.assertNotIn("ahead of origin/issue-9-x", text)
 
+    def test_a_passed_reply_without_a_required_list_is_never_green(self):
+        # #1373 C1: an omitted list hides a required check that has not reported yet, so it is read as pending, never as proof.
+        unlisted = {"state": "passed", "head": SHA, "behind": False, "passed": ["lint"]}
+        result, calls = self.go(replies={"look-checks-1": unlisted, "look-checks-2": self.GREEN})
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "look-checks-2"])
+        with self.subTest(reply="never listed"):
+            result, calls = self.go(replies={f"look-checks-{k}": unlisted for k in (1, 2, 3)})
+            self.assertEqual(result["stage"], "checks-pending")
+            self.assertNotIn("look-checks-4", labels(calls))
+        with self.subTest(reply="an explicit empty list"):
+            result, calls = self.go(replies={"look-checks-1": dict(unlisted, required=[])})
+            self.assertEqual(self.after_pr(calls), ["look-checks-1"])
+            self.assertEqual(result["stage"], "awaiting-look")
+
+    def test_the_poll_reads_the_required_checks_of_both_sources_and_matches_their_app(self):
+        # #1373 C2, C3: the rulesets and classic protection are both read, and a required check is judged by the app its entry names.
+        text = prompt(self.go()[1], "look-checks-1")
+        self.assertIn("gh api repos/owner/repo/rules/branches/dev", text)
+        self.assertIn("gh api repos/owner/repo/branches/dev/protection", text)
+        self.assertIn("integration_id", text)
+        self.assertIn("app_id", text)
+        self.assertNotIn("whenever that reply lists no required status checks", text)
+
+    def test_the_poll_has_one_watch_and_one_deadline(self):
+        # #1373 I1: a stuck check must end a poll so the three-wait counter advances.
+        text = prompt(self.go()[1], "look-checks-1")
+        self.assertEqual(text.count("--watch"), 1)
+        self.assertNotIn("run it again", text)
+
+    def test_a_forge_that_moved_during_the_verification_is_read_again_before_the_stop(self):
+        # #1373 I2: after the look-reverify call the stop waits on the forge once more: its checks and its head.
+        moved = {"sync-1": {"merge_commit": D, "head": D}}
+        base = {"look-checks-1": dict(self.GREEN, behind=True)}
+        result, calls = self.go(replies=dict(base, **{"look-checks-3": dict(self.PENDING, head=D)}), patch=moved)
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "sync-1", "look-push", "look-checks-2", "look-reverify", "look-checks-3", "look-checks-4"])
+        self.assertEqual((result["stage"], result["head"]), ("awaiting-look", D))
+        with self.subTest(read="head moved"):
+            result, calls = self.go(replies=dict(base, **{"look-checks-3": dict(self.GREEN, head=B)}), patch=moved)
+            self.assertEqual((result["stage"], result["head"]), ("head-moved", B))
+            self.assertNotIn("look", result["cont"])
+        with self.subTest(read="red"):
+            red = dict(self.RED, head=D)
+            result, calls = self.go(replies=dict(base, **{"look-checks-3": red, "look-checks-4": dict(self.GREEN, head=F)}),
+                                    patch=dict(moved, **{"fix-ci": {"start_head": D, "commit": F}}))
+            self.assertEqual(self.after_pr(calls)[-7:], ["look-checks-3", "fix-ci", "fix-ci-review", "look-push", "look-checks-4", "look-reverify", "look-checks-5"])
     def test_a_head_with_no_check_reported_yet_is_polled_again(self):
         result, calls = self.go(replies={"look-checks-1": {"state": "passed", "head": SHA, "behind": False, "passed": []},
                                          "look-checks-2": self.GREEN})
@@ -10262,7 +10308,7 @@ class LookChecksTest(unittest.TestCase):
     def test_a_red_check_gets_the_one_fix_and_the_stop_names_the_fixed_head(self):
         result, calls = self.go(replies={"look-checks-1": self.RED, "look-checks-2": dict(self.GREEN, head=F)}, patch=self.FIXED)
         got = labels(calls)
-        self.assertEqual(self.after_pr(calls), ["look-checks-1", "fix-ci", "fix-ci-review", "look-push", "look-checks-2", "look-reverify"])
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "fix-ci", "fix-ci-review", "look-push", "look-checks-2", "look-reverify", "look-checks-3"])
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], F)
         self.assertEqual(result["cont"]["look"], {"pr": 42, "head": F})
@@ -10300,7 +10346,7 @@ class LookChecksTest(unittest.TestCase):
     def test_a_base_that_moved_during_the_wait_is_synced_pushed_and_verified_before_the_stop(self):
         result, calls = self.go(replies={"look-checks-1": dict(self.GREEN, behind=True)},
                                 patch={"sync-1": {"merge_commit": D, "head": D}, "look-reverify": {"pictures": LookStopTest.PICS}})
-        self.assertEqual(self.after_pr(calls), ["look-checks-1", "sync-1", "look-push", "look-checks-2", "look-reverify"])
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "sync-1", "look-push", "look-checks-2", "look-reverify", "look-checks-3"])
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], D)
         self.assertEqual(result["cont"]["look"]["head"], D)
@@ -10312,7 +10358,7 @@ class LookChecksTest(unittest.TestCase):
         result, calls = self.go(replies={"look-checks-1": self.RED, "look-checks-2": dict(self.GREEN, head=F, behind=True)},
                                 patch=dict(self.FIXED, **{"sync-1": {"merge_commit": D, "head": D}, "look-reverify": {"pictures": LookStopTest.PICS}}))
         self.assertEqual(self.after_pr(calls), ["look-checks-1", "fix-ci", "fix-ci-review", "look-push", "look-checks-2", "sync-1",
-                                                "look-push", "look-checks-3", "look-reverify"])
+                                                "look-push", "look-checks-3", "look-reverify", "look-checks-4"])
         self.assertEqual(result["head"], D)
         self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
         self.assertEqual(result["cont"]["verified"]["head"], D)
@@ -10494,6 +10540,16 @@ class LookResumeTest(unittest.TestCase):
                 self.assertIn("cont", result)
                 self.assertNotIn("merge", got)
                 self.assertIn("land-unlock", got)
+
+    def test_a_marked_landing_reads_an_omitted_required_list_as_pending(self):
+        # #1373 C1: a passed reply with no required list proves no required check passed.
+        short = {"state": "passed", "head": D, "passed": ["ci"]}
+        patch = dict(self.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None}}, pr={"checks": {"state": "behind", "head": SHA}})
+        result, calls = self.approve(patch=patch, replies={f"checks-{k}": short for k in range(2, 7)})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "checks-pending")
+        self.assertNotIn("look-status", got)
+        self.assertNotIn("merge", got)
 
     def test_a_marked_landing_reads_a_missing_required_check_as_pending(self):
         # #1373, D8: a passed reply that leaves a required name out of passed is pending for a marked landing too.
