@@ -761,13 +761,22 @@ their number. A thread is `{"id", "questions", "follow_up"}`: `id` is its first 
 A question entry is `{"id", "question", "asked_at",
 "state": "working" | "answered" | "timed_out" | "failed", "state_text", "answered_at": <time> |
 null, "answer": <str> | null, "read_text", "ran_text", "unknown_text", "back_text",
-"back_choices", "production_text"}`. `state_text` is `ASK_WORKING_TEXT`, `ASK_ANSWERED_TEXT`, or
+"back_choices", "production_text", "request_key", "deep", "spend_text", "deep_offer", "deep_text"}`.
+`state_text` is `ASK_WORKING_TEXT` (`ASK_DEEP_WORKING_TEXT` for a working deeper question), `ASK_ANSWERED_TEXT`, or
 for a timed-out or failed question `ASK_TIMED_OUT_TEXT` or `ASK_FAILED_TEXT` and `": "` and the
 reason when the reason is a non-empty string, else the bare text. The last seven members are null unless the question is
 answered: `answer` is the parsed answer part, `read_text`, `ran_text`, `unknown_text` and
 `back_text` are `ASK_READ_TEXT`, `ASK_RAN_TEXT`, `ASK_UNKNOWN_TEXT` and `ASK_BACK_TEXT` over their
 part and each null when the part is, `back_choices` is the back part's choices as a list (empty
-when it has none), and `production_text` is the parsed production line as is.
+when it has none), and `production_text` is the parsed production line as is. `deep` is the question's
+deeper flag. `spend_text` is `ASK_SPENT_TEXT` over the tokens (thousands commas) and dollars (two
+decimals) of `question_spend` (the question's own session in the spend view's days), set on every
+question that is no longer working, answered, failed or timed out alike, and null while it works or when
+that spend is unknown or has no tokens. `deep_offer` is true exactly when the question is its thread's
+last, answered with a non-empty parsed answer, and not deep; `deep_text` is then `ASK_DEEP_ESTIMATE_TEXT`
+over the integer mean tokens and mean dollars of the project's newest `DEEP_ESTIMATE_COUNT` deeper
+questions that are not working and spent above 0 tokens, or `ASK_DEEP_NO_ESTIMATE_TEXT` when none did
+(`DEEP_TIMEOUT_SECONDS // 60` minutes), and null otherwise.
 A question is never an inbox item; it changes no count, headline, sentence, `stale`, `quiet` or
 order (#1177, #1178, ADR-console-059 D3, D4).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
@@ -782,7 +791,9 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from types import MappingProxyType
 
-from agent_tools.console import answer as owner_answer, contract_draft, inbox, project_question
+from agent_tools.console import (
+    answer as owner_answer, contract_draft, inbox, project_question, question_records,
+    spend as spend_module)
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY
@@ -967,6 +978,13 @@ ASK_READ_TEXT = "Read: {text}"
 ASK_RAN_TEXT = "Ran: {text}"
 ASK_UNKNOWN_TEXT = "Could not find out: {text}"
 ASK_BACK_TEXT = "Question for you: {text}"
+ASK_DEEP_WORKING_TEXT = "Digging deeper"
+ASK_SPENT_TEXT = "Spent {tokens} tokens, about ${dollars}"
+ASK_DEEP_ESTIMATE_TEXT = ("Dig deeper asks again on a stronger model for up to {minutes} minutes. "
+                          "Earlier deeper answers here spent about {tokens} tokens, ${dollars} each.")
+ASK_DEEP_NO_ESTIMATE_TEXT = ("Dig deeper asks again on a stronger model for up to {minutes} minutes. "
+                             "No earlier deeper answer here to estimate its spend from.")
+DEEP_ESTIMATE_COUNT = 5
 _ASK_STATE_TEXT = {project_question.WORKING: ASK_WORKING_TEXT,
                    project_question.ANSWERED: ASK_ANSWERED_TEXT,
                    project_question.TIMED_OUT: ASK_TIMED_OUT_TEXT,
@@ -1984,15 +2002,58 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
     }
 
 
-def _question_threads(questions: Sequence[project_question.AskedQuestion]) -> dict | None:
+def question_spend(question: project_question.AskedQuestion,
+                   spend: Mapping | None) -> spend_module.Tokens | None:
+    """The tokens of the question's own session across the spend view's days; None when it is unknown."""
+    if question.session_id is None or spend is None:
+        return None
+    found = None
+    for day in spend.get("days", ()):
+        wire = (day.get("session") or {}).get(question.session_id)
+        if wire is not None:
+            tokens = spend_module.Tokens(**wire)
+            found = tokens if found is None else found + tokens
+    return found
+
+
+def _deep_text(questions: Sequence[project_question.AskedQuestion], spend: Mapping | None) -> str:
+    minutes = project_question.DEEP_TIMEOUT_SECONDS // 60
+    figures = []
+    for question in sorted(questions, key=lambda q: -q.seq):
+        if not question.deep or question.state == project_question.WORKING:
+            continue
+        tokens = question_spend(question, spend)
+        if tokens is not None and question_records.figure(tokens)["tokens"] > 0:
+            figures.append(tokens)
+        if len(figures) == DEEP_ESTIMATE_COUNT:
+            break
+    if not figures:
+        return ASK_DEEP_NO_ESTIMATE_TEXT.format(minutes=minutes)
+    mean_tokens = sum(question_records.figure(t)["tokens"] for t in figures) // len(figures)
+    mean_dollars = sum(t.dollars for t in figures) / len(figures)
+    return ASK_DEEP_ESTIMATE_TEXT.format(minutes=minutes, tokens=f"{mean_tokens:,}",
+                                         dollars=f"{round(mean_dollars, 2):.2f}")
+
+
+def _question_threads(questions: Sequence[project_question.AskedQuestion],
+                      spend: Mapping | None = None) -> dict | None:
+    deep_text = _deep_text(questions, spend)
+    lasts = {group[-1].question_id for group in project_question.threads(questions)}
+
     def one(question: project_question.AskedQuestion) -> dict:
         reason = question.reason
         state_text = _ASK_STATE_TEXT[question.state]
+        if question.state == project_question.WORKING and question.deep:
+            state_text = ASK_DEEP_WORKING_TEXT
         if question.state in (project_question.TIMED_OUT, project_question.FAILED) and reason:
             state_text = f"{state_text}: {reason}"
         parts = (project_question.answer_parts(question.answer)
                  if question.state == project_question.ANSWERED and question.answer is not None
                  else None)
+        offer = (question.question_id in lasts and parts is not None and bool(parts.answer)
+                 and not question.deep)
+        spent = None if question.state == project_question.WORKING else question_spend(question, spend)
+        figure = None if spent is None else question_records.figure(spent)
 
         def said(template: str, text: str | None) -> str | None:
             return None if text is None else template.format(text=text)
@@ -2012,6 +2073,11 @@ def _question_threads(questions: Sequence[project_question.AskedQuestion]) -> di
             "back_choices": None if parts is None else list(parts.choices),
             "production_text": None if parts is None else parts.production,
             "request_key": question.request_key,
+            "deep": question.deep,
+            "spend_text": (None if figure is None or figure["tokens"] <= 0 else ASK_SPENT_TEXT.format(
+                tokens=f"{figure['tokens']:,}", dollars=f"{figure['dollars']:.2f}")),
+            "deep_offer": offer,
+            "deep_text": deep_text if offer else None,
         }
 
     threads = project_question.threads(questions)
@@ -2394,7 +2460,7 @@ def derive_view(
     overlaps = {pid: _overlap_entries(drafted.get(pid, []) + finished.get(pid, []), titles, pid)
                 for pid in registered}
     notice_post = {pid: any(takes_notices(s) for s in drafted.get(pid, ())) for pid in registered}
-    asks = {pid: _question_threads((project_questions or {}).get(pid, ())) for pid in registered}
+    asks = {pid: _question_threads((project_questions or {}).get(pid, ()), spend) for pid in registered}
 
     sprint_waits: dict[str, list[dict]] = {}
     project_waits: dict[str, list[dict]] = {}

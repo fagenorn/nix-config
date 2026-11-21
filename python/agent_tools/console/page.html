@@ -376,6 +376,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .asks .asks-project { display: block; min-width: 0; margin-bottom: 4px; font-weight: 600; color: var(--sub0); overflow-wrap: anywhere; }
 .ask-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
 .ask-text { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
+.ask-spend { margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
+.ask-deep-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
+.ask-deep-estimate { width: 100%; margin: 0; overflow-wrap: anywhere; }
+.ask-deep-reason { margin: 0; overflow-wrap: anywhere; }
+.ask-deep-reason:empty { display: none; }
 .follow { margin-top: 8px; }
 .follow-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
 .follow-text { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
@@ -418,6 +423,7 @@ code.md-code { padding: 0 4px; font-size: .875em; background: var(--mantle); bor
 .ask-sources summary { cursor: pointer; }
 .ask-sources > p { margin-top: 2px; }
 .ask > .ask-goal { margin-top: 10px; }
+.ask > .ask-deep { margin-top: 10px; margin-right: 8px; }
 .ask > .ask-callout { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; padding: 14px 16px; border: 1px solid var(--s1); border-radius: 12px; }
 .ask-callout > p { flex-basis: 100%; margin: 0; }
 .ask-callout .ask-back { font-weight: 600; color: var(--text); }
@@ -850,6 +856,8 @@ const followDrafts = new Map();
 const followPosts = new Map();
 const followSent = new Map();
 const followLatest = new Map();
+// Follow keys, each with the id of the answer it was opened on, whose Dig deeper confirmation is open (#1274).
+const deepOpen = new Set();
 const askReveal = new Set();
 const deleteOpen = new Set();
 const deletePosts = new Map();
@@ -2657,6 +2665,7 @@ function askRow(projectId, question, first, last, thread) {
   if (!first) row.appendChild(phrase("p", "ask-question", question.question, timeEl("ago", question.asked_at, "ask-age")));
   if (question.state !== "answered") {
     row.appendChild(el("p", "ask-state", question.state_text));
+    if (typeof question.spend_text === "string") row.appendChild(el("p", "ask-spend", question.spend_text));
     return row;
   }
   const answered = typeof question.answer === "string" && question.answer !== "";
@@ -2676,9 +2685,35 @@ function askRow(projectId, question, first, last, thread) {
     for (const [key, cls] of sources) fold.appendChild(el("p", cls, question[key]));
     row.appendChild(fold);
   }
+  if (typeof question.spend_text === "string") row.appendChild(el("p", "ask-spend", question.spend_text));
+  const digKey = followKey(projectId, thread.id);
+  if (question.deep_offer === true && last && thread.follow_up === true && followOutstanding(digKey, thread).length === 0) {
+    row.appendChild(deepControl(projectId, question, thread, digKey));
+  }
   if (answered) row.appendChild(actionButton("ask-goal btn-quiet", "Make it a goal", () => goalFromAnswer(projectId, question)));
   if (typeof question.back_text === "string") row.appendChild(askCallout(projectId, question, last, thread));
   return row;
+}
+// Dig deeper: the button, then its estimate with Start and Cancel; nothing is posted until Start.
+function deepControl(projectId, question, thread, key) {
+  const open = key + "\n" + question.id;
+  if (!deepOpen.has(open)) {
+    return actionButton("ask-deep btn-quiet", "Dig deeper", () => { deepOpen.add(open); redrawNotices(); });
+  }
+  const confirm = el("div", "ask-deep-confirm");
+  confirm.setAttribute("role", "group");
+  confirm.setAttribute("aria-label", "Dig deeper");
+  confirm.appendChild(el("p", "ask-deep-estimate", question.deep_text));
+  const state = followPosts.get(key);
+  confirm.appendChild(actionButton("ask-deep-start btn-quiet", "Start", () => postFollowUp(projectId, thread, question.question, true, question.id)));
+  confirm.appendChild(actionButton("ask-deep-cancel btn-quiet", "Cancel", () => {
+    deepOpen.delete(open);
+    const shown = followPosts.get(key);
+    if (shown !== undefined && shown.phase === "failed" && shown.deep === true) followPosts.delete(key);
+    redrawNotices();
+  }));
+  confirm.appendChild(el("p", "ask-deep-reason", state !== undefined && state.phase === "failed" && state.deep === true ? state.reason : ""));
+  return confirm;
 }
 // The question back to the owner: its text, then its choices as buttons only on the thread's last question while answered and with no follow-up outstanding, then the reason a refused choice gives.
 function askCallout(projectId, question, last, thread) {
@@ -2765,16 +2800,17 @@ function followReconcile(key, thread) {
   }
   sent.list = sent.list.filter((submission) => !taken.has(submission));
 }
-// `chosen` is a choice of a question back: its text is sent and the follow-up draft and box are left as they are.
-async function postFollowUp(projectId, thread, chosen) {
+// `chosen` is the text to send as it stands (a choice of a question back, or with `deep` the question asked again deeper): the follow-up draft and box are left as they are.
+async function postFollowUp(projectId, thread, chosen, deep = false, deepAnswer = "") {
   const key = followKey(projectId, thread.id);
   const current = followPosts.get(key);
   if (current !== undefined && current.phase === "sending") return;
-  const choice = typeof chosen === "string";
+  const direct = typeof chosen === "string";
+  const choice = direct && !deep;
   const draft = followDrafts.get(key);
-  const text = choice ? chosen : draft === undefined ? "" : draft.value;
+  const text = direct ? chosen : draft === undefined ? "" : draft.value;
   if (text.trim() === "") return;
-  const state = { phase: "sending", reason: "", text, at: new Date(Date.now()).toISOString(), choice };
+  const state = { phase: "sending", reason: "", text, at: new Date(Date.now()).toISOString(), choice, deep };
   const sent = followSent.get(key);
   if (sent === undefined || sent.list.length === 0) followSent.set(key, { base: new Set(thread.questions.map((question) => question.id)), list: [] });
   followPosts.set(key, state);
@@ -2782,7 +2818,7 @@ async function postFollowUp(projectId, thread, chosen) {
   let reason;
   try {
     reason = await ownerAnswer(await fetch("/api/project-question", {
-      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ project_id: projectId, question: text, thread_id: thread.id }),
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify(deep ? { project_id: projectId, question: text, thread_id: thread.id, deep: true } : { project_id: projectId, question: text, thread_id: thread.id }),
     }));
   } catch (error) {
     console.error(error);
@@ -2792,7 +2828,8 @@ async function postFollowUp(projectId, thread, chosen) {
   if (reason === null) {
     // Text typed while the send was in flight is a new draft: the editor stays open on it, as the Ask box does.
     const typed = followDrafts.get(key);
-    if (!choice && (typed === undefined || typed.value === text)) {
+    if (deep) deepOpen.delete(key + "\n" + deepAnswer);
+    if (!direct && (typed === undefined || typed.value === text)) {
       followOpen.delete(key);
       followDrafts.delete(key);
     }
@@ -2801,7 +2838,7 @@ async function postFollowUp(projectId, thread, chosen) {
     followReconcile(key, followLatest.get(key));
   } else {
     if (reason === CREDENTIAL_REFUSAL) {
-      if (!choice) dropRefusedPaste(followDrafts, key, text);
+      if (!direct) dropRefusedPaste(followDrafts, key, text);
       state.text = "";
     }
     state.phase = "failed";
@@ -2821,7 +2858,7 @@ function followBox(projectId, thread) {
   const draft = followDrafts.get(key);
   if (draft !== undefined) field.value = draft.value;
   const send = actionButton("follow-send btn-quiet", "Send", () => postFollowUp(projectId, thread));
-  const reason = el("span", "follow-reason", state !== undefined && state.phase === "failed" && state.choice !== true ? state.reason : "");
+  const reason = el("span", "follow-reason", state !== undefined && state.phase === "failed" && state.choice !== true && state.deep !== true ? state.reason : "");
   send.disabled = sending || field.value.trim() === "";
   markBusy(send, sending);
   field.addEventListener("input", () => {

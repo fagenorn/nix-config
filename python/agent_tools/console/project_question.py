@@ -55,6 +55,23 @@ parentheses right after the file name, as `<path> (spend)`; a cost question is a
 from the spend part, and spend is null only when the console could not read its spend (ADR-console-090).
 No permission rule is added: Read is already admitted. A write that
 fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
+
+Deeper mode (#1274, ADR-console-099). An `Ask` with `deep` true (`new_ask(..., deep=True)`; the page's
+Dig deeper, `parse_ask`'s optional boolean `deep`) is a deeper look at an answered question. It runs
+`DEEP_MODEL` (`opus`, `model_of`) with `DEEP_TIMEOUT_SECONDS` (1200, `timeout_of`; a timed-out run's
+reason names that figure) instead of `MODEL` and `TIMEOUT_SECONDS`. With records, its prompt lists the
+`transcripts` part of `question_records.DEEP_SECTIONS` beside the others and adds `DEEP_TEXT` after the
+records text and before the thread: analyse before answering, answer where time or tokens go from the
+`transcripts` part (counts, times and token sums by script, phase and issue; no transcript itself is
+readable), quote each figure exactly and cite it as `<path> (transcripts)`. A light ask's argv, prompt and
+settings are byte-identical to before. A deeper ask without records is refused: `new_ask(..., deep=True)`
+raises `ValueError(DEEP_NEEDS_RECORDS)` and `run_question` of such an `Ask` is a failed outcome with that
+reason before any file is written or session started, because only records give the hook its confinement.
+A deeper session's settings differ from a light one's only by the
+hook's fifth argument, the ask's checkout root: the permission rules are the same, and the hook confines
+Read, Grep, Glob and the admitted commands to the root and the records file (`OUTSIDE_ROOT`,
+`project_question_hook`); a symlink the checkout itself holds is part of its declared content, a stated
+limit (ADR-console-099 D1).
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
 (`parse_keyed_request` also reads an optional `request_key`, ADR-console-089 D9).
@@ -90,12 +107,13 @@ Argv. `launch_command` is None on a host `manager.supported` refuses, else `clau
 --output-format json --settings <file> <prompt>`. `--tools` is variadic: it is always followed by
 another option, so the prompt, which is last, is never swallowed into the tool list. The session id
 is a fresh UUID per question, which the service records in the asked row so the Spend page can tell
-the question's transcript (ADR-console-059). No `systemd-run` scope is used.
+the question's transcript (ADR-console-059). No `systemd-run` scope is used. A deeper ask names
+`--model opus`.
 
 Runner. `run_question` never raises for these cases and removes the settings file once written, in
 this order: no launch command (`UNAVAILABLE_TEXT`); a root that is not a directory; a settings
 write that fails; a records write that fails (`RECORDS_UNWRITABLE`, only with records, after the
-settings write); the run itself with `TIMEOUT_SECONDS`, the `cancel` event, `stdin` closed and
+settings write); the run itself with `timeout_of(ask)` (`TIMEOUT_SECONDS`, or `DEEP_TIMEOUT_SECONDS` for a deeper ask), the `cancel` event, `stdin` closed and
 stderr to a temporary file; `TimeoutExpired` (`TIMED_OUT`); a missing `claude-account`; a set
 `cancel` (`STOPPED_TEXT`); a non-zero exit (the last non-empty stderr line); then the JSON on
 stdout: not an object with a string `result` (`UNREADABLE_TEXT`), `is_error` true (the result text),
@@ -110,7 +128,8 @@ a string `question`; an answered row applies only to a still-working question of
 the same project (the first answer wins, strays are ignored): outcome `answered` with a string
 `answer` is `ANSWERED`, `answered` without one is `FAILED` with `UNREADABLE_TEXT`, `timed_out` is
 `TIMED_OUT`, anything else is `FAILED`; `reason` is kept only when a string and `answered_at` is
-the answered row's `at`. Folding two batches through `known` equals folding once, and `known` is
+the answered row's `at`. An asked row's `deep` is kept only when it is `True` and its `session_id` only
+when a non-empty string (#1274). Folding two batches through `known` equals folding once, and `known` is
 never mutated. `answer_parts(text)` splits a stored answer by the `HEADINGS` of the shape `LEAD`
 asks for: a heading matches at line start after optional spaces, case-insensitively, followed by
 `:`, and is not recognised inside fenced code (a line whose left-trimmed text starts with three
@@ -154,7 +173,11 @@ of a thread with a working question with `THREAD_WORKING`. `parse_delete_request
 string `thread_id` and optionally a `request_key` (a string that fullmatches `REQUEST_KEY`, 32
 lowercase hex digits; any other is a `ValueError`), and returns
 `(project_id, question, thread_id or None, request_key or None)`; `parse_request` returns its
-first three. The key names one request: an asked row carries `request_key` only when one was
+first three; `parse_ask` also reads an optional `deep`, a JSON boolean (`ValueError("deep must be true or false")`
+otherwise), and returns `parse_keyed_request`'s four with it, and `parse_keyed_request` is its first four.
+`deep_follow_up(questions, thread_id, question)` is `follow_up` (its refusals first), then `DEEP_STALE`
+unless the thread's last question is not deep and has this very text: a Dig deeper is honoured only
+against the thread's current last light answer. The key names one request: an asked row carries `request_key` only when one was
 given, the fold keeps it only when it is a string fullmatching `REQUEST_KEY`, and the service asks
 a key once per project (ADR-console-089 D9).
 """
@@ -187,8 +210,10 @@ from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
 MODEL = "sonnet"
+DEEP_MODEL = "opus"
 PERMISSION_MODE = "dontAsk"
 TIMEOUT_SECONDS = 300
+DEEP_TIMEOUT_SECONDS = 1200
 MAX_QUESTION_CHARS = 2000
 SETTINGS_DIR = "project-question-settings"
 SETTINGS_SUFFIX = ".settings.json"
@@ -241,7 +266,16 @@ RECORDS_TEXT = (
     "decimals, never rounded, converted or reworded. {sections}The console wrote it for this project when this question started; "
     "its spend is null only when the console could not read its spend. The console's other "
     "files are not readable from this session.\n\n")
+DEEP_TEXT = (
+    "This question asks for a deeper look, so analyse before you answer. The records file also "
+    "holds a transcripts part: counts, times and token sums of this project's delivery runs over "
+    "the last 30 days, by script, phase and issue, aggregated by the console from the runs' "
+    "transcripts; no transcript itself is readable. Answer where time or tokens go from that "
+    "part, quote each figure exactly as it is printed, and name it under Read as {path} "
+    "(transcripts).\n\n")
 RECORDS_FAILED = "the console's records could not be gathered: {detail}"
+CHECKOUT_MOVED = "the project no longer holds the checkout the question was asked in"
+DEEP_NEEDS_RECORDS = "a deeper question needs the console's records: it carries the checkout confinement"
 CONTRACT_UNREADABLE = "the project's contract could not be resolved, so no session was started: {detail}"
 UNAVAILABLE_TEXT = "questions are not available on this host yet"
 UNREGISTERED = "this project is not registered"
@@ -293,6 +327,7 @@ THREAD_LEAD = (
     "This question follows up earlier questions of the same thread, oldest first, each with the "
     "answer you gave. Use them as context: the rules above still apply.\n\n"
 )
+DEEP_STALE = "This answer was already dug deeper, or its thread moved on: reload to see it."
 THREAD_UNKNOWN = "this thread is not one of the project's questions"
 THREAD_WORKING = "this thread is still being answered: delete it once the answer is in"
 THREAD_UNANSWERED = "a follow-up continues a thread whose last question was answered"
@@ -390,6 +425,7 @@ class Ask:
     repo: str | None = None
     unset: tuple[str, ...] = ()
     records: str | None = None
+    deep: bool = False
 
 
 @dataclass(frozen=True)
@@ -465,10 +501,20 @@ def new_session_id() -> str:
 def new_ask(question_id: str, project_id: str, root: str, question: str, profile: str,
             routes: Sequence[Route], settings_dir: Path, *, session_id: str,
             thread: Sequence[Turn] = (), repo: str | None = None,
-            unset: Sequence[str] = (), records: str | None = None) -> Ask:
+            unset: Sequence[str] = (), records: str | None = None, deep: bool = False) -> Ask:
+    if deep and records is None:
+        raise ValueError(DEEP_NEEDS_RECORDS)
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
                Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread), repo,
-               tuple(unset), records)
+               tuple(unset), records, deep)
+
+
+def model_of(ask: Ask) -> str:
+    return DEEP_MODEL if ask.deep else MODEL
+
+
+def timeout_of(ask: Ask) -> int:
+    return DEEP_TIMEOUT_SECONDS if ask.deep else TIMEOUT_SECONDS
 
 
 def records_path(ask: Ask) -> Path:
@@ -497,14 +543,14 @@ def _decode_body(body: bytes) -> object:
         raise ValueError("the body is nested too deeply") from error
 
 
-def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
+def parse_ask(body: bytes) -> tuple[str, str, str | None, str | None, bool]:
     value = _decode_body(body)
     required = {"project_id", "question"}
     if not isinstance(value, dict) or not required <= set(value) <= required | {
-            "thread_id", "request_key"}:
+            "thread_id", "request_key", "deep"}:
         raise ValueError(
-            "the body must be an object of project_id, question, an optional thread_id and an "
-            "optional request_key")
+            "the body must be an object of project_id, question, an optional thread_id, an "
+            "optional request_key and an optional deep")
     project_id, question = value["project_id"], value["question"]
     thread_id = value.get("thread_id")
     if "thread_id" in value and (not isinstance(thread_id, str) or not thread_id):
@@ -517,7 +563,14 @@ def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
         raise ValueError("project_id must be a non-empty string")
     if not isinstance(question, str):
         raise ValueError("question must be a string")
-    return project_id, question, thread_id, request_key
+    deep = value.get("deep", False)
+    if not isinstance(deep, bool):
+        raise ValueError("deep must be true or false")
+    return project_id, question, thread_id, request_key, deep
+
+
+def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
+    return parse_ask(body)[:4]
 
 
 def parse_request(body: bytes) -> tuple[str, str, str | None]:
@@ -563,7 +616,7 @@ def reads_paragraph(repo: str | None) -> str:
 
 def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = (), *,
            repo: str | None = None, records: str | None = None,
-           sections: Mapping[str, tuple[int, int]] | None = None) -> str:
+           sections: Mapping[str, tuple[int, int]] | None = None, deep: bool = False) -> str:
     if routes:
         paragraph = ("Commands you may run, each exactly as written and alone: "
                      + ", ".join(shlex.join(route.argv) for route in routes) + ".\n\n")
@@ -571,9 +624,12 @@ def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = (), 
         paragraph = ("This project declares no read-only command, so production cannot be read: "
                      "answer from the code, the docs and the reads below.\n\n")
     parts = "; ".join(f"{name} offset {sections[name][0]} limit {sections[name][1]}"
-                      for name in question_records.SECTIONS if name in (sections or {}))
+                      for name in (question_records.DEEP_SECTIONS if deep and records is not None
+                                   else question_records.SECTIONS) if name in (sections or {}))
     held = (RECORDS_TEXT.format(path=records, sections=SECTIONS_TEXT.format(parts=parts) if parts else "")
             if records is not None else "")
+    if deep and records is not None:
+        held += DEEP_TEXT.format(path=records)
     return (LEAD + paragraph + reads_paragraph(repo) + held + thread_text(thread) + QUESTION_MARK
             + question)
 
@@ -583,14 +639,14 @@ def tools(routes: Sequence[Route]) -> str:
 
 
 def hook_command(routes: Sequence[Route], repo: str | None = None,
-                 confinement: tuple[str, str] | None = None) -> str:
+                 confinement: tuple[str, ...] | None = None) -> str:
     allowed = json.dumps([list(route.argv) for route in routes], separators=(",", ":"))
     return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed, repo or "",
                        *(confinement or ())])
 
 
 def settings_document(routes: Sequence[Route], repo: str | None = None,
-                      confinement: tuple[str, str] | None = None) -> dict:
+                      confinement: tuple[str, ...] | None = None) -> dict:
     return {
         "permissions": {
             "defaultMode": PERMISSION_MODE,
@@ -608,13 +664,15 @@ def settings_document(routes: Sequence[Route], repo: str | None = None,
 def launch_command(ask: Ask, platform: str) -> list[str] | None:
     if not manager.supported(platform):
         return None
-    return ["claude-account", "run", "-p", "--model", MODEL, "--session-id", ask.session_id,
+    return ["claude-account", "run", "-p", "--model", model_of(ask), "--session-id", ask.session_id,
             "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
             "--output-format", "json", "--settings", str(ask.settings),
             prompt(ask.question, ask.routes, ask.thread, repo=ask.repo,
                    records=str(records_path(ask)) if ask.records is not None else None,
-                   sections=(question_records.section_lines(ask.records)
-                             if ask.records is not None else None))]
+                   sections=(question_records.section_lines(
+                       ask.records, question_records.DEEP_SECTIONS if ask.deep else question_records.SECTIONS)
+                             if ask.records is not None else None),
+                   deep=ask.deep)]
 
 
 def answer_text(result: str, routes: Sequence[Route]) -> str:
@@ -631,7 +689,7 @@ def session_environment(ask: Ask, environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def _write_settings(ask: Ask) -> None:
-    confinement = ((str(private_dir(ask)), str(records_path(ask)))
+    confinement = ((str(private_dir(ask)), str(records_path(ask)), *((ask.root,) if ask.deep else ()))
                    if ask.records is not None else None)
     directory = ask.settings.parent
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -684,6 +742,8 @@ def _last_line(stderr) -> str | None:
 def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: str = sys.platform,
                  run=manager.run_in_own_group,
                  environ: Mapping[str, str] = os.environ) -> Outcome:
+    if ask.deep and ask.records is None:
+        return Outcome(FAILED, reason=DEEP_NEEDS_RECORDS)
     argv = launch_command(ask, platform)
     if argv is None:
         return Outcome(FAILED, reason=UNAVAILABLE_TEXT)
@@ -703,12 +763,12 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
                     FAILED, reason=RECORDS_UNWRITABLE.format(detail=error.strerror or error))
         with tempfile.TemporaryFile() as stderr:
             try:
-                done = run(argv, timeout=TIMEOUT_SECONDS, cancel=cancel, cwd=ask.root,
+                done = run(argv, timeout=timeout_of(ask), cancel=cancel, cwd=ask.root,
                            env=session_environment(ask, environ),
                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr,
                            start_new_session=True)
             except subprocess.TimeoutExpired:
-                return Outcome(TIMED_OUT, reason=f"the session did not answer within {TIMEOUT_SECONDS} s")
+                return Outcome(TIMED_OUT, reason=f"the session did not answer within {timeout_of(ask)} s")
             except FileNotFoundError:
                 return Outcome(FAILED, reason="claude-account is not installed")
             if cancel is not None and cancel.is_set():
@@ -765,6 +825,8 @@ class AskedQuestion:
     answered_at: str | None = None
     thread_id: str | None = None
     request_key: str | None = None
+    deep: bool = False
+    session_id: str | None = None
 
 
 def _part(lines: list[str], key: str) -> str | None:
@@ -839,10 +901,12 @@ def asked_questions(events: Iterable[Event],
                 head = next((item for item in items if isinstance(named, str) and named
                              and item.question_id == named), None)
                 thread_id = (head.thread_id or head.question_id) if head else question_id
-                key = payload.get("request_key")
+                key, session = payload.get("request_key"), payload.get("session_id")
                 items.append(AskedQuestion(
                     question_id, question, event.at, event.seq, thread_id=thread_id,
-                    request_key=key if isinstance(key, str) and REQUEST_KEY.fullmatch(key) else None))
+                    request_key=key if isinstance(key, str) and REQUEST_KEY.fullmatch(key) else None,
+                    deep=payload.get("deep") is True,
+                    session_id=session if isinstance(session, str) and session else None))
         elif event.kind == PROJECT_QUESTION_ANSWERED:
             if index is not None and items[index].state == WORKING:
                 items[index] = _answered(items[index], event)
@@ -895,4 +959,14 @@ def follow_up(questions: Sequence[AskedQuestion], thread_id: str, question: str)
         raise Refused(THREAD_CREDENTIAL)
     if len(thread_text(turns).encode("utf-8")) + len(question.encode("utf-8")) > MAX_THREAD_BYTES:
         raise Refused(THREAD_TOO_LONG)
+    return turns
+
+
+def deep_follow_up(questions: Sequence[AskedQuestion], thread_id: str,
+                   question: str) -> tuple[Turn, ...]:
+    """`follow_up`, honoured only for a Dig deeper of the thread's last light answer with this text."""
+    turns = follow_up(questions, thread_id, question)
+    last = _thread_of(questions, thread_id)[-1]
+    if last.deep or last.question != question:
+        raise Refused(DEEP_STALE)
     return turns
