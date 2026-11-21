@@ -15,7 +15,7 @@
         "prefix": "worktree-"
       },
       "commit": {
-        "co_authored_by": true,
+        "co_authored_by": false,
         "signed": true
       },
       "merge": {

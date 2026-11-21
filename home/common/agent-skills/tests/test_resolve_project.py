@@ -1964,6 +1964,14 @@ class DriftGateTest(ResolverTestCase):
         self.assertEqual(snapshot["bindings"]["paths"]["context"],
                          [str(REPO_ROOT / "docs/CONTEXT-MAP.md")])
 
+    def test_the_repository_snapshot_reports_no_co_author_lines(self):
+        # P11: this reads this repository's own live contract, not the pinned fixture.
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        self.assertIs(
+            json.loads(out)["bindings"]["vcs"]["commit"]["co_authored_by"], False)
+
     def test_the_repository_check_projections_is_clean(self):
         code, out, err = run("check-projections", "--repo-root", str(REPO_ROOT),
                              home=self.home)
