@@ -168,6 +168,25 @@ def _pass_set_with_maybe(toy: dict) -> None:
     step(toy, "review")["members"][0]["pass"] = ["approve", "maybe"]
 
 
+def _append_in(step_id: str, path: str) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        step(toy, step_id)["in"].append(path)
+    return change
+
+
+def _drop_holder_input(toy: dict) -> None:
+    toy["inputs"].remove("holder")
+
+
+def _items_not_required(schema: dict) -> None:
+    schema["required"].remove("items")
+
+
+def _append_to_review_prompt(directory: Path) -> None:
+    with (directory / "toy-review.md").open("a", encoding="utf-8") as prompt:
+        prompt.write("\n{{draft.items}}\n")
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -266,6 +285,22 @@ CASES = [
          [("toy", "draft", "unknown_outcome")]),
     Case("pass_set_outcome_the_member_cannot_produce", editing("toy", _pass_set_with_maybe),
          [("toy", "review", "unknown_outcome")]),
+    Case("input_not_produced_on_every_route",
+         editing("toy", _set(lambda toy: step(toy, "scope")["on"], "failed", "children")),
+         [("toy", "children", "unproduced_input")]),
+    Case("input_produced_only_later",
+         editing("toy", _set(lambda toy: step(toy, "scope"), "in", ["run.range", "draft.summary"])),
+         [("toy", "scope", "unproduced_input")]),
+    Case("undeclared_run_input", editing("toy", _append_in("children", "run.ticket")),
+         [("toy", "children", "unproduced_input")]),
+    Case("keep_alive_reads_an_undeclared_input", editing("toy", _drop_holder_input),
+         [("toy", None, "unproduced_input")]),
+    Case("member_the_schema_lacks", editing("toy", _append_in("children", "draft.nope")),
+         [("toy", "children", "unknown_member")]),
+    Case("consumed_member_not_required", _editing_draft_reply(_items_not_required),
+         [("toy", "children", "unknown_member")]),
+    Case("placeholder_outside_in", _append_to_review_prompt,
+         [("toy", "review-a", "unknown_placeholder")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -353,6 +388,15 @@ class GraphTest(unittest.TestCase):
     def test_exhausted_may_be_mapped_off_a_cycle(self):
         directory = broken_copy(editing(
             "toy-child", _set(lambda child: step(child, "claim")["on"], "exhausted", "child-stop")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+
+class DataFlowTest(unittest.TestCase):
+    def test_a_member_reads_what_precedes_its_group(self):
+        directory = broken_copy(editing(
+            "toy", _set(lambda toy: step(toy, "review-a"), "in", ["draft.summary", "run.issue"])))
         code, out, _ = run_check("--procedures", str(directory))
         self.assertEqual((code, out), (0, compact(
             {"procedures": ["toy", "toy-child"], "verdict": "ok"})))

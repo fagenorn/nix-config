@@ -63,7 +63,7 @@ member is `None` when that reference failed or does not apply to the kind
 (`outcomes`: a command's verdicts, a reply's outcome enum or a grader's
 outcomes; `reply_properties` and `reply_required`: the reply schema's member
 names and `required` names; `child_stops`: the child's stop names, only when
-the child loaded with no phase A refusal), and `keep_alive`, the keep-alive
+the child loaded with no phase A refusal; `prompt`: the prompt file's text), and `keep_alive`, the keep-alive
 command's outcomes or `None`.
 
 Phase C (graph, only on a file with no phase A refusal and no `unknown_target`;
@@ -77,6 +77,21 @@ member's `pass` entries are checked at the group) and `unbounded_cycle` (a
 cycle among steps with no `max_visits`, refused at its first step, or a step
 on a cycle whose `exhausted` target re-enters the loop). An outcome check whose
 reference failed phase B is skipped for that step.
+
+Phase C, data flow (after the graph checks; in step order, the header's
+`keep_alive` first, one refusal per path or placeholder):
+`unproduced_input` (an `in` path `run.<n>` whose `n` is not a header input, or
+`<X>.<m>` where `X` is not produced on every route to the step: `X` is a
+non-member step, or a member of a group, among the `dominators` of the step
+without itself; a group member is dominated through its group; a step never
+reads its own result; a step the walk does not reach, and a member of a group
+it does not reach, skip this route check and keep the `run.<n>` and member
+checks), `unknown_member` (`X` is an agent step whose reply schema resolved and
+`m` is not in its `properties` or not in its `required` list, because a value
+the reply may leave out cannot be consumed; the result of any other kind
+declares no schema and is not member-checked) and `unknown_placeholder` (a
+`{{<path>}}` of the step's prompt that is none of its `in` paths; skipped when
+the prompt is missing).
 """
 
 from __future__ import annotations
@@ -101,13 +116,15 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "undeclared_verdicts", "unknown_role", "missing_prompt", "missing_reply",
            "invalid_reply", "unknown_grader", "missing_procedure",
            "unreachable_step", "unreachable_done", "unmapped_outcome",
-           "unknown_outcome", "unbounded_cycle")
+           "unknown_outcome", "unbounded_cycle", "unproduced_input",
+           "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 PATH_RE = re.compile(r"^([a-z][a-z0-9-]*)\.([a-z][a-z0-9_]*)$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
 HEADER_MEMBERS = ("format", "keep_alive", "inputs", "stops", "steps")
 COMMON_REQUIRED = ("id", "stage", "kind")
@@ -142,6 +159,7 @@ class StepResolved:
     reply_properties: frozenset[str] | None = None
     reply_required: frozenset[str] | None = None
     child_stops: tuple[str, ...] | None = None
+    prompt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -539,19 +557,25 @@ def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | s
                       found: _Findings, label: str) -> StepResolved:
     if item["role"] not in ROLES:
         found.add("unknown_role", f"{item['role']!r} is not one of {', '.join(ROLES)}.", label)
+    prompt = None
     if not (directory / item["prompt"]).is_file():
         found.add("missing_prompt", f"{item['prompt']!r} is not in the procedure directory.", label)
+    else:
+        try:
+            prompt = (directory / item["prompt"]).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            prompt = None
     if not (directory / item["reply"]).is_file():
         found.add("missing_reply", f"{item['reply']!r} is not in the procedure directory.", label)
-        return StepResolved()
+        return StepResolved(prompt=prompt)
     key = f"{item['reply']}\0{item['outcome_from']}"
     if key not in replies:
         replies[key] = _reply_schema(directory / item["reply"], item["outcome_from"])
     reply = replies[key]
     if isinstance(reply, str):
         found.add("invalid_reply", reply, label)
-        return StepResolved()
-    return StepResolved(reply.outcomes, reply.properties, reply.required)
+        return StepResolved(prompt=prompt)
+    return StepResolved(reply.outcomes, reply.properties, reply.required, prompt=prompt)
 
 
 def check_references(name: str, doc: dict, directory: Path,
@@ -692,6 +716,76 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     return graph
 
 
+def dominators(graph: Mapping[str, tuple[str, ...]], entry: str) -> dict[str, frozenset[str]]:
+    """Node -> the nodes on every route from `entry` to it, itself included.
+
+    Defined over the nodes reachable from `entry`: `dom(entry) = {entry}` and
+    `dom(n) = {n} | intersection of dom(p) over reachable predecessors p`,
+    iterated to a fixed point.
+    """
+    nodes = {entry} | _reach(graph, entry)
+    predecessors: dict[str, list[str]] = {node: [] for node in nodes}
+    for node in nodes:
+        for target in graph.get(node, ()):
+            predecessors[target].append(node)
+    dom = {node: frozenset(nodes) for node in nodes}
+    dom[entry] = frozenset({entry})
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes - {entry}:
+            common = frozenset.intersection(*(dom[p] for p in predecessors[node]))
+            updated = common | {node}
+            if updated != dom[node]:
+                dom[node] = updated
+                changed = True
+    return dom
+
+
+def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> None:
+    graph = flow_graph(procedure)
+    by_id = {item["id"]: item for item in procedure["steps"]}
+    group_of = {member["step"]: item["id"] for item in procedure["steps"]
+                if item["kind"] == "group" for member in item["members"]}
+    dom = dominators(graph, procedure["steps"][0]["id"])
+    inputs = set(procedure["inputs"])
+
+    def check_path(path: str, step: dict | None) -> None:
+        label = None if step is None else step["id"]
+        producer, member = path.split(".", 1)
+        if producer == "run":
+            if member not in inputs:
+                found.add("unproduced_input", f"{path!r} is not an input of the procedure.", label)
+            return
+        if step is not None:
+            owner = group_of.get(label, label)
+            if owner in dom:
+                before = dom[owner] - {owner}
+                if producer not in by_id or group_of.get(producer, producer) not in before:
+                    found.add("unproduced_input",
+                              f"{path!r} is not produced on every route to the step.", label)
+        known = resolved.steps.get(producer)
+        if (producer in by_id and by_id[producer]["kind"] == "agent"
+                and known is not None and known.reply_properties is not None
+                and known.reply_required is not None
+                and (member not in known.reply_properties or member not in known.reply_required)):
+            found.add("unknown_member",
+                      f"{path!r} is not a member the reply of {producer!r} always carries.", label)
+
+    for path in procedure["keep_alive"]["in"]:
+        check_path(path, None)
+    for item in procedure["steps"]:
+        reads = item.get("in", [])
+        for path in reads:
+            check_path(path, item)
+        prompt = resolved.steps[item["id"]].prompt
+        if item["kind"] == "agent" and prompt is not None:
+            for name in dict.fromkeys(PLACEHOLDER_RE.findall(prompt)):
+                if name not in reads:
+                    found.add("unknown_placeholder",
+                              f"the prompt names {{{{{name}}}}}, which is not an in path.", item["id"])
+
+
 def _check_reachability(procedure: dict, found: _Findings) -> None:
     members = _members_of(procedure)
     graph = flow_graph(procedure)
@@ -777,6 +871,7 @@ def check_graph(name: str, doc: dict, resolved: Resolved) -> list[Refusal]:
     _check_reachability(doc, found)
     _check_outcomes(doc, resolved, found)
     _check_cycles(doc, found)
+    _check_data_flow(doc, resolved, found)
     position = {item["id"]: index for index, item in enumerate(doc["steps"])}
     return sorted(found.refusals,
                   key=lambda r: (-1 if r.step is None else position[r.step]))
