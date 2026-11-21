@@ -78,11 +78,19 @@ launching client's. So `run_launch` writes the sprint's id and secret as `{"env"
 per-sprint settings file (mode 0600, replaced on a retry) and passes `--settings <file>`; Claude
 Code applies a settings file's `env` to that session. Only the path is on argv. The file holds
 three more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}`, because a manager
-writes no code and every delivery makes its own worktree, and one `PermissionRequest` command hook
-that prints the client's deny decision with `REFUSAL`, one fixed sentence, because nobody watches
-a manager's session (a plain `printf`, no interpreter start). The third is `"permissions":
-{"defaultMode": <mode>}`, the mode the launch's `Permission` chose for the project (ADR-console-060,
-#1151), nothing else under `permissions`; a launch built without one carries `permission.FALLBACK`,
+writes no code and every delivery makes its own worktree, and `hooks`, which hold three. One `PermissionRequest`
+command hook prints the client's deny decision with `REFUSAL`, one fixed sentence, because nobody
+watches a manager's session (a plain `printf`, no interpreter start). A `PreToolUse` and a
+`PostToolUse` command hook, each with matcher `Bash` and no `if` filter, run `PERMIT_COMMAND`
+(`sprint permit`, `PERMIT_TIMEOUT` 60 seconds) and `LANDED_COMMAND` (`sprint permit --landed`,
+`LANDED_TIMEOUT` 30 seconds): the console judges each Bash call of the session and allows only the
+sprint's own merge, rerun and approved release (ADR-console-093); an `if` filter would let a
+spelling it missed fall to the owner's global `gh pr merge` allow. The third member is
+`"permissions": {"defaultMode": <mode>, "deny": [...]}`, the mode the launch's `Permission` chose
+for the project (ADR-console-060, #1151) and the `MANAGER_DENY` rules (an `--admin` merge,
+`release transaction abandon`, a `--dispose` release run) that block in every mode; there is no
+allow rule, no ask rule, no `autoMode` and no `disableAllHooks`. A launch built without a
+permission carries `permission.FALLBACK`,
 so `auto`. `settings_document(env, permission)` is that content and `write_settings(path, env,
 permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a
 stopped or removed session (`service._refresh_settings`).
@@ -185,6 +193,12 @@ FINISH_LIMIT = 590
 FINISH_SECONDS = 50
 SHORT_ID_LENGTH = 8
 SETTINGS_SUFFIX = ".settings.json"
+PERMIT_COMMAND = "sprint permit"
+LANDED_COMMAND = "sprint permit --landed"
+PERMIT_TIMEOUT = 60
+LANDED_TIMEOUT = 30
+MANAGER_DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)",
+                "Bash(release transaction run *--dispose*)")
 LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 
 OUT_OF_TIME_TEXT = "this run has no time left for the next stop or removal"
@@ -495,15 +509,20 @@ def launcher_for(platform: str) -> Callable[[Launch], None] | None:
 
 
 def settings_document(env: Mapping[str, str], permission: permissions.Permission) -> dict:
-    """The settings a manager's session runs under: its environment, no isolation guard, no prompts, the mode."""
+    """The settings a manager's session runs under: its environment, no isolation guard, no prompts, the mode, the permit hooks and the deny rules."""
     refusal = json.dumps({"hookSpecificOutput": {
         "hookEventName": "PermissionRequest",
         "decision": {"behavior": "deny", "message": REFUSAL}}})
     return {"env": dict(env),
             "worktree": {"bgIsolation": "none"},
-            "hooks": {"PermissionRequest": [{"hooks": [{
-                "type": "command", "command": f"printf '%s\\n' {shlex.quote(refusal)}"}]}]},
-            "permissions": {"defaultMode": permission.mode}}
+            "hooks": {
+                "PermissionRequest": [{"hooks": [{
+                    "type": "command", "command": f"printf '%s\\n' {shlex.quote(refusal)}"}]}],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{
+                    "type": "command", "command": PERMIT_COMMAND, "timeout": PERMIT_TIMEOUT}]}],
+                "PostToolUse": [{"matcher": "Bash", "hooks": [{
+                    "type": "command", "command": LANDED_COMMAND, "timeout": LANDED_TIMEOUT}]}]},
+            "permissions": {"defaultMode": permission.mode, "deny": list(MANAGER_DENY)}}
 
 
 def write_settings(path: Path, env: Mapping[str, str], permission: permissions.Permission) -> None:

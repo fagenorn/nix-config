@@ -10,6 +10,7 @@ If this text is no longer in your context, run `sprint contract` again.
 - Work only through the existing skills and never write code: no edit, no commit, no branch, no pull request.
 - Decide reversible matters yourself and record each decision in the brief. Nobody watches this session, so never ask in it: bring a real choice to the owner with `sprint ask`.
 - A permission prompt in this session is refused automatically, so never wait for one.
+- The session may run, each alone, its own sprint's pull request merge at its matched head in the project's merge form, `gh run rerun <id> --failed --repo <project>` of its own pull requests' required check runs, and the exact `release transaction run` of a release the owner approved on a release card. The console judges each at the call and refuses every other merge, rerun or release step; a refusal is reported like a guard refusal, so never ask about it.
 - Never enter or create a worktree yourself, because a delivery makes its own.
 - Talk to the owner only through the `sprint` command.
 

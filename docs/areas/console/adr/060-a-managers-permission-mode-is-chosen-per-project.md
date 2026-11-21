@@ -1,6 +1,6 @@
 # ADR-console-060 — A manager's permission mode is chosen per project
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-093
 - **Decided in:** #1151
 
 ## Context

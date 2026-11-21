@@ -192,6 +192,10 @@ class CommandTest(Case):
         self.assertEqual(manager.launch_tools("win32"), ())
 
 
+DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)",
+        "Bash(release transaction run *--dispose*)")
+
+
 class RunTest(Case):
     ENVIRON = {"PATH": "/p", "HOME": "/h", "CLAUDE_CONFIG_DIR": "/x",
                "CONSOLE_SPRINT_ID": "b" * 16, "CONSOLE_SPRINT_SECRET": "old"}
@@ -276,6 +280,20 @@ class RunTest(Case):
         self.assertFalse(self.settings.exists())
         manager.remove_settings(self.dir, SID)
 
+    def test_the_settings_grant_only_through_the_permit_hooks_and_deny_the_rest(self):
+        self.run_fake()
+        settings = json.loads(self.settings.read_text())
+        self.assertEqual(set(settings["permissions"]), {"defaultMode", "deny"})
+        self.assertEqual(settings["permissions"]["deny"], list(DENY))
+        self.assertNotIn("autoMode", settings)
+        self.assertNotIn("disableAllHooks", settings)
+        [pre] = settings["hooks"]["PreToolUse"]
+        self.assertEqual(pre, {"matcher": "Bash", "hooks": [{
+            "type": "command", "command": "sprint permit", "timeout": 60}]})
+        [post] = settings["hooks"]["PostToolUse"]
+        self.assertEqual(post, {"matcher": "Bash", "hooks": [{
+            "type": "command", "command": "sprint permit --landed", "timeout": 30}]})
+
     def test_the_settings_carry_the_launchs_permission_mode(self):
         bypass = permission.Permission(permission.BYPASS, permission.RULES_IN_PLACE)
         auto = permission.Permission(permission.AUTO, permission.NOT_DECLARED)
@@ -288,7 +306,7 @@ class RunTest(Case):
                 manager.run_launch(launch, platform="linux", run=self.fake(),
                                    environ=self.ENVIRON)
                 self.assertEqual(json.loads(self.settings.read_text())["permissions"],
-                                 {"defaultMode": mode})
+                                 {"defaultMode": mode, "deny": list(DENY)})
                 self.assertEqual(list(self.dir.iterdir()), [self.settings])
 
     def test_the_settings_turn_the_isolation_guard_off_and_refuse_every_permission_prompt(self):
@@ -296,7 +314,7 @@ class RunTest(Case):
         settings = json.loads(self.settings.read_text())
         self.assertEqual(set(settings), {"env", "worktree", "hooks", "permissions"})
         self.assertEqual(settings["worktree"], {"bgIsolation": "none"})
-        self.assertEqual(set(settings["hooks"]), {"PermissionRequest"})
+        self.assertEqual(set(settings["hooks"]), {"PermissionRequest", "PreToolUse", "PostToolUse"})
         [group] = settings["hooks"]["PermissionRequest"]
         self.assertNotIn("matcher", group)
         [hook] = group["hooks"]

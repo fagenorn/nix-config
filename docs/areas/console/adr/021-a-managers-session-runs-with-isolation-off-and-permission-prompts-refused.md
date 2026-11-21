@@ -1,6 +1,6 @@
 # ADR-console-021 — A manager's session runs with the background isolation guard off and permission prompts refused
 
-- **Status:** accepted; amended by ADR-console-060
+- **Status:** accepted; amended by ADR-console-060, ADR-console-093
 - **Decided in:** #835, #973
 
 ## Context

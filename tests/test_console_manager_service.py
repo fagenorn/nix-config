@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1818,6 +1819,50 @@ class PermitServiceTest(PermitCase):
         self.assertIn(service.PERMIT_PATH, service.MANAGER_WRITES)
         self.assertIn(service.PERMIT_PATH, service.OWNER_ONLY)
         self.assertIn(service.PERMIT_PATH, service.ROUTES)
+
+
+class PermitHookTest(PermitCase):
+    """The hook commands the settings carry, run as the client runs them: `sh -c <command>` with the hook input on stdin."""
+
+    def hook(self, svc, sid, command, hook_input):
+        bin_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, bin_dir)
+        shim = bin_dir / "sprint"
+        shim.write_text("#!/bin/sh\nexec python3 -m agent_tools.console.sprint \"$@\" "
+                        f"--port {svc.address[1]}\n")
+        shim.chmod(0o755)
+        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}",
+               "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "python"),
+               manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}
+        done = subprocess.run(["sh", "-c", command], input=json.dumps(hook_input).encode(),
+                              env=env, capture_output=True, timeout=30)
+        self.assertEqual((done.returncode, done.stderr), (0, b""))
+        return done.stdout.decode()
+
+    def test_the_generated_hook_allows_only_the_granted_commands(self):
+        svc, sid = self.boot()
+        hooks = manager.settings_document({}, permission.FALLBACK)["hooks"]
+        [pre] = hooks["PreToolUse"][0]["hooks"]
+        [post] = hooks["PostToolUse"][0]["hooks"]
+
+        def call(command):
+            return {"session_id": "s-1", "tool_name": "Bash", "tool_input": {"command": command}}
+
+        out = self.hook(svc, sid, pre["command"], call(MERGE))
+        self.assertEqual(json.loads(out), {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason": ""}})
+        self.assertEqual([row["decision"] for row in self.rows("permit.judged")], ["allow"])
+        self.fake.pr = {**self.fake.pr, "branch": "issue-99-x"}
+        out = self.hook(svc, sid, pre["command"], call(MERGE.replace(" 7 ", " 8 ")))
+        deny = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual((deny["hookEventName"], deny["permissionDecision"]), ("PreToolUse", "deny"))
+        self.assertEqual([row["decision"] for row in self.rows("permit.judged")], ["allow", "deny"])
+        self.assertEqual(self.hook(svc, sid, pre["command"], call("git status")), "")
+        self.assertEqual(len(self.rows("permit.judged")), 2)
+        self.assertEqual(self.rows("permit.landed"), [])
+        self.assertEqual(self.hook(svc, sid, post["command"], call(MERGE)), "")
+        self.assertEqual(len(self.rows("permit.landed")), 1)
 
 
 class PermitWireTest(PermitCase):
