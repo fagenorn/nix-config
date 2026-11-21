@@ -1103,6 +1103,27 @@ class ManagerContractTest(unittest.TestCase):
         self.assertIn("`to-issues`", item)
         self.assertIn("changes how something looks", item)
 
+    def test_the_contract_says_how_to_declare_a_live_fault_and_where_scope_changes_go(self):
+        text = run_sprint("contract").stdout
+        flat = " ".join(text.split())
+        section = flat.partition("## A live fault ")[2].partition(" ## ")[0]
+        after = flat.partition("## After approval ")[2].partition(" ## ")[0]
+        self.assertEqual(text.count("\n## A live fault\n"), 1)
+        self.assertLess(text.index("## Questions"), text.index("## A live fault"))
+        self.assertLess(text.index("## A live fault"), text.index("## Notices"))
+        for needle in (
+                "`sprint live-fault --fault-file -`", "`issue`", "`observed`", "`when`",
+                "`proven`", "your latest report names", "needs no go-ahead",
+                "never ask the owner about it", "`sprint: live fault <id> declared`",
+                sprints.FAULT_MEMBER.format(member="<member>"), sprints.FAULT_NOT_OURS,
+                sprints.FAULT_TWICE, "the owner may withdraw it there", "`sprint recap`",
+                "`live_faults`",
+                "scope changes go to the follow-up issue, never into the fix",
+                '`"live_fault": true`'):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        self.assertIn("it goes to the follow-up issue, as A live fault says", after)
+
     def test_the_contract_says_what_to_do_on_an_awaiting_look_stop(self):
         text = run_sprint("contract").stdout
         self.assertIn("\n## A look before merge\n", text)
