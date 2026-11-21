@@ -33,7 +33,22 @@ from .test_resolve_project import (
 )
 
 
-class FleetPreflightTest(ResolverTestCase):
+class FleetFixtures:
+    """Registered-project fixtures shared by the preflight and its verify check."""
+
+    def project(self, project_id: str, *, min_inclusive: str = "1.2.0",
+                max_exclusive: str = "3.0.0",
+                contract: dict | None = None) -> tuple[dict, Path]:
+        if contract is None:
+            contract = source_contract()
+            contract["project"]["id"] = project_id
+            contract["platform"] = {"min_inclusive": min_inclusive,
+                                    "max_exclusive": max_exclusive}
+        root = self.make_root(contract)
+        return {"project_id": project_id, "root": str(root)}, root
+
+
+class FleetPreflightTest(FleetFixtures, ResolverTestCase):
     def candidate(self, version: str | None = None) -> Path:
         manifest = (committed_manifest() if version is None
                     else mutated_manifest(platform_version=version))
@@ -50,17 +65,6 @@ class FleetPreflightTest(ResolverTestCase):
             env={**os.environ, "HOME": str(self.home), **(env or {})},
         )
         return proc.returncode, proc.stdout, proc.stderr
-
-    def project(self, project_id: str, *, min_inclusive: str = "1.2.0",
-                max_exclusive: str = "3.0.0",
-                contract: dict | None = None) -> tuple[dict, Path]:
-        if contract is None:
-            contract = source_contract()
-            contract["project"]["id"] = project_id
-            contract["platform"] = {"min_inclusive": min_inclusive,
-                                    "max_exclusive": max_exclusive}
-        root = self.make_root(contract)
-        return {"project_id": project_id, "root": str(root)}, root
 
     def rows(self, out: str) -> list[list[str]]:
         return [line.split(" ") for line in out.splitlines()
@@ -270,3 +274,123 @@ class FleetPreflightTest(ResolverTestCase):
         table = (REPO_ROOT / "lib" / "agent-tools.nix").read_text("utf-8")
         row = '    "fleet-preflight" = "project_contract.fleet_preflight";'
         self.assertEqual(table.splitlines().count(row), 1)
+
+
+class FleetPreflightCheckTest(FleetFixtures, ResolverTestCase):
+    """The verify check for issue 1451: the checkout's own preflight over the real fleet."""
+
+    SCRIPT = "home/common/verify-pending/checks/fleet-preflight"
+
+    def setUp(self):
+        super().setUp()
+        install_home(self.home, None)
+
+    def check(self, root: Path = REPO_ROOT,
+              env: dict | None = None) -> tuple[int, str, str]:
+        proc = subprocess.run(
+            [str(root / self.SCRIPT)], cwd=root,
+            env=env or {**os.environ, "HOME": str(self.home)},
+            capture_output=True, text=True, timeout=120)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def three_project_fleet(self) -> Path:
+        entries = [self.project(f"fagenorn/{name}")[0]
+                   for name in ("gamma", "alpha", "beta")]
+        return install_registry(self.home, registry(*entries))
+
+    def test_the_check_is_committed_executable(self):
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-s", self.SCRIPT],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.stdout.split(" ")[0], "100755")
+
+    def test_the_check_matches_a_multi_project_fleet(self):
+        self.three_project_fleet()
+        code, out, err = self.check()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(out.splitlines()), 1)
+        payload = json.loads(out)
+        ids = ["fagenorn/alpha", "fagenorn/beta", "fagenorn/gamma"]
+        self.assertEqual(payload["verdict"], "green")
+        self.assertEqual([r["project_id"] for r in payload["fleet"]], ids)
+        self.assertEqual(payload["registered"], ids)
+        self.assertEqual(payload["missing"], [])
+        self.assertEqual(payload["extra"], [])
+        self.assertEqual(payload["refused"], [])
+        self.assertEqual(
+            payload["manifest_path"],
+            str((REPO_ROOT / "home/common/agent-skills/platform-manifest.json").resolve()))
+
+    def test_a_dropped_or_duplicated_row_is_not_met(self):
+        registry_file = self.three_project_fleet()
+        code, out, err = self.check()
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        report = {k: payload[k] for k in
+                  ("platform_version", "manifest_path", "fleet", "refused")}
+        entries = json.loads(registry_file.read_text(encoding="utf-8"))["projects"]
+        from agent_tools.verification import verify_checks
+        beta = [r for r in report["fleet"] if r["project_id"] == "fagenorn/beta"]
+        others = [r for r in report["fleet"] if r["project_id"] != "fagenorn/beta"]
+        with self.subTest("unchanged"):
+            self.assertEqual(verify_checks.fleet_preflight_verdict(report, entries)[0], 0)
+        with self.subTest("dropped"):
+            code, verdict = verify_checks.fleet_preflight_verdict(
+                {**report, "fleet": others}, entries)
+            self.assertEqual(code, 1)
+            self.assertEqual(verdict["verdict"], "red")
+            self.assertEqual(verdict["missing"], ["fagenorn/beta"])
+        with self.subTest("duplicated"):
+            code, verdict = verify_checks.fleet_preflight_verdict(
+                {**report, "fleet": report["fleet"] + beta}, entries)
+            self.assertEqual(code, 1)
+            self.assertEqual(verdict["extra"], ["fagenorn/beta"])
+
+    def test_a_refused_project_is_not_met(self):
+        alpha, _ = self.project("fagenorn/alpha")
+        ahead, _ = self.project("fagenorn/ahead", min_inclusive="2.1.0")
+        install_registry(self.home, registry(alpha, ahead))
+        code, out, err = self.check()
+        self.assertEqual(code, 1, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["refused"], ["fagenorn/ahead"])
+        self.assertEqual(payload["verdict"], "red")
+        self.assertEqual(payload["missing"], [])
+        self.assertEqual(payload["extra"], [])
+
+    def test_an_empty_fleet_reports_no_row(self):
+        code, out, err = self.check()
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["fleet"], [])
+        self.assertEqual(payload["registered"], [])
+
+    def test_an_unreadable_registry_is_an_error(self):
+        install_registry(self.home, "{")
+        code, out, err = self.check()
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(out), {"verdict": "unreadable",
+                                           "repair_id": "platform.registry.parse"})
+
+    def test_a_registered_source_checkout_gets_no_bytecode(self):
+        entry, root = self.project("fagenorn/self")
+        shutil.copytree(REPO_ROOT / "python", root / "python",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        manifest = root / "home/common/agent-skills/platform-manifest.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / "home/common/agent-skills/platform-manifest.json", manifest)
+        script = root / self.SCRIPT
+        script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / self.SCRIPT, script)
+        script.chmod(0o755)
+        install_registry(self.home, registry(entry))
+        before = tree_snapshot(root)
+        env = {**os.environ, "HOME": str(self.home)}
+        for name in ("PYTHONPYCACHEPREFIX", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH"):
+            env.pop(name, None)
+        code, out, err = self.check(root, env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["registered"], ["fagenorn/self"])
+        self.assertEqual(sorted(str(p.relative_to(root))
+                                for p in root.rglob("__pycache__")), [])
+        self.assertEqual(tree_snapshot(root), before)
