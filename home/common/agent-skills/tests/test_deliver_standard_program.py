@@ -6278,6 +6278,14 @@ class ScopedReviewRoundTest(unittest.TestCase):
         self.assertIn(AMENDED, prompt(calls, "final-scoped"))
         self.assertEqual(result["cont"]["reviewed"], {"head": TIP})
 
+    def test_an_applied_amend_is_kept_by_a_stop_before_the_next_verdict(self):
+        cont = FinalReviewedResumeTest.stopped_after_review()["cont"]
+        lost, _ = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), replies={"final-scoped": None}, patch={"setup": {"head": TIP}})
+        self.assertEqual(lost["stage"], "final-review")
+        self.assertEqual(lost["cont"]["reviewed"], {"head": TIP, "amended": True})
+        _, calls = run(args=dict(ARGS, cont=lost["cont"]), replies={"verify": None}, patch={"setup": {"head": TIP}})
+        self.assertIn(AMENDED, prompt(calls, "final-scoped"))
+
 
 class FixDiffFindingTest(unittest.TestCase):
     """#950: a finding not marked narrowing, in a file the fix wave's commits changed, is admitted to the next wave like a narrowing one."""

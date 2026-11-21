@@ -1439,6 +1439,8 @@ ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MOD
   if (!graded) return why({ stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: am.status === 'refused' ? CONT : STALE })
   log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
   amendApplied = true
+  // #1370: the amendment is graded by the next round's verdict only; a stop before it (a lost scoped reviewer, a blocked task) hands the mark back, and markReviewed drops it.
+  if (reviewed) reviewed = { ...reviewed, amended: true }
   // #996: the amended task file is the owner's answer to a blocked task, unless a decision is still to be worked in below.
   if (newDecision === null && !(BLOCKED && BLOCKED.asked)) blocked = null
   // An applied amend makes every cached result stale, even when every edit was recorded already: an earlier run may have died after the clerk
