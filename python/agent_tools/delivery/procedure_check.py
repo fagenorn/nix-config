@@ -40,6 +40,31 @@ Phases. Phase A (structure, per file): `unreadable_procedure`,
 with a phase A refusal gets no other phase, so one defect yields one refusal.
 Refusals are ordered by procedure name, phase, then step position, and name
 the step id, or `None` for a header, `keep_alive` or stop defect.
+
+Phase B (references, only on a file with no phase A refusal; the header,
+`keep_alive` and stops first, then the steps in order, one refusal per failed
+reference): `unknown_target` (an `on` target that is no step, stop or `done`,
+a stop `reenter` or a group member `step` that is no step), `unknown_command`
+and `undeclared_verdicts` (a `command` step or `keep_alive` against
+`command_verdicts.json`: an id that is no key, or a `subcommand` on a
+`verdicts`-form declaration, is the first; a `null` declaration, or a
+`subcommands`-form declaration that lacks the named subcommand, is the
+second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply`
+(no such file in the procedure directory), `invalid_reply` (the reply schema
+is not a strict-JSON object with a `properties` object, a `required` list of
+strings that contains `outcome_from`, and an `enum` of distinct non-empty
+strings under `properties[outcome_from]`), `unknown_grader` (not in
+`GRADERS`) and `missing_procedure` (a `call` child file is absent; a child
+that exists but fails phase A gives the parent no refusal).
+
+`Resolved` records, per procedure, what each step's references resolved to,
+for the checks that follow phase B: a `StepResolved` per step id, whose
+member is `None` when that reference failed or does not apply to the kind
+(`outcomes`: a command's verdicts, a reply's outcome enum or a grader's
+outcomes; `reply_properties` and `reply_required`: the reply schema's member
+names and `required` names; `child_stops`: the child's stop names, only when
+the child loaded with no phase A refusal), and `keep_alive`, the keep-alive
+command's outcomes or `None`.
 """
 
 from __future__ import annotations
@@ -51,6 +76,7 @@ from pathlib import Path
 from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.delivery.engine_graders import GRADERS
 
 FORMAT = 1
 STAGES = ("setup", "planning", "plan review", "building", "final review",
@@ -59,7 +85,9 @@ KINDS = ("command", "agent", "decide", "group", "call")
 NEEDS = ("owner-decision", "owner-look", "retry", "nothing")
 ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
 DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
-           "unknown_stage", "duplicate_step")
+           "unknown_stage", "duplicate_step", "unknown_target", "unknown_command",
+           "undeclared_verdicts", "unknown_role", "missing_prompt", "missing_reply",
+           "invalid_reply", "unknown_grader", "missing_procedure")
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -92,9 +120,28 @@ class Refusal:
 
 
 @dataclass(frozen=True)
+class StepResolved:
+    """What one step's references resolved to; `None` is unresolved or n/a."""
+
+    outcomes: tuple[str, ...] | None = None
+    reply_properties: frozenset[str] | None = None
+    reply_required: frozenset[str] | None = None
+    child_stops: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class Resolved:
+    """The resolved references of one procedure (phase B), by step id."""
+
+    steps: Mapping[str, StepResolved]
+    keep_alive: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
 class CheckResult:
     procedures: tuple[str, ...]
     refusals: tuple[Refusal, ...]
+    resolved: Mapping[str, Resolved]
 
 
 class DeclarationError(Exception):
@@ -422,17 +469,130 @@ def check_structure(name: str, doc: object) -> list[Refusal]:
     return found.refusals
 
 
-def _check_procedure(path: Path, commands: Mapping[str, CommandDeclaration | None]) -> list[Refusal]:
-    """Run the phases of one file in order; a refusal in a phase skips the later ones."""
+@dataclass(frozen=True)
+class _Reply:
+    properties: frozenset[str]
+    required: frozenset[str]
+    outcomes: tuple[str, ...]
+
+
+def _reply_schema(path: Path, outcome_from: str) -> _Reply | str:
+    """The reply schema's facts, or the reason it is invalid."""
+    try:
+        schema = _strict_load(path)
+    except (OSError, ValueError) as error:
+        return " ".join(f"the reply schema cannot be read as strict JSON: {error}".split())
+    if not isinstance(schema, dict):
+        return "the reply schema is not a JSON object."
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return "the reply schema has no properties object."
+    required = schema.get("required")
+    if not isinstance(required, list) or not all(isinstance(n, str) for n in required):
+        return "the reply schema has no required list of strings."
+    if outcome_from not in required:
+        return f"the reply schema does not require {outcome_from!r}."
+    outcome = properties.get(outcome_from)
+    enum = outcome.get("enum") if isinstance(outcome, dict) else None
+    if (not isinstance(enum, list) or not enum or not all(_is_text(v) for v in enum)
+            or len(set(enum)) != len(enum)):
+        return f"properties.{outcome_from} has no enum of distinct non-empty strings."
+    return _Reply(frozenset(properties), frozenset(required), tuple(enum))
+
+
+def _command_outcomes(reference: dict, commands: Mapping[str, CommandDeclaration | None],
+                      found: _Findings, step: str | None) -> tuple[str, ...] | None:
+    command, subcommand = reference["command"], reference.get("subcommand")
+    if command not in commands:
+        found.add("unknown_command", f"{command!r} is not a command-table id.", step)
+        return None
+    declaration = commands[command]
+    if declaration is None:
+        found.add("undeclared_verdicts", f"{command!r} declares no verdicts yet.", step)
+        return None
+    if declaration.verdicts is not None and subcommand is not None:
+        found.add("unknown_command", f"{command!r} has no subcommands.", step)
+        return None
+    outcomes = declaration.outcomes(subcommand)
+    if outcomes is None:
+        found.add("undeclared_verdicts",
+                  f"{command!r} declares no verdicts for subcommand {subcommand!r}.", step)
+    return outcomes
+
+
+def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | str],
+                      found: _Findings, label: str) -> StepResolved:
+    if item["role"] not in ROLES:
+        found.add("unknown_role", f"{item['role']!r} is not one of {', '.join(ROLES)}.", label)
+    if not (directory / item["prompt"]).is_file():
+        found.add("missing_prompt", f"{item['prompt']!r} is not in the procedure directory.", label)
+    if not (directory / item["reply"]).is_file():
+        found.add("missing_reply", f"{item['reply']!r} is not in the procedure directory.", label)
+        return StepResolved()
+    key = f"{item['reply']}\0{item['outcome_from']}"
+    if key not in replies:
+        replies[key] = _reply_schema(directory / item["reply"], item["outcome_from"])
+    reply = replies[key]
+    if isinstance(reply, str):
+        found.add("invalid_reply", reply, label)
+        return StepResolved()
+    return StepResolved(reply.outcomes, reply.properties, reply.required)
+
+
+def check_references(name: str, doc: dict, directory: Path,
+                     commands: Mapping[str, CommandDeclaration | None],
+                     child_stops: Mapping[str, tuple[str, ...]]) -> tuple[list[Refusal], Resolved]:
+    """Phase B: what a structurally valid procedure refers to must exist, F9-F11."""
+    found = _Findings(name)
+    ids = {item["id"] for item in doc["steps"]}
+    stops = set(doc["stops"])
+    keep_alive = _command_outcomes(doc["keep_alive"], commands, found, None)
+    for stop_name, stop in doc["stops"].items():
+        if stop["reenter"] not in ids:
+            found.add("unknown_target", f"stop {stop_name!r} re-enters {stop['reenter']!r}, which is no step.")
+    resolved: dict[str, StepResolved] = {}
+    replies: dict[str, _Reply | str] = {}
+    for item in doc["steps"]:
+        label, kind = item["id"], item["kind"]
+        for outcome, target in item.get("on", {}).items():
+            if target not in ids and target not in stops and target != "done":
+                found.add("unknown_target",
+                          f"on {outcome!r} goes to {target!r}, which is no step, stop or done.", label)
+        step = StepResolved()
+        if kind == "command":
+            step = StepResolved(_command_outcomes(item, commands, found, label))
+        elif kind == "agent":
+            step = _agent_references(item, directory, replies, found, label)
+        elif kind == "decide":
+            if item["grader"] in GRADERS:
+                step = StepResolved(GRADERS[item["grader"]].outcomes)
+            else:
+                found.add("unknown_grader", f"{item['grader']!r} is not a grader.", label)
+        elif kind == "group":
+            for member in item["members"]:
+                if member["step"] not in ids:
+                    found.add("unknown_target", f"group member {member['step']!r} is no step.", label)
+        elif kind == "call":
+            if not (directory / f"{item['procedure']}.json").is_file():
+                found.add("missing_procedure", f"{item['procedure']!r} is not in the procedure directory.", label)
+            else:
+                step = StepResolved(child_stops=child_stops.get(item["procedure"]))
+        resolved[label] = step
+    return found.refusals, Resolved(resolved, keep_alive)
+
+
+def _load_procedure(path: Path) -> tuple[object | None, list[Refusal]]:
+    """Read one file and run phase A on it."""
     name = path.stem
     if not NAME_RE.match(name):
-        return [Refusal(name, None, "invalid_field", f"the procedure name must match {NAME_RE.pattern}.")]
+        return None, [Refusal(name, None, "invalid_field",
+                              f"the procedure name must match {NAME_RE.pattern}.")]
     try:
         doc = _strict_load(path)
     except (OSError, ValueError) as error:
-        return [Refusal(name, None, "unreadable_procedure",
-                        " ".join(f"the file cannot be read as strict JSON: {error}".split()))]
-    return check_structure(name, doc)
+        return None, [Refusal(name, None, "unreadable_procedure",
+                              " ".join(f"the file cannot be read as strict JSON: {error}".split()))]
+    return doc, check_structure(name, doc)
 
 
 def check_directory(directory: Path,
@@ -442,7 +602,15 @@ def check_directory(directory: Path,
                    key=lambda p: p.stem)
     if not files:
         raise ValueError(f"{directory} holds no procedure file")
+    loaded = {path.stem: _load_procedure(path) for path in files}
+    child_stops = {name: tuple(doc["stops"]) for name, (doc, found) in loaded.items()
+                   if not found}
     refusals: list[Refusal] = []
-    for path in files:
-        refusals.extend(_check_procedure(path, commands))
-    return CheckResult(tuple(p.stem for p in files), tuple(refusals))
+    resolved: dict[str, Resolved] = {}
+    for name, (doc, found) in loaded.items():
+        if found:
+            refusals.extend(found)
+            continue
+        found, resolved[name] = check_references(name, doc, directory, commands, child_stops)
+        refusals.extend(found)
+    return CheckResult(tuple(p.stem for p in files), tuple(refusals), resolved)

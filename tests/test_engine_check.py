@@ -106,6 +106,37 @@ def _write_broken_child(directory: Path) -> None:
     (directory / "toy-child.json").write_text("{", encoding="utf-8")
 
 
+def _reroute_tally(toy: dict) -> None:
+    step(toy, "tally")["on"]["revise"] = "redraft"
+
+
+def _reenter_nowhere(toy: dict) -> None:
+    toy["stops"]["needs-owner"]["reenter"] = "nope"
+
+
+def _undeclared_command(toy: dict) -> None:
+    step(toy, "scope")["command"] = next(
+        key for key, declaration in sorted(procedure_check.load_commands().items())
+        if declaration is None)
+
+
+def _editing_draft_reply(change: Callable[[dict], None]) -> Callable[[Path], None]:
+    def mutate(directory: Path) -> None:
+        path = directory / "toy-draft.reply.json"
+        schema = json.loads(path.read_text(encoding="utf-8"))
+        change(schema)
+        path.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
+    return mutate
+
+
+def _drop_outcome_enum(schema: dict) -> None:
+    del schema["properties"]["status"]["enum"]
+
+
+def _outcome_not_required(schema: dict) -> None:
+    schema["required"].remove("status")
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -132,6 +163,43 @@ CASES = [
     Case("keep_alive_reads_a_step_result",
          editing("toy", _set(lambda toy: toy["keep_alive"], "in", ["draft.summary"])),
          [("toy", None, "invalid_field")]),
+    Case("transition_to_a_missing_step", editing("toy", _reroute_tally),
+         [("toy", "tally", "unknown_target")]),
+    Case("stop_reenters_a_missing_step", editing("toy", _reenter_nowhere),
+         [("toy", None, "unknown_target")]),
+    Case("unknown_command_id",
+         editing("toy", _set(lambda toy: step(toy, "scope"), "command", "nope")),
+         [("toy", "scope", "unknown_command")]),
+    Case("unknown_keep_alive",
+         editing("toy", _set(lambda toy: toy["keep_alive"], "command", "nope")),
+         [("toy", None, "unknown_command")]),
+    Case("subcommand_on_a_plain_command",
+         editing("toy", _set(lambda toy: step(toy, "scope"), "subcommand", "run")),
+         [("toy", "scope", "unknown_command")]),
+    Case("command_without_declared_verdicts", editing("toy", _undeclared_command),
+         [("toy", "scope", "undeclared_verdicts")]),
+    Case("subcommand_without_declared_verdicts",
+         editing("toy-child", _set(lambda toy: step(toy, "claim"), "subcommand", "acquire")),
+         [("toy-child", "claim", "undeclared_verdicts")]),
+    Case("unknown_role",
+         editing("toy", _set(lambda toy: step(toy, "review-b"), "role", "auditor")),
+         [("toy", "review-b", "unknown_role")]),
+    Case("missing_prompt_file",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "prompt", "toy-nope.md")),
+         [("toy", "draft", "missing_prompt")]),
+    Case("missing_reply_schema",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "reply", "toy-nope.reply.json")),
+         [("toy", "draft", "missing_reply")]),
+    Case("reply_without_outcome_enum", _editing_draft_reply(_drop_outcome_enum),
+         [("toy", "draft", "invalid_reply")]),
+    Case("reply_outcome_not_required", _editing_draft_reply(_outcome_not_required),
+         [("toy", "draft", "invalid_reply")]),
+    Case("unknown_grader",
+         editing("toy", _set(lambda toy: step(toy, "tally"), "grader", "nope")),
+         [("toy", "tally", "unknown_grader")]),
+    Case("missing_child_procedure",
+         editing("toy", _set(lambda toy: step(toy, "children"), "procedure", "toy-nope")),
+         [("toy", "children", "missing_procedure")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -213,6 +281,14 @@ class RefusalTableTest(unittest.TestCase):
     def test_every_defect_has_a_table_case(self):
         self.assertEqual({d for c in CASES for _, _, d in c.expected},
                          set(procedure_check.DEFECTS))
+
+
+class RoleTest(unittest.TestCase):
+    def test_each_role_has_its_agent_file(self):
+        for name in procedure_check.ROLES:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    (REPO_ROOT / "home/common/claude-code/agents" / f"{name}.md").is_file())
 
 
 class NoSideEffectTest(unittest.TestCase):
