@@ -58,6 +58,31 @@
       "mode": "plan-only",
       "prompt": "Plan a six-task change that is likely to touch many policy files and grow into a large review. Plan-only: say what you will measure, build or run while writing the plan, and what the plan header says about delivery size.",
       "expected_output": "The planner does not forecast review size: no review-feasibility forecast or projection gate, no forecast blocks, no delivery-estimate header and no projection in the producer report. It does not build, prototype or run the change while planning; the only run is confirming each task's failing test. It still measures the plan package with artifact-budget check and splits the work into independently testable tasks, leaving review size to review time."
+    },
+    {
+      "id": 4,
+      "name": "plan-from-an-issue-body-spec",
+      "mode": "pipeline",
+      "prompt": "Use the `writing-plans` skill to turn the spec `issues/001-well-specified.md` into an implementation plan.\n\nResolve once into a retained ResolvedProject; refusal is fatal and no value is defaulted or inferred. The tracker capability is unsupported, so this file is the issue and its body is the spec. Work on the current branch without a worktree. Autonomous mode: planning forces at least one non-obvious decision; record each as a row `| ID | Choice | Grounding | Rejected alternative |` of the spec's `## Decision ledger` (add the section when it is missing) and cite it from the plan as `per <ID>`. Produce the plan only; do not edit `tinytask/` or `tests/`.",
+      "expected_output": "A plan root under the git directory's plans directory citing at least one ledger row as `per <ID>`. The issue file gains those rows in a `## Decision ledger` section, its acceptance criteria section unchanged, as the only working-tree change. No commit is made and nothing reaches the origin.",
+      "asserts": [
+        {
+          "name": "a plan root exists in the git directory's plans directory",
+          "shell": "has_file \"$PLAN_DIR\"/*.md"
+        },
+        {
+          "name": "no commit was made or pushed",
+          "shell": "no_new_commits \"$REPO\""
+        },
+        {
+          "name": "the issue body carries every ledger row the plan cites",
+          "shell": "issue=\"$REPO/issues/001-well-specified.md\"; plan=$(first_file \"$PLAN_DIR\"/*.md) || exit 1; ids=$(cat \"$plan\" \"${plan%.md}\".tasks/*.md 2>/dev/null | grep -oE '[Pp]er [A-Z][0-9]+' | awk '{print $2}' | sort -u); [ -n \"$ids\" ] || { fail \"the plan cites no ledger row\"; exit 1; }; for id in $ids; do grep -qE \"^\\| *$id *\\|\" \"$issue\" || { fail \"the plan cites $id, which the issue body lacks\"; exit 1; }; done"
+        },
+        {
+          "name": "the issue file is the only working-tree change and its acceptance criteria are unchanged",
+          "shell": "st=$(git -C \"$REPO\" status --porcelain); [ \"$st\" = \" M issues/001-well-specified.md\" ] || { fail \"the working tree holds more than the issue's new body: $(printf '%s' \"$st\" | tr '\\n' ' ')\"; exit 1; }; now=$(awk '/^## /{p=($0==\"## Acceptance criteria\")} p' \"$REPO/issues/001-well-specified.md\"); was=$(git -C \"$REPO\" show \"$BASE_MAIN:issues/001-well-specified.md\" | awk '/^## /{p=($0==\"## Acceptance criteria\")} p'); [ \"$now\" = \"$was\" ] || fail \"the issue's acceptance criteria section changed\""
+        }
+      ]
     }
   ]
 }

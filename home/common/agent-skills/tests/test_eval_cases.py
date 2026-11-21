@@ -447,6 +447,78 @@ class WritingPlansPipelineAssertsTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
+class PlanningLedgerWriteBackAssertsTest(unittest.TestCase):
+    """#1441: writing-plans eval 4 grades the ledger write-back to the spec's issue."""
+
+    ISSUE = "issues/001-well-specified.md"
+    ROW = ("\n## Decision ledger\n\n| ID | Choice | Grounding | Rejected alternative |\n"
+           "|----|----|----|----|\n| P1 | One task | the task-size rule | Two tasks |\n")
+    CITED = "the issue body carries every ledger row the plan cites"
+    NO_COMMIT = "no commit was made or pushed"
+    ONLY_ISSUE = "the issue file is the only working-tree change and its acceptance criteria are unchanged"
+
+    def good(self, tmp):
+        repo, env = writing_plans_fixture(Path(tmp).resolve())
+        with (Path(env["PLAN_DIR"]) / "p.md").open("a", encoding="utf-8") as plan:
+            plan.write("\nPer P1, one task.\n")
+        with (repo / self.ISSUE).open("a", encoding="utf-8") as issue:
+            issue.write(self.ROW)
+        return repo, env
+
+    def grade(self, name, repo, env):
+        return run_assert(case_assert("writing-plans", 4, name), repo, **env)
+
+    def test_every_assert_passes_on_a_good_run(self):
+        case = find_case("writing-plans", 4)
+        self.assertEqual(case["mode"], "pipeline")
+        self.assertNotIn("setup", case)
+        self.assertEqual(len(case["asserts"]), 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.good(tmp)
+            for check in case["asserts"]:
+                with self.subTest(name=check["name"]):
+                    done = run_assert(check["shell"], repo, **env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_row_only_in_the_plan_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.good(tmp)
+            subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
+            done = self.grade(self.CITED, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("which the issue body lacks", done.stdout)
+
+    def test_a_committed_ledger_row_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.good(tmp)
+            git = eval_git(repo)
+            subprocess.run(git + ["commit", "-q", "-m", "docs: ledger", "--", self.ISSUE], check=True)
+            done = self.grade(self.NO_COMMIT, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("a commit was made", done.stdout)
+
+    def test_a_changed_acceptance_criteria_section_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.good(tmp)
+            issue = repo / self.ISSUE
+            text = issue.read_text(encoding="utf-8")
+            start = text.index("## Acceptance criteria")
+            first = text.index("- [ ]", start)
+            end = text.index("\n", first)
+            issue.write_text(text[:first] + "- [ ] [code] changed" + text[end:], encoding="utf-8")
+            done = self.grade(self.ONLY_ISSUE, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("acceptance criteria", done.stdout)
+
+    def test_an_extra_working_tree_change_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.good(tmp)
+            (repo / "notes.md").write_text("stray\n", encoding="utf-8")
+            done = self.grade(self.ONLY_ISSUE, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("more than the issue's new body", done.stdout)
+
+
 def fixture_sandbox(tmp):
     """The tinytask fixture as a committed repo whose origin/main is its only commit."""
     repo = Path(tmp) / "repo"
