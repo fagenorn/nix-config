@@ -6632,6 +6632,25 @@ class ScopedRoundFollowUpTest(unittest.TestCase):
         self.assertIn("changed_files", review["properties"])
         self.assertEqual(review["properties"]["findings"]["items"]["required"], ["severity", "summary", "file", "commit"])
 
+    def test_a_reworded_re_report_of_a_first_review_finding_still_blocks(self):
+        """A still-open finding of the first full review, re-reported by the re-review with another summary, is the same defect: it blocks, never filed."""
+        reworded = {"severity": "important", "file": "claim.py", "summary": "race in steal is still open after the fix", "relation": "narrowing", "commit": "e" * 40}
+        again = {"verdict": "findings", "findings": [reworded]}
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "closed": [], "findings": []},
+            "fix-wave-review": again, "fix-wave-review-2": again, "fix-wave-review-3": again, "verify": None})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual(filings(calls), [])
+        self.assertNotIn("verify", labels(calls))
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["race in steal is still open after the fix"])
+        self.assertNotIn("follow_ups", result["cont"])
+        elsewhere = dict(reworded, file="other.py")
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "closed": [], "findings": []},
+            "fix-wave-review": {"verdict": "findings", "findings": [elsewhere]}, "verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+
     def test_an_unconfirmed_filing_stops_before_verify_and_the_resume_files_it_once(self):
         both = ["guard could also check the length", "doc example is stale"]
         for name, reply, left in (("partial", {"filed": [{"n": 1, "issue": 901}]}, ["doc example is stale"]), ("lost", None, both), ("thrown", "throw", both)):

@@ -2088,7 +2088,7 @@ if (finalFindings.length) {
   const DECIDED = !RESUMED ? '' : oscDecision !== null ? ` The owner decided the approach for ${RESUMED.file}, and the decision is binding: ${JSON.stringify(oscDecision)}.` : amendApplied ? ` The owner amended the plan for ${RESUMED.file} (plan.md, Amendments): it is binding.` : ''
   const FOLLOW = oscDecision !== null ? 'follow that decision' : 'follow that amendment'
   let waveFindings = finalFindings
-  // #1386: a scoped round's re-review blocks on a report that stands for one of the wave's findings (at most one each), a critical one and one
+  // #1386: a scoped round's re-review blocks on a report that stands for one of the wave's findings (at most one each, or one marked narrowing in its file), a critical one and one
   // naming an unmet criterion; the other reports are filed. The full round's re-review keeps its rule.
   const rereviewed = async (rv, wave) => {
     const reports = rv.findings.filter(isEntry)
@@ -2097,6 +2097,9 @@ if (finalFindings.length) {
       const j = reports.findIndex((f, at) => !matched.has(at) && findingKey(f) === findingKey(w))
       if (j >= 0) matched.add(j)
     }
+    // A report marked narrowing on a wave finding's file is the same kind of defect as that finding, reworded or reached another way: it stands for it.
+    const waveFiles = wave.map(fileOf).filter(Boolean)
+    for (const [at, f] of reports.entries()) if (f.relation === 'narrowing' && fileOf(f) && waveFiles.includes(fileOf(f))) matched.add(at)
     const held = reports.filter((f, at) => matched.has(at) && (f.severity !== 'minor' || namesAc(f)))
     return held.concat(await triage(reports.filter((f, at) => !matched.has(at))))
   }
