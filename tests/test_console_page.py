@@ -1,5 +1,6 @@
 """The desk page's static invariants: one self-contained file, no other origin."""
 
+import copy
 import dataclasses
 import gzip
 import json
@@ -334,7 +335,7 @@ class PageTest(unittest.TestCase):
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
              "/api/activate", "/api/look-retry", "/api/share-tailnet", "/api/share-colleague",
              "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
-             "/api/guest-signin-cancel", "/api/adoption-merge"},
+             "/api/guest-signin-cancel", "/api/adoption-merge", "/api/account-signout"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -343,7 +344,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 50)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 51)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -8809,6 +8810,22 @@ class RemovePageTest(unittest.TestCase):
                 self.assertTrue(send["disabled"])
                 name = self.remove_node(snap, "acct-remove-name")
                 self.assertEqual(name["label"], "Type a to remove it")
+
+    def test_remove_on_a_colleagues_account_says_its_managers_move(self) -> None:
+        for count, words in (
+            (2, "2 sessions are running under a. Each manager on it moves to another account, "
+                "or waits for one with room; the other sessions keep running."),
+            (1, "1 session is running under a. A manager on it moves to another account, "
+                "or waits for one with room; any other session keeps running."),
+            (0, "No session is running under a."),
+        ):
+            with self.subTest(count=count):
+                frame = copy.deepcopy(self.removal_frame({"a": count}))
+                for entry in frame["capacity"]["profiles"]:
+                    if entry["profile"] == "a":
+                        entry["owner"] = "colleague@example.invalid"
+                snap = opened(frame, {"click": "acct-remove"})
+                self.assertEqual(full(self.remove_node(snap, "acct-remove-sessions")), words)
 
     def test_no_count_for_the_profile_says_no_sentence(self) -> None:
         snap = opened(self.removal_frame({}), {"click": "acct-remove"})

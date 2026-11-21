@@ -1146,6 +1146,55 @@ class OwnAccountPageTest(unittest.TestCase):
                     and any(c["text"] == "work" for c in nodes(n)))
         self.assertEqual(named(work, "acct-owner"), [])
 
+    def colleague_capacity(self, colleague_signin: tuple | None = None) -> dict:
+        cap = real_capacity(NOW_S, [
+            {"name": "work", "week": .6, "five": .5, "week_reset": NOW_S + 4 * 86400, "five_reset": NOW_S + 3600},
+            {"name": "colleague-1", "week": .3, "five": .4, "week_reset": NOW_S + 5 * 86400,
+             "five_reset": NOW_S + 3600, "signin": colleague_signin}])
+        return {**cap, "profiles": [{**p, "owner": COLLEAGUE if p["profile"] == "colleague-1" else None}
+                                    for p in cap["profiles"]]}
+
+    def account_row(self, snap: dict, name: str) -> dict:
+        return next(n for n in nodes(snap["accounts_body"]) if n["tag"] == "li" and has_class(n, "acct-row")
+                    and any(c["text"] == name for c in nodes(n)))
+
+    def test_the_owner_page_offers_sign_out_beside_a_colleagues_account_only(self) -> None:
+        cap = self.colleague_capacity()
+        (snap,) = harness([START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"}, SNAP], PAGE.read_bytes())
+        colleague = self.account_row(snap, "colleague-1")
+        self.assertEqual([full(c) for c in named(colleague, "acct-signout")], ["Sign out"])
+        self.assertEqual([full(c) for c in named(colleague, "acct-owner")], [COLLEAGUE])
+        work = self.account_row(snap, "work")
+        self.assertEqual(named(work, "acct-signout"), [])
+        for row in (colleague, work):
+            self.assertEqual(len(named(row, "acct-remove")), 1)
+            self.assertEqual(len(named(row, "acct-toggle")), 1)
+
+    def test_sign_out_posts_the_profile_and_shows_a_refusal(self) -> None:
+        cap = self.colleague_capacity()
+        (snap,) = harness([
+            START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"},
+            {"respond": {"status": 409, "text": "a sign-in is running for colleague-1; cancel it first"}},
+            {"click": "acct-signout"}, SNAP], PAGE.read_bytes())
+        self.assertEqual([(url, json.loads(body)) for url, body in writes(snap) if url == "/api/account-signout"],
+                         [("/api/account-signout", {"profile": "colleague-1"})])
+        self.assertIn("Could not sign out: a sign-in is running for colleague-1; cancel it first",
+                      full(self.account_row(snap, "colleague-1")))
+
+    def test_a_second_click_while_a_sign_out_is_in_flight_posts_nothing(self) -> None:
+        cap = self.colleague_capacity()
+        (snap,) = harness([
+            START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"}, {"hold": True},
+            {"click": "acct-signout"}, {"click": "acct-signout"}, SNAP], PAGE.read_bytes())
+        self.assertEqual([url for url, _ in writes(snap)], ["/api/account-signout"])
+        (button,) = named(self.account_row(snap, "colleague-1"), "acct-signout")
+        self.assertEqual((button["aria_disabled"], button["busy"]), ("true", "true"))
+
+    def test_a_signed_out_colleague_row_offers_no_sign_out(self) -> None:
+        cap = self.colleague_capacity(("signed_out", None))
+        (snap,) = harness([START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"}, SNAP], PAGE.read_bytes())
+        self.assertEqual(named(snap["accounts_body"], "acct-signout"), [])
+
     def test_the_guest_pool_reads_yours_for_his_account(self) -> None:
         snap = pool_page({**POOL_TIGHT, "accounts": [{**A1, "label": "yours"}, A2, A3]})
         rows = pool_rows(snap)

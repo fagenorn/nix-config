@@ -1558,6 +1558,49 @@ function exclusionControls(acct, p) {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
   }
 }
+// A colleague's profile carries his login; the owner may sign it out beside Remove (ADR-console-087 D3).
+const signoutPosts = new Map();
+async function signOutAccount(p) {
+  const current = signoutPosts.get(p.profile);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  signoutPosts.set(p.profile, state);
+  redrawAccounts();
+  let reason = null;
+  try {
+    const response = await fetch("/api/account-signout", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({profile: p.profile}),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (signoutPosts.get(p.profile) !== state) return;
+  if (reason === null) signoutPosts.delete(p.profile);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawAccounts();
+}
+function signoutControls(acct, p) {
+  if (typeof p.owner !== "string" || p.owner === "" || signedOut(p)) return;
+  const state = signoutPosts.get(p.profile);
+  const sending = state !== undefined && state.phase === "sending";
+  const button = actionButton("acct-signout btn-quiet", "Sign out", () => signOutAccount(p));
+  // aria-disabled, not disabled, as the exclusion button: the focus must stay restorable.
+  if (sending) button.setAttribute("aria-disabled", "true");
+  markBusy(button, sending);
+  acct.appendChild(button);
+  if (state !== undefined && state.phase === "failed") {
+    acct.appendChild(el("span", "fail", "Could not sign out: " + state.reason));
+  }
+}
 function pinnedProfile(p) {
   return p.pinned === true;
 }
@@ -1608,12 +1651,19 @@ const removeOpen = new Set();
 const removeDrafts = new Map();
 const removePosts = new Map();
 let removeFields = new Map();
-function removeSessionsWords(p, view) {
+function removeSessionsWords(p, view, colleague) {
   const counts = view.profile_sessions;
   if (counts === null || typeof counts !== "object" || !Object.prototype.hasOwnProperty.call(counts, p)) return null;
   const n = counts[p];
   if (typeof n !== "number") return null;
   if (n === 0) return "No session is running under " + p + ".";
+  if (colleague) {
+    // A colleague's account: its managers move to the pool's choice (ADR-console-087 D5).
+    if (n === 1) {
+      return "1 session is running under " + p + ". A manager on it moves to another account, or waits for one with room; any other session keeps running.";
+    }
+    return n + " sessions are running under " + p + ". Each manager on it moves to another account, or waits for one with room; the other sessions keep running.";
+  }
   if (n === 1) return "1 session is running under " + p + " and keeps running.";
   return n + " sessions are running under " + p + " and keep running.";
 }
@@ -1664,7 +1714,7 @@ function removeControls(act, row, p, view) {
   const state = removePosts.get(name);
   const sending = state !== undefined && state.phase === "sending";
   const box = el("div", "acct-remove-box");
-  const words = removeSessionsWords(name, view);
+  const words = removeSessionsWords(name, view, typeof p.owner === "string" && p.owner !== "");
   if (words !== null) box.appendChild(el("span", "acct-remove-sessions", words));
   box.appendChild(el("span", "acct-remove-note", "Type " + name + " to remove it. It is signed out first."));
   const input = el("input", "acct-remove-name field-line");
@@ -3063,6 +3113,7 @@ function accountRow(shown, view) {
   row.appendChild(act);
   exclusionControls(act, p);
   pinControls(act, p);
+  signoutControls(act, p);
   const elsewhere = accountSignin === name && accountCont !== null;
   const live = signinLive(name);
   // The service refuses the owner a sign-in of a profile a colleague added (#1361), so the row offers none.
