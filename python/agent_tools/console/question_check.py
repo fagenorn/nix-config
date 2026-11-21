@@ -153,9 +153,11 @@ _MAGNITUDE = r"(?:[kmb]|thousand|million|billion)"
 _MARK = r"[*`]{0,2}\s?[*`]{0,2}"
 _END = r"(?![\d]|[.,]\d)"
 _SPEND_FIGURE = re.compile(
-    r"\$\s?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+|\d{1,3}(?:,\d{3})+|\d+\s?" + _MAGNITUDE + r"\b)" + _END
+    r"\$\s?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+|\d{1,3}(?:,\d{3})+|\d+\s?" + _MAGNITUDE + r"\b|\d{2,}"
+    + r"|\d(?=\s+(?:per|in\s+total|total|each|across|over)\b))" + _END
     + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:" + _MAGNITUDE + _MARK + r")?tokens?\b"
     + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:dollars|usd)\b", re.IGNORECASE)
+_NEGATION = re.compile(r"\b(?:not?|non|excl(?:uding|udes?|uded)?|without|except(?:ing)?)\b", re.IGNORECASE)
 _PART_SPLIT = re.compile(r"\s*(?:[,;/&]|\band\b)\s*", re.IGNORECASE)
 _EXIT = {"met": 0, "not_met": 1, "waiting": NOT_YET}
 
@@ -189,7 +191,8 @@ def cites_part(read_text: str | None, name: str, part: str) -> bool:
     pattern = re.compile(r"(?:^|(?<=[\s/`'\"(\[<]))" + re.escape(name)
                          + r"`?(?::[0-9][0-9,-]*)?`?\s*\(([^)]*)\)", re.MULTILINE)
     return any(part.casefold() == item.strip(" *`'\"").casefold()
-               for found in pattern.finditer(body) for item in _PART_SPLIT.split(found.group(1)))
+               for found in pattern.finditer(body) if not _NEGATION.search(found.group(1))
+               for item in _PART_SPLIT.split(found.group(1)))
 
 
 def _names(clause: str, name: str) -> bool:
