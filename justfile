@@ -254,6 +254,7 @@ agent-workflow-tests *args:
     tests/test_console_run_line_check.py \
     tests/test_console_look_check.py \
     tests/test_console_look_kept_check.py \
+    tests/test_console_live_fault_check.py \
     tests/test_pr_green.py \
     tests/test_console_page.py \
     tests/test_console_controls.py \
