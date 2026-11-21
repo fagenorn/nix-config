@@ -1075,6 +1075,20 @@ class ManagerContractTest(unittest.TestCase):
         self.assertNotIn("asks for a release, paid or production decision", line)
         self.assertNotIn("another sprint's claim", line)
 
+    def test_the_contract_offers_consequential_as_an_optional_mark(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        (line,) = [part for part in text.split("- `") if part.startswith("consequential`")]
+        for phrase in ("optional", "opens with no option picked",
+                       "Without it, a card that is not a look card opens with your recommended "
+                       "option picked, as before",
+                       "A look card is consequential without it"):
+            with self.subTest(phrase):
+                self.assertIn(phrase, line)
+        r = text.index("- `replaces`")
+        c = text.index("- `consequential`")
+        self.assertLess(r, c)
+        self.assertLess(c, text.index("- `pictures`", r))
+
     def test_the_contract_splits_the_starters_design_choices_from_the_owners_go_aheads(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
         self.assertIn("2. Bring every real choice in one round, a design choice for the sprint's "

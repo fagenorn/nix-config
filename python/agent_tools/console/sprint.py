@@ -72,6 +72,7 @@ round is
                     "recommended": "<exact text of one option>",
                     "needs_words": ["<exact text of an option>", ...],
                     "owner_only": true,
+                    "consequential": true,
                     "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
                                   "pair": "before" | "after"}, ...],
                     "look": {"issue": <n>, "pr": <n>, "head": "<40-hex>", "approve": "<exact text of one option>"},
@@ -95,6 +96,10 @@ spend, a permission escalation), never on a design choice.
 `replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
 in the order the round was sent), and the console takes that question back in the write that
 accepts the new one. The command sends it as given and validates no more than it did: the console decides.
+
+`consequential` is optional and, when given, must be `true` (`CONSEQUENTIAL_SHAPE`): the owner's card opens with no
+option picked and nothing sends until the owner picks or types; without it a card that is not a look card opens
+with the recommended option picked. A look card is consequential without it. The command sends it as given.
 
 `pictures` is optional, at most 8 to a question, and `pair` is optional; a question whose ask or context
 names screenshots, a `.png` file or a screenshots folder must carry one, else the console refuses the
