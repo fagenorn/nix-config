@@ -87,6 +87,7 @@
 | Outside sprints | Console |
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
+| Permission card | Console |
 | Picture | Console |
 | Pinned profile | Console |
 | Plan question | Console |

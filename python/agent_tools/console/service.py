@@ -63,6 +63,8 @@ stream `Content-Length`):
     POST /api/live-fault 200 application/json, a manager declares an issue a fault live in production (below)
     POST /api/live-fault-withdraw 204, a JSON body, the page withdraws a live fault (below)
     POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
+    POST /api/permission-prompt 200 application/json, a manager's hook holds one Bash prompt on the console (below)
+    POST /api/permission-answer 204, a JSON body, the page allows or refuses a manager's held prompt (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
@@ -76,7 +78,8 @@ stream `Content-Length`):
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
                     `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/live-fault`, `/api/permit`,
-                    `/api/picture`, `/api/release-card`, `/api/release-answer` and `/api/round-answer`;
+                    `/api/picture`, `/api/release-card`, `/api/release-answer`, `/api/permission-prompt`,
+                    `/api/permission-answer` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
 Guest door (#1237, ADR-console-066, #1299, ADR-console-077). With `guest_socket` (`console
@@ -1115,6 +1118,38 @@ appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "rep
 the allow of that same tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago;
 otherwise it is False and appends nothing.
 
+Permission card (#1424, `prompt_card`): `POST /api/permission-prompt` is a manager write dispatched beside
+`/api/permit` through `_checked_length(MAX_PROMPT_BYTES)` (262144: twelve bytes for each of the
+`prompt_card.MAX_COMMAND_CHARS` characters a command may have, as JSON escapes them, and 65536 more for the
+rest); its body is `prompt_card.parse_ask`'s, else 400
+`bad permission prompt`; a `sprints.SecretRefused` is 403, any other `sprints.Refused` 409, any other
+exception 500 `permission prompt failed`, with one stderr line `console: permission_prompt_refused
+<sprint_id> <reason>` or `console: permission_prompt_failed <Type>: <message>` (no line carries the command
+or the secret). The body carries no secret: `prompt_secret` (the ingest lock; an unknown sprint is 409, a sprint
+with no secret file or an `auth` that does not match 403) recomputes the request's `auth` from the secret it holds
+(`prompt_card.request_auth` over the body's `signed_bytes`) and returns the secret to the handler, which then calls
+the methods below with it. Success is 200 `{"prompt": <int|null>, "state": <str>, "mac": <hex>}`: phase `ask` calls
+`ask_prompt`, `wait` `prompt_state` and `close` `close_prompt`, and `mac` is `prompt_card.reply_mac` for the request's
+nonce, which the hook checks before it honours the reply, so whatever else listens on the port neither learns the secret
+nor has a decision honoured. The `state` of a prompt the console closed
+(`prompt.closed`, reason `ended`) is `ended`, not `closed` (`prompt_card.wire_state`), so the hook can say why. Each holds the ingest lock for its check, append and fold. `ask_prompt`
+checks the secret first, then answers `(None, prompt_card.REFUSED)` and appends nothing unless the sprint is
+`prompt_card.active` and `session_id` is its manager session; else it appends one `prompt.asked` row, folds it,
+remembers the console's time as the prompt's contact (`_prompt_contact`, memory only), publishes and answers
+`(seq, open)`. It never closes another prompt: the prompts of one session are held side by side. `prompt_state`
+refuses (`sprints.Refused`) a prompt that is unfolded or of another sprint or session, renews the contact of an
+`open` one and answers `open` while `prompt_card.open_prompts` lists it, else appends `prompt.closed` with reason
+`ended` and answers `closed`; any other folded state is returned as it is. `close_prompt` is the same check; an
+`open` prompt gets `prompt.closed` with reason `expired` and `closed`, any other state is returned as it is (an
+answer accepted before the close is what the hook gets) and the contact is dropped. `POST /api/permission-answer`
+(`{"prompt", "answer"}`, at most `MAX_PROMPT_ANSWER_BYTES` 1024) is a page write, owner-only (in `PAGE_WRITES`,
+in neither `GUEST_WRITES`, `GUEST_ACCOUNT_WRITES` nor `MANAGER_WRITES`): 400 `bad permission answer`; 409
+`prompt_card.NOT_OPEN` unless the prompt is listed by `open_prompts` now (one whose hook stopped asking, or any
+prompt after a restart before its hook's next wait, takes no answer); 500 `permission answer failed`; otherwise
+`answer_prompt` appends one `prompt.answered` row and the shared 204 follows. The first answer wins. The prompts are folded
+(`prompt_card.prompts`) at construction and on every append, and the view lists the open ones through
+`prompt_items`. `/api/hooks` and the lifecycle guard are not touched.
+
 Owner notices (#1120, ADR-console-053): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
 `MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
 `MAX_OWNER_NOTICE_WITHDRAW_BYTES` 4096) are page writes: both pass `_page_write`'s guard before any body is
@@ -1979,7 +2014,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -2056,6 +2091,8 @@ LIVE_FAULT_PATH = "/api/live-fault"
 LIVE_FAULT_WITHDRAW_PATH = "/api/live-fault-withdraw"
 NOTICES_PATH = "/api/notices"
 PERMIT_PATH = "/api/permit"
+PROMPT_PATH = prompt_card.ASK_PATH
+PROMPT_ANSWER_PATH = prompt_card.ANSWER_PATH
 WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
 OWNER_NOTICE_PATH = "/api/owner-notice"
 OWNER_NOTICE_WITHDRAW_PATH = "/api/owner-notice-withdraw"
@@ -2109,7 +2146,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
-    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH})
+    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH, PROMPT_ANSWER_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -2142,7 +2179,7 @@ MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
                                             MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, WITHDRAW_QUESTION_PATH,
                                             NOTICE_PATH, NOTICES_PATH, WITHDRAW_NOTICE_PATH,
-                                            LIVE_FAULT_PATH, PERMIT_PATH, PICTURE_PATH})
+                                            LIVE_FAULT_PATH, PERMIT_PATH, PROMPT_PATH, PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
 MAX_WITHDRAW_QUESTION_BYTES = 4096
@@ -2151,6 +2188,10 @@ MAX_LIVE_FAULT_BYTES = 16384
 MAX_LIVE_FAULT_WITHDRAW_BYTES = 4096
 MAX_NOTICES_BYTES = 4096
 MAX_PERMIT_BYTES = 16384
+# The body is JSON with its default escaping, which writes one character as up to twelve bytes (an
+# astral one is two `\uXXXX` escapes), so a command of `MAX_COMMAND_CHARS` characters needs that many.
+MAX_PROMPT_BYTES = 12 * prompt_card.MAX_COMMAND_CHARS + 65536
+MAX_PROMPT_ANSWER_BYTES = 1024
 PERMIT_LANDED_SECONDS = 30 * 60
 MAX_WITHDRAW_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_BYTES = 4096
@@ -2395,6 +2436,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._live_fault_request()
         if route == PERMIT_PATH:
             return self._permit_request()
+        if route == PROMPT_PATH:
+            return self._prompt_request()
         if route == WITHDRAW_NOTICE_PATH:
             return self._withdraw_notice_request()
         if route == PICTURE_PATH:
@@ -2893,6 +2936,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _prompt_answer_request(self, console: "ConsoleService") -> bool:
+        """The owner's answer to a manager's held prompt; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_PROMPT_ANSWER_BYTES)
+        if body is None:
+            return False
+        try:
+            prompt, answer_word = prompt_card.parse_answer(body)
+        except ValueError:
+            self._refuse(400, "bad permission answer")
+            return False
+        try:
+            console.answer_prompt(prompt, answer_word)
+        except prompt_card.Refused as error:
+            print(f"console: permission_answer_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: permission_answer_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "permission answer failed")
+            return False
+        return True
+
     def _plan_defer_request(self, console: "ConsoleService") -> bool:
         """Carry out the Not now write; True when the shared 204 is to be sent."""
         body = self._json_body(MAX_PLAN_DEFER_BYTES)
@@ -3296,6 +3362,47 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: permit_failed {type(error).__name__}: {error}", file=sys.stderr)
             return self._refuse(500, "permit failed")
+        self._send(200, "application/json", json.dumps(
+            reply, sort_keys=True, separators=(",", ":")).encode())
+
+    def _prompt_request(self):
+        """The manager's route: one Bash prompt of the sprint's manager held on the console."""
+        length = self._checked_length(MAX_PROMPT_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            request = prompt_card.parse_ask(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad permission prompt")
+        console = self.server.console
+        try:
+            secret = console.prompt_secret(request.sprint_id, request.auth, request.signed)
+            if request.phase == "ask":
+                prompt, state = console.ask_prompt(
+                    request.sprint_id, secret, request.session_id, request.command,
+                    request.description)
+                reply = {"prompt": prompt, "state": state}
+            elif request.phase == "wait":
+                reply = {"prompt": request.prompt, "state": console.prompt_state(
+                    request.sprint_id, secret, request.session_id, request.prompt)}
+            else:
+                reply = {"prompt": request.prompt, "state": console.close_prompt(
+                    request.sprint_id, secret, request.session_id, request.prompt)}
+            reply["mac"] = prompt_card.reply_mac(
+                secret, request.sprint_id, request.nonce, reply["prompt"], reply["state"])
+        except sprints.SecretRefused:
+            print(f"console: permission_prompt_refused {request.sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: permission_prompt_refused {request.sprint_id} {error}",
+                  file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: permission_prompt_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            return self._refuse(500, "permission prompt failed")
         self._send(200, "application/json", json.dumps(
             reply, sort_keys=True, separators=(",", ":")).encode())
 
@@ -3814,6 +3921,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == RELEASE_ANSWER_PATH:
             self.close_connection = True
             if not self._release_answer_request(console):
+                return
+        elif route == PROMPT_ANSWER_PATH:
+            self.close_connection = True
+            if not self._prompt_answer_request(console):
                 return
         elif route == PLAN_DEFER_PATH:
             self.close_connection = True
@@ -4560,6 +4671,8 @@ class ConsoleService:
             self._on_approval_thread if approval_dispatch is None else approval_dispatch)
         self._adoptions: dict[str, dict] = {}
         self._release_cards: dict[int, release_card.Card] = {}
+        self._prompts: dict[int, prompt_card.Prompt] = {}
+        self._prompt_contact: dict[int, int] = {}
         self._deferred: frozenset[str] = frozenset()
         self._registering: str | None = None
         self._answering = False
@@ -4798,6 +4911,7 @@ class ConsoleService:
             self._registration = self._registration_fold.latest
             self._adoptions = approve.adoptions(events)
             self._release_cards = release_card.cards(events)
+            self._prompts = prompt_card.prompts(events)
             self._deferred = approve.deferrals(events)
             self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
@@ -5058,6 +5172,7 @@ class ConsoleService:
                 shown_root=None if self._registration is None else self._registration["root"]),
             release_items=release_card.inbox_entries(
                 release_card.live(self._release_cards, self._now())),
+            prompt_items=prompt_card.inbox_entries(self._open_prompts(), self._sprints),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),
@@ -5271,6 +5386,78 @@ class ConsoleService:
             if found is None or found.state != release_card.OPEN:
                 raise release_card.Refused(release_card.NOT_OPEN)
             self._apply(self.log.append([release_card.answered_row(card_id, answer)]))
+
+    def _open_prompts(self) -> list[prompt_card.Prompt]:
+        """The prompts a card is shown for now (the caller holds the ingest lock)."""
+        return prompt_card.open_prompts(
+            self._prompts, int(self._clock() * 1000), self._sprints, self._sessions,
+            self._prompt_contact)
+
+    def _held_prompt(self, sprint_id: str, secret: str, session_id: str,
+                     prompt_id: int) -> prompt_card.Prompt:
+        """The folded prompt of this sprint and session, else `sprints.Refused` (under the lock)."""
+        self._manager_sprint(sprint_id, secret)
+        prompt = self._prompts.get(prompt_id)
+        if prompt is None or prompt.sprint_id != sprint_id or prompt.session_id != session_id:
+            raise sprints.Refused(prompt_card.NOT_OPEN)
+        return prompt
+
+    def ask_prompt(self, sprint_id: str, secret: str, session_id: str, command: str,
+                   description: str | None) -> tuple[int | None, str]:
+        """Hold one prompt of the sprint's manager as a card; see the module docstring."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if not prompt_card.active(sprint) or session_id != sprint.manager_session:
+                return None, prompt_card.REFUSED
+            (appended,) = self.log.append([prompt_card.asked_row(
+                sprint.project_id, sprint_id, session_id, command, description)])
+            self._prompt_contact[appended.seq] = int(self._clock() * 1000)
+            self._apply([appended])
+            return appended.seq, prompt_card.OPEN
+
+    def prompt_secret(self, sprint_id: str, auth: str, signed: bytes) -> str:
+        """The sprint's secret, when `auth` is the hook's HMAC under it of `signed` (the secret is never sent)."""
+        with self._ingest:
+            if sprint_id not in self._sprints:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            expected = sprints.read_secret(self._sprint_secrets, sprint_id)
+            if expected is None or not hmac.compare_digest(
+                    prompt_card.request_auth(expected, signed).encode(), auth.encode()):
+                raise sprints.SecretRefused(sprints.SECRET_REFUSED)
+            return expected
+
+    def prompt_state(self, sprint_id: str, secret: str, session_id: str, prompt_id: int) -> str:
+        """The state of a held prompt as its hook's wait reads it; see the module docstring."""
+        with self._ingest:
+            prompt = self._held_prompt(sprint_id, secret, session_id, prompt_id)
+            if prompt.state != prompt_card.OPEN:
+                return prompt_card.wire_state(prompt)
+            shown = any(open.prompt_id == prompt_id for open in self._open_prompts())
+            self._prompt_contact[prompt_id] = int(self._clock() * 1000)
+            if any(open.prompt_id == prompt_id for open in self._open_prompts()):
+                if not shown:
+                    self._publish()
+                return prompt_card.OPEN
+            self._apply(self.log.append([prompt_card.closed_row(prompt.project_id, prompt_id, "ended")]))
+            return prompt_card.ENDED
+
+    def close_prompt(self, sprint_id: str, secret: str, session_id: str, prompt_id: int) -> str:
+        """The hook gives a prompt up: closed, unless the owner's answer was accepted first."""
+        with self._ingest:
+            prompt = self._held_prompt(sprint_id, secret, session_id, prompt_id)
+            self._prompt_contact.pop(prompt_id, None)
+            if prompt.state != prompt_card.OPEN:
+                return prompt_card.wire_state(prompt)
+            self._apply(self.log.append([prompt_card.closed_row(prompt.project_id, prompt_id, "expired")]))
+            return prompt_card.CLOSED
+
+    def answer_prompt(self, prompt_id: int, answer: str) -> None:
+        """Record the owner's answer to a prompt that is open now; see the module docstring."""
+        with self._ingest:
+            found = next((open for open in self._open_prompts() if open.prompt_id == prompt_id), None)
+            if found is None:
+                raise prompt_card.Refused(prompt_card.NOT_OPEN)
+            self._apply(self.log.append([prompt_card.answered_row(found.project_id, prompt_id, answer)]))
 
     def defer_plan(self, plan_id: str) -> None:
         """Record `Not now` for the shown plan's apply card; see the module docstring."""
@@ -9746,7 +9933,12 @@ class ConsoleService:
         self._publish()
 
     def poll_sessions(self) -> list[Event]:
-        """Append what the session registry shows that the folded sessions do not, and publish."""
+        """Append what the session registry shows that the folded sessions do not, and publish.
+
+        A session that waits is then read once more outside the ingest lock: when its transcripts
+        (its own and its agents') hold a turn newer than the wait, a row puts it back to working,
+        unless a row was folded for it since (`last_seq`), which the transcript read never beats (#1424).
+        """
         with self._ingest:
             observations = {
                 session_id: seen
@@ -9767,7 +9959,22 @@ class ConsoleService:
                 self._fold(appended)
             self._publish()
             self._note_choice(self._session_choice(self._profiles))
+            waits = sessions.waiting_snapshot(self._sessions)
+            # The registry's own time of a wait it still shows: a session first read late is not newer than it.
+            marks = {sid: seen.updated_ms for sid, seen in observations.items()
+                     if sid in waits and seen.updated_ms is not None
+                     and sessions.registry_state(seen) == self._sessions[sid].state}
+            dirs = self._projects_dirs()
+        turns = {sid: (seq, turn) for sid, seq in waits.items()
+                 if (turn := movement.transcript_turn_ms(dirs, sid)) is not None}
+        if not turns:
             return appended
+        with self._ingest:
+            moved = self.log.append(sessions.moved_on(self._sessions, turns, project_of, marks))
+            if moved:
+                self._fold(moved)
+                self._publish()
+        return appended + moved
 
     def _session_choice(self, profiles: frozenset[str], excluded: frozenset[str] | None = None,
                         pinned: object = _FOLDED) -> str | None:
@@ -10086,6 +10293,7 @@ class ConsoleService:
         self._registration = self._registration_fold.latest
         self._adoptions = approve.adoptions(appended, self._adoptions)
         self._release_cards = release_card.cards(appended, self._release_cards)
+        self._prompts = prompt_card.prompts(appended, self._prompts)
         self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
@@ -10132,6 +10340,7 @@ class ConsoleService:
                 self._registration = self._registration_fold.latest
                 self._adoptions = approve.adoptions(events)
                 self._release_cards = release_card.cards(events)
+                self._prompts = prompt_card.prompts(events)
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._project_questions = project_question.asked_questions(events)

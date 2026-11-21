@@ -868,8 +868,7 @@ BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
              BALL_NOBODY: "nothing running, may be stuck",
              BALL_WAITING: "waiting", BALL_PAUSED: "paused"}
 NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
-NOW_ANSWER_TEXT = "waiting for your answer in the manager's terminal"
-NOW_PERMISSION_TEXT = "waiting for your permission in the manager's terminal"
+NOW_PERMISSION_TEXT = "waiting for you to allow or refuse a command on its card"
 NOW_DEAF_TEXT = "the manager cannot hear the console: bring it back or drop the sprint"
 NOW_DRAFTING_TEXT = "drafting the brief"
 NOW_BRIEF_TEXT = "waiting for your approval of the brief"

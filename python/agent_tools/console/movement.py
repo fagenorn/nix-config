@@ -103,6 +103,17 @@ shrank or was replaced is read again from its start. `SessionReading.held` is th
 `SessionTarget` with `held_only` (a sprint's known manager session that is absent or ended, so a console
 restart finds its transcript still ending in a held message) reads only that flag: no output time, no
 CPU, so it moves nothing.
+
+Turn time (#1424). `transcript_turn_ms` is the newest `timestamp` of a `user` or `assistant` record in a
+session's own transcript and in every `.jsonl` anywhere under `<projects>/<slug>/<session_id>/` (its
+subagents and workflow agents; a workflow agent's prompt carries the manager's session id while the
+manager's own transcript gains nothing until the `Workflow` call returns), over every slug directory
+of every projects directory, with the same id guard as `session_output_ms`. `system`, `progress` and
+every other type do not count; a line that does not parse (a record nested too deeply included), is not an object, or has no tz-aware ISO
+`timestamp` is skipped, as is an absent or unreadable file; None when no record counts. Each file is
+read incrementally like the held reading (`_TURN_SEEN`, per file identity, through its last complete
+line), so a poll costs what was appended; a file that shrank or was replaced is read again from its
+start, and an incomplete last line is read but not kept. The service uses it to clear a wait.
 """
 
 import json
@@ -117,6 +128,7 @@ from typing import Any
 from agent_tools.claims import owner_actions
 from agent_tools.claims.forge_land_lock import LOCK_PREFIX
 from agent_tools.console.deliveries import branch_issue
+from agent_tools.console.sessions import at_ms
 from agent_tools.release.transaction_history import STATES, TERMINALS
 from agent_tools.release.transaction_storage import is_id
 from agent_tools.system import forge_api
@@ -543,6 +555,69 @@ def session_held(projects_dirs: Iterable[Path], session_id: str) -> bool:
             if _transcript_held(os.path.join(slug, session_id + ".jsonl")):
                 held = True
     return held
+
+
+_TURN_SEEN: dict[str, tuple[int, int, int, int | None]] = {}  # path -> (dev, inode, bytes through the last newline, newest turn ms)
+
+
+def _turn_after(newest: int | None, raw: bytes) -> int | None:
+    if b'"user"' not in raw and b'"assistant"' not in raw:
+        return newest
+    try:
+        record = json.loads(raw)
+    except (ValueError, RecursionError):  # a record nested too deeply to parse is skipped, as any unreadable one
+        return newest
+    if not isinstance(record, dict) or record.get("type") not in ("user", "assistant"):
+        return newest
+    stamp = record.get("timestamp")
+    at = at_ms(stamp) if isinstance(stamp, str) else None
+    if at is None:
+        return newest
+    return at if newest is None else max(newest, at)
+
+
+def _transcript_turn(path: str) -> int | None:
+    try:
+        with open(path, "rb") as handle:
+            stat = os.fstat(handle.fileno())
+            dev, ino, offset, newest = _TURN_SEEN.get(path, (0, 0, 0, None))
+            if (dev, ino) != (stat.st_dev, stat.st_ino) or offset > stat.st_size:
+                offset, newest = 0, None
+            handle.seek(offset)
+            for raw in handle:
+                if not raw.endswith(b"\n"):
+                    return _turn_after(newest, raw)  # still being written: read, not kept
+                offset += len(raw)
+                newest = _turn_after(newest, raw)
+                _TURN_SEEN[path] = (stat.st_dev, stat.st_ino, offset, newest)
+    except OSError:
+        return None
+    _TURN_SEEN[path] = (stat.st_dev, stat.st_ino, offset, newest)
+    return newest
+
+
+def transcript_turn_ms(projects_dirs: Iterable[Path], session_id: str) -> int | None:
+    """The newest user or assistant record time, in epoch milliseconds, of the session's own transcript
+    and of every transcript under its directory (its subagents and workflow agents), over every slug
+    directory; None when no record counts or the id names no path (#1424). Read incrementally."""
+    if session_id in ("", ".", "..") or "/" in session_id or "\0" in session_id:
+        return None
+    newest: int | None = None
+    paths: list[str] = []
+    for projects in projects_dirs:
+        try:
+            slugs = [entry.path for entry in os.scandir(projects) if entry.is_dir()]
+        except OSError:
+            continue
+        for slug in slugs:
+            paths.append(os.path.join(slug, session_id + ".jsonl"))
+            for here, _, names in os.walk(os.path.join(slug, session_id)):
+                paths.extend(os.path.join(here, name) for name in names if name.endswith(".jsonl"))
+    for path in paths:
+        turn = _transcript_turn(path)
+        if turn is not None:
+            newest = turn if newest is None else max(newest, turn)
+    return newest
 
 
 def process_table(proc: Path = Path("/proc"), clock_ticks: int | None = None) -> dict[int, ProcessStat] | None:
