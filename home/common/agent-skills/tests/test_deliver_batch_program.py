@@ -1014,6 +1014,11 @@ PRE_MERGE_CONTS = {"1": ready(1)["cont"]}
 POST_MERGE_CONTS = {"1": dict(ready(1)["cont"], pr=41)}
 
 
+def unpushed(stage, start, head):
+    """#1371: the relaunch conts of a landing that stopped before it pushed (or before its review passed) the fix commit `head`, made at `start`."""
+    return {"1": dict(ready(1)["cont"], untested={"stage": stage, "start_head": start, "head": head})}
+
+
 CHILD_PROGRAM = PROGRAM.with_name("deliver-standard.js")
 CHILD_HARNESS = Path(__file__).with_name("deliver_standard_harness.mjs")
 BOOKKEEPING = re.compile(r"^(facts|acquire|setup|worktree|renew|owner-answer|land-lock|land-unlock|close-out)(-|$)")
@@ -1544,7 +1549,7 @@ class LandTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "ci-failed")
         self.assertNotIn("land-record-1-1", labels(calls))
         self.assertNotIn("land-merge-1", labels(calls))
-        self.assertEqual(result["relaunch"]["conts"], {"1": ready(1)["cont"]})
+        self.assertEqual(result["relaunch"]["conts"], unpushed("checks-fix", SHA, FIX))
 
     def test_a_declared_check_missing_from_a_passed_reply_is_never_merged(self):
         result, calls, _ = run(patch={"setup": {"required_checks": ["ci", "lint"]}})
@@ -2586,9 +2591,11 @@ class SyncFixRoundTest(unittest.TestCase):
         survived = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.LEFT})[0]
         blocked = self.land(**{"land-sync-resolve-1-1": {"status": "blocked", "conflicted": True, "notes": "too tangled"}})[0]
         self.assertEqual([row(r, 1)["outcome"] for r in (survived, blocked)], ["sync-review", "conflict"])
-        self.assertEqual(without(survived["relaunch"], "reasons"), without(blocked["relaunch"], "reasons"))
+        # #1371: the survived row's relaunch also carries the unpushed fix commit as untested; the rest of it is the conflict row's.
+        self.assertEqual(without(without(survived["relaunch"], "reasons"), "conts"), without(without(blocked["relaunch"], "reasons"), "conts"))
         self.assertEqual(survived["relaunch"]["issues"], [1])
-        self.assertEqual(survived["relaunch"]["conts"], PRE_MERGE_CONTS)
+        self.assertEqual(survived["relaunch"]["conts"], unpushed("sync-fix", B, self.FIXED))
+        self.assertEqual(blocked["relaunch"]["conts"], PRE_MERGE_CONTS)
         runs = [run(args=first["relaunch"], patch={"facts-1": dict(HELD, open_pr=OPEN_PR)},
                     replies={"readopt-1": {"ok": False, "reason": "unaccepted", "detail": self.FIXED}}) for first in (survived, blocked)]
         self.assertEqual(labels(runs[0][1]), labels(runs[1][1]))
@@ -2809,7 +2816,8 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
                 # The accepted head is never rewritten, so a relaunch finds the pushed merge unaccepted and reviews it through the child.
                 for gone in ("land-record-1-1", "land-merge-1", "close-out-1"):
                     self.assertNotIn(gone, ls)
-                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
+                # #1371: a fix commit a stop left unpushed is carried as untested; every other stop keeps the child's cont.
+                self.assertEqual(result["relaunch"]["conts"], unpushed("sync-fix", B, SyncFixRoundTest.FIXED) if name == "the finding survives" else PRE_MERGE_CONTS)
 
     def test_a_relaunch_after_a_stop_outside_the_lock_goes_through_the_child(self):
         first, _, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-review-1-1": None})
@@ -4024,6 +4032,64 @@ class PushBoundLandFixTest(unittest.TestCase):
                 for later in ("land-fix-review-1", "land-record-1-1"):
                     self.assertNotIn(later, labels(out["calls"]))
 
+    REJECTED = {"verdict": "findings", "findings": [{"severity": "important", "summary": "weakened a test", "failing_input": "x"}]}
+    LOCAL = "e" * 40
+
+    @staticmethod
+    def pending(result):
+        return result["relaunch"]["conts"]["1"].get("untested")
+
+    def test_a_landing_fix_that_is_not_pushed_is_carried_in_the_cont_as_untested(self):
+        """The commit stays local whenever the round ends before the program pushes it: a relaunch retests and reviews that range."""
+        fixed = {"status": "done", "start_head": SHA, "commit": self.LOCAL, "notes": "fixed"}
+        unasked = OwnRedOutsideLockTest.FIXED
+        sync = {"land-sync-review-1-1": SyncFixRoundTest.FOUND}
+        cases = (
+            ("mode first, no test", run(patch=folded(CI_RED), replies={"land-fix-1": dict(fixed, tests=[])})[0],
+             {"stage": "checks-fix", "start_head": SHA, "head": self.LOCAL}),
+            ("mode first, review rejects", run(patch=folded(CI_RED), replies={"land-fix-1": dict(fixed, tests=["t"]), "land-fix-review-1": self.REJECTED})[0],
+             {"stage": "checks-fix", "start_head": SHA, "head": self.LOCAL}),
+            ("mode first, review lost", run(patch=folded(CI_RED), replies={"land-fix-1": dict(fixed, tests=["t"]), "land-fix-review-1": None})[0],
+             {"stage": "checks-fix", "start_head": SHA, "head": self.LOCAL}),
+            ("mode first, reply names another start", run(patch=folded(CI_RED), replies={"land-fix-1": dict(fixed, start_head="d" * 40, tests=[])})[0],
+             {"stage": "checks-fix", "start_head": SHA, "head": self.LOCAL}),
+            ("mode unasked, no test", run_full(patch=OwnRedOutsideLockTest.PRE_RED, replies={"land-fix-1": dict(unasked, tests=[])})["result"],
+             {"stage": "checks-fix", "start_head": unasked["start_head"], "head": unasked["commit"]}),
+            ("sync fix, no test", SyncFixRoundTest().land(**dict(sync, **{"land-sync-fix-1-1": {
+                "status": "done", "start_head": B, "commit": SyncFixRoundTest.FIXED, "notes": "fixed", "tests": []}}))[0],
+             {"stage": "sync-fix", "start_head": B, "head": SyncFixRoundTest.FIXED}),
+            ("sync fix, re-review rejects", SyncFixRoundTest().land(**dict(sync, **{"land-sync-rereview-1-1": self.REJECTED}))[0],
+             {"stage": "sync-fix", "start_head": B, "head": SyncFixRoundTest.FIXED}),
+            ("sync fix, reply names another start", SyncFixRoundTest().land(**dict(sync, **{"land-sync-fix-1-1": {
+                "status": "done", "start_head": "d" * 40, "commit": SyncFixRoundTest.FIXED, "notes": "fixed", "tests": ["t"]}}))[0],
+             {"stage": "sync-fix", "start_head": B, "head": SyncFixRoundTest.FIXED}),
+        )
+        for case, result, expected in cases:
+            with self.subTest(case=case):
+                self.assertEqual(self.pending(result), expected)
+
+    def test_a_pushed_landing_fix_leaves_no_untested_range_behind(self):
+        result, _, _ = run(patch=folded(CI_RED), replies={"land-record-1-1": {"ok": True, "head": "c0ffee"},
+                                                         "land-merge-1": {"merged": False, "notes": "refused", "behind": False}})
+        self.assertNotIn("untested", (result["relaunch"] or {}).get("conts", {}).get("1", {}))
+
+    def test_a_relaunch_with_the_pending_fix_local_goes_through_its_child_not_a_readopt_stop(self):
+        first, _, _ = run(patch=folded(CI_RED), replies={
+            "land-fix-1": {"status": "done", "start_head": SHA, "commit": self.LOCAL, "notes": "fixed", "tests": ["t"]},
+            "land-fix-review-1": self.REJECTED})
+        cont = first["relaunch"]["conts"]["1"]
+        self.assertEqual(cont["untested"], {"stage": "checks-fix", "start_head": SHA, "head": self.LOCAL})
+        ahead = {"ok": False, "reason": "worktree", "worktree": "/r/.wt/w-issue-1-x", "branch": "issue-1-x", "pr_head": SHA,
+                 "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}], "detail": "heads differ"}
+        facts = {"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}}
+        result, calls, _ = run(args=first["relaunch"], patch=facts, replies={"readopt-1": dict(ahead, head=self.LOCAL)})
+        self.assertEqual(child(calls, 1)["args"]["cont"], cont)
+        self.assertLess(labels(calls).index("readopt-1"), labels(calls).index("child-1"))
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        stopped, calls, _ = run(args=first["relaunch"], patch=facts, replies={"readopt-1": dict(ahead, head="d" * 40)})
+        self.assertEqual((row(stopped, 1)["outcome"], row(stopped, 1)["stage"]), ("stopped", "readopt"))
+        self.assertNotIn("child-1", labels(calls))
+
     GUARDS = [{"id": "format", "argv": ["treefmt", "--fail-on-change"], "cwd": "tools"}]
     PUSH = "git -C /r/.wt/w-issue-1-x push origin issue-1-x"
 
@@ -4422,7 +4488,7 @@ class FoldedFirstLandChecksTest(unittest.TestCase):
             (behind, {"land-checks-1-2": behind, "land-checks-1-3": behind}, ("land-contended", None), PRE_MERGE_CONTS,
              lambda ls: (self.assertIn("land-sync-1-1", ls), self.assertIn("land-sync-1-2", ls),
                          self.assertNotIn("land-sync-1-3", ls), self.assertIn("land-unlock-1", ls))),
-            (CI_RED, {"land-fix-review-1": fix_review}, ("ci-failed", None), PRE_MERGE_CONTS,
+            (CI_RED, {"land-fix-review-1": fix_review}, ("ci-failed", None), unpushed("checks-fix", SHA, FIX),
              lambda ls: (self.assertNotIn("land-record-1-1", ls), self.assertNotIn("land-merge-1", ls))),
         )
         for folded, extra, (outcome, stage), conts, check in table:
@@ -4496,7 +4562,9 @@ class FoldedRecordChecksTest(unittest.TestCase):
                 if stage == "head-moved":
                     self.assertEqual(row(result, 1)["head"], "d" * 40)
                 self.assertEqual(result["relaunch"]["issues"], [1])
-                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
+                # #1371: a record step that did not read the PR at the fix head left the fix unpushed, so it is carried as untested.
+                pushed = reply.get("ok") is True and reply.get("head") == FIX
+                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS if pushed else unpushed("checks-fix", SHA, FIX))
                 check(of(calls, 1))
 
     def test_a_behind_resync_that_merges_lands_through_the_record_checks(self):
@@ -5838,7 +5906,7 @@ class ResolveBeforeLockTest(unittest.TestCase):
         # No step was told to take the lock. The one release, at the ready head, covers a land-pr that took it against its prompt.
         self.assertNotIn("land acquire", "".join(c["prompt"] for c in calls if c["label"].startswith("land-sync-")))
         self.assertEqual(land_release_shas(calls), [SHA])
-        self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
+        self.assertEqual(result["relaunch"]["conts"], unpushed("sync-fix", B, self.FIXED))
 
     def test_every_stop_before_the_lock_releases_the_ready_head_once_and_accepts_nothing(self):
         stops = {
@@ -5863,7 +5931,7 @@ class ResolveBeforeLockTest(unittest.TestCase):
                 # The accepted head of the pull request is still the ready head: only land-pr wrote it.
                 heads = {sha for c in calls if c["kind"] == "agent" for sha in re.findall(r"Accepted head: ([0-9a-f]+)", c["prompt"])}
                 self.assertEqual(heads, {SHA})
-                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
+                self.assertEqual(result["relaunch"]["conts"], unpushed("sync-fix", B, self.FIXED) if name == "the re-review is lost" else PRE_MERGE_CONTS)
 
     def test_a_relaunch_after_a_stop_before_the_lock_reviews_again_before_it_lands(self):
         first = self.land(**{"land-sync-review-1-1": None})["result"]

@@ -739,9 +739,10 @@ const UNTESTED_STAGES = ['checks-fix', 'sync-fix', 'look-fix']
 const untestedOf = u => (isEntry(u) && UNTESTED_STAGES.includes(u.stage) && present(u.head) && present(u.start_head) ? { stage: u.stage, start_head: String(u.start_head), head: String(u.head) } : null)
 let untested = untestedOf(CONT && CONT.untested)
 // #1371: a push-bound fix reply that moved the head and records no test command, whatever its status, is carried in cont.untested so a resume retests it before any push; true when it recorded one.
-// A reply that names no start_head started at before, the head the program knew when it asked for the fix. A range already pending keeps its start: the retest covers everything since the earliest untested commit.
+// The commit is compared with before, the head the program knew when it asked for the fix, never with the start_head the reply names: a reply that names another start_head moved the head all the same, and before stays the base of the retest.
+// A range already pending keeps its start: the retest covers everything since the earliest untested commit.
 const noteUntested = (stage, f, before) => {
-  const from = f && present(f.start_head) ? f.start_head : before
+  const from = present(before) ? before : f && present(f.start_head) ? f.start_head : null
   if (!f || !present(f.commit) || !present(from) || sameSha(f.commit, from) || tested(f)) return false
   untested = { stage, start_head: untested ? untested.start_head : String(from), head: String(f.commit) }
   return true
@@ -1198,6 +1199,9 @@ const PUSH_TESTS = (guards, onFailure = 'fix-and-rerun') => `If you made a commi
 const tested = f => !!f && Array.isArray(f.tests) && f.tests.some(t => typeof t === 'string' && t.trim() !== '')
 const FIX_TESTS = `The program pushes this fix to the open pull request next. ${PUSH_TESTS(PRE_COMMIT)}. ${FMT}`
 const UNTESTED = 'the fix report records no test command, so its commit is not pushed'
+// #1371: the retest's reply also says whether the worktree is still clean once its tests ran: a guard may rewrite a tracked file, and the tested contents would then differ from the commit.
+const RETEST = { ...IMPL, properties: { ...IMPL.properties, clean: { type: 'boolean' } } }
+const RETEST_DIRTY = 'the retest left the worktree changed, so the tested contents are not the commit and it is not pushed'
 // #963: the fix wave and the verification fix are each followed by the verify step, so they run no suite: it ran twice per wave.
 const OWN_TESTS = `Before returning, run in full every test file among or covering the files you changed (never a single test class) and no suite: the verify step runs it next; return tests: each command and its result. ${FMT}`
 // #941: what the resolution of a conflicted sync merge tests, the same text in deliver-batch.js: the files it resolved, not everything the merge brought in.
@@ -2160,8 +2164,9 @@ const PICTURES = picturesOf(verify)
 if (!LOOK_READ) return LOOK_UNREAD()
 // #1371: a resumed delivery whose cont carries an untested commit records its tests at the head being shipped before it is returned as ready or pushed.
 if (untested) {
-  const rt = await call(`${CTX}\n${PLAN_REF} The commits in git -C ${W} diff ${untested.start_head}..${verify.head} are a fix committed with no test command recorded; treat them as the commit you made. The program pushes this head to the open pull request next. ${PUSH_TESTS(PRE_COMMIT, 'report')}. Commit nothing: return status done with start_head and commit both ${verify.head} (git -C ${W} rev-parse HEAD).\n${RULES}`, { label: 'fix-retest', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  const rt = await call(`${CTX}\n${PLAN_REF} The commits in git -C ${W} diff ${untested.start_head}..${verify.head} are a fix committed with no test command recorded; treat them as the commit you made. The program pushes this head to the open pull request next. ${PUSH_TESTS(PRE_COMMIT, 'report')}. Commit nothing: return status done with start_head and commit both ${verify.head} (git -C ${W} rev-parse HEAD), and clean true only when git -C ${W} status --porcelain prints nothing after the last test, else clean false.\n${RULES}`, { label: 'fix-retest', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: RETEST })
   if (!implDone(rt) || !sameSha(rt.start_head, verify.head) || !sameSha(rt.commit, verify.head) || !tested(rt)) return stop(untested.stage, { fix: rt, details: UNTESTED })
+  if (rt.clean !== true) return stop(untested.stage, { fix: rt, details: RETEST_DIRTY })
   untested = null
 }
 if (MODE === 'ready') {

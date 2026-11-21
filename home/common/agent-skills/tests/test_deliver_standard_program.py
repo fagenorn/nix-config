@@ -8373,6 +8373,33 @@ class PushBoundFixTestsTest(unittest.TestCase):
                     self.assertEqual(result["stage"], stage)
                     self.assertEqual(result["cont"]["untested"], {"stage": stage, "start_head": start, "head": commit})
 
+    def test_a_fix_report_naming_another_start_head_is_compared_with_the_head_the_program_knew(self):
+        """The reply's own start_head never decides whether the head moved: the known head stays the retest base."""
+        sites = (
+            ("checks-fix", SHA, FIX, self.PUSH_BOUND[0][1], "fix-ci"),
+            ("sync-fix", MERGE, FIX, self.PUSH_BOUND[1][1], "fix-sync-1"),
+            ("look-fix", SHA, F, self.PUSH_BOUND[2][1], "look-fix"),
+        )
+        for stage, start, commit, kwargs, label in sites:
+            with self.subTest(stage=stage):
+                reply = {"status": "done", "notes": "fixed", "start_head": commit, "commit": commit, "tests": []}
+                result, calls = run(**dict(kwargs, replies={**kwargs.get("replies", {}), label: reply}))
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual(result["cont"]["untested"], {"stage": stage, "start_head": start, "head": commit})
+                self.assertFalse([l for l in labels(calls) if l in ("merge", "look-pr", "look-push") or l.startswith("land-push-")])
+
+    def test_a_retest_that_leaves_the_worktree_changed_does_not_mark_the_head_shipped(self):
+        cont = dict(LOOK_CONT, untested={"stage": "look-fix", "start_head": SHA, "head": F})
+        done = {"status": "done", "notes": "ok", "start_head": F, "commit": F, "tests": self.TESTED}
+        for case, kwargs in (("changed", {"patch": dict(self.READY_AT_F, **{"fix-retest": dict(done, clean=False)})}),
+                             ("unsaid", {"patch": self.READY_AT_F, "replies": {"fix-retest": done}})):
+            with self.subTest(case=case):
+                result, calls = run(args=dict(ARGS, mode="ready", cont=cont), **kwargs)
+                self.assertEqual(result["stage"], "look-fix")
+                self.assertEqual(result["details"], program_const("RETEST_DIRTY"))
+                self.assertEqual(result["cont"]["untested"], {"stage": "look-fix", "start_head": SHA, "head": F})
+                self.assertFalse([l for l in labels(calls) if l in ("pr", "look-pr", "look-push", "merge")])
+
     def test_a_second_untested_look_fix_keeps_the_earliest_pending_start(self):
         cont = dict(LOOK_CONT, untested={"stage": "look-fix", "start_head": SHA, "head": F})
         result, calls = run(args=dict(ARGS, cont=cont, look={"answer": "changes", "words": "make the label bolder"}),

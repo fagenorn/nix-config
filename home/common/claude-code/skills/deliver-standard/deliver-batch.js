@@ -788,8 +788,23 @@ const EMPTY_HEAD_WAIT = () => ` While no check is reported on head, do not answe
 const MERGE_REFUSED = 'Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base, else false.'
 // The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
 const MERGE_CMD = (pr, sha) => `${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${sha}${SETUP.delete_branch ? ' --delete-branch' : ''}`
+// #1371: a fix commit a landing made and has not pushed, or whose review or tests did not pass, stays in the worktree and is carried in the issue's cont as
+// untested: { stage, start_head, head } (the range deliver-standard.js retests and reviews on a relaunch, whose first retest is from the head the landing knew, never the start_head the reply names).
+// A range already pending keeps its start. Only an issue that holds a cont can carry it.
+const holdFix = (n, stage, known, fix) => {
+  if (!fix || !nonEmpty(fix.commit) || !nonEmpty(known) || sameSha(fix.commit, known) || !isObj(CONTS[n])) return
+  const kept = isObj(CONTS[n].untested) && nonEmpty(CONTS[n].untested.start_head) ? CONTS[n].untested.start_head : known
+  CONTS[n] = { ...CONTS[n], untested: { stage, start_head: String(kept), head: String(fix.commit) } }
+}
+// The fix commit reached the pull request and its review passed: it is no longer pending.
+const releaseFix = (n, head) => {
+  if (!isObj(CONTS[n]) || !isObj(CONTS[n].untested) || !sameSha(CONTS[n].untested.head, head)) return
+  const { untested, ...rest } = CONTS[n]
+  CONTS[n] = rest
+}
 // A merged landing must leave a cont naming its PR, or a re-adopted PR (which has none) could not be closed out.
 const markMerged = (n, ready, pr) => {
+  if (isObj(CONTS[n]) && CONTS[n].untested) releaseFix(n, CONTS[n].untested.head)
   CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: ready.branch, worktree: ready.worktree, worktree_path: ready.worktree }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
 }
 const land = async (n, ready, via = {}) => {
@@ -907,6 +922,8 @@ Then, only when ok is true and lock's verdict is acquired, already_held or moved
 ${CHECKS_STEPS(pr)}
 Return those fields as checks; otherwise return checks null.
 ${RULES}`, label, { ...lifecycleClerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
+    // #1371: a record step that read the PR at the pushed head confirms the push of the reviewed fix commit.
+    if (publish && rec && rec.ok === true && sameSha(rec.head, expected)) releaseFix(n, expected)
     let lv = rec && rec.lock ? rec.lock.verdict : null
     if (rec) logWait(label, rec.lock)
     let reread = false
@@ -1087,6 +1104,8 @@ ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', mod
         // full reviewer re-reviews either. A sync-review row from here on names the fix reply: its commit is unaccepted and not pushed.
         const tried = fix ? { fix: { commit: fix.commit, notes: fix.notes } } : {}
         const moved = !!fix && !sameSha(fix.commit, head)
+        // #1371: a fix commit stays local until it is pushed: it is carried as untested from here, whatever stops the round.
+        holdFix(n, 'sync-fix', head, fix)
         if (!fix || fix.status !== 'done' || !fix.commit || !sameSha(fix.start_head, head) || (!moved && !nonEmpty(fix.notes))) {
           return syncStop('the sync fix round did not finish', found[0], fix, { review: rv, ...tried })
         }
@@ -1107,6 +1126,7 @@ ${RULES}`, rereviewLabel, { agentType: 'reviewer', schema: FINDINGS })
       const pu = await call(`A sync fix of issue #${n} of ${SLUG} passed its re-review at ${head} and is not pushed yet. Push it: git -C ${W} fetch origin, confirm git -C ${W} rev-parse HEAD prints ${head}, then run git -C ${W} push origin ${B}, then read git -C ${W} rev-parse origin/${B}. Return ok true and head (that sha) when the push succeeded. When HEAD is another commit or the push fails, change nothing else and return ok false with the head you read and the error in detail.
 ${RULES}`, plabel, { ...lifecycleClerk, schema: RECORD_SCHEMA })
       if (!pu || pu.ok !== true || !sameSha(pu.head, head)) return out('stopped', { stage: 'land-push', expected: head, head: pu ? pu.head : null, detail: pu && pu.detail ? pu.detail : `${plabel} did not push ${head}` })
+      releaseFix(n, head)
     }
     if (head !== expected || outside) {
       expected = head
@@ -1340,6 +1360,8 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
 ${mode === 'first' ? `${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `${FIX_NO_LOCK}\n` : ''}Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, and commit. Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
 When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: mode === 'first' ? { ...IMPL, properties: { ...IMPL.properties, lock_released: { type: 'boolean' } } } : IMPL })
+      // #1371: a fix commit stays local until it is pushed: it is carried as untested from here, whatever ends the round.
+      holdFix(n, 'checks-fix', expected, fix)
       if (!fix || fix.status !== 'done' || !fix.commit) return end({ detail: 'the fix round did not finish' })
       const letGo = mode === 'first' && fix.lock_released === true
       // #818: done at the unchanged head is a rerun of jobs that failed for no cause in the code. The loop polls again; ciFails still ends a second red poll as ci-failed.
@@ -2116,7 +2138,10 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
         return
       }
       if (ro.ok === true && lookPending && !amendPending) log(`readopt-${n}: the issue needs the owner's look (or its marker was not read); it goes through its child`)
-      if (ro.ok !== true && ro.reason !== 'unaccepted') {
+      // #1371: a worktree ahead of its PR by the fix commit an earlier landing kept local and unpushed goes through the child, whose cont carries
+      // that range as untested: its final review reads the commit and its retest records the tests before anything is pushed.
+      const pendingFix = ro.ok !== true && ro.reason === 'worktree' && isObj(CONTS[n]) && isObj(CONTS[n].untested) && nonEmpty(ro.head) && sameSha(CONTS[n].untested.head, ro.head)
+      if (ro.ok !== true && ro.reason !== 'unaccepted' && !pendingFix) {
         rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: ro.reason || 'other', ...(ro.detail ? { note: ro.detail } : {}) }
         return
       }

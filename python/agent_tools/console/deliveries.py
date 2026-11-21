@@ -305,7 +305,7 @@ OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
         r"|direct-rereview",
     ),
     (VERIFYING, r"verify|verify-\d+|verify-rerun-\d+|verify-fix-\d+|verify-fix-review-\d+|ws-check-\d+"
-        r"|look-fix|look-fix-review|renew-look-fix|look-verify"),
+        r"|look-fix|look-fix-review|renew-look-fix|look-verify|fix-retest"),
     (
         LANDING,
         r"pr|hold|merge|close-out|land-unlock|fix-ci|fix-ci-review|land-lock-\d+|land-relock-\d+|land-push-\d+|checks-\d+"
