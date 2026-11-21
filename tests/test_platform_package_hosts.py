@@ -2,10 +2,12 @@
 
 Reads the host evaluations from `tests/host_readings.py`, which evaluates the flake from this
 checkout's git tree.
-On a host whose nix cannot build x86_64-linux, the anis-desktop cases skip and say so; CI's Agent
-Workflow Tests runs them on Linux.
+The darwin hosts are read only on a darwin machine (reading `home.file` forces an import-from-derivation,
+which the pure evaluation on Linux forbids) and anis-desktop only where nix can build x86_64-linux; a
+machine with neither skips and says so, and CI's Agent Workflow Tests runs the anis-desktop cases on Linux.
 Run: just agent-workflow-tests
 """
+import platform
 import re
 import unittest
 
@@ -20,6 +22,12 @@ NO_LINUX_BUILDER = (
 )
 
 
+NO_HOST_EVALUATION = (
+    "this machine evaluates no host's platform install: the darwin hosts need a darwin machine "
+    "(import-from-derivation) and anis-desktop an x86_64-linux builder"
+)
+
+
 def linked(source, target):
     return {"source": source, "enable": True, "target": target, "recursive": False}
 
@@ -27,9 +35,13 @@ def linked(source, target):
 class PlatformPackageHostsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.readings = {host: host_readings.read(host, "agent-platform") for host in host_readings.DARWIN_HOSTS}
+        cls.readings = {}
+        if platform.system() == "Darwin":
+            cls.readings.update({host: host_readings.read(host, "agent-platform") for host in host_readings.DARWIN_HOSTS})
         if host_readings.can_build("x86_64-linux"):
             cls.readings["anis-desktop"] = host_readings.read("anis-desktop", "agent-platform-linux")
+        if not cls.readings:
+            raise unittest.SkipTest(NO_HOST_EVALUATION)
 
     def test_each_host_installs_every_command_from_the_package(self):
         for host, reading in self.readings.items():

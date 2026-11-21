@@ -338,6 +338,19 @@ class SelectTest(unittest.TestCase):
             self.assertEqual("owner-activation" in selected, host == "eleven-m5")
             self.assertFalse(pure)
 
+    def test_the_platform_package_reading_never_joins_a_pure_darwin_evaluation(self):
+        # Reading `home.file` forces an import-from-derivation, which the pure evaluation forbids.
+        for host in host_readings.DARWIN_HOSTS:
+            for builder in (False, True):
+                selected, pure = host_readings.select(
+                    host, host_readings.PARTS, darwin_machine=False, linux_builder=builder)
+                self.assertTrue(pure)
+                self.assertNotIn("agent-platform", selected)
+            selected, pure = host_readings.select(
+                host, host_readings.PARTS, darwin_machine=True, linux_builder=False)
+            self.assertIn("agent-platform", selected)
+            self.assertFalse(pure)
+
     def test_the_linux_host_is_never_pure_and_takes_the_console_only_with_a_builder(self):
         for darwin in (False, True):
             for builder in (False, True):

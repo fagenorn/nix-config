@@ -111,8 +111,9 @@ def runner_triples_apply(root: Path) -> str:
     return f"c: u: ({recipe_apply(root)}) c.services.github-runners"
 
 
-# What each host installs of the flake's platform package. The darwin hosts read it in a pure evaluation;
-# anis-desktop's `home.file` forces import-from-derivation of x86_64-linux derivations, so it needs a builder.
+# What each host installs of the flake's platform package. Reading `home.file` merges every entry, and that
+# forces an import-from-derivation (catppuccin's starship definition), so a darwin host reads it only on a
+# darwin machine, where the evaluation allows IFD, and anis-desktop only with an x86_64-linux builder.
 AGENT_PLATFORM = """c: u: let
       system = c.nixpkgs.hostPlatform.system;
       inputs = c.home-manager.extraSpecialArgs.inputs;
@@ -255,7 +256,7 @@ PARTS: dict[str, Part] = {
       null;
 }""", DARWIN_HOSTS),
     "runner-triples": Part(runner_triples_apply, DARWIN_HOSTS),
-    "agent-platform": Part(AGENT_PLATFORM, DARWIN_HOSTS),
+    "agent-platform": Part(AGENT_PLATFORM, DARWIN_HOSTS, needs="darwin-machine"),
     "agent-platform-linux": Part(AGENT_PLATFORM, ("anis-desktop",), needs="x86_64-linux-builder"),
 }
 
