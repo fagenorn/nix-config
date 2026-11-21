@@ -1,4 +1,4 @@
-# ADR-console-094 — A listed manager waiting on quota moves to an account with room
+# ADR-console-095 — A listed manager waiting on quota moves to an account with room
 
 - **Status:** accepted
 - **Decided in:** #1378

@@ -58,6 +58,7 @@ stream `Content-Length`):
     POST /api/notice 200 application/json, a manager posts one notice for its project (below)
     POST /api/notices 200 application/json, a manager lists its project's open notices (below)
     POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
+    POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
@@ -70,7 +71,7 @@ stream `Content-Length`):
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`,
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/permit`,
                     `/api/picture` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
@@ -1017,6 +1018,35 @@ nothing folds it. A notice nudge is never retried after its own attempt, counts 
 `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
+Permit (#1377, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
+through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
+`{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
+a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
+other exception 500 `permit failed`, each with one stderr line `console: permit_refused <sprint_id>
+<reason>` or `console: permit_failed <Type>: <message>`. Success is 200: phase `judge` answers
+`{"decision": "allow" | "deny" | null, "reason": <str>}` and phase `landed` `{"recorded": <bool>}`.
+`permit(sprint_id, secret, session_id, tool_use_id, command)` answers a `permit.Verdict`: under the ingest lock it
+checks the secret (`_manager_sprint`), returns no decision (`decision` None, no row) for a command
+`permit.mentions` rejects, and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and
+`sprints.takes_questions` (no closing, no stop request, no stop, and not ended by a done report), and
+`permit.NOT_MANAGER` unless `session_id` is the sprint's
+`manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
+delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery
+run the console has since cleaned up still counts; `others`: the issues the newest report of every other
+open sprint of the project lists) and, off the lock,
+the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge binding
+(`merge_binding_of`), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the
+lock again takes the sprint, its checks and the grant afresh and judges once more over the memo's
+frozen replay: any refusal, any difference or any read the memo did not hold is `permit.MOVED`. Each
+decided verdict appends one `permit.judged` row under that lock `{"sprint_id", "session_id",
+"tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge is also remembered in
+memory as `(sprint_id, session_id, tool_use_id, repo, pr, head)` with the service's clock.
+`permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and
+appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge",
+"target": {"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and
+the allow of that same tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago;
+otherwise it is False and appends nothing.
+
 Owner notices (#1120, ADR-console-053): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
 `MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
 `MAX_OWNER_NOTICE_WITHDRAW_BYTES` 4096) are page writes: both pass `_page_write`'s guard before any body is
@@ -1610,7 +1640,7 @@ and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not exclu
 still be scanned and not being removed. Otherwise the reservation ends, nothing is appended and the
 sprint is marked in `_move_cancelled` until the manager's account has room: no later poll decides a
 move again. The started manager row stays, and the sprint waits to wake its session after the reset
-(#1279). A listed manager waiting on quota is moved too (#1378, ADR-console-094): when it is idle
+(#1279). A listed manager waiting on quota is moved too (#1378, ADR-console-095): when it is idle
 or at its limit, the sprint is open, not stalled, with no open no-progress item and work to do, fewer than
 `revive.LIMIT` counted revivals sit in the window, a launcher and a stopper exist, the move was not
 cancelled and `_move_target` finds an account with room, `revive()` reserves a `_ListedMoveReservation`
@@ -1832,12 +1862,12 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, pin, plan_questions, probe, question_records, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
-    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
+    LOOK_RECORDED, PERMIT_JUDGED, PERMIT_LANDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
@@ -1905,6 +1935,7 @@ ASK_PATH = "/api/ask"
 WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
 NOTICE_PATH = "/api/notice"
 NOTICES_PATH = "/api/notices"
+PERMIT_PATH = "/api/permit"
 WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
 OWNER_NOTICE_PATH = "/api/owner-notice"
 OWNER_NOTICE_WITHDRAW_PATH = "/api/owner-notice-withdraw"
@@ -1988,12 +2019,14 @@ MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
                                             MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, WITHDRAW_QUESTION_PATH,
                                             NOTICE_PATH, NOTICES_PATH, WITHDRAW_NOTICE_PATH,
-                                            PICTURE_PATH})
+                                            PERMIT_PATH, PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
 MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_NOTICE_BYTES = 16384
 MAX_NOTICES_BYTES = 4096
+MAX_PERMIT_BYTES = 16384
+PERMIT_LANDED_SECONDS = 30 * 60
 MAX_WITHDRAW_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_WITHDRAW_BYTES = 4096
@@ -2229,6 +2262,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._notice_request()
         if route == NOTICES_PATH:
             return self._notices_request()
+        if route == PERMIT_PATH:
+            return self._permit_request()
         if route == WITHDRAW_NOTICE_PATH:
             return self._withdraw_notice_request()
         if route == PICTURE_PATH:
@@ -3028,6 +3063,39 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self._send(200, "application/json", json.dumps(
             {"notices": entries, "overlaps": sprints.claim_overlaps(entries)},
             sort_keys=True, separators=(",", ":")).encode())
+
+    def _permit_request(self):
+        """The manager's route: the console's judgement of one command of the sprint's manager session."""
+        length = self._checked_length(MAX_PERMIT_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            request = sprints.parse_permit_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad permit")
+        try:
+            if request.phase == "judge":
+                verdict = self.server.console.permit(
+                    request.sprint_id, request.secret, request.session_id, request.tool_use_id,
+                    request.command)
+                reply = {"decision": verdict.decision, "reason": verdict.reason}
+            else:
+                reply = {"recorded": self.server.console.permit_landed(
+                    request.sprint_id, request.secret, request.session_id, request.tool_use_id,
+                    request.command)}
+        except sprints.SecretRefused:
+            print(f"console: permit_refused {request.sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: permit_refused {request.sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: permit_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "permit failed")
+        self._send(200, "application/json", json.dumps(
+            reply, sort_keys=True, separators=(",", ":")).encode())
 
     def _withdraw_notice_request(self):
         """The manager's route: one open notice of the sprint taken back, with its secret."""
@@ -4157,6 +4225,8 @@ class ConsoleService:
                  activator: activation_run.Activator | None = None,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
                  branch_pattern_of: Callable[[str], str | None] = deliveries.configured_branch_pattern,
+                 permit_forge: permit.Forge = permit.FORGE,
+                 merge_binding_of: Callable[[str], tuple[str | None, bool]] = permit.merge_binding,
                  activity: Callable[[str], float | None] = inbox.local_activity,
                  clock: Callable[[], float] = time.time,
                  retention_seconds: float = RETENTION_SECONDS,
@@ -4388,6 +4458,9 @@ class ConsoleService:
         self._activate_thread: threading.Thread | None = None
         self._slug_of = slug_of
         self._branch_pattern_of = branch_pattern_of
+        self._permit_forge = permit_forge
+        self._merge_binding_of = merge_binding_of
+        self._permit_allows: dict[tuple[str, str, str, str | None, int, str], float] = {}
         self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
@@ -8808,6 +8881,117 @@ class ConsoleService:
             return sprints.project_notices(
                 self._sprints.values(), sprint.project_id,
                 owner=sprints.open_owner_notices(self._owner_notices, sprint.project_id))
+
+    @staticmethod
+    def _permit_active(sprint: sprints.SprintState) -> bool:
+        return (sprint.state == sprints.STARTING and sprints.takes_questions(sprint)
+                and sprint.stop_at is None)
+
+    def _permit_refusal(self, sprint: sprints.SprintState, session_id: str,
+                        verb: str | None) -> permit.Verdict | None:
+        """Under the ingest lock: the verdict that refuses the caller before a grant is judged, else None."""
+        if not self._permit_active(sprint):
+            return permit.Verdict(permit.DENY, permit.NOT_ACTIVE, verb, {})
+        if session_id != sprint.manager_session:
+            return permit.Verdict(permit.DENY, permit.NOT_MANAGER, verb, {})
+        if sprint.project_id not in self._states:
+            return permit.Verdict(permit.DENY, permit.NOT_GRANTED, verb, {})
+        return None
+
+    def _permit_sets(self, sprint: sprints.SprintState) -> tuple[frozenset[int], frozenset[int]]:
+        """Under the ingest lock: the issues the sprint may merge and its siblings' issues."""
+        reported = {number for number, _ in sprint.report.issues} if sprint.report else set()
+        others = {number for key, other in self._sprints.items()
+                  if key != sprint.sprint_id and other.project_id == sprint.project_id
+                  and sprints.takes_questions(other) and other.report is not None
+                  for number, _ in other.report.issues}
+        return frozenset(reported & sprint.delivered), frozenset(others)
+
+    def _permit_reads(self, root: str | None) -> tuple[str | None, str | None, str | None, bool]:
+        """Off the lock: the project's slug, branch pattern, merge strategy and whether a merge deletes its branch."""
+        if root is None:
+            return None, None, None, False
+
+        def read(source, default):
+            try:
+                return source(root)
+            except Exception:
+                return default
+        strategy, delete_branch = read(self._merge_binding_of, (None, False))
+        return (read(self._slug_of, None), read(self._branch_pattern_of, None), strategy,
+                delete_branch)
+
+    def _permit_record(self, sprint: sprints.SprintState, session_id: str, tool_use_id: str,
+                       slug: str | None, verdict: permit.Verdict) -> permit.Verdict:
+        """Under the ingest lock: append the `permit.judged` row of a decided verdict and return it."""
+        self._apply(self.log.append([(PERMIT_JUDGED, sprint.project_id, {
+            "sprint_id": sprint.sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
+            "repo": slug, "verb": verdict.verb, "decision": verdict.decision, "reason": verdict.reason,
+            "target": dict(verdict.target)})]))
+        return verdict
+
+    def permit(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
+               command: str) -> permit.Verdict:
+        """The console's verdict on one command of the sprint's manager session (#1377, ADR-console-094)."""
+        verb = permit.verb_of(command)
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if verb is None:
+                return permit.Verdict(None, "", None, {})
+            refusal = self._permit_refusal(sprint, session_id, verb)
+            state = self._states.get(sprint.project_id)
+            root = None if state is None else state.root
+            sets = None if refusal is not None else self._permit_sets(sprint)
+        reads = self._permit_reads(root)
+        slug, pattern, strategy, delete_branch = reads
+        if refusal is not None:
+            with self._ingest:
+                return self._permit_record(sprint, session_id, tool_use_id, slug, refusal)
+        memo = permit.memoized(self._permit_forge)
+        first = permit.judge(command, permit.Grant(
+            slug, root, strategy, delete_branch, pattern, *sets), memo)
+        with self._ingest:
+            verdict = first
+            try:
+                fresh = self._manager_sprint(sprint_id, secret)
+                state = self._states.get(fresh.project_id)
+                if (self._permit_refusal(fresh, session_id, verb) is not None
+                        or state is None or state.root != root
+                        or permit.judge(command, permit.Grant(
+                            slug, root, strategy, delete_branch, pattern, *self._permit_sets(fresh)),
+                            memo.frozen()) != first):
+                    verdict = permit.Verdict(permit.DENY, permit.MOVED, verb, {})
+            except sprints.Refused:
+                verdict = permit.Verdict(permit.DENY, permit.MOVED, verb, {})
+            if verdict.decision == permit.ALLOW and verdict.verb == permit.MERGE:
+                self._permit_allows[(sprint_id, session_id, tool_use_id, slug, verdict.target["pr"],
+                                     verdict.target["head"])] = self._clock()
+            return self._permit_record(sprint, session_id, tool_use_id, slug, verdict)
+
+    def permit_landed(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
+                      command: str) -> bool:
+        """Record a merge the console allowed and the manager's session ran; False records nothing."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            state = self._states.get(sprint.project_id)
+            root = None if state is None else state.root
+        if root is None or permit.verb_of(command) != permit.MERGE:
+            return False
+        slug, _, strategy, delete_branch = self._permit_reads(root)
+        target = permit.merge_target(command, permit.Grant(
+            slug, root, strategy, delete_branch, None, frozenset(), frozenset()))
+        if target is None:
+            return False
+        key = (sprint_id, session_id, tool_use_id, slug, target["pr"], target["head"])
+        with self._ingest:
+            self._manager_sprint(sprint_id, secret)
+            judged = self._permit_allows.get(key)
+            if judged is None or self._clock() - judged > PERMIT_LANDED_SECONDS:
+                return False
+            self._apply(self.log.append([(PERMIT_LANDED, sprint.project_id, {
+                "sprint_id": sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
+                "repo": slug, "verb": permit.MERGE, "target": dict(target)})]))
+            return True
 
     def withdraw_notice(self, sprint_id: str, secret: str, notice_id: int) -> int:
         """Append one `notice.withdrawn` event for an open notice of the sprint; the notice's id."""
