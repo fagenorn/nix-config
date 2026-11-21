@@ -205,6 +205,7 @@ agent-workflow-tests *args:
     tests/test_suite_runner.py \
     tests/test_console_event_log.py \
     tests/test_console_release_card.py \
+    tests/test_console_release_card_service.py \
     tests/test_console_view.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \

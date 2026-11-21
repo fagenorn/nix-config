@@ -265,6 +265,16 @@ yet. Its entry is
 The item is listed per `approve.inbox_entries`, and Merge is offered (`merge` true, `why` null) only per
 `approve.merge_refusal`; otherwise `why` says in plain words why the card offers no Merge.
 
+A release card (#1401, `release_card.inbox_entries`) arrives through the `release_items` argument, one mapping each,
+and is one entry of `inbox.open`, copied, right after the adoption entries, in the order given. It counts in
+`inbox_items` and the headline, is not filtered by the registered projects, and sets no sentence of its own. Its
+entry is
+
+    {"type": "inbox_item", "reason": "release", "key": "release/<card>", "project_id": null,
+     "card": <card number>, "commit": "<40 hex>", "version": "<vMAJOR.MINOR.PATCH>",
+     "headline": "Approve release <version> at <first 12 of the commit>", "answered": false,
+     "waiting_since": "<time the card was posted>"}
+
 `ADOPTION_SENTENCE` says what the page offers: merging the adoption from its card, which says why when it cannot.
 It follows `SIGNIN_SENTENCE` and precedes `QUESTION_SENTENCE` in the precedence.
 
@@ -2237,6 +2247,7 @@ def derive_view(
     pin_launches: Iterable[str] = (),
     registration: Mapping | None = None,
     adoption_items: Iterable[Mapping] = (),
+    release_items: Iterable[Mapping] = (),
     retry_items: Iterable[Mapping] = (),
     apply_items: Iterable[Mapping] = (),
     confirm_items: Iterable[Mapping] = (),
@@ -2297,6 +2308,7 @@ def derive_view(
                       and not e.get("owner")),
                      key=lambda e: e["profile"])
     adoptions = [dict(item) for item in adoption_items]
+    releases = [dict(item) for item in release_items]
     retries = [dict(item) for item in retry_items]
     applies = [dict(item) for item in apply_items]
     confirms = [dict(item) for item in confirm_items]
@@ -2405,7 +2417,7 @@ def derive_view(
 
     at_terminal_asks = [sprint["sprint_id"] for sprint in at_terminal_sprints if asks_at_terminal(sprint)]
     open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
-                  + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
+                  + len(releases) + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
                   + len(failures) + len(trusts) + len(open_items) + len(at_terminal))
     all_out = bool(capacity["all_out"])
     if all_out:
@@ -2476,6 +2488,7 @@ def derive_view(
                           + [_progress_entry(s) for s in unprogressed]
                           + [_signin_entry(e, signin_runs) for e in signins]
                           + adoptions
+                          + releases
                           + [_question_entry(s, q) for s, q in asked]
                           + retries
                           + trusts

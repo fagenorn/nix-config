@@ -19,7 +19,10 @@ guest's answer approves nothing), `card` names a folded card whose state is `OPE
 in `ANSWERS`; it sets that card to `APPROVED` or `DECLINED`. Every other row, and a second answer,
 changes nothing. `cards` never mutates the mapping it is given. `standing` is the newest card of a
 pair that is `OPEN` or `APPROVED`; `approved` is true only for a card of exactly that commit and
-version whose state is `APPROVED`.
+version whose state is `APPROVED`. `inbox_entries` lists one `inbox_item` of reason `release` per
+`OPEN` card in `card_id` order, keyed `release/<card_id>`, headed `Approve release <version> at
+<first 12 of the commit>`, with the `card`, `commit`, `version`, a null `project_id`, `answered`
+False and `waiting_since` the card's `at`.
 
 Host store. `host_store()` is `.agents/state/console/events.sqlite3` under the home the password
 database names for this user, never the caller's `$HOME`: the console's launchd job runs with that
@@ -175,6 +178,17 @@ def standing(cards: Mapping[int, Card], commit: str, version: str) -> Card | Non
 def approved(cards: Mapping[int, Card], commit: str, version: str) -> bool:
     return any(card.commit == commit and card.version == version and card.state == APPROVED
                for card in cards.values())
+
+
+def inbox_entries(cards: Mapping[int, Card]) -> list[dict]:
+    """One `inbox_item` of reason `release` per open card, in card order; nothing else is listed."""
+    return [{"type": "inbox_item", "reason": "release", "key": f"release/{card.card_id}",
+             "project_id": None, "card": card.card_id, "commit": card.commit,
+             "version": card.version,
+             "headline": f"Approve release {card.version} at {card.commit[:12]}",
+             "answered": False, "waiting_since": card.at}
+            for card in sorted(cards.values(), key=lambda card: card.card_id)
+            if card.state == OPEN]
 
 
 def host_store() -> Path:
