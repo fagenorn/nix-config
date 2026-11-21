@@ -25,6 +25,19 @@ profile used most recently (as an instant; a never-used one ranks below every us
 the smallest name) answers; with none signed in, None (P2). The entries are the accounts only (the
 service lists the named profiles, #1016), so the unprofiled client directory is never chosen. A
 name in `last_use` that is not an entry is ignored.
+A colleague's account (#1344, ADR-console-087 D1; an entry whose `owner` is the login that added it,
+which `capacity_view` carries) serves his own sprints first and anyone's when it has room.
+`starter` is the login that started the sprint (None for the owner's) and `waiting` the logins that
+have a sprint waiting for a profile. After the pin, which outranks both, an account is dropped from
+the room rule, the fallback below and `choose_profile`'s all-out wait while any login that owns a
+profile on it is in `waiting` and is not `starter` (ownership is read across every profile on the
+account, so an alias of a colleague's profile is his too); among the rest, the accounts `starter`
+owns that have room answer for him (by the rule above), and otherwise every account with room is a
+candidate. The no-room fallback names only an account no colleague owns or one `starter` owns: a
+colleague's account without a confirmed room reading is never another starter's. `choose_profile`
+waits (`Wait` of the earliest `out_until`) when every remaining signed-in account reads out, even
+when a kept account has room. `colleague_account(capacity, profile)` says whether the account is a
+colleague's. The owner's own accounts have no `owner` and are chosen as before.
 Last use is folded from the log's session rows by `profile_use(events, use)` (a new `ProfileUse`
 of `last`, profile to the `at` of its latest `session.seen`, `session.hook` or `session.profile`
 row, and `owner`, live session id to profile) and outlives the session: a `session.gone` row only
@@ -144,7 +157,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -289,10 +302,17 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
         seen_after=seen_after, permission=permission)
 
 
-def choose_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | Wait:
+def choose_profile(capacity: Mapping, last_use: Mapping[str, str], starter: str | None = None,
+                   waiting: Collection[str] = frozenset()) -> str | Wait:
     if capacity["all_out"]:
         return Wait(capacity["resumes_at"])
-    chosen = session_profile(capacity, last_use)
+    eligible, _ = _eligible(capacity, starter, waiting)
+    considered = [entry for entry in eligible if _signin(entry) != "signed_out"]
+    if (considered and all(entry["state"] == "out" for entry in considered)
+            and not any(entry.get("pinned") and has_room(entry) for entry in capacity["profiles"])):
+        until = [entry["out_until"] for entry in considered if entry["out_until"] is not None]
+        return Wait(min(until) if until else None)
+    chosen = session_profile(capacity, last_use, starter, waiting)
     return Wait(None) if chosen is None else chosen
 
 
@@ -348,20 +368,56 @@ def has_room(entry: Mapping) -> bool:
             and not entry.get("excluded"))
 
 
-def session_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | None:
-    entries = [entry for entry in capacity["profiles"]
-               if not (entry.get("excluded") or entry.get("duplicate_of"))]
-    for entry in entries:
+def _account_owners(entry: Mapping, by_name: Mapping[str, Mapping]) -> frozenset[str]:
+    """The logins that own any profile on the entry's account (#1344): its own and its aliases'."""
+    names = [entry["profile"], *entry.get("same_account_as", ())]
+    return frozenset(owner for name in names
+                     if (owner := (by_name.get(name) or {}).get("owner")) is not None)
+
+
+def _eligible(capacity: Mapping, starter: str | None, waiting: Collection[str]
+              ) -> tuple[list[Mapping], Mapping[str, frozenset[str]]]:
+    """The entries not excluded, not a duplicate and not kept for another login, with each one's owners.
+
+    An account is a colleague's when any profile on it is (`_account_owners`); it is kept for
+    `waiting` logins other than `starter`.
+    """
+    by_name = {entry["profile"]: entry for entry in capacity["profiles"]}
+    live = [entry for entry in capacity["profiles"]
+            if not (entry.get("excluded") or entry.get("duplicate_of"))]
+    owners = {entry["profile"]: _account_owners(entry, by_name) for entry in live}
+    kept = [entry for entry in live
+            if not any(login in waiting and login != starter for login in owners[entry["profile"]])]
+    return kept, owners
+
+
+def colleague_account(capacity: Mapping, profile: str) -> bool:
+    """Whether `profile`'s account is a colleague's (#1344): any profile on it has an owner."""
+    by_name = {entry["profile"]: entry for entry in capacity["profiles"]}
+    entry = by_name.get(profile)
+    return entry is not None and bool(_account_owners(entry, by_name))
+
+
+def session_profile(capacity: Mapping, last_use: Mapping[str, str], starter: str | None = None,
+                    waiting: Collection[str] = frozenset()) -> str | None:
+    live = [entry for entry in capacity["profiles"]
+            if not (entry.get("excluded") or entry.get("duplicate_of"))]
+    for entry in live:
         if entry.get("pinned") and has_room(entry):
             return entry["profile"]
+    entries, owners = _eligible(capacity, starter, waiting)
     room = [entry for entry in entries if has_room(entry)]
     if room:
+        own = [entry for entry in room
+               if starter is not None and starter in owners[entry["profile"]]]
+        room = own or room
         def key(entry):
             return (entry["week_left"] if entry["week_left"] is not None else -1,
                     entry["five_hour_left"] if entry["five_hour_left"] is not None else -1)
         best = max(key(entry) for entry in room)
         return min(entry["profile"] for entry in room if key(entry) == best)
-    signed_in = [entry["profile"] for entry in entries if _signin(entry) == "signed_in"]
+    signed_in = [entry["profile"] for entry in entries if _signin(entry) == "signed_in"
+                 and (not owners[entry["profile"]] or starter in owners[entry["profile"]])]
     if signed_in:
         def rank(name):
             instant = _instant(last_use.get(name))
