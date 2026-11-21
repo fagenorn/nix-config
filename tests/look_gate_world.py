@@ -20,6 +20,7 @@ No test support here is a `TestCase`.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,8 @@ from .program_bridge import NODE, run_program
 # Resolved at import, before ForgeWorld patches PATH.
 GIT = shutil.which("git")
 JQ = shutil.which("jq")
+SH = shutil.which("sh")
+BASE64 = shutil.which("base64")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
@@ -73,7 +76,7 @@ class StepFailure(AssertionError):
 
 class LookGateWorld:
     def __init__(self, test_case: unittest.TestCase, guard_source: Path = GUARD_SOURCE) -> None:
-        for name, path in (("node", NODE), ("git", GIT), ("jq", JQ)):
+        for name, path in (("node", NODE), ("git", GIT), ("jq", JQ), ("base64", BASE64)):
             if path is None:
                 raise AssertionError(f"{name} is not on PATH; the look-gate scenario needs it")
         tmp = tempfile.TemporaryDirectory()
@@ -85,6 +88,9 @@ class LookGateWorld:
                     if k not in ("GITHUB_TOKEN", "GH_TOKEN") and not k.startswith("GIT_")}
         self.env.update(self.forge.env())
         (self.tmp / "home").mkdir()
+        (self.tmp / "decoder-bin").mkdir()
+        self.decoder = self.tmp / "decoder-bin" / "base64"
+        self.decoder.symlink_to(BASE64)
         (self.tmp / "gitconfig").write_text("", encoding="utf-8")
         self.env.update(HOME=str(self.tmp / "home"), GIT_CONFIG_GLOBAL=str(self.tmp / "gitconfig"),
                         GIT_CONFIG_NOSYSTEM="1")
@@ -388,9 +394,25 @@ class LookGateWorld:
         return {"state": "passed", "head": pr["head"], "behind": False, "required": ["ci"], "passed": ["ci"],
                 "renew": {"verdict": "renewed"}}
 
+    def break_decoder(self) -> None:
+        """Make the decoder write a prefix of its output and exit non-zero, as a decode that fails partway does."""
+        self.decoder.unlink()
+        self.decoder.write_text("#!/bin/sh\nprintf prefix\nexit 1\n", encoding="utf-8")
+        self.decoder.chmod(0o755)
+
     def _look_post(self, message, match):
-        line = re.search(r"Run alone and exactly: (look-approval post[^\n]*)", message["prompt"]).group(1)
-        proc = self.look_approval(*line.split()[1:])
+        """Run what the prompt tells the clerk to run: the words-file write, when it has one, then the post.
+
+        The write runs with only `base64` on its PATH (`decoder`), so a command the prompt adds beside it finds none of the stand-ins or the
+        host's real git and forge CLIs. Like the clerk, a write that exits non-zero stops the step with verdict write-failed and no post."""
+        write = re.search(r"run alone and exactly: (printf[^\n]*)", message["prompt"])
+        if write:
+            done = subprocess.run([SH, "-c", write.group(1)], cwd=self.clone, timeout=60, env={"PATH": str(self.decoder.parent)},
+                                  text=True, capture_output=True)
+            if done.returncode != 0:
+                return {"verdict": "write-failed", "detail": done.stderr.strip()}
+        line = re.search(r"run alone and exactly: (look-approval post[^\n]*)", message["prompt"]).group(1)
+        proc = self.look_approval(*shlex.split(line)[1:])
         return json.loads(proc.stdout.strip().splitlines()[-1])
 
     def _look_read(self, message, match):
@@ -460,7 +482,7 @@ class LookGateWorld:
             (r"^look-head$", self._look_head),
             (r"^look-checks-\d+$", self._look_checks),
             (r"^look-post$", self._look_post),
-            (r"^look-read$", self._look_read),
+            (r"^look-(read|status)$", self._look_read),
             (r"^(merge|land-merge-\d+)$", self._merge),
             (r"^land-unlock", const({"verdict": "released"})),
             (r"^land-(re)?lock-", self._lock),
