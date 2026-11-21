@@ -15,6 +15,7 @@ from unittest import mock
 from agent_tools.console import permit
 from agent_tools.console.permit import (ALLOW, DENY, Forge, ForgeUnreadable, Grant, judge,
                                         memoized, mentions, merge_target, words)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
