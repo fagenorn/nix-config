@@ -189,7 +189,8 @@ class PromptRouteTest(PromptCase):
             self.assertEqual(self.phase(svc, sid, "wait", n)[0], 200)
             if self.rows(event_log.PROMPT_CLOSED):
                 break
-        self.assertEqual(self.phase(svc, sid, "wait", n), (200, {"prompt": n, "state": "closed"}))
+        self.assertEqual(self.phase(svc, sid, "wait", n), (200, {"prompt": n, "state": "ended"}))
+        self.assertEqual(self.phase(svc, sid, "close", n), (200, {"prompt": n, "state": "ended"}))
         self.assertEqual(self.rows(event_log.PROMPT_CLOSED), [{"prompt": n, "reason": "ended"}])
         self.assertEqual(self.items(svc), [])
         self.assertEqual(self.answer(svc, n, "allow")[0], 409)
@@ -197,6 +198,57 @@ class PromptRouteTest(PromptCase):
         self.assertEqual(self.phase(svc, sid, "close", m), (200, {"prompt": m, "state": "closed"}))
         self.assertEqual(self.rows(event_log.PROMPT_CLOSED)[-1], {"prompt": m, "reason": "expired"})
         self.assertEqual(len(self.rows(event_log.PROMPT_CLOSED)), 2)
+
+    def test_a_stopped_sprint_closes_its_prompt_as_ended_not_as_unanswered(self):
+        # R7: the hook is told the console closed it, not that ten minutes passed.
+        svc, sid = self.boot()
+        n = self.ask(svc, sid)["prompt"]
+        self.append(svc, SPRINT_STOP_REQUESTED, {"sprint_id": sid, "goal": "g"})
+        self.assertEqual(self.phase(svc, sid, "wait", n), (200, {"prompt": n, "state": "ended"}))
+        self.assertEqual(self.rows(event_log.PROMPT_CLOSED), [{"prompt": n, "reason": "ended"}])
+
+    def test_a_close_the_hook_asked_for_stays_closed_not_ended(self):
+        svc, sid = self.boot()
+        n = self.ask(svc, sid)["prompt"]
+        self.assertEqual(self.phase(svc, sid, "close", n), (200, {"prompt": n, "state": "closed"}))
+        self.assertEqual(self.phase(svc, sid, "wait", n), (200, {"prompt": n, "state": "closed"}))
+
+    def test_the_console_proves_it_holds_the_secret_without_being_sent_it(self):
+        # R1: a hook sends the secret only to a console that proved it holds it.
+        svc, sid = self.boot()
+        nonce = "ab" * 16
+        status, _, text = self.post(svc, prompt_card.ASK_PATH, {
+            "sprint_id": sid, "phase": "prove", "nonce": nonce})
+        self.assertEqual(status, 200)
+        proof = prompt_card.proof(self.secret(sid), sid, nonce)
+        self.assertEqual(json.loads(text), {"proof": proof})
+        self.assertEqual(len(proof), 64)
+        self.assertNotIn(self.secret(sid), text.decode())
+        other = json.loads(self.post(svc, prompt_card.ASK_PATH, {
+            "sprint_id": sid, "phase": "prove", "nonce": "cd" * 16})[2])["proof"]
+        self.assertNotEqual(other, proof)
+        self.assertEqual(self.rows(event_log.PROMPT_ASKED), [])
+        status, _, _ = self.post(svc, prompt_card.ASK_PATH, {
+            "sprint_id": "0" * 16, "phase": "prove", "nonce": nonce})
+        self.assertEqual(status, 409)
+        for body in ({"sprint_id": sid, "phase": "prove"},
+                     {"sprint_id": sid, "phase": "prove", "nonce": "x"},
+                     {"sprint_id": sid, "phase": "prove", "nonce": nonce, "secret": "s"}):
+            self.assertEqual(self.post(svc, prompt_card.ASK_PATH, body)[0], 400)
+
+    def test_a_command_of_the_longest_length_in_any_script_is_held(self):
+        # R4: json escapes each astral character to twelve bytes, so the limit is on the escaped body.
+        svc, sid = self.boot()
+        command = "\U0001F600" * prompt_card.MAX_COMMAND_CHARS
+        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "phase": "ask",
+                           "session_id": "s-1", "command": command, "description": "d" * 4000})
+        self.assertGreater(len(body), 65536)
+        self.assertLessEqual(len(body), service.MAX_PROMPT_BYTES)
+        status, _, text = self.post(svc, prompt_card.ASK_PATH, body.encode())
+        self.assertEqual(status, 200)
+        n = json.loads(text)["prompt"]
+        self.assertEqual([item["command"] for item in self.items(svc)], [command])
+        self.assertEqual(n, self.items(svc)[0]["prompt"])
 
     def test_an_answer_accepted_before_the_close_is_what_the_close_returns(self):
         svc, sid = self.boot()

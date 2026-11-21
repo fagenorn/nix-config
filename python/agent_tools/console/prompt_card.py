@@ -11,14 +11,14 @@ Rows. `event_log.PROMPT_ASKED` carries exactly `{sprint_id, session_id, command}
 carries exactly `{prompt, answer}` (`prompt` is the asked row's `seq`, `answer` one of `ANSWERS`);
 `event_log.PROMPT_CLOSED` carries exactly `{prompt, reason}`, `reason` in `CLOSE_REASONS`:
 `expired` when the hook's hold ran out and `ended` when the console found the prompt no longer
-held. `asked_row`, `answered_row` and `closed_row` build those rows. None is in `KEPT_KINDS`.
+held (a stopped sprint, an ended session, a hook not heard from). `asked_row`, `answered_row` and `closed_row` build those rows. None is in `KEPT_KINDS`.
 
 Fold (`prompts`). An asked row counts only with that exact payload shape, non-empty str ids, a
 non-empty `command` of at most `MAX_COMMAND_CHARS` and a str project; it adds a `Prompt` that is
 `OPEN`. An answered row counts only with exactly `{prompt, answer}` (a row with a `by` member
 counts for nothing, so a guest answers nothing), naming a folded `OPEN` prompt, with `answer` in
 `ANSWERS`; it sets `ALLOWED` or `REFUSED`. A closed row with exactly `{prompt, reason}`, `reason`
-in `CLOSE_REASONS`, naming an `OPEN` prompt sets `CLOSED`. Every other row, and a second answer or
+in `CLOSE_REASONS`, naming an `OPEN` prompt sets `CLOSED` and keeps the reason (`Prompt.reason`). Every other row, and a second answer or
 close, changes nothing. An asked row never changes another prompt: the prompts of one session
 are held side by side, because a manager's workflow agents carry the manager's session id and
 can each hold one (P9). `prompts` never mutates the mapping it is given, and folding all events
@@ -41,8 +41,19 @@ verbatim.
 Wire. `parse_ask` reads the hook's body: strict JSON (a repeated key and NaN are refused),
 `phase` `ask` with exactly `{sprint_id, secret, phase, session_id, command}` and an optional
 `description`, or `wait` and `close` with exactly `{sprint_id, secret, phase, session_id,
-prompt}`. `parse_answer` reads the owner's `{prompt, answer}`. Any other shape is `ValueError`.
+prompt}`, or `prove` with exactly `{sprint_id, phase, nonce}` (`NONCE`, 32 lowercase hexadecimal
+characters), the one request that carries no secret. `parse_answer` reads the owner's `{prompt, answer}`. Any other shape is `ValueError`.
+`wire_state` is the state the hook is told: `ENDED` for a prompt closed with reason `ended` (the console
+closed it, so the manager is not told that nobody answered), else the prompt's own state.
 `hook_output` is the client's `PermissionRequest` decision as one JSON line.
+
+Proof (`proof`). The hook sends the sprint's secret only to a console that has proved it holds it:
+another local account may own the loopback port while the console restarts, and a hook must neither
+hand it the secret nor honour its decision. The hook asks `prove` with a fresh nonce before each
+request that carries the secret; the console answers `{"proof": proof(secret, sprint_id, nonce)}`, the
+hex HMAC-SHA256 keyed by the secret over `prompt-proof`, the sprint id and the nonce, separated by NUL,
+which only a holder of the secret computes. The hook compares it in constant time and sends nothing
+further, and prints a deny, when it differs.
 
 Constants live here except the hold, the poll and the hook's timeout, which `manager` owns
 (`PROMPT_HOLD_SECONDS`, `PROMPT_POLL_SECONDS`, `PROMPT_TIMEOUT`): `sprints` and `sprint` import
@@ -54,7 +65,10 @@ Imports. This module imports only `canonical`, `console.event_log`, `console.man
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -75,8 +89,10 @@ OPEN = "open"
 ALLOWED = "allowed"
 REFUSED = "refused"
 CLOSED = "closed"
-CLOSE_REASONS = ("expired", "ended")
-PHASES = ("ask", "wait", "close")
+ENDED = "ended"
+CLOSE_REASONS = ("expired", ENDED)
+PHASES = ("ask", "wait", "close", "prove")
+NONCE = re.compile(r"[0-9a-f]{32}")
 
 HOLD_SECONDS = manager.PROMPT_HOLD_SECONDS
 POLL_SECONDS = manager.PROMPT_POLL_SECONDS
@@ -87,6 +103,15 @@ MAX_WORDS_CHARS = 200
 HEADLINE = "The manager of {title} asks to run a command"
 NO_WORDS = "It did not say why."
 NOT_OPEN = "This permission prompt is no longer open, so it takes no answer."
+SANDBOX_TEXT = (
+    "A request to run a command outside the sandbox is refused: the console shows the owner only "
+    "the command, so the owner cannot allow that exception. Run the command inside the sandbox, or "
+    "bring the choice to the owner with `sprint ask`, marking the question `owner_only`.")
+ENDED_TEXT = (
+    "The console closed this permission prompt before the owner answered it, because the sprint "
+    "was stopped or ended or this session ended, so it was refused: do the step another way that "
+    "needs no permission, or bring the choice to the owner with `sprint ask`, marking the question "
+    "`owner_only`.")
 OWNER_REFUSED_TEXT = (
     "The owner refused this command on the console: do the step another way, or bring the "
     "choice to the owner with `sprint ask`, marking the question `owner_only`.")
@@ -114,6 +139,7 @@ class Prompt:
     description: str | None
     at: str
     state: str
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +151,7 @@ class AskRequest:
     command: str | None
     description: str | None
     prompt: int | None
+    nonce: str | None = None
 
 
 def _number(value: object) -> bool:
@@ -186,8 +213,19 @@ def prompts(events: Iterable[Event], state: Mapping[int, Prompt] | None = None) 
                 continue
             prompt = folded.get(payload["prompt"]) if _number(payload["prompt"]) else None
             if prompt is not None and prompt.state == OPEN:
-                folded[prompt.prompt_id] = replace(prompt, state=CLOSED)
+                folded[prompt.prompt_id] = replace(prompt, state=CLOSED, reason=payload["reason"])
     return folded
+
+
+def wire_state(prompt: Prompt) -> str:
+    """The state the hook is told: a prompt the console closed reads `ENDED`, not `CLOSED`."""
+    return ENDED if prompt.state == CLOSED and prompt.reason == ENDED else prompt.state
+
+
+def proof(secret: str, sprint_id: str, nonce: str) -> str:
+    """The console's proof that it holds the sprint's secret, for the hook's `nonce` (see the module docstring)."""
+    return hmac.new(secret.encode(), f"prompt-proof\0{sprint_id}\0{nonce}".encode(),
+                    hashlib.sha256).hexdigest()
 
 
 def active(sprint: SprintState) -> bool:
@@ -260,6 +298,13 @@ def _decoded(body: bytes) -> dict:
 def parse_ask(body: bytes) -> AskRequest:
     value = _decoded(body)
     phase = value.get("phase")
+    if phase == "prove":
+        if set(value) != {"sprint_id", "phase", "nonce"}:
+            raise ValueError("the body must be an object of exactly nonce, phase, sprint_id")
+        nonce = value["nonce"]
+        if not _text(value["sprint_id"]) or not isinstance(nonce, str) or NONCE.fullmatch(nonce) is None:
+            raise ValueError("sprint_id must be a non-empty string and nonce 32 lowercase hexadecimal characters")
+        return AskRequest(value["sprint_id"], "", "prove", "", None, None, None, nonce)
     keys = {"sprint_id", "secret", "phase", "session_id"}
     if phase == "ask":
         keys |= {"command"}
@@ -268,7 +313,7 @@ def parse_ask(body: bytes) -> AskRequest:
     elif phase in ("wait", "close"):
         keys |= {"prompt"}
     else:
-        raise ValueError("phase must be ask, wait or close")
+        raise ValueError("phase must be ask, wait, close or prove")
     if set(value) != keys:
         raise ValueError(f"the body must be an object of exactly {', '.join(sorted(keys))}")
     if not all(_text(value[key]) for key in ("sprint_id", "secret", "session_id")):

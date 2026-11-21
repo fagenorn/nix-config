@@ -720,6 +720,22 @@ class HookTest(Case):
             {"session_id": SID, "cwd": "/srv/p00", "repo": "/srv/p00", "state": "working",
              "turn_ms": hook + 1000}])
 
+    def test_a_turn_between_the_registrys_wait_and_the_first_poll_clears_the_wait(self):
+        # R3: the registry said waiting two minutes ago, the transcript turn is a minute old and the
+        # first poll is now: the wait is older than the turn, whatever the poll row's own time.
+        now = int(time.time() * 1000)
+        self.projects().mkdir(parents=True)
+        (self.projects() / f"{SID}.jsonl").write_text(self.record("user", now - 60000))
+        support.write_session(
+            self.sessions, pid=os.getpid(), session_id=SID, cwd="/srv/p00", status="waiting",
+            waiting_for="permission prompt", updated_at=now - 120000)
+        svc = self.start(self.ITEMS, session_poll_seconds=3600)
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {SID: "working"})
+        self.assertEqual([row["turn_ms"] for row in self.turn_rows()], [now - 60000])
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {SID: "working"})
+
     def test_a_workflow_agents_wait_clears_from_the_agents_transcript(self):
         svc, hook = self.waiting_on_a_permission()
         agents = self.projects() / SID / "subagents"

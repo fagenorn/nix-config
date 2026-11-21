@@ -1083,12 +1083,17 @@ the allow of that same tool call was judged at most `PERMIT_LANDED_SECONDS` (30 
 otherwise it is False and appends nothing.
 
 Permission card (#1424, `prompt_card`): `POST /api/permission-prompt` is a manager write dispatched beside
-`/api/permit` through `_checked_length(MAX_PROMPT_BYTES)` (65536); its body is `prompt_card.parse_ask`'s, else 400
+`/api/permit` through `_checked_length(MAX_PROMPT_BYTES)` (262144: twelve bytes for each of the
+`prompt_card.MAX_COMMAND_CHARS` characters a command may have, as JSON escapes them, and 65536 more for the
+rest); its body is `prompt_card.parse_ask`'s, else 400
 `bad permission prompt`; a `sprints.SecretRefused` is 403, any other `sprints.Refused` 409, any other
 exception 500 `permission prompt failed`, with one stderr line `console: permission_prompt_refused
 <sprint_id> <reason>` or `console: permission_prompt_failed <Type>: <message>` (no line carries the command
 or the secret). Success is 200 `{"prompt": <int|null>, "state": <str>}`: phase `ask` calls `ask_prompt`, `wait`
-`prompt_state` and `close` `close_prompt`. Each holds the ingest lock for its check, append and fold. `ask_prompt`
+`prompt_state` and `close` `close_prompt`; phase `prove`, the one request with no secret, is 200 `{"proof": <hex>}`
+from `prove_prompt` (an unknown sprint is 409, a sprint with no secret file 403), the HMAC the hook checks before it
+sends the secret to whatever listens on the port (`prompt_card.proof`). The `state` of a prompt the console closed
+(`prompt.closed`, reason `ended`) is `ended`, not `closed` (`prompt_card.wire_state`), so the hook can say why. Each holds the ingest lock for its check, append and fold. `ask_prompt`
 checks the secret first, then answers `(None, prompt_card.REFUSED)` and appends nothing unless the sprint is
 `prompt_card.active` and `session_id` is its manager session; else it appends one `prompt.asked` row, folds it,
 remembers the console's time as the prompt's contact (`_prompt_contact`, memory only), publishes and answers
@@ -2122,7 +2127,9 @@ MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_NOTICE_BYTES = 16384
 MAX_NOTICES_BYTES = 4096
 MAX_PERMIT_BYTES = 16384
-MAX_PROMPT_BYTES = 65536
+# The body is JSON with its default escaping, which writes one character as up to twelve bytes (an
+# astral one is two `\uXXXX` escapes), so a command of `MAX_COMMAND_CHARS` characters needs that many.
+MAX_PROMPT_BYTES = 12 * prompt_card.MAX_COMMAND_CHARS + 65536
 MAX_PROMPT_ANSWER_BYTES = 1024
 PERMIT_LANDED_SECONDS = 30 * 60
 MAX_WITHDRAW_NOTICE_BYTES = 4096
@@ -3282,16 +3289,19 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(400, "bad permission prompt")
         console = self.server.console
         try:
-            if request.phase == "ask":
+            if request.phase == "prove":
+                reply = {"proof": console.prove_prompt(request.sprint_id, request.nonce)}
+            elif request.phase == "ask":
                 prompt, state = console.ask_prompt(
                     request.sprint_id, request.secret, request.session_id, request.command,
                     request.description)
+                reply = {"prompt": prompt, "state": state}
             elif request.phase == "wait":
-                prompt, state = request.prompt, console.prompt_state(
-                    request.sprint_id, request.secret, request.session_id, request.prompt)
+                reply = {"prompt": request.prompt, "state": console.prompt_state(
+                    request.sprint_id, request.secret, request.session_id, request.prompt)}
             else:
-                prompt, state = request.prompt, console.close_prompt(
-                    request.sprint_id, request.secret, request.session_id, request.prompt)
+                reply = {"prompt": request.prompt, "state": console.close_prompt(
+                    request.sprint_id, request.secret, request.session_id, request.prompt)}
         except sprints.SecretRefused:
             print(f"console: permission_prompt_refused {request.sprint_id} {sprints.SECRET_REFUSED}",
                   file=sys.stderr)
@@ -3305,8 +3315,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                   file=sys.stderr)
             return self._refuse(500, "permission prompt failed")
         self._send(200, "application/json", json.dumps(
-            {"prompt": prompt, "state": state}, sort_keys=True,
-            separators=(",", ":")).encode())
+            reply, sort_keys=True, separators=(",", ":")).encode())
 
     def _withdraw_notice_request(self):
         """The manager's route: one open notice of the sprint taken back, with its secret."""
@@ -5290,12 +5299,22 @@ class ConsoleService:
             self._apply([appended])
             return appended.seq, prompt_card.OPEN
 
+    def prove_prompt(self, sprint_id: str, nonce: str) -> str:
+        """The proof that this console holds the sprint's secret, for a hook's `nonce` (the secret is not sent)."""
+        with self._ingest:
+            if sprint_id not in self._sprints:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            expected = sprints.read_secret(self._sprint_secrets, sprint_id)
+            if expected is None:
+                raise sprints.SecretRefused(sprints.SECRET_REFUSED)
+            return prompt_card.proof(expected, sprint_id, nonce)
+
     def prompt_state(self, sprint_id: str, secret: str, session_id: str, prompt_id: int) -> str:
         """The state of a held prompt as its hook's wait reads it; see the module docstring."""
         with self._ingest:
             prompt = self._held_prompt(sprint_id, secret, session_id, prompt_id)
             if prompt.state != prompt_card.OPEN:
-                return prompt.state
+                return prompt_card.wire_state(prompt)
             shown = any(open.prompt_id == prompt_id for open in self._open_prompts())
             self._prompt_contact[prompt_id] = int(self._clock() * 1000)
             if any(open.prompt_id == prompt_id for open in self._open_prompts()):
@@ -5303,7 +5322,7 @@ class ConsoleService:
                     self._publish()
                 return prompt_card.OPEN
             self._apply(self.log.append([prompt_card.closed_row(prompt.project_id, prompt_id, "ended")]))
-            return prompt_card.CLOSED
+            return prompt_card.ENDED
 
     def close_prompt(self, sprint_id: str, secret: str, session_id: str, prompt_id: int) -> str:
         """The hook gives a prompt up: closed, unless the owner's answer was accepted first."""
@@ -5311,7 +5330,7 @@ class ConsoleService:
             prompt = self._held_prompt(sprint_id, secret, session_id, prompt_id)
             self._prompt_contact.pop(prompt_id, None)
             if prompt.state != prompt_card.OPEN:
-                return prompt.state
+                return prompt_card.wire_state(prompt)
             self._apply(self.log.append([prompt_card.closed_row(prompt.project_id, prompt_id, "expired")]))
             return prompt_card.CLOSED
 
@@ -9737,13 +9756,17 @@ class ConsoleService:
             self._publish()
             self._note_choice(self._session_choice(self._profiles))
             waits = sessions.waiting_snapshot(self._sessions)
+            # The registry's own time of a wait it still shows: a session first read late is not newer than it.
+            marks = {sid: seen.updated_ms for sid, seen in observations.items()
+                     if sid in waits and seen.updated_ms is not None
+                     and sessions.registry_state(seen) == self._sessions[sid].state}
             dirs = self._projects_dirs()
         turns = {sid: (seq, turn) for sid, seq in waits.items()
                  if (turn := movement.transcript_turn_ms(dirs, sid)) is not None}
         if not turns:
             return appended
         with self._ingest:
-            moved = self.log.append(sessions.moved_on(self._sessions, turns, project_of))
+            moved = self.log.append(sessions.moved_on(self._sessions, turns, project_of, marks))
             if moved:
                 self._fold(moved)
                 self._publish()

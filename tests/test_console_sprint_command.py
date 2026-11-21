@@ -1492,13 +1492,26 @@ class PromptCommandTest(unittest.TestCase):
     def state(word, prompt=7):
         return {"prompt": prompt, "state": word}
 
-    def run_prompt(self, stdin, replies, times=(0,), env=None):
-        """The exit code, the printed text, the requests `(path, body)` and the sleeps."""
+    def run_prompt(self, stdin, replies, times=(0,), env=None, prover=None):
+        """The exit code, the printed text, the requests `(path, body)` and the sleeps.
+
+        Each request is first answered by the console's proof of the sprint's secret, which `prover`
+        (a function of the proof request's body, else the honest one) may replace; the proof requests
+        are kept in `self.proofs`, the byte lengths of the others in `self.lengths`."""
         sent, slept, out = [], [], StringIO()
         queue, ticks = list(replies), list(times)
+        self.proofs, self.lengths = [], []
+
+        def honest(request):
+            return {"proof": prompt_card.proof("secret", request["sprint_id"], request["nonce"])}
 
         def fake(port, method, path, body=None, headers=None):
-            sent.append((path, json.loads(body)))
+            request = json.loads(body)
+            if request["phase"] == "prove":
+                self.proofs.append(request)
+                return json.dumps((prover or honest)(request))
+            self.lengths.append(len(body))
+            sent.append((path, request))
             reply = queue.pop(0)
             if isinstance(reply, Exception):
                 raise reply
@@ -1599,6 +1612,97 @@ class PromptCommandTest(unittest.TestCase):
             with self.subTest(name):
                 code, out, sent, slept = self.run_prompt(self.hook(), [reply])
                 self.assertEqual((code, out, len(sent), slept), (0, refusal, 1, []))
+
+    def test_the_secret_goes_only_to_a_console_that_proved_it_holds_it(self):
+        # R1: another account's listener on the port must get no secret and have no decision honoured.
+        refusal = prompt_card.hook_output("deny", manager.REFUSAL) + "\n"
+        for name, prover in (("a wrong proof", lambda request: {"proof": "0" * 64}),
+                             ("no proof", lambda request: {"nonsense": 1}),
+                             ("an allow", lambda request: {"prompt": 7, "state": "allowed"})):
+            with self.subTest(name):
+                code, out, sent, slept = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("allowed")], prover=prover)
+                self.assertEqual((code, out, sent, slept), (0, refusal, [], []))
+                self.assertEqual(len(self.proofs), 1)
+                self.assertNotIn("secret", self.proofs[0])
+        with self.subTest("a console that lost its proof mid-hold"):
+            proofs = []
+
+            def later_spoofed(request):
+                proofs.append(request)
+                return ({"proof": "0" * 64} if len(proofs) == 3
+                        else {"proof": prompt_card.proof("secret", request["sprint_id"],
+                                                         request["nonce"])})
+
+            code, out, sent, _ = self.run_prompt(
+                self.hook(), [self.ASKED, self.state("open"), self.state("allowed")],
+                prover=later_spoofed)
+            self.assertEqual((code, out), (0, refusal))
+            self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait"])
+        with self.subTest("fresh nonces"):
+            self.run_prompt(self.hook(), [self.ASKED, self.state("open"), self.state("allowed")])
+            self.assertEqual(len(self.proofs), 3)
+            self.assertEqual(len({request["nonce"] for request in self.proofs}), 3)
+            for request in self.proofs:
+                self.assertEqual(set(request), {"sprint_id", "phase", "nonce"})
+
+    def test_a_reply_naming_another_prompt_decides_nothing(self):
+        # R2: only the prompt the hook asked about may be allowed, refused or closed.
+        code, out, sent, slept = self.run_prompt(
+            self.hook(), [self.ASKED, self.state("allowed", prompt=8), self.state("allowed")])
+        self.assertEqual((code, out), (0, prompt_card.hook_output("allow") + "\n"))
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(slept, [prompt_card.POLL_SECONDS])
+        expired = prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT) + "\n"
+        over = prompt_card.HOLD_SECONDS
+        for name, replies in (
+                ("a wait", [self.ASKED, self.state("refused", prompt=8), self.state("closed")]),
+                ("a close", [self.ASKED, self.state("open"), self.state("allowed", prompt=8)])):
+            with self.subTest(name):
+                code, out, sent, _ = self.run_prompt(self.hook(), replies, times=[0, 0, over])
+                self.assertEqual(out, expired)
+                self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait", "close"])
+
+    def test_a_command_of_the_longest_length_in_any_script_fits_the_requests_limit(self):
+        # R4: json escapes each astral character to twelve bytes, and the console limits the whole body.
+        for text in ("\U0001F600" * 6000, "\U0001F600" * prompt_card.MAX_COMMAND_CHARS,
+                     "\u2028" * prompt_card.MAX_COMMAND_CHARS, "\x00" * prompt_card.MAX_COMMAND_CHARS):
+            with self.subTest(len(text)):
+                code, out, sent, _ = self.run_prompt(
+                    self.hook(tool_input={"command": text, "description": "d" * 4000}),
+                    [self.ASKED, self.state("allowed")])
+                self.assertEqual(out, prompt_card.hook_output("allow") + "\n")
+                self.assertEqual(sent[0][1]["command"], text)
+                self.assertLessEqual(self.lengths[0], service.MAX_PROMPT_BYTES)
+
+    def test_a_closure_the_console_made_is_not_told_as_ten_minutes_unanswered(self):
+        # R7: a stopped sprint or an ended session closes the prompt at once; the manager is told that.
+        ended = prompt_card.hook_output("deny", prompt_card.ENDED_TEXT) + "\n"
+        self.assertNotEqual(prompt_card.ENDED_TEXT, prompt_card.EXPIRED_TEXT)
+        self.assertNotIn("ten minutes", prompt_card.ENDED_TEXT)
+        code, out, sent, _ = self.run_prompt(self.hook(), [self.ASKED, self.state("ended")])
+        self.assertEqual((code, out, len(sent)), (0, ended, 2))
+        code, out, _, _ = self.run_prompt(
+            self.hook(), [self.ASKED, self.state("open"), self.state("ended")],
+            times=[0, 0, prompt_card.HOLD_SECONDS])
+        self.assertEqual(out, ended)
+
+    def test_a_request_to_run_outside_the_sandbox_is_refused_and_no_card_is_raised(self):
+        # C1: Allow once would approve the whole tool input, the exception included.
+        refusal = prompt_card.hook_output("deny", prompt_card.SANDBOX_TEXT) + "\n"
+        for flag in (True, "true", 1, "yes"):
+            with self.subTest(flag):
+                code, out, sent, _ = self.run_prompt(self.hook(tool_input={
+                    "command": "./check.sh", "dangerouslyDisableSandbox": flag}), [])
+                self.assertEqual((code, out, sent), (0, refusal, []))
+                self.assertEqual(self.proofs, [])
+        for flag in (False, None):
+            with self.subTest(flag):
+                code, out, sent, _ = self.run_prompt(self.hook(tool_input={
+                    "command": "./check.sh", "dangerouslyDisableSandbox": flag}),
+                    [self.ASKED, self.state("allowed")])
+                self.assertEqual(out, prompt_card.hook_output("allow") + "\n")
+        self.assertNotIn("terminal", prompt_card.SANDBOX_TEXT.lower())
 
     def test_the_command_starts_in_a_fresh_interpreter(self):
         environment = {k: v for k, v in os.environ.items()

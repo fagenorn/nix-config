@@ -1535,6 +1535,7 @@ function isPermission(item) {
 }
 // A permission card (#1424): a manager's held prompt; the owner always clicks, so neither answer is picked for them.
 const permissionAnswers = new Map();
+let permissionButtons = new Map();
 async function answerPermission(item, answer) {
   const current = permissionAnswers.get(item.key);
   if (current !== undefined && current.phase === "sending") return;
@@ -1572,7 +1573,10 @@ function permissionCard(item) {
   const allow = actionButton("permission-allow btn-primary", "Allow once", () => answerPermission(item, "allow"));
   const refuse = actionButton("permission-refuse btn-quiet", "Refuse", () => answerPermission(item, "refuse"));
   for (const button of [allow, refuse]) {
-    if (sending) button.setAttribute("disabled", "");
+    button.dataset.held = item.key + button.textContent;
+    permissionButtons.set(button.dataset.held, button);
+    // aria-disabled, not disabled: a disabled button cannot keep the focus, and answerPermission guards itself.
+    if (sending) button.setAttribute("aria-disabled", "true");
     markBusy(button, sending);
   }
   const act = el("div", "act");
@@ -5072,6 +5076,9 @@ function drawInbox(view, guest = null) {
     : null;
   // A card the owner focused from a check line is rebuilt by every redraw, so its item key is kept and the replacement card is focused again.
   const heldCard = [...inboxCards].find(([, card]) => card === active);
+  // A permission card's answer button is rebuilt too: its prompt and label find its twin, so Enter never reaches the brief's approve key.
+  const heldAnswer = active?.dataset?.held;
+  permissionButtons = new Map();
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
@@ -5249,6 +5256,8 @@ function drawInbox(view, guest = null) {
     again.setSelectionRange(held.start, held.end);
   } else if (heldCard !== undefined) {
     focusCard(cardOf.get(heldCard[0]));
+  } else if (permissionButtons.has(heldAnswer)) {
+    permissionButtons.get(heldAnswer).focus({ preventScroll: true });
   }
 }
 function momentLine(moment) {

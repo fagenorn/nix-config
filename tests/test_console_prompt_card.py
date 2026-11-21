@@ -212,7 +212,16 @@ class PromptCardTest(unittest.TestCase):
                          prompt_card.AskRequest(SPRINT, "k", "wait", "s-1", None, None, 4))
         self.assertEqual(prompt_card.parse_ask(body(**{**wait, "phase": "close"})).phase, "close")
         self.assertEqual(prompt_card.parse_answer(body(prompt=7, answer="refuse")), (7, "refuse"))
+        prove = dict(sprint_id=SPRINT, phase="prove", nonce="ab" * 16)
+        self.assertEqual(prompt_card.parse_ask(body(**prove)),
+                         prompt_card.AskRequest(SPRINT, "", "prove", "", None, None, None, "ab" * 16))
         refused = [
+            body(**{k: v for k, v in prove.items() if k != "nonce"}),
+            body(**{**prove, "nonce": "x"}),
+            body(**{**prove, "nonce": "AB" * 16}),
+            body(**{**prove, "nonce": 3}),
+            body(**prove, secret="k"),
+            body(**prove, session_id="s-1"),
             json.dumps(ask).replace('"command": "ls"', '"command": "ls", "command": "rm"').encode(),
             body(**ask, extra=1),
             body(**{**ask, "command": ""}),
@@ -234,6 +243,26 @@ class PromptCardTest(unittest.TestCase):
                                                                          by="x")):
             with self.subTest(text), self.assertRaises(ValueError):
                 prompt_card.parse_answer(text)
+
+    def test_the_proof_is_a_keyed_digest_of_the_sprint_and_the_nonce(self):
+        import hashlib
+        import hmac
+        nonce = "ab" * 16
+        expected = hmac.new(b"k", f"prompt-proof\0{SPRINT}\0{nonce}".encode(),
+                            hashlib.sha256).hexdigest()
+        self.assertEqual(prompt_card.proof("k", SPRINT, nonce), expected)
+        self.assertNotEqual(prompt_card.proof("j", SPRINT, nonce), expected)
+        self.assertNotEqual(prompt_card.proof("k", "1" * 16, nonce), expected)
+        self.assertNotEqual(prompt_card.proof("k", SPRINT, "cd" * 16), expected)
+
+    def test_a_close_keeps_its_reason_in_the_fold(self):
+        events = [asked(1), closed(2, 1, "ended"), asked(3), closed(4, 3, "expired")]
+        folded = prompt_card.prompts(events)
+        self.assertEqual([(p.state, p.reason) for p in folded.values()],
+                         [(prompt_card.CLOSED, "ended"), (prompt_card.CLOSED, "expired")])
+        self.assertEqual(prompt_card.wire_state(folded[1]), prompt_card.ENDED)
+        self.assertEqual(prompt_card.wire_state(folded[3]), prompt_card.CLOSED)
+        self.assertEqual(prompt_card.wire_state(prompt_card.prompts([asked(5)])[5]), prompt_card.OPEN)
 
     def test_the_hook_output_is_the_clients_permission_decision(self):
         self.assertEqual(json.loads(prompt_card.hook_output("allow")),

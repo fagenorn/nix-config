@@ -25,6 +25,10 @@ ADR-console-021 refuses every permission prompt of a manager's session with one 
 
 **D8. The view counts open cards only.** A session's waiting state counts nothing for the owner, and a waiting state clears when the session's own or its agents' transcripts hold a turn after it.
 
+**D9. The hook proves the console before it sends the secret.** Another local account may own the loopback port while the console restarts. Before the ask and each wait or close the hook sends a nonce with no secret and sends the secret only when the reply is the HMAC of the nonce under the sprint's secret, so such a process gets no secret and has no decision honoured. A reply counts only for the prompt asked.
+
+**D10. A request to leave the sandbox is refused, and a closure is told as the console's.** Allow once approves the whole tool input while the card shows only the command, so a prompt that asks to run outside the sandbox is refused at once. A prompt the console closed (a stopped sprint, an ended session) reaches the hook as `ended`, not as ten minutes unanswered.
+
 ## Consequences
 
 - A manager's turn waits up to ten minutes on an unanswered card; unanswered, the prompt is refused with its own sentence and the manager goes on.

@@ -183,7 +183,9 @@ class PageTest(unittest.TestCase):
         # Raised from 70 KB by #1272: the thread delete control, the credential refusal's draft cleanup in both
         # editors and the settling of accepted questions after a stream break (about 1 KB compressed) did not fit
         # the 100 bytes the cap had left.
-        self.assertLess(len(gzip.compress(self.data, 9)), 72704)
+        # Raised from 71 KB by #1424: the permission card's answer buttons keep their focus through a redraw and
+        # stay focusable while sending (about 150 bytes compressed, over the 2 the cap had left).
+        self.assertLess(len(gzip.compress(self.data, 9)), 73728)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -11811,7 +11813,9 @@ class PagePermissionCardTest(unittest.TestCase):
                 (card,) = permission_cards(pending)
                 for cls in ("permission-allow", "permission-refuse"):
                     (b,) = of_class(card, "button", cls)
-                    self.assertTrue(b["disabled"])
+                    # aria-disabled, not disabled: a disabled button cannot keep the focus (#1424).
+                    self.assertFalse(b["disabled"])
+                    self.assertEqual(b["aria_disabled"], "true")
                     self.assertEqual(b["busy"], "true")
                 (card,) = permission_cards(failed)
                 (fail,) = of_class(card, "span", "fail")
@@ -11819,7 +11823,40 @@ class PagePermissionCardTest(unittest.TestCase):
                 for cls in ("permission-allow", "permission-refuse"):
                     (b,) = of_class(card, "button", cls)
                     self.assertFalse(b["disabled"])
+                    self.assertIsNone(b["aria_disabled"])
                     self.assertIsNone(b["busy"])
+
+    def test_a_focused_answer_keeps_focus_through_a_frame_and_enter_approves_no_brief(self) -> None:
+        # R6: a streamed frame rebuilds the card and detaches the focused button; focus must come back to its
+        # twin by prompt and answer, not fall to BODY, where Enter reaches the inbox answer keys.
+        begin = {"start": {"focused": False, "clock": NOW_MS}}
+        both = frame([ANSWERABLE, PERMISSION_ITEM])
+        for button in ("permission-allow", "permission-refuse"):
+            with self.subTest(button=button):
+                steps = [begin, {"frame": both}, {"focus_on": button}, {"frame": both}]
+                (kept, pressed, later) = render([*steps, {"snapshot": True}, {"key": "Enter", "follow": True},
+                                                 {"snapshot": True}, {"clock": NOW_MS + 5000},
+                                                 {"snapshot": True}])
+                self.assertEqual(role(kept["active"]), button)
+                self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
+                self.assertEqual(answers(later), [])
+
+    def test_the_focus_returns_to_the_same_prompts_same_answer_only(self) -> None:
+        other = {**PERMISSION_ITEM, "key": "permission/8", "prompt": 8}
+        both = frame([PERMISSION_ITEM, other])
+        steps = [START, {"frame": both}, {"focus_on": "permission-refuse", "nth": 1}, {"frame": both}]
+        (snap,) = render([*steps, {"snapshot": True}])
+        (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"]]
+        self.assertEqual(role(focused["cls"]), "permission-refuse")
+        cards = permission_cards(snap)
+        self.assertEqual([[n["focused"] for n in of_class(c, "button", "permission-refuse")]
+                          for c in cards], [[False], [True]])
+
+    def test_a_focused_answer_keeps_focus_while_it_is_sending(self) -> None:
+        (sending,) = render([
+            START, {"frame": frame([PERMISSION_ITEM])}, {"hold": True},
+            {"focus_on": "permission-refuse"}, {"click": "permission-refuse"}, {"snapshot": True}])
+        self.assertEqual(role(sending["active"]), "permission-refuse")
 
     def test_a_card_no_longer_listed_drops_its_failed_answer(self) -> None:
         (snap,) = render([

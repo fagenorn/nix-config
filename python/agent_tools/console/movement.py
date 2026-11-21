@@ -109,7 +109,7 @@ session's own transcript and in every `.jsonl` anywhere under `<projects>/<slug>
 subagents and workflow agents; a workflow agent's prompt carries the manager's session id while the
 manager's own transcript gains nothing until the `Workflow` call returns), over every slug directory
 of every projects directory, with the same id guard as `session_output_ms`. `system`, `progress` and
-every other type do not count; a line that does not parse, is not an object, or has no tz-aware ISO
+every other type do not count; a line that does not parse (a record nested too deeply included), is not an object, or has no tz-aware ISO
 `timestamp` is skipped, as is an absent or unreadable file; None when no record counts. Each file is
 read incrementally like the held reading (`_TURN_SEEN`, per file identity, through its last complete
 line), so a poll costs what was appended; a file that shrank or was replaced is read again from its
@@ -565,7 +565,7 @@ def _turn_after(newest: int | None, raw: bytes) -> int | None:
         return newest
     try:
         record = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):  # a record nested too deeply to parse is skipped, as any unreadable one
         return newest
     if not isinstance(record, dict) or record.get("type") not in ("user", "assistant"):
         return newest

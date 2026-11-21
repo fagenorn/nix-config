@@ -609,6 +609,21 @@ class MovedOnTest(unittest.TestCase):
                 self.assertEqual(moved_on({"s1": st}, {}, project_of), [])
                 self.assertEqual(moved_on({"s1": st}, {"s1": (0, 2500)}, project_of), [])
 
+    def test_a_turn_after_the_registrys_wait_clears_it_though_the_poll_row_is_newer(self):
+        # R3: the registry said waiting at 10:00 (1000), the transcript turn is 10:01 (2000) and the poll
+        # first read it at 10:02 (3000): the row's own time must not hide the turn.
+        st = SessionState("s1", "/srv/p00", "/srv/p00", "waiting_permission", "n", 1, "t1", None,
+                          None, 3000)
+        rows = moved_on({"s1": st}, {"s1": (1, 2000)}, project_of, {"s1": 1000})
+        self.assertEqual([payload["turn_ms"] for _, _, payload in rows], [2000])
+        self.assertEqual(moved_on({"s1": st}, {"s1": (1, 2000)}, project_of), [])
+        self.assertEqual(moved_on({"s1": st}, {"s1": (1, 1000)}, project_of, {"s1": 1000}), [])
+        later = replace(st, state_ms=500)
+        self.assertEqual(moved_on({"s1": later}, {"s1": (1, 700)}, project_of, {"s1": 1000}),
+                         [(SEEN, project_of("/srv/p00"),
+                           {"session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00",
+                            "state": "working", "turn_ms": 700})])
+
     def test_the_correction_names_no_session_and_no_profile(self):
         st = replace(self.waiting(), profile="work")
         ((kind, project, payload),) = moved_on({"s1": st}, {"s1": (1, 2500)}, project_of)

@@ -456,6 +456,22 @@ class TranscriptTurnTest(unittest.TestCase):
             for none in ("s2", "", "..", ".", "a/b", "s\x001"):
                 self.assertIsNone(transcript_turn_ms([projects], none), none)
 
+    def test_a_record_nested_too_deeply_to_parse_is_skipped_and_the_rest_still_counts(self):
+        # R5: the parser's RecursionError must not abort the poll for every later session.
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            own = projects / "-srv-p00" / "s1.jsonl"
+            own.parent.mkdir(parents=True)
+            deep = '{"type": "user", "timestamp": "x", "n": ' + "[" * 200_000 + "]" * 200_000 + "}\n"
+            own.write_text(stamped("user", self.T1) + deep + stamped("assistant", self.T2))
+            self.assertEqual(transcript_turn_ms([projects], "s1"), self.T2 * 1000)
+            with own.open("a") as handle:
+                handle.write(deep + stamped("user", self.T3))
+            self.assertEqual(transcript_turn_ms([projects], "s1"), self.T3 * 1000)
+            only = projects / "-srv-p00" / "s2.jsonl"
+            only.write_text(deep)
+            self.assertIsNone(transcript_turn_ms([projects], "s2"))
+
     def test_a_replaced_transcript_is_read_again_from_its_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             projects = Path(tmp) / "projects"

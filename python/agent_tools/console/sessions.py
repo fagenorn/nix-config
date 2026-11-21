@@ -56,7 +56,9 @@ transcripts of the sessions `waiting_snapshot` lists, outside its lock, and appe
 row with state `working` and `turn_ms`, carrying no `name` or `profile` so that it never names a
 manager session again. The fold keeps `turn_ms` as `cleared_ms` (any other row keeps the known one),
 and `poll_changes` ignores a registry reading whose `updatedAt` is not newer than the larger of
-`hook_ms` and `cleared_ms`, so an unchanged `waiting` reading never sets the wait again. Why: a
+`hook_ms` and `cleared_ms`, so an unchanged `waiting` reading never sets the wait again. A wait a poll
+first read from the registry is dated by the registry's `updatedAt` while it still shows that wait (`moved_on`'s
+`registry_ms`), not by the poll's row, so a turn between the two clears it. Why: a
 refused prompt sends no hook that moves the state, and a workflow agent's prompt is folded under the
 manager's session id while the manager's own transcript is silent until the call returns.
 
@@ -541,19 +543,26 @@ def moved_on(
     states: Mapping[str, SessionState],
     turns: Mapping[str, tuple[int, int]],
     project_of: Callable[[str | None], str | None],
+    registry_ms: Mapping[str, int] | None = None,
 ) -> list[tuple[str, str | None, dict]]:
     """The `session.seen` rows that put a waiting session back to working (#1424).
 
     `turns` maps a session id to the `last_seq` it was snapshotted at and the time of its newest
     transcript turn. A session is corrected only while it still waits at that `last_seq` and the turn
-    is newer than its wait. The row names no session and no profile.
+    is newer than its wait. The wait began at `state_ms` or, when `registry_ms` holds the registry's
+    `updatedAt` of the same wait, at the earlier of the two: a row the poll wrote when it first read
+    the registry carries the poll's time, which a turn between the wait and that poll must not lose to.
+    The row names no session and no profile.
     """
     changes: list[tuple[str, str | None, dict]] = []
     for session_id in sorted(turns):
         known = states.get(session_id)
         seq, turn = turns[session_id]
         if (known is None or known.state not in _WAITING or known.last_seq != seq
-                or known.state_ms is None or turn <= known.state_ms):
+                or known.state_ms is None):
+            continue
+        waiting_since = min(known.state_ms, (registry_ms or {}).get(session_id, known.state_ms))
+        if turn <= waiting_since:
             continue
         changes.append((SEEN, project_of(known.repo), {
             "session_id": session_id, "cwd": known.cwd, "repo": known.repo,
