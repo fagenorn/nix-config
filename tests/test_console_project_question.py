@@ -2654,7 +2654,7 @@ class QuestionServiceTest(QuestionCase):
         self.assertEqual(event_log.PROJECT_QUESTION_ANSWERED, ANSWERED_KIND)
         self.assertNotIn(ASKED, event_log.KEPT_KINDS)
         self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
-        self.assertEqual(event_log.SCHEMA_VERSION, 12)
+        self.assertEqual(event_log.SCHEMA_VERSION, 13)
 
     def test_the_published_view_shows_the_question_working_then_answered(self):
         held = []

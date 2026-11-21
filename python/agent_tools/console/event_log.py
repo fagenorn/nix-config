@@ -42,6 +42,10 @@ Two kinds record a manager's notices (#1117): `NOTICE_POSTED` (`notice.posted`) 
 an open notice and a withdrawal is never lost (ADR-console-044). `NOTICE_NUDGED` (`notice.nudged`,
 #1120) records the one nudge an owner's notice cost a manager; it is not kept; the sprint fold reads only its `permission` member (ADR-console-060).
 
+Two kinds record a manager's live faults (#1432): `FAULT_DECLARED` (`fault.declared`) and
+`FAULT_WITHDRAWN` (`fault.withdrawn`), both in `KEPT_KINDS` like the notice rows, so the retention
+pass never drops an open declaration and a withdrawal is never lost (ADR-console-099).
+
 Three more kinds are kept (#892): `SPRINT_CLOSED` (`sprint.closed`), `SPRINT_STOP_REQUESTED`
 (`sprint.stop_requested`) and `MANAGER_STOPPED` (`manager.stopped`). `manager.stopped` is kept
 because it alone ends a stop and a withdrawal's pending stop, and retention runs before the fold at
@@ -197,8 +201,8 @@ and writes nothing. A payload is stored as canonical JSON (sorted keys, compact
 separators, non-ASCII kept, NaN refused), serialised before the transaction
 begins.
 
-`PRAGMA user_version` is `SCHEMA_VERSION` (12) once opened: version 0 is created
-as schema 12, versions 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 11 are migrated to 12 in one transaction each and
+`PRAGMA user_version` is `SCHEMA_VERSION` (13) once opened: version 0 is created
+as schema 13, versions 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 are migrated to 13 in one transaction each and
 keep every row, and a file at any other version raises `EventLogError` and is not
 modified. The parent directory is created with mode 0700. The connection
 is shared across threads and every use of it holds one lock.
@@ -213,7 +217,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 LOGIN_MAX = 254
 _LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 RETENTION = timedelta(days=90)
@@ -243,6 +247,8 @@ LOOK_RECORDED = "look.recorded"
 NOTICE_POSTED = "notice.posted"
 NOTICE_WITHDRAWN = "notice.withdrawn"
 NOTICE_NUDGED = "notice.nudged"
+FAULT_DECLARED = "fault.declared"
+FAULT_WITHDRAWN = "fault.withdrawn"
 PROJECT_QUESTION_ASKED = "project_question.asked"
 PROJECT_QUESTION_KEYED = "project_question.keyed"
 PROJECT_QUESTION_ANSWERED = "project_question.answered"
@@ -288,8 +294,8 @@ SHARING_REMOVED = "sharing.removed"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # kind, the three message kinds, the three question kinds, the look record, the two notice kinds,
 # the closing kind, the stop request and the stop's completion, and the record of a deleted
-# question thread) are never removed: not by the retention pass, not by a raw connection (the
-# delete trigger of schema 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12).
+# question thread, and the two live-fault kinds) are never removed: not by the retention pass, not
+# by a raw connection (the delete trigger of schema 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 and 13).
 # `SPRINT_NUDGED` and `MANAGER_STOP_FAILED` are not among them, nor is any manager kind other
 # than `MANAGER_STOPPED` (`MANAGER_STARTED`, `MANAGER_FAILED`, `MANAGER_WAITING`,
 # `MANAGER_WOKEN`, `MANAGER_STALLED`, `MANAGER_NUDGED`, `MANAGER_NO_PROGRESS`), nor is
@@ -301,7 +307,8 @@ KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN, LOOK_RECORDED,
                         NOTICE_POSTED, NOTICE_WITHDRAWN,
                         SPRINT_CLOSED, SPRINT_STOP_REQUESTED, MANAGER_STOPPED,
-                        PROJECT_QUESTION_DELETED})
+                        PROJECT_QUESTION_DELETED,
+                        FAULT_DECLARED, FAULT_WITHDRAWN})
 
 _APPEND_ONLY = "the console event log is append-only"
 
@@ -341,13 +348,14 @@ _RETENTION = (
         BEGIN SELECT RAISE(ABORT, '{_RETENTION_ONLY_FORWARD}'); END""",
 )
 
-# What schemas 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 add to schema 2: the delete trigger also refuses
+# What schemas 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 and 13 add to schema 2: the delete trigger also refuses
 # every row of a kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind
 # needs no hand-edited SQL, only a re-run on an existing store (schema 4 added the
 # brief kinds, schema 5 the report kind, schema 6 the message kinds, schema 7 the closing kinds
 # and the stop's completion, schema 8 the question kinds, schema 9 the question withdrawal,
 # schema 10 the notice kinds, schema 11 the look record, schema 12 the deletion record and one exception:
-# an asked or answered question row is deletable when a later deletion record of its project names it).
+# an asked or answered question row is deletable when a later deletion record of its project names it,
+# schema 13 the two live-fault kinds).
 _KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
                            for kind in sorted(KEPT_KINDS))
 _QUESTION_NAMED = f"""OLD.kind IN ('{PROJECT_QUESTION_ASKED}', '{PROJECT_QUESTION_ANSWERED}')
@@ -447,7 +455,7 @@ class EventLog:
             return
         if version == 1:
             self._transaction(self._migrate_from_1)
-        elif version in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
+        elif version in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
             self._transaction(self._migrate_from_2)
         elif version == 0:
             self._transaction(self._create_schema)

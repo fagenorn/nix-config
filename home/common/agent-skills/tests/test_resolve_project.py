@@ -34,7 +34,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.project_contract import resolve_project
+from agent_tools.project_contract import adopt_apply, resolve_project
 
 from ._inprocess_cli import run_module
 
@@ -324,6 +324,31 @@ def schema_one(contract: dict) -> dict:
     out["capabilities"][RETIRED_MEMBER] = {"support": "unsupported"}
     out["platform"] = {"min_inclusive": "1.0.0", "max_exclusive": "2.0.0"}
     return out
+
+
+class CoAuthorMemberTest(unittest.TestCase):
+    SCOPE = ("python/agent_tools", "home/common/agent-skills/skills", "home/common/agent-guidance",
+             "home/common/claude-code")
+
+    def test_only_the_resolver_names_the_co_author_member(self):
+        found = []
+        for scope in self.SCOPE:
+            top = REPO_ROOT / scope
+            self.assertTrue(top.is_dir(), scope)
+            for directory, names, files in os.walk(top, followlinks=False):
+                names[:] = [n for n in names if n != "__pycache__"]
+                for name in files:
+                    path = Path(directory) / name
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    if b"co_authored_by" in path.read_bytes():
+                        found.append(path.relative_to(REPO_ROOT).as_posix())
+        self.assertEqual(sorted(found), ["python/agent_tools/project_contract/resolve_project.py"])
+
+    def test_the_retired_member_is_written_false_and_is_a_schema_two_commit_member(self):
+        self.assertEqual(dict(resolve_project.RETIRED_COMMIT_MEMBERS), {"co_authored_by": False})
+        self.assertLessEqual(set(resolve_project.RETIRED_COMMIT_MEMBERS),
+                             set(resolve_project.COMMIT_MEMBERS))
 
 
 class SchemaTwoFixtureTest(unittest.TestCase):
@@ -1062,6 +1087,35 @@ class CommittedContractTest(ResolverTestCase):
         })
         self.assertNotIn("deploy", snapshot["bindings"])
         self.assertNotIn("deploy", snapshot["capabilities"])
+
+    def test_the_repositorys_own_contract_runs_its_commit_through_the_devenv_shell(self):
+        # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        self.assertEqual(snapshot["bindings"]["vcs"]["commit"], {
+            "co_authored_by": False,
+            "signed": True,
+            "environment": "commit-environment",
+        })
+        self.assertEqual(snapshot["bindings"]["commands"]["commit-environment"], {
+            "argv": ["devenv", "shell", "--"],
+            "cwd": str(REPO_ROOT),
+            "env": [],
+        })
+        self.assertNotIn("commit-environment", snapshot["bindings"]["workflow"]["verification"])
+
+    def test_adoption_apply_resolves_the_repositorys_commit_environment(self):
+        # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        environment = adopt_apply.commit_environment(snapshot, REPO_ROOT)
+        self.assertEqual(environment, {
+            "id": "commit-environment",
+            "argv": ["devenv", "shell", "--"],
+            "cwd": str(REPO_ROOT.resolve()),
+        })
 
 
 def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, str]:
@@ -1938,6 +1992,14 @@ class DriftGateTest(ResolverTestCase):
                          "available")
         self.assertEqual(snapshot["bindings"]["paths"]["context"],
                          [str(REPO_ROOT / "docs/CONTEXT-MAP.md")])
+
+    def test_the_repository_snapshot_reports_no_co_author_lines(self):
+        # P11: this reads this repository's own live contract, not the pinned fixture.
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        self.assertIs(
+            json.loads(out)["bindings"]["vcs"]["commit"]["co_authored_by"], False)
 
     def test_the_repository_check_projections_is_clean(self):
         code, out, err = run("check-projections", "--repo-root", str(REPO_ROOT),

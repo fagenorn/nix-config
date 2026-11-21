@@ -111,6 +111,51 @@ def runner_triples_apply(root: Path) -> str:
     return f"c: u: ({recipe_apply(root)}) c.services.github-runners"
 
 
+# What each host installs of the flake's platform package, read from the definitions of `home.file`
+# (the host's own option, found through `inputs.self`) and not from the merged `home.file`: merging
+# forces an import-from-derivation (catppuccin's starship definition) that a pure evaluation, and a
+# Linux machine evaluating a darwin host, cannot do. Each entry is resolved the way home-manager
+# resolves it (`enable` drops it, `target` defaults to the attribute name, `recursive` defaults to
+# false, an absolute `target` under the home directory loses that prefix); a field or entry wrapped by `mkIf`/`mkForce` reads as `<kind>`, so it never equals a plain link.
+AGENT_PLATFORM = """c: u: let
+  system = c.nixpkgs.hostPlatform.system;
+  inputs = c.home-manager.extraSpecialArgs.inputs;
+  package = inputs.self.packages.${system}.agent-platform;
+  commands = builtins.attrNames package.launchers;
+  mine = builtins.filter (s: s.config.networking.hostName == c.networking.hostName)
+    (builtins.attrValues inputs.self.darwinConfigurations ++ builtins.attrValues inputs.self.nixosConfigurations);
+  definitions = (builtins.head mine).options.home-manager.users.valueMeta.attrs.${u.home.username}.configuration.options.home.file.definitionsWithLocations;
+  wrapped = v: builtins.isAttrs v && v ? _type;
+  home = "${u.home.homeDirectory}/";
+  relative = t: if builtins.isString t && builtins.substring 0 (builtins.stringLength home) t == home
+    then builtins.substring (builtins.stringLength home) (builtins.stringLength t) t else t;
+  field = e: name: default: if !(e ? ${name}) then default else if wrapped e.${name} then "<${e.${name}._type}>" else e.${name};
+  entries = builtins.concatMap (d: map (n: let e = d.value.${n}; in
+    if wrapped e then { name = n; target = n; enable = "<${e._type}>"; recursive = null; source = "<${e._type}>"; }
+    else {
+      name = n;
+      target = relative (field e "target" n);
+      enable = field e "enable" true;
+      recursive = field e "recursive" false;
+      source = if e ? source && !(wrapped e.source) then "${e.source}" else null;
+    }) (builtins.attrNames d.value)) definitions;
+  under = p: n: builtins.substring 0 (builtins.stringLength p) n == p;
+  installed = builtins.filter (e: e.enable != false && (e.target == ".agents" || under ".agents/" e.target)) entries;
+  reachesBin = t: t == ".agents" || t == ".agents/bin" || under ".agents/bin/" t;
+  at = path: let m = builtins.filter (e: e.target == path) installed;
+    in if builtins.length m == 1 then builtins.removeAttrs (builtins.head m) [ "name" ] else m;
+in {
+  package = "${package}";
+  inherit commands;
+  launchers = builtins.mapAttrs (_: l: "${l}") package.launchers;
+  bin = builtins.listToAttrs (map (n: { name = n; value = at ".agents/bin/${n}"; }) commands);
+  binEntries = map (e: e.target) (builtins.filter (e: reachesBin e.target) installed);
+  standards = at ".agents/standards";
+  manifest = at ".agents/share/platform-manifest.json";
+  python = "${package.python}";
+  channelPython = "${(if system == "aarch64-darwin" then inputs.nixpkgs-darwin else inputs.nixpkgs).legacyPackages.${system}.python3}";
+}"""
+
 PARTS: dict[str, Part] = {
     "verify-pending": Part("""c: u: {
           command = u.verifyPending.command;
@@ -149,6 +194,7 @@ PARTS: dict[str, Part] = {
         }""", DARWIN_HOSTS, needs="darwin-machine"),
     "console": Part("""c: u: {
       command = u.agentConsole.command;
+      launcher = "${c.home-manager.extraSpecialArgs.inputs.self.packages.${c.nixpkgs.hostPlatform.system}.agent-platform.launchers.console}";
       home = u.home.homeDirectory;
       path = u.agentConsole.path;
       gh = "${u.programs.gh.package}";
@@ -161,6 +207,7 @@ PARTS: dict[str, Part] = {
     }""", ("anis-desktop",), needs="x86_64-linux-builder"),
     "console-darwin": Part("""c: u: {
       command = u.agentConsole.command;
+      launcher = "${c.home-manager.extraSpecialArgs.inputs.self.packages.${c.nixpkgs.hostPlatform.system}.agent-platform.launchers.console}";
       path = u.agentConsole.path;
       home = u.home.homeDirectory;
       tailscaleClient = if c.services.tailscale.enable then "${c.services.tailscale.package}/bin/tailscale" else null;
@@ -233,6 +280,7 @@ PARTS: dict[str, Part] = {
       null;
 }""", DARWIN_HOSTS),
     "runner-triples": Part(runner_triples_apply, DARWIN_HOSTS),
+    "agent-platform": Part(AGENT_PLATFORM, ALL_HOSTS),
 }
 
 

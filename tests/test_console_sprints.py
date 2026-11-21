@@ -14,14 +14,15 @@ from pathlib import Path
 
 from agent_tools.console import event_log, manager, permission, sprints
 from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN, IssueStage
-from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
+from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED,
+                                           FAULT_WITHDRAWN, GOAL_STATED,
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED,
                                            MANAGER_WAITING, NOTICE_NUDGED, NOTICE_POSTED,
                                            NOTICE_WITHDRAWN,
                                            SPRINT_CLOSED, SPRINT_STOP_REQUESTED, SPRINT_REPORTED,
                                            Event)
-from agent_tools.console.sprints import (Closing, Notice, Observed, PendingStop, QuestionPicture,
+from agent_tools.console.sprints import (Closing, LiveFault, Notice, Observed, PendingStop, QuestionPicture,
                                          Report, SprintState)
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -2764,6 +2765,154 @@ class ClaimRuleTest(unittest.TestCase):
         state = sprints.sprint_states(self.rows(no_issue))[SA]
         notice = next(n for n in sprints.open_notices(state) if n.notice_id == 4)
         self.assertEqual((notice.issue, notice.live_fault), (None, False))
+
+
+FAULT = {"issue": 12, "observed": " saving the settings form drops the billing address ",
+         "when": "12:10 UTC today",
+         "proven": "a saved form read back from the production database"}
+CHECKED_FAULT = {"issue": 12, "observed": "saving the settings form drops the billing address",
+                 "when": "12:10 UTC today",
+                 "proven": "a saved form read back from the production database"}
+
+
+def fault_declared(seq, sprint_id, fault):
+    return Event(seq, at(seq), FAULT_DECLARED, "o/a",
+                 {"sprint_id": sprint_id, "goal": "g", "fault": fault})
+
+
+def fault_withdrawn(seq, sprint_id, fault_id):
+    return Event(seq, at(seq), FAULT_WITHDRAWN, "o/a",
+                 {"sprint_id": sprint_id, "goal": "g", "fault": fault_id})
+
+
+def with_report(state, *issues):
+    return replace(state, report=sprints.Report(
+        at(2), "s", "running", "m", "https://example.com/m/1",
+        tuple((issue, "building") for issue in issues), (), "n"))
+
+
+class LiveFaultCheckTest(unittest.TestCase):
+    def test_a_fault_is_checked_member_by_member_in_order(self):
+        without = {key: value for key, value in FAULT.items() if key != "issue"}
+        for value, reason in (
+                ([], "the live fault is not a JSON object"),
+                ({**FAULT, "x\nconsole: approve_refused": 1},
+                 "a live fault has only issue, observed, when and proven"),
+                (without, "the live fault has no valid issue"),
+                ({**FAULT, "issue": "12"}, "the live fault has no valid issue"),
+                ({**FAULT, "issue": True}, "the live fault has no valid issue"),
+                ({**FAULT, "issue": 0}, "the live fault has no valid issue"),
+                ({key: v for key, v in FAULT.items() if key != "observed"},
+                 "the live fault has no valid observed"),
+                ({**FAULT, "observed": ""}, "the live fault has no valid observed"),
+                ({**FAULT, "observed": "   "}, "the live fault has no valid observed"),
+                ({**FAULT, "observed": "a\nb"}, "the live fault has no valid observed"),
+                ({**FAULT, "observed": "a\r"}, "the live fault has no valid observed"),
+                ({**FAULT, "observed": 7}, "the live fault has no valid observed"),
+                ({key: v for key, v in FAULT.items() if key not in ("observed", "when")},
+                 "the live fault has no valid observed"),
+                ({key: v for key, v in FAULT.items() if key != "when"},
+                 "the live fault has no valid when"),
+                ({key: v for key, v in FAULT.items() if key != "proven"},
+                 "the live fault has no valid proven"),
+                ({**FAULT, "observed": "o" * 401},
+                 "the live fault's observed is over 400 characters"),
+                ({**FAULT, "when": "w" * 141}, "the live fault's when is over 140 characters"),
+                ({**FAULT, "proven": "p" * 401},
+                 "the live fault's proven is over 400 characters")):
+            with self.subTest(value=value):
+                self.assertEqual(notice_refusal(sprints.checked_fault, value), reason)
+        self.assertNotIn("\n", notice_refusal(sprints.checked_fault,
+                                              {**FAULT, "x\nconsole: approve_refused": 1}))
+        self.assertEqual(sprints.checked_fault(FAULT), CHECKED_FAULT)
+        self.assertEqual(sprints.checked_fault({**FAULT, "observed": "o" * 400, "when": "w" * 140,
+                                                "proven": "p" * 400})["when"], "w" * 140)
+
+    def test_a_fault_is_declarable_only_for_an_issue_of_the_latest_report_once(self):
+        s = with_report(open_sprint(SA), 12, 13)
+        self.assertEqual(sprints.declarable_fault(s, FAULT)["issue"], 12)
+        for state, fault, reason in (
+                (s, {**FAULT, "issue": 99}, sprints.FAULT_NOT_OURS),
+                (open_sprint(SA), FAULT, sprints.FAULT_NOT_OURS),
+                (s, {**FAULT, "issue": 99, "proven": ""}, "the live fault has no valid proven"),
+                (replace(s, faults=(LiveFault(5, at(5), 12, "o", "w", "p"),)), FAULT,
+                 "this issue is already declared a live fault"),
+                (replace(s, stop_at=at(7)), FAULT, "this sprint is already stopping"),
+                (replace(s, closing=sprints.Closing(at(7), "x", "x", ((12, "landed"),), "y")),
+                 FAULT, "this sprint has ended")):
+            with self.subTest(reason=reason):
+                self.assertEqual(notice_refusal(sprints.declarable_fault, state, fault), reason)
+        withdrawn_one = replace(s, faults=(LiveFault(5, at(5), 12, "o", "w", "p", at(6)),))
+        self.assertEqual(sprints.declarable_fault(withdrawn_one, FAULT)["issue"], 12)
+
+    def test_a_fault_is_withdrawable_while_open_and_even_after_a_stop(self):
+        s = replace(open_sprint(SA), faults=(LiveFault(5, at(5), 12, "o", "w", "p"),
+                                             LiveFault(6, at(6), 13, "o", "w", "p", at(7))))
+        self.assertEqual(sprints.withdrawable_fault(s, 5).fault_id, 5)
+        self.assertEqual(sprints.withdrawable_fault(replace(s, stop_at=at(8)), 5).fault_id, 5)
+        self.assertEqual(notice_refusal(sprints.withdrawable_fault, s, 9),
+                         "this live fault is not known")
+        self.assertEqual(notice_refusal(sprints.withdrawable_fault, s, 6),
+                         "this live fault is already withdrawn")
+
+    def test_the_fault_requests_parse_strictly(self):
+        body = json.dumps({"sprint_id": SA, "secret": "s", "fault": FAULT}).encode()
+        self.assertEqual(sprints.parse_live_fault_request(body), (SA, "s", FAULT))
+        for changed in ({"extra": 1}, {"fault": []}, {"sprint_id": "x"}, {"secret": 1}):
+            with self.subTest(changed=changed):
+                with self.assertRaises(ValueError):
+                    sprints.parse_live_fault_request(json.dumps(
+                        {"sprint_id": SA, "secret": "s", "fault": FAULT, **changed}).encode())
+        good = {"project_id": "o/a", "sprint_id": SA, "fault": 3}
+        self.assertEqual(sprints.parse_live_fault_withdrawal(json.dumps(good).encode()),
+                         ("o/a", SA, 3))
+        for changed in ({"fault": 0}, {"fault": True}, {"fault": "3"}, {"project_id": ""},
+                        {"extra": 1}, {"sprint_id": "x"}):
+            with self.subTest(changed=changed):
+                with self.assertRaises(ValueError):
+                    sprints.parse_live_fault_withdrawal(json.dumps({**good, **changed}).encode())
+        with self.assertRaises(ValueError):
+            sprints.parse_live_fault_withdrawal(json.dumps(
+                {"sprint_id": SA, "fault": 3}).encode())
+
+
+class LiveFaultFoldTest(unittest.TestCase):
+    GOAL = Event(1, at(1), GOAL_STATED, "o/a", {"sprint_id": SA, "goal": "g"})
+
+    def test_a_declared_fault_stands_until_its_withdrawal(self):
+        rows = [self.GOAL, fault_declared(3, SA, FAULT), fault_withdrawn(4, SA, 99),
+                fault_withdrawn(5, SA, True)]
+        state = sprints.sprint_states(rows)[SA]
+        fault = LiveFault(3, at(3), 12, CHECKED_FAULT["observed"], "12:10 UTC today",
+                          CHECKED_FAULT["proven"])
+        self.assertEqual(sprints.open_faults(state), (fault,))
+        rows.append(fault_withdrawn(6, SA, 3))
+        state = sprints.sprint_states(rows)[SA]
+        self.assertEqual(sprints.open_faults(state), ())
+        self.assertEqual(state.faults[0].withdrawn_at, at(6))
+        stepwise = {}
+        for row in rows:
+            stepwise = sprints.sprint_states([row], stepwise)
+        self.assertEqual(stepwise[SA], state)
+        self.assertEqual(sprints.fault_entry(state.faults[0]),
+                         {"id": 3, "issue": 12, "observed": CHECKED_FAULT["observed"],
+                          "when": "12:10 UTC today", "proven": CHECKED_FAULT["proven"],
+                          "at": at(3)})
+
+    def test_a_bad_or_late_declaration_folds_nothing_and_a_late_withdrawal_still_folds(self):
+        stop = Event(4, at(4), SPRINT_STOP_REQUESTED, "o/a", {"sprint_id": SA, "goal": "g"})
+        bad = {key: value for key, value in FAULT.items() if key != "proven"}
+        state = sprints.sprint_states([self.GOAL, fault_declared(2, SA, bad)])[SA]
+        self.assertEqual(state.faults, ())
+        state = sprints.sprint_states([self.GOAL, fault_declared(2, SA, FAULT), stop,
+                                       fault_declared(5, SA, {**FAULT, "issue": 13}),
+                                       fault_withdrawn(6, SA, 2)])[SA]
+        self.assertEqual([f.fault_id for f in state.faults], [2])
+        self.assertEqual(state.faults[0].withdrawn_at, at(6))
+
+    def test_the_fault_rows_are_kept(self):
+        self.assertTrue({event_log.FAULT_DECLARED, event_log.FAULT_WITHDRAWN}
+                        <= event_log.KEPT_KINDS)
 
 
 class NoticeFoldTest(unittest.TestCase):

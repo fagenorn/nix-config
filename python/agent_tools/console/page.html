@@ -285,6 +285,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .wait { margin-top: 6px; font-size: .84375rem; color: var(--sub0); max-width: 44rem; overflow-wrap: anywhere; }
 .wait a { color: inherit; text-underline-offset: 3px; }
 .sprint-checks .wait { margin: 0; padding: 2px 0; font-size: .8125rem; max-width: none; }
+.sprint-checks .live-fault { margin: 0; padding: 2px 0; font-size: .8125rem; max-width: none; }
+.live-fault-text { color: var(--red); overflow-wrap: anywhere; }
 .notice code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
@@ -548,6 +550,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .cap-extra { display: none; }
   .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
   .sprint-checks .wait { min-height: 44px; }
+  .sprint-checks .live-fault { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -833,7 +836,9 @@ function pipGroup(stage) {
 const withdrawals = new Map();
 const stops = new Map();
 const retries = new Map();
+const faultWithdrawals = new Map();
 const latestSprints = new Map();
+const latestFinished = new Map();
 const tellDrafts = new Map();
 const tells = new Map();
 const tellOpen = new Set();
@@ -1108,8 +1113,10 @@ function drawSprint(item, entry, sprint) {
   if (spendBox !== null) item.appendChild(spendBox);
   const checks = sprint.checks || [];
   const waits = Array.isArray(sprint.waits) ? sprint.waits : [];
-  if (checks.length > 0 || waits.length > 0) {
+  const faults = Array.isArray(sprint.live_faults) ? sprint.live_faults : [];
+  if (faults.length > 0 || checks.length > 0 || waits.length > 0) {
     const list = el("ul", "sprint-checks");
+    liveFaultLines(list, sprint, entry.project_id, () => redrawSprint(sprint.sprint_id));
     for (const check of checks) {
       const line = el("li", "");
       line.appendChild(actionButton("sprint-check btn-quiet btn-bare", ownerWords(check.text), () => openCheckCard(check)));
@@ -1333,6 +1340,57 @@ async function retry(item, entry, sprint) {
   for (const row of document.querySelectorAll("li.sprint")) {
     if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
   }
+}
+function redrawSprint(id) {
+  const latest = latestSprints.get(id);
+  if (latest === undefined) return;
+  for (const row of document.querySelectorAll("li.sprint")) {
+    if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
+  }
+}
+// A sprint's declared live faults as the first lines of a sprint-checks list: the sentence, and for the owner a Withdraw. redraw runs when a withdraw starts and when it ends.
+function liveFaultLines(list, sprint, projectId, redraw) {
+  const faults = Array.isArray(sprint.live_faults) ? sprint.live_faults : [];
+  for (const fault of faults) {
+    const state = faultWithdrawals.get(sprint.sprint_id + "#" + fault.id);
+    const line = el("li", "live-fault");
+    line.appendChild(el("span", "live-fault-text", fault.text));
+    if (!guestDoor) {
+      const sending = state !== undefined && state.phase === "sending";
+      const withdraw = actionButton("live-fault-withdraw btn-quiet", "Withdraw", () => withdrawLiveFault(sprint, projectId, fault, redraw));
+      withdraw.disabled = sending;
+      markBusy(withdraw, sending);
+      line.appendChild(withdraw);
+      if (state !== undefined && state.phase === "failed") line.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
+    }
+    list.appendChild(line);
+  }
+}
+async function withdrawLiveFault(sprint, projectId, fault, redraw) {
+  if (guestDoor) return;
+  const key = sprint.sprint_id + "#" + fault.id;
+  const current = faultWithdrawals.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  faultWithdrawals.set(key, state);
+  redraw();
+  let reason;
+  try {
+    reason = await ownerAnswer(await fetch("/api/live-fault-withdraw", {
+      method: "POST", headers: ownerHeaders(),
+      body: JSON.stringify({ project_id: projectId, sprint_id: sprint.sprint_id, fault: fault.id }),
+    }));
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (faultWithdrawals.get(key) !== state) return;
+  if (reason === null) faultWithdrawals.delete(key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
 }
 const stallPosts = new Map();
 function isStall(item) {
@@ -5272,14 +5330,17 @@ function renderDigest(view) {
 function collectSprints(view) {
   const running = [];
   const ended = [];
+  const endedProjects = new Map();
   for (const entry of view.entries) {
     for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
       const finished = project.finished_sprints;
       const all = (project.sprints || []).concat(
         finished !== null && finished !== undefined && Array.isArray(finished.sprints) ? finished.sprints : []);
       for (const sprint of all) {
-        if (typeof sprint.ended_at === "string") ended.push(sprint);
-        else running.push({ entry: project, sprint });
+        if (typeof sprint.ended_at === "string") {
+          ended.push(sprint);
+          endedProjects.set(sprint.sprint_id, project.project_id);
+        } else running.push({ entry: project, sprint });
       }
     }
   }
@@ -5288,7 +5349,7 @@ function collectSprints(view) {
     if (Number.isFinite(by) && by !== 0) return by;
     return x.sprint_id < y.sprint_id ? -1 : x.sprint_id > y.sprint_id ? 1 : 0;
   });
-  return { running, ended };
+  return { running, ended, endedProjects };
 }
 function workCount(view) {
   const sprints = collectSprints(view).running;
@@ -5327,7 +5388,19 @@ function closingReport(sprint) {
   if (tracker !== null) box.appendChild(tracker);
   return box;
 }
-function finishedLine(sprint) {
+// A finished sprint's fault lines redrawn on the row now on the page, from the latest view: a frame may have replaced the row while a withdraw was pending.
+function redrawFinished(id) {
+  const latest = latestFinished.get(id);
+  if (latest === undefined) return;
+  for (const row of document.querySelectorAll("li.finished-line")) {
+    if (row.dataset.sprintId !== id) continue;
+    const list = Array.from(row.children).find((child) => child.className === "sprint-checks");
+    if (list === undefined) continue;
+    list.replaceChildren();
+    liveFaultLines(list, latest.sprint, latest.projectId, () => redrawFinished(id));
+  }
+}
+function finishedLine(sprint, projectId) {
   const item = el("li", "finished-line");
   item.dataset.sprintId = sprint.sprint_id;
   const fold = el("details");
@@ -5348,16 +5421,22 @@ function finishedLine(sprint) {
   messageLife(messages, sprint, false);
   fold.appendChild(messages);
   item.appendChild(fold);
+  if (Array.isArray(sprint.live_faults) && sprint.live_faults.length > 0) {
+    const faults = el("ul", "sprint-checks");
+    latestFinished.set(sprint.sprint_id, { sprint, projectId });
+    liveFaultLines(faults, sprint, projectId, () => redrawFinished(sprint.sprint_id));
+    item.appendChild(faults);
+  }
   return item;
 }
-function finishedList(ended) {
+function finishedList(ended, endedProjects) {
   const fold = el("details", "finished-list");
   fold.dataset.key = "finished";
   const summary = el("summary", "", "Finished sprints (" + ended.length + ")");
   if (ended.some(hasNewReply)) summary.appendChild(el("span", "message-new", "new reply"));
   fold.appendChild(summary);
   const list = el("ul");
-  for (const sprint of ended) list.appendChild(finishedLine(sprint));
+  for (const sprint of ended) list.appendChild(finishedLine(sprint, endedProjects.get(sprint.sprint_id)));
   fold.appendChild(list);
   return fold;
 }
@@ -5493,7 +5572,7 @@ function drawProjects(view) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
     return;
   }
-  const { running, ended } = collectSprints(view);
+  const { running, ended, endedProjects } = collectSprints(view);
   const list = el("ul");
   list.id = "list";
   const live = new Set();
@@ -5514,8 +5593,14 @@ function drawProjects(view) {
   for (const id of [...withdrawals.keys()]) {
     if (!live.has(id)) withdrawals.delete(id);
   }
+  for (const key of [...faultWithdrawals.keys()]) {
+    if (!live.has(key.split("#")[0])) faultWithdrawals.delete(key);
+  }
   for (const id of [...latestSprints.keys()]) {
     if (!live.has(id)) latestSprints.delete(id);
+  }
+  for (const id of [...latestFinished.keys()]) {
+    if (!live.has(id)) latestFinished.delete(id);
   }
   for (const id of [...tells.keys()]) {
     if (!live.has(id)) tells.delete(id);
@@ -5588,7 +5673,7 @@ function drawProjects(view) {
     }
   }
   section.appendChild(list);
-  if (ended.length > 0) section.appendChild(finishedList(ended));
+  if (ended.length > 0) section.appendChild(finishedList(ended, endedProjects));
   if (heldTell !== null) {
     const again = Array.from(document.querySelectorAll("textarea.tell"))
       .find((area) => area.dataset.tell === heldTell.id);

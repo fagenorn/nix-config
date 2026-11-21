@@ -10,7 +10,8 @@ from agent_tools.console import sprints, service
 
 from . import console_test_support as support
 from .test_console_messages import GOAL_TEXT, PARTS
-from .test_console_reports import CLOSING
+from .test_console_answer import view_of
+from .test_console_reports import CLOSING, REPORT
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -21,12 +22,21 @@ NOTICES = "/api/notices"
 WITHDRAW_NOTICE = "/api/withdraw-notice"
 OWNER_NOTICE = "/api/owner-notice"
 OWNER_WITHDRAW = "/api/owner-notice-withdraw"
+LIVE_FAULT = "/api/live-fault"
+FAULT_WITHDRAW = "/api/live-fault-withdraw"
+REPORT_PATH = "/api/report"
 JSON = {"Content-Type": "application/json"}
 CLAIM = {"kind": "claim", "text": " the page fold ", "what": "python/agent_tools/console/page.html",
          "until": "the board fold lands", "issue": 7}
 HEADS_UP = {"kind": "heads-up", "text": "sprint ask gains a dry run"}
 HAND_OFF = {"kind": "hand-off", "text": "the importer needs a retry", "to": "owner"}
 OTHER_GOAL = "make the exporter resumable"
+FAULT = {"issue": 12, "observed": "saving the settings form drops the billing address",
+         "when": "12:10 UTC today",
+         "proven": "a saved form read back from the production database"}
+FAULT_TEXT = ("Live fault in production on #12: saving the settings form drops the billing "
+              "address, seen 12:10 UTC today, proven by a saved form read back from the "
+              "production database")
 
 
 class NoticeRouteTest(Case):
@@ -500,4 +510,148 @@ class OwnerNoticeRouteTest(Case):
         self.assertTrue(lines[2].startswith("console: owner_notice_withdraw_refused owner/p01 "),
                         lines[2])
         for leaked in (private, self.token()):
+            self.assertNotIn(leaked, output)
+
+
+class LiveFaultRouteTest(Case):
+    """A declared live fault is on its sprint's line and the owner withdraws it (#1432)."""
+
+    def open(self, **kwargs):
+        support.write_registry(self.registry, support.entries(2))
+        return self.start(**kwargs)
+
+    def secret(self, sid):
+        return (self.store.parent / "sprint-secrets" / sid).read_text().removesuffix("\n")
+
+    def approved(self, svc, project_id):
+        sid = svc.state_goal(project_id, GOAL_TEXT)
+        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "brief": PARTS}).encode()
+        self.assertEqual(support.post_page(svc.address, BRIEF, JSON, body)[0], 200)
+        body = json.dumps({"project_id": project_id, "sprint_id": sid, "version": 1}).encode()
+        self.assertEqual(
+            support.post_page(svc.address, APPROVE, self.own(svc, **JSON), body)[0], 204)
+        return sid
+
+    def reported(self, svc, project_id):
+        sid = self.approved(svc, project_id)
+        svc.send_report(sid, self.secret(sid), REPORT)
+        return sid
+
+    def post(self, svc, path, body, **headers):
+        return support.post_page(svc.address, path, {**JSON, **headers},
+                                 json.dumps(body).encode())
+
+    def declare(self, svc, sid, fault=FAULT):
+        status, _, body = self.post(svc, LIVE_FAULT, {
+            "sprint_id": sid, "secret": self.secret(sid), "fault": fault})
+        self.assertEqual(status, 200, body)
+        return json.loads(body)["fault"]
+
+    def withdraw_fault(self, svc, project_id, sid, fault_id, **headers):
+        return self.post(svc, FAULT_WITHDRAW, {
+            "project_id": project_id, "sprint_id": sid, "fault": fault_id},
+            **(headers or self.own(svc)))
+
+    def faults_of(self, svc, sid):
+        for entry in view_of(svc)["entries"]:
+            for project in entry["projects"] if entry["type"] == "quiet_group" else [entry]:
+                shown = project["sprints"] + list(
+                    (project["finished_sprints"] or {"sprints": ()})["sprints"])
+                for sprint in shown:
+                    if sprint["sprint_id"] == sid:
+                        return sprint["live_faults"]
+        self.fail("the sprint is not in the view")
+
+    def sprint_entry(self, svc, sid):
+        for entry in view_of(svc)["entries"]:
+            for project in entry["projects"] if entry["type"] == "quiet_group" else [entry]:
+                for sprint in project["sprints"] + list(
+                        (project["finished_sprints"] or {"sprints": ()})["sprints"]):
+                    if sprint["sprint_id"] == sid:
+                        return sprint
+        self.fail("the sprint is not in the view")
+
+    def rows(self, kind):
+        return [row for row in support.log_rows(self.store) if row[2] == kind]
+
+    def test_a_declared_live_fault_is_on_its_sprints_line_and_the_owners_withdraw_removes_it(self):
+        svc = self.open()
+        a = self.reported(svc, "owner/p01")
+        inbox = view_of(svc)["statement"]["inbox_items"]
+        seq = self.declare(svc, a)
+        (declared,) = self.rows("fault.declared")
+        self.assertEqual(self.faults_of(svc, a), [
+            {"id": seq, **FAULT, "at": declared[1], "text": FAULT_TEXT}])
+        self.assertEqual(view_of(svc)["statement"]["inbox_items"], inbox)
+        status, _, _ = self.withdraw_fault(svc, "owner/p01", a, seq)
+        self.assertEqual(status, 204)
+        (withdrawn,) = self.rows("fault.withdrawn")
+        self.assertEqual(json.loads(withdrawn[4]),
+                         {"sprint_id": a, "goal": GOAL_TEXT, "fault": seq})
+        self.assertEqual(self.faults_of(svc, a), [])
+        self.assertEqual(svc.recap(a, self.secret(a))["live_faults"], [])
+
+    def test_the_withdraw_is_refused_without_the_token_from_another_origin_or_for_what_it_cannot_end(self):
+        svc = self.open()
+        a = self.reported(svc, "owner/p01")
+        seq = self.declare(svc, a)
+        body = {"project_id": "owner/p01", "sprint_id": a, "fault": seq}
+        for headers, body, status, text in (
+                ({"Origin": self.own(svc)["Origin"]}, body, 403, b"token refused\n"),
+                (self.own(svc, Origin="http://evil.test"), body, 403, b"origin refused\n"),
+                (self.own(svc), {**body, "fault": seq + 100}, 409,
+                 b"this live fault is not known\n"),
+                (self.own(svc), {**body, "project_id": "owner/p02"}, 409,
+                 b"this sprint is not open\n"),
+                (self.own(svc), {"project_id": "owner/p01", "sprint_id": a}, 400,
+                 b"bad live fault withdrawal\n")):
+            got = self.assert_unchanged(
+                svc, lambda: self.post(svc, FAULT_WITHDRAW, body, **headers))
+            self.assertEqual((got[0], got[2]), (status, text))
+        self.assertEqual(self.withdraw_fault(svc, "owner/p01", a, seq)[0], 204)
+        got = self.assert_unchanged(svc, lambda: self.withdraw_fault(svc, "owner/p01", a, seq))
+        self.assertEqual((got[0], got[2]), (409, b"this live fault is already withdrawn\n"))
+
+    def test_live_faults_survive_a_restart(self):
+        svc = self.open()
+        a = self.reported(svc, "owner/p01")
+        first = self.declare(svc, a)
+        second = self.declare(svc, a, {**FAULT, "issue": 13})
+        self.assertEqual(self.withdraw_fault(svc, "owner/p01", a, second)[0], 204)
+        svc.close()
+        again = self.start()
+        self.assertEqual([(fault["id"], fault["issue"]) for fault in self.faults_of(again, a)],
+                         [(first, 12)])
+
+    def test_the_owner_withdraws_a_live_fault_after_the_sprint_ends(self):
+        svc = self.open()
+        a = self.reported(svc, "owner/p01")
+        seq = self.declare(svc, a)
+        svc.send_closing(a, self.secret(a), CLOSING)
+        self.assertIsInstance(self.sprint_entry(svc, a)["ended_at"], str)
+        self.assertEqual([fault["id"] for fault in self.faults_of(svc, a)], [seq])
+        self.assertEqual(self.withdraw_fault(svc, "owner/p01", a, seq)[0], 204)
+        self.assertEqual(len(self.rows("fault.withdrawn")), 1)
+        self.assertEqual(self.faults_of(svc, a), [])
+
+    def test_the_live_fault_routes_print_neither_the_secret_nor_the_evidence(self):
+        svc = self.open()
+        a = self.reported(svc, "owner/p01")
+        seq = self.declare(svc, a)
+        secret = self.secret(a)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            got = self.post(svc, LIVE_FAULT, {"sprint_id": a, "secret": secret,
+                                              "fault": {**FAULT, "issue": 99}})
+            self.assertEqual(got[0], 409)
+            got = self.withdraw_fault(svc, "owner/p01", a, seq + 100)
+            self.assertEqual((got[0], got[2]), (409, b"this live fault is not known\n"))
+            got = self.withdraw_fault(svc, "owner/p01\nconsole: forged", a, seq)
+            self.assertEqual((got[0], got[2]), (409, b"this sprint is not open\n"))
+        output = stderr.getvalue()
+        self.assertEqual(output.splitlines(), [
+            f"console: live_fault_refused {a} {sprints.FAULT_NOT_OURS}",
+            f"console: live_fault_withdraw_refused {a} this live fault is not known",
+            f"console: live_fault_withdraw_refused {a} this sprint is not open"])
+        for leaked in (secret, FAULT["observed"], FAULT["proven"], "forged"):
             self.assertNotIn(leaked, output)

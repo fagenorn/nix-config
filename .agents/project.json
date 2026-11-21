@@ -15,8 +15,9 @@
         "prefix": "worktree-"
       },
       "commit": {
-        "co_authored_by": true,
-        "signed": true
+        "co_authored_by": false,
+        "signed": true,
+        "environment": "commit-environment"
       },
       "merge": {
         "strategy": "merge",
@@ -95,6 +96,15 @@
           "--fresh",
           "--reviewer",
           "diff-review"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "commit-environment": {
+        "argv": [
+          "devenv",
+          "shell",
+          "--"
         ],
         "cwd": ".",
         "env": []

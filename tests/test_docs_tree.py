@@ -606,6 +606,21 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("org.nixos.claude-cache-proxy", doc)
         self.assertIn("ownerServices.atBoot", doc)
 
+    def test_the_claude_code_readme_names_the_settings_switch_as_the_one_source_of_attribution(self):
+        path = "home/common/claude-code/README.md"
+        doc = self.doc(path)
+        raw = (REPO_ROOT / path).read_text(encoding="utf-8")
+        self.assertIn("Attribution has one source: the generated settings' `attribution`", doc)
+        self.assertIn("nothing reads the contract's retired co-author member (#1449)", doc)
+        self.assertNotIn("co_authored_by", raw)
+        settings = land_queue_section(raw, "Settings")
+        self.assertIn("Attribution has one source: the generated settings' `attribution`", settings)
+        self.assertIn("`attribution` is the one configuration setting for Claude Code's automatic "
+                      "attribution", re.sub(r"\s+", " ", settings))
+        self.assertIn("The two delivery programs tell their agents separately to omit commit "
+                      "trailers", re.sub(r"\s+", " ", settings))
+        self.assertNotIn("delivery program decides it", doc)
+
     def test_the_owner_port_peer_decision_is_recorded(self):
         path = "docs/areas/console/adr/076-the-owners-port-answers-only-the-owners-own-processes.md"
         adr008 = "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"

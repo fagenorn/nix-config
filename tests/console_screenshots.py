@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-two screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-three screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -15,6 +15,10 @@ Contract:
   which is the before picture (#1347);
   `notice-post-open` is that fold with the owner's post control opened, and shot against a page
   that has no such control it is the same fold, which is how the before pictures are made;
+  `live-fault` is one running sprint with a live fault its manager declared on issue 12 (its
+  `fault.declared` row is seeded as a literal kind, so the module needs nothing the base commit
+  lacks): the sprint line carries the declaration and the owner's Withdraw, and on a base console
+  that ignores the row the same sprint shows neither, which is the before picture (#1432);
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
   lock, served through a stand-in forge reader, with a live delivery run of issue 12 in its `pr`
   step (a run that is not live is no holder of the sprint's), whose run line reads
@@ -152,7 +156,7 @@ Contract:
   picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
   card opens on the plan's own first line and its draft shows nothing.
   `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 104 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 106 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -257,7 +261,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
+          "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
@@ -2252,6 +2256,16 @@ def overlap_card() -> bool:
     return not hasattr(view, "OVERLAP_UNSETTLED_TEXT")
 
 
+LIVE_FAULT_OBSERVED = "saving the settings form drops the billing address"
+LIVE_FAULT_WHEN = "12:10 UTC today"
+LIVE_FAULT_PROVEN = "a saved form read back from the production database"
+
+
+def declares_live_faults() -> bool:
+    """Whether this service lets the owner withdraw a manager's live-fault declaration (a base commit's has no such method)."""
+    return hasattr(ConsoleService, "withdraw_live_fault")
+
+
 def offers_account_changes() -> bool:
     """Whether this service lets an account be signed out alone (a base commit's service has no such method)."""
     return hasattr(ConsoleService, "sign_out_account")
@@ -2405,6 +2419,12 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
                     "recommended": "Add resumable uploads lands first", "owner_only": True}]})
         seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
             "kind": "heads-up", "text": "routes are frozen until Friday"}})
+    elif state == "live-fault":
+        sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE,
+                                report=6 * MINUTE)
+        seed.put(4 * MINUTE, "fault.declared", web, {"sprint_id": sid, "goal": goal, "fault": {
+            "issue": 12, "observed": LIVE_FAULT_OBSERVED, "when": LIVE_FAULT_WHEN,
+            "proven": LIVE_FAULT_PROVEN}})
     elif state in ("ask-box", "ask-goal"):
         seed.put(3 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
             "question_id": "1177a1", "question": ASK_ANSWERED_QUESTION,
@@ -3049,7 +3069,8 @@ JARGON_COUNT = r"""(() => {
   }).length;
   const phrases = document.body.innerText.match(
     /\bon track\b|\bstated (just now|\d)|\bwithdraw|\bnudge|\bstop or\b|would do differently/gi);
-  const owners = Array.from(document.querySelectorAll('#projects button.notice-withdraw')).filter(
+  const owners = Array.from(document.querySelectorAll(
+    '#projects button.notice-withdraw, #projects button.live-fault-withdraw')).filter(
     (button) => button.innerText.trim() === 'Withdraw').length;
   return folds + rows + Math.max(0, (phrases ? phrases.length : 0) - owners);
 })()"""
@@ -3164,6 +3185,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.click('details[data-key^="notices:"] > summary')
             if state == "notice-post-open" and page.query_selector("button.notice-open"):
                 page.click("button.notice-open")
+        if state == "live-fault" and declares_live_faults():
+            for selector in (".sprint-checks .live-fault", ".live-fault-withdraw"):
+                page.wait_for_selector(selector)
         if state in ("goal-open", "goal-near", "goal-over"):
             page.focus("textarea.goal-text")
             page.wait_for_selector(".goal-box")
