@@ -6,13 +6,16 @@ Run: just agent-workflow-tests
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.console import deliveries, event_log, question_records, sprints, view
+from agent_tools.console import (
+    deliveries, event_log, project_question, question_records, sprints, transcript_digest, view)
 from agent_tools.console.event_log import Event
 from agent_tools.console.spend import Tokens
+from agent_tools.console.transcript_digest import PhaseFigures, RunDigest
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -324,7 +327,8 @@ class ProjectRecordsTest(unittest.TestCase):
 
     def test_each_section_reads_alone_by_its_offset_and_limit(self):
         r = records()
-        expected = set(r) - {"project_id", "written_at"}
+        expected = set(r) - {"project_id", "written_at", "transcripts"}
+        self.assertIsNone(r["transcripts"])
         text = question_records.encode(r)
         index = question_records.section_lines(text)
         self.assertEqual(
@@ -354,6 +358,108 @@ class ProjectRecordsTest(unittest.TestCase):
         self.assertEqual(question_records.section_lines('{\n "project_id": "owner/p01"\n}\n'), {})
         self.assertEqual(question_records.section_lines(""), {})
         self.assertEqual(question_records.section_lines("not json"), {})
+
+
+def digest(issues, script, wall, phases, started="2026-11-17T08:00:00+00:00",
+           ended="2026-11-17T09:00:00+00:00") -> RunDigest:
+    return RunDigest(tuple(issues), script, started, ended, wall, {
+        name: PhaseFigures(1, 2, 3, seconds, Tokens(input=tokens, dollars=tokens / 100))
+        for name, (seconds, tokens) in phases.items()})
+
+
+RUN_A = digest((7,), "deliver-standard", 900, {"implement": (600, 150), "plan": (120, 40)})
+RUN_B = digest((7, 8), "deliver-batch", 400, {"plan": (300, 500)},
+               "2026-11-17T10:00:00+00:00", "2026-11-17T11:00:00+00:00")
+
+
+class TranscriptsPartTest(unittest.TestCase):
+    def test_scripts_phases_and_issues_are_counted(self):
+        part = records(transcripts=[RUN_A, RUN_B])["transcripts"]
+        self.assertEqual(set(part), {"note", "first_at", "last_at", "runs", "agents", "scripts",
+                                     "phases", "issues"})
+        self.assertEqual(part["note"], question_records.TRANSCRIPTS_NOTE)
+        self.assertEqual((part["first_at"], part["last_at"], part["runs"], part["agents"]),
+                         ("2026-11-17T08:00:00+00:00", "2026-11-17T11:00:00+00:00", 2, 3))
+        top = part["scripts"][0]
+        self.assertEqual((top["script"], top["runs"], top["seconds"], top["tokens"]),
+                         ("deliver-batch", 1, 400, 500))
+        self.assertEqual([p["phase"] for p in part["phases"]], ["implement", "plan"])
+        self.assertEqual([p["seconds"] for p in part["phases"]], [600, 420])
+        self.assertEqual(part["issues"], [
+            {"issue": 7, "runs": 1, "shared_runs": 1, "seconds": 900, "tokens": 190,
+             "dollars": 1.9, "approximate": False,
+             "phases": {"implement": {"seconds": 600, "tokens": 150, "dollars": 1.5,
+                                      "approximate": False},
+                        "plan": {"seconds": 120, "tokens": 40, "dollars": 0.4,
+                                 "approximate": False}}},
+            {"issue": 8, "runs": 0, "shared_runs": 1, "seconds": 0, "tokens": 0,
+             "dollars": 0.0, "approximate": False, "phases": {}}])
+
+    def test_an_issue_counts_only_runs_that_delivered_it_alone(self):
+        issues = records(transcripts=[RUN_A, RUN_B])["transcripts"]["issues"]
+        self.assertEqual(issues[0]["tokens"], 190)
+        self.assertNotEqual(issues[0]["tokens"], 690)
+
+    def test_without_transcripts_the_part_is_null(self):
+        r = records()
+        self.assertIsNone(r["transcripts"])
+        self.assertEqual(set(r), {"project_id", "written_at", "transcripts", *question_records.SECTIONS})
+
+    def test_the_transcripts_part_has_its_own_lines(self):
+        r = records(transcripts=[RUN_A, RUN_B])
+        text = question_records.encode(r)
+        self.assertNotIn("transcripts", question_records.section_lines(text))
+        index = question_records.section_lines(text, question_records.DEEP_SECTIONS)
+        offset, limit = index["transcripts"]
+        part = "\n".join(text.split("\n")[offset - 1:offset - 1 + limit])
+        self.assertTrue(part.startswith(' "transcripts": '))
+        self.assertEqual(json.loads(part.removeprefix(' "transcripts": ').removesuffix(",")),
+                         r["transcripts"])
+        self.assertEqual(set(index), {*question_records.SECTIONS, "transcripts"})
+
+    def test_run_issues_are_the_projects_own_delivery_rows(self):
+        rows = [seen(1, P, "s-1", "wf_a", [stage(7)]), seen(2, O, "s-0", "wf_a", [stage(9)])]
+        self.assertEqual(question_records.run_issues(rows, P), {"wf_a": (7,)})
+
+    def test_owner_since_is_the_day_after_the_predecessor_left(self):
+        def registry(seq, kind, project, payload):
+            return Event(seq, f"{DAY1}T12:00:00+00:00", kind, project, payload)
+
+        for ending in (registry(101, event_log.PROJECT_UNREGISTERED, "owner/old", {}),
+                       registry(101, "project.registered", "owner/old", {"root": "/srv/elsewhere"})):
+            with self.subTest(ending=ending.kind):
+                events = [registry(100, "project.registered", "owner/old", {"root": P_ROOT})
+                          ] + EVENTS + [ending, Event(102, f"{DAY2}T12:00:00+00:00",
+                                                     "project.registered", P, {"root": P_ROOT})]
+                self.assertEqual(question_records.owner_since(
+                    sorted(events, key=lambda e: e.seq), P, P_ROOT), DAY2)
+        self.assertIsNone(question_records.owner_since(EVENTS, P, P_ROOT))
+
+    def test_a_token_in_a_transcript_never_reaches_the_records(self):
+        token = "ghp_" + "A1b2" * 9
+        run = f"wf_{token}"
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        tree = Path(os.path.realpath(directory)) / "projects"
+        run_dir = tree / "-srv-p01" / f"sid-{token}" / "subagents" / "workflows" / run
+        run_dir.mkdir(parents=True)
+        (run_dir / "journal.jsonl").write_text(json.dumps(
+            {"type": "started", "agentId": "a1", "label": f"impl-{token}", "phase": "Tasks"}) + "\n")
+        line = {"type": "assistant", "sessionId": token, "timestamp": "2026-11-17T08:00:00Z",
+                "cwd": f"{P_ROOT}/{token}",
+                "message": {"id": "m1", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 3},
+                            "content": [{"type": "text", "text": token},
+                                        {"type": "tool_use", "id": "t1", "name": "Read",
+                                         "input": {"p": token}}]}}
+        (run_dir / "agent-a1.jsonl").write_text(json.dumps(line) + "\n")
+        runs = transcript_digest.project_runs(
+            [tree], P, {P_ROOT: P}.get, "2026-11-01", {run: [7]}, repo_of=lambda cwd: P_ROOT)
+        text = question_records.encode(records(transcripts=runs))
+        self.assertNotIn(token, text)
+        self.assertFalse(project_question.credential_shaped(text))
+        part = json.loads(text)["transcripts"]
+        self.assertEqual(part["runs"], 1)
+        self.assertEqual(part["issues"][0]["issue"], 7)
 
 
 if __name__ == "__main__":

@@ -27,7 +27,27 @@ below is a figure merged into its entry.
                       "issues": [{"issue", "stage"}]}],     # newest row first
      "activations": [{"commit", "state", "started_at", "finished_at", "reason", "next_step"}],
      "held_checks": [{"key", "issue", "reason", "kind", "question", "detail", "waiting_since",
-                      "answered", "answered_at", "wait"}]}
+                      "answered", "answered_at", "wait"}],
+     "transcripts": null | {"note": TRANSCRIPTS_NOTE, "first_at", "last_at", "runs", "agents",
+         "scripts": [{"script", "runs", "agents", "messages", "tool_calls", "seconds", tokens...}],
+         "phases":  [{"phase", "agents", "messages", "tool_calls", "seconds", tokens...}],
+         "issues":  [{"issue", "runs", "shared_runs", "seconds", tokens...,
+                      "phases": {<phase>: {"seconds", tokens...}}}]}}
+
+`transcripts` is the optional deep part (#1274): `project_records(..., transcripts=runs)` takes the
+`RunDigest`s `transcript_digest.project_runs` read for the project and `transcripts_part` aggregates
+them; without `transcripts` the key is present and null and every other part is unchanged. The part
+holds counts, seconds and token figures only, never a run id, label, session id, path or transcript
+text. `scripts` are ordered by most tokens then script, `phases` by most seconds then phase and
+`issues` by most seconds then issue. A script's seconds sum its runs' wall seconds, a phase's sum its
+agent-seconds, and an issue's `runs` and figures count only the runs that delivered it alone, its
+`shared_runs` the runs that named it with others (the rule of the spend part).
+
+Transcript window. `owner_since(events, project_id, root)` is None when no earlier owner of `root` left
+it, else the ISO date of the day after that row's UTC date (the same rule the spend part applies: a
+predecessor's last day is never counted); the caller starts the transcript read at the later of that
+date and 30 days ago. `run_issues(events, project_id)` is the run id to sorted issues mapping of the
+project's own delivery rows, the one the spend part and the transcript join share.
 
 Ownership of a path (ADR-console-089 D3). A checkout path can be registered to another project later,
 and the activation rows name a path and the spend view is attributed by today's registry, so neither
@@ -52,7 +72,8 @@ within a project; a run id another project also uses never adds to these figures
 sum only the runs whose issues are exactly that one issue; the runs that named it with others are its
 `shared_runs`. A run's `issues` are the sorted union of the issues the project's delivery rows name
 for that run id under any session, `[]` when none is retained. `spend` is None when the view is None,
-and the rest is still written.
+and the rest is still written. The `transcripts` part holds only what the
+`RunDigest`s it is given hold, which `transcript_digest` read for `project_id` alone.
 
 Deliveries. The rows are walked in `seq` order and parsed by `deliveries.delivery_states`; a row that
 gives no state is skipped. A run is one `(session_id, run_id)`; its state is its last row's, and its
@@ -71,7 +92,8 @@ a tracker `decision` item is not one. `waiting_since` and `answered_at` are the 
 attributes. Ordered by `(waiting_since, key)`.
 
 Sections (ADR-console-090). `SECTIONS` names the five top-level members a session reads alone, in the
-order the prompt lists them. `section_lines(text)` gives, for each of them that `encode` wrote as a
+order the prompt lists them; `DEEP_SECTIONS` adds `transcripts`, which only a deeper question's prompt
+lists. `section_lines(text, names=SECTIONS)` gives, for each of `names` that `encode` wrote as a
 top-level member of `text`, `(offset, limit)` for Read: `offset` is the 1-based number of the line that
 starts the member (exactly one space, then `"<name>": `) and `limit` the lines up to, not including, the
 next top-level member or the closing brace. Lines are counted by `text.split("\n")`, never
@@ -83,8 +105,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Collection, Iterable, Mapping
-from datetime import datetime, timezone
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from agent_tools.console import deliveries, inbox as inbox_module, spend as spend_module, sprints
@@ -92,6 +114,7 @@ from agent_tools.console.event_log import (
     ACTIVATION_FINISHED, ACTIVATION_STARTED, PROJECT_REGISTERED as REGISTERED, PROJECT_UNREGISTERED, Event)
 
 if TYPE_CHECKING:
+    from agent_tools.console.transcript_digest import PhaseFigures, RunDigest
     from agent_tools.console.view import InboxRecord
 
 HELD_PREFIX = "verify-"
@@ -99,6 +122,12 @@ SPEND_NOTE = (
     "Tokens sum input, cache writes, cache reads and output; dollars are estimates at API list "
     "prices. A run's spend counts once, under that run; an issue's tokens count only the runs that "
     "delivered that issue alone, and shared_runs lists the runs that delivered it with other issues.")
+TRANSCRIPTS_NOTE = (
+    "Counts, seconds and token figures read from this project's delivery transcripts; no "
+    "transcript text is included. The window starts at the later of 30 days ago and the day the "
+    "project began to hold its checkout. Seconds of a phase are agent-seconds, those of a run or "
+    "an issue are wall seconds. An issue counts only the runs that delivered it alone; "
+    "shared_runs counts the runs that named it with others.")
 
 
 def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Event | None:
@@ -148,6 +177,23 @@ def _owned_since(rows: Iterable[Event], project_id: str, root: str) -> int:
     return 0
 
 
+def run_issues(events: Iterable[Event], project_id: str) -> dict[str, tuple[int, ...]]:
+    """Each run id to the sorted union of the issues the project's own delivery rows name for it."""
+    found: dict[str, set[int]] = {}
+    for event in sorted(events, key=lambda event: event.seq):
+        if event.kind != deliveries.DELIVERY_SEEN or event.project != project_id:
+            continue
+        for state in deliveries.delivery_states([event]).values():
+            found.setdefault(state.run_id, set()).update(i.issue for i in state.issues)
+    return {run: tuple(sorted(issues)) for run, issues in found.items()}
+
+
+def owner_since(events: Iterable[Event], project_id: str, root: str) -> str | None:
+    """The ISO date the project began to hold `root`, when an earlier owner left it, else None."""
+    left = _earlier_owner_left(sorted(events, key=lambda event: event.seq), project_id, root)
+    return None if left is None else (date.fromisoformat(left.at[:10]) + timedelta(days=1)).isoformat()
+
+
 def figure(tokens: spend_module.Tokens) -> dict:
     return {"tokens": tokens.input + tokens.cache_write + tokens.cache_read + tokens.output,
             "dollars": round(tokens.dollars, 2), "approximate": tokens.approximate}
@@ -158,17 +204,18 @@ def encode(records: Mapping) -> str:
 
 
 SECTIONS = ("spend", "sprints", "deliveries", "activations", "held_checks")
+DEEP_SECTIONS = (*SECTIONS, "transcripts")
 _MEMBER = re.compile(r' "([^"]+)": ')
 
 
-def section_lines(text: str) -> dict[str, tuple[int, int]]:
+def section_lines(text: str, names: Sequence[str] = SECTIONS) -> dict[str, tuple[int, int]]:
     lines = text.split("\n")
     found: dict[str, tuple[int, int]] = {}
     opened: tuple[str, int] | None = None
     for number, line in enumerate(lines, 1):
         if opened is not None and (line.startswith(' "') or line == "}"):
             name, start = opened
-            if name in SECTIONS:
+            if name in names:
                 found[name] = (start, number - start)
             opened = None
         if opened is None and (match := _MEMBER.match(line)):
@@ -253,6 +300,55 @@ def _spend(project_id: str, view: Mapping, run_issues: Mapping[str, list[int]],
         "runs": runs,
         "issues": sorted(issues, key=lambda entry: (-entry["tokens"], entry["issue"])),
         "sprints": _ranked(sprint_entries, "sprint_id")}
+
+
+def transcripts_part(runs: Sequence[RunDigest]) -> dict:
+    """The aggregates of `runs` by script, phase and issue (see the module docstring)."""
+    by_script: dict[str, list] = {}
+    by_phase: dict[str, list[PhaseFigures]] = {}
+    by_issue: dict[int, dict[str, list]] = {}
+    for run in runs:
+        by_script.setdefault(run.script, []).append(run)
+        for phase, figures in run.phases.items():
+            by_phase.setdefault(phase, []).append(figures)
+        for issue in run.issues:
+            by_issue.setdefault(issue, {"alone": [], "shared": []})[
+                "alone" if run.issues == (issue,) else "shared"].append(run)
+
+    def count(figures: Iterable[PhaseFigures]) -> dict:
+        figures = list(figures)
+        return {"agents": sum(f.agents for f in figures), "messages": sum(f.messages for f in figures),
+                "tool_calls": sum(f.tool_calls for f in figures),
+                "seconds": sum(f.seconds for f in figures),
+                **figure(_total(f.tokens for f in figures))}
+
+    scripts = [{"script": script, "runs": len(group), "seconds": sum(r.seconds for r in group),
+                **{k: v for k, v in count(f for r in group for f in r.phases.values()).items()
+                   if k != "seconds"}}
+               for script, group in by_script.items()]
+    phases = [{"phase": phase, **count(group)} for phase, group in by_phase.items()]
+    issues = []
+    for issue, groups in by_issue.items():
+        alone = groups["alone"]
+        own: dict[str, list[PhaseFigures]] = {}
+        for run in alone:
+            for phase, figures in run.phases.items():
+                own.setdefault(phase, []).append(figures)
+        total = count(f for group in own.values() for f in group)
+        issues.append({
+            "issue": issue, "runs": len(alone), "shared_runs": len(groups["shared"]),
+            "seconds": sum(r.seconds for r in alone),
+            **{k: total[k] for k in ("tokens", "dollars", "approximate")},
+            "phases": {phase: {k: v for k, v in count(group).items()
+                               if k in ("seconds", "tokens", "dollars", "approximate")}
+                       for phase, group in sorted(own.items())}})
+    return {
+        "note": TRANSCRIPTS_NOTE, "first_at": min((r.started_at for r in runs), default=None),
+        "last_at": max((r.ended_at for r in runs), default=None), "runs": len(runs),
+        "agents": sum(f.agents for r in runs for f in r.phases.values()),
+        "scripts": sorted(scripts, key=lambda e: (-e["tokens"], e["script"])),
+        "phases": sorted(phases, key=lambda e: (-e["seconds"], e["phase"])),
+        "issues": sorted(issues, key=lambda e: (-e["seconds"], e["issue"]))}
 
 
 def _pairs(rows: Iterable[tuple[int, str]]) -> list[dict]:
@@ -345,14 +441,11 @@ def project_records(
     project_id: str, *, root: str, events: Iterable[Event], spend: Mapping | None,
     live_runs: Collection[tuple[str, str]], sprint_states: Mapping[str, sprints.SprintState],
     inbox: Mapping[tuple[str, str], "InboxRecord"], written_at: str,
+    transcripts: Sequence[RunDigest] | None = None,
 ) -> dict:
     """The records of `project_id` (see the module docstring); `root` is its checkout root."""
     rows = sorted(events, key=lambda event: event.seq)
     seen_rows = [e for e in rows if e.kind == deliveries.DELIVERY_SEEN and e.project == project_id]
-    run_issues: dict[str, set[int]] = {}
-    for event in seen_rows:
-        for state in deliveries.delivery_states([event]).values():
-            run_issues.setdefault(state.run_id, set()).update(i.issue for i in state.issues)
     left = _earlier_owner_left(rows, project_id, root)
     own_sprints = sorted((s for s in sprint_states.values() if s.project_id == project_id),
                          key=lambda state: -state.stated_seq)
@@ -362,10 +455,11 @@ def project_records(
     return {
         "project_id": project_id, "written_at": written_at,
         "spend": None if spend is None else _spend(
-            project_id, spend, {run: sorted(issues) for run, issues in run_issues.items()},
+            project_id, spend, {run: list(issues) for run, issues in run_issues(rows, project_id).items()},
             sprint_states, None if left is None else left.at[:10]),
         "sprints": [_sprint_entry(state) for state in own_sprints],
         "deliveries": _deliveries(seen_rows, live_runs),
         "activations": _activations(
             rows, root, max(_owned_since(rows, project_id, root), 0 if left is None else left.seq)),
-        "held_checks": held}
+        "held_checks": held,
+        "transcripts": None if transcripts is None else transcripts_part(transcripts)}
