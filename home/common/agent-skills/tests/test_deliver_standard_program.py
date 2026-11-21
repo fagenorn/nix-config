@@ -9508,6 +9508,9 @@ class LiveBindingTest(unittest.TestCase):
         "early conflict": {"args": ARGS, "patch": live({"pr": {"probe": {"conflicted": True, "tree": "e" * 40, "files": ["a.py"]}, "lock": None, "checks": None}})},
         "owner changes": {"args": dict(ARGS, cont=LIVE_CONT, look={"answer": "changes", "words": "make the label bold"}),
                           "patch": {"setup": {"look": MARKED, "head": SHA, "live_fault": DECLARED}}},
+        "approve a moved head": {"args": dict(ARGS, cont=LIVE_CONT, look={"answer": "approve", "head": D}),
+                                 "patch": {"setup": {"look": MARKED, "head": SHA, "live_fault": DECLARED}, "look-head": {"head": D},
+                                           "look-verify": LOOK_OK, "look-read": {"verdict": "approved"}}},
         "clean": {"args": ARGS, "patch": LIVE_PATCH},
     }
 
@@ -9556,6 +9559,14 @@ class LiveBindingTest(unittest.TestCase):
         self.assertEqual(result["stage"], "live-bound")
         self.assertNotIn("look-fix", labels(calls))
         self.assertNotIn("renew-look-fix", labels(calls))
+
+    def test_an_approve_of_a_head_that_is_not_the_delivered_commit_stops_before_any_verification(self):
+        result, calls = self.go("approve a moved head")
+        got = labels(calls)
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertIn("not the delivered commit", result["reason"])
+        for label in ("look-verify", "look-read", "look-pr", "pr", "merge"):
+            self.assertNotIn(label, got)
 
     def test_the_pr_evidence_names_the_live_review(self):
         _, calls = self.go("clean")

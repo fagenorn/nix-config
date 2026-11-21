@@ -3051,6 +3051,8 @@ ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK
     lookWhy = `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head}`
     return lookWaitStop(P, hd.head)
   }
+  // The live lane lands only the commit its one reviewer read: an approved head that moved (an integration merge, a push) is never verified, recorded or merged here.
+  if (LANE === 'live' && !sameSha(A, liveCommit())) return liveBound(`the owner approved ${A}, not the delivered commit ${liveCommit()}, and landing it would merge a commit the live review never read`)
   let recordable = sameSha(A, V0)
   if (!recordable) {
     const lv = await call(`${CTX}
