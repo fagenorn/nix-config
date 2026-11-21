@@ -1,14 +1,19 @@
-"""The permit judge: which Bash commands a manager's session may run (#1377, ADR-console-094).
+"""The permit judge: which Bash commands a manager's session may run (#1377, #1401, ADR-console-094, ADR-console-096).
 
-A manager's session may run exactly two commands, and `judge(command, grant, forge)` decides each
+A manager's session may run exactly three commands, and `judge(command, grant, forge)` decides each
 one without touching the network, the clock or a file beyond the injected `Forge` readers and
 `os.path.realpath`. Everything it needs about the sprint is in the `Grant`.
 
-The two shapes (D3), judged only over the literal-word grammar of `words`:
+The three shapes (D3), judged only over the literal-word grammar of `words`:
 
 1. Merge: `gh pr merge <n> --repo <slug> --<strategy> --match-head-commit <40 lowercase hex>`, then
    `--delete-branch` exactly when `grant.delete_branch` is true. `<n>` is digits with no leading zero.
 2. Rerun: `gh run rerun <id> --failed --repo <slug>`.
+3. Release: `release transaction run` and then only flag-value pairs, each flag one of `RELEASE_FLAGS`
+   spelled exactly (`--confirm` may repeat, every other flag at most once), each value a word that does
+   not begin with `-`. This is a grant, not a check: the release command itself refuses a candidate the
+   owner has not approved on the console (ADR-release-016), so the permit reads no forge and checks no
+   approval (ADR-console-096).
 
 `words(command)` is a small scanner, not `shlex` (which accepts expansions and comments the shell
 would act on). It splits on spaces and tabs only. A word is a plain run of `[A-Za-z0-9_./:@%+=,-]`
@@ -20,8 +25,18 @@ redirection, an expansion, a glob, a comment, a tilde, a brace, a newline outsid
 `mentions(command)` is True when, after deleting every quote and backslash and splitting on
 whitespace and on `;|&()<>$`, the backtick, `,`, `[`, `]`, `{` and `}`, some word whose basename is `gh` is followed by `pr
 merge` or `run rerun`. Only the literal form is ever granted: every other spelling that `mentions` is
-`DENY` with `ALONE`, never undecided. A release is not granted here (ADR-console-094): the permit
-decides nothing about one, so a command that runs a release gets no decision from it.
+`DENY` with `ALONE`, never undecided. `release_operation(command)` also reads the release command,
+under any program name (a bare `release`, any path whose basename is `release`, `python3 -m
+agent_tools.release.release`, behind `env` or inside a chain): `abandon` is `ABANDON` and a `run` with a
+`--dispose` or `--dispose=` word is `DISPOSE`, both always `DENY` for a manager (the lead abandons on the
+owner's word and disposes on the owner's yes to a token). A literal command is judged on its words, so a
+value is never an option: `--notes-file /tmp/a--dispose.md` is an ordinary run. The plain run is
+`RELEASE` only as the literal shape above and only as the first command. Every other run spelling (a
+preview, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a repeated flag, a
+value beginning with `-`, a wrapper, text built at run time and piped to a shell) gets no decision and
+falls to the session's classifier, as a merge spelling does; the release command's own approval
+check is what makes that safe, and the residual is that an abandon or dispose spelling the scan cannot
+see also gets no decision.
 
 `judge` returns a `Verdict`. A command that `mentions` no granted verb gets `Verdict(None, "", None, {})`
 and no reader is called. A command that does is `ALLOW` only in a granted shape and `DENY` otherwise,
@@ -44,13 +59,15 @@ never None. The checks run in this order, the first that applies deciding:
   `NOT_CHECK_RUN`. Else `ALLOW` with target `{"run", "pr"}`.
 - A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`.
 
-`Verdict.payload()` is `{"verb", "decision", "reason", "target"}`; `verb` is `merge` or
-`rerun`. `merge_target(command, grant)` is `{"pr", "head"}` when the command is exactly the granted
+`Verdict.payload()` is `{"verb", "decision", "reason", "target"}`; `verb` is `merge`, `rerun`,
+`release` (target `{"commit", "version"}`, None for a member the run does not name), `release-abandon` or
+`release-dispose`. `merge_target(command, grant)` is `{"pr", "head"}` when the command is exactly the granted
 merge shape and None otherwise. `NOT_ACTIVE`, `NOT_MANAGER` and `MOVED` are the reasons the console
 itself gives (the sprint is not active, the caller is not its manager, the sprint changed between
 the first judgement and the second).
 
-`verb_of(command)` is the verb `mentions` found (`merge` or `rerun`), None when it found none.
+`verb_of(command)` is the verb `mentions` found (`merge`, `rerun` or one of the three release verbs), None
+when it found none.
 
 `memoized(forge)` caches each reader's result, or the `ForgeUnreadable` it raised, by its arguments;
 its `.frozen()` is a `Forge` over the same cache that raises `ForgeUnreadable("not read before")`
@@ -77,6 +94,8 @@ DENY = "deny"
 
 ALONE = "This command runs only alone, spelled exactly as the permitted form, with no operator, expansion or wrapper."
 NOT_GRANTED = "The permit grants only the exact merge and rerun forms, and this one differs."
+NO_ABANDON = "A manager never abandons a release; the lead does, on the owner's word."
+NO_DISPOSE = "A manager never disposes of a release; the lead does, on the owner's yes to its token."
 ADMIN = "An administrator merge is never permitted."
 OTHER_REPO = "The command names another repository than this sprint's project."
 NOT_OWN_PR = "Pull request {pr} is not this sprint's own pull request."
@@ -92,6 +111,9 @@ NOT_MANAGER = "Only the sprint's manager session may run this command."
 MOVED = "The sprint changed while the command was judged."
 
 MERGE, RERUN = "merge", "rerun"
+RELEASE, ABANDON, DISPOSE = "release", "release-abandon", "release-dispose"
+RELEASE_FLAGS = ("--repo-root", "--profile", "--commit", "--version", "--title", "--notes-file",
+                 "--confirm")
 ACTIONS_APP, ANY_APP = 15368, -1
 
 _PLAIN = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
@@ -313,6 +335,45 @@ def words(command: str) -> list[str] | None:
 _SPLIT = re.compile(r"[\s;|&()<>$`,\[\]{}]+")
 
 
+def release_target(command: str) -> dict | None:
+    """`{"commit", "version"}` when the command is exactly the plain release run, else None."""
+    parts = words(command)
+    if parts is None or parts[:3] != ["release", "transaction", "run"]:
+        return None
+    rest, seen, target = parts[3:], set(), {"commit": None, "version": None}
+    if len(rest) % 2:
+        return None
+    for flag, value in zip(rest[::2], rest[1::2]):
+        if flag not in RELEASE_FLAGS or value.startswith("-"):
+            return None
+        if flag != "--confirm" and flag in seen:
+            return None
+        seen.add(flag)
+        if flag in ("--commit", "--version"):
+            target[flag[2:]] = value
+    return target
+
+
+def release_operation(command: str) -> str | None:
+    """`RELEASE`, `ABANDON` or `DISPOSE` when the command runs the release command that way, else None."""
+    literal = words(command)
+    parts = literal if literal is not None else _SPLIT.split(re.sub(r"['\"\\]", "", command))
+    for index, part in enumerate(parts):
+        if (os.path.basename(part) != "release" and part != "agent_tools.release.release"
+                or parts[index + 1:index + 2] != ["transaction"] or len(parts) <= index + 2):
+            continue
+        verb = parts[index + 2]
+        if verb == "abandon":
+            return ABANDON
+        if verb == "run" and any(
+                word == "--dispose" or word.startswith("--dispose=") for word in parts[index + 3:]):
+            return DISPOSE
+        if literal is not None and index == 0 and verb == "run" and release_target(command) is not None:
+            return RELEASE
+        return None
+    return None
+
+
 def _verb_of(command: str) -> str | None:
     parts = _SPLIT.split(re.sub(r"['\"\\]", "", command))
     for index, part in enumerate(parts):
@@ -321,11 +382,11 @@ def _verb_of(command: str) -> str | None:
             return MERGE
         if name == "gh" and rest == ["run", "rerun"]:
             return RERUN
-    return None
+    return release_operation(command)
 
 
 def verb_of(command: str) -> str | None:
-    """`merge` or `rerun` when `mentions(command)`, else None."""
+    """`merge`, `rerun` or a release verb when `mentions(command)`, else None."""
     return _verb_of(command)
 
 
@@ -435,6 +496,12 @@ def judge(command: str, grant: Grant, forge: Forge) -> Verdict:
     verb = _verb_of(command)
     if verb is None:
         return _no_decision()
+    if verb == RELEASE:
+        return _allow(RELEASE, release_target(command))
+    if verb == ABANDON:
+        return _deny(ABANDON, NO_ABANDON)
+    if verb == DISPOSE:
+        return _deny(DISPOSE, NO_DISPOSE)
     parts = words(command)
     if parts is None:
         return _deny(verb, ALONE)

@@ -1045,7 +1045,7 @@ nothing folds it. A notice nudge is never retried after its own attempt, counts 
 `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
-Permit (#1377, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
+Permit (#1377, #1401, ADR-console-094, ADR-console-096): `POST /api/permit` is a manager write dispatched beside `/api/notices`
 through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
 `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
 a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
@@ -1054,7 +1054,9 @@ other exception 500 `permit failed`, each with one stderr line `console: permit_
 `{"decision": "allow" | "deny" | null, "reason": <str>}` and phase `landed` `{"recorded": <bool>}`.
 `permit(sprint_id, secret, session_id, tool_use_id, command)` answers a `permit.Verdict`: under the ingest lock it
 checks the secret (`_manager_sprint`), returns no decision (`decision` None, no row) for a command
-`permit.mentions` rejects, and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and
+`permit.mentions` rejects (a command running a release is a mention: the plain `release transaction run`
+is `allow` with verb `release` and target `{"commit", "version"}` and reads no forge; abandon and dispose are
+`deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the program is named), and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and
 `sprints.takes_questions` (no closing, no stop request, no stop, and not ended by a done report), and
 `permit.NOT_MANAGER` unless `session_id` is the sprint's
 `manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a

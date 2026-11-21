@@ -1621,14 +1621,28 @@ class PermitCase(Case):
 
 
 class PermitServiceTest(PermitCase):
-    def test_the_console_decides_nothing_about_a_release_run(self):
+    def test_the_sprints_manager_is_allowed_the_plain_release_run_and_refused_abandon(self):
         svc, sid = self.boot()
+        verdict = self.judge(svc, sid, RELEASE_RUN)
+        self.assertEqual((verdict.decision, verdict.verb), ("allow", "release"))
+        (row,) = self.rows("permit.judged")
+        self.assertEqual((row["verb"], row["decision"], row["reason"], row["target"]),
+                         ("release", "allow", "", {"commit": "a" * 40, "version": "v1.2.0"}))
+        other = self.judge(svc, sid, RELEASE_RUN, session="s-2", call="t-2")
+        self.assertEqual((other.decision, other.reason), ("deny", permit.NOT_MANAGER))
+        abandon = self.judge(svc, sid, "release transaction abandon --repo-root r", call="t-3")
+        self.assertEqual((abandon.decision, abandon.verb, abandon.reason),
+                         ("deny", "release-abandon", permit.NO_ABANDON))
+        self.assertEqual(3, len(self.rows("permit.judged")))
+        self.assertEqual({"verb": "release-abandon", "decision": "deny", "reason": permit.NO_ABANDON,
+                          "target": {}},
+                         {key: self.rows("permit.judged")[2][key]
+                          for key in ("verb", "decision", "reason", "target")})
+        before = len(self.rows("permit.judged"))
         piped = "git log -1 --format=release%x20transaction%x20run%x20--candidate%x20X | sh"
-        for command in (RELEASE_RUN, "release transaction abandon", piped):
-            with self.subTest(command=command[:30]):
-                verdict = self.judge(svc, sid, command)
-                self.assertEqual((verdict.decision, verdict.reason, verdict.verb), (None, "", None))
-        self.assertEqual(self.rows("permit.judged"), [])
+        verdict = self.judge(svc, sid, piped, call="t-4")
+        self.assertEqual((verdict.decision, verdict.reason, verdict.verb), (None, "", None))
+        self.assertEqual(before, len(self.rows("permit.judged")))
 
     def test_the_sprints_delivered_reported_pull_request_merges(self):
         svc, sid = self.boot()

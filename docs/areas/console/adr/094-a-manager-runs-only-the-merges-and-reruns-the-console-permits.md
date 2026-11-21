@@ -1,6 +1,6 @@
 # ADR-console-094 — A manager runs only the merges and reruns the console permits
 
-- **Status:** accepted
+- **Status:** accepted; D1 amended by ADR-console-096
 - **Decided in:** #1377
 
 ## Context
