@@ -54,6 +54,7 @@ from agent_tools.console.sprints import (
     Observed,
     PendingStop,
     Question,
+    QuestionLook,
     QuestionPicture,
     Report,
     SprintState,
@@ -1836,6 +1837,35 @@ class QuestionViewTest(unittest.TestCase):
         entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
         self.assertIs(entries[0]["owner_only"], True)
         self.assertNotIn("owner_only", entries[1])
+
+    def test_a_consequential_question_says_so_and_others_say_nothing(self):
+        state_ = asked(started(A))
+        first, second = state_.questions
+        state_ = dataclasses.replace(state_, questions=(
+            dataclasses.replace(first, consequential=True),
+            dataclasses.replace(second, owner_only=True)))
+        entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+        self.assertIs(entries[0]["consequential"], True)
+        self.assertIs(entries[1]["owner_only"], True)
+        self.assertNotIn("consequential", entries[1])
+
+    def test_a_look_or_a_before_and_after_pair_makes_a_question_consequential(self):
+        before = QuestionPicture("a" * 64, "the page before", "before")
+        after = QuestionPicture("b" * 64, "the page after", "after")
+        for name, change, consequential in (
+                ("look", {"look": QuestionLook(12, 34, "a" * 40, "files")}, True),
+                ("pair", {"pictures": (before, after)}, True),
+                ("one picture", {"pictures": (before,)}, False)):
+            with self.subTest(name):
+                state_ = asked(started(A))
+                first, *rest = state_.questions
+                state_ = dataclasses.replace(
+                    state_, questions=(dataclasses.replace(first, **change), *rest))
+                entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+                if consequential:
+                    self.assertIs(entries[0]["consequential"], True)
+                else:
+                    self.assertNotIn("consequential", entries[0])
 
     def test_questions_follow_briefs_and_lead_tracker_items(self):
         b = "b" * 16

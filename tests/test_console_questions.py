@@ -99,6 +99,23 @@ class QuestionRouteTest(QuestionRoutes):
                          ["files", "no"])
         self.assertEqual(view["statement"]["inbox_items"], 2)
 
+    def test_a_consequential_mark_reaches_the_card(self):
+        svc = self.open()
+        sid, _ = self.asked(svc, {"questions": [{**Q0, "consequential": True}, Q1]})
+        (row,) = self.rows("questions.asked")
+        opened = view_of(svc)["inbox"]["open"]
+        self.assertEqual(row["questions"], [{**Q0, "consequential": True}, Q1])
+        self.assertIs(opened[0]["consequential"], True)
+        self.assertNotIn("consequential", opened[1])
+
+    def test_a_consequential_mark_other_than_true_is_refused_and_logs_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        got = self.assert_unchanged(svc, lambda: self.ask(
+            svc, sid, self.secret(sid), {"questions": [{**Q0, "consequential": False}]}))
+        self.assertEqual((got[0], got[2]),
+                         (409, sprints.CONSEQUENTIAL_SHAPE.format(n=1).encode() + b"\n"))
+
     def test_a_round_is_refused_before_approval_without_the_secret_or_when_malformed(self):
         svc = self.open()
         early = svc.state_goal("owner/p01", GOAL_TEXT)
