@@ -2704,6 +2704,50 @@ class ScreenshotStyleTableTest(unittest.TestCase):
                 else:
                     self.assertIsNone(found)
 
+    def test_no_chromium_run_opens_a_browser_inside_another_or_waits_without_a_bound(self) -> None:
+        import ast
+        sources = {"module": Path(shots.__file__).read_text(encoding="utf-8"),
+                   "tests": Path(__file__).read_text(encoding="utf-8")}
+        trees = {label: ast.parse(text) for label, text in sources.items()}
+        opens = {"capture", "main", "sandboxed_capture", "styled", "read_pages", "sync_playwright"}
+
+        def name_of(call):
+            if isinstance(call.func, ast.Name):
+                return call.func.id
+            return call.func.attr if isinstance(call.func, ast.Attribute) else None
+
+        def calls_in(nodes):
+            return [c for node in nodes for c in ast.walk(node) if isinstance(c, ast.Call)]
+
+        def unbounded(value):
+            return isinstance(value, ast.Constant) and value.value in (0, None)
+
+        bad = []
+        for label, tree in trees.items():
+            for node in ast.walk(tree):
+                if isinstance(node, ast.With) and any(
+                        isinstance(item.context_expr, ast.Call)
+                        and name_of(item.context_expr) == "sync_playwright" for item in node.items):
+                    bad += [f"{label}:{c.lineno} opens a browser inside one ({name_of(c)})"
+                            for c in calls_in(node.body) if name_of(c) in opens]
+            for call in calls_in([tree]):
+                if (any(k.arg == "timeout" and unbounded(k.value) for k in call.keywords)
+                        or (name_of(call) in ("set_default_timeout", "set_default_navigation_timeout")
+                            and call.args and isinstance(call.args[0], ast.Constant)
+                            and call.args[0].value == 0)):
+                    bad.append(f"{label}:{call.lineno} waits without a bound")
+        opening = sorted(f.name for f in ast.walk(trees["module"]) if isinstance(f, ast.FunctionDef)
+                         and any(name_of(c) == "sync_playwright" for c in calls_in([f])))
+        if opening != ["capture"]:
+            bad.append(f"the module opens a browser in {opening}")
+        awaiting = sorted(name for name, value in vars(shots).items()
+                          if isinstance(value, str) and "await " in value)
+        if awaiting != ["STYLE_SETTLE"]:
+            bad.append(f"page scripts that await: {awaiting}")
+        if re.search(r"for \(let tries = 0; tries < \d+; tries\+\+\)", shots.STYLE_SETTLE) is None:
+            bad.append("STYLE_SETTLE waits without a bound")
+        self.assertEqual(bad, [])
+
     def test_the_look_card_opens_the_viewer_before_its_style_reading(self) -> None:
         self.assertEqual(shots.STYLE_STEPS["look-card"], ("button.pic-thumb",))
 
