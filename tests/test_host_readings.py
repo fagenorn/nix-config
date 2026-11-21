@@ -634,7 +634,7 @@ def stub_reading(definitions):
           nixpkgs = channel; nixpkgs-darwin = channel;
         }};
       }};
-    in ({host_readings.AGENT_PLATFORM}) c {{ home.username = "tester"; }}"""
+    in ({host_readings.AGENT_PLATFORM}) c {{ home.username = "tester"; home.homeDirectory = "/home/tester"; }}"""
     done = subprocess.run(
         [*host_readings.NIX, "--json", "--expr", expression],
         capture_output=True, text=True, timeout=120, env=accounts_sandbox.unsandboxed_environment())
@@ -660,6 +660,17 @@ class AgentPlatformPartTest(unittest.TestCase):
     def test_an_enabled_entry_redirected_into_the_bin_directory_is_listed_by_its_target(self):
         got = stub_reading(definition(TOOL, 'extraTool = { source = "/x"; target = ".agents/bin/extra"; };'))
         self.assertEqual(sorted(got["binEntries"]), [".agents/bin/extra", ".agents/bin/tool"])
+
+    def test_an_absolute_target_under_the_home_directory_is_read_as_home_manager_reads_it(self):
+        got = stub_reading(definition(TOOL, 'extra = { source = "/x"; target = "/home/tester/.agents/bin/extra"; };'))
+        self.assertEqual(sorted(got["binEntries"]), [".agents/bin/extra", ".agents/bin/tool"])
+
+    def test_a_link_of_the_bin_directory_or_of_the_agents_directory_is_listed(self):
+        for target in (".agents/bin", ".agents"):
+            with self.subTest(target):
+                entry = f'"{target}" = {{ source = "/x"; recursive = true; }};'
+                got = stub_reading(definition(TOOL, entry))
+                self.assertEqual(sorted(got["binEntries"]), sorted([target, ".agents/bin/tool"]))
 
     def test_a_disabled_entry_in_the_bin_directory_is_not_listed(self):
         got = stub_reading(definition(TOOL, '".agents/bin/extra" = { source = "/x"; enable = false; };'))
