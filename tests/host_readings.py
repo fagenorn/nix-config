@@ -111,6 +111,28 @@ def runner_triples_apply(root: Path) -> str:
     return f"c: u: ({recipe_apply(root)}) c.services.github-runners"
 
 
+# What each host installs of the flake's platform package. The darwin hosts read it in a pure evaluation;
+# anis-desktop's `home.file` forces import-from-derivation of x86_64-linux derivations, so it needs a builder.
+AGENT_PLATFORM = """c: u: let
+      system = c.nixpkgs.hostPlatform.system;
+      inputs = c.home-manager.extraSpecialArgs.inputs;
+      package = inputs.self.packages.${system}.agent-platform;
+      commands = builtins.attrNames package.launchers;
+      file = name: let f = u.home.file.${name}; in {
+        source = "${f.source}";
+        inherit (f) enable target recursive;
+      };
+    in {
+      package = "${package}";
+      inherit commands;
+      bin = builtins.listToAttrs (map (n: { name = n; value = file ".agents/bin/${n}"; }) commands);
+      binEntries = builtins.filter (n: builtins.substring 0 12 n == ".agents/bin/") (builtins.attrNames u.home.file);
+      standards = file ".agents/standards";
+      manifest = file ".agents/share/platform-manifest.json";
+      python = "${package.python}";
+      channelPython = "${(if system == "aarch64-darwin" then inputs.nixpkgs-darwin else inputs.nixpkgs).legacyPackages.${system}.python3}";
+    }"""
+
 PARTS: dict[str, Part] = {
     "verify-pending": Part("""c: u: {
           command = u.verifyPending.command;
@@ -233,6 +255,8 @@ PARTS: dict[str, Part] = {
       null;
 }""", DARWIN_HOSTS),
     "runner-triples": Part(runner_triples_apply, DARWIN_HOSTS),
+    "agent-platform": Part(AGENT_PLATFORM, DARWIN_HOSTS),
+    "agent-platform-linux": Part(AGENT_PLATFORM, ("anis-desktop",), needs="x86_64-linux-builder"),
 }
 
 

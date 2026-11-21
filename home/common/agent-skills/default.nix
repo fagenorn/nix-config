@@ -28,15 +28,16 @@ in
     ".agents/bin/impeccable".source = impeccable.launcher;
 
     # Layers 0 and 1 of the standards architecture, machine-global so every
-    # project inherits the bar and its stack's trap library. Layer 2 (project
+    # project inherits the bar and its stack's trap library. They come from the
+    # platform package, the same files a project's CI reads. Layer 2 (project
     # deltas) stays in each repo under docs/standards/.
-    ".agents/standards".source = ./standards;
+    ".agents/standards".source = "${agentTools}/share/agent-platform/standards";
 
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
 
-    # The platform manifest: authored data with nothing templated, so this
-    # store copy is byte-identical to the repository's (D1).
-    ".agents/share/platform-manifest.json".source = ./platform-manifest.json;
+    # The platform manifest: authored data with nothing templated, taken from
+    # the platform package, so it is the file a project's CI reads (D1).
+    ".agents/share/platform-manifest.json".source = "${agentTools}/share/agent-platform/platform-manifest.json";
 
     # The host declaration: authored host policy -- per route, whether it is
     # supported and how many agent slots one root session may hold -- read by
