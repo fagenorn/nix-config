@@ -78,6 +78,22 @@
         "cwd": ".",
         "env": []
       },
+      "lint": {
+        "argv": [
+          "just",
+          "lint"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "test": {
+        "argv": [
+          "just",
+          "test"
+        ],
+        "cwd": ".",
+        "env": []
+      },
       "codex-plan-review": {
         "argv": [
           "codex-companion",
@@ -112,7 +128,8 @@
     },
     "workflow": {
       "verification": [
-        "nix-build"
+        "lint",
+        "test"
       ],
       "orchestration": {
         "max_parallel": 2,
