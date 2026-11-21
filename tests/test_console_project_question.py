@@ -2148,6 +2148,9 @@ class QuestionCase(Case):
         return [(row[2], row[3], json.loads(row[4])) for row in support.log_rows(self.store)
                 if row[2].startswith("project_question.")]
 
+    def shown(self, svc):
+        return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
+
 
 class QuestionServiceTest(QuestionCase):
     def test_asking_appends_a_question_row_then_exactly_one_answer_row_per_outcome(self):
@@ -2293,9 +2296,6 @@ class QuestionServiceTest(QuestionCase):
         self.assertNotIn(ASKED, event_log.KEPT_KINDS)
         self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
         self.assertEqual(event_log.SCHEMA_VERSION, 12)
-
-    def shown(self, svc):
-        return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
 
     def test_the_published_view_shows_the_question_working_then_answered(self):
         held = []
@@ -2989,6 +2989,112 @@ class QuestionThreadServiceTest(QuestionCase):
         self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
 
 
+class QuestionDeleteServiceTest(QuestionCase):
+    """The owner deletes a question thread; the log keeps a record of the ids and nothing of the text."""
+
+    def test_deleting_a_thread_removes_its_text_from_the_log_and_the_view_and_keeps_a_text_free_record(self):
+        svc = self.start()
+        self.outcome = project_question.Outcome("answered", answer="Answer: FIRST-ANSWER-TEXT")
+        first = svc.ask_project_question(WHY, "FIRST-QUESTION-TEXT?")
+        self.outcome = project_question.Outcome("answered", answer="Answer: FOLLOW-ANSWER-TEXT")
+        follow = svc.ask_project_question(WHY, "FOLLOW-QUESTION-TEXT?", first)
+        self.outcome = project_question.Outcome("answered", answer="Answer: OTHER-ANSWER-TEXT")
+        other = svc.ask_project_question(WHY, "OTHER-QUESTION-TEXT?")
+        svc.delete_question_thread(WHY, first)
+        rows = self.question_rows()
+        self.assertEqual(rows[-1], (
+            "project_question.deleted", WHY, {"question_ids": [first, follow], "thread_id": first}))
+        self.assertEqual(
+            [row for row in rows if row[2].get("question_id") in (first, follow)], [])
+        self.assertEqual([row[0] for row in rows if row[2].get("question_id") == other],
+                         [ASKED, ANSWERED_KIND])
+        self.assertEqual([t["id"] for t in self.shown(svc)["questions"]["threads"]], [other])
+        svc.close()
+        gone = (b"FIRST-QUESTION-TEXT", b"FIRST-ANSWER-TEXT", b"FOLLOW-QUESTION-TEXT",
+                b"FOLLOW-ANSWER-TEXT")
+        for path in self.store.parent.glob(self.store.name + "*"):
+            for text in gone:
+                with self.subTest(path=path.name, text=text):
+                    self.assertNotIn(text, path.read_bytes())
+        restarted = self.start()
+        self.assertEqual([t["id"] for t in self.shown(restarted)["questions"]["threads"]], [other])
+
+    def test_a_delete_names_a_registered_project_and_one_of_its_threads(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "why?")
+        follow = svc.ask_project_question(WHY, "and?", first)
+        for project, thread, reason in (
+                ("owner/p99", first, project_question.UNREGISTERED),
+                (WHY, follow, project_question.THREAD_UNKNOWN),
+                (WHY, "nope", project_question.THREAD_UNKNOWN)):
+            with self.subTest(project=project, thread=thread):
+                before = self.question_rows()
+                with self.assertRaises(project_question.Refused) as caught:
+                    svc.delete_question_thread(project, thread)
+                self.assertEqual(str(caught.exception), reason)
+                self.assertEqual(self.question_rows(), before)
+
+    def test_a_thread_still_being_answered_is_deleted_only_once_its_answer_is_in(self):
+        svc = self.start(project_question_dispatch=self.queued.append)
+        try:
+            first = svc.ask_project_question(WHY, "why?")
+            before = self.question_rows()
+            with self.assertRaises(project_question.Refused) as caught:
+                svc.delete_question_thread(WHY, first)
+            self.assertEqual(str(caught.exception), project_question.THREAD_WORKING)
+            self.assertEqual(self.question_rows(), before)
+            self.queued.pop()()
+            svc.delete_question_thread(WHY, first)
+            self.assertIsNone(self.shown(svc)["questions"])
+        finally:
+            while self.queued:
+                self.queued.pop()()
+
+    def test_a_question_left_working_by_a_crash_can_be_deleted(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(self.store)
+        try:
+            log.append([(event_log.PROJECT_QUESTION_ASKED, WHY, {
+                "question_id": "q0", "question": "LEFT-WORKING-TEXT", "profile": "work",
+                "session_id": SESSION_ID})])
+        finally:
+            log.close()
+        svc = self.start()
+        svc.delete_question_thread(WHY, "q0")
+        svc.close()
+        for path in self.store.parent.glob(self.store.name + "*"):
+            self.assertNotIn(b"LEFT-WORKING-TEXT", path.read_bytes())
+
+    def test_a_follow_up_to_a_deleted_thread_is_refused(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "why?")
+        svc.delete_question_thread(WHY, first)
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, "and?", first)
+        self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
+        self.assertEqual(len(self.asked), 1)
+
+    def test_a_keyed_question_replays_its_receipt_after_its_thread_is_deleted_and_a_restart(self):
+        key = "0123456789abcdef" * 2
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "q?", request_key=key)
+        svc.delete_question_thread(WHY, first)
+        self.assertEqual(svc.ask_project_question(WHY, "q?", request_key=key), first)
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(
+                WHY, f"key {FAKE_CREDENTIALS['github']}", request_key=key)
+        self.assertEqual(str(caught.exception), project_question.CREDENTIAL)
+        self.assertEqual(len(self.asked), 1)
+        rows = self.question_rows()
+        self.assertIn(("project_question.keyed", WHY, {"request_key": key, "question_id": first}),
+                      rows)
+        self.assertNotIn(ASKED, [row[0] for row in rows])
+        svc.close()
+        restarted = self.start()
+        self.assertEqual(restarted.ask_project_question(WHY, "q?", request_key=key), first)
+        self.assertEqual(len(self.asked), 1)
+
+
 class QuestionRequestKeyTest(QuestionCase):
     """A request may carry a key the console asks once per project (ADR-console-089 D9)."""
 
@@ -3183,3 +3289,49 @@ class QuestionRouteTest(QuestionCase):
             with self.subTest(method=method):
                 status, headers, _ = support.request(svc.address, method, QUESTION_ROUTE)
                 self.assertEqual((status, headers["Allow"]), (405, "POST"))
+
+
+class QuestionDeleteRouteTest(QuestionCase):
+    def post(self, svc, body, headers):
+        payload = body if isinstance(body, bytes) else json.dumps(body).encode()
+        return support.post_page(svc.address, service.PROJECT_QUESTION_DELETE_PATH, headers, payload)
+
+    def test_the_delete_route_deletes_with_204_and_refuses_what_it_cannot_read(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "why?")
+        cases = (
+            ({"project_id": WHY}, 400, b"bad delete\n"),
+            ({"project_id": WHY, "thread_id": first, "x": 1}, 400, b"bad delete\n"))
+        for body, status, text in cases:
+            with self.subTest(body=body):
+                got = self.assert_unchanged(
+                    svc, lambda: self.post(svc, body, self.own(svc, **JSON)))
+                self.assertEqual((got[0], got[2]), (status, text))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            got = self.assert_unchanged(svc, lambda: self.post(
+                svc, {"project_id": WHY, "thread_id": "nope"}, self.own(svc, **JSON)))
+        self.assertEqual((got[0], got[2]),
+                         (409, (project_question.THREAD_UNKNOWN + "\n").encode()))
+        self.assertEqual(errors.getvalue(),
+                         f"console: project_question_delete_refused {project_question.THREAD_UNKNOWN}\n")
+        status, _, body = self.post(
+            svc, {"project_id": WHY, "thread_id": first}, self.own(svc, **JSON))
+        self.assertEqual((status, body), (204, b""))
+        self.assertIsNone(self.shown(svc)["questions"])
+
+    def test_the_delete_route_is_an_owner_only_page_write_that_takes_only_post(self):
+        svc = self.start()
+        route = service.PROJECT_QUESTION_DELETE_PATH
+        self.assertIn(route, service.PAGE_WRITES)
+        self.assertIn(route, service.OWNER_ONLY)
+        self.assertNotIn(route, service.GUEST_WRITES)
+        for method in ("GET", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                status, headers, _ = support.request(svc.address, method, route)
+                self.assertEqual((status, headers["Allow"]), (405, "POST"))
+        first = svc.ask_project_question(WHY, "why?")
+        origin = f"http://127.0.0.1:{svc.address[1]}"
+        got = self.assert_unchanged(svc, lambda: self.post(
+            svc, {"project_id": WHY, "thread_id": first}, {"Origin": origin, **JSON}))
+        self.assertEqual((got[0], got[2]), (403, b"token refused\n"))

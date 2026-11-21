@@ -47,6 +47,7 @@ stream `Content-Length`):
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
     POST /api/register-cancel 204, a JSON body, the page cancels a registration that was not applied yet (below)
     POST /api/project-question 204, a JSON body, the page asks a read-only question about a project (below)
+    POST /api/project-question-delete 204, a JSON body, the page deletes a question thread (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -1752,6 +1753,25 @@ project_question_unanswered <question_id> <reason>`, and a row that cannot be ap
 the approval workers and before the server and the log close, until no accepted question is
 unanswered and then joins the question workers; the stop flag, set first, also cancels a running
 session. Nothing in this path reads the tracker or the forge.
+
+`POST /api/project-question-delete` (#1272, ADR-console-093) carries one JSON body of exactly
+`project_id` and `thread_id` (`MAX_PROJECT_QUESTION_DELETE_BYTES`, 4096), is a page write and so
+owner-only, and deletes one question thread: a body `project_question.parse_delete_request` does
+not accept is 400 `bad delete`; `project_question.Refused` is one stderr line `console:
+project_question_delete_refused <reason>` and 409 with the reason; any other exception is
+`console: project_question_delete_failed <Type>: <message>` and 500 `delete failed`; success is an
+empty `204`. `delete_question_thread(project_id, thread_id)` decides under the ingest lock, in
+this order: an unregistered project, a thread id that is not one of the project's threads, and a
+thread any of whose questions has a running session (`_project_questions_running`, the ids
+counted open until `_record_project_answer` releases them) are each `Refused`, and a refusal
+appends nothing; a question left working by a crash has no running session and is deletable. An
+accepted delete has `EventLog.delete_question_thread` remove the thread's asked and answered rows
+and write one `project_question.deleted` record holding only the question ids and the thread id,
+kept forever, and applies that record through the fold, so the published view drops the thread
+and a follow-up naming it is `THREAD_UNKNOWN`. It starts no session and reads no tracker. What
+stays: a `project_question.keyed` receipt, so a keyed re-send returns the deleted question's id
+and starts nothing, the session's own transcript outside the log, and the session's spend, which
+`_spend_questions` keeps under Questions until a restart rebuilds it from the surviving asked rows.
 """
 
 import contextlib
@@ -1884,6 +1904,8 @@ TRUST_CHECK_PATH = "/api/trust-check"
 REGISTER_CANCEL_PATH = "/api/register-cancel"
 PROJECT_QUESTION_PATH = "/api/project-question"
 PROJECT_QUESTION_THREAD = "console-project-question"
+PROJECT_QUESTION_DELETE_PATH = "/api/project-question-delete"
+MAX_PROJECT_QUESTION_DELETE_BYTES = 4096
 SHARE_TAILNET_PATH = "/api/share-tailnet"
 SHARE_COLLEAGUE_PATH = "/api/share-colleague"
 SHARE_REMOVE_PATH = "/api/share-remove"
@@ -1900,7 +1922,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     ACCOUNT_REMOVE_PATH, ACCOUNT_SIGNOUT_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, ADOPTION_MERGE_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH,
     TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
     GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH})
@@ -2315,6 +2337,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: project_question_failed {type(error).__name__}: {error}", file=sys.stderr)
             self._refuse(500, "question failed")
+            return False
+        return True
+
+    def _project_question_delete_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out a question thread's deletion; False when it was refused."""
+        body = self._json_body(MAX_PROJECT_QUESTION_DELETE_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, thread_id = project_question.parse_delete_request(body)
+        except ValueError:
+            self._refuse(400, "bad delete")
+            return False
+        try:
+            console.delete_question_thread(project_id, thread_id)
+        except project_question.Refused as error:
+            print(f"console: project_question_delete_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: project_question_delete_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "delete failed")
             return False
         return True
 
@@ -3367,6 +3412,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._project_question_request(console):
                 return
+        elif route == PROJECT_QUESTION_DELETE_PATH:
+            self.close_connection = True
+            if not self._project_question_delete_request(console):
+                return
         elif route in (APPROVE_PATH, REPLY_PATH):
             self.close_connection = True
             if not self._decision_request(console, route):
@@ -4174,6 +4223,7 @@ class ConsoleService:
             else project_question_dispatch)
         self._question_keys: dict[tuple[str, str], str] = {}
         self._project_questions_open = 0  # accepted questions whose answered row is not yet written
+        self._project_questions_running: set[str] = set()  # their ids: a session may still write
         self._project_question_workers: list[threading.Thread] = []
         self._probe_thread: threading.Thread | None = None
         self._nudger = nudger
@@ -5084,6 +5134,7 @@ class ConsoleService:
             appended = self.log.append(rows)
             self._apply(appended)
             self._project_questions_open += 1
+            self._project_questions_running.add(question_id)
         try:
             self._project_question_dispatch(
                 lambda: self._run_project_question(
@@ -5093,6 +5144,25 @@ class ConsoleService:
                 project_question.FAILED, reason=f"{type(error).__name__}: {error}"))
             raise
         return question_id
+
+    def delete_question_thread(self, project_id: str, thread_id: str) -> None:
+        """Delete one question thread of a registered project from the log (#1272, ADR-console-093).
+
+        Under the ingest lock and in this order: an unregistered project, a thread id that is not
+        one of the project's threads and a thread any of whose questions has a running session
+        are each `project_question.Refused`, and a refusal appends nothing. An accepted delete
+        has the log remove the thread's asked and answered rows and keep one text-free
+        `project_question.deleted` record, applied through the fold so the published view drops the
+        thread. It starts no session and reads no tracker.
+        """
+        with self._ingest:
+            if project_id not in self._states:
+                raise project_question.Refused(project_question.UNREGISTERED)
+            ids = project_question.thread_question_ids(
+                self._project_questions.get(project_id, ()), thread_id)
+            if any(one in self._project_questions_running for one in ids):
+                raise project_question.Refused(project_question.THREAD_WORKING)
+            self._apply([self.log.delete_question_thread(project_id, thread_id, ids)])
 
     def _run_project_question(self, question_id: str, project_id: str, root: str, text: str,
                               profile: str, session_id: str,
@@ -5206,6 +5276,7 @@ class ConsoleService:
         finally:
             with self._ingest:
                 self._project_questions_open -= 1
+                self._project_questions_running.discard(question_id)
                 self._project_questions_done.notify_all()
 
     def _probe_profile(self, session_id: str) -> str | None:
