@@ -74,7 +74,7 @@ One PNG a manager sent to the console, kept by the console under its SHA-256 has
 _Avoid_: screenshot file, attachment
 
 **Nudge**:
-The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report (ADR-console-020). A relay comes from a sender in the manager's own permission mode that can only message (ADR-console-068).
+The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report, none while a report's wait-until time is ahead or its pause stands (ADR-console-020). A relay comes from a sender in the manager's own permission mode that can only message (ADR-console-068).
 _Avoid_: ping, notification
 
 **Bring-back**:
@@ -82,7 +82,7 @@ The console waking a gone manager in place, or starting a successor, while its s
 _Avoid_: restart loop, resurrection
 
 **Report**:
-The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018). It may carry up to eight pictures, each with a line, shown as thumbnails in its Detail fold and full size in the viewer (ADR-console-041). A status line that starts with `merge refused: <reason>` marks a merge the guard refused; the sprint's line reads it until a later report without it clears it (the manager's report after the issue lands), and it is never a question (ADR-console-048).
+The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018). It may carry up to eight pictures, each with a line, shown as thumbnails in its Detail fold and full size in the viewer (ADR-console-041). A status line that starts with `merge refused: <reason>` marks a merge the guard refused; the sprint's line reads it until a later report without it clears it (the manager's report after the issue lands), and it is never a question (ADR-console-048). A report may state a wait-until time or a pause, and the sprint's line then says so (ADR-console-020).
 _Avoid_: update, log
 
 **Sprint**:

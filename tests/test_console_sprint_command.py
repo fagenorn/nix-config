@@ -1344,6 +1344,17 @@ class ManagerContractTest(unittest.TestCase):
         for stage in sprints.REPORT_STAGES:
             self.assertIn(stage, run_sprint("report", "--help").stdout)
 
+    def test_the_contract_and_the_help_name_the_wait_and_pause_members(self):
+        reporting = run_sprint("contract").stdout.partition("## Reporting")[2].partition("\n## ")[0]
+        helped = run_sprint("report", "--help").stdout
+        for member in sprints.REPORT_OPTIONAL:
+            with self.subTest(member=member):
+                self.assertIn(f"`{member}`", reporting)
+                self.assertIn(f"{member}:", helped)
+        limit = f"{sprints.MAX_WAIT_HOURS} hours"
+        self.assertIn(limit, " ".join(reporting.split()))
+        self.assertIn(limit, " ".join(helped.split()))
+
 
 class CommandContractTest(unittest.TestCase):
     def test_the_command_table_names_the_module_and_its_docstring_states_the_contract(self):

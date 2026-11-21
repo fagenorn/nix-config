@@ -68,6 +68,8 @@ If this text is no longer in your context, run `sprint contract` again.
 
 Optionally `pictures`, at most 8: `[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}]`, for example the look of a landed change. `sprint report` uploads each `file` for you and sends its id; the `line` is what the owner reads beside the picture, and `pair` (optional, each of `before` and `after` at most once) marks a before-and-after pair. Only pictures of this sprint are accepted; a picture over 2 MiB, one that is not a PNG, or a list over these limits is refused with the reason and the report is not sent. A list refused before the first upload leaves nothing uploaded, while a picture refused while uploading leaves the ones uploaded before it stored, named by nothing, until the console's sweep removes them: fix the file and send again.
 
+Optionally `wait_until` or `paused`, never both. `wait_until` is an ISO 8601 UTC time such as `2027-01-15T10:00:00Z`, after the moment you send and at most 24 hours ahead; a time in the past, one further ahead, a local time or another offset is refused. Send it when you wait on a timed expiry, for example a quota reset, so the console sends you no idle nudge until then. `paused` is one line saying why the sprint is paused, with no issue number (a `#` followed by a digit is refused); send it when the lead asked you to pause to free an account. A pause stands until your next report, and a later report without `paused` lifts it. While a wait or a pause stands the console still delivers the owner's messages and answers at once.
+
 ```json
 {"status": "two slices are building and one has landed",
  "phase": "running",

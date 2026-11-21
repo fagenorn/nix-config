@@ -248,6 +248,10 @@ REPORT_HELP = """the report's members, all required:
   next:        one line, what the manager does next
 
 optional:
+  wait_until:  an ISO 8601 UTC time, "2027-01-15T10:00:00Z": after now and at most 24 hours
+               ahead; the console sends no idle nudge until then
+  paused:      one line, why the lead paused the sprint, no issue number; it stands until a
+               report without it. Send wait_until or paused, never both
   pictures:    at most 8, [{"file": "<path to a PNG>", "line": "<one line, at most 140
                characters>", "pair": "before" | "after"}, ...]; the command uploads each file
                and sends its id

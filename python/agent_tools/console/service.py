@@ -1095,6 +1095,14 @@ Success is 200 `application/json` `{"at":"<the row's at>"}`. Every refusal is `t
 line, closes the connection, appends nothing and publishes nothing. The secret appears in no stderr
 line or answer.
 
+A report may also state a `wait_until` time or a `paused` reason (#1380, ADR-console-020):
+`_checked_report` passes `sprints.checked_report` the service's clock in milliseconds, so a time that is
+not after now or is more than 24 hours ahead, a pause that names an issue number and a report that
+states both are each 409 with the reason, on the send and on a dry run alike (a malformed member is
+409 `the report has no valid <member>`; any other key is 400 `bad report`). The row's `report`
+carries them only when stated. The fold judges nothing against a clock, so a stored wait whose time
+has passed still folds and a restart changes no sprint's report.
+
 Closing (#892): `POST /api/close` is a manager write like the report's: no token, the sprint's
 secret in its place, `_checked_length(MAX_CLOSE_BYTES)` (65536, the same refusals as the report's:
 any `Origin` is 403 `origin refused`, 415 `json only`, 411, 413), then `sprints.parse_close_request`
@@ -7442,7 +7450,7 @@ class ConsoleService:
         sprint = self._manager_sprint(sprint_id, secret)
         if sprint.state != sprints.STARTING:
             raise sprints.Refused(sprints.NOT_STARTED)
-        checked = sprints.checked_report(report)
+        checked = sprints.checked_report(report, int(self._clock() * 1000))
         for m, member in enumerate(checked.get("pictures", ()), 1):
             self._own_picture(sprint, member["picture"],
                               sprints.PART_PICTURE_UNKNOWN.format(owner="report", m=m),

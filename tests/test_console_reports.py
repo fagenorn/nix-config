@@ -36,12 +36,13 @@ CLOSING = {"summary": "Importer resumes after a crash\nwith detail",
            "differently": "cut smaller slices"}
 CHECKED = {**REPORT, "issues": [{"issue": 12, "stage": "building"},
                                 {"issue": 13, "stage": "landed"}]}
+NOW = 1_800_000_000  # 2027-01-15T08:00:00Z
 
 
 class ReportRouteTest(Case):
-    def open(self):
+    def open(self, **kwargs):
         support.write_registry(self.registry, support.entries(2))
-        return self.start()
+        return self.start(**kwargs)
 
     def started(self, svc):
         sid = svc.state_goal("owner/p01", GOAL_TEXT)
@@ -171,6 +172,82 @@ class ReportRouteTest(Case):
              if m["sentence"] == f"A merge in {PARTS['title']} was refused: "
                                  "required checks are not green"],
             [f"A merge in {PARTS['title']} was refused: required checks are not green"])
+
+    def test_a_report_may_state_a_wait_until_or_a_pause_and_it_is_stored_and_folded(self):
+        svc = self.open(clock=lambda: NOW)
+        sid = self.started(svc)
+        secret = self.secret(sid)
+        got = self.report(svc, sid, secret, {**REPORT, "wait_until": "2027-01-15T10:00:00Z"})
+        self.assertEqual(got[0], 200)
+        report = json.loads(support.log_rows(self.store)[-1][4])["report"]
+        self.assertEqual(report, {**CHECKED, "wait_until": "2027-01-15T10:00:00+00:00"})
+        folded = svc._sprints[sid].report
+        self.assertEqual((folded.wait_until, folded.paused),
+                         ("2027-01-15T10:00:00+00:00", None))
+        got = self.report(svc, sid, secret, {**REPORT, "paused": "  the lead freed this account  "})
+        self.assertEqual(got[0], 200)
+        report = json.loads(support.log_rows(self.store)[-1][4])["report"]
+        self.assertEqual(report, {**CHECKED, "paused": "the lead freed this account"})
+        folded = svc._sprints[sid].report
+        self.assertEqual((folded.wait_until, folded.paused),
+                         (None, "the lead freed this account"))
+
+    def test_a_wait_until_in_the_past_unparseable_or_beyond_the_limit_is_refused_with_the_report(self):
+        svc = self.open(clock=lambda: NOW)
+        sid = self.started(svc)
+        secret = self.secret(sid)
+        member = "the report has no valid {}"
+        table = [
+            ({"wait_until": "2027-01-15T07:59:59Z"}, sprints.WAIT_PAST),
+            ({"wait_until": "2027-01-15T08:00:00Z"}, sprints.WAIT_PAST),
+            ({"wait_until": "2027-01-16T08:00:01Z"}, sprints.WAIT_TOO_FAR),
+            ({"wait_until": "2027-01-16T08:00:00.000500Z"}, sprints.WAIT_TOO_FAR),
+            ({"wait_until": "tomorrow"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T10:00:00"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T12:00:00+02:00"}, member.format("wait_until")),
+            ({"wait_until": 1800007200}, member.format("wait_until")),
+            ({"wait_until": None}, member.format("wait_until")),
+            ({"paused": ""}, member.format("paused")),
+            ({"paused": "a\nb"}, member.format("paused")),
+            ({"paused": "x" * 501}, member.format("paused")),
+            ({"paused": "#12 waits"}, sprints.PAUSED_NUMBER),
+            ({"wait_until": "2027-01-15T10:00:00Z", "paused": "the lead asked"},
+             sprints.WAIT_AND_PAUSE),
+        ]
+        for extra, reason in table:
+            with self.subTest(extra=extra):
+                body = {**REPORT, **extra}
+                self.refused(svc, lambda: self.report(svc, sid, secret, body), 409,
+                             reason.encode())
+
+        def dry(wait_until):
+            body = json.dumps({"sprint_id": sid, "secret": secret, "dry_run": True,
+                               "report": {**REPORT, "wait_until": wait_until}}).encode()
+            return self.assert_unchanged(
+                svc, lambda: support.post_page(svc.address, REPORT_PATH, JSON, body))
+
+        got = dry("2027-01-15T07:59:59Z")
+        self.assertEqual((got[0], got[2]), (409, sprints.WAIT_PAST.encode() + b"\n"))
+        for edge in ("2027-01-16T08:00:00Z", "2027-01-15T08:00:00.000500Z"):
+            with self.subTest(edge=edge):
+                got = dry(edge)
+                self.assertEqual((got[0], got[2]), (200, b'{"checked":true}'))
+
+    def test_the_fold_keeps_a_wait_until_whose_time_has_passed(self):
+        self.assertEqual(sprints.checked_report({**REPORT, "wait_until": "2000-01-01T00:00:00Z"}),
+                         {**CHECKED, "wait_until": "2000-01-01T00:00:00+00:00"})
+        with self.assertRaises(sprints.Refused) as raised:
+            sprints.checked_report({**REPORT, "wait_until": "2000-01-01T00:00:00Z"},
+                                   now_ms=NOW * 1000)
+        self.assertEqual(str(raised.exception), sprints.WAIT_PAST)
+        svc = self.open(clock=lambda: NOW)
+        sid = self.started(svc)
+        got = self.report(svc, sid, self.secret(sid),
+                          {**REPORT, "wait_until": "2027-01-15T10:00:00Z"})
+        self.assertEqual(got[0], 200)
+        svc.close()
+        second = self.start(clock=lambda: NOW + 3 * 3600)
+        self.assertEqual(second._sprints[sid].report.wait_until, "2027-01-15T10:00:00+00:00")
 
     def test_a_report_survives_a_restart(self):
         svc = self.open()
