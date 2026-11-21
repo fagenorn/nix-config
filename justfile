@@ -91,6 +91,14 @@ evals skill id:
 agent_tools_path := justfile_directory() / "python"
 system_result := justfile_directory() / "result"
 
+# Run the lints (verification command `lint`): every member runs and each failing one is named.
+lint:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command lint
+
+# Run the build then the agent workflow suite (verification command `test`), naming each failing member.
+test:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command test
+
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output).
 agent-workflow-tests *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
@@ -206,6 +214,7 @@ agent-workflow-tests *args:
     tests/test_branch_protection.py \
     tests/test_devenv_cache_ignored.py \
     tests/test_suite_runner.py \
+    tests/test_verification_command.py \
     tests/test_console_event_log.py \
     tests/test_console_release_card.py \
     tests/test_console_release_card_service.py \
