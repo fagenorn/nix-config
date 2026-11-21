@@ -192,7 +192,7 @@ class CommandTest(Case):
         self.assertEqual(manager.launch_tools("win32"), ())
 
 
-DENY = ("Bash(gh pr merge *--admin*)",)
+DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)")
 
 
 class RunTest(Case):
@@ -284,6 +284,9 @@ class RunTest(Case):
         settings = json.loads(self.settings.read_text())
         self.assertEqual(set(settings["permissions"]), {"defaultMode", "deny"})
         self.assertEqual(settings["permissions"]["deny"], list(DENY))
+        self.assertIn("Bash(release transaction abandon*)", settings["permissions"]["deny"])
+        self.assertFalse([rule for rule in settings["permissions"]["deny"]
+                          if "release transaction run" in rule])
         self.assertNotIn("autoMode", settings)
         self.assertNotIn("disableAllHooks", settings)
         [pre] = settings["hooks"]["PreToolUse"]

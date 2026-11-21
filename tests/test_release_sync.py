@@ -77,7 +77,7 @@ class SyncCase(unittest.TestCase):
     def driver(self, forge=None, **project):
         project = rs.project(self, **{"profiles": {"two-branch": support.merge_profile()},
                                       "integration": "dev", **project})
-        return release_driver.Driver(project, registry={"github-forge": forge or self.forge},
+        return release_driver.Driver(project, approvals=rs.approve_all, registry={"github-forge": forge or self.forge},
                                      clock=self.clock)
 
     def argvs(self, tool, head):
@@ -171,6 +171,35 @@ class SyncRunTest(SyncCase):
         except release_driver.Refusal as caught:
             refusal = caught.code
         self.assertEqual(refusal, "confirmation_stale")
+
+
+class SyncApprovalTest(SyncCase):
+    """A bare run of a finished release writes the sync, so it asks the console like any run."""
+
+    def test_a_bare_run_finishes_a_pending_sync_only_on_an_approved_card(self):
+        self.world.sync_ready(create_exit=1, create_stdout="", create_stderr="gh: connection reset")
+        driver = self.driver()
+        rs.release(driver, rs.candidate())
+        before, asked = self.mutations(), []
+        self.world.sync_ready(branch_tip=MERGED)
+        def declined(commit, version):
+            asked.append((commit, version))
+            return False
+        driver.approvals = declined
+        for _ in range(2):
+            with self.assertRaises(release_driver.Refusal) as caught:
+                driver.run(None, [])
+            self.assertEqual(caught.exception.code, "release_unapproved")
+        self.assertEqual(asked, [(CANONICAL["commit"], CANONICAL["tag"])] * 2)
+        self.assertEqual(self.mutations(), before)
+        driver.approvals = None
+        with self.assertRaises(release_driver.Refusal) as caught:
+            driver.run(None, [])
+        self.assertEqual(caught.exception.code, "approval_unreadable")
+        self.assertEqual(self.mutations(), before)
+        self.assertEqual(driver.status()["release"]["state"], "succeeded")
+        driver.approvals = rs.approve_all
+        self.assertEqual(driver.run(None, [])["sync"], DONE)
 
 
 class SyncLookupTest(SyncCase):
@@ -278,7 +307,7 @@ class SingleBranchUnchangedTest(SyncCase):
         self.forge = rs.StatefulForge(self.world)
 
     def single(self):
-        return release_driver.Driver(rs.project(self), registry={"github-forge": self.forge},
+        return release_driver.Driver(rs.project(self), approvals=rs.approve_all, registry={"github-forge": self.forge},
                                      clock=self.clock)
 
     def test_the_documents_carry_no_sync_and_a_finished_release_still_needs_a_candidate(self):

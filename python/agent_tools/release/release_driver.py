@@ -85,7 +85,16 @@ that state holds (issue 845).
 Run (D6, D7, D14, D20, D21). `run` re-derives the plan as `preview` does and writes nothing
 until it passes: a refused plan raises its refusal, a token outside the recomputed set refuses
 `confirmation_stale`, and a missing one `confirmation_required` (all-or-nothing). It then
-creates the transaction (mode `new`), acquires custody as executor `release-driver` with a
+asks the approval gate (ADR-release-016), before the land lock, the store, `_adopt` and the
+create are touched. The gate applies to every `run` that goes on to write: a new candidate, a
+resumed transaction (whatever its stored fields say, which are no proof of approval) and the
+bare `run` of a finished release whose sync is read and finished again. It calls
+`approvals(commit, version)` once with the plan's candidate (the stored one on a resume or a
+finished release) and refuses `release_unapproved` when it answers False, or
+`approval_unreadable` when it raises `ApprovalUnreadable` or the driver has no `approvals`
+reader (the reason `no approvals reader`), each in one line. `preview`, `status`, `abandon`
+and `dispose` never ask. The driver imports no console module: its caller supplies the reader.
+It then creates the transaction (mode `new`), acquires custody as executor `release-driver` with a
 900000 ms TTL and issues one grant per token (`release-irreversible`, actor `operator`, kind
 `human`) and, when the plan has a non-irreversible action, `release-scope:<acquisition
 ordinal>` (`release-scope`). It renews custody before each phase and each action, so a lapsed
@@ -403,11 +412,17 @@ class _Plan:
     receipt: dict[str, Any] | None
 
 
+class ApprovalUnreadable(Exception):
+    """An approvals reader could not read the console's records; `str()` is the reason."""
+
+
 class Driver:
     def __init__(self, project: Project, *, profile_id: str | None = None,
                  registry: Mapping[str, Any] = release_adapter.REGISTRY,
-                 clock: Callable[[], int] | None = None) -> None:
+                 clock: Callable[[], int] | None = None,
+                 approvals: Callable[[str, str], bool] | None = None) -> None:
         self.project = project
+        self.approvals = approvals
         self.registry = registry
         self.clock = clock
         self.profile_id = _select(project.contract, profile_id)
@@ -683,6 +698,7 @@ class Driver:
             raise Refusal("confirmation_stale", "not confirmations of this release: "
                           + ", ".join(dict.fromkeys(confirmations)))
         transaction = current[1]
+        self._require_approval(transaction.subject["candidate"])
         ending = "done" if transaction.state == "succeeded" else "attention"
         return {**self._result(transaction, ending), "legacy": None, "lock": None,
                 "sync": self._synced(transaction, self._router())}
@@ -748,6 +764,7 @@ class Driver:
         missing = [action for given, action in listed.items() if given not in supplied]
         if missing:
             raise Refusal("confirmation_required", "confirm: " + ", ".join(missing))
+        self._require_approval(plan.candidate)
         router = self._router()
         lock = None
         if self.sync is not None and plan.transaction is None:
@@ -766,6 +783,24 @@ class Driver:
         acquisition = _openings(transaction)
         drive = _Drive(self, plan, store, router, custody, acquisition, transaction, lock)
         return {**drive.run(supplied), "legacy": legacy}
+
+    def _require_approval(self, candidate: Mapping[str, Any]) -> None:
+        """Refuse unless the console records an approved release card of the candidate's exact
+        commit and version; nothing the transaction store holds stands in for that record."""
+        commit, version = candidate["commit"], candidate["version"]
+        try:
+            if self.approvals is None:
+                raise ApprovalUnreadable("no approvals reader")
+            approved = self.approvals(commit, version)
+        except ApprovalUnreadable as error:
+            raise Refusal("approval_unreadable",
+                          f"the console's records on this host could not be read ({error}), so "
+                          f"no approval of {version} at {commit} can be confirmed") from error
+        if not approved:
+            raise Refusal("release_unapproved",
+                          f"no approved release card records {version} at {commit}: post one "
+                          f"with release-card post --commit {commit} --version {version}, have "
+                          "the owner approve it on the console page, then run again")
 
     def _rerun_denied(self) -> tuple[str, ...]:
         """The actions whose guard refusal may run again: the sync's merge, else none."""

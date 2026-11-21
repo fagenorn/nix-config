@@ -107,6 +107,12 @@ project's slug, null when unknown), `verb`, `decision`, `reason` and `target`) a
 `session_id`, `repo`, `verb` `merge` and `target` `{"pr", "head"}`). Neither is in `KEPT_KINDS`, so
 retention removes them like any other row, and no fold reads them.
 
+Two rows record a release card outside any sprint (#1401): `RELEASE_CARD_POSTED` (`release_card.posted`)
+carries payload `commit`, `version`, with a null project column, and `RELEASE_CARD_ANSWERED`
+(`release_card.answered`) carries payload `card` (the posted row's `seq`) and `answer` (`approve` or
+`decline`); an owner's row carries no `by`. Neither is in `KEPT_KINDS`: retention removes them like any
+other row, and the reader ignores rows outside the window.
+
 One kind is kept in part (#1010): `SIGNIN_READING` (`signin.reading`) is not in `KEPT_KINDS`, but the
 retention pass leaves the newest row of each profile (by sequence number, the profile being the
 payload's `profile`) in place whatever its age, and also the newest row of each profile whose
@@ -273,6 +279,8 @@ ACTIVATION_STARTED = "activation.started"
 ACTIVATION_FINISHED = "activation.finished"
 PERMIT_JUDGED = "permit.judged"
 PERMIT_LANDED = "permit.landed"
+RELEASE_CARD_POSTED = "release_card.posted"
+RELEASE_CARD_ANSWERED = "release_card.answered"
 SHARING_TAILNET = "sharing.tailnet"
 SHARING_COLLEAGUE = "sharing.colleague"
 SHARING_REMOVED = "sharing.removed"

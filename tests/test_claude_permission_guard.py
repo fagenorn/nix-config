@@ -2089,6 +2089,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "kubectl get pods", "timeout 5 kubectl get pods -A",
                 f"{preview} --title 'ship just switch'",
                 "release transaction run --repo-root . --confirm tok",
+                "release transaction run --repo-root . --commit " + "a" * 40
+                + " --version v1.2.0 --title 'v1.2.0 notes' --notes-file /tmp/n"
+                " --confirm tag:0123456789ab --confirm github-release:0123456789ab",
                 'echo "just switch"', "git commit -m 'run just switch later'",
                 "cat > notes.md <<'EOF'\njust switch\nEOF\n", "true # just switch",
                 "cat <<'EOF' >/dev/null\nbody\nEOF\njust build",

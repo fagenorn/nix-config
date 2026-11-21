@@ -2,6 +2,8 @@
 
 Run: just agent-workflow-tests
 """
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -10,6 +12,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from agent_tools.console import event_log, release_card
+from agent_tools.release import release
 
 from . import forge_world
 from . import release_test_support as support
@@ -39,6 +45,35 @@ class ReleaseCommandCase(unittest.TestCase):
             shutil.copy(REPO / name, self.root / name)
         self.write_contract(json.loads((REPO / ".agents/project.json").read_text("utf-8")))
         subprocess.run(["git", "init", "--quiet"], cwd=self.root, check=True)
+        self.host_store = Path(tmp.name).resolve() / "host/.agents/state/console/events.sqlite3"
+
+    def run_in_process(self, *args, cwd=None):
+        """`release.main` in this process, with the host console store patched to
+        `self.host_store` (never under `self.home`); returns (code, document, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, {"HOME": str(self.home)}))
+            stack.enter_context(mock.patch.object(release_card, "host_store",
+                                                  return_value=self.host_store))
+            if cwd is not None:
+                stack.enter_context(contextlib.chdir(cwd))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            code = release.main([*args, "--repo-root", str(self.root)])
+        return code, json.loads(out.getvalue()), err.getvalue()
+
+    def card(self, commit, version, answer=None, store=None):
+        """Post a release card to `store` (the host store by default) and optionally answer it."""
+        path = store or self.host_store
+        path.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(path)
+        try:
+            (posted,) = log.append([release_card.posted_row(commit, version)])
+            if answer is not None:
+                log.append([release_card.answered_row(posted.seq, answer)])
+        finally:
+            log.close()
+        return posted.seq
 
     def write_contract(self, contract):
         (self.root / ".agents/project.json").write_text(json.dumps(contract), encoding="utf-8")
@@ -189,8 +224,8 @@ class DeployInspectRemovedTest(ReleaseCommandCase):
         self.assertIn("invalid choice", result.stderr)
 
 
-class TransactionCommandTest(ReleaseCommandCase):
-    """`release transaction` against nix-config's own profile (#128 spec §1, §4–§7)."""
+class CandidateCommandCase(ReleaseCommandCase):
+    """A world, a notes file and the candidate flags of nix-config's own profile."""
 
     def setUp(self):
         super().setUp()
@@ -215,7 +250,16 @@ class TransactionCommandTest(ReleaseCommandCase):
 
     def run_with(self, tokens):
         confirms = [part for token in tokens for part in ("--confirm", token)]
-        return self.run_release("transaction", "run", *self.candidate(), *confirms, cwd=self.root)
+        return self.run_in_process("transaction", "run", *self.candidate(), *confirms,
+                                   cwd=self.root)
+
+
+class TransactionCommandTest(CandidateCommandCase):
+    """`release transaction` against nix-config's own profile (#128 spec §1, §4–§7)."""
+
+    def setUp(self):
+        super().setUp()
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
 
     def test_preview_names_tag_and_release(self):
         document = self.preview()
@@ -271,7 +315,7 @@ class TransactionCommandTest(ReleaseCommandCase):
                                 {"object": {"type": "commit", "sha": CANONICAL["commit"]}})
         _, resume, _ = self.run_release("transaction", "preview")
         confirms = [part for c in resume["confirmations"] for part in ("--confirm", c["token"])]
-        code, result, err = self.run_release("transaction", "run", *confirms, cwd=self.root)
+        code, result, err = self.run_in_process("transaction", "run", *confirms, cwd=self.root)
         self.assertEqual((code, result["next"]), (0, "attention"), err)
         code, document, _ = self.run_release("transaction", "preview", *self.candidate())
         self.assertEqual((code, document["error"]["code"]), (3, "release_in_flight"))
@@ -287,10 +331,10 @@ class TransactionCommandTest(ReleaseCommandCase):
         code, document, err = self.run_release("transaction", "preview", *dispose)
         self.assertEqual((code, document["mode"]), (0, "dispose"), err)
         token = document["confirmations"][0]["token"]
-        code, refused, _ = self.run_release("transaction", "run", *dispose, cwd=self.root)
+        code, refused, _ = self.run_in_process("transaction", "run", *dispose, cwd=self.root)
         self.assertEqual((code, refused["error"]["code"]), (3, "confirmation_required"))
-        code, result, err = self.run_release("transaction", "run", *dispose, "--confirm", token,
-                                             cwd=self.root)
+        code, result, err = self.run_in_process("transaction", "run", *dispose, "--confirm",
+                                                token, cwd=self.root)
         self.assertEqual((code, result["state"], result["next"]), (0, "failed", "disposed"), err)
         _, status, _ = self.run_release("transaction", "status")
         self.assertEqual((status["release"]["state"], status["release"]["disposition"]["reference"]),
@@ -321,6 +365,144 @@ class TransactionCommandTest(ReleaseCommandCase):
         theirs = raw("agent_tools.project_contract.resolve_project", "resolve", "--require", "release")
         self.assertEqual((ours.returncode, ours.stdout), (2, theirs.stdout))
         self.assertEqual(theirs.returncode, 2)
+
+
+class ApprovalCommandTest(CandidateCommandCase):
+    """The run is refused unless the host console records an approved card of the candidate."""
+
+    def reaches_done(self):
+        self.world.canonical()
+        self.world.verification_ready()  # canonical() overwrote the tip and protection reads.
+
+    def tokens(self):
+        return [c["token"] for c in self.preview()["confirmations"]]
+
+    def test_a_run_with_no_card_or_no_console_is_refused_in_one_line_and_writes_nothing(self):
+        tokens = self.tokens()
+        code, document, err = self.run_with(tokens)
+        self.assertEqual((code, document["error"]["code"]), (3, "approval_unreadable"), err)
+        self.assertNotIn("\n", document["error"]["detail"])
+        self.card("f" * 40, "v0.0.1")
+        code, document, err = self.run_with(tokens)
+        self.assertEqual((code, document["error"]["code"]), (3, "release_unapproved"), err)
+        self.assertNotIn("\n", document["error"]["detail"])
+        self.assertFalse(self.store_exists())
+
+    def test_an_approval_of_another_candidate_does_not_count(self):
+        tokens = self.tokens()
+        self.card(CANONICAL["commit"], "v0.0.1", release_card.APPROVE)
+        self.card("f" * 40, CANONICAL["tag"], release_card.APPROVE)
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.DECLINE)
+        self.card(CANONICAL["commit"], CANONICAL["tag"])
+        code, document, err = self.run_with(tokens)
+        self.assertEqual((code, document["error"]["code"]), (3, "release_unapproved"), err)
+        self.assertFalse(self.store_exists())
+
+    def test_the_owners_approval_of_the_leads_card_lets_the_run_proceed(self):
+        self.reaches_done()
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
+        code, result, err = self.run_with(self.tokens())
+        self.assertEqual((code, result["state"], result["next"]), (0, "succeeded", "done"), err)
+
+    def test_only_the_host_consoles_store_decides(self):
+        self.reaches_done()
+        tokens = self.tokens()
+        caller = self.home / ".agents/state/console/events.sqlite3"
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE, store=caller)
+        self.card("f" * 40, "v0.0.1", store=self.host_store)
+        code, document, err = self.run_with(tokens)
+        self.assertEqual((code, document["error"]["code"]), (3, "release_unapproved"), err)
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
+        caller.unlink()
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.DECLINE, store=caller)
+        code, result, err = self.run_with(tokens)
+        self.assertEqual((code, result["state"]), (0, "succeeded"), err)
+
+    def parked(self):
+        """Run an approved release until it parks; returns its status release member."""
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
+        self.world.invoke_ready(guard_exit=1)
+        self.world.not_found("gh", ROWS["tag.ref"]["argv"][1:])
+        self.world.not_found("gh", ROWS["release.view"]["argv"][1:])
+        code, result, err = self.run_with(self.tokens())
+        self.assertEqual((code, result["next"]), (0, "attention"), err)
+        return self.status()
+
+    def status(self):
+        code, document, err = self.run_release("transaction", "status")
+        self.assertEqual(code, 0, err)
+        release = document["release"]
+        return release["state"], [(a["name"], a["status"]) for a in release["actions"]]
+
+    def resume(self):
+        code, resume, err = self.run_release("transaction", "preview")
+        self.assertEqual(code, 0, err)
+        confirms = [part for c in resume["confirmations"] for part in ("--confirm", c["token"])]
+        return self.run_in_process("transaction", "run", *confirms, cwd=self.root)
+
+    def test_a_parked_release_resumes_only_while_the_console_approves_its_candidate(self):
+        parked = self.parked()
+        self.host_store.unlink()
+        code, document, err = self.resume()
+        self.assertEqual((code, document["error"]["code"]), (3, "approval_unreadable"), err)
+        self.assertEqual(self.status(), parked)
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.DECLINE)
+        code, document, err = self.resume()
+        self.assertEqual((code, document["error"]["code"]), (3, "release_unapproved"), err)
+        self.assertEqual(self.status(), parked)
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
+        code, result, err = self.resume()
+        self.assertEqual((code, result["next"]), (0, "attention"), err)
+        self.assertNotIn("error", result)
+
+    def test_a_missing_passwd_entry_breaks_only_the_run(self):
+        tokens = self.tokens()
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
+
+        def main(*args):
+            out = io.StringIO()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"HOME": str(self.home)}))
+                stack.enter_context(mock.patch.object(
+                    release_card.pwd, "getpwuid", side_effect=KeyError("uid not found")))
+                stack.enter_context(contextlib.chdir(self.root))
+                stack.enter_context(contextlib.redirect_stdout(out))
+                code = release.main([*args, "--repo-root", str(self.root)])
+            return code, json.loads(out.getvalue())
+
+        code, document = main("transaction", "status")
+        self.assertEqual(code, 0, document)
+        code, document = main("transaction", "abandon")
+        self.assertNotEqual(document.get("error", {}).get("code"), "approval_unreadable", document)
+        confirms = [part for token in tokens for part in ("--confirm", token)]
+        code, document = main("transaction", "run", *self.candidate(), *confirms)
+        self.assertEqual((code, document["error"]["code"]), (3, "approval_unreadable"), document)
+        self.assertIn("uid not found", document["error"]["detail"])
+        self.assertNotIn("\n", document["error"]["detail"])
+        self.assertFalse(self.store_exists())
+
+
+class ParserCommandTest(ReleaseCommandCase):
+    """Options are never abbreviated, so an abbreviation cannot reach a dispose or a run."""
+
+    def raw(self, *args):
+        env = dict(os.environ, PYTHONPATH=str(PYTHON), HOME=str(self.home))
+        result = subprocess.run([sys.executable, "-m", "agent_tools.release.release", *args,
+                                 "--repo-root", str(self.root)],
+                                capture_output=True, text=True, env=env, timeout=120)
+        return result.returncode, result.stdout, result.stderr
+
+    def test_an_abbreviated_option_is_refused_before_anything_runs(self):
+        for args in (("transaction", "run", "--disp", "no_recovery_path", "--reference", "x",
+                      "--confirm", "tok"),
+                     ("transaction", "preview", "--disp", "no_recovery_path", "--reference", "x"),
+                     ("transaction", "run", "--commi", "a" * 40, "--version", "v1.2.0",
+                      "--confirm", "tok")):
+            with self.subTest(args=args):
+                code, out, err = self.raw(*args)
+                self.assertEqual((code, out), (2, ""), err)
+                self.assertIn("unrecognized arguments", err)
+        self.assertFalse((self.root / ".git/agent-release").exists())
 
 
 class LegacyCommandTest(TransactionCommandTest):
@@ -396,6 +578,7 @@ class TwoBranchCommandTest(ReleaseCommandCase):
         self.addCleanup(notes.cleanup)
         self.notes = Path(notes.name) / "notes.md"
         self.notes.write_text("notes body\n", encoding="utf-8")
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.APPROVE)
 
     def test_preview_refuses_a_missing_release_pr(self):
         self.world.merge_observation_ready(prs=[])
@@ -420,10 +603,30 @@ class TwoBranchCommandTest(ReleaseCommandCase):
         self.assertEqual(document["lock"]["verdict"], "acquired")
         self.world.set_ref(forge_world.LAND_LOCK.format(branch="dev"), None)
         confirms = [part for entry in document["confirmations"] for part in ("--confirm", entry["token"])]
-        code, result, err = self.run_release("transaction", "run", *candidate, *confirms, cwd=self.root)
+        code, result, err = self.run_in_process("transaction", "run", *candidate, *confirms,
+                                                cwd=self.root)
         self.assertEqual((code, result["error"]["code"], result["error"]["repair_id"]),
                          (3, "land_lock_lost", None), err)
         self.assertIn("preview again", result["error"]["detail"])
+        self.assertFalse((self.root / ".git/agent-release").exists())
+
+    def test_an_unapproved_candidate_is_refused_before_the_land_lock_is_taken(self):
+        self.world.merge_observation_ready()
+        self.world.land_lock_ready(lock=None)
+        candidate = ["--commit", CANONICAL["commit"], "--version", CANONICAL["tag"],
+                     "--title", CANONICAL["title"], "--notes-file", str(self.notes)]
+        code, document, err = self.run_release("transaction", "preview", *candidate)
+        self.assertEqual(code, 0, err)
+        self.world.set_ref(forge_world.LAND_LOCK.format(branch="dev"), None)
+        self.host_store.unlink()
+        self.card(CANONICAL["commit"], CANONICAL["tag"], release_card.DECLINE)
+        confirms = [part for entry in document["confirmations"]
+                    for part in ("--confirm", entry["token"])]
+        before = len(self.world.calls())
+        code, result, err = self.run_in_process("transaction", "run", *candidate, *confirms,
+                                                cwd=self.root)
+        self.assertEqual((code, result["error"]["code"]), (3, "release_unapproved"), err)
+        self.assertFalse([call for call in self.world.calls()[before:] if "-X" in call["argv"]])
         self.assertFalse((self.root / ".git/agent-release").exists())
 
     def test_a_finished_release_prints_its_sync_and_a_rerun_prints_it_again(self):
@@ -440,13 +643,14 @@ class TwoBranchCommandTest(ReleaseCommandCase):
         code, document, err = self.run_release("transaction", "preview", *candidate)
         self.assertEqual(code, 0, err)
         confirms = [part for entry in document["confirmations"] for part in ("--confirm", entry["token"])]
-        code, result, err = self.run_release("transaction", "run", *candidate, *confirms, cwd=self.root)
+        code, result, err = self.run_in_process("transaction", "run", *candidate, *confirms,
+                                                cwd=self.root)
         self.assertEqual((code, result["state"], result["next"]), (0, "succeeded", "done"), err)
         sync = {"status": "done", "branch": forge_world.SYNC["branch"], "pr": forge_world.SYNC["pr"],
                 "url": forge_world.SYNC_URL, "reason": None, "manual": []}
         self.assertEqual(result["sync"], sync)
         self.assertEqual(result["lock"], {"verdict": "released", "lock_sha": None, "detail": None})
-        code, rerun, err = self.run_release("transaction", "run", cwd=self.root)
+        code, rerun, err = self.run_in_process("transaction", "run", cwd=self.root)
         self.assertEqual((code, rerun["state"], rerun["next"], rerun["sync"], rerun["lock"]),
                          (0, "succeeded", "done", sync, None), err)
         self.assertEqual(rerun["transaction_id"], result["transaction_id"])

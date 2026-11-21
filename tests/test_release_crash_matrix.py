@@ -23,7 +23,7 @@ class MatrixCase(unittest.TestCase):
             key, operation, after = crash
             registry[key] = rs.CrashAt(registry[key], operation, after=after)
         project = rs.project(self, profiles={"two-branch": rs.fixture_profile()}, integration="dev")
-        return release_driver.Driver(project, registry=registry, clock=self.clock)
+        return release_driver.Driver(project, approvals=rs.approve_all, registry=registry, clock=self.clock)
 
     def counts(self):
         pushes = sum(c["argv"] == ROWS["tag.push"]["argv"][1:] for c in self.world.calls())
@@ -123,7 +123,7 @@ class WatchCrashTest(unittest.TestCase):
 
     def test_a_crash_while_watching_resumes_by_observing_without_republishing(self):
         project = rs.project(self, profiles={"watched": support.watched_profile()})
-        driver = release_driver.Driver(project, clock=self.clock, registry={
+        driver = release_driver.Driver(project, approvals=rs.approve_all, clock=self.clock, registry={
             "github-forge": self.forge, "github-actions-health": self.watch})
         self.watch.crash_next_inspect = True
         shown = driver.preview(rs.candidate())
@@ -158,7 +158,7 @@ class WatchedTwoBranchTest(unittest.TestCase):
         world.land_lock_ready()
         project = rs.project(self, profiles={"watched": support.watched_merge_profile()},
                              integration="dev")
-        driver = release_driver.Driver(project, clock=rs.Clock(), registry={
+        driver = release_driver.Driver(project, approvals=rs.approve_all, clock=rs.Clock(), registry={
             "github-forge": forge, "github-actions-health": watch})
         _, result = rs.release(driver, rs.candidate())
         self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
@@ -192,7 +192,7 @@ class TwoBranchMatrixTest(unittest.TestCase):
         if crash is not None:
             forge = rs.CrashAt(forge, crash, after=True)
         project = rs.project(self, profiles={"two-branch": rs.forge_merge_profile()}, integration="dev")
-        return release_driver.Driver(project, registry={"github-forge": forge, "fixture-deploy": self.deploy},
+        return release_driver.Driver(project, approvals=rs.approve_all, registry={"github-forge": forge, "fixture-deploy": self.deploy},
                                      clock=self.clock)
 
     def merges(self):

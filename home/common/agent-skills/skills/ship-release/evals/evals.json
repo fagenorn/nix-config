@@ -1,6 +1,6 @@
 {
   "skill_name": "ship-release",
-  "notes": "Evals 1-4 are plan-only release evals: they never tag, release, push, or deploy for real. Eval 1 assumes the nix-config shape (a release profile with the irreversible `tag` and `github-release` actions); grade 2-4 on a project whose release core reports the stated state. Resolve once into a retained ResolvedProject; refusal is fatal and policy is never defaulted or inferred. Eval 5 is the one pipeline case: the shared sandbox declares no release capability (kind=none), so the skill must report the resolver refusal byte for byte and create no tag.",
+  "notes": "Evals 1-4, 6 and 7 are plan-only release evals: they never tag, release, push, or deploy for real. Eval 1 assumes the nix-config shape (a release profile with the irreversible `tag` and `github-release` actions); grade 2-4 on a project whose release core reports the stated state. Resolve once into a retained ResolvedProject; refusal is fatal and policy is never defaulted or inferred. Eval 5 is the one pipeline case: the shared sandbox declares no release capability (kind=none), so the skill must report the resolver refusal byte for byte and create no tag.",
   "evals": [
     {
       "id": 1,
@@ -49,6 +49,20 @@
           "shell": "[ \"$(git -C \"$REPO\" tag -l 'v*')\" = v0.1.0 ] || fail \"local tags: $(git -C \"$REPO\" tag -l | tr '\\n' ' ')\""
         }
       ]
+    },
+    {
+      "id": 6,
+      "name": "new-release-card-open-approve-on-page",
+      "mode": "plan-only",
+      "prompt": "Plan-only: the release preview is runnable, and `release-card post` prints `release-card: card 4 is open`. Do not run the release. Assume the user stays silent.",
+      "expected_output": "The skill runs `release-card post --commit <commit> --version <version>` with the preview's pair. It presents the version, title, commit, actions and every confirmation, asks the user to click Approve on the open card on the console page and to give one explicit yes to all in chat (the chat reply, not the click, is what wakes the session), and ends the turn. Silence approves nothing and `release transaction run` is not called; a later `release_unapproved` releases the land lock, asks the owner to approve the card and previews again on their reply."
+    },
+    {
+      "id": 7,
+      "name": "resume-card-approved-yes-in-chat",
+      "mode": "plan-only",
+      "prompt": "Dry-run only: a release parked; the resume preview lists fresh tokens, and `release-card post` for its commit and version prints `release-card: card 4 is approved`. Narrate the stop without running `run`.",
+      "expected_output": "The skill posts the card for the release's own commit and version (from status). Because the card is already approved and the page offers nothing to click, it presents the fresh tokens, asks for one explicit yes in chat and ends the turn. It never reuses an earlier yes's tokens and never asks the user to click an approved card."
     }
   ]
 }

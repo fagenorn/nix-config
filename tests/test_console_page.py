@@ -21,7 +21,7 @@ from agent_tools.console import signin as console_signin
 from agent_tools.console import project_question
 from agent_tools.console.event_log import Event
 from agent_tools.console.project_question import NO_PRODUCTION_LINE
-from agent_tools.console import event_log
+from agent_tools.console import event_log, release_card
 from agent_tools.console.sprints import MAX_REPORT_ISSUES, Question, sprint_states
 from agent_tools.console.sprints import NUDGE_ACTION_TEXT
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -183,7 +183,9 @@ class PageTest(unittest.TestCase):
         # Raised from 70 KB by #1272: the thread delete control, the credential refusal's draft cleanup in both
         # editors and the settling of accepted questions after a stream break (about 1 KB compressed) did not fit
         # the 100 bytes the cap had left.
-        self.assertLess(len(gzip.compress(self.data, 9)), 72704)
+        # Raised from 71 KB by the merge of #1274 with main: each side fit under the 72704 bytes the cap held
+        # (72643 and 72425), and merged the page is 72956 bytes.
+        self.assertLess(len(gzip.compress(self.data, 9)), 74752)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -229,7 +231,7 @@ class PageTest(unittest.TestCase):
              "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
              "/api/guest-signin-cancel", "/api/adoption-merge", "/api/account-signout",
              "/api/guest-account-signout", "/api/guest-account-remove",
-             "/api/project-question-delete"},
+             "/api/project-question-delete", "/api/release-answer"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -238,7 +240,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 54)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 55)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -8730,6 +8732,23 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(posted(post), {"plan_id": PLAN_A, "number": 7, "commit": "a" * 40})
         self.assertIn("X-Console-Token", post["headers"])
 
+    def test_a_release_card_offers_approve_and_decline_and_posts_each_answer(self) -> None:
+        for button, answer in (("release-approve", "approve"), ("release-decline", "decline")):
+            with self.subTest(button=button):
+                (snap,) = render([
+                    START, {"frame": frame([RELEASE_ITEM])}, {"click": button}, {"snapshot": True}])
+                (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "release")]
+                text = full(card)
+                self.assertIn("v1.2.0", text)
+                self.assertIn("a" * 40, text)
+                (approve,) = of_class(card, "button", "release-approve")
+                (decline,) = of_class(card, "button", "release-decline")
+                self.assertEqual((full(approve), full(decline)), ("Approve release", "Decline"))
+                (post,) = snap["posts"]
+                self.assertEqual(post["url"], "/api/release-answer")
+                self.assertEqual(posted(post), {"card": 3, "answer": answer})
+                self.assertIn("X-Console-Token", post["headers"])
+
     def test_an_adoption_card_without_merge_says_why_and_offers_no_button(self) -> None:
         (snap,) = render([START, {"frame": frame([MOVED_ITEM])}, {"snapshot": True}])
         (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
@@ -10018,6 +10037,8 @@ ADOPTION_ITEM = {
     "url": "https://github.com/o/r/pull/7", "number": 7, "answered": False,
     "waiting_since": "2026-11-15T08:00:00+00:00",
     "plan_id": PLAN_A, "commit": "a" * 40, "merge": True, "why": None}
+RELEASE_ITEM = release_card.inbox_entries(
+    {3: release_card.Card(3, "a" * 40, "v1.2.0", "2026-11-21T08:00:00+00:00", "open")})[0]
 MOVED_ITEM = {**ADOPTION_ITEM, "merge": False,
               "headline": "Merge is not offered for the adoption of o/r",
               "why": "Its branch holds commits the console did not push. Review them on the forge "

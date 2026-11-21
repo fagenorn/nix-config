@@ -1075,6 +1075,12 @@ class ManagerContractTest(unittest.TestCase):
         self.assertNotIn("asks for a release, paid or production decision", line)
         self.assertNotIn("another sprint's claim", line)
 
+    def test_the_contract_says_only_an_approved_release_card_approves_a_release(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        self.assertIn("Only an approved release card approves a release, and the lead posts that "
+                      "card", text)
+        self.assertIn("the owner's answer to a `sprint ask`, owner-only or not, never does", text)
+
     def test_the_contract_offers_consequential_as_an_optional_mark(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
         (line,) = [part for part in text.split("- `") if part.startswith("consequential`")]

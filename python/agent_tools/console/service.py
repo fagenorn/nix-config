@@ -42,6 +42,8 @@ stream `Content-Length`):
     POST /api/plan-answer 204, a JSON body, the page answers one question of the adoption plan (below)
     POST /api/plan-approve 204, a JSON body, the page approves a ready adoption plan (below)
     POST /api/adoption-merge 204, a JSON body, the page merges an adoption's pull request at its recorded head (below)
+    POST /api/release-card 200 application/json, the lead posts a release candidate's card (below)
+    POST /api/release-answer 204, a JSON body, the page approves or declines a release card (below)
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
     POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
@@ -72,7 +74,7 @@ stream `Content-Length`):
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
                     `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/permit`,
-                    `/api/picture` and `/api/round-answer`;
+                    `/api/picture`, `/api/release-card`, `/api/release-answer` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
 Guest door (#1237, ADR-console-066, #1299, ADR-console-077). With `guest_socket` (`console
@@ -753,6 +755,34 @@ an empty `204`. A plan in `_deferred` gets no apply card until the shown plan id
 work line is unchanged. It runs nothing else. Any other exception is
 `console: plan_defer_failed <Type>: <message>`, then its traceback, and 500 `deferring failed`.
 
+`POST /api/release-card` (#1401, ADR-console-097) is the lead's post of a release card
+(`release_card`), an owner-port route that is not a page write: loopback `Host` and the owner-peer
+rule as every route, any `Origin` is 403 `origin refused`, a media type other than
+`application/json` 415 `json only`, any `Transfer-Encoding` or a length that is not digits 411
+`length required`, more than `MAX_RELEASE_CARD_BYTES` (1024) 413 `too large`, and a body
+`release_card.parse_post` refuses (anything but `{"commit", "version"}` of a release candidate's
+pattern) 400 `bad release card`. Under the ingest lock it answers 200
+`{"card": <int>, "state": "open" | "approved"}`: the standing card of the pair
+(`release_card.standing`, nothing appended) when one is open or approved and posted inside the
+retention window (`release_card.live`: the cards the release command still reads), else it appends one
+`release_card.posted` row, folds and publishes it and answers its `seq` as `open`. Posting approves
+nothing, and each refusal appends nothing. Any other exception is `console: release_card_failed
+<Type>: <message>` and 500 `release card failed`.
+
+`POST /api/release-answer` (#1401, ADR-console-097) is the owner's Approve release or Decline on a
+release card. It is an owner-only page write (`OWNER_ONLY`; in neither `GUEST_WRITES` nor
+`MANAGER_WRITES`), so `write_guard.refusal` runs first (no or a foreign `Origin` 403 `origin refused`,
+no or a wrong token 403 `token refused`), then the same JSON and length checks with
+`MAX_RELEASE_ANSWER_BYTES` (1024) and `release_card.parse_answer` (`{"card", "answer"}`, `answer`
+`approve` or `decline`): 400 `bad release answer`. Under the ingest lock the folded card must exist, be open and be
+posted inside the retention window (`release_card.live`), else 409 `release_card.NOT_OPEN` with one stderr line `console: release_answer_refused
+<words>`; otherwise it appends one `release_card.answered` row, folds and publishes it, and the answer
+is an empty `204`. The first answer wins: a later one is 409. Each refusal appends nothing. The
+cards are folded (`release_card.cards`) at construction and on every append, so a restart shows the
+same cards, and the view lists the open live ones through `release_items`; a card past the window is
+never answered, never returned for a repost and never listed, between its expiry and the daily
+retention pass, so the lead gets a fresh card.
+
 `POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
 `application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
 then ingests (`ingest_reading`): `capacity.parse_report` keeps the whitelisted members of the body
@@ -1018,7 +1048,7 @@ nothing folds it. A notice nudge is never retried after its own attempt, counts 
 `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
-Permit (#1377, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
+Permit (#1377, #1401, ADR-console-094, ADR-console-098): `POST /api/permit` is a manager write dispatched beside `/api/notices`
 through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
 `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
 a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
@@ -1027,7 +1057,9 @@ other exception 500 `permit failed`, each with one stderr line `console: permit_
 `{"decision": "allow" | "deny" | null, "reason": <str>}` and phase `landed` `{"recorded": <bool>}`.
 `permit(sprint_id, secret, session_id, tool_use_id, command)` answers a `permit.Verdict`: under the ingest lock it
 checks the secret (`_manager_sprint`), returns no decision (`decision` None, no row) for a command
-`permit.mentions` rejects, and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and
+`permit.mentions` rejects (a command running a release is a mention: the plain `release transaction run`
+is `allow` with verb `release` and target `{"commit", "version"}` and reads no forge; abandon and dispose are
+`deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the program is named), and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and
 `sprints.takes_questions` (no closing, no stop request, no stop, and not ended by a done report), and
 `permit.NOT_MANAGER` unless `session_id` is the sprint's
 `manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
@@ -1896,7 +1928,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, register, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -1994,6 +2026,8 @@ PLAN_ANSWER_PATH = "/api/plan-answer"
 PLAN_APPROVE_PATH = "/api/plan-approve"
 ADOPTION_REGISTER_PATH = "/api/adoption-register"
 ADOPTION_MERGE_PATH = "/api/adoption-merge"
+RELEASE_CARD_PATH = release_card.PATH
+RELEASE_ANSWER_PATH = release_card.ANSWER_PATH
 PLAN_DEFER_PATH = "/api/plan-defer"
 REGISTER_CONFIRM_PATH = "/api/register-confirm"
 TRUST_CHECK_PATH = "/api/trust-check"
@@ -2021,7 +2055,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
-    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH})
+    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -2081,7 +2115,11 @@ _FOLDED = object()
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
-POST_LIMITS = {HOOK_PATH: MAX_HOOK_BYTES, READINGS_PATH: MAX_READING_BYTES}
+MAX_RELEASE_CARD_BYTES = 1024
+MAX_RELEASE_ANSWER_BYTES = 1024
+POST_LIMITS = {HOOK_PATH: MAX_HOOK_BYTES, READINGS_PATH: MAX_READING_BYTES,
+               RELEASE_CARD_PATH: MAX_RELEASE_CARD_BYTES,
+               RELEASE_ANSWER_PATH: MAX_RELEASE_ANSWER_BYTES}
 PAGE_PATH = "/"
 STATE_PATH = "/api/state"
 STREAM_PATH = "/api/stream"
@@ -2305,6 +2343,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._picture_request()
         if route == RECAP_PATH:
             return self._recap_request()
+        if route == RELEASE_CARD_PATH:
+            return self._release_card_request()
         if route in PAGE_WRITES:
             return self._page_write(route)
         if route not in POST_LIMITS:
@@ -2748,6 +2788,50 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: adoption_merge_failed {type(error).__name__}", file=sys.stderr)
             self._refuse(500, "merging failed")
+            return False
+        return True
+
+    def _release_card_request(self):
+        """The lead's post of a release card: no `Origin`, JSON, a bounded length, a valid pair."""
+        if self.headers.get("Origin") is not None:
+            return self._refuse(403, "origin refused")
+        body = self._json_body(MAX_RELEASE_CARD_BYTES)
+        if body is None:
+            return
+        try:
+            commit, version = release_card.parse_post(body)
+        except ValueError:
+            return self._refuse(400, "bad release card")
+        self.close_connection = True
+        try:
+            card, state = self.server.console.post_release_card(commit, version)
+        except Exception as error:
+            print(f"console: release_card_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "release card failed")
+        self._send(200, "application/json",
+                   json.dumps({"card": card, "state": state}, sort_keys=True,
+                              separators=(",", ":")).encode(), ("Connection", "close"))
+
+    def _release_answer_request(self, console: "ConsoleService") -> bool:
+        """The owner's answer to a release card; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_RELEASE_ANSWER_BYTES)
+        if body is None:
+            return False
+        try:
+            card, answer_word = release_card.parse_answer(body)
+        except ValueError:
+            self._refuse(400, "bad release answer")
+            return False
+        try:
+            console.answer_release_card(card, answer_word)
+        except release_card.Refused as error:
+            print(f"console: release_answer_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: release_answer_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "release answer failed")
             return False
         return True
 
@@ -3621,6 +3705,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._adoption_merge_request(console):
                 return
+        elif route == RELEASE_ANSWER_PATH:
+            self.close_connection = True
+            if not self._release_answer_request(console):
+                return
         elif route == PLAN_DEFER_PATH:
             self.close_connection = True
             if not self._plan_defer_request(console):
@@ -4361,6 +4449,7 @@ class ConsoleService:
         self._approval_dispatch = (
             self._on_approval_thread if approval_dispatch is None else approval_dispatch)
         self._adoptions: dict[str, dict] = {}
+        self._release_cards: dict[int, release_card.Card] = {}
         self._deferred: frozenset[str] = frozenset()
         self._registering: str | None = None
         self._answering = False
@@ -4598,6 +4687,7 @@ class ConsoleService:
             self._registration_fold = register.fold(events)
             self._registration = self._registration_fold.latest
             self._adoptions = approve.adoptions(events)
+            self._release_cards = release_card.cards(events)
             self._deferred = approve.deferrals(events)
             self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
@@ -4856,6 +4946,8 @@ class ConsoleService:
             adoption_items=approve.inbox_entries(
                 self._adoptions,
                 shown_root=None if self._registration is None else self._registration["root"]),
+            release_items=release_card.inbox_entries(
+                release_card.live(self._release_cards, self._now())),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),
@@ -5050,6 +5142,25 @@ class ConsoleService:
             appended = self.log.append([(digest.LOOKED, None, {})])
             self._apply(appended)
             return appended
+
+    def post_release_card(self, commit: str, version: str) -> tuple[int, str]:
+        """The standing card of the pair as `(card, state)`, else a new open one; see the module docstring."""
+        with self._ingest:
+            standing = release_card.standing(
+                release_card.live(self._release_cards, self._now()), commit, version)
+            if standing is not None:
+                return standing.card_id, standing.state
+            (appended,) = self.log.append([release_card.posted_row(commit, version)])
+            self._apply([appended])
+            return appended.seq, release_card.OPEN
+
+    def answer_release_card(self, card_id: int, answer: str) -> None:
+        """Record the owner's answer to an open release card; see the module docstring."""
+        with self._ingest:
+            found = release_card.live(self._release_cards, self._now()).get(card_id)
+            if found is None or found.state != release_card.OPEN:
+                raise release_card.Refused(release_card.NOT_OPEN)
+            self._apply(self.log.append([release_card.answered_row(card_id, answer)]))
 
     def defer_plan(self, plan_id: str) -> None:
         """Record `Not now` for the shown plan's apply card; see the module docstring."""
@@ -9820,6 +9931,7 @@ class ConsoleService:
         self._registration_fold = register.fold(appended, self._registration_fold)
         self._registration = self._registration_fold.latest
         self._adoptions = approve.adoptions(appended, self._adoptions)
+        self._release_cards = release_card.cards(appended, self._release_cards)
         self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
@@ -9865,6 +9977,7 @@ class ConsoleService:
                 self._registration_fold = register.fold(events)
                 self._registration = self._registration_fold.latest
                 self._adoptions = approve.adoptions(events)
+                self._release_cards = release_card.cards(events)
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._project_questions = project_question.asked_questions(events)
