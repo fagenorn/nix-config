@@ -409,14 +409,16 @@ class TwoBranchCommandTest(ReleaseCommandCase):
         self.assertIsNone(document["verification"])
         self.assertFalse((self.root / ".git/agent-release").exists())
 
-    def test_a_run_without_the_land_lock_prints_the_refusal_and_creates_nothing(self):
-        """Issue 875: the lock was free, so `run` took it and refuses instead of merging."""
+    def test_a_lock_lost_after_the_preview_prints_the_refusal_and_creates_nothing(self):
+        """Issue 875: the lock was gone, so `run` took it and refuses instead of merging."""
         self.world.merge_observation_ready()
         self.world.land_lock_ready(lock=None)
         candidate = ["--commit", CANONICAL["commit"], "--version", CANONICAL["tag"],
                      "--title", CANONICAL["title"], "--notes-file", str(self.notes)]
         code, document, err = self.run_release("transaction", "preview", *candidate)
         self.assertEqual(code, 0, err)
+        self.assertEqual(document["lock"]["verdict"], "acquired")
+        self.world.set_ref(forge_world.LAND_LOCK.format(branch="dev"), None)
         confirms = [part for entry in document["confirmations"] for part in ("--confirm", entry["token"])]
         code, result, err = self.run_release("transaction", "run", *candidate, *confirms, cwd=self.root)
         self.assertEqual((code, result["error"]["code"], result["error"]["repair_id"]),

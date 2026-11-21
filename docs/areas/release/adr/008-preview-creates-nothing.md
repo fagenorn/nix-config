@@ -1,6 +1,6 @@
 # ADR-release-008 — Preview creates nothing and run re-derives the previewed plan
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-release-014
 - **Decided in:** #128 D6, D17, D18; #69
 
 ## Context

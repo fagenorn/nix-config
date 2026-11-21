@@ -2,10 +2,12 @@
 and preview (#128 spec §1, §2, §4, §7; D1, D4, D6, D13, D18, D19, D25, D26).
 
 `Driver` compiles one release profile of a project and reads the release store under the
-main checkout's git common dir. `preview` and `status` create nothing: no directory, no
-transaction, no lock (store or land lock), and no adapter call. `preview` makes the three read-only GitHub reads
-of `release_verification` and no other call, plus, for a profile that consumes `merge`, the
-three `observe_merge` reads before them (issue 554 D3). A problem the caller must repair is a
+main checkout's git common dir. `status` creates nothing. `preview` creates no directory, no
+transaction and no store lock and calls no adapter, but for a profile with a sync it takes the
+land lock of the integration branch (issue 1376, ADR-release-014). `preview` makes the three
+read-only GitHub reads of `release_verification`, plus, for a profile that consumes `merge`,
+the three `observe_merge` reads before them (issue 554 D3) and the land lock's one-shot
+acquire after them. A problem the caller must repair is a
 `Refusal`; a problem that only makes a new release unrunnable is reported in the preview
 document (D18), which then lists no confirmations (issue 845).
 
@@ -136,7 +138,19 @@ Land lock (issue 875, ADR-release-011, ADR-claims-009). A profile with a sync re
 integration branch through a pull request headed by that branch, so its caller holds the land
 lock of the integration branch at the candidate commit from before the first preview. `run`
 never acquires it for the caller and never waits: it makes one one-shot check through
-`release_lock` and proceeds only on `already_held`. A new release is checked after the
+`release_lock` and proceeds only on `already_held`. `preview` of a profile with a sync takes
+the lock the run will hold (issue 1376, ADR-release-014): once `observe_merge` has left the
+plan runnable and the merge is not satisfied it makes one one-shot `acquire` at the candidate
+commit, through the same router as `run`, so a free lock is taken and the run's check then
+finds it held. It keeps `already_held` and `acquired`, and a resumed release also keeps
+`no_open_pr` (it parks at its run, see below). Every other verdict makes the document not
+runnable, with no confirmations and the refusal `run` would raise: `moved` is `land_lock_lost`,
+`held_by` and `lost_to` are `land_lock_held`, `error` is `land_lock_unavailable`. The document
+carries `lock`, the acquire answer or null when no call was made (an unrunnable plan or a
+merge already satisfied). `preview` never releases the lock: one it took and that no run
+follows is left to the caller's stop rule and to the staleness rules below. The plan digest
+and the tokens do not depend on the answer, and `run`'s own check is unchanged. A new release
+is checked after the
 confirmation checks and before the store or the transaction is created; a resumed one is
 checked right before its merge action is invoked, and gives custody up before it refuses.
 A resumed release whose pull request is no longer open at the candidate commit (`no_open_pr`)
@@ -504,7 +518,18 @@ class Driver:
                       "no proof unit targets a GitHub repository to verify the candidate against")
 
     def preview(self, candidate: Mapping[str, str] | None) -> dict[str, Any]:
-        return self._plan(candidate).document
+        plan = self._plan(candidate)
+        if self.sync is None:
+            return plan.document
+        if plan.refusal is not None or self._merged(plan.transaction):
+            return {**plan.document, "lock": None}
+        lock = self._lock(self._router(), "acquire", plan.candidate["commit"])
+        refusal = self._lock_refusal(lock, plan.candidate["commit"], taken=True,
+                                     park=plan.transaction is not None)
+        if refusal is None:
+            return {**plan.document, "lock": lock}
+        return {**plan.document, "confirmations": [], "runnable": False,
+                "refusal": refusal.as_object(), "lock": lock}
 
     def _plan(self, candidate: Mapping[str, str] | None) -> "_Plan":
         """What `preview` shows and `run` re-derives before it writes anything (§5)."""
@@ -670,23 +695,34 @@ class Driver:
         passes, and every other verdict refuses (issue 875, ADR-claims-009). With `park`, the
         answer `no_open_pr` is returned for the caller to park on."""
         lock = self._lock(router, "acquire", sha)
+        refusal = self._lock_refusal(lock, sha, taken=False, park=park)
+        if refusal is not None:
+            raise refusal
+        return lock
+
+    def _lock_refusal(self, lock: dict[str, Any], sha: str, *, taken: bool,
+                      park: bool) -> Refusal | None:
+        """The refusal the answer `lock` of an acquire at `sha` makes, or None when it passes:
+        `already_held` always, `acquired` when the caller `taken` the lock itself (the
+        preview), and `no_open_pr` when `park`."""
         verdict = lock["verdict"]
-        if verdict == release_lock.HELD or (park and release_lock.gone(lock)):
-            return lock
+        if (verdict == release_lock.HELD or (taken and verdict == "acquired")
+                or (park and release_lock.gone(lock))):
+            return None
         branch = self.sync["integration"]
         repair = (f"wait for the checks on the current head of {branch} under the lock, then "
                   "preview again")
         if verdict in ("acquired", "moved"):
-            raise Refusal("land_lock_lost", f"the land lock of {branch} was not at {sha} and "
-                          f"is now ({verdict}), so a landing may have moved the release head: "
-                          + repair)
+            return Refusal("land_lock_lost", f"the land lock of {branch} was not at {sha} and "
+                           f"is now ({verdict}), so a landing may have moved the release head: "
+                           + repair)
         if verdict == "error":
-            raise Refusal("land_lock_unavailable", f"the land lock of {branch} could not be "
-                          f"checked at {sha} ({lock['detail']}): acquire it with a wait, then "
-                          + repair)
-        raise Refusal("land_lock_held", f"the land lock of {branch} is {verdict} "
-                      f"{lock['lock_sha']} ({lock['detail']}): acquire it with a wait, then "
-                      + repair)
+            return Refusal("land_lock_unavailable", f"the land lock of {branch} could not be "
+                           f"checked at {sha} ({lock['detail']}): acquire it with a wait, then "
+                           + repair)
+        return Refusal("land_lock_held", f"the land lock of {branch} is {verdict} "
+                       f"{lock['lock_sha']} ({lock['detail']}): acquire it with a wait, then "
+                       + repair)
 
     def run(self, candidate: Mapping[str, str] | None,
             confirmations: Sequence[str]) -> dict[str, Any]:
