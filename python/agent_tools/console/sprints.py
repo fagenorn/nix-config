@@ -225,7 +225,9 @@ report, and a report never clears it. Observations are narrower: only when the s
 and the run moved after it (`moved_ms` greater than the report's `at` in milliseconds), each of the
 run's stages for an issue in the report's `issues` becomes that issue's `Observed(issue, moved_ms,
 session_id, run_id, stage)` when `(moved_ms, session_id, run_id)` is at least the kept one's.
-`delivery.gone` changes nothing: the last stage and movement outlive the run.
+`delivery.gone` changes nothing: the last stage and movement outlive the run. A run of the sprint's
+manager session also adds each of its issues to `SprintState.delivered` (#1377), which only grows, so
+the record that the manager delivered an issue outlives the run and its cleanup.
 `SprintState.observed` is ordered by issue. Folding `a + b` equals folding `b` onto the fold of `a`.
 
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
@@ -292,6 +294,9 @@ text)`; `parse_inbox_request(body)` reads the manager's `{"sprint_id", "secret"}
 `(sprint_id, secret)`; `parse_message_reply_request(body)` reads the manager's `{"sprint_id",
 "secret", "message": <int of at least 1>, "reply": <str>}` and returns `(sprint_id, secret,
 message_id, reply)`. All three are as strict as `parse_reply` (`ValueError` otherwise).
+`parse_permit_request(body)` reads the manager's `{"sprint_id", "secret", "phase": "judge" | "landed",
+"session_id": <1 to 128 characters>, "tool_use_id": <1 to 128 characters>, "command": <at most 8192
+characters>}` and returns the frozen `PermitRequest` of those six members, `ValueError` for any other body (#1377).
 `inbox_entry(message)` is the wire entry `{"id", "kind", "version", "text", "at"}`, and for a
 `MESSAGE_ANSWER` message also `"question"`, `"round"`, `"chosen"` and `"words"` (see below).
 
@@ -1174,6 +1179,7 @@ class SprintState:
     notices: tuple[Notice, ...] = ()
     permission: Permission | None = None
     started_by: str | None = None
+    delivered: frozenset[int] = frozenset()
 
     @property
     def state(self) -> str:
@@ -1376,6 +1382,42 @@ def parse_inbox_request(body: bytes) -> tuple[str, str]:
     if not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
     return sprint_id, value["secret"]
+
+
+PERMIT_PHASES = ("judge", "landed")
+MAX_PERMIT_SESSION_CHARS = 128
+MAX_PERMIT_COMMAND_CHARS = 8192
+
+
+@dataclass(frozen=True)
+class PermitRequest:
+    sprint_id: str
+    secret: str
+    phase: str
+    session_id: str
+    tool_use_id: str
+    command: str
+
+
+def parse_permit_request(body: bytes) -> PermitRequest:
+    """The manager's permit request: an object of exactly the five members, none repeated (#1377)."""
+    value = _object(body, {"sprint_id", "secret", "phase", "session_id", "tool_use_id", "command"},
+                    project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    if value["phase"] not in PERMIT_PHASES:
+        raise ValueError("phase must be judge or landed")
+    session_id = value["session_id"]
+    if not isinstance(session_id, str) or not 1 <= len(session_id) <= MAX_PERMIT_SESSION_CHARS:
+        raise ValueError("session_id must be a string of 1 to 128 characters")
+    tool_use_id = value["tool_use_id"]
+    if not isinstance(tool_use_id, str) or not 1 <= len(tool_use_id) <= MAX_PERMIT_SESSION_CHARS:
+        raise ValueError("tool_use_id must be a string of 1 to 128 characters")
+    command = value["command"]
+    if not isinstance(command, str) or len(command) > MAX_PERMIT_COMMAND_CHARS:
+        raise ValueError("command must be a string of at most 8192 characters")
+    return PermitRequest(sprint_id, value["secret"], value["phase"], session_id, tool_use_id, command)
 
 
 def parse_message_reply_request(body: bytes) -> tuple[str, str, int, str]:
@@ -2715,6 +2757,7 @@ def _observed(folded: dict[str, SprintState], event: Event) -> None:
             if not own and not any(stage.issue in named for stage in run.issues):
                 continue
             moved = max(state.moved_ms or 0, run.moved_ms)
+            delivered = state.delivered | {stage.issue for stage in run.issues} if own else state.delivered
             observed = state.observed
             if report is not None and run.moved_ms > int(
                     datetime.fromisoformat(report.at).timestamp() * 1000):
@@ -2729,7 +2772,7 @@ def _observed(folded: dict[str, SprintState], event: Event) -> None:
                         kept[stage.issue] = Observed(stage.issue, run.moved_ms, run.session_id,
                                                      run.run_id, stage)
                 observed = tuple(kept[issue] for issue in sorted(kept))
-            folded[sprint_id] = replace(state, moved_ms=moved, observed=observed)
+            folded[sprint_id] = replace(state, moved_ms=moved, observed=observed, delivered=delivered)
 
 
 def sprint_states(events: Iterable[Event],
