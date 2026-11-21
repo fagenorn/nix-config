@@ -567,7 +567,9 @@ STYLE_LISTS = {
                   "colours": {**_SPEND_PALETTE, "--hair": _HAIR, "--hover": _HOVER}},
     },
 }
-_EVERY_STATE = tuple(state for state in STATES if state != "guest-page")
+# The guest pages are read only by the guest rows (#1313).
+_GUEST_PAGES = ("guest-page", "guest-steer")
+_EVERY_STATE = tuple(state for state in STATES if state not in _GUEST_PAGES)
 _BOTH = (1440, 480)
 _NEEDS = ".needs, .needs *, .btn-primary, .btn-primary *"
 _RED_ON = "{ color: rgb(1, 2, 3) !important }"
@@ -2902,12 +2904,14 @@ SCROLL_Y = "window.scrollY"
 def read_style(page, rows: Sequence[StyleCheck], *, mutation: str | None = None,
                only: str | None = None) -> tuple[str, ...]:
     """Read each row's computed style on `page`, leaving no probe and no mutation behind."""
+    read = [row for row in rows if only is None or row.name == only]
     page.evaluate(STYLE_CLEAR)
     if mutation is not None:
         page.evaluate(STYLE_MUTATE, mutation)
-    page.evaluate(STYLE_PLACE, [asdict(row) for row in rows])
+    # Only the rows read are placed: a mutated read of one row would otherwise lay out every
+    # other row's probe again, which takes the whole run past an hour.
+    page.evaluate(STYLE_PLACE, [asdict(row) for row in read])
     page.evaluate(STYLE_SETTLE)
-    read = [row for row in rows if only is None or row.name == only]
     found: list[str] = []
     plain = [row for row in read if not row.forced and not row.reduced_motion]
     if plain:

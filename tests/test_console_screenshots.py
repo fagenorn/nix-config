@@ -2544,6 +2544,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
 
 class ScreenshotStyleTableTest(unittest.TestCase):
+    def test_only_the_guest_rows_read_the_guest_pages(self) -> None:
+        named = sorted(row.name for row in shots.STYLE_CHECKS
+                       if set(row.states) & {"guest-page", "guest-steer"})
+        self.assertEqual([name for name in named if not name.startswith("guest-")], [])
+
     def test_every_style_check_is_well_formed(self) -> None:
         names = [row.name for row in shots.STYLE_CHECKS]
         self.assertEqual(len(names), len(set(names)))
