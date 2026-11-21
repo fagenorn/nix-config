@@ -629,8 +629,8 @@ issue of its sprint is faulty in production (`event_log.FAULT_DECLARED`, `FAULT_
 `checked_fault(fault)` refuses at the first failure, in order: not an object (`FAULT_NOT_OBJECT`); a
 key other than issue, observed, when and proven (`FAULT_EXTRA`, never naming the key); an `issue`
 that is not an int of at least 1 (`FAULT_MEMBER`); then `observed`, `when` and `proven`, each one
-line of text (not a string, without a visible character (whitespace and invisible format characters
-such as a zero-width space do not count), holding an unpaired surrogate or holding a line break is
+line of text (not a string, without a visible character (whitespace, invisible format and combining characters,
+and blank fillers such as a Hangul filler or the braille blank do not count), holding an unpaired surrogate or holding a line break is
 `FAULT_MEMBER`; over `MAX_FAULT_OBSERVED_CHARS` (400), `MAX_FAULT_WHEN_CHARS` (140) or `MAX_FAULT_PROVEN_CHARS` (400)
 after stripping is `FAULT_TOO_LONG`); it returns the four members, texts stripped.
 `declarable_fault(state, fault)` refuses, in order: a sprint that takes no notice (`ALREADY_STOPPING`,
@@ -1987,9 +1987,17 @@ def open_notices(state: SprintState) -> tuple[Notice, ...]:
                         key=lambda notice: notice.notice_id))
 
 
+_BLANK_GLYPHS = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
 def _visible(value: str) -> bool:
-    """True when the text holds a character that is neither whitespace nor an invisible format one."""
-    return any(not char.isspace() and unicodedata.category(char) != "Cf" for char in value)
+    """True when the text holds a letter, number, punctuation or symbol that draws a mark.
+
+    Whitespace, format and combining characters, and the blank-drawing fillers (Hangul fillers,
+    the braille blank) do not count.
+    """
+    return any(unicodedata.category(char)[0] in "LNPS" and char not in _BLANK_GLYPHS
+               for char in value)
 
 
 def _encodable(value: str) -> bool:
