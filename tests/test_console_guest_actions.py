@@ -304,9 +304,10 @@ class GuestWriteTableTest(GuestWriteCase):
         self.assertLessEqual(service.GUEST_WRITES, service.PAGE_WRITES)
         self.assertFalse(service.GUEST_WRITES & service.OWNER_ONLY)
 
-    def test_the_guest_account_writes_are_exactly_three(self):
+    def test_the_guest_account_writes_are_exactly_five(self):
         self.assertEqual(service.GUEST_ACCOUNT_WRITES, {
-            "/api/guest-account", "/api/guest-signin-code", "/api/guest-signin-cancel"})
+            "/api/guest-account", "/api/guest-signin-code", "/api/guest-signin-cancel",
+            "/api/guest-account-signout", "/api/guest-account-remove"})
         self.assertLessEqual(service.GUEST_ACCOUNT_WRITES, service.PAGE_WRITES)
         self.assertFalse(service.GUEST_ACCOUNT_WRITES & service.GUEST_WRITES)
         self.assertFalse(service.GUEST_ACCOUNT_WRITES & service.OWNER_ONLY)

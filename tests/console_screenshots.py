@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the forty-nine screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -93,9 +93,10 @@ Contract:
   can act on with its Approve and Ask for changes controls; and an owner sprint with an owner message;
   and one tracker card, a release confirm of `owner/web#12`, waiting on the owner, which the page
   draws as `.guest-wait` with no control. `owner-actors` is the owner's desk over the same seed.
-  `guest-page`, `guest-steer` and `owner-actors` also hold the pool's three accounts, `work-main` and
+  `owner-accounts` is that desk again with the accounts panel opened (`#capacity` clicked), the last state.
+  `guest-page`, `guest-steer`, `owner-actors` and `owner-accounts` also hold the pool's three accounts, `work-main` and
   `work-spare`, each with a week and a 5h window, and `colleague-1`, which COLLEAGUE added himself (an
-  `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1"}` written straight to the log) and
+  `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1", "identity": <the mark of its directory>}` written straight to the log, the identity without which his row has no token and the page no Sign out or Remove) and
   whose week is the tightest of the three (5% left against `work-spare`'s 10% and `work-main`'s 60%);
   every manager runs on `work-main`, so the guest page shows `yours`, `Account 2` and `Account 3` and
   the sprint's account, `Account 2`, and the owner's strip shows COLLEAGUE beside `colleague-1` in
@@ -105,7 +106,13 @@ Contract:
   `guest-steer` shots click it at each width and wait for `.guest-consent` and a disabled
   `.guest-signin` (the consent open, nothing ticked, nothing posted); on a page without it they click
   nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` on a page that has a `.cap-owner`
-  and for none on a page that has not. With `--sheets` `capture` also writes
+  and for none on a page that has not. `owner-accounts` waits for the opened panel (`#accounts:not([hidden])`)
+  and, on a page that has an `.acct-owner`, for `.acct-row .acct-owner`. `offers_account_changes()`
+  (`ConsoleService` has `sign_out_account`) keys the account controls on the code being shot, never on
+  the page: when it is true `owner-accounts` also waits for `.acct-row .acct-signout` and `guest-page` for
+  `.pool-yours .pool-signout` and `.pool-yours .pool-remove`, unconditionally, so a head capture whose page
+  lacks a control times out and fails instead of writing a picture without it; on the base commit's archive
+  it is false and neither waits, so a base run still writes every file. With `--sheets` `capture` also writes
   `<state>-sheet.png` after each state's widths, the shots side by side in one PNG that must stay
   under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. Each
   width waits for what the owner judges to be visible, which fails the run when it is not:
@@ -225,7 +232,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
+from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
@@ -244,7 +251,8 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
           "register-draft", "register-reconcile-apply", "register-reconcile-draft", "adoption-merge", "adoption-moved", "adoption-failed", "sharing-panel",
-          "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
+          "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors",
+          "owner-accounts")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -2142,6 +2150,11 @@ def offers_merge() -> bool:
     return hasattr(approve.GitHubForge, "merge_pull_request")
 
 
+def offers_account_changes() -> bool:
+    """Whether this service lets an account be signed out alone (a base commit's service has no such method)."""
+    return hasattr(ConsoleService, "sign_out_account")
+
+
 def _seed_adoption(seed: _Seed, state: str, root: str) -> None:
     """An adoption pull request of `root` the console opened, read ready at the head it pushed or at another.
 
@@ -2165,8 +2178,11 @@ def _seed_adoption(seed: _Seed, state: str, root: str) -> None:
 
 
 def _seed_state(seed: _Seed, state: str, web_root: str = "",
-                read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> tuple[str, ...]:
-    """Seed the events of `state`; returns the sprint ids whose transcripts the state writes."""
+                read: tuple[str, str] = (READ_QUESTION, READ_ANSWER),
+                colleague_identity: str | None = None) -> tuple[str, ...]:
+    """Seed the events of `state`; returns the sprint ids whose transcripts the state writes.
+
+    `colleague_identity` is the mark of the colleague's profile directory, which his `account.added` row records."""
     web, api = PROJECTS[0], PROJECTS[1]
     if state in REGISTER_STATES:
         _seed_registration(seed, state, str(Path(web_root).parent / REGISTER_NAME))
@@ -2194,12 +2210,12 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "name": manager.session_name(web, sid)})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
-    elif state in (*SHARING_STATES, "owner-actors"):
+    elif state in (*SHARING_STATES, "owner-actors", "owner-accounts"):
         seed.put(3 * MINUTE, SHARING_TAILNET, None, {"tailnet": TAILNET})
         if state == "sharing-off":
             seed.put(MINUTE, SHARING_TAILNET, None, {"shared": False})
         seed.put(2 * MINUTE, SHARING_COLLEAGUE, None, {"login": COLLEAGUE, "projects": [web]})
-        if state in ("guest-steer", "owner-actors"):
+        if state in ("guest-steer", "owner-actors", "owner-accounts"):
             seed.colleague_sprint(web, "Add resumable uploads", started=40 * MINUTE,
                                   by=COLLEAGUE, answered=True)
             seed.colleague_sprint(web, "Fix the settings page", started=20 * MINUTE, by=COLLEAGUE)
@@ -2210,10 +2226,13 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         else:
             seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
             seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
-        if state in ("guest-page", "guest-steer", "owner-actors"):
+        if state in ("guest-page", "guest-steer", "owner-actors", "owner-accounts"):
             seed.account("work-main", 0.4, session=0.25, week_in=3 * 86400, session_in=2 * 3600)
             seed.account("work-spare", 0.9, session=0.6, week_in=5 * 86400, session_in=4 * 3600)
-            seed.put(10 * MINUTE, event_log.ACCOUNT_ADDED, None, {"by": COLLEAGUE, "profile": "colleague-1"})
+            added = {"by": COLLEAGUE, "profile": "colleague-1"}
+            if colleague_identity is not None:
+                added["identity"] = colleague_identity
+            seed.put(10 * MINUTE, event_log.ACCOUNT_ADDED, None, added)
             seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
@@ -2435,15 +2454,21 @@ def build_fixture(root: Path, state: str, now_s: float, *,
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
-    log = EventLog(fixture.store, clock=lambda: at[0])
-    try:
-        sprint_ids = _seed_state(_Seed(log, at, now_s, console / "pictures"), state, str(projects[0]), read=read)
-    finally:
-        log.close()
-    if state in ("accounts-panel", "guest-page", "guest-steer", "owner-actors"):
+    colleague_identity = None
+    if state in ("accounts-panel", "guest-page", "guest-steer", "owner-actors", "owner-accounts"):
         colleague = ("colleague-1",) if state != "accounts-panel" else ()
         for name in ("work-main", "work-spare", *colleague):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
+        if colleague:
+            # The directory's own mark: the console owns the account to the colleague only while the
+            # row's identity is the directory's, and his pool row carries a token only then.
+            colleague_identity = account_add.mark(accounts / "profiles" / "colleague-1")
+    log = EventLog(fixture.store, clock=lambda: at[0])
+    try:
+        sprint_ids = _seed_state(_Seed(log, at, now_s, console / "pictures"), state, str(projects[0]), read=read,
+                                 colleague_identity=colleague_identity)
+    finally:
+        log.close()
     if state == "manager-cannot-hear":
         _write_held_manager(fixture, now_s)
     if state == "spend-page":
@@ -2984,6 +3009,16 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
                 page.wait_for_selector(selector)
         if state == "owner-actors" and page.query_selector(".cap-owner") is not None:
             page.wait_for_selector(".cap-tightest .cap-owner")
+        if state == "guest-page" and offers_account_changes():
+            for selector in (".pool-yours .pool-signout", ".pool-yours .pool-remove"):
+                page.wait_for_selector(selector)
+        if state == "owner-accounts":
+            page.click("#capacity")
+            page.wait_for_selector("#accounts:not([hidden])")
+            if page.query_selector(".acct-owner") is not None:
+                page.wait_for_selector(".acct-row .acct-owner")
+            if offers_account_changes():
+                page.wait_for_selector(".acct-row .acct-signout")
         if state in ADOPTION_STATES:
             page.wait_for_selector(
                 ADOPTION_CARD + (" .reason" if state == "adoption-moved" else " button.adoption-merge")

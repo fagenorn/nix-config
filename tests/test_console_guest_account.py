@@ -31,6 +31,8 @@ ADD = "/api/guest-account"
 CODE_ROUTE = "/api/guest-signin-code"
 CANCEL = "/api/guest-signin-cancel"
 ROUTES = (ADD, CODE_ROUTE, CANCEL)
+SIGNOUT = "/api/guest-account-signout"
+REMOVE = "/api/guest-account-remove"
 VALID = {ADD: {"consent": True}, CODE_ROUTE: {"attempt": 1, "code": CODE}, CANCEL: {"attempt": 1}}
 PLANTED = "sk-ant-oat01-PLANTED-zq77"
 
@@ -45,6 +47,23 @@ class Unreadable:
         if self.case.list_error is not None:
             raise self.case.list_error
         return iter(Listing(self.case.profiles))
+
+
+class Gate:
+    """A lock whose entry waits for the test: `entered` is set at the door, `go` lets the entry on."""
+
+    def __init__(self, lock):
+        self.lock = lock
+        self.entered = threading.Event()
+        self.go = threading.Event()
+
+    def __enter__(self):
+        self.entered.set()
+        self.go.wait(10)
+        self.lock.acquire()
+
+    def __exit__(self, *exc):
+        self.lock.release()
 
 
 class GuestAccountCase(GuestWriteCase):
@@ -64,6 +83,10 @@ class GuestAccountCase(GuestWriteCase):
         self.now = [NOW]
         self.status_of = {}
         self.read_error = {}
+        self.read_failure = None  # a failure of every status read while set (read_error is per profile)
+        self.signed_out = []
+        self.signout_error = None
+        self.removed_calls = []
         self.added = []
         self.add_error = None
         self.after_add = None
@@ -81,7 +104,14 @@ class GuestAccountCase(GuestWriteCase):
         patch.start()
         self.addCleanup(patch.stop)
 
+    def signer_out(self, one):
+        self.signed_out.append(one.profile)
+        if self.signout_error is not None:
+            raise self.signout_error
+
     def read(self, one):
+        if self.read_failure is not None:
+            raise self.read_failure
         if one.profile in self.read_error:
             raise self.read_error[one.profile]
         return self.status_of.get(one.profile, signin.Status("signed_out", None))
@@ -95,6 +125,7 @@ class GuestAccountCase(GuestWriteCase):
             self.after_add(name)
 
     def remover(self, name):
+        self.removed_calls.append(name)
         if self.remove_fails:
             raise account_remove.RemoveFailed("failed")
         shutil.rmtree(self.profiles / name)
@@ -121,7 +152,7 @@ class GuestAccountCase(GuestWriteCase):
                                       host="console-host")
         self.svc = self.start(
             profile_dirs=Unreadable(self), signin_reader=self.read, signin_runs=factory,
-            account_adder=self.adder, signer_out=lambda one: None, account_remover=self.remover,
+            account_adder=self.adder, signer_out=self.signer_out, account_remover=self.remover,
             trust_granter=self.granter,
             clock=lambda: self.now[0],
             log_clock=lambda: datetime.fromtimestamp(self.now[0], timezone.utc).isoformat(
@@ -197,6 +228,33 @@ class GuestAccountCase(GuestWriteCase):
         self.status_of[profile] = signin.Status("signed_in", None, f"{profile}@corp-zq.invalid")
         self.sent_code(login)
         until(self, lambda: self.own_state(login) == "signed_in")
+
+    def signed_in_account(self, login=COLLEAGUE):
+        """Add an account of his and sign it in at an address of its own; its profile."""
+        before = self.names()
+        self.assertEqual(self.add(login)[0], 200)
+        (profile,) = self.names() - before
+        self.status_of[profile] = signin.Status("signed_in", None, f"{profile}@corp-zq.invalid")
+        self.sent_code(login)
+        until(self, lambda: self.own_state(login) == "signed_in")
+        return profile
+
+    def number(self, login=COLLEAGUE, label="yours"):
+        """The number of the first row of his pool with `label`."""
+        return next(row["number"] for row in self.guest_view(login)["pool"]["accounts"]
+                    if row["label"] == label)
+
+    def change_body(self, login=COLLEAGUE, label="yours"):
+        """The body of a sign-out or a removal of the first account of his pool with `label`, as his page sends it."""
+        row = next(row for row in self.guest_view(login)["pool"]["accounts"] if row["label"] == label)
+        return {"account": row["number"], "ident": row["ident"]}
+
+    def changes(self):
+        """What a sign-out or a removal changes, copied now."""
+        return (list(self.signed_out), list(self.removed_calls), sorted(self.names()),
+                self.rows("account.removal"),
+                [row for row in self.acted() if row["action"] == "signout"],
+                self.rows("profile.exclusion"))
 
     def cancelled(self, login=COLLEAGUE):
         attempt = self.shown_attempt(login)
@@ -1030,6 +1088,320 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertNotIn("planted-grant-failure", err.text)
 
 
+class GuestAccountChangeTest(GuestAccountCase):
+    def test_he_signs_out_his_own_account(self):
+        self.begin()
+        profile = self.signed_in_account()
+        self.assertEqual(self.post(SIGNOUT, self.change_body()), (204, b""))
+        self.assertEqual(self.signed_out, [profile])
+        self.assertEqual([row for row in self.acted() if row["action"] == "signout"][-1],
+                         {"by": COLLEAGUE, "profile": "colleague-1", "action": "signout",
+                          "outcome": "signed_out"})
+        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+        self.assertEqual([row["in_use"] for row in self.guest_view()["pool"]["accounts"]
+                          if row["label"] == "yours"], [False])
+        self.assertIn("colleague-1", self.names())
+
+    def test_he_removes_his_own_account(self):
+        self.begin()
+        self.signed_in_account()
+        self.assertEqual(self.post(REMOVE, self.change_body()), (204, b""))
+        self.assertEqual(self.names(), {"work"})
+        self.assertEqual(self.rows("account.removal")[-1],
+                         {"by": COLLEAGUE, "profile": "colleague-1", "outcome": "removed",
+                          "kind": None})
+        self.assertEqual([row for row in self.guest_view()["pool"]["accounts"]
+                          if row["label"] == "yours"], [])
+        self.assertNotIn("colleague-1", [entry["profile"]
+                                         for entry in self.owner_view()["capacity"]["profiles"]])
+
+
+class GuestAccountChangeRefusalTest(GuestAccountCase):
+    def refused_both(self, svc, number, login=COLLEAGUE, text=guest.NOT_YOUR_ACCOUNT_TEXT, ident=None):
+        """Both writes naming `number` with `ident`, by default his own account's genuine token: only the number is wrong."""
+        ident = self.change_body(login)["ident"] if ident is None else ident
+        before = self.changes()
+        for route in (SIGNOUT, REMOVE):
+            with self.subTest(route=route, number=number):
+                got = self.still(svc, lambda: self.post(route, {"account": number, "ident": ident}, login))
+                self.assertEqual(got, (409, text.encode() + b"\n"))
+        self.assertEqual(self.changes(), before)
+
+    def test_he_cannot_sign_out_or_remove_another_colleagues_account(self):
+        svc = self.begin()
+        self.signed_in_account(COLLEAGUE)
+        self.signed_in_account(SECOND)
+        theirs = self.change_body(SECOND)
+        self.assertNotEqual(theirs["ident"], self.change_body(COLLEAGUE)["ident"])
+        # Their genuine number and token: only the ownership check can refuse it.
+        self.refused_both(svc, theirs["account"], ident=theirs["ident"])
+
+    def test_he_cannot_sign_out_or_remove_the_owners_account(self):
+        svc = self.begin()
+        self.signed_in_account(COLLEAGUE)
+        self.status_of["work"] = signin.Status("signed_in", None, "work@corp-zq.invalid")
+        svc.poll_sessions()
+        rows = self.guest_view()["pool"]["accounts"]
+        owners = next(row["number"] for row in rows if row["label"] != "yours")
+        self.refused_both(svc, owners)
+
+    def test_an_unknown_account_number_is_refused(self):
+        svc = self.begin()
+        self.signed_in_account(COLLEAGUE)
+        self.refused_both(svc, 99)
+
+    def test_he_cannot_exclude_any_account_even_his_own(self):
+        svc = self.begin()
+        self.signed_in_account(COLLEAGUE)
+        self.signed_in_account(SECOND)
+        for profile in ("colleague-1", "colleague-2", "work"):
+            with self.subTest(profile=profile):
+                got = self.still(svc, lambda: self.post(
+                    "/api/exclusion", {"profile": profile, "excluded": True}))
+                self.assertEqual(got, (403, guest.OWNER_ONLY_TEXT.encode() + b"\n"))
+        self.assertEqual(self.rows("profile.exclusion"), [])
+
+    def test_each_login_header_case_is_refused_on_each_action(self):
+        svc = self.begin()
+        self.signed_in_account(COLLEAGUE)
+        mine = self.change_body()
+        cases = (("missing", ()), ("doubled", (COLLEAGUE, COLLEAGUE)), ("two", (COLLEAGUE, SECOND)),
+                 ("unlisted", (STRANGER,)), ("forged", (f"{SECOND}, {COLLEAGUE}",)))
+        before = self.changes()
+        for route in (SIGNOUT, REMOVE, "/api/exclusion"):
+            body = ({"profile": "colleague-1", "excluded": True} if route == "/api/exclusion"
+                    else mine)
+            for name, logins in cases:
+                with self.subTest(route=route, case=name):
+                    got = self.still(svc, lambda: self.guest_post(svc, route, body, logins=logins))
+                    self.assertEqual(got, (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
+        self.assertEqual(self.changes(), before)
+
+    def test_a_forged_login_on_the_owners_port_is_refused_on_each_action(self):
+        svc = self.begin()
+        self.signed_in_account(COLLEAGUE)
+        headers = {"Origin": f"http://127.0.0.1:{svc.address[1]}",
+                   "X-Console-Token": self.owner_token(), **JSON, "Tailscale-User-Login": COLLEAGUE}
+        before = self.changes()
+        for route, body in (("/api/account-signout", {"profile": "colleague-1"}),
+                            ("/api/account-remove", {"profile": "colleague-1", "typed": "colleague-1"}),
+                            ("/api/exclusion", {"profile": "colleague-1", "excluded": True})):
+            with self.subTest(route=route):
+                status, _, answer = support.post_page(
+                    svc.address, route, headers, json.dumps(body).encode())
+                self.assertEqual((status, answer), (403, guest.OWNER_PORT_TEXT.encode() + b"\n"))
+        self.assertEqual(self.changes(), before)
+
+    def waiting_change(self, svc, lock, route, login=COLLEAGUE):
+        """His change of `route` waits at the door of `_adding` while the owner replaces the directory."""
+        svc._adding = lock
+        profile = self.signed_in_account(login)
+        mine = self.change_body(login)
+        svc._adding = gate = Gate(lock)
+        answers = []
+        thread = threading.Thread(target=lambda: answers.append(self.post(route, mine, login)),
+                                  daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(gate.entered.wait(10))
+            self.replace_dir(profile)
+        finally:
+            gate.go.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        return profile, answers[0]
+
+    def test_a_waiting_change_meets_the_owners_replacement_and_leaves_it(self):
+        svc = self.begin()
+        lock = svc._adding
+        for route in (REMOVE, SIGNOUT):
+            with self.subTest(route=route):
+                profile, answer = self.waiting_change(svc, lock, route)
+                self.assertEqual(answer, (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
+                self.assertEqual(self.signed_out, [])
+                self.assertEqual(self.removed_calls, [])
+                self.assertTrue((self.profiles / profile).is_dir())
+                self.assertEqual(self.rows("account.removal"), [])
+                self.assertEqual([row for row in self.acted() if row["action"] == "signout"], [])
+
+    def test_a_stale_request_does_not_touch_a_later_account_that_got_the_same_number(self):
+        svc = self.begin()
+        old = self.signed_in_account()
+        stale = self.change_body()
+        svc.remove_account(old, old)
+        self.signed_in_account()
+        fresh = self.change_body()
+        self.assertEqual(stale["account"], fresh["account"])
+        self.assertNotEqual(stale["ident"], fresh["ident"])
+        before = self.changes()
+        for route in (SIGNOUT, REMOVE):
+            with self.subTest(route=route):
+                got = self.still(svc, lambda: self.post(route, stale))
+                self.assertEqual(got, (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
+        self.assertEqual(self.changes(), before)
+        self.assertEqual(self.post(REMOVE, fresh), (204, b""))
+
+    def test_a_request_saved_before_a_sign_out_does_not_remove_the_account_signed_in_after_it(self):
+        svc = self.begin()
+        profile = self.signed_in_account()
+        stale = self.change_body()
+        self.assertEqual(self.post(SIGNOUT, stale), (204, b""))
+        # The same profile, so the same directory and the same number, signs in as another Claude account.
+        self.status_of[profile] = signin.Status("signed_in", None, "another@corp-zq.invalid")
+        svc._record_signin(profile, self.status_of[profile], svc._signin_ticket(profile))
+        fresh = self.change_body()
+        self.assertEqual(stale["account"], fresh["account"])
+        self.assertNotEqual(stale["ident"], fresh["ident"])
+        before = self.changes()
+        for route in (SIGNOUT, REMOVE):
+            with self.subTest(route=route):
+                got = self.still(svc, lambda: self.post(route, stale))
+                self.assertEqual(got, (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
+        self.assertEqual(self.changes(), before)
+        self.assertEqual(self.post(REMOVE, fresh), (204, b""))
+
+    def test_a_directory_replaced_while_a_second_profile_drains_is_never_changed(self):
+        svc = self.begin()
+        first, second = self.shared_account()
+        body = self.change_body()
+        for route in (REMOVE, SIGNOUT):
+            with self.subTest(route=route):
+                with svc._ingest:
+                    svc._probing.add(second)
+                answers = []
+                thread = threading.Thread(
+                    target=lambda: answers.append(self.post(route, body)), daemon=True)
+                thread.start()
+                try:
+                    until(self, lambda: second in svc._removing)
+                    self.replace_dir(first)
+                finally:
+                    with svc._ingest:
+                        svc._probing.discard(second)
+                        svc._idle.notify_all()
+                    thread.join(10)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(answers[0], (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
+                self.assertEqual((self.signed_out, self.removed_calls), ([], []))
+                self.assertEqual(svc._removing, set())
+                self.assertTrue((self.profiles / first).is_dir())
+                self.assertTrue((self.profiles / second).is_dir())
+                return
+
+    def test_a_change_waiting_for_the_drain_meets_the_owners_replacement_and_leaves_it(self):
+        svc = self.begin()
+        for route in (REMOVE, SIGNOUT):
+            with self.subTest(route=route):
+                profile = self.signed_in_account()
+                body = self.change_body()
+                with svc._ingest:
+                    svc._probing.add(profile)
+                answers = []
+                thread = threading.Thread(
+                    target=lambda: answers.append(self.post(route, body)), daemon=True)
+                thread.start()
+                try:
+                    until(self, lambda: profile in svc._removing)
+                    self.replace_dir(profile)
+                finally:
+                    with svc._ingest:
+                        svc._probing.discard(profile)
+                        svc._idle.notify_all()
+                    thread.join(10)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(answers[0], (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
+                self.assertEqual(self.signed_out, [])
+                self.assertEqual(self.removed_calls, [])
+                self.assertTrue((self.profiles / profile).is_dir())
+                self.assertEqual(svc._removing, set())
+                self.assertEqual(self.rows("account.removal"), [])
+                self.assertEqual([row for row in self.acted() if row["action"] == "signout"], [])
+                shutil.rmtree(self.profiles / profile)
+
+    def shared_account(self):
+        """Two profiles of his signed in to one address, so one pool row and one number; the pair."""
+        first = self.signed_in_account()
+        before = self.names()
+        self.assertEqual(self.add()[0], 200)
+        (second,) = self.names() - before
+        self.status_of[second] = signin.Status("signed_in", None, f"{first}@corp-zq.invalid")
+        self.sent_code()
+        until(self, lambda: self.own_state() == "signed_in")
+        return first, second
+
+    def test_a_busy_second_profile_of_one_account_leaves_the_first_as_it_was(self):
+        svc = self.begin()
+        first, second = self.shared_account()
+        self.assertEqual(len([row for row in self.guest_view()["pool"]["accounts"]
+                              if row["label"] == "yours"]), 1)
+        body = self.change_body()
+        with mock.patch.object(account_remove, "DRAIN_TIMEOUT", 0.2):
+            for route in (REMOVE, SIGNOUT):
+                with self.subTest(route=route):
+                    with svc._ingest:
+                        svc._probing.add(second)
+                    try:
+                        got = self.still(svc, lambda: self.post(route, body))
+                    finally:
+                        with svc._ingest:
+                            svc._probing.discard(second)
+                            svc._idle.notify_all()
+                    self.assertEqual(got, (409, guest.ACCOUNT_BUSY_TEXT.encode() + b"\n"))
+                    self.assertEqual((self.signed_out, self.removed_calls), ([], []))
+                    self.assertEqual(self.names(), {"work", first, second})
+                    self.assertEqual(svc._removing, set())
+        self.assertEqual(self.post(REMOVE, body), (204, b""))
+        self.assertEqual(self.names(), {"work"})
+
+    def test_the_guest_change_writes_are_guarded_like_a_guest_write(self):
+        svc = self.begin()
+        self.signed_in_account()
+        origin = "https://" + TAILNET
+        guards = (
+            ("no token", {"token": None}, 403, "token refused"),
+            ("owner token", {"token": self.owner_token()}, 403, "token refused"),
+            ("http origin", {"origin": "http://" + TAILNET}, 403, "origin refused"),
+            ("no origin", {"origin": None}, 403, "origin refused"),
+            ("two origins", {"origin": [origin, origin]}, 403, "origin refused"),
+            ("no login", {"logins": ()}, 403, guest.NOT_SHARED_TEXT),
+            ("two logins", {"logins": (COLLEAGUE, SECOND)}, 403, guest.NOT_SHARED_TEXT),
+            ("one login twice", {"logins": (COLLEAGUE, COLLEAGUE)}, 403, guest.NOT_SHARED_TEXT),
+            ("unlisted login", {"logins": (STRANGER,)}, 403, guest.NOT_SHARED_TEXT))
+        before = self.changes()
+        for route in (SIGNOUT, REMOVE):
+            for name, kwargs, status, text in guards:
+                with self.subTest(route=route, case=name):
+                    got = self.still(svc, lambda: self.guest_post(
+                        svc, route, b"", send_body=False, **kwargs))
+                    self.assertEqual(got, (status, text.encode() + b"\n"))
+            with self.subTest(route=route, case="a GET"):
+                got = self.still(svc, lambda: self.guest_post(
+                    svc, route, b"", send_body=False, method="GET"))
+                self.assertEqual(got, (405, b"method not allowed\n"))
+                self.assertEqual(self.last_headers["Allow"], "POST")
+            for body in (b"{}", {"account": 1}, {"ident": "t"}, {"account": "1", "ident": "t"},
+                         {"account": True, "ident": "t"}, {"account": 0, "ident": "t"},
+                         {"account": 1, "ident": ""}, {"account": 1, "ident": 1},
+                         {"account": 1, "ident": "t", "profile": "colleague-1"}, b"not json"):
+                with self.subTest(route=route, body=body):
+                    got = self.still(svc, lambda: self.guest_post(svc, route, body))
+                    self.assertEqual(got, (400, b"bad account\n"))
+        self.assertEqual(self.changes(), before)
+
+    def test_the_owners_port_takes_no_guest_change_write(self):
+        svc = self.begin()
+        self.signed_in_account()
+        headers = {"Origin": f"http://127.0.0.1:{svc.address[1]}",
+                   "X-Console-Token": self.owner_token(), **JSON}
+        before = self.changes()
+        for route in (SIGNOUT, REMOVE):
+            with self.subTest(route=route):
+                status, _, answer = support.post_page(
+                    svc.address, route, headers, json.dumps(self.change_body()).encode())
+                self.assertEqual((status, answer), (404, b"not found\n"))
+        self.assertEqual(self.changes(), before)
+
+
 class GuestAccountTextTest(unittest.TestCase):
     def test_only_the_guest_texts_pass_through(self):
         for text in (guest.CONSENT_TEXT, guest.NO_OWN_SIGNIN_TEXT, guest.ACCOUNT_BUSY_TEXT,
@@ -1086,6 +1458,38 @@ class GuestAccountSecrecyTest(GuestAccountCase):
                 with self.subTest(status=status, word=word):
                     self.assertNotIn(word.encode(), blob)
         self.assertGreaterEqual(len(self.responses), 10)
+
+    def test_no_change_answer_or_stderr_line_names_a_login_or_a_profile(self):
+        self.begin()
+        self.signed_in_account(COLLEAGUE)
+        self.signed_in_account(SECOND)
+        mine, theirs = self.change_body(COLLEAGUE), self.change_body(SECOND)
+        with stderr_text() as err:
+            answers = [self.post(SIGNOUT, theirs)]
+            self.signout_error = account_remove.SignOutFailed("exited")
+            answers.append(self.post(SIGNOUT, mine))
+            self.signout_error = account_remove.MoveFailed("stop_failed")
+            answers.append(self.post(SIGNOUT, mine))
+            self.signout_error = account_remove.SignOutFailed("exited")
+            self.read_failure = signin.StatusFailed("unavailable")
+            answers.append(self.post(REMOVE, mine))
+            self.signout_error, self.read_failure, self.remove_fails = None, None, True
+            answers.append(self.post(REMOVE, mine))
+            self.remove_fails = False
+            # The failed removal had signed the account out, which ends the token drawn before it.
+            answers.append(self.post(REMOVE, self.change_body(COLLEAGUE)))
+        self.assertEqual([status for status, _ in answers], [409, 502, 502, 502, 502, 204])
+        self.assertEqual([body for _, body in answers[1:5]], [
+            b"the account could not be signed out: exited\n",
+            account_remove.NOT_MOVED.encode() + b"\n",
+            b"the account could not be signed out: exited\n",
+            b"the account could not be removed: failed\n"])
+        for _, body in answers:
+            for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "work"):
+                self.assertNotIn(word.encode(), body)
+        for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "work"):
+            self.assertNotIn(word, err.text)
+        self.assertIn("console: signin_remove_read_failed unavailable", err.text)
 
 
 if __name__ == "__main__":

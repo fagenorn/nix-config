@@ -134,8 +134,8 @@ by this rule alike), and after which no
 import). A colleague's account must stay his after the window and end only with a completed removal,
 so the owner fold after a retention pass equals the fold before it; an owner-added row, an
 older row of a re-added profile and a row a completed removal ended all age out as before, and a
-failed removal leaves the row kept. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
-#1030) is not in `KEPT_KINDS`.
+failed removal leaves the row kept. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner or the colleague who added the profile confirms,
+#1030, #1345) is not in `KEPT_KINDS`.
 `TRUST_GRANTED` (`trust.granted`, one per folder-trust grant the owner approved or per registered project at the console's start, #1078, `folder_trust.granted_row`)
 is not in `KEPT_KINDS`.
 `PICTURE_STORED` (`picture.stored`, one per picture a manager sent that the console accepted, #1089)

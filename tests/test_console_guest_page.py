@@ -1145,6 +1145,65 @@ class OwnAccountPageTest(unittest.TestCase):
                     and any(c["text"] == "work" for c in nodes(n)))
         self.assertEqual(named(work, "acct-owner"), [])
 
+    def colleague_capacity(self, colleague_signin: tuple | None = None) -> dict:
+        cap = real_capacity(NOW_S, [
+            {"name": "work", "week": .6, "five": .5, "week_reset": NOW_S + 4 * 86400, "five_reset": NOW_S + 3600},
+            {"name": "colleague-1", "week": .3, "five": .4, "week_reset": NOW_S + 5 * 86400,
+             "five_reset": NOW_S + 3600, "signin": colleague_signin}])
+        return {**cap, "profiles": [{**p, "owner": COLLEAGUE if p["profile"] == "colleague-1" else None}
+                                    for p in cap["profiles"]]}
+
+    def account_row(self, snap: dict, name: str) -> dict:
+        return next(n for n in nodes(snap["accounts_body"]) if n["tag"] == "li" and has_class(n, "acct-row")
+                    and any(c["text"] == name for c in nodes(n)))
+
+    def test_the_owner_page_offers_sign_out_beside_a_colleagues_account_only(self) -> None:
+        cap = self.colleague_capacity()
+        (snap,) = harness([START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"}, SNAP], PAGE.read_bytes())
+        colleague = self.account_row(snap, "colleague-1")
+        self.assertEqual([full(c) for c in named(colleague, "acct-signout")], ["Sign out"])
+        self.assertEqual([full(c) for c in named(colleague, "acct-owner")], [COLLEAGUE])
+        work = self.account_row(snap, "work")
+        self.assertEqual(named(work, "acct-signout"), [])
+        for row in (colleague, work):
+            self.assertEqual(len(named(row, "acct-remove")), 1)
+            self.assertEqual(len(named(row, "acct-toggle")), 1)
+
+    def test_sign_out_posts_the_profile_and_shows_a_refusal(self) -> None:
+        cap = self.colleague_capacity()
+        (snap,) = harness([
+            START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"},
+            {"respond": {"status": 409, "text": "a sign-in is running for colleague-1; cancel it first"}},
+            {"click": "acct-signout"}, SNAP], PAGE.read_bytes())
+        self.assertEqual([(url, json.loads(body)) for url, body in writes(snap) if url == "/api/account-signout"],
+                         [("/api/account-signout", {"profile": "colleague-1"})])
+        self.assertIn("Could not sign out: a sign-in is running for colleague-1; cancel it first",
+                      full(self.account_row(snap, "colleague-1")))
+
+    def test_a_failed_move_stays_shown_once_the_account_reads_signed_out(self) -> None:
+        signed_in, signed_out = self.colleague_capacity(), self.colleague_capacity(("signed_out", None))
+        (snap,) = harness([
+            START, {"frame": {**view([]), "capacity": signed_in}}, {"click": "cap"},
+            {"respond": {"status": 502, "text": "the account was signed out but a manager on it was not moved"}},
+            {"click": "acct-signout"}, {"frame": {**view([]), "capacity": signed_out}}, SNAP], PAGE.read_bytes())
+        row = self.account_row(snap, "colleague-1")
+        self.assertEqual(named(row, "acct-signout"), [])
+        self.assertIn("Could not sign out: the account was signed out but a manager on it was not moved", full(row))
+
+    def test_a_second_click_while_a_sign_out_is_in_flight_posts_nothing(self) -> None:
+        cap = self.colleague_capacity()
+        (snap,) = harness([
+            START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"}, {"hold": True},
+            {"click": "acct-signout"}, {"click": "acct-signout"}, SNAP], PAGE.read_bytes())
+        self.assertEqual([url for url, _ in writes(snap)], ["/api/account-signout"])
+        (button,) = named(self.account_row(snap, "colleague-1"), "acct-signout")
+        self.assertEqual((button["aria_disabled"], button["busy"]), ("true", "true"))
+
+    def test_a_signed_out_colleague_row_offers_no_sign_out(self) -> None:
+        cap = self.colleague_capacity(("signed_out", None))
+        (snap,) = harness([START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"}, SNAP], PAGE.read_bytes())
+        self.assertEqual(named(snap["accounts_body"], "acct-signout"), [])
+
     def test_the_guest_pool_reads_yours_for_his_account(self) -> None:
         snap = pool_page({**POOL_TIGHT, "accounts": [{**A1, "label": "yours"}, A2, A3]})
         rows = pool_rows(snap)
@@ -1303,3 +1362,74 @@ class OwnAccountPageTest(unittest.TestCase):
         (snap,) = harness([START, {"frame": {**view([project(1, [])]), "pool": POOL_TIGHT}}, {"snapshot": "page"}],
                           PAGE.read_bytes())
         self.assertEqual([n for n in nodes(snap["page"]) if has_class(n, "pool-add")], [])
+
+
+MINE = {**A1, "label": "yours", "number": 1, "ident": "tok-1"}
+A2N = {**A2, "number": 2}
+A3N = {**A3, "number": 3}
+CHANGE_FRAME = {**OWN_FRAME, "pool": {**POOL_TIGHT, "accounts": [MINE, A2N, A3N]}}
+REMOVE_NOTE = ("Remove your account from the pool? It is signed out first. Each manager on it moves to another account, "
+               "or waits for one with room; any other session keeps running.")
+
+
+class OwnAccountChangePageTest(unittest.TestCase):
+    def test_only_his_own_row_offers_sign_out_and_remove(self) -> None:
+        (snap,) = harness([START, {"frame": CHANGE_FRAME}, SNAP], GUEST)
+        rows = pool_rows(snap)
+
+        def label(row: dict) -> str:
+            return next(n["text"] for n in nodes(row) if n["tag"] == "b")
+
+        self.assertEqual([label(r) for r in rows], ["yours", "Account 2", "Account 3"])
+        for cls in ("pool-signout", "pool-remove"):
+            self.assertEqual([label(r) for r in rows if span(r, cls) is not None], ["yours"])
+            self.assertEqual(len(named(snap["pool"], cls)), 1)
+        self.assertEqual(full(named(snap["pool"], "pool-signout")[0]), "Sign out")
+        self.assertEqual(full(named(snap["pool"], "pool-remove")[0]), "Remove")
+
+    def test_a_row_without_a_positive_number_offers_neither(self) -> None:
+        frame = {**OWN_FRAME, "pool": {**POOL_TIGHT, "accounts": [
+            {**MINE, "number": 0}, {**MINE, "number": None}, {**MINE, "ident": None}, {**MINE, "ident": ""}]}}
+        (snap,) = harness([START, {"frame": frame}, SNAP], GUEST)
+        self.assertEqual(named(snap["pool"], "pool-signout") + named(snap["pool"], "pool-remove"), [])
+
+    def test_sign_out_posts_his_account_number(self) -> None:
+        (snap,) = harness([START, {"frame": CHANGE_FRAME}, {"respond": NO_REPLY}, {"click": "pool-signout"}, SNAP], GUEST)
+        self.assertEqual(own_writes(snap), [("/api/guest-account-signout", {"account": 1, "ident": "tok-1"})])
+
+    def test_remove_asks_first_and_posts_only_on_remove_it(self) -> None:
+        asked, cancelled, sent = harness([
+            START, {"frame": CHANGE_FRAME}, {"click": "pool-remove"}, SNAP, {"click": "pool-remove-cancel"}, SNAP,
+            {"click": "pool-remove"}, {"respond": NO_REPLY}, {"click": "pool-remove-send"}, SNAP], GUEST)
+        self.assertEqual([full(n) for n in named(asked["pool"], "pool-remove-note")], [REMOVE_NOTE])
+        self.assertEqual(own_writes(asked), [])
+        self.assertEqual(named(cancelled["pool"], "pool-remove-note"), [])
+        self.assertEqual(own_writes(cancelled), [])
+        self.assertEqual(own_writes(sent), [("/api/guest-account-remove", {"account": 1, "ident": "tok-1"})])
+
+    def test_a_confirmation_opened_for_one_account_does_not_survive_another_under_its_number(self) -> None:
+        replaced = {**CHANGE_FRAME, "pool": {**POOL_TIGHT, "accounts": [{**MINE, "ident": "tok-2"}, A2N, A3N]}}
+        asked, redrawn, sent = harness([
+            START, {"frame": CHANGE_FRAME}, {"click": "pool-remove"}, SNAP, {"frame": replaced}, SNAP,
+            {"respond": NO_REPLY}, {"click": "pool-remove"}, {"click": "pool-remove-send"}, SNAP], GUEST)
+        self.assertEqual(len(named(asked["pool"], "pool-remove-send")), 1)
+        for cls in ("pool-remove-note", "pool-remove-send", "pool-remove-cancel"):
+            self.assertEqual(named(redrawn["pool"], cls), [])
+        self.assertEqual(len(named(redrawn["pool"], "pool-remove")), 1)
+        self.assertEqual(own_writes(redrawn), [])
+        self.assertEqual(own_writes(sent), [("/api/guest-account-remove", {"account": 1, "ident": "tok-2"})])
+
+    def test_a_refused_change_says_why_on_his_row(self) -> None:
+        refused = {"respond": {"status": 409, "text": "That account is not yours."}}
+        first, second = harness([
+            START, {"frame": CHANGE_FRAME}, refused, {"click": "pool-signout"}, SNAP, {"frame": CHANGE_FRAME}, SNAP], GUEST)
+        for snap in (first, second):
+            row = pool_rows(snap)[0]
+            self.assertEqual([full(n) for n in named(row, "fail")], ["Could not sign out: That account is not yours."])
+
+    def test_a_second_click_while_a_change_is_in_flight_posts_nothing(self) -> None:
+        (snap,) = harness([
+            START, {"frame": CHANGE_FRAME}, {"hold": True}, {"click": "pool-signout"}, {"click": "pool-signout"}, SNAP], GUEST)
+        self.assertEqual(own_writes(snap), [("/api/guest-account-signout", {"account": 1, "ident": "tok-1"})])
+        (button,) = named(snap["pool"], "pool-signout")
+        self.assertEqual((button["aria_disabled"], button["busy"]), ("true", "true"))
