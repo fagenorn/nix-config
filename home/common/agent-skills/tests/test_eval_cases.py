@@ -98,7 +98,12 @@ def writing_plans_fixture(tmp, *, with_plan=True):
     (repo / "issues").mkdir(parents=True)
     shutil.copy(EVALS_DIR / "fixture-repo/issues/001-well-specified.md", repo / "issues")
     git = base_commit(repo)
-    spec_dir, plan_dir = repo / ".claude/specs", repo / ".claude/plans"
+    origin = Path(tmp) / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(git + ["remote", "add", "origin", str(origin)], check=True)
+    subprocess.run(git + ["push", "-q", "origin", "main"], check=True,
+                   env={**os.environ, **QUIET_GIT})
+    spec_dir, plan_dir = repo / ".git/specs", repo / ".git/plans"
     if with_plan:
         issue = (repo / "issues/001-well-specified.md").read_text(encoding="utf-8")
         criteria = issue.split("## Acceptance criteria", 1)[1].split("\n## ", 1)[0]
@@ -118,10 +123,20 @@ def writing_plans_fixture(tmp, *, with_plan=True):
         (plan_dir / "p.tasks/task-1.md").write_text(
             "# Task 1: Add the filter\n\nRun: `python3 -m unittest tests.test_cli`\nExpected: PASS.\n",
             encoding="utf-8")
-        subprocess.run(git + ["add", "-A"], check=True)
-        subprocess.run(git + ["commit", "-q", "-m", "docs: plan"], check=True)
-    env = {"REPO": str(repo), "SPEC_DIR": str(spec_dir), "PLAN_DIR": str(plan_dir), "WT_COUNT": "0"}
+    base = subprocess.run(git + ["rev-parse", "main"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    refs = subprocess.run(["git", "-C", str(origin), "for-each-ref",
+                           "--format=%(refname) %(objectname)"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    env = {"REPO": str(repo), "ORIGIN": str(origin), "BASE_MAIN": base, "ORIGIN_REFS": refs,
+           "SPEC_DIR": str(spec_dir), "PLAN_DIR": str(plan_dir), "WT_COUNT": "0"}
     return repo, env
+
+
+def eval_git(repo):
+    """The git argv that commits in `repo` as the eval identity."""
+    return ["git", "-C", str(repo), "-c", "user.name=eval", "-c", "user.email=eval@example.invalid",
+            "-c", "commit.gpgsign=false"]
 
 
 class EvalCasesTest(unittest.TestCase):
@@ -345,7 +360,7 @@ class WritingPlansPipelineAssertsTest(unittest.TestCase):
                     self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_plan_asserts_fail_when_no_plan_was_written(self):
-        names = ("a plan artifact exists under the retained plans directory",
+        names = ("a plan root exists in the git directory's plans directory",
                  "every task section (inline or per-task brief) has a falsifiable verification line",
                  self.DECISION)
         with tempfile.TemporaryDirectory() as tmp:
@@ -354,6 +369,45 @@ class WritingPlansPipelineAssertsTest(unittest.TestCase):
                 with self.subTest(name=name):
                     done = run_assert(case_assert("writing-plans", 1, name), repo, **env)
                     self.assertNotEqual(done.returncode, 0, done.stdout)
+
+    CLEAN = "nothing was committed and the working tree is clean"
+
+    def commit_plan_copy(self, repo, env):
+        stray = repo / ".claude/plans/p.md"
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(Path(env["PLAN_DIR"]) / "p.md", stray)
+        git = eval_git(repo)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "docs: plan"], check=True)
+
+    def test_a_committed_plan_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = writing_plans_fixture(Path(tmp).resolve())
+            self.commit_plan_copy(repo, env)
+            done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("a commit was made", done.stdout)
+
+    def test_a_plan_committed_on_a_side_branch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = writing_plans_fixture(Path(tmp).resolve())
+            git = eval_git(repo)
+            subprocess.run(git + ["switch", "-q", "-c", "side"], check=True)
+            self.commit_plan_copy(repo, env)
+            subprocess.run(git + ["switch", "-q", "main"], check=True)
+            subprocess.run(git + ["branch", "-q", "-D", "side"], check=True)
+            done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("a commit was made", done.stdout)
+
+    def test_a_new_origin_ref_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = writing_plans_fixture(Path(tmp).resolve())
+            subprocess.run(eval_git(repo) + ["push", "-q", "origin", "main:refs/heads/extra"],
+                           check=True, env={**os.environ, **QUIET_GIT})
+            done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("origin's refs changed", done.stdout)
 
     def test_a_failed_precondition_reads_no_stdin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -419,7 +473,7 @@ def published_sandbox(tmp):
                           capture_output=True, text=True, check=True).stdout.strip()
     env = {"WORK": str(tmp), "REPO": str(repo), "ORIGIN": str(origin), "BASE_MAIN": base,
            "ORIGIN_REFS": refs,
-           "SPEC_DIR": str(repo / ".claude/specs"), "PLAN_DIR": str(repo / ".claude/plans"),
+           "SPEC_DIR": str(repo / ".git/specs"), "PLAN_DIR": str(repo / ".git/plans"),
            "WT": "", "WT_COUNT": "0", "PRE_WT": ""}
     return repo, git, env
 
@@ -674,29 +728,33 @@ class CodeMapEvalCasesTest(unittest.TestCase):
     """#354: the design case grades a crafted sandbox."""
 
     SPEC = "2026-10-11-list-state-design.md"
-    SPEC_EXISTS = "a spec exists under the retained specs directory and is committed"
+    SPEC_EXISTS = "the spec is the issue's body, drafted in the git directory, and nothing was committed"
     SPEC_FORMAT = "the spec's Decisions section names no file path or line number"
-    MAP_EXISTS = "the code map exists in the git directory, named after the spec"
+    MAP_EXISTS = "the code map sits beside the spec draft, named after it"
     MAP_VALID = "the code map is well-formed and lists the three files the issue decides about"
     MAP_PLACED = "no code map is tracked or present in the working tree"
     NOT_STARTED = "the implementation was not started"
 
     def design_sandbox(self, tmp, *, decisions="The list command gains a state filter.", with_map=True):
-        """The fixture after a good design run: a committed spec and its code map in .git."""
-        repo, git = fixture_sandbox(tmp)
-        spec_dir = repo / ".claude/specs"
+        """The fixture after a good design run: the spec draft and its code map in .git, the
+        issue file rewritten to the draft, and nothing committed."""
+        repo, _, env = published_sandbox(tmp)
+        spec_dir = Path(env["SPEC_DIR"])
         spec_dir.mkdir(parents=True)
-        (spec_dir / self.SPEC).write_text(
+        issue = repo / "issues/001-well-specified.md"
+        text = issue.read_text(encoding="utf-8")
+        draft = spec_dir / self.SPEC
+        draft.write_text(
             f"# Design\n\n## Problem\n\nNo done-only view.\n\n## Decisions\n\n{decisions}\n\n"
-            "## Test seams\n\nThe command line, as tests/test_cli.py drives it.\n", encoding="utf-8")
-        subprocess.run(git + ["add", "-A"], check=True)
-        subprocess.run(git + ["commit", "-q", "-m", "docs: spec"], check=True)
+            "## Test seams\n\nThe command line, as tests/test_cli.py drives it.\n\n"
+            + text[text.index("## Proposal"):], encoding="utf-8")
+        shutil.copy(draft, issue)
         if with_map:
-            (repo / ".git" / self.SPEC.replace(".md", ".code-map.md")).write_text(
+            (spec_dir / self.SPEC.replace(".md", ".code-map.md")).write_text(
                 f"# Code map: {self.SPEC}\n\n## The list command\n- Why: it gains the state filter\n"
                 "- Code: `tinytask/cli.py` (`main`); `tinytask/model.py` (`STATES`)\n"
                 "- Tests: `tests/test_cli.py` (`CliTest`)\n", encoding="utf-8")
-        return repo, {"REPO": str(repo), "SPEC_DIR": str(spec_dir)}
+        return repo, env
 
     def grade(self, name, repo, env):
         return run_assert(case_assert("design", 1, name), repo, **env)
@@ -720,15 +778,19 @@ class CodeMapEvalCasesTest(unittest.TestCase):
                     self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
             self.assertEqual(self.grade(self.SPEC_EXISTS, repo, env).returncode, 0)
 
-    def test_a_code_map_in_the_working_tree_fails_the_placement_assert(self):
+    def test_a_code_map_in_the_working_tree_fails_the_placement_and_working_tree_asserts(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = self.design_sandbox(Path(tmp).resolve())
             stray = repo / ".claude/specs" / self.SPEC.replace(".md", ".code-map.md")
+            stray.parent.mkdir(parents=True, exist_ok=True)
             stray.write_text("# Code map\n", encoding="utf-8")
             done = self.grade(self.MAP_PLACED, repo, env)
             self.assertNotEqual(done.returncode, 0, done.stdout)
             self.assertIn(stray.name, done.stdout)
-            for name in (self.SPEC_EXISTS, self.SPEC_FORMAT, self.MAP_EXISTS, self.MAP_VALID):
+            done = self.grade(self.SPEC_EXISTS, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("the working tree holds more than the issue's new body", done.stdout)
+            for name in (self.SPEC_FORMAT, self.MAP_EXISTS, self.MAP_VALID):
                 with self.subTest(name=name):
                     done = self.grade(name, repo, env)
                     self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -741,14 +803,38 @@ class CodeMapEvalCasesTest(unittest.TestCase):
             self.assertNotEqual(done.returncode, 0, done.stdout)
             self.assertIn("tinytask/cli.py", done.stdout)
 
-    def test_a_spec_edited_after_its_commit_fails_the_committed_assert(self):
+    def test_an_issue_body_that_differs_from_the_draft_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = self.design_sandbox(Path(tmp).resolve())
-            spec = repo / ".claude/specs" / self.SPEC
-            spec.write_text(spec.read_text(encoding="utf-8") + "\nA later draft.\n", encoding="utf-8")
+            issue = repo / "issues/001-well-specified.md"
+            issue.write_text(issue.read_text(encoding="utf-8") + "\nA later line.\n", encoding="utf-8")
             done = self.grade(self.SPEC_EXISTS, repo, env)
             self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("differs from its committed content", done.stdout)
+            self.assertIn("the issue body is not the spec draft", done.stdout)
+
+    def test_a_spec_committed_on_a_side_branch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve())
+            git = eval_git(repo)
+            subprocess.run(git + ["switch", "-q", "-c", "side"], check=True)
+            subprocess.run(git + ["commit", "-q", "-am", "docs: spec"], check=True)
+            subprocess.run(git + ["switch", "-q", "main"], check=True)
+            subprocess.run(git + ["branch", "-q", "-D", "side"], check=True)
+            shutil.copy(Path(env["SPEC_DIR"]) / self.SPEC, repo / "issues/001-well-specified.md")
+            done = self.grade(self.SPEC_EXISTS, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("a commit was made", done.stdout)
+
+    def test_a_changed_acceptance_criteria_section_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve())
+            for path in (Path(env["SPEC_DIR"]) / self.SPEC, repo / "issues/001-well-specified.md"):
+                text = path.read_text(encoding="utf-8")
+                path.write_text(re.sub(r"(?m)^- \[ \] \[code\] .*$", "- [ ] [code] changed",
+                                       text, count=1), encoding="utf-8")
+            done = self.grade(self.SPEC_EXISTS, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("acceptance criteria", done.stdout)
 
     def test_an_untracked_source_file_fails_the_not_started_assert(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -928,6 +1014,15 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
             env.update(WT=str(worktree), WT_COUNT="1")
             self.assertNotEqual(self.grade("the renamed flag works through the CLI",
                                            repo, env).returncode, 0)
+
+    def test_a_spec_in_the_worktree_git_directory_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, _, env = self.good_run(Path(tmp).resolve())
+            git_dir = subprocess.run(["git", "-C", env["WT"], "rev-parse", "--absolute-git-dir"],
+                                     capture_output=True, text=True, check=True).stdout.strip()
+            (Path(git_dir) / "specs").mkdir(parents=True)
+            (Path(git_dir) / "specs/s.md").write_text("# spec\n", encoding="utf-8")
+            self.assertNotEqual(self.grade("no spec or plan was written", repo, env).returncode, 0)
 
     def test_a_spec_in_the_worktree_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

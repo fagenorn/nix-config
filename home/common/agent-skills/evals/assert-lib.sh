@@ -19,9 +19,10 @@
 #             there is no setup)
 #   ORIGIN_REFS  the origin's full ref set right after the setup hook, one
 #             "<refname> <sha>" line per ref (compare it to detect a push under any name)
-#   SPEC_DIR / PLAN_DIR  absolute paths from the fixture's retained resolver snapshot:
-#             use them bare under REPO and as "$WT/${SPEC_DIR#"$REPO"/}" under another
-#             checkout, never "$REPO/$SPEC_DIR"
+#   SPEC_DIR / PLAN_DIR  REPO's git directory plus /specs and /plans, where a run on REPO
+#             drafts a spec and a plan. Under a linked worktree use
+#             "$(git -C "$WT" rev-parse --absolute-git-dir)/specs" and /plans, never a path
+#             derived from SPEC_DIR
 #   CLAUDE_EXIT          exit status of the claude run
 
 fail() {
@@ -207,6 +208,23 @@ commits_touch() {
   local touched
   touched=$(git -C "$dir" log --oneline main..HEAD -- "$@" 2>/dev/null)
   [ -n "$touched" ] || fail "no commits between main..HEAD touching: $*"
+}
+
+# no_new_commits <repo> — the run made no commit anywhere and pushed nothing. Fails with
+# "a commit was made after setup: <up to three shas>" when any commit reachable from any
+# ref, any worktree's HEAD or any reflog is not an ancestor of $BASE_MAIN (so a commit on
+# a deleted side branch still counts), and with "the origin's refs changed" when the
+# origin's ref set differs from $ORIGIN_REFS. Use it only in cases with no setup: a
+# setup's own commits sit on the pre-created branch.
+no_new_commits() {
+  local repo="$1" made refs
+  made=$(git -C "$repo" rev-list --all --reflog --not "$BASE_MAIN") ||
+    { fail "cannot list the commits of: $repo"; return 1; }
+  [ -z "$made" ] ||
+    { fail "a commit was made after setup: $(printf '%s\n' "$made" | head -n 3 | tr '\n' ' ')"; return 1; }
+  refs=$(git -C "$ORIGIN" for-each-ref --format='%(refname) %(objectname)') ||
+    { fail "cannot list the refs of: $ORIGIN"; return 1; }
+  [ "$refs" = "$ORIGIN_REFS" ] || { fail "the origin's refs changed"; return 1; }
 }
 
 # path_unchanged_since <dir> <ref> <pathspec...> — the working tree matches <ref> for

@@ -6,11 +6,11 @@
       "id": 1,
       "name": "plan-from-well-specified-requirements",
       "mode": "pipeline",
-      "prompt": "Use the `writing-plans` skill to turn `issues/001-well-specified.md` into an implementation plan.\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is the requirements; refusal is fatal and no value is defaulted or inferred. Work on the current branch without a worktree. Autonomous mode: record each non-obvious decision as `| ID | Choice | Grounding | Rejected alternative |`. Produce and commit plan artifacts only; do not edit `tinytask/` or `tests/`.\n\nReport the resolved plan path(s) and each self-answered decision.",
-      "expected_output": "Plan artifacts under the retained plans directory, committed on the current branch: either one plan file with Task N sections, or (target contract) a thin index plus per-task briefs. Every task carries at least one falsifiable verification line naming a command and the observation that would show the task incomplete. Planning decisions are logged in a decision section — target contract: compact ledger rows `ID | choice | grounding | rejected alternative`. No placeholders (TBD/TODO/'implement later'), and no source file touched. The plan root carries an Acceptance map with rows AC1 to AC7, each of kind code, each owned by one task.",
+      "prompt": "Use the `writing-plans` skill to turn `issues/001-well-specified.md` into an implementation plan.\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is the requirements; refusal is fatal and no value is defaulted or inferred. Work on the current branch without a worktree. Autonomous mode: record each non-obvious decision as `| ID | Choice | Grounding | Rejected alternative |`. Produce the plan only; do not edit `tinytask/` or `tests/`.\n\nReport the resolved plan path(s) and each self-answered decision.",
+      "expected_output": "The plan is under the git directory's plans directory, no commit is made, and HEAD and the working tree are unchanged: either one plan file with Task N sections, or (target contract) a thin index plus per-task briefs. Every task carries at least one falsifiable verification line naming a command and the observation that would show the task incomplete. Planning decisions are logged in a decision section — target contract: compact ledger rows `ID | choice | grounding | rejected alternative`. No placeholders (TBD/TODO/'implement later'), and no source file touched. The plan root carries an Acceptance map with rows AC1 to AC7, each of kind code, each owned by one task.",
       "asserts": [
         {
-          "name": "a plan artifact exists under the retained plans directory",
+          "name": "a plan root exists in the git directory's plans directory",
           "shell": "has_file \"$PLAN_DIR\"/*.md"
         },
         {
@@ -27,8 +27,8 @@
           "shell": "f=$(grep -rliE '^#+ .*(decision|auto-resolved)' \"$SPEC_DIR\" \"$PLAN_DIR\" 2>/dev/null | head -1); [ -n \"$f\" ] || { fail \"no decision section under $SPEC_DIR or $PLAN_DIR\"; exit 1; }; h=$(grep -iE -m1 '^#+ .*(decision|auto-resolved)' \"$f\"); [ -n \"$h\" ] || { fail \"decision heading vanished from $f\"; exit 1; }; ledger_has_rows \"$f\" \"$h\" || { fail \"decision section has no entries (### or ledger rows) in $f\"; exit 1; }"
         },
         {
-          "name": "the plan artifacts are committed",
-          "shell": "[ -n \"$(git -C \"$REPO\" log --oneline origin/main..HEAD -- \"$PLAN_DIR\" 2>/dev/null)\" ] || fail \"no commit touching $PLAN_DIR on the current branch\""
+          "name": "nothing was committed and the working tree is clean",
+          "shell": "no_new_commits \"$REPO\" || exit 1; [ -z \"$(git -C \"$REPO\" status --porcelain)\" ] || fail \"the working tree changed: $(git -C \"$REPO\" status --porcelain | tr '\\n' ' ')\""
         },
         {
           "name": "no placeholder text in any plan artifact",
@@ -48,8 +48,8 @@
       "id": 2,
       "name": "verification-gates-scoped-to-plan-owned-paths",
       "mode": "plan-only",
-      "prompt": "You're writing the plan for a two-task feature in a repo where a delivery program drives the flow: the plan and spec land as `docs(plans):`/`docs(specs):` commits on the same branch, and ship-time syncs merge the integration branch in. I want you to write the verification gate for the final task. Before you write it, explain what a BAD gate looks like here and why, then give me the exact gate you'd write instead. Plan-only — no files, just the reasoning and the gate text.",
-      "expected_output": "The answer must reject raw commit-range expectations — 'exactly N files changed between BASE..HEAD', 'every commit in the range is a feat:' — and explain the two concrete failure modes: the caller's spec/plan artifact commits land in the range, and a ship-time sync merge pulls in everything the integration branch advanced by, so an unscoped gate reads another issue's shipped work as scope creep. The good gate is scoped to the files the plan owns: a pathspec'd diff (`git diff --stat BASE..HEAD -- <paths from the plan's Files: blocks>`) or a direct file-content assertion; where commit shape genuinely is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`) and exempt the artifact and review-fixup subjects. The gate must also be falsifiable at the base commit — a criterion already true at BASE is how an implementer completes a no-op.",
+      "prompt": "You're writing the plan for a two-task feature in a repo where a delivery program drives the flow: review-fixup commits land on the same branch, and ship-time syncs merge the integration branch in. I want you to write the verification gate for the final task. Before you write it, explain what a BAD gate looks like here and why, then give me the exact gate you'd write instead. Plan-only — no files, just the reasoning and the gate text.",
+      "expected_output": "The answer must reject raw commit-range expectations — 'exactly N files changed between BASE..HEAD', 'every commit in the range is a feat:' — and explain the two concrete failure modes: review-fixup commits land in the range, and a ship-time sync merge pulls in everything the integration branch advanced by, so an unscoped gate reads another issue's shipped work as scope creep. The good gate is scoped to the files the plan owns: a pathspec'd diff (`git diff --stat BASE..HEAD -- <paths from the plan's Files: blocks>`) or a direct file-content assertion; where commit shape genuinely is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`) and exempt review-fixup subjects (no spec or plan commits). The gate must also be falsifiable at the base commit — a criterion already true at BASE is how an implementer completes a no-op.",
       "files": []
     },
     {

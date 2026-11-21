@@ -43,7 +43,7 @@
         },
         {
           "name": "no spec or plan was written",
-          "shell": "dirs_empty \"$WT/${SPEC_DIR#\"$REPO\"/}\" \"$WT/${PLAN_DIR#\"$REPO\"/}\" || fail \"a spec or plan was written on the direct lane\""
+          "shell": "g=$(git -C \"$WT\" rev-parse --absolute-git-dir) || { fail \"no git directory for $WT\"; exit 1; }; dirs_empty \"$g/specs\" \"$g/plans\" \"$SPEC_DIR\" \"$PLAN_DIR\" \"$WT/.claude/specs\" \"$WT/.claude/plans\" || fail \"a spec or plan was written on the direct lane\""
         },
         {
           "name": "the worktree is left clean",
