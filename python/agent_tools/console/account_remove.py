@@ -5,23 +5,31 @@ and `typed`, both strings, and returns `(profile, typed)`. `profile` is non-empt
 cap of its own (a profile name is bounded only by the service's request-body limit, as the
 launcher's `valid_name` and `sessions.account_name` bound none); `typed` is any string, the empty
 one included, because the service judges whether it matches. It raises `ValueError` otherwise.
+`parse_signout_request(body)` takes a UTF-8 JSON object whose members are exactly `profile`, a
+non-empty string, and returns it, else `ValueError` (#1345). `parse_guest_request(body)` takes one
+whose members are exactly `account`, an `int` that is not a `bool` and is at least 1, and returns
+it, else `ValueError`: a colleague names his account by its pool number, never by a profile.
 
 Texts. `UNAVAILABLE` is `removing an account is not available on this host`, `MISMATCH` is `the
 typed name does not match`, `UNKNOWN` is `no such profile`, `running(profile)` is `a sign-in is
 running for <profile>; cancel it first`, `busy(profile)` is `<profile> is still being read; try
 again in a moment` (the drain of a probe or a client run under the profile already in flight
 timed out) and `removing(profile)` is `<profile> is being removed` (a sign-in start refused during a
-removal).
+removal). `SIGNOUT_UNAVAILABLE` is `signing an account out is not available on this host`,
+`NOT_COLLEAGUE` is `only an account a colleague added is signed out here` and `NOT_MOVED` is `the
+account was signed out but a manager on it was not moved` (it names no profile).
 
 Timeouts. `SIGNOUT_TIMEOUT` and `REMOVE_TIMEOUT` are 30 seconds each; `DRAIN_TIMEOUT` is 15 seconds,
 what a removal waits for a probe or a client run under the profile already in flight (a manager
 launch, nudge, wake, stop or sign-in status read).
 
-Row. `removed(profile, outcome, kind)` is `("account.removal", None, {"by": "owner", "profile":
-profile, "outcome": outcome, "kind": kind})`, one per removal the owner confirms on the page. It
+Row. `removed(profile, outcome, kind, by="owner")` is `("account.removal", None, {"by": by, "profile":
+profile, "outcome": outcome, "kind": kind})`, one per removal the owner or the colleague who added
+the profile confirms (`by` is `owner` or a login with `event_log.normal_login(by) == by`, #1345). It
 raises `ValueError` when `account_add.refusal(profile)` is not None, when `outcome` is not in
 `OUTCOMES` (`removed`, `removed_signed_out_already`, `signout_failed`, `remove_failed`), when `kind`
-is None for any outcome but `removed`, or when `kind` is not None for `removed`. `REMOVAL` is
+is None for any outcome but `removed`, when `kind` is not None for `removed`, or when `by` is
+neither `owner` nor a normal-form login (checked last). `REMOVAL` is
 `event_log.ACCOUNT_REMOVAL`; the kind is not in `KEPT_KINDS`.
 
 Sign-out. `signout_command()` is `["claude-account", "run", "auth", "logout"]`. `sign_out(one, *,
@@ -43,7 +51,9 @@ and `timeout`. Exit 0 returns None. The launcher's `rm` is the one implementatio
 nothing here deletes anything. A failure raises `RemoveFailed(kind)`, `str(error) == kind`, `kind`
 one of `REMOVE_KINDS`: `not_installed`, `timed_out`, `unavailable`, `failed` (a non-zero exit); the
 fifth, `still_listed`, is raised by the console service when the profile is still listed after a
-successful rm, never here.
+successful rm, never here. `REMOVE_KINDS` also holds `stop_failed`, a removal whose move of the
+managers on the profile could not stop one; `MoveFailed(kind)` carries it as `.kind`, as
+`SignOutFailed` and `RemoveFailed` do.
 
 Platform. `signer_out_for(platform)` is `sign_out` and `remover_for(platform)` is `Remover()` where
 `manager.supported(platform)`, else None.
@@ -67,9 +77,13 @@ DRAIN_TIMEOUT = 15
 UNAVAILABLE = "removing an account is not available on this host"
 MISMATCH = "the typed name does not match"
 UNKNOWN = "no such profile"
+SIGNOUT_UNAVAILABLE = "signing an account out is not available on this host"
+NOT_COLLEAGUE = "only an account a colleague added is signed out here"
+NOT_MOVED = "the account was signed out but a manager on it was not moved"
 OUTCOMES = ("removed", "removed_signed_out_already", "signout_failed", "remove_failed")
 SIGNOUT_KINDS = ("not_installed", "timed_out", "unavailable", "exited")
-REMOVE_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "still_listed")
+REMOVE_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "still_listed",
+                "stop_failed")
 
 
 def running(profile: str) -> str:
@@ -84,19 +98,40 @@ def removing(profile: str) -> str:
     return f"{profile} is being removed"
 
 
-def parse_remove_request(body: bytes) -> tuple[str, str]:
+def _object(body: bytes, members: set[str]) -> dict:
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("not a JSON object") from error
-    if (not isinstance(value, dict) or set(value) != {"profile", "typed"}
-            or not isinstance(value["profile"], str) or not isinstance(value["typed"], str)
+    if not isinstance(value, dict) or set(value) != members:
+        raise ValueError("wrong members")
+    return value
+
+
+def parse_signout_request(body: bytes) -> str:
+    profile = _object(body, {"profile"})["profile"]
+    if not isinstance(profile, str) or not profile:
+        raise ValueError("wrong members")
+    return profile
+
+
+def parse_guest_request(body: bytes) -> int:
+    account = _object(body, {"account"})["account"]
+    if not isinstance(account, int) or isinstance(account, bool) or account < 1:
+        raise ValueError("wrong members")
+    return account
+
+
+def parse_remove_request(body: bytes) -> tuple[str, str]:
+    value = _object(body, {"profile", "typed"})
+    if (not isinstance(value["profile"], str) or not isinstance(value["typed"], str)
             or not value["profile"]):
         raise ValueError("wrong members")
     return value["profile"], value["typed"]
 
 
-def removed(profile: str, outcome: str, kind: str | None) -> tuple[str, None, dict]:
+def removed(profile: str, outcome: str, kind: str | None,
+            by: str = "owner") -> tuple[str, None, dict]:
     reason = account_add.refusal(profile)
     if reason is not None:
         raise ValueError(reason)
@@ -104,7 +139,9 @@ def removed(profile: str, outcome: str, kind: str | None) -> tuple[str, None, di
         raise ValueError("unknown outcome")
     if (kind is None) != (outcome == "removed"):
         raise ValueError("a kind belongs to every outcome but removed")
-    return (REMOVAL, None, {"by": "owner", "profile": profile, "outcome": outcome, "kind": kind})
+    if by != "owner" and event_log.normal_login(by) != by:
+        raise ValueError("by is neither owner nor a login")
+    return (REMOVAL, None, {"by": by, "profile": profile, "outcome": outcome, "kind": kind})
 
 
 def signout_command() -> list[str]:
@@ -142,6 +179,12 @@ def sign_out(one: probe.Probe, *, run=manager.run_in_own_group,
         shutil.rmtree(cwd, ignore_errors=True)
     if result.returncode != 0:
         raise SignOutFailed("exited")
+
+
+class MoveFailed(Exception):
+    def __init__(self, kind: str):
+        super().__init__(kind)
+        self.kind = kind
 
 
 class Remover:

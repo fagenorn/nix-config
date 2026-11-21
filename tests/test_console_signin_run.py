@@ -426,6 +426,17 @@ class EntryTest(unittest.TestCase):
         half = ended_state(events[:3])
         self.assertEqual(ended_state(events[3:], half), folded)
 
+    def test_a_sign_out_is_an_action_with_its_own_outcomes(self):
+        self.assertEqual(
+            acted("colleague-1", "signout", "signed_out", "colleague@example.invalid")[2],
+            {"by": "colleague@example.invalid", "profile": "colleague-1", "action": "signout",
+             "outcome": "signed_out"})
+        self.assertEqual(acted("work", "signout", "failed")[2]["by"], "owner")
+        for outcome in ("sent", "started"):
+            with self.subTest(outcome=outcome):
+                with self.assertRaises(ValueError):
+                    acted("work", "signout", outcome)
+
     def test_an_older_attempts_late_row_never_replaces_a_newer_result(self):
         rows = [ended("work", "signed_in", 9), ended("work", "cancelled", 4),
                 ended("work", "failed", 9)]

@@ -80,7 +80,8 @@ capacity profiles, and puts in their place the `pool` member (#1341, ADR-console
 builds it from the owner's capacity view: `POOL_MEMBERS` are `state`, `tight`, `all_out`,
 `resumes_at`, `no_reading` and `accounts`; each account row carries exactly `ACCOUNT_MEMBERS`: a
 neutral `label` (`Account <n>`, or `yours` on the page of a colleague holding a profile of that
-account, ADR-console-087 D4), `state`, the percent left and reset of the week and the session,
+account, ADR-console-087 D4), the account's `number` (an `int`, the `<n>` of `Account <n>`, and
+the number of a `yours` row's account too: how a guest names an account in a write, #1345), `state`, the percent left and reset of the week and the session,
 `next_reset`, `out_until` and `in_use` (not signed out and not excluded). One row stands for one
 account: a profile whose `duplicate_of` is set (signed in to an address another profile counts) has
 no row and shares its account's label. `tight`, `all_out`, `resumes_at` and `no_reading` are the
@@ -188,7 +189,9 @@ sign-in (the newest, the one his page shows), else one of his own profiles that 
 `colleague-<n>` it names itself; no body names a profile, the code and the cancel carry the attempt the add
 answered and act on that attempt only, and no sign-in of a profile that is not his own is ever started, passed a code or
 cancelled. A refusal is read by a guest only as one of the fixed texts `CONSENT_TEXT`, `NO_OWN_SIGNIN_TEXT`,
-`ACCOUNT_BUSY_TEXT`, `ACCOUNT_UNAVAILABLE_TEXT`, `NOT_SHARED_TEXT` or `REVOKED_TEXT` (`account_text` maps any
+`ACCOUNT_BUSY_TEXT`, `ACCOUNT_UNAVAILABLE_TEXT`, `NOT_SHARED_TEXT`, `REVOKED_TEXT`, `NOT_YOUR_ACCOUNT_TEXT`
+(the number names no account of his) or `CHANGE_UNAVAILABLE_TEXT` (signing out or removing is not available on this
+host; `account_reason` names them `not_yours` and `unavailable`) (`account_text` maps any
 other text, such as one that names a profile, to `ACCOUNT_BUSY_TEXT`). No answer names a profile, a login, a
 code or the client's output.
 
@@ -268,6 +271,8 @@ def colleague_signin_text(profile: str, login: str) -> str:
     """The owner's refusal to start a sign-in of a profile a colleague added (#1361, ADR-console-087 D3)."""
     return f"{profile} is {login}'s account, so only {login} can sign it in. You can sign it out or remove it."
 ACCOUNT_BUSY_TEXT = "That cannot be done right now. Try again in a moment."
+NOT_YOUR_ACCOUNT_TEXT = "That account is not yours."
+CHANGE_UNAVAILABLE_TEXT = "Signing out or removing an account is not available on this host."
 ACCOUNT_UNAVAILABLE_TEXT = "Adding an account is not available on this host."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
                    "Point Tailscale Serve at the console's guest socket.")
@@ -504,7 +509,8 @@ def admit(access: Access, name: str | None, hosts: Sequence[str], forwarded_host
 
 ACCESS_TEXTS = frozenset({SHARING_OFF_TEXT, NAME_UNREAD_TEXT, HOST_TEXT, NOT_SHARED_TEXT, REVOKED_TEXT})
 ACCOUNT_TEXTS = frozenset({CONSENT_TEXT, NO_OWN_SIGNIN_TEXT, ACCOUNT_BUSY_TEXT,
-                           ACCOUNT_UNAVAILABLE_TEXT, NOT_SHARED_TEXT, REVOKED_TEXT})
+                           ACCOUNT_UNAVAILABLE_TEXT, NOT_SHARED_TEXT, REVOKED_TEXT,
+                           NOT_YOUR_ACCOUNT_TEXT, CHANGE_UNAVAILABLE_TEXT})
 
 
 def account_refusal(policy: Policy, actor: GuestActor) -> str | None:
@@ -525,9 +531,10 @@ def account_text(text: str) -> str:
 
 
 def account_reason(text: str) -> str:
-    """The stderr reason of a refused account write: one of consent, access, no_run, busy, unavailable."""
+    """The stderr reason of a refused account write: one of consent, access, no_run, busy, unavailable, not_yours."""
     return {CONSENT_TEXT: "consent", NO_OWN_SIGNIN_TEXT: "no_run",
-            ACCOUNT_UNAVAILABLE_TEXT: "unavailable", ACCOUNT_BUSY_TEXT: "busy"}.get(
+            ACCOUNT_UNAVAILABLE_TEXT: "unavailable", CHANGE_UNAVAILABLE_TEXT: "unavailable",
+            NOT_YOUR_ACCOUNT_TEXT: "not_yours", ACCOUNT_BUSY_TEXT: "busy"}.get(
                 text, "access" if text in ACCESS_TEXTS else "busy")
 
 
@@ -638,7 +645,7 @@ def scoped(inputs: Mapping[str, object], projects: frozenset[str]) -> dict:
     return result
 
 
-ACCOUNT_MEMBERS = ("label", "state", "week_left", "five_hour_left", "week_reset",
+ACCOUNT_MEMBERS = ("label", "number", "state", "week_left", "five_hour_left", "week_reset",
                    "five_hour_reset", "next_reset", "out_until", "in_use")
 POOL_MEMBERS = ("state", "tight", "all_out", "resumes_at", "no_reading", "accounts")
 NUMBERS_FILE = "account-numbers.json"
@@ -734,7 +741,8 @@ def pool_view(capacity: Mapping, numbers: Mapping[str, int],
     own = _own_numbers(numbers, mine)
     entries = sorted((entry for entry in capacity["profiles"] if entry["duplicate_of"] is None),
                      key=lambda entry: (numbers[entry["profile"]], entry["profile"]))
-    rows = [{"label": _label(numbers[entry["profile"]], own), "state": entry["state"],
+    rows = [{"label": _label(numbers[entry["profile"]], own), "number": numbers[entry["profile"]],
+             "state": entry["state"],
              "week_left": entry["week_left"], "five_hour_left": entry["five_hour_left"],
              "week_reset": entry["week_reset"], "five_hour_reset": entry["five_hour_reset"],
              "next_reset": entry["next_reset"], "out_until": entry["out_until"],
