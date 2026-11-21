@@ -3940,18 +3940,18 @@ function recommendedIndex(q) {
 function soleOption(item) {
   return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
 }
-// A look card's approving option (#1260) never starts picked: an approval is the owner's own choice.
-function approvingIndex(item) {
-  const look = lookOf(item);
-  return look !== null && Number.isInteger(look.approve_index) ? look.approve_index : -1;
+// A card the manager marked consequential, and every look card, never starts its recommendation picked: an approval is the owner's own pick (#1260, #1265).
+function consequential(item) {
+  return item.consequential === true || lookOf(item) !== null;
 }
 function startPicks(item) {
   if (soleOption(item)) return [0];
   return item.questions.map((q) => {
     const chosen = q.options.indexOf(q.chosen);
     if (chosen >= 0) return chosen;
+    if (consequential(item)) return null;
     const recommended = recommendedIndex(q);
-    return recommended >= 0 && recommended !== approvingIndex(item) ? recommended : null;
+    return recommended >= 0 ? recommended : null;
   });
 }
 function answerState(item) {

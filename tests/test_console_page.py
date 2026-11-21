@@ -5208,6 +5208,64 @@ class PageLookTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "try-again")], [])
 
 
+class PageConsequentialTest(unittest.TestCase):
+    BODY = {"project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 0}
+
+    @staticmethod
+    def asked() -> dict:
+        return question(0, "May the release run now?", ["Run it now", "Wait for Monday"],
+                        "Run it now", consequential=True)
+
+    def test_a_consequential_question_opens_with_nothing_picked_and_enter_sends_nothing(self) -> None:
+        (opened, after) = render([
+            START, {"frame": frame([self.asked()])}, {"snapshot": True}, {"key": "Enter"},
+            {"clock": 20000}, {"snapshot": True},
+        ])
+        self.assertEqual(picked(opened), [])
+        self.assertEqual(count(opened, "rec"), 1)
+        self.assertIs(field(opened, "send")["disabled"], True)
+        self.assertEqual(round_posts(after), [])
+
+    def test_a_look_card_opens_with_nothing_picked_whatever_it_recommends(self) -> None:
+        open_card = question(0, "May this merge?", ["approve", "ask for changes"], "ask for changes",
+                             look=look_of("open", "Choosing approve records it."))
+        (opened, after) = render([
+            START, {"frame": frame([open_card])}, {"snapshot": True}, {"key": "Enter"},
+            {"clock": 20000}, {"snapshot": True},
+        ])
+        self.assertEqual(picked(opened), [])
+        self.assertIs(field(opened, "send")["disabled"], True)
+        self.assertEqual(round_posts(after), [])
+
+    def test_a_pick_or_words_make_a_consequential_card_sendable(self) -> None:
+        (typed, sent) = render([
+            START, {"frame": frame([self.asked()])},
+            {"type": {"class": "words-text", "text": "hold it until Monday"}},
+            {"snapshot": True}, {"click": "send"}, {"clock": 10000}, {"snapshot": True},
+        ])
+        self.assertEqual(picked(typed), [])
+        self.assertIs(field(typed, "send")["disabled"], False)
+        self.assertEqual(posted(round_posts(sent)[-1]), {**self.BODY, "text": "hold it until Monday"})
+        (chose, sent) = render([
+            START, {"frame": frame([self.asked()])}, {"click": "opt", "nth": 0},
+            {"snapshot": True}, {"click": "send"}, {"clock": 10000}, {"snapshot": True},
+        ])
+        self.assertEqual(len(picked(chose)), 1)
+        self.assertTrue(picked(chose)[0].endswith("Run it now"))
+        self.assertIs(field(chose, "send")["disabled"], False)
+        self.assertEqual(posted(round_posts(sent)[-1]), {**self.BODY, "choice": 0})
+
+    def test_a_sent_consequential_card_keeps_the_owners_pick(self) -> None:
+        (sent,) = render([
+            START, {"frame": frame([self.asked()])}, {"click": "opt", "nth": 1},
+            {"click": "send"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        self.assertIn(SENT_TEXT, full(sent["inbox"]))
+        self.assertEqual(len(picked(sent)), 1)
+        self.assertTrue(picked(sent)[0].endswith("Wait for Monday"))
+        self.assertEqual(posted(round_posts(sent)[-1]), {**self.BODY, "choice": 1})
+
+
 class PageManagerTest(unittest.TestCase):
     def test_a_failed_manager_shows_its_reason_and_retry_posts(self) -> None:
         reason = "could not start a manager: the directory is not trusted"
