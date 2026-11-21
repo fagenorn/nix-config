@@ -232,7 +232,7 @@ from agent_tools.console.capacity import EMPTY
 from agent_tools.console.event_log import (
     LOGIN_MAX, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event, normal_login)
 from agent_tools.console.sprints import (
-    NUDGE_ACTION_TEXT, STALLED_TEXT, STARTED, SprintState, ended_at)
+    NUDGE_ACTION_TEXT, STALLED_TEXT, STARTED, SprintState, ended_at, is_look)
 from agent_tools.console.view import project_for
 
 OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
@@ -561,11 +561,6 @@ def revokes(before: Access, after: Access) -> bool:
 
 def steer_refusal(login: str, started_by: str | None) -> str | None:
     return None if started_by == login else NOT_YOUR_SPRINT_TEXT
-
-
-def is_look(pairs: Iterable[str | None]) -> bool:
-    """A look is a question carrying both a before and an after picture; one alone is a plain picture."""
-    return {"before", "after"} <= set(pairs)
 
 
 def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_hosts: Sequence[str],
