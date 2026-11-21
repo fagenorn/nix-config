@@ -372,6 +372,40 @@ class TransactionStore:
         return self._create(creation_key, subject, concurrency_keys, proof, recovery, None,
                             authority_class, rerun_denied)
 
+    def adopt_rerun_denied(self, transaction_id: str, rerun_denied: Collection[str]
+                           ) -> Transaction:
+        """Let a transaction stored without `rerun_denied` name `rerun_denied` (ADR-release-015).
+
+        A transaction created before the member existed keeps the class rule for good unless its
+        caller names the actions again; this writes the sorted names onto the stored `created`
+        event, once, under the transaction lock and after the whole document validates. A
+        transaction that already carries the same names, and a terminal one, is returned
+        unchanged with no write. Names that are not a non-empty list, tuple, set or frozenset of
+        distinct non-empty strings are `StateInvalid`; a transaction that already carries other
+        names is a `CreationConflict`. The history is unchanged, so no custody is needed.
+        """
+        violation = rerun_names_violation(rerun_denied)
+        if violation is None and not rerun_denied:
+            violation = "holds no name"
+        where = f"{transaction_id}: adopt_rerun_denied"
+        if violation is not None:
+            raise StateInvalid(f"{where}: rerun_denied {violation}")
+        names = sorted(rerun_denied)
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            stored = prior["events"][0].get("rerun_denied")
+            if prior["state"] in TERMINALS or stored == names:
+                return snapshot(prior)
+            if stored is not None:
+                raise CreationConflict(f"{where}: the transaction already names rerun_denied "
+                                       f"{stored!r}")
+            candidate = copy.deepcopy(prior)
+            candidate["events"][0]["rerun_denied"] = names
+            _validate_state(candidate, transaction_id, self.root)
+            directory = self.root / transaction_id
+            atomic_write(directory, directory / "state.json", candidate)
+            return snapshot(candidate)
+
     def _create(self, creation_key: str, subject: dict, concurrency_keys: Collection[str],
                 proof: dict, recovery: dict, recovers: str | None,
                 authority_class: str, rerun_denied: Collection[str] = ()) -> Transaction:
@@ -786,7 +820,8 @@ class TransactionStore:
         `inspection_required`, `not_absent`, `not_retryable`, `budget_exhausted` and
         `window_closed`, each before any write or call; an action the `created` event names in
         `rerun_denied` skips `not_retryable` and `window_closed` after a guard refusal
-        (`rejected`, `authorization_denied`) only (ADR-release-015). An admitted attempt `n` appends
+        (`rejected`, `authorization_denied`) only, and never in `recovering`
+        (ADR-release-015). An admitted attempt `n` appends
         `invocation_intended` stamped with the held fence, and the lock is released.
         `effect.invoke` and then `effect.inspect` run with no lock held, on one request
         whose `attempt` is `n`; a result outside its closed shape is `EffectResultInvalid`
@@ -811,7 +846,8 @@ class TransactionStore:
                 return snapshot(prior)
             fence = prior["custody"]["fence"]
             reason = refusal(entry, held_fence=fence, now_ms=now,
-                             rerun_denied=name in prior["events"][0].get("rerun_denied", ()))
+                             rerun_denied=(name in prior["events"][0].get("rerun_denied", ())
+                                           and prior["state"] != "recovering"))
             if reason is not None:
                 raise refused_error(transaction_id, identity, reason)
             attempt = entry.attempts + 1

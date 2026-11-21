@@ -15,7 +15,9 @@ home of the four admission rules, in order: a fresh `absent` inspection under th
 retryable failure, inclusive (`window_closed`). An action the `created` event names in
 `rerun_denied` also runs again after a guard refusal (`denied`: `rejected`,
 `authorization_denied`, which applied nothing): that predecessor passes `not_retryable` and is
-not closed by `window_closed`, while `budget_exhausted` still bounds it; every other
+not closed by `window_closed` and starts no retry window (the window opens at the first
+retryable failure), while `budget_exhausted` still bounds it, and in `recovering` it stays
+`not_retryable`; every other
 non-retry-safe class stays `not_retryable` (ADR-release-015). `refused_error` is the one
 construction path for `InvocationRefused` and raises `ValueError` for a reason outside
 `REFUSAL_REASONS`.
@@ -156,7 +158,7 @@ def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
     """The rule one envelope-checked action event breaks against the actions folded before
     it, the open span's fence (None outside a span) and the folded `state`, or None
     (#206 D2, D14, D17). `rerun_denied` holds the names the `created` event lets run again
-    after a guard refusal (ADR-release-015)."""
+    after a guard refusal, outside `recovering` (ADR-release-015)."""
     event_type = event["type"]
     identity = event["action_id"]
     if type(identity) is not str:
@@ -201,7 +203,8 @@ def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
                 or inspection["fence"] != event["fence"]):
             return "invocation_intended does not follow an absent inspection under its fence"
         if attempt > 1 and not (retry_safe(entry)
-                                or (denied(entry) and entry.name in rerun_denied)):
+                                or (denied(entry) and entry.name in rerun_denied
+                                    and state != "recovering")):
             return "invocation_intended retry follows an attempt that is not retry-safe"
         return None
     if event_type == "invocation_returned":
@@ -231,7 +234,7 @@ def apply_action_event(event: dict, actions: dict[str, ActionFold]) -> None:
                             "at": event["at"]}
         entry.open = False
         if (event["outcome"] == "absent" and entry.attempts >= 1
-                and entry.first_failure_ms is None):
+                and entry.first_failure_ms is None and not denied(entry)):
             entry.first_failure_ms = parse_at(event["at"])
         return
     if event_type == "invocation_intended":
@@ -279,8 +282,8 @@ def refusal(entry: ActionFold | None, *, held_fence: dict, now_ms: int,
             rerun_denied: bool = False) -> str | None:
     """The reason the next attempt is not admitted at `now_ms` under `held_fence`, or None:
     rules 1-4 in order (#206 D5, D6). `rerun_denied` says the `created` event names this
-    action, so a guard-refused predecessor skips `not_retryable` and `window_closed`
-    (ADR-release-015)."""
+    action and the transaction is not `recovering`, so a guard-refused predecessor skips
+    `not_retryable` and `window_closed` (ADR-release-015)."""
     inspection = None if entry is None or entry.open else entry.inspection
     if inspection is None or inspection["fence"] != held_fence:
         return "inspection_required"

@@ -5,6 +5,7 @@ The caller acquires the lock before the first preview; `preview` takes it one-sh
 free (issue 1376), `run` re-checks it right before it may merge, proceeds only on
 `already_held`, and releases it on every ending but a `confirm` or `wait` that can still merge.
 """
+import json
 import unittest
 from unittest import mock
 
@@ -439,6 +440,23 @@ class DeniedMergeTest(LockCase):
         self.assertEqual(self.action(driver, "merge")["attempts"], 3)
         self.assertEqual(result["lock"], RELEASED)
         self.assertEqual(len(self.merge_asks()), 3)
+
+    def test_a_release_parked_before_the_names_were_stored_runs_again_too(self):
+        self.deny()
+        driver = self.driver()
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "attention")
+        transaction = driver.current()[1]
+        state = driver.store().root / transaction.transaction_id / "state.json"
+        document = json.loads(state.read_text())
+        del document["events"][0]["rerun_denied"]
+        state.write_text(json.dumps(document))
+        self.assertNotIn("rerun_denied", driver.current()[1].events[0])
+        self.admit()
+        result = self.again(driver)
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(len(self.merges()), 1)
+        self.assertEqual(driver.current()[1].events[0]["rerun_denied"], ["merge"])
 
     def test_a_merge_refused_for_another_class_still_parks_not_retryable(self):
         floor = forge_world.FLOOR_PROTECTION

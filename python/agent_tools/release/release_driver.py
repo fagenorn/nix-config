@@ -761,10 +761,26 @@ class Driver:
             transaction = self._create(store, plan)
         else:
             store, transaction = self.store(), plan.transaction
+            transaction = self._adopt(store, transaction)
         custody, transaction = self._acquire(store, transaction)
         acquisition = _openings(transaction)
         drive = _Drive(self, plan, store, router, custody, acquisition, transaction, lock)
         return {**drive.run(supplied), "legacy": legacy}
+
+    def _rerun_denied(self) -> tuple[str, ...]:
+        """The actions whose guard refusal may run again: the sync's merge, else none."""
+        return () if self.sync is None else (self.sync["action"],)
+
+    def _adopt(self, store: TransactionStore, transaction: Transaction) -> Transaction:
+        """A resumed transaction stored before `rerun_denied` existed names the merge now, so a
+        release parked on a guard refusal runs again once the guard admits it (ADR-release-015)."""
+        names = self._rerun_denied()
+        if not names:
+            return transaction
+        try:
+            return store.adopt_rerun_denied(transaction.transaction_id, names)
+        except (CreationConflict, TransactionBusy) as error:
+            raise Refusal("release_busy", str(error)) from error
 
     def _create(self, store: TransactionStore, plan: _Plan) -> Transaction:
         inputs = release_profile.bind_candidate(self.compiled, dict(plan.candidate))
@@ -774,7 +790,7 @@ class Driver:
                 inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
                 proof=inputs["proof"], recovery=inputs["recovery"],
                 authority_class=AUTHORITY_CLASS,
-                rerun_denied=() if self.sync is None else (self.sync["action"],))
+                rerun_denied=self._rerun_denied())
         except (CreationConflict, LeaseUnavailable, TransactionBusy) as error:
             raise Refusal("release_busy", str(error)) from error
 

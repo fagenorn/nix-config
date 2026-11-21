@@ -552,6 +552,40 @@ class LockAndSchemaGuardTest(AdvanceCase):
             create("b", rerun_denied=("merge",))
         self.assertIn("rerun_denied", str(caught.exception))
 
+    def test_a_transaction_stored_without_rerun_denied_adopts_the_names_once(self):
+        stored = self.store.create("a", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF,
+                                   recovery=EMPTY_RECOVERY, authority_class=AUTHORITY)
+        transaction_id = stored.transaction_id
+        self.assertNotIn("rerun_denied", stored.events[0])
+        adopted = self.store.adopt_rerun_denied(transaction_id, ("tag", "merge"))
+        self.assertEqual(adopted.events[0]["rerun_denied"], ["merge", "tag"])
+        self.assertEqual(self.store.load(transaction_id).events[0]["rerun_denied"],
+                         ["merge", "tag"])
+        self.assertEqual((adopted.revision, len(adopted.events)), (stored.revision, 1))
+        written = self.state_path(transaction_id).read_bytes()
+        again = self.store.adopt_rerun_denied(transaction_id, ["merge", "tag"])
+        self.assertEqual(again.events, adopted.events)
+        self.assertEqual(self.state_path(transaction_id).read_bytes(), written)
+        with self.assertRaises(CreationConflict) as caught:
+            self.store.adopt_rerun_denied(transaction_id, ("merge",))
+        self.assertIn("rerun_denied", str(caught.exception))
+        self.assertEqual(self.state_path(transaction_id).read_bytes(), written)
+
+    def test_a_malformed_or_empty_adoption_is_refused_with_nothing_written(self):
+        transaction_id = self.store.create(
+            "a", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY,
+            authority_class=AUTHORITY).transaction_id
+        written = self.state_path(transaction_id).read_bytes()
+        for value in ("merge", (), ["merge", "merge"], [""], [1], None):
+            with self.subTest(rerun_denied=value):
+                with self.assertRaises(StateInvalid) as caught:
+                    self.store.adopt_rerun_denied(transaction_id, value)
+                self.assertIn("rerun_denied", str(caught.exception))
+        self.assertEqual(self.state_path(transaction_id).read_bytes(), written)
+        with self.assertRaises(UnknownTransaction):
+            self.store.adopt_rerun_denied("rel_01890a5d-ac96-7abc-8def-0123456789ab",
+                                          ("merge",))
+
     def test_a_schema_invalid_state_refuses_advance_before_any_write(self):
         transaction_id = self.reach("k", ())
         self.write(transaction_id, {**self.document(transaction_id), "extra": 1})

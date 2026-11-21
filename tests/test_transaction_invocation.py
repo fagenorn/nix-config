@@ -475,6 +475,36 @@ class InvokeActionTest(InvokeCase):
                              lambda: self.invoke(self.effect(during=self.fail), name=name),
                              name=name)
 
+    def named_creation(self, *names):
+        self.transaction_id = self.new("named", keys=("key:named",), rerun_denied=names)
+        self.custody = self.acquire(self.transaction_id)
+        self.publishing()
+
+    def test_rerun_denied_invokes_a_denied_attempt_again_past_the_window(self):
+        self.named_creation(self.NAME)
+        self.inspect()
+        self.invoke(self.effect(results=[DENIED]))
+        self.wait(RETRY_WINDOW_MS + 1)
+        self.invoke()
+        self.assertEqual(self.view()["status"], "satisfied")
+        self.assertEqual(self.attempts(), [1, 2])
+        self.assertEqual(self.world.invokes, {self.act(): 2})
+        TransactionStore(self.root).load(self.transaction_id)
+
+    def test_rerun_denied_admits_no_other_non_retry_safe_class(self):
+        self.named_creation("invalid", "precondition", "unsupported", "unknown", "vanished")
+        for name, result in (("invalid", ("rejected", "invalid_input")),
+                             ("precondition", ("rejected", "precondition_failed")),
+                             ("unsupported", ("rejected", "unsupported_operation")),
+                             ("unknown", ("unknown", "authorization_denied")),
+                             ("vanished", ("accepted", None))):
+            with self.subTest(name=name):
+                self.inspect(name=name)
+                self.invoke(self.effect(results=[result], inspect_outcome="absent"), name=name)
+                self.refused("not_retryable",
+                             lambda: self.invoke(self.effect(during=self.fail), name=name),
+                             name=name)
+
     def test_a_denied_attempt_of_an_action_the_creation_did_not_name_is_not_retryable(self):
         self.inspect()
         self.invoke(self.effect(results=[DENIED]))
@@ -585,34 +615,39 @@ class InvokeActionTest(InvokeCase):
 
 
 class RerunDeniedTest(InvokeCase):
-    RERUN = ("build", "invalid", "precondition", "throttled", "unknown", "unsupported",
-             "vanished")
+    RERUN = ("build", "interrupted", "invalid", "precondition", "throttled", "unknown",
+             "unsupported", "vanished")
 
     def new(self, key="k", keys=KEYS, rerun_denied=()):
         return super().new(key, keys, rerun_denied=self.RERUN)
 
-    def test_a_named_denied_attempt_runs_again_past_the_window(self):
-        self.inspect()
-        self.invoke(self.effect(results=[DENIED]))
-        self.wait(RETRY_WINDOW_MS + 1)
-        self.invoke()
-        self.assertEqual(self.view()["status"], "satisfied")
-        self.assertEqual(self.attempts(), [1, 2])
-        self.assertEqual(self.world.invokes, {self.act(): 2})
-        TransactionStore(self.root).load(self.transaction_id)
-
-    def test_a_named_action_admits_no_other_non_retry_safe_class(self):
-        for name, result in (("invalid", ("rejected", "invalid_input")),
-                             ("precondition", ("rejected", "precondition_failed")),
-                             ("unsupported", ("rejected", "unsupported_operation")),
-                             ("unknown", ("unknown", "authorization_denied")),
-                             ("vanished", ("accepted", None))):
+    def test_a_denial_starts_no_window_for_a_later_retryable_failure(self):
+        for name, later in (("throttled", self.effect(results=[THROTTLED])),
+                            ("interrupted", self.effect(crash="before"))):
             with self.subTest(name=name):
                 self.inspect(name=name)
-                self.invoke(self.effect(results=[result], inspect_outcome="absent"), name=name)
-                self.refused("not_retryable",
-                             lambda: self.invoke(self.effect(during=self.fail), name=name),
-                             name=name)
+                self.invoke(self.effect(results=[DENIED]), name=name)
+                self.wait(RETRY_WINDOW_MS + 1)
+                self.assertIsNone(self.views()[name]["retry_deadline_at"])
+                if name == "interrupted":
+                    with self.assertRaises(Crash):
+                        self.invoke(later, name=name)
+                    self.store.release(self.custody)
+                    self.custody = self.acquire(self.transaction_id)
+                else:
+                    self.invoke(later, name=name)
+                self.inspect(name=name)
+                self.assertIsNotNone(self.views()[name]["retry_deadline_at"])
+                self.invoke(name=name)
+                self.assertEqual(self.views()[name]["status"], "satisfied")
+                self.assertEqual(self.attempts(name), [1, 2, 3])
+
+    def test_the_window_a_retryable_failure_starts_after_a_denial_still_closes(self):
+        self.inspect()
+        self.invoke(self.effect(results=[DENIED, THROTTLED]))
+        self.invoke(self.effect(results=[THROTTLED]))
+        self.wait(RETRY_WINDOW_MS + 1)
+        self.refused("window_closed", lambda: self.invoke(self.effect(during=self.fail)))
 
     def test_a_named_action_keeps_the_window_for_a_retry_safe_class(self):
         self.inspect(name="throttled")

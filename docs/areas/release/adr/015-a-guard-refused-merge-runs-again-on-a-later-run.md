@@ -29,12 +29,22 @@ predecessor stays `not_retryable` for a named action too: `invalid_input`,
 `authorization_denied` and an `accepted` attempt that reads `absent`. A retry-safe predecessor is
 still closed by `window_closed`.
 
+A guard refusal starts no retry window, because it applied nothing: the window opens at the
+first retryable failure, so a merge the guard admits hours later, whose re-run then fails
+transiently or is interrupted, can still be retried within 900000 ms of that failure. The
+exception holds outside `recovering` only, where the ordinary class rule applies to every
+action, so recovery settlement and admission never disagree about the same operation.
+
 Replay enforces what admission does. The history rule that a retry follows a retry-safe
 attempt now also admits a denied attempt of an action the created event names, so a hand edit
 that un-names the action, names another or changes the result fails to load. A malformed member
 fails the load with `event 1 rerun_denied is not a sorted list of distinct non-empty strings`.
 
-The release driver names the merge action, and only when the profile has a sync. A guard
+The release driver names the merge action, and only when the profile has a sync. A transaction
+stored before the member existed adopts the names when the driver resumes it
+(`TransactionStore.adopt_rerun_denied`): the sorted names are written once onto the stored
+`created` event under the transaction lock, after the whole document validates, so a release
+parked on a guard refusal by an earlier build runs again too. A guard
 refusal of the tag or the release stays `not_retryable`. After the third refusal the release
 parks, the next run parks with `merge: refused budget_exhausted`, and abandoning it is a
 separate `abandon` call: no refusal abandons on its own.
