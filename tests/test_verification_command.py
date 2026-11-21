@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.delivery.verification_command import Member, members
 from agent_tools.system.siblings import sibling_argv
@@ -23,8 +24,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_JUST = shutil.which("just")
 
 
+def git_env() -> dict[str, str]:
+    """The environment with every `GIT_*` variable removed, so no variable the caller
+    exported (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, ...) selects the repository a
+    `git -C <dir>` command acts on."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def child_env(**extra: str) -> dict[str, str]:
-    env = dict(os.environ)
+    env = git_env()
     env["PYTHONPATH"] = str(REPO_ROOT / "python")
     env.update(extra)
     return env
@@ -41,11 +49,17 @@ def stub_just(directory: Path) -> Path:
     path = directory / "just"
     path.write_text(
         "#!/bin/sh\n"
-        "printf '%s %s\\n' \"$PWD\" \"$*\" >> \"$STUB_LOG\"\n"
+        "printf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$STUB_LOG\"\n"
         "[ \"$1\" = \"${STUB_FAIL:-}\" ] && exit 3\n"
         "exit 0\n", "utf-8")
     path.chmod(0o755)
     return path
+
+
+def read_stub_log(log: Path) -> list[tuple[str, str]]:
+    """The stub's records as (directory, arguments); a tab separates them, so a directory
+    holding a space is not split."""
+    return [tuple(line.split("\t", 1)) for line in log.read_text().splitlines()]
 
 
 def module_stderr(result) -> list[str]:
@@ -110,8 +124,7 @@ class TestEntryPointTest(JustCase):
         env = child_env(PATH=f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}",
                         STUB_LOG=str(log), STUB_FAIL=fail)
         result = self.run_just(["--justfile", str(REPO_ROOT / "justfile"), "test"], tmp, env)
-        entries = [line.split(" ", 1) for line in log.read_text().splitlines()]
-        return result, entries
+        return result, read_stub_log(log)
 
     def test_a_failing_member_fails_test_naming_it(self):
         result, entries = self.run_test_recipe("build")
@@ -151,30 +164,37 @@ class TestEntryPointTest(JustCase):
         self.assertEqual(stderr[-1], "test: failed: nix-build, agent-workflow-tests")
 
 
+def scratch_checkout() -> Path:
+    """A fresh git repository holding a copy of the tree, committed once."""
+    env = git_env()
+    scratch = Path(tempfile.mkdtemp()).resolve()
+    listing = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--cached", "--others",
+         "--exclude-standard"], capture_output=True, check=True, env=env).stdout
+    for raw in listing.split(b"\0"):
+        if not raw:
+            continue
+        relative = os.fsdecode(raw)
+        source = REPO_ROOT / relative
+        target = scratch / relative
+        if source.is_symlink():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(os.readlink(source), target)
+        elif source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                  "-c", "commit.gpgsign=false", "commit", "-qm", "scratch"]):
+        subprocess.run(["git", "-C", str(scratch), *args], check=True,
+                       capture_output=True, env=env)
+    return scratch
+
+
 class LintEntryPointTest(JustCase):
     @classmethod
     def setUpClass(cls):
-        cls.scratch = Path(tempfile.mkdtemp()).resolve()
-        listing = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--cached", "--others",
-             "--exclude-standard"], capture_output=True, check=True).stdout
-        for raw in listing.split(b"\0"):
-            if not raw:
-                continue
-            relative = os.fsdecode(raw)
-            source = REPO_ROOT / relative
-            target = cls.scratch / relative
-            if source.is_symlink():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.symlink(os.readlink(source), target)
-            elif source.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-        for args in (["init", "-q"], ["add", "-A"],
-                     ["-c", "user.name=t", "-c", "user.email=t@example.invalid",
-                      "-c", "commit.gpgsign=false", "commit", "-qm", "scratch"]):
-            subprocess.run(["git", "-C", str(cls.scratch), *args], check=True,
-                           capture_output=True)
+        cls.scratch = scratch_checkout()
 
     @classmethod
     def tearDownClass(cls):
@@ -240,12 +260,19 @@ def workflow_triggers(path: Path) -> set[str]:
     value = COMMENT_TAIL.sub("", lines[index].split(":", 1)[1]).strip()
     if value == "":
         names: set[str] = set()
+        entry_indent = None
         for line in lines[index + 1:]:
             if line.strip() == "" or line.lstrip().startswith("#"):
                 continue
             if not line.startswith(" "):
                 break
-            if len(line) - len(line.lstrip()) == 2:
+            indent = len(line) - len(line.lstrip())
+            if entry_indent is None:
+                entry_indent = indent
+            if indent < entry_indent or entry_indent != 2:
+                raise AssertionError(
+                    f"{path.name}: trigger entries must be indented two spaces, found {line!r}")
+            if indent == entry_indent:
                 match = re.match(r"^  ([a-z_]+):", line)
                 if not match:
                     raise AssertionError(f"{path.name}: unsupported `on:` line {line!r}")
@@ -357,7 +384,13 @@ def _executable(path: Path, job: str, step: list[str]) -> str:
             elif value == "" or value[0] in "|>":
                 raise AssertionError(f"{where}: unsupported `run:` form {value!r}")
             else:
-                run.append(value)
+                # A plain scalar continues on every following line indented past its key.
+                parts = [value]
+                while i < len(step) and (step[i].strip() == "" or _indent(step[i]) > 8):
+                    if not _blank_or_comment(step[i]):
+                        parts.append(step[i].strip())
+                    i += 1
+                run.append(" ".join(parts))
     if len(uses) + len(run) != 1:
         raise AssertionError(f"{where}: a step needs exactly one of `uses:` and `run:`")
     return (uses or run)[0]
@@ -392,6 +425,11 @@ def workflow_steps(path: Path) -> list[tuple[str, str, str]]:
 def classify(found, table):
     found, table = set(found), set(table)
     return sorted(found - table), sorted(table - found)
+
+
+def invokes_module(text: str, module: str) -> bool:
+    """Whether `text` runs exactly `-m <module>`, not a module whose name merely contains it."""
+    return module in re.findall(r"(?:^|\s)-m\s+([\w.]+)(?![\w.-])", text)
 
 
 CI_EVAL = (
@@ -440,6 +478,22 @@ CI_STEP_CLASSES = {
 }
 
 
+class InvokesModuleTest(unittest.TestCase):
+    MODULE = "agent_tools.delivery.agnostic_lint"
+
+    def test_the_complete_module_argument_is_compared(self):
+        for text in (f"python3 -m {self.MODULE} --root x", f"python3 -m {self.MODULE}",
+                     f"PYTHONPATH=p python3 -m {self.MODULE}\ntouch out",
+                     f"python3 -m {self.MODULE}'"):
+            with self.subTest(text):
+                self.assertTrue(invokes_module(text, self.MODULE))
+        for text in (f"python3 -m {self.MODULE}_v2 --root x", f"python3 -m {self.MODULE}.extra",
+                     f"python3 -m x.{self.MODULE}", f"python3 -m {self.MODULE}-v2",
+                     f"python3 -mx {self.MODULE}", "python3 -m other"):
+            with self.subTest(text):
+                self.assertFalse(invokes_module(text, self.MODULE))
+
+
 class CiLintMembersTest(unittest.TestCase):
     def test_every_pull_request_ci_step_is_classified(self):
         found = set()
@@ -459,12 +513,58 @@ class CiLintMembersTest(unittest.TestCase):
             member = lint[member_id]
             module = member.argv[member.argv.index("-m") + 1]
             executable = key[2]
-            if f"-m {module}" in executable:
+            if invokes_module(executable, module):
                 continue
             self.assertRegex(executable, rf"\.#checks\.[a-z0-9_-]+\.{re.escape(member_id)}\b")
             start = flake.index(f"{member_id} = ")
             body = flake[start:flake.index("'';", start)]
-            self.assertIn(f"-m {module}", body, key)
+            self.assertTrue(invokes_module(body, module), key)
+
+
+class StubLogTest(JustCase):
+    def test_a_checkout_path_with_a_space_is_recorded_whole(self):
+        tmp = self.tmp()
+        stub = stub_just(tmp / "bin")
+        checkout = tmp / "nix config"
+        checkout.mkdir()
+        log = tmp / "log"
+        subprocess.run([str(stub), "build", "--flag"], cwd=checkout, check=True,
+                       env={**os.environ, "STUB_LOG": str(log), "PWD": str(checkout)})
+        self.assertEqual([(Path(pwd), args) for pwd, args in read_stub_log(log)],
+                         [(checkout, "build --flag")])
+
+
+class ScratchCheckoutTest(JustCase):
+    def test_repository_selection_variables_do_not_reach_the_callers_checkout(self):
+        caller = self.tmp()
+        git = ["git", "-C", str(caller), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "commit.gpgsign=false"]
+        subprocess.run([*git, "init", "-q"], check=True, capture_output=True)
+        (caller / "f").write_text("one\n", "utf-8")
+        subprocess.run([*git, "add", "f"], check=True, capture_output=True)
+        subprocess.run([*git, "commit", "-qm", "base"], check=True, capture_output=True)
+        (caller / "f").write_text("two\n", "utf-8")
+        subprocess.run([*git, "add", "f"], check=True, capture_output=True)
+        (caller / "f").write_text("three\n", "utf-8")
+
+        def state():
+            return [subprocess.run([*git, *args], check=True, capture_output=True,
+                                   text=True).stdout
+                    for args in (["rev-parse", "HEAD"], ["diff", "--cached"], ["diff"])]
+
+        before = state()
+        polluted = {"GIT_DIR": str(caller / ".git"), "GIT_WORK_TREE": str(caller),
+                    "GIT_INDEX_FILE": str(caller / ".git" / "index")}
+        with mock.patch.dict(os.environ, polluted):
+            self.assertFalse([k for k in child_env() if k.startswith("GIT_")])
+            scratch = scratch_checkout()
+        self.addCleanup(shutil.rmtree, scratch, True)
+        self.assertEqual(state(), before)
+        self.assertTrue((scratch / ".git").is_dir())
+        self.assertEqual(
+            subprocess.run(["git", "-C", str(scratch), "log", "--format=%s"], check=True,
+                           capture_output=True, text=True, env=git_env()).stdout.split(),
+            ["scratch"])
 
 
 class CiParserTest(JustCase):
@@ -508,6 +608,37 @@ class CiParserTest(JustCase):
                 with self.assertRaises(AssertionError) as caught:
                     pull_request_workflows(directory)
                 self.assertIn("w.yaml", str(caught.exception))
+
+    def test_a_trigger_indented_beyond_two_spaces_is_refused(self):
+        directory = self.tmp()
+        self.workflow(directory, "w.yaml", "on:\n    pull_request:\n      branches: [main]",
+                      "python3 -m agent_tools.delivery.context_map_lint")
+        with self.assertRaises(AssertionError) as caught:
+            pull_request_workflows(directory)
+        self.assertIn("w.yaml", str(caught.exception))
+
+    def test_a_continuation_line_of_an_inline_run_is_part_of_the_step(self):
+        directory = self.tmp()
+        path = directory / "w.yaml"
+        path.write_text("name: W\non: pull_request\njobs:\n  j:\n    steps:\n"
+                        "      - run: nix build x\n          && ruff check .\n"
+                        "          && ruff format .\n      - run: y\n", "utf-8")
+        self.assertEqual(workflow_steps(path), [
+            ("w.yaml", "j", "nix build x && ruff check . && ruff format ."),
+            ("w.yaml", "j", "y")])
+
+    def test_a_lint_continued_onto_a_classified_inline_run_is_unclassified(self):
+        directory = self.tmp()
+        lines = (REPO_ROOT / ".github" / "workflows" / "ci.yaml").read_text("utf-8").splitlines()
+        original = "nix build --no-link '.#checks.x86_64-linux.omlx-adapter'"
+        at = next(i for i, line in enumerate(lines) if line.endswith(f"run: {original}"))
+        lines.insert(at + 1, "          && PYTHONPATH=python python3 -m agent_tools.delivery.context_map_lint")
+        copy = directory / "ci.yaml"
+        copy.write_text("\n".join(lines) + "\n", "utf-8")
+        unclassified, stale = classify(workflow_steps(copy), CI_STEP_CLASSES)
+        self.assertEqual(len(unclassified), 1)
+        self.assertTrue(unclassified[0][2].startswith(original + " && "))
+        self.assertIn(("ci.yaml", "nix-eval", original), stale)
 
     def test_a_lint_appended_to_a_classified_step_is_unclassified(self):
         directory = self.tmp()
