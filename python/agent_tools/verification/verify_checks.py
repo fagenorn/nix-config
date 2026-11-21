@@ -35,22 +35,26 @@ authorized owner in the installed guard policy.
 `devenv-shell --probe commit|clean [--repo-root R] [--timeout-seconds N]` (`verify_checks.devenv_shell`,
 issue 1447) is met when a commit made through the project's devenv shell is signed and leaves its
 worktree clean (`commit`), or when a shell leaves a fresh worktree clean (`clean`). It never runs
-in R: it makes a detached scratch worktree of R's `HEAD` in a temporary directory and removes
-exactly that registration afterwards (no `git worktree prune`, so every other registration
-survives), leaving R's HEAD, branch, index and status unchanged. Every git call and every shell
+in R: it makes a shared-object clone of R at R's `HEAD` in a temporary directory, with a git
+configuration and object database of its own, and removes that directory afterwards (a removal
+that fails is a fixture error), leaving R's HEAD, branch, index, status and configuration
+unchanged and every registration of R's worktrees alone. Every git call and every shell
 runs under the caller's environment without the eight repository-location names
 (`GIT_DIR`, `GIT_WORK_TREE`, ...), so `HOME`, `PATH`, the git configuration and the ssh agent reach
 the shell and an inherited redirect cannot point git at the caller's branch. The `commit` probe
 runs `devenv shell -- git commit --allow-empty -m probe`; its report names the exit, whether a new
-commit exists, whether its header carries a signature, the porcelain status read before the
-worktree is removed, and the worktree's `core.hooksPath` read outside the shell and, when the
-commit shell exited 0, inside a second shell run (a difference is `hooks_changed`). The reason is
+commit exists (HEAD is a commit whose sole parent is the starting commit and whose message is
+`probe`, so a shell that moves HEAD elsewhere has made none), whether its header carries a
+signature, the porcelain status read before the clone is removed, and the clone's `core.hooksPath`
+read outside the shell and, when the commit shell exited 0, inside a second shell run (a
+difference is `hooks_changed`). The reason is
 the first that applies: `devenv_missing`, `timeout`, `shell_failed`, then for `commit`
 `no_commit`, `unsigned`, `dirty`, `hooks_changed`, for `clean` `dirty`; it is null exactly when
-met. Each shell runs in its own process group bounded by `--timeout-seconds` (1 to 300, the
-contract's commit-environment bound), and its group is killed with SIGKILL once it ends, so
-nothing it started outlives it; a SIGTERM, SIGHUP or SIGINT to the check kills the live shell's
-group and exits 128 plus the signal after the worktree is removed. It exits 0 when met, 1 when
+met. Each shell runs under a leash in its own process group (`adopt_apply.run_leashed`) bounded by
+`--timeout-seconds` (1 to 300, the contract's commit-environment bound): the group is killed with
+SIGKILL once the run ends and when the check itself dies, SIGKILL included, so nothing it started
+outlives it; a SIGTERM, SIGHUP or SIGINT to the check ends the live shell's group and exits 128
+plus the signal after the clone is removed. It exits 0 when met, 1 when
 not and 2 on a usage or fixture error.
 
 `cutover-manifest [--repo-root R] [--branch B] [--main-ref REV]` (`verify_checks.cutover_manifest`,
@@ -363,6 +367,7 @@ from urllib.parse import quote
 
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract.adopt_apply import run_leashed
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers, forge_owner_action
@@ -843,33 +848,22 @@ DEVENV_SHELL_REPOSITORY_ENV = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
 DEVENV_SHELL_TERMINATION = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 DEVENV_SHELL_TAIL_LINES = 5
-
-
-def _kill_group(pgid: int) -> None:
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+COMMIT_PROBE_MESSAGE = "probe"
 
 
 def _devenv_run(argv: list[str], cwd: Path, env: Mapping[str, str], stdout: Path, log: Path,
-                timeout: float, live: set[int]) -> tuple[int | None, float]:
-    """One shell run in its own process group: (exit or None on timeout, elapsed seconds)."""
+                timeout: float) -> tuple[int | None, float]:
+    """One leashed shell run: (exit or None on timeout, elapsed seconds).
+
+    The leash ends the shell's whole process tree when the run ends and when this process dies."""
     started = time.monotonic()
     try:
         with open(stdout, "ab") as out, open(log, "ab") as err:
-            proc = subprocess.Popen(argv, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=err, process_group=0)
-            live.add(proc.pid)
             try:
-                try:
-                    code: int | None = proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    code = None
-            finally:
-                _kill_group(proc.pid)
-                proc.wait()
-                live.discard(proc.pid)
+                code: int | None = run_leashed(argv, cwd=str(cwd), env=dict(env), stdout=out,
+                                               stderr=err, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                code = None
     except OSError as error:
         raise FixtureError(f"{argv[0]}: {type(error).__name__}") from error
     return code, round(time.monotonic() - started, 1)
@@ -889,7 +883,7 @@ def devenv_shell(probe: str, repo_root: Path, *, devenv_bin: str | None,
                  environ: Mapping[str, str], timeout: float) -> tuple[int, dict]:
     """Met when a commit through the devenv shell is signed and clean, or a shell leaves a clean tree.
 
-    Raises FixtureError when the scratch worktree cannot be made or driven, GitError when git fails."""
+    Raises FixtureError when the scratch clone cannot be made, driven or removed, GitError when git fails."""
     commit = probe == "commit"
     report: dict = {"probe": probe, "exit": None, "elapsed_seconds": 0.0}
     if commit:
@@ -902,14 +896,12 @@ def devenv_shell(probe: str, repo_root: Path, *, devenv_bin: str | None,
         report["reason"] = "devenv_missing"
         return 1, report
     env = {key: value for key, value in environ.items() if key not in DEVENV_SHELL_REPOSITORY_ENV}
-    live: set[int] = set()
 
     def terminate(signum: int, _frame: object) -> None:
-        for pgid in list(live):
-            _kill_group(pgid)
         raise SystemExit(128 + signum)
 
     previous = {signum: signal.signal(signum, terminate) for signum in DEVENV_SHELL_TERMINATION}
+    leftover: OSError | None = None
     try:
         try:
             tmp = Path(tempfile.mkdtemp(prefix="verify-devenv-shell-"))
@@ -918,17 +910,22 @@ def devenv_shell(probe: str, repo_root: Path, *, devenv_bin: str | None,
         worktree = tmp / "wt"
         try:
             sha = _git_ok(repo_root, "rev-parse", "HEAD", environ=env).strip()
-            added = _git(repo_root, "worktree", "add", "--detach", str(worktree), sha,
-                         environ=env)
-            if added.returncode != 0:
-                detail = added.stderr.strip().splitlines()
-                raise FixtureError(f"git worktree add failed: {detail[0] if detail else added.returncode}")
+            # A clone of its own: its configuration and object database are not the caller's, so
+            # nothing the shell writes (core.hooksPath included) outlives the scratch directory.
+            for where, args in (
+                    (repo_root, ("clone", "--quiet", "--shared", "--no-checkout",
+                                 str(repo_root.resolve()), str(worktree))),
+                    (worktree, ("checkout", "--quiet", "--detach", sha))):
+                made = _git(where, "-c", "core.hooksPath=/dev/null", *args, environ=env)
+                if made.returncode != 0:
+                    detail = made.stderr.strip().splitlines()
+                    raise FixtureError(
+                        f"scratch clone failed: {detail[0] if detail else made.returncode}")
             log = tmp / "shell.log"
             outside = _config_hooks_path(worktree, env) if commit else None
-            argv = ([devenv_bin, "shell", "--", "git", "commit", "--allow-empty", "-m", "probe"]
+            argv = ([devenv_bin, "shell", "--", "git", "commit", "--allow-empty", "-m", COMMIT_PROBE_MESSAGE]
                     if commit else [devenv_bin, "shell", "--", "true"])
-            code, report["elapsed_seconds"] = _devenv_run(
-                argv, worktree, env, log, log, timeout, live)
+            code, report["elapsed_seconds"] = _devenv_run(argv, worktree, env, log, log, timeout)
             report["exit"] = code
             report["status"] = _git_ok(worktree, "status", "--porcelain",
                                        environ=env).splitlines()
@@ -936,7 +933,12 @@ def devenv_shell(probe: str, repo_root: Path, *, devenv_bin: str | None,
             hooks_changed = False
             if commit:
                 head = _git_ok(worktree, "rev-parse", "HEAD", environ=env).strip()
-                report["new_commit"] = head != sha
+                parents = _git_ok(worktree, "rev-list", "--parents", "-n", "1", "HEAD",
+                                  environ=env).split()[1:]
+                message = _git_ok(worktree, "show", "-s", "--format=%B", "HEAD",
+                                  environ=env).strip()
+                report["new_commit"] = (head != sha and parents == [sha]
+                                        and message == COMMIT_PROBE_MESSAGE)
                 if report["new_commit"]:
                     header = _git_ok(worktree, "cat-file", "commit", "HEAD",
                                      environ=env).split("\n\n", 1)[0]
@@ -947,18 +949,22 @@ def devenv_shell(probe: str, repo_root: Path, *, devenv_bin: str | None,
                     hooks_out = tmp / "hooks.out"
                     inside_code, _ = _devenv_run(
                         [devenv_bin, "shell", "--", "git", "config", "--get", "core.hooksPath"],
-                        worktree, env, hooks_out, log, timeout, live)
+                        worktree, env, hooks_out, log, timeout)
                     lines = [line for line in hooks_out.read_text(
                         encoding="utf-8", errors="replace").splitlines() if line.strip()]
                     report["hooks_path"]["inside"] = lines[-1] if lines else None
                     hooks_changed = (inside_code not in (0, 1)
                                      or report["hooks_path"]["inside"] != outside)
         finally:
-            _git(repo_root, "worktree", "remove", "--force", str(worktree), environ=env)
-            shutil.rmtree(tmp, ignore_errors=True)
+            try:
+                shutil.rmtree(tmp)
+            except OSError as error:
+                leftover = error
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+    if leftover is not None:
+        raise FixtureError(f"scratch clone not removed: {type(leftover).__name__}")
     if report["exit"] is None:
         report["reason"] = "timeout"
     elif report["exit"] != 0:

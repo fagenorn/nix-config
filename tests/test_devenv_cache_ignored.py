@@ -69,6 +69,9 @@ def _hostile_host_home(parent: Path) -> Path:
     return home
 
 
+NIXPKGS_URL = "github:cachix/devenv-nixpkgs/rolling"
+DECLARED = {"nixpkgs": NIXPKGS_URL}
+
 ALLOWED_SOURCES = {
     ("github", "cachix", "devenv"),
     ("github", "cachix", "devenv-nixpkgs"),
@@ -109,7 +112,44 @@ def _declared_inputs(text: str) -> list[str]:
     return names
 
 
-def _lock_problems(declared: list[str], lock: dict) -> list[str]:
+_GITHUB_URL = re.compile(r"^github:([^/]+)/([^/]+)(?:/(.+))?$")
+
+
+def _declared_urls(text: str) -> dict[str, str]:
+    """Each declared input name with its url, read through the strict grammar."""
+    urls: dict[str, str] = {}
+    current = None
+    for name in _declared_inputs(text):
+        urls[name] = ""
+    for line in text.splitlines():
+        match = _INPUT_LINE.match(line)
+        if match:
+            current = match.group(1)
+        elif _URL_LINE.match(line):
+            urls[current] = line.split("url: ", 1)[1]
+    return urls
+
+
+def _original_problems(name: str, url: str | None, node: dict) -> list[str]:
+    original = node.get("original")
+    if not isinstance(original, dict):
+        return [f"root input {name} has no original to compare with its declaration"]
+    if url is None:
+        want = {"type": "github", "owner": "cachix", "repo": "devenv"}
+    else:
+        match = _GITHUB_URL.match(url)
+        if match is None:
+            return [f"root input {name} declares an unsupported url {url!r}"]
+        want = {"type": "github", "owner": match.group(1), "repo": match.group(2)}
+        if match.group(3):
+            want["ref"] = match.group(3)
+    wrong = {key: original.get(key) for key, value in want.items() if original.get(key) != value}
+    if url is not None and "ref" not in want and original.get("ref") is not None:
+        wrong["ref"] = original["ref"]
+    return [f"root input {name} original differs from its declaration: {wrong}"] if wrong else []
+
+
+def _lock_problems(declared: dict[str, str], lock: dict) -> list[str]:
     problems: list[str] = []
     if lock.get("version") != 7:
         problems.append(f"version != 7: {lock.get('version')!r}")
@@ -120,6 +160,23 @@ def _lock_problems(declared: list[str], lock: dict) -> list[str]:
         problems.append(
             f"root inputs differ: extra {sorted(roots - want)}, missing {sorted(want - roots)}"
         )
+    for name in sorted(roots):
+        target = nodes["root"]["inputs"][name]
+        if not isinstance(target, str) or target not in nodes:
+            problems.append(f"root input {name} points at a missing node {target!r}")
+            continue
+        problems.extend(_original_problems(name, declared.get(name), nodes[target]))
+    for name, node in nodes.items():
+        for key, reference in node.get("inputs", {}).items():
+            if isinstance(reference, list):
+                # A follows path starts at a root input, not at a node name.
+                head = reference[0] if reference else None
+                found = isinstance(head, str) and head in nodes["root"]["inputs"]
+            else:
+                head = reference
+                found = isinstance(head, str) and head in nodes
+            if not found:
+                problems.append(f"node {name} input {key} points at a missing node {head!r}")
     for name, node in nodes.items():
         if name == "root":
             continue
@@ -140,6 +197,7 @@ def _valid_lock() -> dict:
         "nodes": {
             "root": {"inputs": {"devenv": "devenv", "nixpkgs": "nixpkgs"}},
             "devenv": {
+                "original": {"type": "github", "owner": "cachix", "repo": "devenv"},
                 "locked": {
                     "type": "github",
                     "owner": "cachix",
@@ -148,6 +206,12 @@ def _valid_lock() -> dict:
                 }
             },
             "nixpkgs": {
+                "original": {
+                    "type": "github",
+                    "owner": "cachix",
+                    "repo": "devenv-nixpkgs",
+                    "ref": "rolling",
+                },
                 "locked": {
                     "type": "github",
                     "owner": "cachix",
@@ -204,9 +268,9 @@ class DevenvFilesTests(unittest.TestCase):
         )
 
     def test_the_tracked_lock_locks_exactly_the_declared_inputs(self):
-        declared = _declared_inputs((REPO_ROOT / "devenv.yaml").read_text())
+        declared = _declared_urls((REPO_ROOT / "devenv.yaml").read_text())
         lock = json.loads((REPO_ROOT / "devenv.lock").read_text())
-        self.assertEqual(declared, ["nixpkgs"])
+        self.assertEqual(declared, {"nixpkgs": NIXPKGS_URL})
         problems = _lock_problems(declared, lock)
         self.assertEqual(problems, [], problems)
 
@@ -226,7 +290,7 @@ class DevenvFilesTests(unittest.TestCase):
         )
 
     def test_a_lock_pinning_anything_beyond_the_declared_inputs_is_a_problem(self):
-        self.assertEqual(_lock_problems(["nixpkgs"], _valid_lock()), [])
+        self.assertEqual(_lock_problems(DECLARED, _valid_lock()), [])
 
         with self.subTest("extra root input"):
             lock = _valid_lock()
@@ -239,7 +303,7 @@ class DevenvFilesTests(unittest.TestCase):
                     "narHash": "sha256-x",
                 }
             }
-            problems = _lock_problems(["nixpkgs"], lock)
+            problems = _lock_problems(DECLARED, lock)
             self.assertTrue(any("platform" in p for p in problems), problems)
 
         with self.subTest("foreign transitive node"):
@@ -252,13 +316,35 @@ class DevenvFilesTests(unittest.TestCase):
                     "narHash": "sha256-x",
                 }
             }
-            problems = _lock_problems(["nixpkgs"], lock)
+            problems = _lock_problems(DECLARED, lock)
             self.assertTrue(any("platform-src" in p for p in problems), problems)
+
+        with self.subTest("a root input whose node is gone"):
+            lock = _valid_lock()
+            del lock["nodes"]["nixpkgs"]
+            problems = _lock_problems(DECLARED, lock)
+            self.assertTrue(any("nixpkgs" in p and "missing" in p for p in problems), problems)
+
+        with self.subTest("a transitive input whose node is gone"):
+            lock = _valid_lock()
+            lock["nodes"]["nixpkgs"]["inputs"] = {"nixpkgs-src": "nixpkgs-src"}
+            problems = _lock_problems(DECLARED, lock)
+            self.assertTrue(any("nixpkgs-src" in p and "missing" in p for p in problems), problems)
+
+        with self.subTest("a root input locked from another source than declared"):
+            for member, value in (("repo", "other"), ("ref", "stable"), ("owner", "example")):
+                lock = _valid_lock()
+                lock["nodes"]["nixpkgs"]["original"][member] = value
+                problems = _lock_problems(DECLARED, lock)
+                self.assertTrue(any("differs" in p for p in problems), (member, problems))
+            lock = _valid_lock()
+            del lock["nodes"]["devenv"]["original"]
+            self.assertTrue(_lock_problems(DECLARED, lock))
 
         with self.subTest("unlocked input"):
             lock = _valid_lock()
             lock["nodes"]["nixpkgs"]["locked"]["narHash"] = ""
-            problems = _lock_problems(["nixpkgs"], lock)
+            problems = _lock_problems(DECLARED, lock)
             self.assertTrue(any("nixpkgs" in p for p in problems), problems)
 
     def test_the_shell_declares_exactly_its_tools_and_nothing_else(self):

@@ -4087,10 +4087,26 @@ if (state / "sleep").exists():
     (state / "grandchild.pid").write_text(str(child.pid), encoding="utf-8")
     time.sleep(60)
 env = dict(os.environ)
+command = sys.argv[3:]
+if (state / "locked").exists():
+    locked = Path.cwd() / ".devenv" / "locked"
+    locked.mkdir(exist_ok=True)
+    (locked / "f").write_text("x", encoding="utf-8")
+    locked.chmod(0o500)
+if (state / "localconfig").exists():
+    subprocess.run(["git", "config", "core.hooksPath", "/dev/null"], check=True)
+if (state / "message").exists():
+    command = ["other" if word == "probe" else word for word in command]
+if (state / "rewind").exists():
+    env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="commit.gpgsign",
+               GIT_CONFIG_VALUE_0="false")
+    subprocess.run(command, env=env, check=True)
+    subprocess.run(["git", "reset", "-q", "--hard", (state / "rewind").read_text()], check=True)
+    sys.exit(0)
 if (state / "hooks").exists():
     env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath",
                GIT_CONFIG_VALUE_0="/dev/null")
-sys.exit(subprocess.run(sys.argv[3:], env=env).returncode)
+sys.exit(subprocess.run(command, env=env).returncode)
 """
 FAKE_KEYGEN = f"""#!{sys.executable}
 import sys
@@ -4236,6 +4252,58 @@ class DevenvShellCheckTest(unittest.TestCase):
         self.assertIs(report["signed"], False)
         self.assertEqual(report["reason"], "no_commit")
 
+    def test_a_head_moved_to_an_older_signed_commit_is_not_a_probe_commit(self):
+        world = self.world
+        world.set_signing(False)
+        world.git("commit", "--allow-empty", "-m", "tip")
+        (world.state / "rewind").write_text(world.base, encoding="utf-8")
+        result = world.check("commit")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = world.report(result)
+        self.assertEqual(report["exit"], 0)
+        self.assertIs(report["new_commit"], False)
+        self.assertEqual(report["reason"], "no_commit")
+        self.assertIs(report["met"], False)
+
+    def test_a_commit_with_another_message_is_not_the_probe_commit(self):
+        world = self.world
+        world.flag("message")
+        result = world.check("commit")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = world.report(result)
+        self.assertIs(report["new_commit"], False)
+        self.assertEqual(report["reason"], "no_commit")
+
+    def test_a_shell_that_writes_the_repository_config_leaves_the_callers_untouched(self):
+        world = self.world
+        world.flag("localconfig")
+        before = (world.repo / ".git" / "config").read_text(encoding="utf-8")
+        result = world.check("commit")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(world.report(result)["reason"], "hooks_changed")
+        self.assertEqual((world.repo / ".git" / "config").read_text(encoding="utf-8"), before)
+        configured = subprocess.run(
+            ["git", "-C", str(world.repo), "config", "--get", "core.hooksPath"],
+            env=world.env, capture_output=True, text=True)
+        self.assertEqual(configured.returncode, 1)
+        self.assertEqual(len(world.worktrees()), 1)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can remove a read-only directory")
+    def test_a_scratch_clone_that_cannot_be_removed_is_a_fixture_error(self):
+        world = self.world
+        world.flag("locked")
+        result = world.check("clean")
+        scratch = Path(world.calls()[0]["cwd"]).parent
+        try:
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("fixture_error", result.stderr)
+            self.assertIn("not removed", result.stderr)
+            self.assertEqual(result.stdout, "")
+        finally:
+            for locked in scratch.rglob("locked"):
+                locked.chmod(0o700)
+            shutil.rmtree(scratch, ignore_errors=True)
+
     def test_a_failing_shell_is_not_met(self):
         self.world.flag("fail")
         result = self.world.check("commit")
@@ -4322,6 +4390,33 @@ class DevenvShellCheckTest(unittest.TestCase):
             self.assertTrue(process_is_gone(world.calls()[0]["pid"]))
             self.assertEqual(len(world.worktrees()), 1)
             self.assertFalse(Path(world.calls()[0]["cwd"]).exists())
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+
+    def test_a_killed_check_still_ends_its_shell(self):
+        world = self.world
+        world.flag("sleep")
+        proc = subprocess.Popen(
+            [str(ROOT / CHECKS / "devenv-shell"), "--probe", "commit",
+             "--repo-root", str(world.repo)],
+            cwd=ROOT, env=world.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            pid_file = world.state / "grandchild.pid"
+            deadline = time.monotonic() + 20
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(pid_file.exists())
+            scratch = Path(world.calls()[0]["cwd"]).parent
+            self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+            proc.kill()
+            proc.wait(timeout=20)
+            self.assertEqual(proc.returncode, -signal.SIGKILL)
+            self.assertTrue(process_is_gone(int(pid_file.read_text(encoding="utf-8"))))
+            self.assertTrue(process_is_gone(world.calls()[0]["pid"]))
         finally:
             if proc.poll() is None:
                 proc.kill()
