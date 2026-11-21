@@ -34,9 +34,9 @@ def commit(root, message):
     run_git(root, "commit", "-q", "-m", message)
 
 
-def run_tool(*args, cwd=None):
+def run_tool(*args):
     return subprocess.run([sys.executable, "-m", "agent_tools.delivery.adr_number", *map(str, args)],
-                          capture_output=True, text=True, timeout=120, cwd=cwd)
+                          capture_output=True, text=True, timeout=120)
 
 
 def error_code(done):
@@ -141,7 +141,7 @@ class NextNumberTest(unittest.TestCase):
         }
         for name, (args, code) in cases.items():
             with self.subTest(name):
-                done = run_tool("next", *args, cwd=self.root)
+                done = run_tool("next", *args)
                 self.assertEqual((done.returncode, done.stdout, error_code(done)), (2, "", code))
         with self.subTest("no subcommand"):
             done = run_tool()
