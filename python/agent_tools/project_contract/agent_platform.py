@@ -45,12 +45,15 @@ loudly, never replaced by an assumed version (R1.3).
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import math
 import os
+from os import open as open_fd
 from pathlib import Path
 import re
+import stat
 import tempfile
 from typing import Iterator
 
@@ -672,6 +675,22 @@ def validate_registry(source: object) -> list[dict]:
     return violations
 
 
+def _read_regular_file(path: Path) -> bytes:
+    """The bytes of the regular file at `path`; any other kind raises `OSError`.
+
+    Opened nonblocking and judged by its descriptor, so a FIFO with no writer
+    is refused instead of waiting for one.
+    """
+    fd = open_fd(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(fd)
+
+
 def read_registry() -> list[dict]:
     """The registered fleet entries, in the order the file declares them.
 
@@ -680,20 +699,24 @@ def read_registry() -> list[dict]:
     read-only caller a writer. A registry that exists but will not read, will
     not parse, or does not match the schema raises instead — reporting an
     empty fleet for a corrupt file would hide exactly the projects an operator
-    registered. A dangling link at the registry or at one of its directories is
-    a registry that exists but will not read.
+    registered. A registry path that is not absolute (an empty or relative
+    `HOME`), one that is not a regular file, and a dangling link at the
+    registry or at one of its directories are each a registry that exists but
+    will not read.
     """
     path = registry_path()
+    unreadable = _refuse([_registry_violation(
+        "", "the fleet registry could not be read", "unreadable")])
+    if not path.is_absolute():
+        raise unreadable
     try:
-        raw = path.read_bytes()
+        raw = _read_regular_file(path)
     except FileNotFoundError:
         if any(p.is_symlink() and not p.exists() for p in (path, *path.parents)):
-            raise _refuse([_registry_violation(
-                "", "the fleet registry could not be read", "unreadable")]) from None
+            raise unreadable from None
         return []
     except (OSError, RuntimeError):
-        raise _refuse([_registry_violation(
-            "", "the fleet registry could not be read", "unreadable")]) from None
+        raise unreadable from None
     try:
         source = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError):

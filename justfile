@@ -16,10 +16,11 @@ trace target_host=hostname: (build target_host "--show-trace")
 
 # Build the nix-darwin configuration and switch to it
 # Fleet preflight (issue 1451) runs between the build and the activation, as a body line so --no-deps cannot skip it.
+# It reads the working directory's tree (the one built and activated), not the justfile's, so --working-directory cannot split them.
 [macos]
 switch target_host=hostname: (build target_host)
   @echo "switching to new config for {{target_host}}"
-  PYTHONPATH="{{agent_tools_path}}" nix --extra-experimental-features 'nix-command flakes' shell --inputs-from "{{justfile_directory()}}" nixpkgs#python3 --command python3 -B -m agent_tools.project_contract.fleet_preflight --manifest "{{justfile_directory()}}/home/common/agent-skills/platform-manifest.json"
+  PYTHONPATH="$PWD/python" nix --extra-experimental-features 'nix-command flakes' shell --inputs-from "$PWD" nixpkgs#python3 --command python3 -B -m agent_tools.project_contract.fleet_preflight --manifest "$PWD/home/common/agent-skills/platform-manifest.json"
   sudo ./result/sw/bin/darwin-rebuild switch --flake ".#{{target_host}}"
 
 # Mint a one-hour registration token per self-hosted runner (see
@@ -67,10 +68,11 @@ trace target_host=hostname: (build target_host "--show-trace")
 
 # Build the NixOS configuration and switch to it.
 # Fleet preflight (issue 1451) runs between the build and the activation, as a body line so --no-deps cannot skip it.
+# It reads the working directory's tree (the one built and activated), not the justfile's, so --working-directory cannot split them.
 [linux]
 switch target_host=hostname: (build target_host)
   @echo "Switching NixOS config for {{target_host}}..."
-  PYTHONPATH="{{agent_tools_path}}" nix --extra-experimental-features 'nix-command flakes' shell --inputs-from "{{justfile_directory()}}" nixpkgs#python3 --command python3 -B -m agent_tools.project_contract.fleet_preflight --manifest "{{justfile_directory()}}/home/common/agent-skills/platform-manifest.json"
+  PYTHONPATH="$PWD/python" nix --extra-experimental-features 'nix-command flakes' shell --inputs-from "$PWD" nixpkgs#python3 --command python3 -B -m agent_tools.project_contract.fleet_preflight --manifest "$PWD/home/common/agent-skills/platform-manifest.json"
   sudo nixos-rebuild switch --flake .#{{target_host}}
 
 ## colmena

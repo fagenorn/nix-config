@@ -51,17 +51,17 @@ from agent_tools.project_contract import resolve_project
 PREFLIGHT_SCHEMA_VERSION = 1
 
 
-def preflight(manifest_path: Path) -> dict:
-    """The fleet's verdicts against the manifest at `manifest_path`.
+def judge(manifest_path: Path) -> tuple[dict, list[dict]]:
+    """The fleet's report and the registry entries it was judged from, one read.
 
     The candidate manifest loads first, so a broken candidate surfaces before
     the registry is read. Raises `resolve_project.ContractError` when either
     will not read.
     """
     manifest, resolved = resolve_project.require_platform_manifest(manifest_path)
+    entries = resolve_project.require_registry()
     rows = sorted(
-        (resolve_project.fleet_row(entry, manifest)
-         for entry in resolve_project.require_registry()),
+        (resolve_project.fleet_row(entry, manifest) for entry in entries),
         key=lambda row: row["project_id"])
     return {
         "schema_version": PREFLIGHT_SCHEMA_VERSION,
@@ -69,7 +69,12 @@ def preflight(manifest_path: Path) -> dict:
         "manifest_path": str(resolved),
         "fleet": rows,
         "refused": [row["project_id"] for row in rows if not row["compatible"]],
-    }
+    }, entries
+
+
+def preflight(manifest_path: Path) -> dict:
+    """The fleet's verdicts against the manifest at `manifest_path`."""
+    return judge(manifest_path)[0]
 
 
 def exit_code(report: dict) -> int:

@@ -56,12 +56,12 @@ class FleetPreflightTest(FleetFixtures, ResolverTestCase):
         path.write_text(json.dumps(manifest), encoding="utf-8")
         return path
 
-    def preflight(self, *args: str,
-                  env: dict | None = None) -> tuple[int, str, str]:
+    def preflight(self, *args: str, env: dict | None = None,
+                  cwd: Path | None = None, timeout: int = 60) -> tuple[int, str, str]:
         proc = subprocess.run(
             [sys.executable, "-m", "agent_tools.project_contract.fleet_preflight",
              *args],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=timeout, cwd=cwd,
             env={**os.environ, "HOME": str(self.home), **(env or {})},
         )
         return proc.returncode, proc.stdout, proc.stderr
@@ -150,8 +150,14 @@ class FleetPreflightTest(FleetFixtures, ResolverTestCase):
             os.symlink(missing, fleet)
             return "platform.registry.unreadable"
 
+        def fifo_registry() -> str:
+            fleet.mkdir(parents=True, exist_ok=True)
+            os.mkfifo(fleet / "registry.json")
+            return "platform.registry.unreadable"
+
         cases = {
             "chmod 000": (unreadable, False),
+            "fifo registry": (fifo_registry, True),
             "not json": (not_json, True),
             "unknown member": (unknown_member, False),
             "dangling registry link": (dangling_registry, True),
@@ -161,7 +167,8 @@ class FleetPreflightTest(FleetFixtures, ResolverTestCase):
             with self.subTest(name):
                 repair_id = make()
                 try:
-                    code, out, err = self.preflight("--manifest", candidate)
+                    code, out, err = self.preflight(
+                        "--manifest", candidate, timeout=20)
                     self.assertEqual(code, 2, err)
                     self.assertEqual(out, "")
                     self.assertIn(repair_id, err)
@@ -183,6 +190,21 @@ class FleetPreflightTest(FleetFixtures, ResolverTestCase):
                         (fleet if fleet.is_symlink() else state).unlink()
                     if state.exists():
                         shutil.rmtree(state)
+
+    def test_a_home_that_is_not_an_absolute_path_refuses(self):
+        entry, _ = self.project("fagenorn/alpha")
+        install_registry(self.home, registry(entry))
+        candidate = str(self.candidate())
+        elsewhere = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        for home in ("", "relative/home"):
+            with self.subTest(home=home):
+                code, out, err = self.preflight(
+                    "--manifest", candidate, cwd=elsewhere,
+                    env={"HOME": home, "PYTHONPATH": str(REPO_ROOT / "python")})
+                self.assertEqual(code, 2, err)
+                self.assertEqual(out, "")
+                self.assertIn("platform.registry.unreadable", err)
 
     def test_the_preflight_changes_no_project_and_no_registry(self):
         alpha_root, beta_root = self.two_project_fleet()
@@ -357,6 +379,22 @@ class FleetPreflightCheckTest(FleetFixtures, ResolverTestCase):
         self.assertEqual(payload["verdict"], "red")
         self.assertEqual(payload["missing"], [])
         self.assertEqual(payload["extra"], [])
+
+    def test_the_judgement_and_the_comparison_read_one_registry_snapshot(self):
+        from unittest import mock
+        from agent_tools.project_contract import agent_platform
+        from agent_tools.verification import verify_checks
+        alpha, _ = self.project("fagenorn/alpha")
+        beta, _ = self.project("fagenorn/beta")
+        manifest = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
+        with mock.patch.object(agent_platform, "read_registry",
+                               side_effect=[[alpha], [alpha, beta]]) as read:
+            code, verdict = verify_checks.fleet_preflight_check(manifest)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(code, 0, verdict)
+        self.assertEqual(verdict["verdict"], "green")
+        self.assertEqual(verdict["missing"], [])
+        self.assertEqual(verdict["registered"], ["fagenorn/alpha"])
 
     def test_an_empty_fleet_reports_no_row(self):
         code, out, err = self.check()

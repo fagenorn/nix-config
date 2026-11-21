@@ -121,6 +121,7 @@ class FleetPreflightRecipeTest(unittest.TestCase):
         *just_args: str,
         preflight_exit: int,
         extra_env: dict | None = None,
+        working_directory: Path | None = None,
     ) -> tuple[int, list[str], Path]:
         path = self.platform_justfile(platform)
         work = self.scratch()
@@ -148,7 +149,7 @@ class FleetPreflightRecipeTest(unittest.TestCase):
                 "--justfile",
                 str(path),
                 "--working-directory",
-                str(path.parent),
+                str(working_directory or path.parent),
                 *just_args,
             ],
             stdin=subprocess.DEVNULL,
@@ -158,7 +159,7 @@ class FleetPreflightRecipeTest(unittest.TestCase):
             env=env,
         )
         lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-        return proc.returncode, lines, path.parent
+        return proc.returncode, lines, (working_directory or path.parent)
 
     @staticmethod
     def calls(lines: list[str]) -> list[tuple[str, str, str]]:
@@ -169,6 +170,7 @@ class FleetPreflightRecipeTest(unittest.TestCase):
         ]
 
     def assert_preflight_call(self, call: tuple[str, str, str], directory: Path) -> None:
+        directory = directory.resolve()
         name, python_path, args = call
         self.assertEqual(name, "nix", call)
         self.assertEqual(python_path, f"{directory}/python", call)
@@ -269,6 +271,24 @@ class FleetPreflightRecipeTest(unittest.TestCase):
                 self.assert_preflight_call(calls[0], directory)
                 self.assertEqual(calls[1][0], "sudo")
                 self.assertIn(ACTIVATION_MARKERS[platform], calls[1][2] + " ")
+
+    def test_the_preflight_judges_the_tree_the_switch_activates(self) -> None:
+        for platform in ("macos", "linux"):
+            with self.subTest(platform=platform):
+                activated = self.scratch().resolve()
+                code, lines, directory = self.stubbed_run(
+                    platform,
+                    "--no-deps",
+                    "switch",
+                    HOST,
+                    preflight_exit=0,
+                    working_directory=activated,
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(directory, activated)
+                calls = self.calls(lines)
+                self.assert_preflight_call(calls[0], activated)
+                self.assertEqual(len(lines), 6, lines)
 
     def test_the_build_recipe_runs_no_preflight(self) -> None:
         for platform in ("macos", "linux"):

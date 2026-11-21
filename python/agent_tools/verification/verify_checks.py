@@ -2654,10 +2654,9 @@ def fleet_preflight_verdict(report: dict, entries: list[dict]) -> tuple[int, dic
 
 
 def fleet_preflight_check(manifest: Path = Path(MANIFEST_PATH)) -> tuple[int, dict]:
-    """This checkout's fleet preflight against `manifest`, compared with the registry it read."""
+    """This checkout's fleet preflight against `manifest`, compared with the one registry snapshot it judged."""
     try:
-        report = fleet_preflight.preflight(manifest)
-        entries = agent_platform.read_registry()
+        report, entries = fleet_preflight.judge(manifest)
     except (resolve_project.ContractError, agent_platform.PlatformManifestError) as error:
         return 2, {"verdict": "unreadable", "repair_id": error.repair_id}
     return fleet_preflight_verdict(report, entries)
