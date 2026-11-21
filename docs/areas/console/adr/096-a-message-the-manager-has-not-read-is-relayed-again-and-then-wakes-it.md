@@ -1,4 +1,4 @@
-# ADR-console-094 — A message the manager has not read is relayed again and then wakes it
+# ADR-console-096 — A message the manager has not read is relayed again and then wakes it
 
 - **Status:** accepted
 - **Decided in:** #1379

@@ -1527,7 +1527,7 @@ message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS`
 `self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
 (row times are compared as epoch milliseconds).
 
-Unread after a relay (#1379, ADR-console-094): a sprint `renudge()` did not reserve by that rule is
+Unread after a relay (#1379, ADR-console-096): a sprint `renudge()` did not reserve by that rule is
 asked `sprints.unread_step(sprint, now)`. `RELAY_AGAIN` reserves it and dispatches the ordinary message
 nudge (so a manager listed meanwhile gets a relay and a gone one a wake); `WAKE_UNREAD` reserves it and
 dispatches `_dispatch_unread_wake` after the lock. `_unread_wake` decides the step again under the lock
@@ -8109,7 +8109,7 @@ class ConsoleService:
             self._dispatch_notice_nudge(sprint_id)
 
     def _unread_wake(self, sprint_id: str) -> None:
-        """Stop the manager's listed session and wake it in place for a message it left unread; the reservation ends here (ADR-console-094)."""
+        """Stop the manager's listed session and wake it in place for a message it left unread; the reservation ends here (ADR-console-096)."""
         heard: set[int] = set()
         with self._ingest:
             found = self._nudgeable(sprint_id)

@@ -1,6 +1,6 @@
 # ADR-console-016 — What the owner says to a sprint reaches its manager
 
-- **Status:** accepted; amended by ADR-console-075, ADR-console-094
+- **Status:** accepted; amended by ADR-console-075, ADR-console-096
 - **Decided in:** #831, #834, #835, #889, #949, #1086
 
 ## Context
