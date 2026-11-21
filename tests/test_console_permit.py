@@ -1,4 +1,4 @@
-"""The permit judge: which Bash commands a manager's session may run (#1377, ADR-console-093).
+"""The permit judge: which Bash commands a manager's session may run (#1377, ADR-console-094).
 
 `permit.judge` is pure over a `Grant` and injected forge readers, so every case here fakes the readers
 and calls it directly: the three granted shapes, each refusal reason, the literal-word grammar, the

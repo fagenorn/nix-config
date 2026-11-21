@@ -84,7 +84,7 @@ watches a manager's session (a plain `printf`, no interpreter start). A `PreTool
 `PostToolUse` command hook, each with matcher `Bash` and no `if` filter, run `PERMIT_COMMAND`
 (`sprint permit`, `PERMIT_TIMEOUT` 60 seconds) and `LANDED_COMMAND` (`sprint permit --landed`,
 `LANDED_TIMEOUT` 30 seconds): the console judges each Bash call of the session and allows only the
-sprint's own merge, rerun and approved release (ADR-console-093); an `if` filter would let a
+sprint's own merge, rerun and approved release (ADR-console-094); an `if` filter would let a
 spelling it missed fall to the owner's global `gh pr merge` allow. The third member is
 `"permissions": {"defaultMode": <mode>, "deny": [...]}`, the mode the launch's `Permission` chose
 for the project (ADR-console-060, #1151) and the `MANAGER_DENY` rules (an `--admin` merge,

@@ -1017,7 +1017,7 @@ nothing folds it. A notice nudge is never retried after its own attempt, counts 
 `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
-Permit (#1377, ADR-console-093): `POST /api/permit` is a manager write dispatched beside `/api/notices`
+Permit (#1377, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
 through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
 `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "command"}`, else 400 `bad permit`;
 a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
@@ -8522,7 +8522,7 @@ class ConsoleService:
         return verdict
 
     def permit(self, sprint_id: str, secret: str, session_id: str, command: str) -> permit.Verdict:
-        """The console's verdict on one command of the sprint's manager session (#1377, ADR-console-093)."""
+        """The console's verdict on one command of the sprint's manager session (#1377, ADR-console-094)."""
         verb = permit.verb_of(command)
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)

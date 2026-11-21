@@ -1,4 +1,4 @@
-"""The permit judge: which Bash commands a manager's session may run (#1377, ADR-console-093).
+"""The permit judge: which Bash commands a manager's session may run (#1377, ADR-console-094).
 
 A manager's session may run exactly three commands, and `judge(command, grant, forge)` decides each
 one without touching the network, the clock or a file beyond the injected `Forge` readers and

@@ -87,7 +87,7 @@ the newest row of each kind in place whatever its age, because the console folds
 activation's state at construction and a failed activation must still show its reason and next step
 while its commit stays pending (ADR-system-004 D9).
 
-Two rows record a manager's permit (#1377, ADR-console-093): `PERMIT_JUDGED` (`permit.judged`, one per
+Two rows record a manager's permit (#1377, ADR-console-094): `PERMIT_JUDGED` (`permit.judged`, one per
 decided verdict on a merge, rerun or release command: payload `sprint_id`, `session_id`, `repo` (the
 project's slug, null when unknown), `verb`, `decision`, `reason` and `target`) and `PERMIT_LANDED`
 (`permit.landed`, one per merge the manager's session ran after the console allowed it: `sprint_id`,

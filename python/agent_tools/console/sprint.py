@@ -204,7 +204,7 @@ from `$CONSOLE_SPRINT_ID` (not beside `--sprint`), else none; with none, or when
 a refused notices request is exit 1. A status with no secret is not an error.
 
 `sprint permit` is the hook a manager's settings run before (and, with `--landed`, after) each Bash call
-(#1377, ADR-console-093). It reads the hook input document from stdin (a JSON object with a string
+(#1377, ADR-console-094). It reads the hook input document from stdin (a JSON object with a string
 `session_id` and a string `tool_input.command`), resolves the sprint and secret as `sprint inbox` does and
 sends `POST /api/permit` with `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id",
 "command"}`; it prints at most one line and is always exit 0. For a command that

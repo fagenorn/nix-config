@@ -1,4 +1,4 @@
-# ADR-console-093 — A manager runs only the merges, reruns and releases the console permits
+# ADR-console-094 — A manager runs only the merges, reruns and releases the console permits
 
 - **Status:** accepted
 - **Decided in:** #1377
