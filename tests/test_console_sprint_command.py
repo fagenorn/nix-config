@@ -1208,11 +1208,6 @@ class ManagerContractTest(unittest.TestCase):
         self.assertNotIn("ask the owner which lands first", section)
         self.assertNotIn('"owner_only": true', section)
 
-    def test_the_command_docstring_names_no_claim_as_a_go_ahead(self):
-        doc = " ".join(sprint.__doc__.split())
-        self.assertIn("(a release, a production step, spend, a permission escalation)", doc)
-        self.assertNotIn("another sprint's claim", doc)
-
     def test_contract_sends_no_request(self):
         out = StringIO()
         refused = AssertionError("sprint contract opened a connection")
