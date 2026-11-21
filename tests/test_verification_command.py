@@ -422,6 +422,12 @@ CI_STEP_CLASSES = {
     ("ci.yaml", "flake-checker", "DeterminateSystems/flake-checker-action@v5"):
         ("not-lint", "annotates flake.lock health and never fails a run"),
     ("ci.yaml", "nix-eval", CI_EVAL): ("not-lint", "evaluates a host configuration"),
+    ("ci.yaml", "nix-eval", "nix build --no-link '.#packages.x86_64-linux.agent-platform'"):
+        ("not-lint", "builds the platform package"),
+    ("ci.yaml", "nix-eval", "nix eval --raw '.#packages.aarch64-darwin.agent-platform.drvPath'"):
+        ("not-lint", "evaluates the macOS platform package"),
+    ("ci.yaml", "nix-eval", "nix build --no-link '.#checks.x86_64-linux.agent-platform'"):
+        ("not-lint", "runs the platform package with no home configuration"),
     ("ci.yaml", "nix-eval", "nix build --no-link '.#checks.x86_64-linux.omlx-adapter'"):
         ("not-lint", "tests the adapter against its pinned upstream"),
     ("ci.yaml", "agent-workflow-tests",
