@@ -2083,10 +2083,15 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
       // The row sends the issue to a run of its own, whose holder is not this batch's: a claim this batch still holds would stop that run, so it is given back first.
       const cl = f.claim || {}
       if ((cl.verdict === 'held_by' || cl.verdict === 'stale') && cl.by === HOLDER) {
-        await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) is left out of this batch because it is a live fault, which is delivered alone. Release the batch claim.
+        const rel = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) is left out of this batch because it is a live fault, which is delivered alone. Release the batch claim.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
-Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
+Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
+        // A release that failed leaves the claim held, which would stop the alone run: the row stays open for a relaunch instead of final.
+        if (!rel || (rel.verdict !== 'released' && rel.verdict !== 'not_held')) {
+          rows[n] = { issue: n, outcome: 'stopped', stage: 'release', detail: rel ? (rel.detail || rel.verdict) : `release-${n} returned nothing` }
+          return
+        }
       }
       rows[n] = { issue: n, outcome: 'live-fault', reason }
       return

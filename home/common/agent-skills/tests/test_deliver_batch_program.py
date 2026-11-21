@@ -497,6 +497,18 @@ class LiveFaultIntakeTest(unittest.TestCase):
                     self.assertNotIn("readopt-1", labels(calls))
                     self.assertNotIn("land-pr-1", labels(calls))
 
+    def test_a_failed_release_of_a_declared_issue_stays_open_for_a_relaunch(self):
+        # The row is final only when the claim is given back: a claim still held would stop the run that delivers it alone.
+        facts = {"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}, "live_fault": {"verdict": "declared"}}}
+        for reply, detail in (({"verdict": "error", "detail": "HTTP 502"}, "HTTP 502"), (None, "release-1 returned nothing")):
+            with self.subTest(reply=reply):
+                result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts, replies={"release-1": reply})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "release", "reason": f"release: {detail}"})
+                self.assertEqual(result["relaunch"]["issues"], [1])
+                self.assertNotIn("child-1", labels(calls))
+        result, _, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts, replies={"release-1": {"verdict": "not_held"}})
+        self.assertEqual(row(result, 1)["outcome"], "live-fault")
+
     def test_a_merged_landing_is_still_closed_out_beside_a_declaration(self):
         facts = {"facts-1": dict(landing(41), claim={"verdict": "held_by", "by": HOLDER}, live_fault={"verdict": "declared"})}
         result, _, _ = run(args=dict(ARGS, conts={"1": dict(reviewed(1), pr=41)}), patch=facts)
