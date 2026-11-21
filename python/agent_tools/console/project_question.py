@@ -141,6 +141,13 @@ and a thread whose `thread_text` plus the question exceeds `MAX_THREAD_BYTES` UT
 (`THREAD_TOO_LONG`): the prompt is one argv string and Linux refuses one past 131072 bytes.
 Between the last two, a thread any of whose questions or answers is credential-shaped is refused
 (`THREAD_CREDENTIAL`, #1272): the turns are the text the next session's prompt would carry.
+A `PROJECT_QUESTION_DELETED` row removes from its project's folded questions each question whose
+id is a string member of its `question_ids` list (a row with a non-string project or a
+`question_ids` that is not a list removes nothing, the rule the delete trigger enforces,
+#1272). `thread_question_ids(questions, thread_id)` returns the ids of the thread whose id is
+`thread_id`, ascending by `seq`, or refuses with `THREAD_UNKNOWN`; the service refuses a delete
+of a thread with a working question with `THREAD_WORKING`. `parse_delete_request` reads exactly
+`project_id` and `thread_id`, both non-empty strings, and returns them as a pair.
 `parse_keyed_request` reads exactly `project_id` and `question`, plus optionally a non-empty
 string `thread_id` and optionally a `request_key` (a string that fullmatches `REQUEST_KEY`, 32
 lowercase hex digits; any other is a `ValueError`), and returns
@@ -170,7 +177,8 @@ from pathlib import Path
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import manager, question_records
 from agent_tools.console.event_log import (
-    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED, Event)
+    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_DELETED,
+    PROJECT_QUESTION_KEYED, Event)
 from agent_tools.console.project_question_hook import (
     GH_READ_GROUPS, GH_READ_VERBS, GIT_READS, PLAIN_WORD, REPO_SLUG)
 from agent_tools.project_contract import resolve_project
@@ -284,6 +292,7 @@ THREAD_LEAD = (
     "answer you gave. Use them as context: the rules above still apply.\n\n"
 )
 THREAD_UNKNOWN = "this thread is not one of the project's questions"
+THREAD_WORKING = "this thread is still being answered: delete it once the answer is in"
 THREAD_UNANSWERED = "a follow-up continues a thread whose last question was answered"
 THREAD_TOO_LONG = "this thread is too long to continue: ask a new question"
 CREDENTIAL = "this looks like a password, token or key, so it was not kept or sent: take it out and ask again"
@@ -469,12 +478,16 @@ def checked_question(text: str) -> str:
     return text
 
 
-def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
+def _decode_body(body: bytes) -> object:
     try:
-        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
-                           parse_constant=reject_nonfinite_literal)
+        return json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                          parse_constant=reject_nonfinite_literal)
     except RecursionError as error:
         raise ValueError("the body is nested too deeply") from error
+
+
+def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
+    value = _decode_body(body)
     required = {"project_id", "question"}
     if not isinstance(value, dict) or not required <= set(value) <= required | {
             "thread_id", "request_key"}:
@@ -498,6 +511,18 @@ def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
 
 def parse_request(body: bytes) -> tuple[str, str, str | None]:
     return parse_keyed_request(body)[:3]
+
+
+def parse_delete_request(body: bytes) -> tuple[str, str]:
+    value = _decode_body(body)
+    if not isinstance(value, dict) or set(value) != {"project_id", "thread_id"}:
+        raise ValueError("the body must be an object of project_id and thread_id")
+    project_id, thread_id = value["project_id"], value["thread_id"]
+    if not isinstance(project_id, str) or not project_id:
+        raise ValueError("project_id must be a non-empty string")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise ValueError("thread_id must be a non-empty string")
+    return project_id, thread_id
 
 
 def thread_text(thread: Sequence[Turn]) -> str:
@@ -784,6 +809,13 @@ def asked_questions(events: Iterable[Event],
     found = {project: list(items) for project, items in known.items()} if known else {}
     for event in events:
         project, payload = event.project, event.payload
+        if event.kind == PROJECT_QUESTION_DELETED:
+            named = payload.get("question_ids")
+            if isinstance(project, str) and isinstance(named, list):
+                dropped = {name for name in named if isinstance(name, str)}
+                found[project] = [item for item in found.get(project, [])
+                                  if item.question_id not in dropped]
+            continue
         question_id = payload.get("question_id")
         if not isinstance(project, str) or not isinstance(question_id, str) or not question_id:
             continue
@@ -831,11 +863,20 @@ def threads(questions: Sequence[AskedQuestion]) -> tuple[tuple[AskedQuestion, ..
     return tuple(tuple(group) for group in ordered)
 
 
-def follow_up(questions: Sequence[AskedQuestion], thread_id: str, question: str) -> tuple[Turn, ...]:
+def _thread_of(questions: Sequence[AskedQuestion], thread_id: str) -> tuple[AskedQuestion, ...]:
     thread = next((group for group in threads(questions)
                    if (group[0].thread_id or group[0].question_id) == thread_id), None)
     if thread is None:
         raise Refused(THREAD_UNKNOWN)
+    return thread
+
+
+def thread_question_ids(questions: Sequence[AskedQuestion], thread_id: str) -> tuple[str, ...]:
+    return tuple(q.question_id for q in _thread_of(questions, thread_id))
+
+
+def follow_up(questions: Sequence[AskedQuestion], thread_id: str, question: str) -> tuple[Turn, ...]:
+    thread = _thread_of(questions, thread_id)
     if thread[-1].state != ANSWERED:
         raise Refused(THREAD_UNANSWERED)
     turns = tuple(Turn(q.question, q.answer or "") for q in thread)

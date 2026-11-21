@@ -1614,6 +1614,37 @@ class QuestionFoldTest(unittest.TestCase):
                          project_question.asked_questions(rows))
         self.assertEqual(first, before)
 
+    def test_a_deletion_row_drops_the_named_questions_of_its_project_only(self):
+        rows = [_asked(1, "o/a", "q1"),
+                _answered(2, "o/a", "q1", outcome="answered", answer="A"),
+                _asked(3, "o/a", "q2", thread_id="q1"),
+                _asked(4, "o/b", "q1"),
+                _asked(5, "o/a", "q3"),
+                _row(6, "project_question.deleted", "o/a",
+                     {"question_ids": ["q1", "q2"], "thread_id": "q1"})]
+        once = project_question.asked_questions(rows)
+        batched = project_question.asked_questions(
+            rows[3:], project_question.asked_questions(rows[:3]))
+        self.assertEqual(once, batched)
+        self.assertEqual([q.question_id for q in once["o/a"]], ["q3"])
+        self.assertEqual([q.question_id for q in once["o/b"]], ["q1"])
+
+    def test_a_malformed_deletion_row_drops_nothing(self):
+        cases = (("o/a", {"question_ids": "q1"}), (None, {"question_ids": ["q1"]}),
+                 ("o/a", {"question_ids": {"k": "q1"}}), ("o/a", {"question_ids": [1, None]}),
+                 ("o/a", {}))
+        for project, payload in cases:
+            with self.subTest(project=project, payload=payload):
+                rows = [_asked(1, "o/a", "q1"),
+                        _row(2, "project_question.deleted", project, payload)]
+                found = project_question.asked_questions(rows)
+                self.assertEqual([q.question_id for q in found["o/a"]], ["q1"])
+
+    def test_a_project_whose_every_question_is_deleted_has_no_entry(self):
+        rows = [_asked(1, "o/a", "q1"),
+                _row(2, "project_question.deleted", "o/a", {"question_ids": ["q1"]})]
+        self.assertNotIn("o/a", project_question.asked_questions(rows))
+
 
 def _ids(found):
     return [[q.question_id for q in thread] for thread in found]
@@ -1708,6 +1739,52 @@ class FollowUpTest(unittest.TestCase):
         self.assertEqual(str(caught.exception), project_question.THREAD_TOO_LONG)
         short = self.answered("x" * 1000)
         self.assertEqual(len(project_question.follow_up(short, "q1", "why?")), 1)
+
+
+class ThreadDeleteTest(unittest.TestCase):
+    P = "owner/p01"
+
+    def questions(self):
+        return project_question.asked_questions([
+            _asked(1, self.P, "q1"),
+            _answered(2, self.P, "q1", outcome="answered", answer="A"),
+            _asked(3, self.P, "q2", thread_id="q1"),
+            _asked(4, self.P, "q3")])[self.P]
+
+    def test_a_thread_names_its_questions_in_order(self):
+        qs = self.questions()
+        self.assertEqual(project_question.thread_question_ids(qs, "q1"), ("q1", "q2"))
+        self.assertEqual(project_question.thread_question_ids(qs, "q3"), ("q3",))
+
+    def test_an_unknown_thread_or_a_follow_up_id_is_refused(self):
+        for thread_id in ("q2", "nope"):
+            with self.subTest(thread_id=thread_id):
+                with self.assertRaises(project_question.Refused) as caught:
+                    project_question.thread_question_ids(self.questions(), thread_id)
+                self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
+
+
+class DeleteRequestTest(unittest.TestCase):
+    def test_a_delete_request_reads_exactly_the_project_and_the_thread(self):
+        self.assertEqual(
+            project_question.parse_delete_request(b'{"project_id":"o/a","thread_id":"q1"}'),
+            ("o/a", "q1"))
+
+    def test_any_other_delete_body_is_refused(self):
+        bodies = (b'{"project_id":"o/a"}',
+                  b'{"project_id":"o/a","thread_id":"q1","question":"x"}',
+                  b'{"project_id":"","thread_id":"q1"}', b'{"project_id":"o/a","thread_id":""}',
+                  b'{"project_id":"o/a","thread_id":3}', b'["o/a","q1"]',
+                  b'{"project_id":"o/a","project_id":"o/b","thread_id":"q1"}',
+                  b'{"project_id":"o/a","thread_id":NaN}', b"\xff", b"[" * 100000)
+        for body in bodies:
+            with self.subTest(body=body[:60]):
+                with self.assertRaises(ValueError):
+                    project_question.parse_delete_request(body)
+
+    def test_the_working_refusal_names_no_question_text(self):
+        self.assertEqual(project_question.THREAD_WORKING,
+                         "this thread is still being answered: delete it once the answer is in")
 
 
 class AnswerRulesTest(unittest.TestCase):
