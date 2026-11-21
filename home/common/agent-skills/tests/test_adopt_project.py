@@ -258,15 +258,17 @@ def host_independent(contract: dict) -> dict:
 
     This repository's GitHub release profile derives a `blocked` release
     capability on any host without the forge adapter's executables on `PATH`,
-    and its plan and code review commands run `codex-companion`, which the
+    and the platform's review commands run `codex-companion`, which the
     hosted CI runner lacks. No fixture built on this is about release or
-    review, so release is opted out and both review commands become `true`,
-    which every host resolves: the verdicts are the same everywhere.
+    review, so release is opted out and each review command is replaced by an
+    authored `true` entry under its id, which every host resolves: the verdicts
+    are the same everywhere.
     """
     contract["release"] = "unsupported"
     review = contract["bindings"]["workflow"]["review"]
     for role in ("plan", "code"):
-        contract["bindings"]["commands"][review[role]]["argv"] = ["true"]
+        contract["bindings"]["commands"][review[role]] = {
+            "argv": ["true"], "cwd": ".", "env": []}
     return contract
 
 

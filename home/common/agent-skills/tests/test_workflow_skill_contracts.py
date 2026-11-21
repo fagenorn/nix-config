@@ -2388,6 +2388,7 @@ class PlatformReviewCommandsTest(unittest.TestCase):
     """
 
     REVIEWER_FLAG = "--reviewer"
+    QUOTED_FLAG = re.compile(r"[\"']--reviewer[\"']")
 
     def companion_shape(self, argv: list[str], operation: str) -> bool:
         if len(argv) < 2 or PurePosixPath(argv[0]).name != "codex-companion":
@@ -2420,6 +2421,27 @@ class PlatformReviewCommandsTest(unittest.TestCase):
                           ("flag moved between", moved)):
             with self.subTest(control=name):
                 self.assertFalse(self.companion_shape(bad, "plan-review"))
+
+
+    def test_the_reviewer_flag_is_defined_once(self):
+        listing = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--cached", "--others",
+             "--exclude-standard", "--", "python/agent_tools", "home/common"],
+            capture_output=True, check=True).stdout
+        hits = {}
+        for name in listing.decode("utf-8").split("\0"):
+            if not name:
+                continue
+            try:
+                text = (REPO_ROOT / name).read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            count = len(self.QUOTED_FLAG.findall(text))
+            if count:
+                hits[name] = count
+        self.assertEqual(hits, {
+            "python/agent_tools/project_contract/agent_platform.py": 1,
+            "home/common/agent-skills/tests/test_workflow_skill_contracts.py": 1})
 
 
 class LiveSkillsNameNoRetiredSkillTest(unittest.TestCase):

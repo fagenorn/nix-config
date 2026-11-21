@@ -347,6 +347,12 @@ class SchemaTwoFixtureTest(unittest.TestCase):
         self.assertNotIn("deploy", contract["bindings"])
         self.assertNotIn("deploy", contract["capabilities"])
 
+    def test_the_fixture_authors_no_platform_command(self):
+        bindings = source_contract()["bindings"]
+        self.assertTrue(set(agent_platform.PLATFORM_COMMANDS).isdisjoint(bindings["commands"]))
+        self.assertEqual(bindings["workflow"]["review"],
+                         {"plan": "codex-plan-review", "code": "codex-diff-review"})
+
 
 class ResolverTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -466,12 +472,10 @@ class SnapshotShapeTest(ResolverTestCase):
         self.assertEqual(bindings["workflow"]["review"],
                          {"plan": "codex-plan-review", "code": "codex-diff-review"})
         self.assertNotIn("codex-review", bindings["commands"])
-        for review_id, operation in (("codex-plan-review", "plan-review"),
-                                     ("codex-diff-review", "diff-review")):
+        for review_id in ("codex-plan-review", "codex-diff-review"):
             with self.subTest(review_id=review_id):
                 self.assertEqual(bindings["commands"][review_id], {
-                    "argv": ["codex-companion", "task", "--fresh",
-                             "--reviewer", operation],
+                    "argv": list(agent_platform.PLATFORM_COMMANDS[review_id]["argv"]),
                     "cwd": snap["project"]["root"],
                     "env": [],
                 })
