@@ -238,6 +238,20 @@ class ShipReleaseContractsTest(unittest.TestCase):
         self.assertEqual(actions, {"status", "preview", "run", "abandon"})
         self.assertEqual(len(lines), 7)
 
+    def test_the_runnable_preview_posts_the_release_card(self):
+        """Issue 1401: Phase 3 posts the release card, in a form the card command parses."""
+        from agent_tools.console import release_card
+        spans = re.findall(r"`(release-card [^`]+)`", self.skill)
+        phase3 = self.skill.split("## Phase 3", 1)[1].split("\n## ", 1)[0]
+        self.assertEqual(len(spans), 1)
+        self.assertIn(spans[0], phase3)
+        self.assertIn("in chat after the owner's Approve click", phase3)
+        phase4 = self.skill.split("## Phase 4", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("`release_unapproved`: release the land lock, have the owner approve the card", phase4)
+        argv = shlex.split(spans[0].replace("<commit>", "a" * 40).replace("<version>", "v1.2.3"))
+        args = release_card.build_parser().parse_args(argv[1:])
+        self.assertEqual((args.command, args.commit, args.version), ("post", "a" * 40, "v1.2.3"))
+
     def test_a_release_parked_after_an_effect_is_disposed_on_the_users_yes(self):
         """Issue 1050: the dispose form parses, sits in Phase 5 behind an explicit yes, and
         the notes after a failed release start at the last succeeded version."""

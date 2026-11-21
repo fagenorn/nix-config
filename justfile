@@ -171,6 +171,7 @@ agent-workflow-tests *args:
     tests/test_release_command.py \
     tests/test_fallback_audit.py \
     tests/test_release_driver.py \
+    tests/test_release_dispose.py \
     tests/test_release_crash_matrix.py \
     tests/test_release_cutover.py \
     tests/test_release_evidence.py \
@@ -204,6 +205,8 @@ agent-workflow-tests *args:
     tests/test_devenv_cache_ignored.py \
     tests/test_suite_runner.py \
     tests/test_console_event_log.py \
+    tests/test_console_release_card.py \
+    tests/test_console_release_card_service.py \
     tests/test_console_view.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \

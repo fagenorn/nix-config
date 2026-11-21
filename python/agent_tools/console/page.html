@@ -1483,6 +1483,58 @@ function adoptionCard(item) {
   }
   return card;
 }
+function isRelease(item) {
+  return item.reason === "release";
+}
+// A release card (#1401): the owner always clicks, so neither answer is picked for them.
+const releaseAnswers = new Map();
+async function answerRelease(item, answer) {
+  const current = releaseAnswers.get(item.key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  releaseAnswers.set(item.key, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await fetch("/api/release-answer", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ card: item.card, answer }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "the console did not answer";
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (releaseAnswers.get(item.key) !== state) return;
+  if (reason === null) releaseAnswers.delete(item.key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+function releaseCard(item) {
+  const card = el("article", "card release");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(phrase("p", "meta", item.version, " \u00b7 ", item.commit, " \u00b7 waiting ", timeEl("since", item.waiting_since, "")));
+  const state = releaseAnswers.get(item.key);
+  const sending = state !== undefined && state.phase === "sending";
+  const approve = actionButton("release-approve btn-primary", "Approve release", () => answerRelease(item, "approve"));
+  const decline = actionButton("release-decline btn-quiet", "Decline", () => answerRelease(item, "decline"));
+  for (const button of [approve, decline]) {
+    if (sending) button.setAttribute("disabled", "");
+    markBusy(button, sending);
+  }
+  const act = el("div", "act");
+  act.appendChild(approve);
+  act.appendChild(decline);
+  if (state !== undefined && state.phase === "failed") {
+    act.appendChild(el("span", "fail", "Could not answer: " + state.reason));
+  }
+  card.appendChild(act);
+  return card;
+}
 function adoptionNotice(key, state) {
   const card = el("article", "card adoption-failed");
   card.appendChild(pathWords(el("p", "q"), "Could not merge the adoption of " + state.name));
@@ -4989,7 +5041,7 @@ function drawInbox(view, guest = null) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isLookCard(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isRelease(item) && !isLookCard(item));
   const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
@@ -5088,6 +5140,11 @@ function drawInbox(view, guest = null) {
   for (const item of adoptions) section.appendChild(adoptionCard(item));
   for (const [key, state] of adoptionMerges) {
     if (state.phase === "failed" && !adoptions.some((item) => item.key === state.plan && item.number === state.number && item.commit === state.commit)) section.appendChild(adoptionNotice(key, state));
+  }
+  const releases = open.filter(isRelease);
+  for (const item of releases) section.appendChild(releaseCard(item));
+  for (const key of [...releaseAnswers.keys()]) {
+    if (!releases.some((item) => item.key === key)) releaseAnswers.delete(key);
   }
   for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {

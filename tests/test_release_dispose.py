@@ -53,7 +53,7 @@ class DisposeCase(unittest.TestCase):
         self.watch = rs.ScriptedRailway(("diverged", "silent_rollback"))
         self.project = rs.project(self, profiles={"railway": support.railway_watched_profile()})
         self.driver = release_driver.Driver(
-            self.project, clock=self.clock,
+            self.project, approvals=rs.approve_all, clock=self.clock,
             registry={"github-forge": self.forge, "railway-deploy": self.watch})
 
     def parked(self):
@@ -281,6 +281,7 @@ class DisposeRefusalTest(DisposeCase):
         drifted = release_driver.Driver(
             dataclasses.replace(self.project, contract={
                 **self.project.contract, "release": {"profiles": {"railway": profile}}}),
+            approvals=rs.approve_all,
             clock=self.clock, registry=self.driver.registry)
         refusal = self.assertRefusal("profile_drift", drifted.preview_dispose, GROUND, WHY)
         self.assertTrue(refusal.detail.endswith(": restore that profile"), refusal.detail)

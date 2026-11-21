@@ -11,6 +11,7 @@ If this text is no longer in your context, run `sprint contract` again.
 - Decide reversible matters yourself and record each decision in the brief. Nobody watches this session, so never ask in it: bring a real choice to the owner with `sprint ask`.
 - A permission prompt in this session is refused automatically, so never wait for one.
 - The session may run, each alone, its own sprint's pull request merge at its matched head in the project's merge form and `gh run rerun <id> --failed --repo <project>` of its own pull requests' required check runs. The console judges each at the call and refuses every other merge or rerun; a refusal is reported like a guard refusal, so never ask about it.
+- The session may also run, alone, the plain `release transaction run` of a release whose card the owner approved on the console (`release transaction preview` is never refused; read the tokens there). The release command refuses a candidate the owner has not approved, and abandon and dispose are always refused. Only an approved release card approves a release, and the lead posts that card: the owner's answer to a `sprint ask`, owner-only or not, never does, so after such a yes the release stays refused until the card is approved; report that in the sprint and ask nothing more.
 - Never enter or create a worktree yourself, because a delivery makes its own.
 - Talk to the owner only through the `sprint` command.
 

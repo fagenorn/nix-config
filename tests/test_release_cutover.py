@@ -86,7 +86,7 @@ class DriverLegacyTest(unittest.TestCase):
 
     def driver(self):
         project = rs.project(self)
-        return release_driver.Driver(project, registry={"github-forge": rs.StatefulForge(self.world)},
+        return release_driver.Driver(project, approvals=rs.approve_all, registry={"github-forge": rs.StatefulForge(self.world)},
                                      clock=self.clock)
 
     def test_in_flight_blocks_preview_and_run_but_not_status(self):
@@ -113,6 +113,19 @@ class DriverLegacyTest(unittest.TestCase):
         for file in store.rglob("*"):
             if file.is_file():
                 self.assertNotIn(b"headSha", file.read_bytes())
+
+    def test_a_refused_approval_leaves_a_completed_file_and_no_store(self):
+        driver = self.driver()
+        driver.approvals = lambda commit, version: False
+        path = write(driver.project.root, {**STATE, "tag": "v0.9.0", "deployState": "none"})
+        before = path.read_bytes()
+        shown = driver.preview(rs.candidate())
+        tokens = [c["token"] for c in shown["confirmations"]]
+        with self.assertRaises(release_driver.Refusal) as caught:
+            driver.run(rs.candidate(), tokens)
+        self.assertEqual(caught.exception.code, "release_unapproved")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((driver.project.common_dir / "agent-release").exists())
 
 
 if __name__ == "__main__":
