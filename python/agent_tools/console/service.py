@@ -1498,7 +1498,12 @@ appends one `sprint.nudged {sprint_id, through: the last unread id, covers: the 
 also prints `console: nudge_failed <sprint_id> <reason>`); when the sprint was marked in
 `_nudge_again` and now holds an unread message `covers` does not list (one above `through`, or an approval
 released while the nudge ran), it is reserved and dispatched once
-more (never after a success alone). `renudge()`, called by `_poll_loop` after `poll_deliveries` (a
+more (never after a success alone). An idle nudge's end (`_end_idle`, under the lock) honours the
+mark as a relay's end does (#1380): it drops the reservation and the mark and, when the sprint was
+marked and still has an unread message the service may nudge about, reserves it again and
+dispatches the relay once the lock is released, at each of `_idle_nudge`'s exits, so a message or
+an answer that waited behind a queued idle nudge goes at once and never waits for `renudge`.
+`renudge()`, called by `_poll_loop` after `poll_deliveries` (a
 failure is `console: renudge_failed <Type>: <message>`), reserves under the lock each open
 unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
 message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS` before
@@ -1644,8 +1649,10 @@ latest movement of a run of that session that has not ended: the larger `moved_m
 mtime of every unended run it read, whether or not the run names an issue; a manager with such a
 run is not nudged until it has been still for `idle.RUN_STILL_MS`, 30 minutes, #974), the sprint's
 waiting count and its quota; a sprint not out whose manager row is not `started` or whose manager is seen
-`working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides:
-`GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
+`working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides (it gives
+nothing while the report's stated wait or pause holds, `sprints.stated_hold`, #1380: no nudge and
+no `manager.no_progress` row are made then, while message, answer, brief and stop sends do not
+read it): `GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
 null), `NUDGE` reserves the sprint in `_nudging` and dispatches `_idle_nudge` after the lock.
 `_idle_nudge(sprint_id, forced)` decides again under the lock (`_idle_due`), reads the listing off
 the lock (a manager not listed sends nothing and appends nothing: the bring-back owns a gone
@@ -8376,35 +8383,64 @@ class ConsoleService:
         with self._ingest:
             due = self._idle_due(sprint_id, forced)
             if due is None:
-                self._nudging.discard(sprint_id)
-                return
-            sprint, cwd = due
-            name = manager.session_name(sprint.project_id, sprint_id)
-            profile, session_id = sprint.manager.profile, sprint.manager_session or ""
+                again = self._end_idle(sprint_id)
+            else:
+                sprint, cwd = due
+                name = manager.session_name(sprint.project_id, sprint_id)
+                profile, session_id = sprint.manager.profile, sprint.manager_session or ""
+        if due is None:
+            if again:
+                self._dispatch_nudge(sprint_id)
+            return
         reason = None
         try:
             listed = sorted((o for o in self._listing().values() if o.name == name),
                             key=lambda o: o.session_id)
             if not listed:
                 with self._ingest:
-                    self._nudging.discard(sprint_id)
+                    again = self._end_idle(sprint_id)
+                if again:
+                    self._dispatch_nudge(sprint_id)
                 return
             session_id = listed[0].session_id
             with self._ingest:
                 if (self._idle_due(sprint_id, forced) is None
                         or self._working_now(listed[0])):
-                    self._nudging.discard(sprint_id)
-                    return
-                bypass = self._relays_in_bypass(sprint_id)
+                    again = self._end_idle(sprint_id)
+                else:
+                    again = None
+                    bypass = self._relays_in_bypass(sprint_id)
+            if again is not None:
+                if again:
+                    self._dispatch_nudge(sprint_id)
+                return
             self._send_nudge(nudge.Nudge(sprint_id, nudge.CONTINUE, name, session_id, profile, cwd,
                                          sender_bypass=bypass))
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)
                       else f"{type(error).__name__}: {error}")
         with self._ingest:
-            self._nudging.discard(sprint_id)
             self._settled[sprint_id] = int(self._clock() * 1000)
             self._record_idle(sprint_id, session_id, reason)
+            again = self._end_idle(sprint_id)
+        if again:
+            self._dispatch_nudge(sprint_id)
+
+    def _end_idle(self, sprint_id: str) -> bool:
+        """Under the ingest lock: end an idle nudge's reservation; whether a relay asked for meanwhile is reserved.
+
+        A relay asked for while the idle job held the reservation is marked in `_nudge_again`
+        (`_reserve_nudge`); the mark is honoured here as `_nudge` honours it, so a message or an
+        answer is never left to `renudge`. A true result is the caller's to dispatch with
+        `_dispatch_nudge` after leaving the lock.
+        """
+        self._nudging.discard(sprint_id)
+        wanted = sprint_id in self._nudge_again
+        self._nudge_again.discard(sprint_id)
+        if wanted and not self._stop.is_set() and self._nudgeable(sprint_id) is not None:
+            self._nudging.add(sprint_id)
+            return True
+        return False
 
     def _record_idle(self, sprint_id: str, session_id: str, reason: str | None) -> None:
         """Under the ingest lock: append one `manager.nudged` row for the open sprint and fold it."""

@@ -168,7 +168,11 @@ constants are `QUOTA` (a view state), `QUOTA_TEXT` (the manager's waiting text, 
 until`), `NO_PROGRESS_TEXT` (`the manager has stopped making progress on {title}`) and `NOT_STUCK`
 (the service's refusal of a continue with no item open). `parse_continue(body)` reads the owner's
 continue write, exactly `parse_withdraw`'s shape and refusals, and returns `(project_id,
-sprint_id)`. `idle` (which this module does not import) reads these fields.
+sprint_id)`. `idle` (which this module does not import) reads these fields. `stated_hold(state, now_ms)` (#1380) is
+the hold the report's own `paused` or `wait_until` puts on them: `(PAUSED, reason)` or `(WAIT_UNTIL,
+time)` while it stands, else `None`; a `wait_until` holds while `now_ms * 1000` is under its
+microseconds (`_wait_us`, never the truncating `_ms`), so a fractional-millisecond deadline holds
+through its own millisecond.
 
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
 `(manager_state, manager_text, retry)`; its docstring holds the rules. `failed_start(state, listed,
@@ -845,6 +849,8 @@ REPORT_MEMBER = "the report has no valid {member}"
 STATUS_NUMBER = "the status line names an issue number"
 WAIT_PAST = "the report's wait_until is not in the future"
 WAIT_TOO_FAR = f"the report's wait_until is more than {MAX_WAIT_HOURS} hours ahead"
+PAUSED = "paused"
+WAIT_UNTIL = "wait_until"
 PAUSED_NUMBER = "the pause reason names an issue number"
 WAIT_AND_PAUSE = "a report states a wait_until or a paused reason, not both"
 CLOSING_MEMBER = "the closing report has no valid {member}"
@@ -2892,6 +2898,27 @@ def merge_refused(state: SprintState) -> str | None:
     if state.report is None or state.closing is not None:
         return None
     return refused_reason(state.report.status)
+
+
+def stated_hold(state: SprintState, now_ms: int | None) -> tuple[str, str] | None:
+    """The wait or pause the sprint's report states and that still holds, else None (#1380).
+
+    `(PAUSED, report.paused)` while the report carries a `paused` reason, `(WAIT_UNTIL,
+    report.wait_until)` while it carries a `wait_until` that `now_ms` has not reached (`now_ms`
+    None counts as not reached). The deadline is compared in microseconds (`_wait_us`), never
+    through `_ms`, which truncates: a deadline with a fractional millisecond holds through the
+    millisecond it falls in and releases on the next, and a whole-millisecond deadline releases at
+    `now_ms` equal to it. A sprint without a report holds nothing.
+    """
+    report = state.report
+    if report is None:
+        return None
+    if report.paused is not None:
+        return PAUSED, report.paused
+    if report.wait_until is not None and (
+            now_ms is None or now_ms * 1000 < _wait_us(report.wait_until)):
+        return WAIT_UNTIL, report.wait_until
+    return None
 
 
 def ended_at(state: SprintState) -> str | None:

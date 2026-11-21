@@ -7,7 +7,7 @@ import os
 import shutil
 import threading
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from agent_tools.console import capacity, nudge, permission, service, signin, sprints
@@ -22,6 +22,11 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 RESET = int(T0) + 3600
 RESUMED = PARTS["title"] + " resumed after the quota reset"
 JSON = {"Content-Type": "application/json"}
+
+
+def at(seconds, us=0):
+    """The ISO 8601 UTC time `seconds` after the epoch plus `us` microseconds."""
+    return (datetime.fromtimestamp(seconds, timezone.utc) + timedelta(microseconds=us)).isoformat()
 
 
 class IdleCase(ReviveCase):
@@ -350,6 +355,82 @@ class IdleServiceTest(IdleCase):
         with mock.patch.object(service.ConsoleService, "nudge_idle", lambda self: called.set()):
             self.begin(session_poll_seconds=0.05)
             self.assertTrue(called.wait(10))
+
+    def test_a_wait_until_two_hours_ahead_holds_every_idle_nudge_and_the_card_until_that_time(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 60
+        svc.send_report(sid, self.secret(sid), {**REPORT, "wait_until": at(T0 + 60 + 7200)})
+        for seconds in (300, 900, 1500, 2100, 2700, 3600, 5400, 7259.999):
+            self.poll(svc, seconds)
+        self.assertEqual(self.continues(), [])
+        self.assertEqual(self.rows("manager.no_progress"), [])
+        self.poll(svc, 7260)
+        self.assertEqual(self.continues(), [
+            nudge.Nudge(sid, "continue", self.name(sid), "s-1", "work", "/srv/p01")])
+
+    def test_a_wait_until_with_a_fractional_millisecond_holds_through_its_last_tick(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 60
+        svc.send_report(sid, self.secret(sid), {**REPORT, "wait_until": at(T0 + 7260, 500)})
+        self.poll(svc, 7260)
+        self.assertEqual(self.continues(), [])
+        self.poll(svc, 7261)
+        self.assertEqual(len(self.continues()), 1)
+
+    def test_a_pause_holds_every_idle_nudge_until_a_later_report_without_one(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 60
+        svc.send_report(sid, self.secret(sid), {**REPORT, "paused": "the lead freed the account"})
+        for seconds in (300, 900, 1500, 2100, 2700, 7200):
+            self.poll(svc, seconds)
+        self.assertEqual(self.continues(), [])
+        self.assertEqual(self.rows("manager.no_progress"), [])
+        self.now[0] = T0 + 7300
+        svc.send_report(sid, self.secret(sid), REPORT)
+        self.poll(svc, 7600)
+        self.assertEqual(len(self.continues()), 1)
+
+    def test_a_message_or_an_answer_reaches_a_waiting_or_paused_manager_at_once(self):
+        for extra in ({"wait_until": at(T0 + 60 + 7200)}, {"paused": "the lead freed the account"}):
+            with self.subTest(extra=sorted(extra)):
+                self.setUp()
+                svc, sid = self.idle_service()
+                secret = self.secret(sid)
+                self.now[0] = T0 + 60
+                svc.send_report(sid, secret, {**REPORT, **extra})
+                self.poll(svc, 600)
+                self.assertEqual(self.continues(), [])
+                self.nudges.clear()
+                svc.send_message("owner/p01", sid, "hello")
+                self.drain()
+                self.assertEqual([n.route for n in self.nudges], ["relay"])
+                self.nudges.clear()
+                round_id, _ = svc.ask_questions(sid, secret, ROUND)
+                svc.answer_question("owner/p01", sid, round_id, 0, 0, None)
+                self.drain()
+                self.assertEqual([n.route for n in self.nudges], ["relay"])
+
+    def test_a_message_or_an_answer_sent_while_an_idle_nudge_is_queued_reaches_a_holding_manager_at_once(self):
+        for extra in ({"wait_until": at(T0 + 300 + 7200)}, {"paused": "the lead freed the account"}):
+            for send in ("message", "answer"):
+                with self.subTest(extra=sorted(extra), send=send):
+                    self.setUp()
+                    svc, sid = self.idle_service()
+                    secret = self.secret(sid)
+                    self.now[0] = T0 + 300
+                    svc.nudge_idle()
+                    self.assertEqual(svc._nudging, {sid})
+                    self.assertEqual(len(self.queued.jobs), 1)
+                    svc.send_report(sid, secret, {**REPORT, **extra})
+                    if send == "message":
+                        svc.send_message("owner/p01", sid, "hello")
+                    else:
+                        round_id, _ = svc.ask_questions(sid, secret, ROUND)
+                        svc.answer_question("owner/p01", sid, round_id, 0, 0, None)
+                    self.drain()
+                    self.assertEqual([n.route for n in self.nudges], ["relay"])
+                    self.assertEqual(self.continues(), [])
+                    self.assertEqual(svc._nudge_again, set())
 
 
 class IdleQuotaTest(IdleCase):
