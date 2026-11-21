@@ -93,7 +93,8 @@ stays in `running()`.
 Rows. `acted(profile, action, outcome, by="owner")` is `("signin.acted", None, {"by": by, "profile",
 "action", "outcome"})` (`by` is `owner` or a colleague's login, `event_log.normal_login(by) == by`,
 else `ValueError`, #1343), `action` one of `ACTIONS` and `outcome` one of `START_OUTCOMES` for `start`,
-`sent` for `code`, `cancelled` for `cancel`. `ended(profile, outcome, attempt)` is `("signin.ended",
+`sent` for `code`, `cancelled` for `cancel`, `signed_out` or `failed` for `signout` (a sign-out
+alone of a colleague's account, #1345). `ended(profile, outcome, attempt)` is `("signin.ended",
 None, {"profile", "outcome", "attempt"})`, `outcome` one of `OUTCOMES`, `attempt` the sequence
 number of the run's `signin.acted` start row (a positive `int`, never a `bool`). Both raise
 `ValueError` otherwise. Neither kind is in `KEPT_KINDS`, and neither carries a link or a code.
@@ -180,7 +181,7 @@ ROUTES = ("manual", "loopback", "unknown")
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 _LOOPBACK_ADDRESSES = (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1"))
 MAX_CODE_CHARS = 512
-ACTIONS = ("start", "code", "cancel")
+ACTIONS = ("start", "code", "cancel", "signout")
 START_OUTCOMES = ("started", "running", "failed")
 OUTCOMES = ("signed_in", "failed", "timed_out", "cancelled")
 ENDS = ("exited", "timed_out", "cancelled")
@@ -188,7 +189,8 @@ CODE_INPUT = "pipe"
 CODE_END = {"pipe": "\n", "pty": "\r"}
 POLL_SECONDS = 0.1
 
-_ACTION_OUTCOMES = {"start": START_OUTCOMES, "code": ("sent",), "cancel": ("cancelled",)}
+_ACTION_OUTCOMES = {"start": START_OUTCOMES, "code": ("sent",), "cancel": ("cancelled",),
+                    "signout": ("signed_out", "failed")}
 
 
 def login_command() -> list[str]:

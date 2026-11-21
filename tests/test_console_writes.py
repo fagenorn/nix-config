@@ -137,7 +137,7 @@ class WriteRouteTest(Case):
                           "/api/round-answer", "/api/continue", "/api/exclusion", "/api/pin",
                           "/api/signin", "/api/signin-code", "/api/signin-cancel",
                           "/api/signin-link", "/api/account-add",
-                          "/api/account-remove", "/api/register-project",
+                          "/api/account-remove", "/api/account-signout", "/api/register-project",
                           "/api/plan-answer", "/api/plan-approve",
                           "/api/adoption-register", "/api/adoption-merge", "/api/plan-defer",
                           "/api/register-confirm", "/api/trust-check",
@@ -146,7 +146,8 @@ class WriteRouteTest(Case):
                           "/api/activate", "/api/share-tailnet", "/api/share-colleague",
                           "/api/share-remove", "/api/look-retry",
                           "/api/guest-account", "/api/guest-signin-code",
-                          "/api/guest-signin-cancel"})
+                          "/api/guest-signin-cancel", "/api/guest-account-signout",
+                          "/api/guest-account-remove"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(

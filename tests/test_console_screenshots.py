@@ -121,11 +121,11 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_forty_nine_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 49)
-        self.assertEqual(shots.STATES[-7:], ("sharing-panel", "sharing-off", "sharing-unreadable",
+    def test_the_set_is_fifty_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 50)
+        self.assertEqual(shots.STATES[-8:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
-                                             "owner-actors"))
+                                             "owner-actors", "owner-accounts"))
         self.assertIn("guest-steer", shots.SHARING_STATES)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
@@ -142,7 +142,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.STATES[shots.STATES.index("adoption-moved") + 1],
                          "adoption-failed")
         self.assertEqual(shots.ADOPTION_STATES, ("adoption-merge", "adoption-moved", "adoption-failed"))
-        self.assertEqual(shots.STATES[-31:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-32:-8], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
@@ -187,7 +187,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertFalse(steer["verify-approve"])
 
     def test_the_guest_seed_holds_a_colleagues_own_account(self) -> None:
-        for state in ("guest-page", "guest-steer", "owner-actors"):
+        for state in ("guest-page", "guest-steer", "owner-actors", "owner-accounts"):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
                 fixture = shots.build_fixture(Path(tmp).resolve(), state, time.time())
                 log = shots.EventLog(fixture.store)
@@ -196,11 +196,16 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 finally:
                     log.close()
                 added = [e.payload for e in events if e.kind == "account.added"]
-                self.assertEqual(added, [{"by": shots.COLLEAGUE, "profile": "colleague-1"}])
+                self.assertEqual(added, [{
+                    "by": shots.COLLEAGUE, "profile": "colleague-1",
+                    "identity": account_add.identity(fixture.accounts / "profiles" / "colleague-1")}])
+                self.assertIsNotNone(added[0]["identity"])
                 readings = [e.payload for e in events
                             if e.kind == "signin.reading" and e.payload.get("profile") == "colleague-1"]
                 self.assertEqual([r["state"] for r in readings], ["signed_in"])
                 self.assertTrue((fixture.accounts / "profiles" / "colleague-1").is_dir())
+                for name in ("work-main", "work-spare"):
+                    self.assertTrue((fixture.accounts / "profiles" / name).is_dir())
 
     def test_the_guest_seed_builds_against_the_base_revisions_add_row(self) -> None:
         # The before picture runs this fixture against the base revision, whose `added` takes a profile only.
@@ -216,7 +221,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     added = [e.payload for e in log.events() if e.kind == "account.added"]
                 finally:
                     log.close()
-                self.assertEqual(added, [{"by": shots.COLLEAGUE, "profile": "colleague-1"}])
+                self.assertEqual([(a["by"], a["profile"]) for a in added], [(shots.COLLEAGUE, "colleague-1")])
 
     def test_the_guest_page_shot_opens_the_consent_only_on_a_page_that_has_it(self) -> None:
         door = "#console-door"
@@ -258,6 +263,48 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         self.assertLess(order.index(wanted), order.index("shot"))
                     else:
                         self.assertNotIn(wanted, page.waits)
+
+    def test_the_owner_accounts_shot_opens_the_panel_and_waits_for_sign_out_where_the_service_offers_it(
+            self) -> None:
+        for width in (1440, 480):
+            for offered in (True, False):
+                with self.subTest(width=width, offered=offered), tempfile.TemporaryDirectory() as tmp, \
+                        mock.patch.object(shots, "offers_account_changes", return_value=offered):
+                    browser, page = fake_browser({"#console-door", ".acct-owner"})
+                    order = []
+                    page.screenshot = lambda path, full_page: order.append("shot")
+                    wait = page.wait_for_selector
+                    page.wait_for_selector = lambda s: (wait(s), order.append(s))
+                    shots._shoot(browser, "http://console.test/", "owner-accounts", width, Path(tmp))
+                    self.assertEqual(page.clicks, ["#capacity"])
+                    self.assertIn("#accounts:not([hidden])", page.waits)
+                    self.assertIn(".acct-row .acct-owner", page.waits)
+                    if offered:
+                        self.assertIn(".acct-row .acct-signout", page.waits)
+                        self.assertLess(order.index(".acct-row .acct-signout"), order.index("shot"))
+                    else:
+                        self.assertNotIn(".acct-row .acct-signout", page.waits)
+
+    def test_the_guest_page_shot_waits_for_his_controls_where_the_service_offers_them(self) -> None:
+        controls = (".pool-yours .pool-signout", ".pool-yours .pool-remove")
+        for offered in (True, False):
+            with self.subTest(offered=offered), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "offers_account_changes", return_value=offered):
+                browser, page = fake_browser({"#console-door", "#pool", ".pool-add"})
+                order = []
+                page.screenshot = lambda path, full_page: order.append("shot")
+                wait = page.wait_for_selector
+                page.wait_for_selector = lambda s: (wait(s), order.append(s))
+                shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
+                for selector in controls:
+                    if offered:
+                        self.assertIn(selector, page.waits)
+                        self.assertLess(order.index(selector), order.index("shot"))
+                    else:
+                        self.assertNotIn(selector, page.waits)
+
+    def test_the_account_changes_are_offered_by_this_service(self) -> None:
+        self.assertIs(shots.offers_account_changes(), True)
 
     def test_capture_shoots_the_guest_steer_state_through_the_guest_door(self) -> None:
         class Browser:
