@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from clerk_tools import outside_clerk_tools, granted_tools  # noqa: E402
 from program_harness import server_for  # noqa: E402
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -12260,24 +12262,54 @@ class LookResumeTest(unittest.TestCase):
     # #1425: the clerk has no Write tool, so the look-post prompt may name only the tools its agent definition grants.
     def test_the_look_post_prompt_names_only_tools_the_clerk_has(self):
         _, calls = self.fix()
-        clerk = (REPO_ROOT / "home/common/claude-code/agents/clerk.md").read_text(encoding="utf-8")
-        granted = set(re.search(r"^tools: (.*)$", clerk, re.M).group(1).split(", "))
-        self.assertEqual(granted, {"Bash", "Read", "Skill"})
-        named = set(re.findall(r"\b([A-Z][A-Za-z]+) tool\b", prompt(calls, "look-post")))
-        self.assertLessEqual(named, granted, f"the look-post prompt names tools outside the clerk's: {named - granted}")
+        self.assertEqual(granted_tools(), {"Bash", "Read", "Skill"})
+        text = prompt(calls, "look-post")
+        self.assertEqual(outside_clerk_tools(text), set())
         self.assertEqual([c["agentType"] for c in calls if c["label"] == "look-post"], ["clerk"])
+        # The check itself: an added sentence asking for a tool the clerk lacks, with or without the word "tool", is found.
+        self.assertEqual(outside_clerk_tools(text + "\nUse Edit to update the file"), {"Edit"})
+        self.assertEqual(outside_clerk_tools(text + "\nUse the Write tool"), {"Write"})
+        self.assertEqual(outside_clerk_tools("Run it with Bash, then Read the file"), set())
 
+    def look_post_commands(self, plan_dir, words):
+        """The look-post prompt for a plan directory: its words-file write and its post command, as the clerk is told to run them."""
+        cont = self.look_cont()
+        cont["setup"]["plan_dir"] = str(plan_dir)
+        look = {"answer": "fix", "head": SHA, "words": words}
+        _, calls = run(args=dict(ARGS, cont=cont, look=look), patch=self.FIXED)
+        text = prompt(calls, "look-post")
+        return (text, re.search(r"run alone and exactly: (printf [^\n]*)", text).group(1),
+                re.search(r"run alone and exactly: (look-approval post[^\n]*)", text).group(1))
+
+    # #1425 (DR-01): the plan directory is a checkout path; one with a space, an apostrophe and a dollar sign is written and posted whole.
     def test_the_owners_words_reach_the_words_file_unchanged(self):
         words = "make the \"label\" bold:\nit costs $5 and `x` and 'y' \\ n \u00e9 \U0001f600\n\n"
-        look = {"answer": "fix", "head": SHA, "words": words}
-        _, calls = run(args=dict(ARGS, cont=self.look_cont(), look=look), patch=self.FIXED)
-        command = re.search(r"run alone and exactly: (printf [^\n]*)", prompt(calls, "look-post")).group(1)
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "look-fix-words.txt"
-            command = command.replace("/r/.git/worktrees/w/deliver-standard/look-fix-words.txt", str(target))
-            self.assertIn(str(target), command)
-            subprocess.run(["sh", "-c", command], check=True, timeout=60)
-            self.assertEqual(target.read_bytes(), words.encode("utf-8"))
+            plan_dir = Path(tmp) / "Team Checkout" / "it's $HOME" / "deliver-standard"
+            plan_dir.mkdir(parents=True)
+            _, write, post = self.look_post_commands(plan_dir, words)
+            subprocess.run(["sh", "-c", write], check=True, cwd=tmp, timeout=60)
+            self.assertEqual((plan_dir / "look-fix-words.txt").read_bytes(), words.encode("utf-8"))
+            self.assertEqual(os.listdir(tmp), ["Team Checkout"], "the write created a file beside the plan directory")
+            self.assertEqual(shlex.split(post)[-1], str(plan_dir / "look-fix-words.txt"))
+
+    # #1425 (DR-03): a write that fails partway leaves a prefix the post would accept, so the clerk is told to stop and the program stops.
+    def test_a_failed_words_write_posts_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            text, write, _ = self.look_post_commands(Path(tmp), "make the label bold")
+            self.assertIn("If that command exits non-zero, run nothing else and return verdict write-failed", text)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            decoder = bin_dir / "base64"
+            decoder.write_text("#!/bin/sh\nprintf prefix\nexit 1\n", encoding="utf-8")
+            decoder.chmod(0o755)
+            done = subprocess.run([shutil.which("sh"), "-c", write], cwd=tmp, env={"PATH": str(bin_dir)}, capture_output=True, timeout=60)
+            self.assertEqual((done.returncode != 0, (Path(tmp) / "look-fix-words.txt").read_bytes()), (True, b"prefix"))
+        failed = dict(self.FIXED, **{"look-post": {"verdict": "write-failed", "detail": "base64: invalid input"}})
+        result, calls = self.fix(patch=failed)
+        self.assertEqual(result["stage"], "look-approve")
+        for label in ("look-fix", "look-status", "merge"):
+            self.assertNotIn(label, labels(calls))
 
     def test_fix_for_a_moved_head_posts_nothing(self):
         result, calls = self.fix(head=B)
