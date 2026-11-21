@@ -352,19 +352,43 @@ def _names_release(part: str) -> bool:
     return name in _RELEASE_PROGRAMS or module == _RELEASE_MODULE
 
 
+_SEGMENT = re.compile(r"[;|&()\n`]")
+_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
+_READERS = frozenset({"git", "gh", "sed", "grep", "rg", "ls", "cat", "head", "tail", "wc", "diff", "less"})
+
+
+def _segment_is_release(words_: list[str]) -> bool:
+    """One simple command that names the release program: a read of it, or anything that may run it."""
+    while words_ and _ASSIGNMENT.match(words_[0]):
+        words_ = words_[1:]
+    if not words_ or not any(_names_release(part) for part in words_):
+        return False
+    head = os.path.basename(words_[0])
+    if _names_release(words_[0]) or (
+            head.startswith("python") and any(_names_release(part) for part in words_[1:4])):
+        rest = words_[1:]
+        return any(part == "transaction" and following not in _RELEASE_READS
+                   for part, following in zip(rest, rest[1:]))
+    return head not in _READERS
+
+
 def _is_release(command: str, parts: list[str]) -> bool:
-    """Fail closed: any spelling that can reach a release run or abandon, however the shell names the program."""
+    """Fail closed: any spelling that can reach a release run or abandon, however the shell names the program.
+
+    A command naming the release program is only read when each simple command that names it is the program
+    itself or an interpreter running it with `transaction status` or `preview`, or starts with a reader
+    (`git`, `grep`, `sed`...): a wrapper such as `xargs` or `env` takes its words from a pipe or a file.
+    """
     if any(first == "transaction" and second in ("run", "abandon")
            for first, second in zip(parts, parts[1:])):
         return True
-    named = [index for index, part in enumerate(parts) if _names_release(part)]
-    if not named:
+    if not any(_names_release(part) for part in parts):
         return False
     if any(char in command for char in "$`"):
         return True
-    after = parts[named[0] + 1:]
-    return any(part == "transaction" and following not in _RELEASE_READS
-               for part, following in zip(after, after[1:]))
+    cleaned = re.sub(r"['\"\\]", "", command)
+    return any(_segment_is_release([part for part in _SPLIT.split(segment) if part])
+               for segment in _SEGMENT.split(cleaned))
 
 
 def _verb_of(command: str) -> str | None:

@@ -308,7 +308,11 @@ class JudgeTest(unittest.TestCase):
                         f"r=release; $r transaction abandon",
                         f"x=transaction; release $x run",
                         f"release transaction $verb --repo-root {self.root}",
-                        f"echo {run}"):
+                        f"echo {run}",
+                        "printf '%s\\n' --candidate X run transaction | tac | xargs release",
+                        "xargs -a FILE release", "cat FILE | xargs release",
+                        "env release", "sudo release.py", "find . -exec release {} +",
+                        "echo run transaction release | tac | sh"):
             with self.subTest(command):
                 self.assertTrue(mentions(command))
                 self.assertEqual("release", permit.verb_of(command))
@@ -318,7 +322,8 @@ class JudgeTest(unittest.TestCase):
     def test_release_words_that_reach_no_run_or_abandon_are_not_mentioned(self):
         for command in ("release transaction status", "release transaction preview --repo-root r",
                         "sed -n 1,20p python/agent_tools/release/release.py", "git checkout release",
-                        "gh release list", "echo transaction"):
+                        "gh release list", "echo transaction", "grep -rn release docs | wc -l",
+                        "PYTHONPATH=python python3 -m agent_tools.release.release transaction status"):
             with self.subTest(command):
                 self.assertFalse(mentions(command))
 
