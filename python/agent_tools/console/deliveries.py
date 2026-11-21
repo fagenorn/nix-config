@@ -298,11 +298,12 @@ OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
     (BUILDING, r"fix-(\d+)-\d+"),
     (BUILDING, r"rereview-(\d+)-\d+"),
     (BUILDING, r"direct-impl"),
+    (BUILDING, r"live-impl|renew-tasks"),
     (
         FINAL_REVIEW,
         r"renew-final-review|diff-size|final-codex|final-\d+|final-integration|final-scoped|follow-ups-\d+|fix-wave|fix-wave-\d+"
         r"|fix-wave-review|fix-wave-review-\d+|direct-codex|direct-review|direct-review-full|direct-fix"
-        r"|direct-rereview",
+        r"|direct-rereview|live-review",
     ),
     (VERIFYING, r"verify|verify-\d+|verify-rerun-\d+|verify-fix-\d+|verify-fix-review-\d+|ws-check-\d+"
         r"|look-fix|look-fix-review|renew-look-fix|look-verify|look-reverify|fix-retest"),

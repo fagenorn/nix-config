@@ -244,7 +244,7 @@ FOLDED_READ = {
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
                "worktree_path", "head", "merged_pr", "merged_refs", "merged_heads", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
                "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
-               "verification", "holder", "acquire", "claim", "answer", "renew"},
+               "verification", "holder", "acquire", "claim", "answer", "renew", "live_fault"},
               {"existing": {"local_branch", "remote_branch", "worktree", "dirty", "status"},
                "merged_refs[]": {"number", "closes"}, "merged_heads[]": {"number", "commits"},
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
@@ -2825,7 +2825,8 @@ class PlanTestCaseFormTest(unittest.TestCase):
         self.assertIn(self.RESUMED, impl)
         self.assertNotIn("mutation checks still hold", impl)
         direct = PROGRAM.read_text(encoding="utf-8")
-        self.assertEqual(direct.count(self.RESUMED.replace(" start_head is", "")), 2)
+        # The direct lane and the live-fault lane (#1433) each build the paragraph, and the standard task prompt does.
+        self.assertEqual(direct.count(self.RESUMED.replace(" start_head is", "")), 3)
 
     def test_no_implementer_schema_asks_for_mutation_checked(self):
         """#1002: nothing read the member, so no schema asks for it: not here, not in deliver-batch, not in the harness fixture."""
@@ -8483,6 +8484,213 @@ class DirectLaneTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+LIVE_START = "b" * 40
+DECLARED = {"verdict": "declared", "sprint_id": "0123456789abcdef",
+            "fault": {"id": 5, "issue": 9, "observed": "saving the settings form drops the billing address",
+                      "when": "12:10 UTC", "proven": "a saved form read back from the database",
+                      "at": "2026-11-21T12:10:00.123456+00:00"}}
+LIVE_PATCH = {"setup": {"live_fault": DECLARED}}
+FT = {"name": "test_harm", "file": "tests/test_harm.py",
+      "red": {"command": "pytest tests/test_harm.py::test_harm", "exit": 1, "head": LIVE_START, "failed": ["test_harm"],
+              "output": "AssertionError: the billing address was dropped"},
+      "green": {"command": "pytest tests/test_harm.py::test_harm", "exit": 0, "head": SHA, "passed": ["test_harm"]}}
+LIVE_IMPL_REPLY = {"status": "done", "start_head": LIVE_START, "commit": SHA, "tests": ["t"], "notes": "ok",
+                   "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}], "fault_test": FT, "beyond": []}
+
+
+def with_ft(**changes):
+    """The default fault_test with the named parts replaced: red=/green= merge into their run, the rest replace."""
+    ft = copy.deepcopy(FT)
+    for key, value in changes.items():
+        if key in ("red", "green"):
+            ft[key].update(value)
+        else:
+            ft[key] = value
+    return ft
+
+
+class LiveLaneTest(unittest.TestCase):
+    """#1433: a declared live fault runs one implementer with failing-then-passing evidence and one review, no plan."""
+
+    def test_a_declared_issue_runs_one_implementer_and_one_reviewer_and_no_plan(self):
+        result, calls = run(args=ARGS, patch=LIVE_PATCH)
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertFalse([l for l in names if l.startswith("plan") or l == "owner-answer"], names)
+        self.assertFalse([l for l in names if l.endswith("-codex")], names)
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], ["live-impl"])
+        reviewers = [(c["label"], c["agentType"]) for c in calls if c["agentType"] in ("reviewer", "reviewer-lite")]
+        self.assertEqual(reviewers, [("live-review", "reviewer")])
+        self.assertLess(names.index("renew-tasks"), names.index("live-impl"))
+        self.assertLess(names.index("live-impl"), names.index("live-review"))
+        self.assertLess(names.index("live-review"), names.index("verify"))
+        self.assertLess(names.index("verify"), names.index("pr"))
+
+    def test_the_setup_reads_the_declaration_unless_a_lane_is_chosen(self):
+        for args, patch in ((ARGS, None), (dict(ARGS, lane="live"), LIVE_PATCH)):
+            _, calls = run(args=args, patch=patch)
+            text = prompt(calls, "setup")
+            self.assertIn("sprint recap", text)
+            self.assertIn("sprint: no sprint id", text)
+        for lane in ("standard", "direct"):
+            _, calls = run(args=dict(ARGS, lane=lane))
+            self.assertNotIn("sprint recap", prompt(calls, "setup"))
+
+    def test_an_explicit_standard_lane_reads_no_declaration(self):
+        _, calls = run(args=dict(ARGS, lane="standard"), patch=LIVE_PATCH)
+        self.assertIn("plan", labels(calls))
+        self.assertNotIn("live-impl", labels(calls))
+
+    def test_an_explicit_live_lane_without_a_standing_declaration_stops(self):
+        wrong_issue = copy.deepcopy(DECLARED)
+        wrong_issue["fault"]["issue"] = 10
+        for reply in ({"verdict": "none"}, {"verdict": "no-sprint"}, wrong_issue, dict(DECLARED, sprint_id="x")):
+            with self.subTest(reply=reply):
+                result, calls = run(args=dict(ARGS, lane="live"), patch={"setup": {"live_fault": reply}})
+                self.assertEqual(result["stage"], "live-fault")
+                self.assertIn("rerun with lane standard and no cont", result["reason"])
+                self.assertNotIn("live-impl", labels(calls))
+                self.assertEqual(result["cont"]["lane"], "live")
+
+    def test_an_unread_declaration_stops_a_lane_less_run_before_any_planner(self):
+        for live_fault in ({"verdict": "error", "detail": "console down"}, None, {"verdict": "declared"}):
+            with self.subTest(live_fault=live_fault):
+                result, calls = run(args=ARGS, patch={"setup": {"live_fault": live_fault}})
+                self.assertEqual(result["stage"], "live-fault")
+                self.assertIn("could not be read", result["reason"])
+                self.assertFalse([l for l in labels(calls) if l.startswith("plan")], labels(calls))
+                self.assertNotIn("live-impl", labels(calls))
+                self.assertEqual(result["cont"]["lane"], "live")
+                resumed, calls = run(args=dict(ARGS, cont=result["cont"]), patch={"setup": {"head": SHA, "live_fault": DECLARED}})
+                self.assertIn("live-impl", labels(calls))
+        _, calls = run(args=ARGS, patch={"setup": {"live_fault": {"verdict": "no-sprint"}}})
+        self.assertIn("plan", labels(calls))
+
+    def test_an_early_stop_on_a_declared_issue_keeps_the_live_lane(self):
+        result, _ = run(args=ARGS, patch={"setup": {"ok": False, "reason": "not-resumable", "live_fault": DECLARED}})
+        self.assertEqual(result["stage"], "setup")
+        self.assertEqual(result["cont"]["lane"], "live")
+        stopped, _ = run(args=ARGS, patch={"setup": {"live_fault": DECLARED, "claim": {"ok": False, "reason": "worktree"}}})
+        self.assertEqual(stopped["stage"], "claim")
+        self.assertEqual(stopped["cont"]["lane"], "live")
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"live_fault": DECLARED}})
+        self.assertNotIn("plan", labels(calls))
+        self.assertIn("live-impl", labels(calls))
+
+    def test_a_declared_issue_in_plan_mode_stops(self):
+        result, calls = run(args=dict(ARGS, mode="plan"), patch=LIVE_PATCH)
+        self.assertEqual(result["stage"], "live-fault")
+        self.assertIn("no plan mode", result["reason"])
+        self.assertNotIn("live-impl", labels(calls))
+        self.assertNotIn("plan", labels(calls))
+        result, calls = run(args=dict(ARGS, lane="live", mode="plan"))
+        self.assertEqual(result, {"stage": "args", "error": "the live-fault lane has no plan mode"})
+        self.assertEqual(calls, [])
+
+    def test_a_change_without_failing_then_passing_evidence_stops(self):
+        reply = dict(LIVE_IMPL_REPLY)
+        without = {k: v for k, v in reply.items() if k != "fault_test"}
+        cases = {
+            "absent": {"live-impl": without},
+            "red passed": {"live-impl": dict(reply, fault_test=with_ft(red={"exit": 0}))},
+            "red never ran": {"live-impl": dict(reply, fault_test=with_ft(red={"exit": 127, "failed": []}))},
+            "another test failed": {"live-impl": dict(reply, fault_test=with_ft(red={"failed": ["test_other"]}))},
+            "no failure line": {"live-impl": dict(reply, fault_test=with_ft(red={"output": ""}))},
+            "green failed": {"live-impl": dict(reply, fault_test=with_ft(green={"exit": 1}))},
+            "green passed nothing": {"live-impl": dict(reply, fault_test=with_ft(green={"passed": []}))},
+            "another selector": {"live-impl": dict(reply, fault_test=with_ft(green={"command": "pytest tests/test_other.py::test_other"}))},
+            "red at another head": {"live-impl": dict(reply, fault_test=with_ft(red={"head": "e" * 40}))},
+            "green at another head": {"live-impl": dict(reply, fault_test=with_ft(green={"head": "e" * 40}))},
+            "no name": {"live-impl": dict(reply, fault_test=with_ft(name=""))},
+        }
+        for name, replies in cases.items():
+            with self.subTest(case=name):
+                result, calls = run(args=ARGS, patch=LIVE_PATCH, replies=replies)
+                self.assertEqual(result["stage"], "live-evidence")
+                self.assertTrue(result["reason"].startswith("live-evidence: the change carries no test shown failing before it and passing after it"), result["reason"])
+                self.assertIn("rerun with lane standard and no cont", result["reason"])
+                self.assertNotIn("live-review", labels(calls))
+                self.assertNotIn("verify", labels(calls))
+                self.assertNotIn("partial", result["cont"])
+                self.assertEqual(result["cont"]["live_fault"]["final"], "live-evidence")
+        result, _ = run(args=ARGS, patch=LIVE_PATCH)
+        self.assertEqual(result["stage"], "done")
+
+    def test_a_final_live_stop_does_not_resume(self):
+        stopped, _ = run(args=ARGS, patch=LIVE_PATCH, replies={"live-impl": dict(LIVE_IMPL_REPLY, fault_test=with_ft(red={"exit": 0}))})
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": SHA, "live_fault": DECLARED}})
+        self.assertEqual(result["stage"], "live-evidence")
+        self.assertIn("already stopped at live-evidence", result["reason"])
+        self.assertNotIn("live-impl", labels(calls))
+
+    def test_the_implementer_is_called_once_after_its_own_renew(self):
+        _, calls = run(args=ARGS, patch=LIVE_PATCH)
+        schema = schema_of(calls, "live-impl")
+        self.assertNotIn("renew", schema["properties"])
+        self.assertLessEqual({"fault_test", "beyond"}, set(schema["properties"]))
+        self.assertEqual(schema["required"], ["status", "notes"])
+        result, calls = run(args=ARGS, patch=LIVE_PATCH, replies={"live-impl": None})
+        self.assertEqual(result["stage"], "task")
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], ["live-impl"])
+        self.assertEqual(result["cont"]["partial"], 1)
+        result, calls = run(args=ARGS, patch=dict(LIVE_PATCH, **{"live-impl": {"status": "blocked", "notes": "needs a schema change"}}))
+        self.assertEqual(result["stage"], "live-bound")
+        self.assertEqual(result["cont"]["live_fault"]["final"], "live-bound")
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], ["live-impl"])
+
+    def test_the_live_implementer_is_told_the_fault_and_the_test_first_order(self):
+        _, calls = run(args=ARGS, patch=LIVE_PATCH)
+        text = prompt(calls, "live-impl")
+        for piece in (DECLARED["fault"]["observed"], "smallest change that stops the harm", "it must fail",
+                      "run the same command again", "it must pass", "beyond"):
+            self.assertIn(piece, text)
+
+    def test_an_unusable_review_is_not_asked_again(self):
+        result, calls = run(args=ARGS, patch=LIVE_PATCH, replies={"live-review": INCOMPLETE})
+        self.assertEqual(result["stage"], "live-review")
+        self.assertNotIn("live-review-again", labels(calls))
+        self.assertEqual(result["lost_reviews"], ["live-review"])
+        self.assertNotIn("final", result["cont"]["live_fault"])
+        result, _ = run(args=ARGS, patch=dict(LIVE_PATCH, **{"live-review": {"head": "e" * 40}}))
+        self.assertEqual(result["stage"], "live-bound")
+
+    def test_a_live_stop_resumes_in_the_live_lane(self):
+        stopped, _ = run(args=ARGS, patch=LIVE_PATCH, replies={"verify": None})
+        self.assertEqual(stopped["cont"]["lane"], "live")
+        self.assertEqual(stopped["cont"]["live_fault"],
+                         {"id": 5, "sprint_id": "0123456789abcdef", "issue": 9, "at": DECLARED["fault"]["at"]})
+        self.assertEqual(stopped["cont"]["done"][0]["fault_test"]["red"]["exit"], 1)
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": SHA, "live_fault": DECLARED}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("live-impl", labels(calls))
+        self.assertNotIn("live-review", labels(calls))
+        self.assertIn("sprint recap", prompt(calls, "setup"))
+        result, _ = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": SHA, "live_fault": {"verdict": "none"}}})
+        self.assertEqual(result["stage"], "live-fault")
+
+    def test_a_replaced_declaration_stops_the_resume(self):
+        stopped, _ = run(args=ARGS, patch=LIVE_PATCH, replies={"verify": None})
+        replaced = copy.deepcopy(DECLARED)
+        replaced["fault"].update({"id": 6, "at": "2026-11-21T13:00:00.000000+00:00"})
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": SHA, "live_fault": replaced}})
+        self.assertEqual(result["stage"], "live-fault")
+        self.assertIn("withdrawn or replaced", result["reason"])
+        self.assertNotIn("live-review", labels(calls))
+
+    def test_a_blocked_codex_capability_does_not_stop_the_live_lane(self):
+        blocked = {"review_state": {"code": "blocked", "plan": "blocked"}}
+        result, calls = run(args=ARGS, patch={"setup": dict(blocked, live_fault=DECLARED)})
+        self.assertEqual(result["stage"], "done")
+        self.assertFalse([l for l in labels(calls) if l.endswith("-codex")], labels(calls))
+        result, _ = run(args=ARGS, patch={"setup": blocked})
+        self.assertEqual(result["stage"], "review-blocked")
+
+    def test_the_lane_arg_takes_live_only(self):
+        result, calls = run(args=dict(ARGS, lane="fast"))
+        self.assertEqual(result, {"stage": "args", "error": "lane must be standard, direct or live"})
+        self.assertEqual(calls, [])
+
+
 class DeadAgentTest(unittest.TestCase):
     """deliver-batch (#636 D12) reads dead_agents to tell an agent that returned nothing from a stop."""
 
@@ -9065,10 +9273,10 @@ EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind,
              "hold-draft", "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
              "look-checks-", "look-reverify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
-    (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
+    (IMPL, ("direct-impl", "direct-fix", "live-impl", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-", "look-fix", "fix-retest")),
     (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "final-scoped", "fix-wave-review",
-           "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-", "look-fix-review")),
+           "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-", "look-fix-review", "live-review")),
     # #923: a review with no diff range (a no-commit task, a fix answered with no commit) runs on reviewer.
     (EITHER, ("review-", "direct-review", "rereview-")),
     (LITE, ("direct-rereview",)),
@@ -9085,6 +9293,8 @@ NARROWING = {"verdict": "findings",
              "findings": [{"severity": "critical", "summary": "race in release", "relation": "narrowing"}]}
 SCENARIOS = (
     {},
+    # #1433: the live-fault lane's one implementer and one reviewer.
+    {"patch": LIVE_PATCH},
     {"args": dict(ARGS, cont=RESUME_FOR_ANSWER), "replies": {"owner-answer": ANSWER}},
     {"args": dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT])},
     {"args": dict(ARGS, cont=dict(AMEND_CONT, blocked={"task": 2, "notes": "the fixture is missing"}), decisions="Use the other fixture.")},
@@ -9430,6 +9640,8 @@ class PreCommitFocusTest(unittest.TestCase):
         ({"replies": {"sync-review-1": FINDING, "checks-2": PASSED},
           "patch": dict(CONFLICT, pr={"checks": {"state": "behind", "head": SHA}})}, {"sync-1", "sync-resolve-1", "fix-sync-1"}),
         ({"args": DIRECT, "replies": {"direct-review": BAD}}, {"direct-impl", "direct-fix"}),
+        # #1433: the live-fault lane's one implementer.
+        ({"patch": LIVE_PATCH}, {"live-impl"}),
         # #1139: the owner's changes answer runs one fix round.
         ({"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "changes", "words": "make the label bold"})}, {"look-fix"}),
     )
@@ -9439,7 +9651,7 @@ class PreCommitFocusTest(unittest.TestCase):
         """Every FOCUSED-carrying implementer prompt, by label, over SCENARIOS with this verification contract."""
         found = {}
         for scenario, expected in self.SCENARIOS:
-            patched = dict(scenario, patch={**scenario.get("patch", {}), "setup": {"verification": verification}})
+            patched = dict(scenario, patch={**scenario.get("patch", {}), "setup": {**scenario.get("patch", {}).get("setup", {}), "verification": verification}})
             _, calls = run(**patched)
             prompts = {c["label"]: c["prompt"] for c in calls
                        if c["agentType"] == "implementer" and c["label"] in expected}
@@ -10653,16 +10865,16 @@ class StructuredReplyTest(unittest.TestCase):
     def test_every_review_reply_is_read_through_the_one_wrapper(self):
         source = PROGRAM.read_text(encoding="utf-8")
         schemas = (r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(SCOPED \? withItems\(FINDINGS, SCOPED_ITEM\) : FINAL_FINDINGS\)|SYNC_REVIEW_SCHEMA\(followup\)|FINDINGS|PLAN_REVIEW"
-                   r"|GRADED_FINDINGS|DIRECT_FINDINGS|FINAL_SCHEMA|SCOPED_FINDINGS) \}")
+                   r"|GRADED_FINDINGS|DIRECT_FINDINGS|FINAL_SCHEMA|SCOPED_FINDINGS|LIVE_FINDINGS) \}")
         sites = [m.end() for m in re.finditer(schemas, source)]
-        self.assertEqual(len(sites), 17)
+        self.assertEqual(len(sites), 18)
         # The options object of a review call closes the readReview() call, or one of its three named options does.
         tails = [source[end:source.index(")", end) + 1] for end in sites]
-        self.assertEqual(sorted(set(tails)), sorted([")", ", { fileless })", ", { ruled: true })", ", { optional: true })"]))
-        self.assertEqual((tails.count(", { fileless })"), tails.count(", { ruled: true })"), tails.count(", { optional: true })")), (4, 2, 1))
-        self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 17)
+        self.assertEqual(sorted(set(tails)), sorted([")", ", { fileless })", ", { ruled: true })", ", { optional: true })", ", { once: true })"]))
+        self.assertEqual((tails.count(", { fileless })"), tails.count(", { ruled: true })"), tails.count(", { optional: true })"), tails.count(", { once: true })")), (4, 2, 1, 1))
+        self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 18)
         # No schema that carries findings is built anywhere else: each is one of the named ones above, FINDINGS spread into it.
-        self.assertEqual(len(re.findall(r"\.\.\.(?:GRADED_)?FINDINGS,", source)), 6)
+        self.assertEqual(len(re.findall(r"\.\.\.(?:GRADED_)?FINDINGS,", source)), 7)
         self.assertEqual(source.count(", { fileless })"), 4)
         self.assertEqual(source.count("const fileless = !diffReviewed\n"), 1)
         self.assertEqual(source.count("{ ruled: true }"), 2)

@@ -6,6 +6,7 @@
 // gets that step's default; a key present with null stays null. The fresh setup prompt (it names `--holder <host>/<id> `)
 // A scenario's "after": { "<label>": "<other label>" } holds the reply of <label> until <other label> has been called (a run where it never is does not end).
 // #1139: every setup reply carries the look marker read (SETUP.look, unmarked): an explicit ok setup reply with no own look key gets it too, fresh and resume alike.
+// #1433: every setup reply carries the live-fault read (SETUP.live_fault, none); an explicit setup reply of any kind, ok or not, with no own live_fault key gets it too, so a scenario stays standard unless it declares a fault.
 // also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire, claim, answer (the owner's answer) and renew (the already_held claim renew); a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}], logs: [each log() line], events: ["call <label>" and "reply <label>" in order] }.
 import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -14,6 +15,13 @@ const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
 const TASK_COMMIT = n => (n === 1 ? 'c0ffee' : `c0ffee${n}`)
 const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], notes: 'ok' }
+// #1433: the live-fault lane's implementer returns the test it ran failing at start_head and passing at its commit (full shas, as followUpOf needs).
+const LIVE_START = 'b'.repeat(40)
+const FT = {
+  name: 'test_harm', file: 'tests/test_harm.py',
+  red: { command: 'pytest tests/test_harm.py::test_harm', exit: 1, head: LIVE_START, failed: ['test_harm'], output: 'AssertionError: the billing address was dropped' },
+  green: { command: 'pytest tests/test_harm.py::test_harm', exit: 0, head: SHA, passed: ['test_harm'] },
+}
 const SETUP = {
   ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main',
   branch: 'issue-9-x', worktree_path: '/r/.wt/w-issue-9-x', dirty: false, unset_env: [], merge_strategy: 'merge', delete_branch: true,
@@ -21,6 +29,7 @@ const SETUP = {
   knowledge: { standards: ['/r/docs/standards'], hints: ['/r/.hints'], rejections: ['/r/.rej'] },
   verification: [{ id: 'build', argv: ['make', 'build'], cwd: '.' }],
   look: { verdict: 'unmarked', covers: [] },
+  live_fault: { verdict: 'none' },
 }
 // The folded claim of a fresh setup prompt: the id its acquire command names, or null for a resume prompt.
 const HOLDER_ID = prompt => { const m = /--holder <host>\/([A-Za-z0-9._-]+) /.exec(prompt); return m ? m[1] : null }
@@ -78,6 +87,7 @@ const DEFAULTS = [
   [/^plan(-revise|-rules-revise|-branch-revise|-task-revise)?$/, PLAN],
   [/^direct-impl$/, { ...DONE, acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], sensitive: false, ineligible: false, renew: { verdict: 'renewed' } }],
   [/^direct-fix$/, DONE],
+  [/^live-impl$/, { status: 'done', start_head: LIVE_START, commit: SHA, tests: ['t'], notes: 'ok', acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], fault_test: FT, beyond: [] }],
   [/-codex$/, { available: true, ...PASS }],
   [/^diff-size$/, { measured: true, changed_lines: 10 }],
   [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '', renew: { verdict: 'renewed' } }],
@@ -86,6 +96,7 @@ const DEFAULTS = [
     const input = m ? JSON.parse(m[1]) : { edits: [] }
     return { status: 'applied', edits: input.edits.map(e => ({ file: e.file, exists: true, occurrences: 1, already: false })), refused: [] }
   }],
+  [/^live-review$/, { ...PASS, head: SHA, acceptance: [{ id: 'AC1', met: true, evidence: 'tests/test_harm.py:3 test_harm' }] }],
   [/^direct-review/, { ...PASS, acceptance: [{ id: 'AC1', met: true, evidence: 'test_a.py:10 test_works' }] }],
   // #1386: the follow-up filing step files each entry it is given as the next issue number of its call.
   [/^follow-ups-\d+$/, (prompt, label) => {
@@ -171,6 +182,7 @@ export function makeRunner(programText) {
           for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
         }
         if (label === 'setup' && out && typeof out === 'object' && !Array.isArray(out) && out.ok === true && !Object.prototype.hasOwnProperty.call(out, 'look')) out.look = structuredClone(SETUP.look)
+        if (label === 'setup' && out && typeof out === 'object' && !Array.isArray(out) && !Object.prototype.hasOwnProperty.call(out, 'live_fault')) out.live_fault = structuredClone(SETUP.live_fault)
         return released(label, prompt, out)
       }
       const base = defaultOf(label, prompt)
