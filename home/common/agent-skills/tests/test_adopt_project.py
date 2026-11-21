@@ -267,6 +267,8 @@ def host_independent(contract: dict) -> dict:
     contract["release"] = "unsupported"
     review = contract["bindings"]["workflow"]["review"]
     for role in ("plan", "code"):
+        if review[role] is None:
+            continue  # an unsupported role names no command id
         contract["bindings"]["commands"][review[role]] = {
             "argv": ["true"], "cwd": ".", "env": []}
     return contract
@@ -3580,6 +3582,19 @@ class ProcessWiringTest(AdoptTestCase):
                 child = run_child(*args, home=self.home)
                 self.assertEqual(child[0], expected, child[2])
                 self.assertEqual(run(*args, home=self.home), child)
+
+
+class HostIndependentFixtureTest(unittest.TestCase):
+    def test_an_unsupported_review_role_adds_no_command(self):
+        contract = fixture_contract()
+        contract["bindings"]["workflow"]["review"]["plan"] = None
+        original = {"argv": ["make", "null"], "cwd": ".", "env": []}
+        contract["bindings"]["commands"]["null"] = original
+        host_independent(contract)
+        # The fixture is written as JSON, where a `None` key becomes the id "null".
+        commands = json.loads(json.dumps(contract))["bindings"]["commands"]
+        self.assertEqual(commands["null"], original)
+        self.assertIn(contract["bindings"]["workflow"]["review"]["code"], commands)
 
 
 class AdoptFailureWrapperTest(unittest.TestCase):

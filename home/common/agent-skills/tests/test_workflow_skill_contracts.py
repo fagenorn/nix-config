@@ -2422,6 +2422,15 @@ class PlatformReviewCommandsTest(unittest.TestCase):
             with self.subTest(control=name):
                 self.assertFalse(self.companion_shape(bad, "plan-review"))
 
+    def test_the_platform_review_argv_is_pinned_in_the_stricter_order(self):
+        # Spelled out, not read back from PLATFORM_COMMANDS, so dropping `--fresh`
+        # from the one definition fails here although `companion_shape` accepts it.
+        for command_id, operation in (("codex-plan-review", "plan-review"),
+                                      ("codex-diff-review", "diff-review")):
+            with self.subTest(command_id=command_id):
+                self.assertEqual(
+                    agent_platform.PLATFORM_COMMANDS[command_id]["argv"],
+                    ["codex-companion", "task", "--fresh", self.REVIEWER_FLAG, operation])
 
     def test_the_reviewer_flag_is_defined_once(self):
         listing = subprocess.run(
