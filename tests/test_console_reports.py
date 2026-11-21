@@ -192,6 +192,12 @@ class ReportRouteTest(Case):
         self.assertEqual((folded.wait_until, folded.paused),
                          (None, "the lead freed this account"))
 
+    def dry(self, svc, sid, secret, extra):
+        body = json.dumps({"sprint_id": sid, "secret": secret, "dry_run": True,
+                           "report": {**REPORT, **extra}}).encode()
+        return self.assert_unchanged(
+            svc, lambda: support.post_page(svc.address, REPORT_PATH, JSON, body))
+
     def test_a_wait_until_in_the_past_unparseable_or_beyond_the_limit_is_refused_with_the_report(self):
         svc = self.open(clock=lambda: NOW)
         sid = self.started(svc)
@@ -202,9 +208,13 @@ class ReportRouteTest(Case):
             ({"wait_until": "2027-01-15T08:00:00Z"}, sprints.WAIT_PAST),
             ({"wait_until": "2027-01-16T08:00:01Z"}, sprints.WAIT_TOO_FAR),
             ({"wait_until": "2027-01-16T08:00:00.000500Z"}, sprints.WAIT_TOO_FAR),
+            ({"wait_until": "2027-01-16T08:00:00.0000001Z"}, sprints.WAIT_TOO_FAR),
             ({"wait_until": "tomorrow"}, member.format("wait_until")),
             ({"wait_until": "2027-01-15T10:00:00"}, member.format("wait_until")),
             ({"wait_until": "2027-01-15T12:00:00+02:00"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T10:00:00+00:00:00.5"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T10:00:00-00:00:00.5"}, member.format("wait_until")),
+            ({"wait_until": "2027-01-15T10:00:00+00:00:30"}, member.format("wait_until")),
             ({"wait_until": 1800007200}, member.format("wait_until")),
             ({"wait_until": None}, member.format("wait_until")),
             ({"paused": ""}, member.format("paused")),
@@ -215,23 +225,59 @@ class ReportRouteTest(Case):
              sprints.WAIT_AND_PAUSE),
         ]
         for extra, reason in table:
-            with self.subTest(extra=extra):
+            with self.subTest(route="send", extra=extra):
                 body = {**REPORT, **extra}
                 self.refused(svc, lambda: self.report(svc, sid, secret, body), 409,
                              reason.encode())
-
-        def dry(wait_until):
-            body = json.dumps({"sprint_id": sid, "secret": secret, "dry_run": True,
-                               "report": {**REPORT, "wait_until": wait_until}}).encode()
-            return self.assert_unchanged(
-                svc, lambda: support.post_page(svc.address, REPORT_PATH, JSON, body))
-
-        got = dry("2027-01-15T07:59:59Z")
-        self.assertEqual((got[0], got[2]), (409, sprints.WAIT_PAST.encode() + b"\n"))
+            with self.subTest(route="dry run", extra=extra):
+                got = self.dry(svc, sid, secret, extra)
+                self.assertEqual((got[0], got[2]), (409, reason.encode() + b"\n"))
         for edge in ("2027-01-16T08:00:00Z", "2027-01-15T08:00:00.000500Z"):
             with self.subTest(edge=edge):
-                got = dry(edge)
+                got = self.dry(svc, sid, secret, {"wait_until": edge})
                 self.assertEqual((got[0], got[2]), (200, b'{"checked":true}'))
+
+    def test_a_wait_until_inside_the_clocks_own_millisecond_is_judged_against_the_exact_clock(self):
+        svc = self.open(clock=lambda: NOW + 0.0009)  # 08:00:00.0009Z
+        sid = self.started(svc)
+        secret = self.secret(sid)
+        for route in ("send", "dry run"):
+            with self.subTest(route=route, past=True):
+                extra = {"wait_until": "2027-01-15T08:00:00.000500Z"}
+                if route == "send":
+                    self.refused(svc, lambda: self.report(svc, sid, secret, {**REPORT, **extra}),
+                                 409, sprints.WAIT_PAST.encode())
+                else:
+                    got = self.dry(svc, sid, secret, extra)
+                    self.assertEqual((got[0], got[2]), (409, sprints.WAIT_PAST.encode() + b"\n"))
+        got = self.dry(svc, sid, secret, {"wait_until": "2027-01-15T08:00:00.001Z"})
+        self.assertEqual((got[0], got[2]), (200, b'{"checked":true}'))
+
+    def test_a_wait_until_finer_than_a_microsecond_is_kept_by_rounding_up(self):
+        svc = self.open(clock=lambda: NOW)
+        sid = self.started(svc)
+        got = self.report(svc, sid, self.secret(sid),
+                          {**REPORT, "wait_until": "2027-01-15T10:00:00.0000001Z"})
+        self.assertEqual(got[0], 200)
+        self.assertEqual(svc._sprints[sid].report.wait_until, "2027-01-15T10:00:00.000001+00:00")
+
+    def test_a_wait_until_is_read_from_the_forms_of_a_utc_time(self):
+        for given, stored in (
+                ("2027-01-15T10:00:00Z", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15T10:00:00z", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15 10:00:00+0000", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15T10:00:00-00", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15T10:00Z", "2027-01-15T10:00:00+00:00"),
+                ("2027-01-15T10:00:00,25Z", "2027-01-15T10:00:00.250000+00:00"),
+                ("2027-01-15T10:00:00.1234567Z", "2027-01-15T10:00:00.123457+00:00"),
+                ("2027-01-15T10:00:00.1234560Z", "2027-01-15T10:00:00.123456+00:00")):
+            with self.subTest(given=given):
+                self.assertEqual(
+                    sprints.checked_report({**REPORT, "wait_until": given})["wait_until"], stored)
+        for given in ("2027-01-15", "2027-01-15T24:00:00Z", "2027-02-30T10:00:00Z",
+                      "2027-01-15T10:00:00.Z", "2027-01-15T10:00:00\u0661Z"):
+            with self.subTest(given=given), self.assertRaises(sprints.Refused):
+                sprints.checked_report({**REPORT, "wait_until": given})
 
     def test_the_fold_keeps_a_wait_until_whose_time_has_passed(self):
         self.assertEqual(sprints.checked_report({**REPORT, "wait_until": "2000-01-01T00:00:00Z"}),

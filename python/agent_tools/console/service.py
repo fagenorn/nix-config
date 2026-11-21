@@ -899,7 +899,8 @@ nothing, publishes nothing and marks nothing read. It answers 200 `application/j
 "report", "unread"}`: `brief` is null until a brief is sent, else `{"version", "decision" ("none",
 "approved" or "changes"), "reply" (the owner's words, or null), "parts"}` of the latest version;
 `report` is null until a report is sent, else the last report `{"at", "status", "phase",
-"milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}`, which a newer
+"milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}` and the
+`wait_until` and `paused` the report states, only when it states them (#1380), which a newer
 brief does not remove; `unread` is the number of the owner's messages not yet read.
 
 Questions (#891): `POST /api/ask` is a manager write dispatched like `/api/brief`, before
@@ -1096,7 +1097,8 @@ line, closes the connection, appends nothing and publishes nothing. The secret a
 line or answer.
 
 A report may also state a `wait_until` time or a `paused` reason (#1380, ADR-console-020):
-`_checked_report` passes `sprints.checked_report` the service's clock in milliseconds, so a time that is
+`_checked_report` passes `sprints.checked_report` the service's clock in milliseconds as an exact `Fraction`
+(never truncated, so a deadline within the clock's own millisecond is judged as it stands), so a time that is
 not after now or is more than 24 hours ahead, a pause that names an issue number and a report that
 states both are each 409 with the reason, on the send and on a dry run alike (a malformed member is
 409 `the report has no valid <member>`; any other key is 400 `bad report`). The row's `report`
@@ -1825,6 +1827,7 @@ import collections
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -7457,7 +7460,7 @@ class ConsoleService:
         sprint = self._manager_sprint(sprint_id, secret)
         if sprint.state != sprints.STARTING:
             raise sprints.Refused(sprints.NOT_STARTED)
-        checked = sprints.checked_report(report, int(self._clock() * 1000))
+        checked = sprints.checked_report(report, Fraction(self._clock()) * 1000)
         for m, member in enumerate(checked.get("pictures", ()), 1):
             self._own_picture(sprint, member["picture"],
                               sprints.PART_PICTURE_UNKNOWN.format(owner="report", m=m),
@@ -8346,13 +8349,8 @@ class ConsoleService:
         try:
             self._dispatch(lambda: self._idle_nudge(sprint_id, forced))
         except Exception as error:
-            reason = f"the nudge could not start: {type(error).__name__}: {error}"
-            with self._ingest:
-                self._nudging.discard(sprint_id)
-                self._settled[sprint_id] = int(self._clock() * 1000)
-                sprint = self._sprints.get(sprint_id)
-                self._record_idle(
-                    sprint_id, "" if sprint is None else sprint.manager_session or "", reason)
+            self._finish_idle(sprint_id, None,
+                              f"the nudge could not start: {type(error).__name__}: {error}")
 
     def _idle_due(self, sprint_id: str, forced: bool) -> tuple[sprints.SprintState, str] | None:
         """Under the ingest lock: the open sprint and its project's root while an idle nudge is still the step."""
@@ -8419,12 +8417,27 @@ class ConsoleService:
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)
                       else f"{type(error).__name__}: {error}")
-        with self._ingest:
-            self._settled[sprint_id] = int(self._clock() * 1000)
-            self._record_idle(sprint_id, session_id, reason)
-            again = self._end_idle(sprint_id)
-        if again:
-            self._dispatch_nudge(sprint_id)
+        self._finish_idle(sprint_id, session_id, reason)
+
+    def _finish_idle(self, sprint_id: str, session_id: str | None, reason: str | None) -> None:
+        """Record an idle nudge's attempt and end its reservation, whatever the record does (#1380).
+
+        `session_id` None is the sprint's own manager session (a nudge that never started). The
+        reservation ends, and a relay marked meanwhile is dispatched, even when the record raises
+        (a locked database): a stale reservation would hold every later send until a restart.
+        """
+        try:
+            with self._ingest:
+                self._settled[sprint_id] = int(self._clock() * 1000)
+                if session_id is None:
+                    sprint = self._sprints.get(sprint_id)
+                    session_id = "" if sprint is None else sprint.manager_session or ""
+                self._record_idle(sprint_id, session_id, reason)
+        finally:
+            with self._ingest:
+                again = self._end_idle(sprint_id)
+            if again:
+                self._dispatch_nudge(sprint_id)
 
     def _end_idle(self, sprint_id: str) -> bool:
         """Under the ingest lock: end an idle nudge's reservation; whether a relay asked for meanwhile is reserved.
@@ -8484,7 +8497,9 @@ class ConsoleService:
                     "at": report.at, "status": report.status, "phase": report.phase,
                     "milestone": report.milestone, "tracker_url": report.tracker_url,
                     "issues": [{"issue": issue, "stage": stage} for issue, stage in report.issues],
-                    "inbox": list(report.inbox), "next": report.next_step},
+                    "inbox": list(report.inbox), "next": report.next_step,
+                    **({} if report.wait_until is None else {"wait_until": report.wait_until}),
+                    **({} if report.paused is None else {"paused": report.paused})},
                 "unread": len(sprints.unread(sprint))}
 
     def answer_message(self, sprint_id: str, secret: str, message_id: int, reply: str) -> str:

@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 import json
 import os
 import shutil
+import sqlite3
 import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -377,6 +378,16 @@ class IdleServiceTest(IdleCase):
         self.poll(svc, 7261)
         self.assertEqual(len(self.continues()), 1)
 
+    def test_a_wait_until_finer_than_a_microsecond_holds_through_the_millisecond_it_falls_in(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 60
+        svc.send_report(sid, self.secret(sid),
+                        {**REPORT, "wait_until": at(T0 + 7260).replace("+00:00", ".0000001Z")})
+        self.poll(svc, 7260)
+        self.assertEqual(self.continues(), [])
+        self.poll(svc, 7261)
+        self.assertEqual(len(self.continues()), 1)
+
     def test_a_pause_holds_every_idle_nudge_until_a_later_report_without_one(self):
         svc, sid = self.idle_service()
         self.now[0] = T0 + 60
@@ -431,6 +442,53 @@ class IdleServiceTest(IdleCase):
                     self.assertEqual([n.route for n in self.nudges], ["relay"])
                     self.assertEqual(self.continues(), [])
                     self.assertEqual(svc._nudge_again, set())
+
+    def test_a_locked_database_while_recording_an_idle_nudge_leaves_no_reservation_behind(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 300
+        svc.nudge_idle()
+        self.assertEqual(svc._nudging, {sid})
+        real = svc.log.append
+
+        def locked(rows):
+            if any(row[0] == "manager.nudged" for row in rows):
+                raise sqlite3.OperationalError("database is locked")
+            return real(rows)
+
+        with mock.patch.object(svc.log, "append", locked), \
+                self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+            self.queued.run_next()
+        self.assertEqual(svc._nudging, set())
+        self.nudges.clear()
+        svc.send_report(sid, self.secret(sid), {**REPORT, "paused": "the lead freed the account"})
+        svc.send_message("owner/p01", sid, "hello")
+        self.drain()
+        self.assertEqual([n.route for n in self.nudges], ["relay"])
+
+    def test_a_dispatcher_that_cannot_start_an_idle_nudge_still_sends_a_message_marked_meanwhile(self):
+        starts = []
+        armed = []
+
+        def dispatch(job):
+            if not armed or starts:
+                return self.queued(job)
+            starts.append(job)
+            svc.send_report(sid, self.secret(sid), {**REPORT, "paused": "the lead freed the account"})
+            svc.send_message("owner/p01", sid, "hello")
+            raise RuntimeError("can't start new thread")
+
+        svc = self.begin(dispatch=dispatch)
+        sid = self.arrive(svc)
+        self.listed_now(sid)
+        self.now[0] = T0 + 300
+        armed.append(True)
+        svc.nudge_idle()
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(self.queued.jobs), 1)
+        self.drain()
+        self.assertEqual([n.route for n in self.nudges], ["relay"])
+        self.assertEqual((svc._nudging, svc._nudge_again), (set(), set()))
+        self.assertEqual([row["ok"] for row in self.rows("manager.nudged")], [False])
 
 
 class IdleQuotaTest(IdleCase):

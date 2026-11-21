@@ -12,6 +12,7 @@ import sys
 import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -913,6 +914,22 @@ class RecapTest(Case):
                        "issues": CHECKED["issues"], "inbox": REPORT["inbox"],
                        "next": REPORT["next"]},
             "unread": 2})
+
+    def test_recap_shows_the_wait_or_the_pause_the_report_states_beside_its_next_step(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret = self.secret(sid)
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        svc.send_report(sid, secret, {**REPORT, "next": "deploy", "paused": "release in progress"})
+        report = svc.recap(sid, secret)["report"]
+        self.assertEqual((report["next"], report["paused"]), ("deploy", "release in progress"))
+        self.assertNotIn("wait_until", report)
+        until = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=2)
+        svc.send_report(sid, secret, {**REPORT, "wait_until": until.isoformat()})
+        report = svc.recap(sid, secret)["report"]
+        self.assertEqual(report["wait_until"], until.isoformat())
+        self.assertNotIn("paused", report)
 
     def test_recap_of_a_sprint_without_brief_or_report_is_nulls_and_zero(self):
         svc = self.open()

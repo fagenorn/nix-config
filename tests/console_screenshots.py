@@ -3344,7 +3344,7 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
             taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
-                             sheets=args.sheets)
+                             sheets=args.sheets, composite=args.composite)
                      if real else capture(Path(args.out), states=states, sheets=args.sheets,
                                           composite=args.composite))
         except Unavailable as error:

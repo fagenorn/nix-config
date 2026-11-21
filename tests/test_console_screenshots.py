@@ -1763,6 +1763,19 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     shots.main(["--out", tmp, *flags])
                 self.assertEqual(raised.exception.code, 2)
 
+    def test_a_real_answer_run_passes_the_sheets_and_the_composite_to_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(shots, "capture", return_value=[]) as capture, \
+                redirect_stdout(StringIO()) as out:
+            answer = Path(tmp) / "answer.txt"
+            answer.write_text("Answer: plain", encoding="utf-8")
+            self.assertEqual(shots.main(["--out", tmp, "--question", "Q?", "--answer-file",
+                                         str(answer), "--sheets", "--composite", "combined.png"]), 0)
+        self.assertEqual(capture.call_args.kwargs["composite"], "combined.png")
+        self.assertIs(capture.call_args.kwargs["sheets"], True)
+        self.assertEqual(capture.call_args.kwargs["states"], ("question-read",))
+        self.assertIn("combined.png", out.getvalue())
+
     def test_a_real_answer_seeds_the_question_read_state_with_that_question_and_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             now_s = time.time()

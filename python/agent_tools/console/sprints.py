@@ -171,7 +171,7 @@ continue write, exactly `parse_withdraw`'s shape and refusals, and returns `(pro
 sprint_id)`. `idle` (which this module does not import) reads these fields. `stated_hold(state, now_ms)` (#1380) is
 the hold the report's own `paused` or `wait_until` puts on them: `(PAUSED, reason)` or `(WAIT_UNTIL,
 time)` while it stands, else `None`; a `wait_until` holds while `now_ms * 1000` is under its
-microseconds (`_wait_us`, never the truncating `_ms`), so a fractional-millisecond deadline holds
+microseconds (`_wait_us`, exact, never the truncating `_ms`), so a fractional-millisecond deadline holds
 through its own millisecond.
 
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
@@ -216,14 +216,15 @@ are returned only when it is non-empty. `pictures` is not one of `REPORT_MEMBERS
 
 A report may state a wait or a pause (#1380), the two `REPORT_OPTIONAL` members, checked after the
 seven members and `STATUS_NUMBER` and before `pictures`, in this order. `wait_until` is a string
-`datetime.fromisoformat` parses with a UTC offset of zero (`Z` or `+00:00`; naive, any other offset,
-a number, `null` or a word is `REPORT_MEMBER`). Only when `now_ms` is given: a time at or before the
-clock is `WAIT_PAST` and one more than `MAX_WAIT_HOURS` hours (24) ahead is `WAIT_TOO_FAR`, both
-compared at the time's full microsecond precision (`_wait_us`, integer arithmetic, never `_ms`, which
-truncates to the millisecond). `paused` is a one-line text as `status` is (else `REPORT_MEMBER`),
+`WAIT_TIME` matches: `YYYY-MM-DDTHH:MM`, optional `:SS` with any number of fractional digits, and a
+UTC zone (`Z`, `+00:00`, `+0000` or `+00`); naive, any other offset (a fractional one included), a
+number, `null` or a word is `REPORT_MEMBER`. Only when `now_ms` is given (an int or a `Fraction`, so
+the service passes its clock without truncating it): a time at or before the clock is `WAIT_PAST` and
+one more than `MAX_WAIT_HOURS` hours (24) ahead is `WAIT_TOO_FAR`, both compared exactly (`_wait_us`,
+a `Fraction` of microseconds: no float, never `_ms`, which truncates to the millisecond). `paused` is a one-line text as `status` is (else `REPORT_MEMBER`),
 stripped, and `PAUSED_NUMBER` when it matches `#` and a digit. A report that states both is
-`WAIT_AND_PAUSE`. The returned dict carries `"wait_until"` (as `isoformat()` of the UTC time, so `Z`
-reads `+00:00` and a fractional part is kept) and `"paused"` (stripped) only when given, so a report
+`WAIT_AND_PAUSE`. The returned dict carries `"wait_until"` (as `isoformat()` of the UTC time rounded up to the
+microsecond, so `Z` reads `+00:00` and a fractional part is kept to the microsecond) and `"paused"` (stripped) only when given, so a report
 without either is exactly the dict above.
 
 The fold keeps each open sprint's `Report(at, status, phase, milestone, tracker_url, issues, inbox,
@@ -698,6 +699,7 @@ The module reads no clock and no environment; only the secret helpers touch the 
 
 import fnmatch
 import json
+import math
 import os
 import posixpath
 import re
@@ -705,6 +707,7 @@ import secrets
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
@@ -1526,27 +1529,46 @@ def _valid_report_member(member: str, value: object) -> bool:
 
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+EPOCH_NAIVE = datetime(1970, 1, 1)
 
 
-def _wait_time(value: object) -> datetime | None:
-    """The UTC time a `wait_until` states, or None when it is not an ISO 8601 UTC time."""
-    if not isinstance(value, str):
+WAIT_TIME = re.compile(
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2})[T ]([0-9]{2}:[0-9]{2})(?::([0-9]{2})(?:[.,]([0-9]+))?)?"
+    r"(?:Z|z|[+-]00(?::?00)?)")
+
+
+def _wait_us(value: object) -> Fraction | None:
+    """The exact microseconds since the epoch a `wait_until` states, or None when it is not one.
+
+    A date, a time to the minute, optional seconds with any number of fractional digits, and a UTC
+    zone (`Z`, `+00:00`, `+0000` or `+00`): nothing else, so an offset that is not zero, a
+    fractional offset and a time with no zone are not times. Integer and `Fraction` arithmetic
+    only: no float and no truncation to the millisecond or the microsecond.
+    """
+    if not isinstance(value, str) or len(value) > MAX_LINE_CHARS:
         return None
+    found = WAIT_TIME.fullmatch(value)
+    if found is None:
+        return None
+    day, minute, seconds, fraction = found.groups()
     try:
-        time = datetime.fromisoformat(value)
+        whole = datetime.fromisoformat(f"{day}T{minute}:{seconds or '00'}")
     except ValueError:
         return None
-    if time.tzinfo is None or time.utcoffset() != timedelta(0):
-        return None
-    return time
+    return ((whole - EPOCH_NAIVE) // timedelta(microseconds=1)
+            + Fraction(int(fraction or 0), 10 ** len(fraction or "")) * 1_000_000)
 
 
-def _wait_us(time: str) -> int:
-    """The exact microseconds since the epoch of a checked `wait_until` (no float, no truncation)."""
-    return (datetime.fromisoformat(time) - EPOCH) // timedelta(microseconds=1)
+def _wait_text(us: Fraction) -> str:
+    """The `isoformat()` of a wait's UTC time rounded up to the microsecond.
+
+    The hold compares whole milliseconds with the time, and a whole number is under the time
+    exactly when it is under the time rounded up, so the rounding changes no release.
+    """
+    return (EPOCH + timedelta(microseconds=math.ceil(us))).isoformat()
 
 
-def checked_report(report: dict, now_ms: int | None = None) -> dict:
+def checked_report(report: dict, now_ms: int | Fraction | None = None) -> dict:
     for member in REPORT_MEMBERS:
         if not _valid_report_member(member, report.get(member)):
             raise Refused(REPORT_MEMBER.format(member=member))
@@ -1554,14 +1576,13 @@ def checked_report(report: dict, now_ms: int | None = None) -> dict:
             raise Refused(STATUS_NUMBER)
     wait = None
     if "wait_until" in report:
-        wait = _wait_time(report["wait_until"])
+        wait = _wait_us(report["wait_until"])
         if wait is None:
             raise Refused(REPORT_MEMBER.format(member="wait_until"))
         if now_ms is not None:
-            us = _wait_us(report["wait_until"])
-            if us <= now_ms * 1000:
+            if wait <= now_ms * 1000:
                 raise Refused(WAIT_PAST)
-            if us > (now_ms + MAX_WAIT_HOURS * 3_600_000) * 1000:
+            if wait > (now_ms + MAX_WAIT_HOURS * 3_600_000) * 1000:
                 raise Refused(WAIT_TOO_FAR)
     paused = None
     if "paused" in report:
@@ -1579,7 +1600,7 @@ def checked_report(report: dict, now_ms: int | None = None) -> dict:
                                  for row in report["issues"]), key=lambda row: row["issue"]),
                "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
     if wait is not None:
-        checked["wait_until"] = wait.astimezone(timezone.utc).isoformat()
+        checked["wait_until"] = _wait_text(wait)
     if paused is not None:
         checked["paused"] = paused
     if pictures:
