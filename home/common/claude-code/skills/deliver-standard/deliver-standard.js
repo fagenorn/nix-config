@@ -1128,6 +1128,9 @@ const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test can
 // #747: the narrowed Claude plan review when the Codex plan review runs; the acceptance-planning clause stays the shared one in the prompt, and the Codex sentence is a separate suffix after it.
 const PLAN_RUBRIC_SIZED = `an acceptance criterion with no task, a design choice that breaks the project's documented conventions, standards or docs (name the document it breaks), a project-specific literal written into global skills or agents, or an internal inconsistency (a task, interface, file or decision that the plan root or another task contradicts, or that no task defines)`
 const PLAN_CODEX_OWNS = `The Codex plan review running beside you owns code correctness (whether a task's code, tests and interfaces will work): do not sweep for it.`
+// #1372: a plan of at most this many tasks, none of risk security, skips the Codex plan review; the Claude plan review still runs, and the decision is made once, on the plan entering the plan review.
+const SMALL_PLAN_TASKS = 3
+const smallPlan = p => p.tasks.length <= SMALL_PLAN_TASKS && !p.tasks.some(t => t.risk === 'security')
 // #819: the planner's own half of that check, the finding classes a planner can settle itself; never part of the reviewer's rubric.
 const PLAN_SELF_CHECK = `Also before you return: run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text; for each invariant, threshold and decision a task states, name the test case that fails when that one rule is removed; one with no such case needs a test; and list for each new test or doc the CI workflow test list, the generated index and the project gate that must also change.`
 // The plan step's turn structure (#737, #819), first in the prompt: at least four lookups a message and writing by the twelfth, then one message of writes.
@@ -1627,18 +1630,20 @@ if (RESUME_RULES) {
 }
 if (!planReviewed) {
   const ACS0 = JSON.stringify(plan.acceptance)
-  const planCodexP = REVIEW_PLAN ? call(`${CTX}
+  const PLAN_CODEX = REVIEW_PLAN && !smallPlan(plan) ? REVIEW_PLAN : null
+  if (REVIEW_PLAN && !PLAN_CODEX) log(`codex plan review: skipped, a small plan (${plan.tasks.length} of at most ${SMALL_PLAN_TASKS} tasks, none of risk security)`)
+  const planCodexP = PLAN_CODEX ? call(`${CTX}
 Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${ACS0}.${SPEC}
 Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. ${CX_USE} plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; ${CX_WAIT} Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. ${CX_NONE}
 ${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
   const ruleFindings = planRules(plan)
-  const narrow = REVIEW_SIZING && !!REVIEW_PLAN
+  const narrow = REVIEW_SIZING && !!PLAN_CODEX
   const planReviewClaude = await readReview(`${CTX}
 Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments).${SPEC} ${KNOW} ${MAP_FIRST} Report only Important or Critical defects: ${narrow ? PLAN_RUBRIC_SIZED : PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule).${narrow ? ` ${PLAN_CODEX_OWNS}` : ''} No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { ruled: true })
   const planCodexR = await planCodexP
   if (!planReviewClaude) return stop('plan-review', { details: `the plan reviewer ${silence('plan-review')}` })
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
-  if (REVIEW_PLAN) {
+  if (PLAN_CODEX) {
     if (!planCodexR || !planCodexR.available) return codexStop('plan', planCodexR)
     planFindings = planFindings.concat(findingsOf(planCodexR).map(f => ({ ...f, source: 'codex' })))
     log(`codex plan review: ${findingsOf(planCodexR).length} blocking findings`)
