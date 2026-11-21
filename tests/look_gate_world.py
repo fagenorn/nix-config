@@ -300,7 +300,7 @@ class LookGateWorld:
     def _setup_batch(self, message, match):
         return {"ok": True, "host": "h1", "slug": SLUG, "integration_branch": "main",
                 "default_branch": "main", "merge_strategy": "merge", "delete_branch": True,
-                "unset_env": [], "max_parallel": 2, "required_checks": None}
+                "unset_env": [], "max_parallel": 2, "required_checks": None, "guards": []}
 
     def _setup_standard(self, message, match):
         issue = message["issue"]
@@ -383,6 +383,11 @@ class LookGateWorld:
         pr = self.pr_of(message["issue"])
         return {"state": pr["state"], "head": pr["head"], "renew": {"verdict": "renewed"}}
 
+    def _look_checks(self, message, match):
+        pr = self.pr_of(message["issue"])
+        return {"state": "passed", "head": pr["head"], "behind": False, "required": ["ci"], "passed": ["ci"],
+                "renew": {"verdict": "renewed"}}
+
     def _look_post(self, message, match):
         line = re.search(r"Run alone and exactly: (look-approval post[^\n]*)", message["prompt"]).group(1)
         proc = self.look_approval(*line.split()[1:])
@@ -446,13 +451,14 @@ class LookGateWorld:
             (r"^(impl-\d+|look-fix|fix-.*)$", self._commit),
             (r"^verify-fix-", const({"status": "done", "start_head": "b0", "commit": "c0ffee",
                                      "tests": ["t"], "notes": "ok"})),
-            (r"^verify(-|$)", self._verify),
+            (r"^(verify(-|$)|look-reverify$)", self._verify),
             (r"^(look-pr|pr|land-pr-\d+|land-open-\d+)$", self._pull_request),
             (r"^sync-resolve-", const({"status": "done", "conflicted": True, "merge_commit": SHA,
                                        "resolved_files": ["a.py"], "notes": "resolved"})),
             (r"^sync-\d+$", self._sync),
             (r"^(look-push|land-push-.*)$", self._push),
             (r"^look-head$", self._look_head),
+            (r"^look-checks-\d+$", self._look_checks),
             (r"^look-post$", self._look_post),
             (r"^look-read$", self._look_read),
             (r"^(merge|land-merge-\d+)$", self._merge),

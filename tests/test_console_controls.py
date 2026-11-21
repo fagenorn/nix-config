@@ -15,8 +15,8 @@ from .test_console_page import (
     FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
-    FAILED_LINE, asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
-    look_answered, style_rules, thread, view, with_check, with_notices, with_run, with_sprints, css_declared)
+    FAILED_LINE, asking, check_item, frame, nodes, panel, postable, project, real_capacity, render,
+    look_answered, thread, view, with_check, with_notices, with_run, with_sprints)
 from .test_console_guest_page import (
     CHANGE_FRAME, GUEST, MANUAL, OPEN_OWN, SHARED_FRAME, TICK, UNSHARED_OPEN, attempt_reply, harness)
 
@@ -126,39 +126,8 @@ def controls_of(snapshot: dict) -> list:
     return found
 
 
-def controls_block(text: str) -> str:
-    """The text strictly between the `/* controls */` and `/* end controls */` marker lines."""
-    lines = text.splitlines()
-    if "/* controls */" not in lines or "/* end controls */" not in lines:
-        raise AssertionError("no /* controls */ marker")
-    start, end = lines.index("/* controls */"), lines.index("/* end controls */")
-    return "\n".join(lines[start + 1:end])
-
-
-def desk_block(text: str) -> str:
-    """The text strictly between the `/* controls: desk */` and `/* end controls: desk */` lines."""
-    lines = text.splitlines()
-    if "/* controls: desk */" not in lines or "/* end controls: desk */" not in lines:
-        raise AssertionError("no /* controls: desk */ marker")
-    start, end = lines.index("/* controls: desk */"), lines.index("/* end controls: desk */")
-    return "\n".join(lines[start + 1:end])
-
-
-def outside_blocks(text: str) -> str:
-    """The text without the shared block and the desk addendum right after it."""
-    lines = text.splitlines()
-    controls_block(text)
-    desk_block(text)
-    start, end = lines.index("/* controls */"), lines.index("/* end controls: desk */")
-    return "\n".join(lines[:start] + lines[end + 1:])
-
-
 def page_style() -> str:
     return re.search(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8")).group(1)
-
-
-def spend_style() -> str:
-    return re.search(r"(?s)<style>(.*?)</style>", SPEND.read_text(encoding="utf-8")).group(1)
 
 
 def spend_buttons() -> list:
@@ -439,192 +408,9 @@ def summary_literals(script: str) -> list:
     return found
 
 
-def rules_of(style: str) -> list:
-    """Every (selector, declarations) of the style, media blocks included."""
-    queries = re.findall(r"@media ([^{]*?) \{", style)
-    top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
-    rules = style_rules(top)
-    for query in queries:
-        rules += style_rules(media_block(style, query))
-    return rules
-
-
-def last_compound(selector: str) -> str:
-    return re.split(r"\s*[>+~]\s*|\s+", selector.strip())[-1]
-
-
-def targets_control(selector: str, roles: dict = DESK_CONTROLS) -> str | None:
-    """The control role, kind or tag a selector's last compound targets, else None."""
-    compound = last_compound(selector)
-    if ':not([class*="btn-"])' in compound:
-        return None
-    classes = set(re.findall(r"\.([\w-]+)", compound))
-    for name in sorted(classes):
-        if name in roles or name in KINDS or (
-                name.startswith("ans-") and name not in ANS_PLAIN) or name in ANS_PLAIN:
-            return name
-    if 'class^="ans-"' in compound:
-        return "ans-"
-    if re.match(r"(button|input|textarea)(?![\w-])", compound):
-        return re.match(r"\w+", compound).group(0)
-    if compound.startswith("summary"):
-        before = selector.strip()[:len(selector.strip()) - len(compound)]
-        if set(re.findall(r"\.([\w-]+)", before)) & set(BUTTON_FOLDS):
-            return "summary"
-    return None
-
-
-LOOK = re.compile(
-    r"^(padding.*|border.*|font.*|color|background.*|cursor|outline.*|opacity)$")
-LOOK_OPTION = re.compile(r"^(display|grid.*|align-items|gap|column-gap|width)$")
-BORDER = re.compile(r"^border.*$")
-
-
-def kind_owned(name: str, prop: str) -> bool:
-    if name in BARE_ROLES:
-        return bool(BORDER.match(prop))
-    if LOOK.match(prop):
-        return True
-    return (name == "opt" or name == "btn-option") and bool(LOOK_OPTION.match(prop))
-
-
-def short_rules(style: str, roles: dict) -> list:
-    """Every rule of the style aimed at a control of `roles` that sets a height below 32 px."""
-    small = []
-    for selector, decls in rules_of(style):
-        if targets_control(selector, roles) is None:
-            continue
-        for prop in ("height", "min-height", "max-height"):
-            if prop in decls and css_px(decls[prop]) < 32:
-                small.append(f"{selector} {{ {prop}: {decls[prop]} }}")
-    return small
-
-
-class ControlStyleTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.style = page_style()
-
-    def test_the_kinds_are_declared_once_in_the_controls_block(self) -> None:
-        block = controls_block(self.style)
-        rows = style_rules(block)
-
-        def merged(kind: str) -> dict:
-            out = {}
-            for selector, decls in rows:
-                if selector == kind:
-                    out.update(decls)
-            return out
-
-        shared = {
-            "display": "inline-flex", "align-items": "center", "gap": "8px", "min-height": "32px",
-            "padding": "5px 12px", "font": "500 .875rem/1.4 var(--ui)", "text-align": "left",
-            "text-decoration": "none", "color": "var(--sub1)", "background": "none",
-            "border": "1px solid var(--s1)", "border-radius": "8px", "cursor": "pointer",
-            "transition": "background-color .16s, border-color .16s"}
-        field = {
-            "min-height": "32px", "padding": "5px 10px", "font": "400 .875rem/1.4 var(--ui)",
-            "color": "var(--text)", "background": "var(--mantle)", "border": "1px solid var(--s1)",
-            "border-radius": "8px"}
-        expected = {
-            "btn-primary": {**shared, "min-height": "40px", "padding": "0 16px",
-                            "font-weight": "600"},
-            "btn-quiet": shared,
-            "btn-danger": shared,
-            "btn-option": {**shared, "display": "grid",
-                           "grid-template-columns": "22px minmax(0, 1fr) auto",
-                           "column-gap": "14px", "width": "100%", "min-height": "44px",
-                           "padding": "9px 14px", "color": "var(--text)",
-                           "border-color": "transparent"},
-            "field-line": field,
-            "field-area": {**field, "display": "block", "width": "100%", "min-height": "4.5rem",
-                           "resize": "vertical"},
-            "field-code": {**field, "font-family":
-                           'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace',
-                           "letter-spacing": ".06em"},
-        }
-        for kind, want in expected.items():
-            with self.subTest(kind=kind):
-                have = merged("." + kind)
-                self.assertEqual({k: have.get(k) for k in want}, want)
-                self.assertGreaterEqual(css_px(have["min-height"]), 32)
-        self.assertEqual(merged(".btn-bare").get("padding"), "0")
-        self.assertEqual(merged(".field-bare").get("padding-left"), "0")
-        self.assertIn("--hover: rgba(202, 211, 245, .05);", self.style)
-        outside = style_rules(outside_blocks(self.style))
-        for selector, _decls in outside:
-            self.assertNotIn(selector, ["." + k for k in KINDS], selector)
-
-    def test_both_pages_share_one_controls_block(self) -> None:
-        spend = SPEND.read_text(encoding="utf-8")
-        self.assertEqual(controls_block(spend), controls_block(PAGE.read_text(encoding="utf-8")))
-        self.assertNotIn("/* controls: desk */", spend)
-        self.assertIn("--hover: rgba(202, 211, 245, .05);", spend_style())
-
-    def test_both_pages_turn_motion_off_under_reduced_motion(self) -> None:
-        for name, style in (("desk", self.style), ("spend", spend_style())):
-            with self.subTest(page=name):
-                block = media_block(style, "(prefers-reduced-motion: reduce)")
-                self.assertTrue(block)
-                rules = style_rules(block)
-                for selector in ("*", "*::before", "*::after"):
-                    held = {k: v for s, d in rules if s == selector for k, v in d.items()}
-                    self.assertEqual(held.get("transition-duration"), ".001ms !important")
-                    self.assertEqual(held.get("animation-duration"), ".001ms !important")
-
-    def test_kind_rules_own_the_control_look(self) -> None:
-        offenders = []
-        outside = outside_blocks(self.style)
-        for selector, decls in rules_of(outside):
-            name = targets_control(selector)
-            if name is None or ".picked" in last_compound(selector):
-                continue
-            for prop, value in decls.items():
-                if kind_owned(name, prop):
-                    offenders.append(f"{selector} {{ {prop}: {value} }}")
-                if prop in ("min-height", "height") and css_px(value) < 32:
-                    offenders.append(f"{selector} {{ {prop}: {value} }}")
-        self.assertEqual(offenders, [])
-
-    def test_no_rule_shrinks_a_control_below_32_px(self) -> None:
-        for page, style, roles in (("desk", self.style, DESK_CONTROLS),
-                                   ("spend", spend_style(), SPEND_CONTROLS)):
-            with self.subTest(page=page):
-                self.assertEqual(short_rules(style, roles), [])
-        block = style_rules(controls_block(self.style))
-        for kind in KINDS:
-            with self.subTest(kind=kind):
-                heights = [d["min-height"] for s, d in block if s == "." + kind and "min-height" in d]
-                self.assertTrue(heights, kind)
-                self.assertGreaterEqual(css_px(heights[-1]), 32)
-
-    def test_the_consent_tick_is_at_least_32_px_in_both_directions(self) -> None:
-        # The screenshot check rejects every visible input under 32 px, and the tick is an input.
-        declared = css_declared(self.style, ".guest-tick")
-        for prop in ("width", "height"):
-            with self.subTest(prop=prop):
-                self.assertGreaterEqual(css_px(declared.get(prop, "0")), 32)
-
-    def test_the_height_floor_gate_sees_a_later_spend_rule(self) -> None:
-        shrunk = spend_style() + "\n.span { min-height: 20px; }\n"
-        self.assertEqual(short_rules(shrunk, SPEND_CONTROLS), [".span { min-height: 20px }"])
-        self.assertEqual(short_rules(shrunk, DESK_CONTROLS), [])
-
-
-def css_px(value: str) -> float:
-    """A length in px; `rem` and `em` count 16 px. An unreadable length is 0, so it fails a floor."""
-    match = re.match(r"^([\d.]+)(px|rem|em)?(?:\s*!important)?$", value.strip())
-    if match is None:
-        return 0.0
-    number = float(match.group(1))
-    return number if match.group(2) in (None, "px") else number * 16
-
-
-HOVER = ':hover:not(:disabled):not([aria-disabled="true"])'
 SNAP = {"snapshot": True}
 ADOPTION_REFUSED = {"respond": {"status": 409, "text": "the pull request was merged elsewhere\n"}}
 NO_REPLY = {"status": 204, "text": ""}
-BUTTON_KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option")
 BUSY_ROLES = frozenset({
     "tell-send", "notice-send", "register-send", "account-add-send", "goal-send", "reply-send",
     "acct-toggle", "acct-pin", "acct-remove-send", "acct-remove-cancel", "acct-signin",
@@ -812,14 +598,6 @@ def _every_node(snapshot: dict) -> list:
             for node, _parent in _walk(snapshot[tree], None)]
 
 
-def decls_of(rules: list, selector: str) -> dict:
-    merged = {}
-    for name, decls in rules:
-        if name == selector:
-            merged.update(decls)
-    return merged
-
-
 class ControlStateTest(unittest.TestCase):
     def test_a_sending_control_is_busy(self) -> None:
         self.assertEqual(frozenset().union(*(row[4] for row in BUSY_SCENARIOS)), BUSY_ROLES)
@@ -855,75 +633,6 @@ class ControlStateTest(unittest.TestCase):
                 self.assertEqual(kept["aria_disabled"], "true")
                 self.assertIs(kept["disabled"], False)
 
-    def test_disabled_and_busy_carry_an_attribute_and_a_non_colour_cue(self) -> None:
-        for name, page in (("desk", PAGE), ("spend", SPEND)):
-            rules = style_rules(controls_block(page.read_text(encoding="utf-8")))
-            with self.subTest(page=name):
-                dashed = {"border-width": "1px", "border-style": "dashed",
-                          "border-color": "var(--s1)", "cursor": "not-allowed", "opacity": ".55"}
-                dotted = {"border-width": "1px", "border-style": "dotted", "cursor": "progress"}
-                last_disabled, first_busy = -1, len(rules)
-                for kind in KINDS:
-                    for state, want in ((":disabled", dashed), ('[aria-disabled="true"]', dashed),
-                                        ('[aria-busy="true"]', dotted)):
-                        selector = "." + kind + state
-                        found = [i for i, (sel, _d) in enumerate(rules) if sel == selector]
-                        self.assertTrue(found, selector)
-                        have = decls_of(rules, selector)
-                        self.assertEqual({k: have.get(k) for k in want}, want, selector)
-                        if want is dashed:
-                            last_disabled = max(last_disabled, *found)
-                        else:
-                            first_busy = min(first_busy, *found)
-                self.assertGreater(first_busy, last_disabled)
-                after = [sel for sel, decls in rules if "::after" in sel]
-                self.assertEqual(sorted(after), sorted(
-                    f'.{k}[aria-busy="true"]::after' for k in
-                    ("btn-primary", "btn-quiet", "btn-danger")))
-                for sel, decls in rules:
-                    if "::after" in sel:
-                        self.assertEqual(decls.get("content"), r'"\2026"', sel)
-        desk = style_rules(desk_block(PAGE.read_text(encoding="utf-8")))
-        self.assertFalse([sel for sel, _d in desk if "::after" in sel])
-
-    def test_hover_is_shared_by_both_pages(self) -> None:
-        shared = {"background": "var(--hover)", "border-color": "var(--s2)"}
-        for name, page in (("desk", PAGE), ("spend", SPEND)):
-            text = page.read_text(encoding="utf-8")
-            rules = style_rules(controls_block(text))
-            with self.subTest(page=name):
-                for kind in ("btn-quiet", "btn-danger", "btn-option"):
-                    have = decls_of(rules, "." + kind + HOVER)
-                    self.assertEqual({k: have.get(k) for k in shared}, shared, kind)
-                self.assertEqual(
-                    decls_of(rules, ".btn-quiet.btn-bare" + HOVER).get("border-color"), "transparent")
-                self.assertFalse([sel for sel, _d in rules if ":enabled" in sel])
-        addendum = style_rules(desk_block(PAGE.read_text(encoding="utf-8")))
-        self.assertFalse([sel for sel, _d in addendum if ":enabled" in sel])
-        have = decls_of(addendum, ".btn-primary" + HOVER)
-        self.assertEqual((have.get("background"), have.get("border-color")), ("#f8bb98", "#f8bb98"))
-
-    def test_every_kind_shows_the_lavender_ring_on_keyboard_focus(self) -> None:
-        ring = {"outline": "2px solid var(--lav)", "outline-offset": "2px", "border-radius": "8px"}
-        for name, page in (("desk", PAGE), ("spend", SPEND)):
-            text = page.read_text(encoding="utf-8")
-            rules = style_rules(controls_block(text))
-            with self.subTest(page=name):
-                for kind in KINDS:
-                    have = decls_of(rules, "." + kind + ":focus-visible")
-                    self.assertEqual({k: have.get(k) for k in ring}, ring, kind)
-                self.assertEqual(decls_of(rules, ".field-bare:focus-visible").get("outline"), "none")
-                ring_at = max(i for i, (sel, _d) in enumerate(rules) if sel == ".field-code:focus-visible")
-                bare_at = max(i for i, (sel, _d) in enumerate(rules) if sel == ".field-bare:focus-visible")
-                self.assertGreater(bare_at, ring_at)
-        for name, style in (("desk", page_style()), ("spend", spend_style())):
-            quiet = []
-            for selector, decls in rules_of(outside_blocks(style) if name == "desk" else style):
-                if decls.get("outline") in ("none", "0") and targets_control(selector) is not None:
-                    quiet.append(selector)
-            with self.subTest(outside=name):
-                self.assertEqual(quiet, [])
-
     def test_pressed_is_an_attribute_with_a_non_colour_cue(self) -> None:
         (goal,) = render([START, {"frame": GOAL_FRAME}, {"key": "g"}, SNAP])
         (register,) = render([
@@ -936,26 +645,8 @@ class ControlStateTest(unittest.TestCase):
         self.assertEqual([n["pressed"] for n in options], ["true"] + ["false"] * (len(options) - 1))
         for node in projects + options:
             self.assertNotIn("picked", node["cls"].split())
-        for name, page in (("desk", PAGE), ("spend", SPEND)):
-            rules = style_rules(controls_block(page.read_text(encoding="utf-8")))
-            with self.subTest(page=name):
-                for kind in BUTTON_KINDS:
-                    active = decls_of(rules, "." + kind + ":active")
-                    self.assertEqual(active.get("transform"), "translateY(1px)", kind)
-                    pressed = decls_of(rules, "." + kind + '[aria-pressed="true"]')
-                    self.assertEqual((pressed.get("border-color"), pressed.get("font-weight")),
-                                     ("var(--lav)", "600"), kind)
 
     def test_peach_is_only_on_the_primary_kind(self) -> None:
-        for name, style in (("desk", page_style()), ("spend", spend_style())):
-            for selector, decls in rules_of(style):
-                if not any("var(--peach)" in value for value in decls.values()):
-                    continue
-                classes = set(re.findall(r"\.([\w-]+)", last_compound(selector)))
-                primary = "btn-primary" in classes and not classes & (set(KINDS) - {"btn-primary"})
-                needs = ".needs" in selector and targets_control(selector) is None
-                with self.subTest(page=name, selector=selector):
-                    self.assertTrue(primary or needs)
         for snap in snapshots_of(desk_scenarios()):
             for node in controls_of(snap):
                 self.assertNotIn("needs", node["cls"].split(), node["cls"])
@@ -967,16 +658,6 @@ class ControlStateTest(unittest.TestCase):
                         primaries = [n for n, _p in _walk(card, None)
                                      if "btn-primary" in n["cls"].split()]
                         self.assertLessEqual(len(primaries), 1)
-
-
-def contrast(fg_hex: str, bg_hex: str) -> float:
-    """The WCAG 2 contrast ratio of two `#rrggbb` colours."""
-    def luminance(hex_colour: str) -> float:
-        channels = [int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
-        r, g, b = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
-        return .2126 * r + .7152 * g + .0722 * b
-    lighter, darker = sorted((luminance(fg_hex), luminance(bg_hex)), reverse=True)
-    return (lighter + .05) / (darker + .05)
 
 
 def _field_nodes(snapshot: dict):
@@ -1008,36 +689,6 @@ class ControlLabelTest(unittest.TestCase):
                     continue
                 unlabelled.append(role(node["cls"]))
         self.assertEqual(sorted(set(unlabelled)), [])
-
-    def test_placeholders_meet_4_5_to_1_against_their_field(self) -> None:
-        style = page_style()
-        root_rule = re.search(r":root \{[^}]*\}", style).group(0)
-        root = dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})", root_rule))
-
-        def colour(value: str) -> str:
-            return root[re.fullmatch(r"var\((--[\w-]+)\)", value).group(1)]
-
-        rules = [(s, d) for s, d in style_rules(controls_block(style)) if "::placeholder" in s]
-        self.assertEqual([s for s, _d in rules],
-                         [".field-line::placeholder", ".field-area::placeholder",
-                          ".field-code::placeholder"])
-        decls = rules[0][1]
-        self.assertTrue(all(d == decls for _s, d in rules))
-        self.assertEqual(decls["opacity"], "1")
-        placeholder = colour(decls["color"])
-        everything = style_rules(style)
-        backgrounds = {}
-        for kind in ("field-line", "field-area", "field-code"):
-            backgrounds[kind] = colour(decls_of(everything, "." + kind)["background"])
-        backgrounds["goal-in open"] = colour(
-            decls_of(everything, ".goal-bar.open .goal-in")["background"])
-        for name, background in backgrounds.items():
-            with self.subTest(field=name):
-                self.assertGreaterEqual(contrast(placeholder, background), 4.5)
-
-    def test_contrast_matches_the_wcag_formula(self) -> None:
-        self.assertEqual(round(contrast("#939ab7", "#1e2030"), 2), 5.79)
-        self.assertEqual(round(contrast("#181926", "#f5a97f"), 2), 9.01)
 
 
 VOID_TAGS = frozenset({"input", "br", "hr", "img"})

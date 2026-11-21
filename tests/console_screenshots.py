@@ -8,7 +8,11 @@ Contract:
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
   running sprint's manager session, an outside-sprint session and one workflow run, with spend on
-  at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold;
+  at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold
+  over two sprints whose live-fault claims name one file: on the branch's console the sprint blocks
+  show the overlap line and no card asks about it; on the base commit's console (`overlap_card()`)
+  the seed also records the owner-only card the base contract had the later-started sprint send,
+  which is the before picture (#1347);
   `notice-post-open` is that fold with the owner's post control opened, and shot against a page
   that has no such control it is the same fold, which is how the before pictures are made;
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
@@ -141,7 +145,7 @@ Contract:
   a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
   picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
   card opens on the plan's own first line and its draft shows nothing.
-  `WIDTHS` are the two viewport widths each is shot at. `capture`
+  `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 92 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
@@ -180,8 +184,14 @@ Contract:
   a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
   rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
-  tall (`SHORT_CONTROLS`, read after the state is drawn). It returns 2 with a one-line
-  reason when Playwright or Chromium is missing, else 0.
+  tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot misses a `STYLE_CHECKS`
+  row, the line names each miss: the row's computed style is read after the capture, with probes
+  and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed,
+  then opens its first picture, so the viewer rows read it open). The style reading and its steps run only when
+  `style_applies()` (the page served is the page beside this module), so a base run's pictures and
+  result are as before. In real-answer mode, `fixture` rows are skipped. `capture(...,
+  mutate=True)` records in `Shot.broke` each row whose `broken` rule made it miss. It returns 2
+  with a one-line reason when Playwright or Chromium is missing, else 0.
 - Real-answer mode: `main(["--out", dir, "--question", TEXT, "--answer-file", PATH])` (both or
   neither; one alone exits 2) shoots only `question-read`, seeded with that question and the
   file's UTF-8 text as the stored answer, so it writes exactly `question-read-1440.png` and
@@ -221,12 +231,12 @@ import tempfile
 import threading
 import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
+from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin, view
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
@@ -248,6 +258,10 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors",
           "owner-accounts")
 WIDTHS = (1440, 480)
+# The widths in between a row may also name: they take no picture, a row at one is read in the
+# 1440 shot's page after its own rows, with the viewport resized to it.
+BETWEEN_WIDTHS = (1180, 900)
+STYLE_WIDTHS = (*WIDTHS, *BETWEEN_WIDTHS)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
 GOAL_OVER_CHARS = 2100
@@ -479,6 +493,1451 @@ class Fixture:
 
 
 @dataclass(frozen=True)
+class StyleCheck:
+    """One computed-style check of the page, read after the picture of each state it names.
+
+    `selector` names the element (the first match, or every rendered match with `every`), `prop`
+    its computed property (of `pseudo` when set) and `want` how `value` is compared (`WANTS`).
+    A row with a `probe` reads the matches of `selector` in the probe's markup, placed last in
+    `host` and marked with `data-style-probe`; `compare_probe` places the element `same_as` and
+    `gt` compare with. `forced` pseudo-classes are forced on the matches over CDP, and
+    `reduced_motion` reads under `prefers-reduced-motion: reduce`. `broken` is a rule that must
+    make this row miss, which `capture(mutate=True)` proves. A `fixture` row reads the canonical
+    fixture answer, so a real-answer run skips it. The whole-page kinds (`none_peach`, `palette`,
+    `tokens`, `distinct`, `sizes_shared`) read the elements under `selector` (the probe's, for a
+    probe row) and the painted colours of each, normalised, or the CSSOM `:root` token list;
+    `fills` reads each match against its parent's content width, `right_edge` that its right edge
+    stands at its parent's content edge, `hugs` that its content box is no wider than its text, and
+    `largest_type` (`value` is `<px>|<selector list>`) that no element under `selector` has a
+    `font-size` of `<px>` or more unless it matches the list. `track_max` (`value` is
+    `<index>:<fraction>`) wants the px track at that 1-based index of the resolved
+    `grid-template-columns` to be at most that fraction of the content width, and `tracks` (`value`
+    is a count) that the grid has exactly that many top-level tracks. `alpha_max` wants the colour
+    to be clear or to have an alpha of at most `value`, `opaque` that it is one palette colour at
+    alpha 1, and `follows_shape` that a loaded `img` is as tall as its own shape makes it at its
+    width, within its `min-height` and `max-height`. `kind_look` (`value` is the comma-separated
+    list of properties) compares every rendered control of the seven kinds outside a state
+    (disabled, busy, pressed, picked, hovered, active or focused) with a bare scratch element of
+    its kind on those properties, only the borders for a bare control, and wants each to be at
+    least 32px tall; `contrast` wants the WCAG ratio of the colour (of `pseudo`) against the first
+    opaque background behind it to be at least `value` (a colour the page cannot read as RGB is a
+    named miss, `unreadable <colour>`); `declared` wants the value the CSSOM cascade gives `prop`
+    of the `pseudo` rules matching the subject (for a pseudo-element no engine resolves) to be
+    `value`. A width in `BETWEEN_WIDTHS` is read in the 1440 shot's page, resized to it.
+    """
+    name: str
+    states: tuple[str, ...]
+    widths: tuple[int, ...]
+    selector: str
+    prop: str
+    want: str
+    value: str
+    broken: str
+    probe: str = ""
+    host: str = "body"
+    compare_probe: str = ""
+    compare_host: str = "body"
+    pseudo: str = ""
+    forced: tuple[str, ...] = ()
+    every: bool = False
+    reduced_motion: bool = False
+    fixture: bool = False
+
+
+# The selectors clicked, in order, after a state's picture and before its style reading: the
+# look card opens its first picture in the viewer, so the viewer rows read what the owner sees.
+STYLE_STEPS: dict[str, tuple[str, ...]] = {"look-card": ("button.pic-thumb",)}
+WANTS = frozenset({"equals", "in", "not", "starts", "min", "max", "same_as", "gt",
+                   "none_peach", "palette", "tokens", "distinct", "sizes_shared", "fills",
+                   "largest_type", "right_edge", "hugs", "track_max", "tracks", "alpha_max",
+                   "opaque", "follows_shape", "kind_look", "contrast", "declared"})
+PALETTE = {
+    "--base": "rgb(36, 39, 58)", "--mantle": "rgb(30, 32, 48)", "--s0": "rgb(54, 58, 79)",
+    "--s1": "rgb(73, 77, 100)", "--s2": "rgb(91, 96, 120)", "--text": "rgb(202, 211, 245)",
+    "--sub1": "rgb(184, 192, 224)", "--sub0": "rgb(165, 173, 203)", "--ov2": "rgb(147, 154, 183)",
+    "--crust": "rgb(24, 25, 38)", "--peach": "rgb(245, 169, 127)", "--lav": "rgb(183, 189, 248)",
+    "--green": "rgb(166, 218, 149)", "--yellow": "rgb(238, 212, 159)", "--red": "rgb(237, 135, 150)",
+}
+_HAIR = "rgba(202, 211, 245, 0.09)"
+_HOVER = "rgba(202, 211, 245, 0.05)"
+_CLEAR = "rgba(0, 0, 0, 0)"
+_NO_STATE_COLOURS = ("--peach", "--green", "--yellow", "--red")
+_DESK_TOKENS = ("--base", "--crust", "--display", "--green", "--hair", "--hover", "--lav", "--mantle",
+                "--ov2", "--peach", "--red", "--s0", "--s1", "--s2", "--sub0", "--sub1", "--text",
+                "--ui", "--yellow")
+_SPEND_PALETTE = {k: v for k, v in PALETTE.items() if k not in _NO_STATE_COLOURS}
+# The lists the whole-page want kinds compare with, named by a row's `value`. The desk literals
+# are the only colour literals of the desk page's style block besides its tokens.
+STYLE_LISTS = {
+    "peach": PALETTE["--peach"],
+    "opaque": list(PALETTE.values()),
+    "palette": {
+        "desk": [*PALETTE.values(), "rgb(248, 187, 152)", "rgba(183, 189, 248, 0.1)", _HOVER, _HAIR,
+                 "rgba(24, 25, 38, 0.22)", "rgba(24, 25, 38, 0.28)", "rgba(8, 9, 16, 0.45)",
+                 "rgba(8, 9, 16, 0.9)", _CLEAR],
+        "spend": [*_SPEND_PALETTE.values(), _HOVER, _HAIR, _CLEAR],
+        "notices": [PALETTE[k] for k in ("--text", "--sub1", "--sub0", "--ov2", "--s0", "--s1",
+                                         "--s2", "--base", "--mantle")] + [_HAIR, _HOVER, _CLEAR],
+    },
+    "tokens": {
+        "desk": {"names": list(_DESK_TOKENS),
+                 "colours": {**PALETTE, "--hair": _HAIR, "--hover": _HOVER}},
+        "spend": {"names": [n for n in _DESK_TOKENS if n not in _NO_STATE_COLOURS],
+                  "colours": {**_SPEND_PALETTE, "--hair": _HAIR, "--hover": _HOVER}},
+    },
+}
+# The guest pages are read only by the guest rows (#1313).
+_GUEST_PAGES = ("guest-page", "guest-steer")
+_EVERY_STATE = tuple(state for state in STATES if state not in _GUEST_PAGES)
+_BOTH = (1440, 480)
+_NEEDS = ".needs, .needs *, .btn-primary, .btn-primary *"
+_RED_ON = "{ color: rgb(1, 2, 3) !important }"
+
+
+def _colour(name, state, selector, token, probe="", host="body", widths=(1440,), **kw):
+    """A row that wants `selector`'s `color` to be `token`'s colour, broken by a rule setting it to
+    rgb(1, 2, 3)."""
+    return StyleCheck(name, (state,), widths, selector, kw.pop("prop", "color"), "equals",
+                      PALETTE[token], f"{selector} {_RED_ON}", probe=probe, host=host, **kw)
+
+
+STYLE_CHECKS: tuple[StyleCheck, ...] = (
+    StyleCheck("peach-only-needs", _EVERY_STATE, _BOTH, "body", "color", "none_peach", _NEEDS,
+               ".top-in { border-top: 2px solid rgb(245, 169, 127) !important }"),
+    # A colour painted by a gradient's stops is as prohibited as one painted flat (#1313).
+    StyleCheck("peach-only-needs-gradient", _EVERY_STATE, _BOTH, "body", "background-image",
+               "none_peach", _NEEDS,
+               ".top-in { background-image: linear-gradient(rgb(245, 169, 127), rgb(36, 39, 58)) !important }"),
+    StyleCheck("runs-not-red", ("live-several", "waiting-its-turn"), (1440,),
+               ".run, .runs, .moved, .quiet", "color", "not", PALETTE["--red"],
+               ".run, .runs, .moved, .quiet { color: rgb(237, 135, 150) !important }", every=True),
+    StyleCheck("palette-notices", ("notices-fold",), _BOTH, ".line.notices", "color", "palette",
+               "notices", ".notice-label { color: rgb(183, 189, 248) !important }"),
+    StyleCheck("palette-notices-gradient", ("notices-fold",), _BOTH, ".line.notices",
+               "background-image", "palette", "notices",
+               ".notice { background-image: linear-gradient(var(--peach), var(--base)) !important }"),
+    StyleCheck("palette-accounts", ("accounts-panel",), _BOTH, "#accounts", "color", "palette",
+               "desk", "#accounts { background-color: rgb(1, 2, 3) !important }"),
+    StyleCheck("sizes-accounts", ("accounts-panel",), (1440,), "#accounts", "font-size",
+               "sizes_shared", "", "#accounts * { font-size: 13.37px !important }"),
+    StyleCheck("accounts-hidden", ("accounts-panel",), (1440,), ".acct-panel[hidden]", "display",
+               "equals", "none", ".acct-panel[hidden] { display: block !important }",
+               probe='<div class="acct-panel" hidden data-style-probe></div>'),
+    StyleCheck("palette-spend", ("spend-page",), _BOTH, "body", "color", "palette", "spend",
+               ".brand { color: rgb(237, 135, 150) !important }"),
+    StyleCheck("tokens-desk", ("nothing-running",), (1440,), ":root", "--*", "tokens", "desk",
+               ":root { --green: #00ff00 !important }"),
+    StyleCheck("tokens-spend", ("spend-page",), (1440,), ":root", "--*", "tokens", "spend",
+               ":root { --peach: #f5a97f }"),
+    _colour("state-working", "nothing-running", ".s-working", "--green",
+            probe='<span class="s-working" data-style-probe>x</span>'),
+    _colour("state-waiting-answer", "nothing-running", ".s-waiting_answer", "--yellow",
+            probe='<span class="s-waiting_answer" data-style-probe>x</span>'),
+    _colour("state-waiting-permission", "nothing-running", ".s-waiting_permission", "--yellow",
+            probe='<span class="s-waiting_permission" data-style-probe>x</span>'),
+    _colour("state-limit", "nothing-running", ".s-limit", "--red",
+            probe='<span class="s-limit" data-style-probe>x</span>'),
+    _colour("cap-out-red", "nothing-running", ".cap-out", "--red", host="#capacity",
+            probe='<span class="cap-out" data-style-probe>x</span>'),
+    _colour("message-you-lav", "message-sent", ".message-text", "--lav", widths=_BOTH),
+    _colour("reason-quiet", "nothing-running", ".card .reason", "--ov2",
+            probe='<div class="card" data-style-probe><span class="reason">x</span></div>'),
+    _colour("ball-needs", "nothing-running", ".sprint-ball.needs", "--peach",
+            probe='<span class="sprint-ball needs" data-style-probe>x</span>'),
+    _colour("tone-go", "nothing-running", ".st-go", "--green",
+            probe='<span class="st-go" data-style-probe>x</span>'),
+    _colour("tone-wait", "nothing-running", ".st-wait", "--yellow",
+            probe='<span class="st-wait" data-style-probe>x</span>'),
+    _colour("tone-dim", "nothing-running", ".st-dim", "--ov2",
+            probe='<span class="st-dim" data-style-probe>x</span>'),
+    StyleCheck("pips-differ", ("nothing-running",), (1440,),
+               ".pip.pip-landed | .pip.pip-delivery | .pip.pip-held | .pip.pip-queued",
+               "border-top-style", "distinct", "",
+               ".pip.pip-queued { border: 0 !important; background: var(--sub0) !important }",
+               probe='<span data-style-probe><span class="pip pip-landed"></span>'
+                     '<span class="pip pip-delivery"></span><span class="pip pip-held"></span>'
+                     '<span class="pip pip-queued"></span></span>'),
+    _colour("spend-quiet", "desk-spend", ".spend", "--ov2", widths=_BOTH),
+    _colour("sp-spend-quiet", "desk-spend", ".sp-spend", "--ov2", widths=_BOTH),
+    StyleCheck("option-fills", ("inbox-card",), _BOTH, ".btn-option", "width", "fills", "",
+               ".btn-option { width: 50% !important }", every=True),
+    StyleCheck("option-pick-key", ("question-words",), _BOTH, '.btn-option[aria-pressed="true"] kbd',
+               "background-color", "equals", PALETTE["--lav"],
+               '.btn-option[aria-pressed="true"] kbd { background: none !important }'),
+    _colour("nav-quiet", "nothing-running", ".nav", "--sub0", widths=_BOTH),
+    StyleCheck("nav-nowrap", ("nothing-running",), _BOTH, ".nav", "white-space", "equals", "nowrap",
+               ".nav { white-space: normal !important }"),
+    StyleCheck("nav-width", ("nothing-running",), _BOTH, ".nav", "width", "max", "60",
+               ".nav { width: 200px !important }"),
+    StyleCheck("nav-min-width", ("nothing-running",), _BOTH, ".nav", "min-width", "equals", "auto",
+               ".nav { min-width: 0 !important }"),
+)
+_DESK_STATES = tuple(state for state in _EVERY_STATE if state != "spend-page")
+_RGB = "rgb(1, 2, 3)"
+
+
+def _row(name, states, selector, prop, want, value, bad, widths=_BOTH, **kw):
+    """A row reading `selector`'s `prop`, broken by a rule that sets the property to `bad`."""
+    states = (states,) if isinstance(states, str) else tuple(states)
+    return StyleCheck(name, states, tuple(widths), selector, prop, want, value,
+                      f"{selector}{kw.get('pseudo', '')} {{ {prop}: {bad} !important }}", **kw)
+
+
+def _group(prefix, states, selector, reads, widths=_BOTH, **kw):
+    """The rows `<prefix>-<prop>` of one selector, one per `(prop, want, value, bad)` read."""
+    return tuple(_row(f"{prefix}-{prop}", states, selector, prop, want, value, bad, widths, **kw)
+                 for prop, want, value, bad in reads)
+
+
+_NOTHING = "nothing-running"
+_OPEN_GOAL = ".goal-bar.open .goal-count"
+_PLAIN_BACKGROUND = "rgba(0, 0, 0, 0)"
+_INLINE_BLOCK = (("display", "equals", "inline-block", "block"),
+                 ("max-width", "equals", "100%", "none"),
+                 ("overflow", "equals", "hidden", "visible"),
+                 ("text-overflow", "equals", "ellipsis", "clip"),
+                 ("white-space", "equals", "nowrap", "normal"),
+                 ("vertical-align", "equals", "bottom", "top"))
+_SEC_UI = '<span class="sec-ui" style="font-family: var(--ui)" data-style-probe></span>'
+_DISPLAY_LEAD = (".statement h1, .statement h1 *, .card .q, .card .q *, .reading-question, "
+                 ".reading-question *")
+_SEC_H = (("font-style", "equals", "normal", "italic"),
+          ("font-weight", "equals", "600", "400"),
+          ("font-size", "equals", "15px", "30px"),
+          ("line-height", "equals", "21px", "40px"),
+          ("color", "equals", PALETTE["--text"], _RGB))
+
+
+def _sec_h(prefix, selector, **kw):
+    return (*_group(prefix, _NOTHING, selector, _SEC_H, **kw),
+            _row(f"{prefix}-font-family", _NOTHING, selector, "font-family", "same_as", ".sec-ui",
+                 "serif", compare_probe=_SEC_UI, compare_host="#digest", **kw))
+
+
+STYLE_CHECKS += (
+    *_group("top-wrap", _NOTHING, ".top-in", (("flex-wrap", "equals", "wrap", "nowrap"),)),
+    *_group("top-wrap", _NOTHING, ".top-in", (
+        ("row-gap", "equals", "10px", "1px"), ("column-gap", "equals", "28px", "1px"),
+        ("gap", "equals", "10px 28px", "1px")), widths=(1440,)),
+    _row("statement-narrow-font-size", _NOTHING, ".statement h1", "font-size", "max", "37.9",
+         "3rem", widths=(480,),
+         probe='<div class="statement" data-style-probe><h1>x</h1></div>', host="body"),
+    *_group("goal-box", "goal-open", ".goal-box", (
+        ("max-height", "max", "900", "none"), ("overflow-y", "equals", "auto", "visible"))),
+    _row("goal-box-width-1440", "goal-open", ".goal-box", "width", "max", "600", "700px",
+         widths=(1440,)),
+    _row("goal-box-width-480", "goal-open", ".goal-box", "width", "max", "448", "700px",
+         widths=(480,)),
+    *_group("goal-projects", "goal-open", ".goal-projects", (
+        ("min-width", "equals", "0px", "50px"), ("max-width", "equals", "100%", "none"),
+        ("overflow-y", "equals", "auto", "visible"), ("flex", "equals", "0 1 auto", "1 1 auto"),
+        ("min-height", "equals", "0px", "50px"))),
+    *_group("goal-projects-li", "goal-open", ".goal-projects li", (
+        ("min-width", "equals", "0px", "50px"), ("max-width", "equals", "100%", "none"))),
+    *_group("goal-project", "goal-open", ".goal-project", (
+        ("min-width", "equals", "0px", "50px"), ("max-width", "equals", "100%", "none"),
+        ("overflow-wrap", "equals", "anywhere", "normal"))),
+    _row("goal-filter-min-width", "goal-open", ".goal-filter", "min-width", "equals", "0px",
+         "50px"),
+    _row("goal-act-flex", "goal-open", ".goal-act", "flex", "equals", "0 0 auto", "1 1 auto"),
+    _row("goal-bar-flex-480", _NOTHING, ".goal-bar", "flex", "equals", "1 0 100%", "1 1 10px",
+         widths=(480,)),
+    _row("goal-bar-max-width-480", _NOTHING, ".goal-bar", "max-width", "equals", "none", "300px",
+         widths=(480,)),
+    _row("goal-bar-flex-1440", _NOTHING, ".goal-bar", "flex", "equals", "1 1 192px", "0 0 10px",
+         widths=(1440,)),
+    _row("goal-bar-min-width-1440", _NOTHING, ".goal-bar", "min-width", "equals", "192px", "10px",
+         widths=(1440,)),
+    _row("goal-bar-max-width-1440", _NOTHING, ".goal-bar", "max-width", "equals", "440px", "300px",
+         widths=(1440,)),
+    *_group("placeholder", _NOTHING, ".goal-in .goal-text", (
+        ("white-space", "equals", "nowrap", "normal"), ("overflow", "equals", "hidden", "visible"),
+        ("text-overflow", "equals", "ellipsis", "clip")), pseudo="::placeholder"),
+    _row("placeholder-host-text-overflow", _NOTHING, ".goal-in .goal-text", "text-overflow",
+         "equals", "ellipsis", "clip"),
+    _row("goal-focus-border-color", _NOTHING, ".goal-in", "border-color", "equals",
+         PALETTE["--lav"], _RGB, forced=("focus-within",)),
+    _row("goal-focus-outline", _NOTHING, ".goal-in .field-bare", "outline", "equals",
+         "rgb(202, 211, 245) none 0px", "2px solid " + _RGB,
+         forced=("focus-visible",)),
+    _row("goal-count-closed-display", _NOTHING, ".goal-count", "display", "equals", "none", "block",
+         probe='<span class="goal-count" data-style-probe></span>', host="#goal"),
+    *_group("goal-count", "goal-open", _OPEN_GOAL, (
+        ("display", "equals", "block", "none"), ("position", "equals", "absolute", "static"),
+        ("color", "equals", PALETTE["--ov2"], _RGB), ("white-space", "equals", "normal", "nowrap"),
+        ("flex-basis", "equals", "auto", "300px"), ("min-width", "in", "auto|0px", "300px"))),
+    _row("goal-count-width", "goal-open", _OPEN_GOAL, "width", "hugs", "", "300px"),
+    _row("goal-count-near-color", "goal-near", _OPEN_GOAL, "color", "equals", PALETTE["--ov2"],
+         _RGB),
+    *_group("goal-count-over", "goal-over", ".goal-count.over", (
+        ("color", "equals", PALETTE["--red"], _RGB), ("white-space", "equals", "normal", "nowrap"),
+        ("flex-basis", "equals", "auto", "300px"), ("min-width", "in", "auto|0px", "300px"))),
+    _row("goal-count-over-width", "goal-over", ".goal-count.over", "width", "hugs", "", "300px"),
+    *_group("goal-status", "goal-open", ".goal-status", (
+        ("display", "not", "none", "none"), ("visibility", "equals", "visible", "hidden")),
+        probe='<p class="goal-status" data-style-probe>Could not send: this project is not '
+              'registered</p>', host="#goal .goal-box"),
+    _row("goal-status-empty-display", "goal-open", ".goal-status:empty", "display", "equals",
+         "none", "block", probe='<p class="goal-status" data-style-probe></p>',
+         host="#goal .goal-box"),
+    *_group("fail-shown", _NOTHING, ".fail", (
+        ("display", "not", "none", "none"), ("visibility", "equals", "visible", "hidden")),
+        probe='<p class="fail" data-style-probe>x</p>', host="#inbox"),
+    *_group("cap", "accounts-panel", ".cap", (
+        ("flex", "equals", "0 0 auto", "1 1 auto"), ("overflow", "equals", "hidden", "visible"),
+        ("min-width", "equals", "0px", "50px"), ("max-width", "equals", "100%", "none"),
+        ("white-space", "equals", "nowrap", "normal"), ("flex-wrap", "equals", "nowrap", "wrap"),
+        ("font-size", "equals", "13px", "20px"), ("color", "equals", PALETTE["--sub0"], _RGB),
+        ("cursor", "equals", "pointer", "default"), ("text-align", "equals", "left", "right"),
+        ("padding", "equals", "0px", "9px"), ("font-style", "equals", "normal", "italic"),
+        ("font-weight", "equals", "400", "700"), ("line-height", "equals", "19.5px", "40px"),
+        ("background-image", "equals", "none", "linear-gradient(red, red)"))),
+    _row("cap-font-family", "accounts-panel", ".cap", "font-family", "same_as", "body", "serif"),
+    _row("cap-background-color", _NOTHING, ".cap", "background-color", "equals", _PLAIN_BACKGROUND,
+         _RGB),
+    _row("cap-child-flex", "accounts-panel", ".cap > *", "flex", "equals", "0 0 auto", "1 1 auto",
+         every=True),
+    _row("cap-acct-max-width", "accounts-panel", ".cap-acct", "max-width", "equals", "100%",
+         "none"),
+    _row("cap-acct-white-space", "accounts-panel", ".cap-acct", "white-space", "equals", "nowrap",
+         "normal"),
+    *_group("cap-acct-name", "accounts-panel", ".cap-acct b", (
+        ("overflow", "equals", "hidden", "visible"), ("text-overflow", "equals", "ellipsis", "clip"),
+        ("white-space", "equals", "nowrap", "normal"), ("max-width", "max", "160", "none"))),
+    _colour("cap-excl-color", "accounts-panel", ".cap-excl", "--ov2", host="#capacity",
+            probe='<span class="cap-excl" data-style-probe>x</span>'),
+    _colour("cap-pin-mark-color", "accounts-panel", ".cap-pin-mark", "--ov2", host="#capacity",
+            probe='<span class="cap-pin-mark" data-style-probe>x</span>'),
+    _row("cap-extra-display", "accounts-panel", ".cap-extra", "display", "equals", "none", "block",
+         widths=(480,), probe='<span class="cap-extra" data-style-probe>x</span>',
+         host="#capacity"),
+    _row("brand-white-space", _NOTHING, ".brand", "white-space", "equals", "nowrap", "normal"),
+    _row("top-fit-width", _NOTHING, ".top-in > *", "width", "max", "448", "600px", widths=(480,),
+         every=True),
+    _row("top-fit-min-width", _NOTHING, ".goal-bar, .cap", "min-width", "max", "448", "600px",
+         widths=(480,), every=True),
+    _row("top-fit-flex-basis", _NOTHING, ".goal-bar", "flex-basis", "max", "448", "600px",
+         widths=(480,)),
+    _row("top-fit-meter-width", "accounts-panel", ".meter", "width", "max", "448", "600px",
+         widths=(480,), every=True),
+    _row("top-fit-meter-min-width", "accounts-panel", ".meter", "min-width", "in", "auto|0px",
+         "600px", widths=(480,), every=True),
+    _row("top-fit-meter-flex-basis", "accounts-panel", ".meter", "flex-basis", "equals", "auto",
+         "600px", widths=(480,), every=True),
+    _row("meter-fill-background-color", _NOTHING, ".meter i", "background-color", "equals",
+         PALETTE["--sub0"], _RGB, probe='<span class="meter" data-style-probe><i></i></span>',
+         host="#capacity"),
+    _row("meter-fill-background-image", _NOTHING, ".meter i", "background-image", "equals", "none",
+         "linear-gradient(red, red)",
+         probe='<span class="meter" data-style-probe><i></i></span>', host="#capacity"),
+    _row("meter-excluded-background-color", _NOTHING, ".cap-excluded .meter i", "background-color",
+         "equals", PALETTE["--s2"], _RGB,
+         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
+               '</span></span>', host="#capacity"),
+    _row("meter-excluded-background-image", _NOTHING, ".cap-excluded .meter i",
+         "background-image", "equals", "none", "linear-gradient(red, red)",
+         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
+               '</span></span>', host="#capacity"),
+    StyleCheck("lead-type-font-size", _DESK_STATES, _BOTH, "body", "font-size", "largest_type",
+               "24|" + _DISPLAY_LEAD, ".brand { font-size: 30px !important }", fixture=True),
+    _row("lead-type-card-font-size", "inbox-card", ".card .q", "font-size", "equals", "24px",
+         "20px"),
+    _row("lead-type-card-font", "inbox-card", ".card .q", "font", "starts", "600 24px / 31.2px ",
+         "20px serif"),
+    _row("lead-type-reading-font-size", "question-read", ".reading-question", "font-size",
+         "equals", "24px", "20px", fixture=True),
+    _row("lead-type-reading-font", "question-read", ".reading-question", "font", "starts",
+         "600 24px / 31.2px ", "20px serif", fixture=True),
+    *_group("lead-narrow", "inbox-card", ".card.lead", (
+        ("padding-left", "max", "16", "40px"), ("padding-right", "max", "16", "40px"),
+        ("padding", "equals", "20px 16px", "9px")), widths=(480,)),
+    _row("q-full-width-text-wrap", "inbox-card", ".card .q", "text-wrap", "equals", "pretty",
+         "balance"),
+    _row("q-full-width-reg-text-wrap", "inbox-card", ".card .q.reg", "text-wrap", "not", "balance",
+         "balance",
+         probe='<div class="card" data-style-probe><p class="q reg">x</p></div>'),
+    _row("q-full-width-rest-text-wrap", "inbox-card", ".rest .q.reg", "text-wrap", "not",
+         "balance", "balance",
+         probe='<div class="rest" data-style-probe><p class="q reg">x</p></div>'),
+    _row("reg-ask-font-size-1440", "inbox-card", ".card .q.reg", "font-size", "equals", "20px",
+         "30px", widths=(1440,),
+         probe='<div class="card" data-style-probe><p class="q reg">x</p></div>'),
+    _row("reg-ask-font-size-480", "inbox-card", ".card .q.reg", "font-size", "max", "16", "30px",
+         widths=(480,), probe='<div class="card" data-style-probe><p class="q reg">x</p></div>'),
+    *_group("reg-ask-rest", "inbox-card", ".rest .q.reg", (
+        ("font-weight", "equals", "600", "400"), ("font-size", "equals", "16px", "30px"),
+        ("line-height", "equals", "22.4px", "40px"),
+        ("font", "starts", "600 16px / 22.4px ", "20px serif")),
+        probe='<div class="rest" data-style-probe><p class="q reg">x</p></div>'),
+    *_group("seg", "inbox-card", ".seg", (
+        ("display", "equals", "inline-block", "inline"), ("max-width", "equals", "100%", "none"),
+        ("overflow-wrap", "equals", "anywhere", "normal")),
+        probe='<span class="seg" data-style-probe>x</span>', host="#inbox"),
+    *_group("held-blocks", "inbox-card", ".held.blocks", (
+        ("white-space", "equals", "nowrap", "normal"), ("overflow", "equals", "hidden", "visible"),
+        ("text-overflow", "equals", "ellipsis", "clip")),
+        probe='<p class="held blocks" data-style-probe>x</p>', host="#inbox"),
+    _row("notice-margin-top", "notices-fold", ".notice + .notice", "margin-top", "equals", "12px",
+         "0px"),
+    _row("notice-head-display", "notices-fold", ".notice-head", "display", "equals", "flex",
+         "block"),
+    _row("notice-head-flex-wrap", "notices-fold", ".notice-head", "flex-wrap", "equals", "nowrap",
+         "wrap"),
+    _row("notice-who-flex", "notices-fold", ".notice-who", "flex", "equals", "1 1 auto",
+         "0 0 auto"),
+    _row("notice-who-min-width", "notices-fold", ".notice-who", "min-width", "equals", "0px",
+         "50px"),
+    _row("notice-who-display", "notices-fold", ".notice-who", "display", "equals", "block",
+         "flex"),
+    _row("notice-label-display", "notices-fold", ".notice-label", "display", "equals", "inline",
+         "inline-block"),
+    _row("notice-from-display", "notices-fold", ".notice-from", "display", "equals", "inline",
+         "inline-block"),
+    StyleCheck("notice-age-right", ("notices-fold",), _BOTH, ".notice-head .notice-age", "right",
+               "right_edge", "", ".notice-head .notice-age { margin-right: 40px !important }"),
+    _row("notice-age-margin-left", "notices-fold", ".notice-head .notice-age", "margin-left",
+         "min", "0", "-5px"),
+    _row("notice-age-flex", "notices-fold", ".notice-head .notice-age", "flex", "equals",
+         "0 0 auto", "1 1 auto"),
+    _colour("notice-age-color", "notices-fold", ".notice-head .notice-age", "--ov2",
+            widths=_BOTH),
+    _colour("notice-words-color", "notices-fold", ".notice-words", "--text", widths=_BOTH),
+    *_group("notice-code", "notices-fold", ".notice code", (
+        ("background-color", "equals", PALETTE["--mantle"], _RGB),
+        ("background-image", "equals", "none", "linear-gradient(red, red)"),
+        *_INLINE_BLOCK), probe='<p class="notice" data-style-probe><code>x</code></p>'),
+    *_group("notice-child", "notices-fold", ".notice > *", (
+        ("overflow-wrap", "equals", "anywhere", "normal"), ("min-width", "equals", "0px", "50px")),
+        every=True),
+    *_group("notices-project", "notices-fold", ".notices-project", (
+        ("overflow-wrap", "equals", "anywhere", "normal"), ("margin-left", "equals", "10px",
+                                                           "0px"))),
+    *_group("notice-long", "notices-fold", ".notice .notice-long", _INLINE_BLOCK,
+            probe='<p class="notice" data-style-probe><span class="notice-long">x</span></p>'),
+    _row("notice-gap-open", "notices-fold", ".notice-list + .notice-open", "margin-top", "min",
+         "12", "4px",
+         probe='<div data-style-probe><ul class="notice-list"></ul><p class="notice-open">x</p>'
+               '</div>'),
+    _row("notice-gap-post", "notice-post-open", ".notice-list + .notice-post", "margin-top", "min",
+         "12", "4px",
+         probe='<div data-style-probe><ul class="notice-list"></ul><p class="notice-post">x</p>'
+               '</div>'),
+    *(_row(f"disclosure-{name}-{prop}", state, selector, prop, want, value, bad)
+      for name, state, selector in (("notices", "notices-fold", ".line.notices summary"),
+                                    ("finished", "finished-list", ".finished-list > summary"),
+                                    ("sprint", "live-several", ".sprint-detail summary"))
+      for prop, want, value, bad in (
+          ("display", "equals", "list-item", "block"),
+          ("list-style-type", "in", "disclosure-closed|disclosure-open", "none"))),
+    # No engine resolves the marker's own style, so its declared display is read from the cascade.
+    _row("disclosure-notices-marker-display", "notices-fold", ".line.notices summary", "display",
+         "declared", "revert", "none", pseudo="::-webkit-details-marker"),
+    _row("thread-open-display", "questions-open", ".thread-open", "display", "equals", "flex",
+         "block"),
+    _row("thread-summary-display", "questions-open", ".line.questions > details > summary",
+         "display", "equals", "list-item", "block"),
+    _row("thread-summary-list-style-type", "questions-open", ".line.questions > details > summary",
+         "list-style-type", "in", "disclosure-closed|disclosure-open", "none"),
+    *_group("thread-first", "questions-open", ".thread-first", (
+        ("text-overflow", "equals", "ellipsis", "clip"), ("white-space", "equals", "nowrap",
+                                                          "normal"),
+        ("flex", "equals", "1 1 auto", "0 0 auto"))),
+    _row("reading-weight-panel", "question-read", "#reading", "font-weight", "equals", "400",
+         "700"),
+    _row("reading-weight-call-out", "question-read", "p.reading", "font-weight", "equals", "600",
+         "400", probe='<p class="reading" data-style-probe>x</p>', host="#reading"),
+    _row("answer-type-white-space", "question-read", ".ask-answer p", "white-space", "equals",
+         "pre-line", "normal", fixture=True),
+    _row("answer-type-font-size", "question-read", ".ask-answer", "font-size", "same_as", ".opt .ot",
+         "30px", fixture=True,
+         compare_probe='<div class="opt" data-style-probe><span class="ot">x</span></div>',
+         compare_host="#reading"),
+    _row("answer-type-p-font-size", "question-read", ".ask-answer p", "font-size", "same_as",
+         ".ask-answer", "30px", fixture=True),
+    _row("answer-type-li-font-size", "question-read", ".ask-answer li", "font-size", "same_as",
+         ".ask-answer", "30px", fixture=True),
+    _row("answer-type-list-font-size", "question-read", ".ask-answer .md-list", "font-size",
+         "same_as", ".ask-answer", "30px", fixture=True),
+    _row("answer-type-font", "question-read", ".ask-answer p", "font", "same_as", ".ask-answer",
+         "20px serif", fixture=True),
+    _row("answer-type-li-font", "question-read", ".ask-answer li", "font", "same_as", ".ask-answer",
+         "20px serif", fixture=True),
+    _row("answer-type-list-font", "question-read", ".ask-answer .md-list", "font", "same_as",
+         ".ask-answer", "20px serif", fixture=True),
+    # Each list kind is read on its own rendered subject, since the canonical answer holds a
+    # bulleted list only (#1313).
+    *(_row(f"answer-type-{kind}-{key}", "question-read", f".ask-answer {kind}.md-list", prop,
+           "same_as", ".ask-answer", bad, host="#reading",
+           probe=f'<div class="ask-answer" data-style-probe><{kind} class="md-list"><li>x</li>'
+                 f'</{kind}></div>')
+      for kind in ("ul", "ol")
+      for key, prop, bad in (("font-size", "font-size", "30px"), ("font", "font", "20px serif"))),
+    *(_row(f"digest-lines-{name}-{prop}", _NOTHING, f"{list_} li", prop, want, value, bad,
+           probe='<div data-style-probe><ul class="digest"><li><time class="at">x</time>'
+                 '<span class="said">y</span></li></ul><ul class="earlier-list"><li>'
+                 '<time class="at">x</time><span class="said">y</span></li>'
+                 '<li class="more-n">and 2 more</li></ul></div>', host="#digest")
+      for name, list_ in (("digest", ".digest"), ("earlier", ".earlier-list"))
+      for prop, want, value, bad in (
+          ("display", "equals", "grid", "block"),
+          ("grid-template-columns", "starts", "88px ", "1fr"),
+          ("flex-wrap", "equals", "nowrap", "wrap"))),
+    *_group("digest-lines-more", _NOTHING, ".earlier-list .more-n", (
+        ("display", "equals", "block", "grid"), ("grid-column", "equals", "auto", "1 / 3")),
+        probe='<div data-style-probe><ul class="earlier-list"><li class="more-n">and 2 more</li>'
+              '</ul></div>', host="#digest"),
+    *_sec_h("sec-h-work", "#projects h2"),
+    *_sec_h("sec-h-digest", ".digest-head",
+            probe='<h2 class="sec-h digest-head" data-style-probe>Since you last looked, '
+                  '<time>x</time></h2>', host="#digest"),
+    *_sec_h("sec-h-promoted", "#promoted h2",
+            probe='<h2 class="sec-h" data-style-probe>Capacity</h2>', host="#promoted"),
+)
+_LIVE = "live-several"
+_LOOK = "look-card"
+_OWNER = "owner-check"
+_MARK = '<span class="message-new">new reply</span>'
+_CHECK_LIST = ('<ul class="sprint-checks" data-style-probe><li><button class="sprint-check '
+               'btn-quiet btn-bare">x</button></li></ul>')
+_WAIT_LIST = '<ul class="sprint-checks" data-style-probe><li class="wait">x</li></ul>'
+_REST_ROW = '<ul class="rest" data-style-probe><li class="row">x</li></ul>'
+_CARD_HEAD = '<div class="card" data-style-probe><div class="head">x</div></div>'
+_REST_HEAD = ('<ul class="rest" data-style-probe><li class="row"><div class="head"><span>a</span>'
+              '<span class="wait">waiting</span></div></li></ul>')
+_LEAD_BRIEFS = ('<div data-style-probe><article class="card lead">x</article>'
+                '<details class="row brief-row">x</details><details class="row brief-row">y'
+                '</details></div>')
+_LEAD_REST = ('<div data-style-probe><article class="card lead">x</article>'
+              '<ul class="rest"><li class="row">x</li></ul></div>')
+_ANSWERED = ('<details class="done-item" data-style-probe><summary><b>Which database?</b>'
+             '<span>answered</span></summary></details>')
+_DRAFT = ('<ul class="register-draft" data-style-probe><li><span>a line</span>'
+          '<button class="draft-change btn-quiet">Change</button></li></ul>')
+_OPAQUE_LOOK = "rgba(24, 25, 38, .5)"
+_NO_IMAGE = "linear-gradient(red, red)"
+_HEAD = ".sp-head"
+# A line after a line has the hair above it unless it is `.after-line`, which the rule removes.
+_BLOCK = "#list > li.line + li.line:not(.after-line)"
+_ANSWER_CLIP = (("white-space", "equals", "nowrap", "normal"), ("overflow", "equals", "hidden", "visible"),
+                ("text-overflow", "equals", "ellipsis", "clip"), ("min-width", "equals", "0px", "50px"))
+_ANSWER_SPAN = ".done-item summary > span"
+
+
+def _wide(row_name, state, selector, prop, want, value, bad, **kw):
+    """The 1440 row of a property whose 480 value differs."""
+    return _row(f"{row_name}-1440", state, selector, prop, want, value, bad, widths=(1440,), **kw)
+
+
+def _narrow(row_name, state, selector, prop, want, value, bad, **kw):
+    """The 480 row of a property whose 1440 value differs."""
+    return _row(f"{row_name}-480", state, selector, prop, want, value, bad, widths=(480,), **kw)
+
+
+STYLE_CHECKS += (
+    # The new-reply mark in a summary, the check line and the wait line.
+    _row("new-mark-gap-finished", "finished-list", ".finished-list > summary .message-new",
+         "margin-left", "equals", "10px", "0px", widths=(1440,), host="#projects",
+         probe=f'<details class="finished-list" data-style-probe><summary>Finished {_MARK}'
+               '</summary></details>'),
+    _row("new-mark-gap-earlier", "finished-list", ".sprint-earlier summary .message-new",
+         "margin-left", "equals", "10px", "0px", widths=(1440,), host="#projects",
+         probe=f'<details class="sprint-earlier" data-style-probe><summary>Earlier {_MARK}'
+               '</summary></details>'),
+    _row("check-line-color", _OWNER, ".sprint-check", "color", "same_as", ".sprint-detail summary",
+         _RGB),
+    _row("check-line-cursor", _OWNER, ".sprint-check", "cursor", "same_as", ".sprint-detail summary",
+         "default"),
+    _row("check-line-font-size", _OWNER, ".sprint-check", "font-size", "same_as", ".sprint-detail",
+         "30px"),
+    _row("check-line-text-decoration-line", _OWNER, ".sprint-check", "text-decoration-line",
+         "equals", "none", "underline"),
+    _wide("check-line-min-height", _OWNER, ".sprint-check", "min-height", "same_as", ".btn-quiet",
+          "20px", compare_probe='<button class="btn-quiet" data-style-probe>x</button>'),
+    _narrow("check-line-min-height", _OWNER, ".sprint-check", "min-height", "equals", "44px", "20px"),
+    _narrow("check-line-display", _OWNER, ".sprint-check", "display", "equals", "flex", "block"),
+    _narrow("check-line-align-items", _OWNER, ".sprint-check", "align-items", "equals", "flex-start",
+            "center"),
+    _row("check-line-list-padding", _OWNER, ".sprint-checks", "padding", "equals", "0px 0px 0px 28px",
+         "9px"),
+    *_group("wait-line", _OWNER, ".sprint-checks .wait", (
+        ("margin", "equals", "0px", "9px"), ("padding", "same_as", ".sprint-check", "9px"),
+        ("font-size", "same_as", ".sprint-check", "30px")),
+        probe=_WAIT_LIST, host="#projects", compare_probe=_CHECK_LIST, compare_host="#projects"),
+    _narrow("wait-line-min-height", _OWNER, ".sprint-checks .wait", "min-height", "equals", "44px",
+            "20px", probe=_WAIT_LIST, host="#projects"),
+    _narrow("wait-line-min-height-same", _OWNER, ".sprint-checks .wait", "min-height", "same_as",
+            ".sprint-check", "20px", probe=_WAIT_LIST, host="#projects", compare_probe=_CHECK_LIST,
+            compare_host="#projects"),
+    # The now sentence, the pips and the project block.
+    _row("now-sentence-column-start", _LIVE, ".sp-now", "grid-column-start", "equals", "2", "1"),
+    _row("now-sentence-column-end", _LIVE, ".sp-now", "grid-column-end", "equals", "-1", "3"),
+    _row("now-sentence-display", _LIVE, ".sp-now", "display", "in", "-webkit-box|flow-root", "block"),
+    _row("now-sentence-box-orient", _LIVE, ".sp-now", "-webkit-box-orient", "equals", "vertical",
+         "horizontal"),
+    _row("now-sentence-line-clamp", _LIVE, ".sp-now", "-webkit-line-clamp", "equals", "2", "5"),
+    _row("now-sentence-overflow-y", _LIVE, ".sp-now", "overflow-y", "equals", "hidden", "visible"),
+    _row("pips-wrap-flex-wrap", _LIVE, ".pips", "flex-wrap", "equals", "wrap", "nowrap"),
+    _row("pips-wrap-pips-white-space", _LIVE, ".pips", "white-space", "not", "nowrap", "nowrap"),
+    _row("pips-wrap-prog-white-space", _LIVE, ".sp-prog", "white-space", "not", "nowrap", "nowrap"),
+    _row("pips-wrap-columns", _LIVE, _HEAD, "grid-template-columns", "starts", "16px ", "1fr"),
+    _row("pips-wrap-columns-max", _LIVE, _HEAD, "grid-template-columns", "track_max", "3:0.5",
+         "16px minmax(0, 1fr) 90%"),
+    _row("project-block-border-color", _LIVE, _BLOCK, "border-top-color", "equals", _HAIR, _RGB),
+    _row("project-block-border-width", _LIVE, _BLOCK, "border-top-width", "min", "1", "0px"),
+    _row("project-block-pname-weight", _LIVE, ".pname", "font-weight", "equals", "600", "400"),
+    # The brief rows and the registration rows.
+    _row("row-head-display", _NOTHING, ".row-head", "display", "equals", "flex", "block",
+          probe='<p class="row-head" data-style-probe>x</p>', host="#inbox", widths=(1440,)),
+    _row("row-head-summary-display", _NOTHING, ".brief-row > summary", "display", "equals", "flex",
+          "block", host="#inbox",
+          probe='<details class="row brief-row" data-style-probe><summary class="row-head">x'
+                '</summary></details>', widths=(1440,)),
+    _row("row-head-b-overflow-wrap", _NOTHING, ".row-head b", "overflow-wrap", "equals", "anywhere",
+          "normal", probe='<p class="row-head" data-style-probe><b>x</b></p>', host="#inbox", widths=(1440,)),
+    *(_row(f"rest-head-{name}", _NOTHING, ".rest .head", prop, want, value, bad, widths=(1440,),
+           probe=_REST_HEAD, host="#inbox", **extra)
+      for name, prop, want, value, bad, extra in (
+          ("display", "display", "equals", "flex", "block", {}),
+          ("column-gap", "column-gap", "same_as", ".card .head", "50px",
+           {"compare_probe": _CARD_HEAD, "compare_host": "#inbox"}),
+          ("align-items", "align-items", "same_as", ".card .head", "stretch",
+           {"compare_probe": _CARD_HEAD, "compare_host": "#inbox"}))),
+    StyleCheck("rest-head-wait-right", (_NOTHING,), (1440,), ".head .wait", "right", "right_edge", "",
+               ".head .wait { margin-left: 0 !important }", probe=_REST_HEAD, host="#inbox"),
+    _row("rest-head-wait-margin-left", _NOTHING, ".head .wait", "margin-left", "min", "0", "-5px",
+         widths=(1440,), probe=_REST_HEAD, host="#inbox"),
+    *(_row(f"row-gap-padding-{side}", _NOTHING, ".brief-row", f"padding-{side}", "equals", gap,
+           "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox")
+      for side, gap in (("top", "12px"), ("bottom", "12px"), ("left", "0px"), ("right", "0px"))),
+    *(_row(f"row-gap-padding-{side}-same", _NOTHING, ".brief-row", f"padding-{side}", "same_as",
+           ".rest > li.row", "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox",
+           compare_probe=_REST_ROW, compare_host="#inbox")
+      for side in ("top", "bottom", "left", "right")),
+    _row("row-gap-lead-brief-margin-top", _NOTHING, ".card.lead + .brief-row", "margin-top",
+         "equals", "12px", "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
+    _row("row-gap-lead-rest-margin-top", _NOTHING, ".card.lead + .rest", "margin-top", "equals",
+         "12px", "30px", widths=(1440,), probe=_LEAD_REST, host="#inbox"),
+    _row("row-gap-brief-border-color", _NOTHING, ".brief-row + .brief-row", "border-top-color",
+         "equals", _HAIR, _RGB, widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
+    # The answered row clips its question to one line.
+    *(_row(f"answered-row-b-{prop}", _NOTHING, ".done-item summary > b", prop, want, value, bad,
+           probe=_ANSWERED, host="#inbox")
+      for prop, want, value, bad in _ANSWER_CLIP),
+    *(_row(f"answered-row-span-{prop}", _NOTHING, _ANSWER_SPAN, prop, want, value, bad,
+           probe=_ANSWERED, host="#inbox")
+      for prop, want, value, bad in _ANSWER_CLIP),
+    _row("answered-row-b-flex-grow", _NOTHING, ".done-item summary > b", "flex-grow", "equals", "0",
+         "1", probe=_ANSWERED, host="#inbox"),
+    _row("answered-row-b-flex-shrink", _NOTHING, ".done-item summary > b", "flex-shrink", "gt",
+         _ANSWER_SPAN, "0", probe=_ANSWERED, host="#inbox", compare_probe=_ANSWERED,
+         compare_host="#inbox"),
+    _row("answered-row-span-flex-grow", _NOTHING, _ANSWER_SPAN, "flex-grow", "equals", "0", "1",
+         probe=_ANSWERED, host="#inbox"),
+    _row("answered-row-span-flex-shrink", _NOTHING, _ANSWER_SPAN, "flex-shrink", "min", "0.001",
+         "0", probe=_ANSWERED, host="#inbox"),
+    _row("answered-row-summary-flex-wrap", _NOTHING, ".done-item summary", "flex-wrap", "equals",
+         "nowrap", "wrap", probe=_ANSWERED, host="#inbox"),
+    _row("answered-row-item-min-width", _NOTHING, ".done-item", "min-width", "equals", "0px", "50px",
+         probe=_ANSWERED, host="#inbox"),
+    _row("draft-row-display", _NOTHING, ".register-draft li", "display", "equals", "grid", "block",
+          probe=_DRAFT, host="#inbox", widths=(1440,)),
+    _row("draft-row-columns", _NOTHING, ".register-draft li", "grid-template-columns", "tracks",
+          "2", "1fr", probe=_DRAFT, host="#inbox", widths=(1440,)),
+    _row("draft-row-change-white-space", _NOTHING, ".draft-change", "white-space", "equals",
+          "nowrap", "normal", probe=_DRAFT, host="#inbox", widths=(1440,)),
+    # The picture gallery, its thumbnails and the viewer (read open, after STYLE_STEPS).
+    _row("pics-flex-wrap", _LOOK, ".pics", "flex-wrap", "equals", "wrap", "nowrap"),
+    _row("pics-pic-min-width", _LOOK, ".pic", "min-width", "equals", "0px", "50px"),
+    _row("pics-pic-max-width", _LOOK, ".pic", "max-width", "equals", "100%", "none"),
+    _row("pics-pair-min-width", _LOOK, ".pic-pair", "min-width", "equals", "0px", "50px"),
+    _row("pics-pair-max-width", _LOOK, ".pic-pair", "max-width", "equals", "100%", "none"),
+    _row("pics-line-overflow-wrap", _LOOK, ".pic-line", "overflow-wrap", "equals", "anywhere",
+         "normal"),
+    _wide("pics-pair-display", _LOOK, ".pic-pair", "display", "equals", "flex", "block"),
+    _wide("pics-pair-direction", _LOOK, ".pic-pair", "flex-direction", "equals", "row", "column"),
+    _wide("pics-pair-align-items", _LOOK, ".pic-pair", "align-items", "equals", "flex-start",
+          "stretch"),
+    _narrow("pics-pair-direction", _LOOK, ".pic-pair", "flex-direction", "equals", "column", "row"),
+    *(_row(f"pics-pair-direction-{at}", _LOOK, ".pic-pair", "flex-direction", "equals", "row",
+           "column", widths=(at,)) for at in BETWEEN_WIDTHS),
+    _narrow("pics-pair-align-items", _LOOK, ".pic-pair", "align-items", "equals", "stretch",
+            "flex-start"),
+    _wide("pics-pair-pic-flex", _LOOK, ".pic-pair .pic", "flex", "equals", "1 1 0px", "0 0 auto"),
+    _row("thumb-object-fit", _LOOK, ".pic-thumb img", "object-fit", "equals", "contain", "fill"),
+    _wide("thumb-max-height", _LOOK, ".pic-thumb img", "max-height", "equals", "180px", "400px"),
+    _narrow("thumb-max-height", _LOOK, ".pic-thumb img", "max-height", "equals", "240px", "400px"),
+    _row("thumb-width", _LOOK, ".pic-thumb img", "width", "fills", "", "50%", every=True),
+    _row("thumb-height", _LOOK, ".pic-thumb img", "height", "follows_shape", "", "50px", every=True),
+    *(_row(f"{name}-{kind}", _LOOK, selector, prop, want, value, bad)
+      for name, selector in (("thumb", ".pic-thumb"), ("thumb-img", ".pic-thumb img"))
+      for kind, prop, want, value, bad in (
+          ("background-color", "background-color", "alpha_max", "0.35", "rgb(24, 25, 38)"),
+          ("background-image", "background-image", "equals", "none", _NO_IMAGE))),
+    _row("viewer-display", _LOOK, ".viewer", "display", "equals", "flex", "block"),
+    _row("viewer-direction", _LOOK, ".viewer", "flex-direction", "equals", "column", "row"),
+    _row("viewer-overflow-y", _LOOK, ".viewer", "overflow-y", "in", "visible|hidden|clip", "auto"),
+    _row("viewer-background-color", _LOOK, ".viewer", "background-color", "opaque", "",
+         _OPAQUE_LOOK),
+    _row("viewer-background-image", _LOOK, ".viewer", "background-image", "equals", "none",
+         _NO_IMAGE),
+    _row("viewer-bar-display", _LOOK, ".viewer-bar", "display", "equals", "flex", "block"),
+    _row("viewer-bar-direction", _LOOK, ".viewer-bar", "flex-direction", "equals", "row", "column"),
+    _row("viewer-bar-wrap", _LOOK, ".viewer-bar", "flex-wrap", "equals", "nowrap", "wrap"),
+    _row("viewer-bar-flex", _LOOK, ".viewer-bar", "flex", "equals", "0 0 auto", "1 1 auto"),
+    _row("viewer-bar-background-color", _LOOK, ".viewer-bar", "background-color", "opaque", "",
+         _OPAQUE_LOOK),
+    _row("viewer-bar-background-image", _LOOK, ".viewer-bar", "background-image", "equals", "none",
+         _NO_IMAGE),
+    _row("viewer-stage-overflow-y", _LOOK, ".viewer-stage", "overflow-y", "equals", "auto",
+         "hidden"),
+    _row("viewer-stage-align-items", _LOOK, ".viewer-stage", "align-items", "in",
+         "normal|flex-start|start", "center"),
+    _row("viewer-stage-child-margin-top", _LOOK, ".viewer-stage > *", "margin-top", "equals", "0px",
+         "20px"),
+    _row("viewer-img-max-width", _LOOK, ".viewer img", "max-width", "equals", "100%", "none"),
+    _row("viewer-img-object-fit", _LOOK, ".viewer img", "object-fit", "equals", "contain", "fill"),
+    _row("viewer-html-overflow-y", _LOOK, "html", "overflow-y", "equals", "hidden", "visible"),
+    _narrow("viewer-bar-button-min-height", _LOOK, ".viewer-bar button", "min-height", "min", "44",
+            "20px", every=True),
+    _row("viewer-focus-outline-style", _LOOK, ".viewer", "outline-style", "equals", "none", "solid",
+         forced=("focus-visible",)),
+    _row("viewer-focus-outline", _LOOK, ".viewer", "outline", "equals", "rgb(202, 211, 245) none 0px",
+         "2px solid " + _RGB, forced=("focus-visible",)),
+    _row("viewer-pair-display", _LOOK, ".viewer-pair", "display", "equals", "flex", "block"),
+    _wide("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "row",
+          "column"),
+    _narrow("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "column",
+            "row"),
+)
+CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
+KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
+         "field-code")
+BUTTON_KINDS = KINDS[:4]
+FIELD_KINDS = KINDS[4:]
+LOOK = ("padding-top", "padding-right", "padding-bottom", "padding-left",
+        *(f"border-{side}-{part}" for side in ("top", "right", "bottom", "left")
+          for part in ("width", "style", "color")),
+        *(f"border-{corner}-radius" for corner in ("top-left", "top-right", "bottom-right",
+                                                   "bottom-left")),
+        "font-family", "font-size", "font-style", "font-weight", "line-height", "color",
+        "background-color", "background-image", "cursor", "outline-style", "outline-width",
+        "outline-color", "opacity")
+_SPEND = ("spend-page",)
+_PAGES = (_NOTHING, "spend-page")
+_UI = '<span class="k-ui" style="font-family: var(--ui)" data-style-probe></span>'
+_GRADIENT = "linear-gradient(red, red)"
+# A value each property of a kind row must refuse, for the `broken` rule of its row.
+_REFUSED = {
+    "display": "block", "align-items": "flex-start", "gap": "1px", "column-gap": "1px",
+    "min-height": "1px", "padding": "1px", "font-style": "italic", "font-weight": "300",
+    "font-size": "30px", "line-height": "40px", "font-family": "serif", "text-align": "right",
+    "text-decoration-line": "underline", "color": _RGB, "background-color": _RGB,
+    "background-image": _GRADIENT, "border-width": "3px", "border-style": "double",
+    "border-color": _RGB, "border-radius": "1px", "cursor": "default",
+    "transition-property": "none", "transition-duration": "5s", "letter-spacing": "5px",
+    "resize": "none", "width": "50%", "opacity": "1", "outline-style": "none",
+    "outline-width": "5px", "outline-color": _RGB, "outline-offset": "9px", "transform": "none",
+}
+_SHARED_BUTTON = (
+    ("display", "equals", "inline-flex"), ("align-items", "equals", "center"),
+    ("gap", "equals", "8px"), ("min-height", "equals", "32px"), ("padding", "equals", "5px 12px"),
+    ("font-style", "equals", "normal"), ("font-weight", "equals", "500"),
+    ("font-size", "equals", "14px"), ("line-height", "equals", "19.6px"),
+    ("font-family", "same_as", ".k-ui"), ("text-align", "equals", "left"),
+    ("text-decoration-line", "equals", "none"), ("color", "equals", PALETTE["--sub1"]),
+    ("background-color", "equals", _CLEAR), ("background-image", "equals", "none"),
+    ("border-width", "equals", "1px"), ("border-style", "equals", "solid"),
+    ("border-color", "equals", PALETTE["--s1"]), ("border-radius", "equals", "8px"),
+    ("cursor", "equals", "pointer"),
+    ("transition-property", "equals", "background-color, border-color"),
+    ("transition-duration", "equals", "0.16s, 0.16s"))
+_SHARED_FIELD = (
+    ("min-height", "equals", "32px"), ("padding", "equals", "5px 10px"),
+    ("font-style", "equals", "normal"), ("font-weight", "equals", "400"),
+    ("font-size", "equals", "14px"), ("line-height", "equals", "19.6px"),
+    ("color", "equals", PALETTE["--text"]), ("background-color", "equals", PALETTE["--mantle"]),
+    ("background-image", "equals", "none"), ("border-width", "equals", "1px"), ("border-style", "equals", "solid"),
+    ("border-color", "equals", PALETTE["--s1"]), ("border-radius", "equals", "8px"))
+# What each kind holds differently from the shared look, and what only the desk page changes.
+_KIND_OWN = {
+    "btn-primary": {"min-height": "40px", "padding": "0px 16px", "font-weight": "600"},
+    "btn-option": {"display": "grid", "gap": "8px 14px", "width": ("fills", ""),
+                   "min-height": "44px", "padding": "9px 14px", "color": PALETTE["--text"],
+                   "border-color": _CLEAR},
+    "field-line": {"font-family": ("same_as", ".k-ui")},
+    "field-area": {"font-family": ("same_as", ".k-ui"), "display": "block",
+                   "width": ("fills", ""), "min-height": "72px", "resize": "vertical"},
+    "field-code": {"font-family": ("starts", "ui-monospace"), "letter-spacing": "0.84px"},
+}
+_KIND_DESK = {
+    "btn-primary": {"background-color": PALETTE["--peach"], "border-color": PALETTE["--peach"],
+                    "color": PALETTE["--crust"]},
+    "btn-danger": {"color": PALETTE["--red"]},
+}
+
+
+def _specimen(classes, attrs="", mark=True):
+    """One control of the page's own markup, `classes` first the kind: a button, an input or a
+    textarea, with a placeholder when it is a field."""
+    tag = "textarea" if classes.startswith("field-area") else (
+        "input" if classes.startswith("field-") else "button")
+    head = f'<{tag} class="{classes}"' + ("" if tag == "button" else ' placeholder="x"')
+    head += (f" {attrs}" if attrs else "") + (" data-style-probe" if mark else "")
+    return head + {"button": ">x</button>", "input": ">", "textarea": "></textarea>"}[tag]
+
+
+def _pair(kind, *states):
+    """One probe holding a `kind` control for each of `states`, read together (`every`)."""
+    return ('<span data-style-probe>' + "".join(_specimen(kind, state, mark=False) for state in states)
+            + "</span>")
+
+
+def _look(kind):
+    """The (prop, want, value) reads of a kind: the shared look with the kind's own values."""
+    base = _SHARED_BUTTON if kind in BUTTON_KINDS else _SHARED_FIELD
+    own = _KIND_OWN.get(kind, {})
+    reads = [(prop, *(own.get(prop) if isinstance(own.get(prop), tuple) else (want, own.get(prop, value))))
+             for prop, want, value in base]
+    reads += [(prop, *(v if isinstance(v, tuple) else ("equals", v)))
+              for prop, v in own.items() if prop not in {read[0] for read in reads}]
+    return reads
+
+
+def _kind_rows():
+    rows = []
+    for kind in KINDS:
+        spec = {"probe": _specimen(kind), "compare_probe": _UI}
+        for prop, want, value in _look(kind):
+            extra = dict(spec) if want in ("same_as",) else {"probe": spec["probe"]}
+            desk = _KIND_DESK.get(kind, {}).get(prop)
+            if desk is None:
+                rows.append(_row(f"kind-{kind}-{prop}", _PAGES, f".{kind}", prop, want, value,
+                                 "inline-block" if value == "block" else _REFUSED[prop], **extra))
+                continue
+            for suffix, states, value in (("desk", _NOTHING, desk), ("spend", _SPEND, value)):
+                rows.append(_row(f"kind-{kind}-{prop}-{suffix}", states, f".{kind}", prop, want,
+                                 value, _REFUSED[prop], **extra))
+    option = {"probe": _specimen("btn-option")}
+    rows += [
+        _row("kind-btn-option-column-gap", _PAGES, ".btn-option", "column-gap", "equals", "14px",
+             "1px", **option),
+        _row("kind-btn-option-grid", _PAGES, ".btn-option", "grid-template-columns", "starts",
+             "22px ", "50px 1fr auto", **option),
+        _row("kind-btn-option-grid-tracks", _PAGES, ".btn-option", "grid-template-columns",
+             "tracks", "3", "1fr 1fr", **option)]
+    return rows
+
+
+def _bare_rows():
+    button = {"probe": _specimen("btn-quiet btn-bare")}
+    field = {"probe": _specimen("field-line field-bare")}
+    return [
+        *(_row(f"bare-btn-quiet-{prop}", _PAGES, ".btn-quiet.btn-bare", prop, "equals", value,
+               _REFUSED[prop], **button)
+          for prop, value in (("padding", "0px"), ("border-color", _CLEAR),
+                              ("background-color", _CLEAR))),
+        *(_row(f"bare-field-line-{prop}", _PAGES, ".field-line.field-bare", prop, "equals", value,
+               _REFUSED.get(prop, "1px"), **field)
+          for prop, value in (("padding-left", "0px"), ("padding-right", "0px"),
+                              ("background-color", _CLEAR), ("border-color", _CLEAR)))]
+
+
+def _state_rows():
+    rows = []
+    dashed = (("border-width", "1px"), ("border-style", "dashed"), ("cursor", "not-allowed"),
+              ("opacity", "0.55"))
+    dotted = (("border-width", "1px"), ("border-style", "dotted"), ("cursor", "progress"))
+    refused = {"border-style": "solid", "cursor": "default", "border-width": "3px",
+               "opacity": "1"}
+    for kind in KINDS:
+        both = {"every": True, "probe": _pair(kind, "disabled", 'aria-disabled="true"')}
+        for prop, value in dashed:
+            rows.append(_row(f"disabled-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                             refused[prop], **both))
+        reads = (("border-color", PALETTE["--s1"]),)
+        if kind == "btn-primary":
+            rows += [_row(f"disabled-{kind}-{prop}-desk", _NOTHING, f".{kind}", prop, "equals",
+                          PALETTE[token], _RGB, **both)
+                     for prop, token in (("border-color", "--s2"), ("background-color", "--s1"),
+                                         ("color", "--sub0"))]
+            rows.append(_row(f"disabled-{kind}-border-color-spend", _SPEND, f".{kind}",
+                             "border-color", "equals", PALETTE["--s1"], _RGB, **both))
+        else:
+            rows += [_row(f"disabled-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                          _RGB, **both) for prop, value in reads]
+        busy = {"every": True,
+                "probe": _pair(kind, 'aria-busy="true"', 'aria-busy="true" disabled')}
+        for prop, value in dotted:
+            rows.append(_row(f"busy-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                             {"border-style": "solid", "cursor": "default",
+                              "border-width": "3px"}[prop], **busy))
+        if kind in ("btn-primary", "btn-quiet", "btn-danger"):
+            rows.append(_row(f"busy-{kind}-content", _PAGES, f".{kind}", "content", "equals",
+                             '"…"', "none", pseudo="::after", **busy))
+    for kind in ("btn-quiet", "btn-danger", "btn-option"):
+        probe = {"probe": _specimen(kind), "forced": ("hover",)}
+        for prop, value in (("background-color", _HOVER), ("border-color", PALETTE["--s2"]),
+                            ("background-image", "none")):
+            rows.append(_row(f"hover-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                             _REFUSED[prop], **probe))
+    rows += [
+        _row("hover-btn-quiet-bare-border-color", _PAGES, ".btn-quiet.btn-bare", "border-color",
+             "equals", _CLEAR, _RGB, probe=_specimen("btn-quiet btn-bare"), forced=("hover",)),
+        *(_row(f"hover-btn-primary-{prop}-desk", _NOTHING, ".btn-primary", prop, "equals",
+               "rgb(248, 187, 152)", _RGB, probe=_specimen("btn-primary"), forced=("hover",))
+          for prop in ("background-color", "border-color")),
+        *(_row(f"hover-disabled-btn-quiet-{prop}", _PAGES, ".btn-quiet", prop, "equals", value,
+               bad, probe=_specimen("btn-quiet", "disabled"), forced=("hover",))
+          for prop, value, bad in (("background-color", _CLEAR, _RGB),
+                                   ("border-style", "dashed", "solid")))]
+    for kind in KINDS:
+        probe = {"probe": _specimen(kind), "forced": ("focus-visible",)}
+        for prop, value in (("outline-style", "solid"), ("outline-width", "2px"),
+                            ("outline-color", PALETTE["--lav"]), ("outline-offset", "2px"),
+                            ("border-radius", "8px")):
+            rows.append(_row(f"ring-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                             _REFUSED[prop], **probe))
+    rows += [
+        _row("ring-field-bare-outline-style", _PAGES, ".field-line.field-bare", "outline-style",
+             "equals", "none", "solid", probe=_specimen("field-line field-bare"),
+             forced=("focus-visible",)),
+        _row("ring-every-outline-style", _EVERY_STATE, f":is({CONTROL_SELECTOR}):not(.field-bare, "
+             ".viewer)", "outline-style", "not", "none", "none", every=True,
+             forced=("focus-visible",))]
+    for kind in BUTTON_KINDS:
+        rows += [
+            _row(f"pressed-{kind}-transform", _PAGES, f".{kind}", "transform", "equals",
+                 "matrix(1, 0, 0, 1, 0, 1)", "none", probe=_specimen(kind), forced=("active",)),
+            _row(f"pressed-{kind}-border-color", _PAGES, f".{kind}", "border-color", "equals",
+                 PALETTE["--lav"], _RGB, probe=_specimen(kind, 'aria-pressed="true"')),
+            _row(f"pressed-{kind}-font-weight", _PAGES, f".{kind}", "font-weight", "equals", "600",
+                 "300", probe=_specimen(kind, 'aria-pressed="true"'))]
+    rows.append(_row("pressed-btn-option-background-color-desk", _NOTHING, ".btn-option",
+                     "background-color", "equals", "rgba(183, 189, 248, 0.1)", _RGB,
+                     probe=_specimen("btn-option", 'aria-pressed="true"')))
+    return rows
+
+
+def _placeholder_rows():
+    rows = []
+    dark = "rgb(30, 32, 48)"
+    for kind in FIELD_KINDS:
+        probe = {"probe": _specimen(kind), "pseudo": "::placeholder"}
+        rows += [
+            _row(f"placeholder-{kind}-opacity", _PAGES, f".{kind}", "opacity", "equals", "1", "0.5",
+                 **probe),
+            _row(f"placeholder-{kind}-color", _PAGES, f".{kind}", "color", "equals",
+                 PALETTE["--ov2"], _RGB, **probe),
+            _row(f"placeholder-{kind}-contrast", _PAGES, f".{kind}", "color", "contrast", "4.5",
+                 dark, **probe)]
+    rows.append(_row("placeholder-goal-contrast", "goal-open", ".goal-bar.open .goal-in .goal-text",
+                     "color", "contrast", "4.5", "rgb(36, 39, 58)", pseudo="::placeholder"))
+    rows += [_row(f"placeholder-goal-{prop}", "goal-open", ".goal-bar.open .goal-in", prop, "equals",
+                  value, bad) for prop, value, bad in (("background-color", PALETTE["--base"], _RGB),
+                                                       ("background-image", "none", _GRADIENT))]
+    return rows
+
+
+_MOTION_RULE = ".style-motion i, .style-motion i::before, .style-motion i::after"
+_MOTION = ('<span class="style-motion" data-style-probe><style>' + _MOTION_RULE
+           + ' { content: ""; transition: opacity 1s; animation: none 1s }</style><i></i></span>')
+
+
+def _motion_rows():
+    rows = []
+    for prop in ("transition-duration", "animation-duration"):
+        for pseudo, where in (("", ""), ("::before", "-before"), ("::after", "-after")):
+            still = f"{_MOTION_RULE} {{ transition-duration: 0s !important; animation-duration: 0s !important }}"
+            rows.append(StyleCheck(
+                f"motion-reduced-{prop}{where}", _PAGES, (1440,), ".style-motion i", prop, "max",
+                "0.000001", "@media (prefers-reduced-motion: reduce) { " + _MOTION_RULE
+                + " { transition-duration: 1s !important; animation-duration: 1s !important } }",
+                probe=_MOTION, pseudo=pseudo, reduced_motion=True))
+            rows.append(StyleCheck(
+                f"motion-normal-{prop}{where}", _PAGES, (1440,), ".style-motion i", prop, "min",
+                "0.5", still, probe=_MOTION, pseudo=pseudo))
+    return rows
+
+
+STYLE_CHECKS += (
+    StyleCheck("kind-look", _DESK_STATES, _BOTH, "body", "min-height", "kind_look", ",".join(LOOK),
+               ":is(.btn-primary, .btn-quiet, .btn-danger, .btn-option, .field-line, .field-area, "
+               ".field-code):not([data-style-probe]) { border-top-left-radius: 2px !important }"),
+    StyleCheck("kind-height-floor", _EVERY_STATE, _BOTH, ", ".join(f".{kind}" for kind in KINDS),
+               "height", "min", "32",
+               ", ".join(f".{kind}" for kind in KINDS) + " { height: 10px !important; "
+               "min-height: 0 !important }", every=True),
+    *_kind_rows(),
+    *_bare_rows(),
+    *_state_rows(),
+    *(_row(f"primary-real-{prop}", "inbox-card", ".card.lead .btn-primary:not(:disabled)"
+                                                 ':not([aria-disabled="true"])', prop, "equals",
+           PALETTE[token], _RGB, every=True)
+      for prop, token in (("background-color", "--peach"), ("border-color", "--peach"),
+                          ("color", "--crust"))),
+    *_placeholder_rows(),
+    *_motion_rows(),
+    _row("spend-fit-top-wrap", _SPEND, ".top-in", "flex-wrap", "equals", "wrap", "nowrap",
+         widths=(480,)),
+    _row("spend-fit-trend-min-width", _SPEND, ".trend-day", "min-width", "equals", "0px", "50px",
+         widths=(480,), every=True),
+    _row("spend-fit-min-width", _SPEND, ".figure, .row-name", "min-width", "equals", "0px", "50px",
+         widths=(480,), every=True),
+    _row("spend-fit-width", _SPEND, "#summary", "width", "max", "448", "900px", widths=(480,)),
+    _row("spend-fit-flex-basis", _SPEND, ".trend-day", "flex-basis", "equals", "0px", "900px",
+         widths=(480,), every=True),
+    _row("spend-fit-row-name-wrap", _SPEND, ".row-name", "overflow-wrap", "equals", "anywhere",
+         "normal", widths=(480,), every=True),
+    # The consent tick is at least 32 px in both directions; SHORT_CONTROLS reads only heights
+    # (#1313).
+    _row("guest-tick-width", _GUEST_PAGES, ".guest-tick", "width", "min", "32", "20px"),
+    _row("guest-tick-height", _GUEST_PAGES, ".guest-tick", "height", "min", "32", "20px"),
+    # A hidden owner control in the top bar stays hidden before the guest script removes it; the
+    # probe is the capacity button as the guest bytes carry it (#1313).
+    _row("guest-top-hidden-display", _GUEST_PAGES, ".top-in > [hidden]", "display", "equals", "none",
+         "inline-flex",
+         probe='<button type="button" class="cap btn-quiet btn-bare" hidden data-style-probe></button>',
+         host=".top-in"),
+)
+STYLE_PLACE = r"""((rows) => {
+  let placed = 0;
+  const put = (html, host, name) => {
+    if (!html) return;
+    const where = document.querySelector(host);
+    if (!where) return;
+    const template = document.createElement('template');
+    template.innerHTML = html.trim();
+    const probe = template.content.firstElementChild;
+    if (!probe) return;
+    probe.setAttribute('data-style-probe', name);
+    where.appendChild(probe);
+    placed++;
+  };
+  for (const row of rows) {
+    put(row.probe, row.host, row.name);
+    put(row.compare_probe, row.compare_host, row.name + ':compare');
+  }
+  return placed;
+})"""
+STYLE_MUTATE = r"""((css) => {
+  const style = document.createElement('style');
+  style.id = 'style-mutation';
+  style.textContent = css;
+  document.head.appendChild(style);
+})"""
+STYLE_SETTLE = r"""(async () => {
+  // A picture is fetched after the page draws it, so wait for each one to have its source and load.
+  for (let tries = 0; tries < 100; tries++) {
+    const waiting = Array.from(document.querySelectorAll('img.pic-img')).some(
+      (img) => !img.hidden && (!img.getAttribute('src') || !img.complete));
+    if (!waiting) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  for (const animation of document.getAnimations()) {
+    try { animation.finish(); } catch (error) { /* an infinite animation has no end */ }
+  }
+})"""
+STYLE_CLEAR = r"""(() => {
+  for (const node of document.querySelectorAll('[data-style-probe], #style-mutation')) node.remove();
+})"""
+STYLE_READING = r"""((rows) => {
+  const parse = (text) => {
+    const found = /^(?:rgba?\(|(color)\(srgb\s+)([^)]*)\)$/.exec(String(text).trim());
+    if (!found) return null;
+    const parts = found[2].split(/[\s,\/]+/).filter(Boolean).map(Number);
+    if (parts.length < 3 || parts.length > 4 || parts.some((n) => Number.isNaN(n))) return null;
+    const scale = found[1] ? 255 : 1;
+    const channel = (n) => Math.round(Math.min(255, Math.max(0, n * scale)));
+    const alpha = parts.length === 4 ? parts[3] : 1;
+    return [channel(parts[0]), channel(parts[1]), channel(parts[2]),
+            Math.round(alpha * 100) / 100].join(',');
+  };
+  const same = (a, b) => {
+    const pa = parse(a), pb = parse(b);
+    return pa !== null || pb !== null ? pa === pb : a === b;
+  };
+  const probes = (name) => Array.from(document.querySelectorAll('[data-style-probe]')).filter(
+    (node) => node.getAttribute('data-style-probe') === name);
+  const within = (roots, selector) => roots.flatMap((root) => [
+    ...(root.matches(selector) ? [root] : []), ...root.querySelectorAll(selector)]);
+  const onPage = (selector) => Array.from(document.querySelectorAll(selector)).filter(
+    (node) => !node.closest('[data-style-probe]'));
+  const label = (node) => node.tagName.toLowerCase() + '.'
+    + (node.getAttribute('class') || '').split(/\s+/)[0];
+  const LISTS = __LISTS__;
+  const SHAPES = new Set(['path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse', 'text']);
+  const COLOURS = /(?:rgba?|color|oklab|oklch|lab|lch)\([^)]*\)/g;
+  const painted = (node) => {
+    const s = getComputedStyle(node);
+    const out = [['color', s.color], ['background-color', s.backgroundColor]];
+    for (const side of ['top', 'right', 'bottom', 'left']) {
+      if (parseFloat(s.getPropertyValue('border-' + side + '-width')) > 0) {
+        out.push(['border-' + side + '-color', s.getPropertyValue('border-' + side + '-color')]);
+      }
+    }
+    if (s.outlineStyle !== 'none') out.push(['outline-color', s.outlineColor]);
+    out.push(['text-decoration-color', s.textDecorationColor]);
+    const image = s.getPropertyValue('background-image');
+    if (image !== 'none') for (const colour of image.match(COLOURS) || []) out.push(['background-image', colour]);
+    if (s.getPropertyValue('column-rule-style') !== 'none') {
+      out.push(['column-rule-color', s.getPropertyValue('column-rule-color')]);
+    }
+    for (const prop of ['caret-color', 'accent-color']) {
+      const value = s.getPropertyValue(prop);
+      if (value !== 'auto') out.push([prop, value]);
+    }
+    for (const prop of ['box-shadow', 'text-shadow']) {
+      const value = s.getPropertyValue(prop);
+      if (value !== 'none') for (const colour of value.match(COLOURS) || []) out.push([prop, colour]);
+    }
+    if (SHAPES.has(node.tagName.toLowerCase())) {
+      for (const prop of ['fill', 'stroke']) {
+        const value = s.getPropertyValue(prop);
+        if (value !== 'none' && !value.startsWith('url(')) out.push([prop, value]);
+      }
+    }
+    return out;
+  };
+  const rendered = (node) => node.getClientRects().length > 0;
+  // The specificity of one selector as a number: ids, then classes, attributes and pseudo-classes,
+  // then tags (a functional pseudo-class counts as one class, whatever it holds).
+  const specificity = (selector) => {
+    const text = selector.replace(/\[[^\]]*\]/g, '.a');
+    const ids = (text.match(/#[\w-]+/g) || []).length;
+    const classes = (text.match(/\.[\w-]+|:(?!:)[\w-]+/g) || []).length;
+    const tags = (text.replace(/[#.:][\w-]+/g, ' ').match(/(?:^|[\s>+~])[a-zA-Z][\w-]*/g) || []).length;
+    return ids * 10000 + classes * 100 + tags;
+  };
+  // The value the cascade gives `prop` of `node`'s `pseudo`, read from the CSSOM: no engine
+  // resolves the style of a legacy pseudo-element it ignores, so the winning rule is the one with
+  // the highest importance, then specificity, then order, among the rules that apply at this width.
+  const declared = (node, pseudo, prop) => {
+    let best = null, order = 0;
+    const walk = (rules) => {
+      for (const rule of rules) {
+        if (rule.media && !window.matchMedia(rule.media.mediaText).matches) continue;
+        if (rule.selectorText !== undefined) {
+          const value = rule.style.getPropertyValue(prop);
+          for (const part of rule.selectorText.split(',')) {
+            const text = part.trim();
+            if (!value || !text.endsWith(pseudo)) continue;
+            const base = text.slice(0, text.length - pseudo.length).trim();
+            let hit = false;
+            try { hit = node.matches(base); } catch (error) { hit = false; }
+            if (!hit) continue;
+            const key = [rule.style.getPropertyPriority(prop) === 'important' ? 1 : 0,
+                         specificity(base), order++];
+            if (best === null || key[0] > best.key[0] || (key[0] === best.key[0]
+                && (key[1] > best.key[1] || (key[1] === best.key[1] && key[2] > best.key[2])))) {
+              best = {key, value};
+            }
+          }
+        } else if (rule.cssRules) {
+          walk(rule.cssRules);
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) walk(sheet.cssRules);
+    return best === null ? '(none)' : best.value;
+  };
+  const scopeOf = (row) => {
+    const roots = row.probe ? probes(row.name) : onPage(row.selector);
+    const found = new Set();
+    for (const root of roots) for (const node of [root, ...root.querySelectorAll('*')]) found.add(node);
+    return {
+      roots,
+      nodes: Array.from(found).filter((node) => rendered(node)
+        && (row.probe || !node.closest('[data-style-probe]'))),
+    };
+  };
+  const wholePage = (row) => {
+    const found = [];
+    const { roots, nodes } = scopeOf(row);
+    if (!roots.length) return [`${row.name}: ${row.selector} is absent`];
+    if (row.want === 'none_peach') {
+      const peach = parse(LISTS.peach);
+      for (const node of nodes) {
+        if (node.matches(row.value)) continue;
+        for (const [prop, colour] of painted(node)) {
+          if (parse(colour) === peach) found.push(`${row.name}: ${label(node)} ${prop} is ${colour}`);
+        }
+      }
+    } else if (row.want === 'palette') {
+      const allowed = new Set(LISTS.palette[row.value].map(parse));
+      for (const node of nodes) {
+        for (const [prop, colour] of painted(node)) {
+          if (!allowed.has(parse(colour))) found.push(`${row.name}: ${label(node)} ${prop} is ${colour}`);
+        }
+      }
+    } else if (row.want === 'largest_type') {
+      const [px, ...rest] = row.value.split('|');
+      const allowed = rest.join('|');
+      for (const node of nodes) {
+        const size = getComputedStyle(node).fontSize;
+        if (parseFloat(size) >= parseFloat(px) && !node.matches(allowed)) {
+          found.push(`${row.name}: ${label(node)} font-size is ${size}`);
+        }
+      }
+    } else if (row.want === 'sizes_shared') {
+      const inside = new Set(nodes);
+      const sizes = new Set(Array.from(document.querySelectorAll('body *')).filter(
+        (node) => rendered(node) && !inside.has(node) && !node.closest('[data-style-probe]'))
+        .map((node) => getComputedStyle(node).fontSize));
+      for (const node of nodes) {
+        const size = getComputedStyle(node).fontSize;
+        if (!sizes.has(size)) found.push(`${row.name}: ${label(node)} font-size is ${size}`);
+      }
+    }
+    return found;
+  };
+  const tokens = (row) => {
+    const list = LISTS.tokens[row.value];
+    const declared = new Set();
+    const walk = (rules) => {
+      for (const rule of rules) {
+        if (rule.selectorText === ':root') {
+          for (const name of Array.from(rule.style)) if (name.startsWith('--')) declared.add(name);
+        } else if (rule.cssRules) {
+          walk(rule.cssRules);
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) walk(sheet.cssRules);
+    const found = [];
+    for (const name of Array.from(declared).sort()) {
+      if (!list.names.includes(name)) found.push(`${row.name}: :root declares ${name}`);
+    }
+    for (const name of list.names) {
+      if (!declared.has(name)) found.push(`${row.name}: :root lacks ${name}`);
+    }
+    for (const [name, colour] of Object.entries(list.colours)) {
+      if (!declared.has(name)) continue;
+      const scratch = document.createElement('span');
+      scratch.style.color = `var(${name})`;
+      document.body.appendChild(scratch);
+      const got = getComputedStyle(scratch).color;
+      scratch.remove();
+      if (!same(got, colour)) found.push(`${row.name}: ${name} is ${got}`);
+    }
+    return found;
+  };
+  const distinct = (row) => {
+    const names = row.selector.split('|').map((part) => part.trim());
+    const roots = row.probe ? probes(row.name) : [];
+    const seen = [];
+    for (const name of names) {
+      const [node] = row.probe ? within(roots, name) : onPage(name);
+      if (!node) return [`${row.name}: ${name} is absent`];
+      const s = getComputedStyle(node);
+      const tuple = ['background-image', 'border-top-style', 'border-top-width',
+        'border-top-left-radius', 'box-shadow', 'width']
+        .map((prop) => s.getPropertyValue(prop).replace(COLOURS, 'C')).join('|');
+      seen.push([name, tuple]);
+    }
+    const found = [];
+    for (let i = 0; i < seen.length; i++) {
+      for (let j = i + 1; j < seen.length; j++) {
+        if (seen[i][1] === seen[j][1]) {
+          found.push(`${row.name}: ${seen[i][0]} and ${seen[j][0]} differ only in colour`);
+        }
+      }
+    }
+    return found;
+  };
+  const KIND_TAGS = {'btn-primary': 'button', 'btn-quiet': 'button', 'btn-danger': 'button',
+    'btn-option': 'button', 'field-line': 'input', 'field-area': 'textarea', 'field-code': 'input'};
+  const BARE_ROLES = ['cap', 'pic-thumb', 'sprint-check', 'draft-pick', 'thread-open', 'goal-text'];
+  const IN_A_STATE = ':disabled, [aria-disabled="true"], [aria-busy="true"], [aria-pressed="true"], '
+    + '.picked, :hover, :active, :focus-visible';
+  const kindLook = (row) => {
+    const look = row.value.split(',').map((name) => name.trim()).filter(Boolean);
+    const found = [];
+    const scratch = {};
+    const bareOf = (kind, bare) => {
+      const key = kind + ' ' + bare;
+      if (!scratch[key]) {
+        const node = document.createElement(KIND_TAGS[kind]);
+        node.className = bare ? key : kind;
+        node.setAttribute('data-style-probe', row.name + ':' + kind);
+        document.body.appendChild(node);
+        scratch[key] = node;
+      }
+      return scratch[key];
+    };
+    let seen = 0;
+    for (const kind of Object.keys(KIND_TAGS)) {
+      for (const node of onPage('.' + kind)) {
+        if (!rendered(node) || node.matches(IN_A_STATE)) continue;
+        seen++;
+        const first = (node.getAttribute('class') || '').split(/\s+/)[0];
+        const bare = node.classList.contains('btn-bare') ? 'btn-bare'
+          : node.classList.contains('field-bare') ? 'field-bare' : '';
+        let props = kind === 'btn-option' ? [...look, 'display', 'align-items', 'row-gap', 'column-gap'] : look;
+        if (bare || BARE_ROLES.includes(first)) props = props.filter((name) => name.startsWith('border'));
+        const own = getComputedStyle(node);
+        const base = getComputedStyle(bareOf(kind, bare));
+        for (const name of props) {
+          const got = own.getPropertyValue(name);
+          if (!same(got, base.getPropertyValue(name))) found.push(`${row.name}: ${label(node)} ${name} is ${got}`);
+        }
+        if (parseFloat(own.minHeight) < 32) found.push(`${row.name}: ${label(node)} min-height is ${own.minHeight}`);
+      }
+    }
+    for (const node of Object.values(scratch)) node.remove();
+    return seen ? found : [`${row.name}: ${row.selector} is absent`];
+  };
+  const channelOf = (value) => {
+    const unit = value / 255;
+    return unit <= 0.03928 ? unit / 12.92 : Math.pow((unit + 0.055) / 1.055, 2.4);
+  };
+  const luminance = (rgb) => 0.2126 * channelOf(rgb[0]) + 0.7152 * channelOf(rgb[1]) + 0.0722 * channelOf(rgb[2]);
+  const rgbOf = (text) => {
+    const found = parse(text);
+    return found === null ? null : found.split(',').map(Number);
+  };
+  const backdrop = (node) => {
+    for (let at = node; at; at = at.parentElement) {
+      const colour = rgbOf(getComputedStyle(at).backgroundColor);
+      if (colour && colour[3] === 1) return colour;
+    }
+    return [255, 255, 255, 1];
+  };
+  const misses = [];
+  for (const row of rows) {
+    if (row.want === 'kind_look') { misses.push(...kindLook(row)); continue; }
+    if (['none_peach', 'palette', 'sizes_shared', 'largest_type'].includes(row.want)) {
+      misses.push(...wholePage(row));
+      continue;
+    }
+    if (row.want === 'tokens') { misses.push(...tokens(row)); continue; }
+    if (row.want === 'distinct') { misses.push(...distinct(row)); continue; }
+    const matches = row.probe ? within(probes(row.name), row.selector) : onPage(row.selector);
+    const subjects = row.every ? matches.filter((node) => node.getClientRects().length > 0)
+                               : matches.slice(0, 1);
+    if (!subjects.length) {
+      misses.push(`${row.name}: ${row.selector} is absent`);
+      continue;
+    }
+    const pseudo = row.pseudo || null;
+    for (const node of subjects) {
+      let got = getComputedStyle(node, pseudo).getPropertyValue(row.prop);
+      let other = null;
+      if (row.want === 'same_as' || row.want === 'gt') {
+        const [rival] = [...within(probes(row.name + ':compare'), row.value), ...onPage(row.value)];
+        if (!rival) {
+          misses.push(`${row.name}: ${row.value} is absent`);
+          continue;
+        }
+        other = getComputedStyle(rival, pseudo).getPropertyValue(row.prop);
+      }
+      let ok = false;
+      if (row.want === 'fills') {
+        const parent = node.parentElement;
+        const cs = getComputedStyle(parent);
+        const width = node.getBoundingClientRect().width;
+        got = Math.round(width * 100) / 100 + 'px';
+        ok = width >= parent.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 1;
+      } else if (row.want === 'right_edge') {
+        const parent = node.parentElement;
+        const cs = getComputedStyle(parent);
+        const right = node.getBoundingClientRect().right;
+        got = Math.round(right * 100) / 100 + 'px';
+        ok = right >= parent.getBoundingClientRect().right - parseFloat(cs.paddingRight) - 1;
+      } else if (row.want === 'track_max' || row.want === 'tracks') {
+        got = getComputedStyle(node).getPropertyValue('grid-template-columns');
+        const found = [];
+        let depth = 0, from = 0;
+        for (let i = 0; i <= got.length; i++) {
+          const char = got.charAt(i);
+          if (char === '(') depth++;
+          else if (char === ')') depth--;
+          else if ((char === ' ' || i === got.length) && depth === 0) {
+            if (i > from) found.push(got.slice(from, i));
+            from = i + 1;
+          }
+        }
+        if (row.want === 'tracks') {
+          ok = found.length === parseInt(row.value, 10);
+        } else {
+          const [index, fraction] = row.value.split(':');
+          const cs = getComputedStyle(node);
+          const width = node.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+          const track = found[parseInt(index, 10) - 1];
+          ok = track !== undefined && track.endsWith('px') && !track.includes('(')
+            && parseFloat(track) <= parseFloat(fraction) * width;
+        }
+      } else if (row.want === 'alpha_max') {
+        const colour = parse(got);
+        ok = colour !== null && parseFloat(colour.split(',')[3]) <= parseFloat(row.value);
+      } else if (row.want === 'opaque') {
+        ok = LISTS.opaque.map(parse).includes(parse(got));
+      } else if (row.want === 'follows_shape') {
+        const cs = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        got = Math.round(rect.height * 100) / 100 + 'px';
+        if (!(node.naturalWidth > 0)) {
+          got += ' (not loaded)';
+        } else {
+          const low = parseFloat(cs.minHeight) || 0;
+          const high = cs.maxHeight === 'none' ? Infinity : parseFloat(cs.maxHeight);
+          const shape = Math.max(low, Math.min(high, rect.width * node.naturalHeight / node.naturalWidth));
+          ok = Math.abs(rect.height - shape) <= 1;
+        }
+      } else if (row.want === 'hugs') {
+        const cs = getComputedStyle(node);
+        const width = node.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        got = Math.round(width * 100) / 100 + 'px';
+        ok = width <= range.getBoundingClientRect().width + 1;
+      } else if (row.want === 'contrast') {
+        const text = getComputedStyle(node, pseudo).color;
+        const colour = rgbOf(text);
+        if (colour === null) {
+          got = 'unreadable ' + text;
+        } else {
+          const lights = [luminance(colour), luminance(backdrop(node))];
+          const ratio = (Math.max(...lights) + 0.05) / (Math.min(...lights) + 0.05);
+          got = ratio.toFixed(2);
+          ok = ratio >= parseFloat(row.value);
+        }
+      } else if (row.want === 'declared') {
+        got = declared(node, row.pseudo, row.prop);
+        ok = got === row.value;
+      } else if (row.want === 'equals') ok = same(got, row.value);
+      else if (row.want === 'in') ok = row.value.split('|').some((member) => same(got, member));
+      else if (row.want === 'not') ok = !same(got, row.value);
+      else if (row.want === 'starts') ok = got.startsWith(row.value);
+      else if (row.want === 'min') ok = parseFloat(got) >= parseFloat(row.value);
+      else if (row.want === 'max') ok = parseFloat(got) <= parseFloat(row.value);
+      else if (row.want === 'same_as') ok = same(got, other);
+      else if (row.want === 'gt') ok = parseFloat(got) > parseFloat(other);
+      if (!ok) {
+        misses.push(`${row.name}: ${row.every ? label(node) : row.selector + row.pseudo} `
+                    + `${row.want === 'contrast' ? 'contrast' : row.prop} is ${got}`);
+      }
+    }
+  }
+  return misses;
+})""".replace("__LISTS__", json.dumps(STYLE_LISTS))
+
+
+def style_applies(served: Path | None = None) -> bool:
+    """Whether the page served is the page beside this module (a base run serves the base's)."""
+    if served is None:
+        import agent_tools.console
+        served = Path(next(iter(agent_tools.console.__path__)))
+    here = Path(__file__).resolve().parents[1] / "python/agent_tools/console"
+    for name in ("page.html", "spend.html"):
+        try:
+            if (Path(served) / name).read_bytes() != (here / name).read_bytes():
+                return False
+        except OSError:
+            return False
+    return True
+
+
+@dataclass(frozen=True)
 class Shot:
     state: str
     width: int
@@ -497,6 +1956,9 @@ class Shot:
     activation: tuple[str | None, int] | None = None
     card: tuple[str | None, str | None, bool | None, str | None] | None = None
     register: tuple[str | None, str | None, bool] | None = None
+    style: tuple[str, ...] = ()
+    checked: tuple[str, ...] = ()
+    broke: tuple[str, ...] = ()
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -770,6 +2232,16 @@ def offers_merge() -> bool:
     return hasattr(approve.GitHubForge, "merge_pull_request")
 
 
+def overlap_card() -> bool:
+    """Whether this console is the base commit's, whose manager contract had a claim overlap's asker send the owner a card.
+
+    True on the base commit's console, whose manager contract had the later-started sprint of an
+    unsettled overlap send the owner an owner-only card: the before picture. A console whose view
+    carries `OVERLAP_UNSETTLED_TEXT` shows the overlap as one line and asks nobody.
+    """
+    return not hasattr(view, "OVERLAP_UNSETTLED_TEXT")
+
+
 def offers_account_changes() -> bool:
     """Whether this service lets an account be signed out alone (a base commit's service has no such method)."""
     return hasattr(ConsoleService, "sign_out_account")
@@ -893,12 +2365,28 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.account("work-main", 0.4)
         seed.account("work-spare", 0.9)
     elif state in ("notices-fold", "notice-post-open"):
-        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
+        first, first_goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
+                                        report=2 * MINUTE)
         sid, goal = seed.sprint(web, "Fix the settings page", started=20 * MINUTE,
                                 report=2 * MINUTE)
+        seed.put(100, "notice.posted", web, {"sprint_id": first, "goal": first_goal, "notice": {
+            "kind": "claim", "text": "resuming an upload from its row",
+            "what": "python/agent_tools/console/page.html", "until": "the upload row lands",
+            "issue": 12, "live_fault": True}})
         seed.put(90, "notice.posted", web, {"sprint_id": sid, "goal": goal, "notice": {
             "kind": "claim", "text": "reworking the settings form",
-            "what": "python/agent_tools/console/page.html", "until": "the form lands"}})
+            "what": "python/agent_tools/console/page.html", "until": "the form lands",
+            "issue": 13, "live_fault": True}})
+        if overlap_card():
+            seed.put(60, "questions.asked", web, {
+                "sprint_id": sid, "goal": goal, "blocker": False, "questions": [{
+                    "question": "Which lands first in python/agent_tools/console/page.html: "
+                                "Add resumable uploads or Fix the settings page? "
+                                "Both fix a live fault.",
+                    "blocks": "the settings form slice",
+                    "options": ["Add resumable uploads lands first",
+                                "Fix the settings page lands first"],
+                    "recommended": "Add resumable uploads lands first", "owner_only": True}]})
         seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
             "kind": "heads-up", "text": "routes are frozen until Friday"}})
     elif state in ("ask-box", "ask-goal"):
@@ -1368,7 +2856,8 @@ class _Serve:
 
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
-            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False) -> list[Shot]:
+            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False,
+            mutate: bool = False) -> list[Shot]:
     try:
         from playwright.sync_api import Error, sync_playwright
     except ImportError as error:
@@ -1406,7 +2895,9 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                                 path = "spend" if state == "spend-page" else ""
                                 taken.append(
                                     _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
-                                          question=read[0]))
+                                           question=read[0],
+                                           canonical=read == (READ_QUESTION, READ_ANSWER),
+                                           mutate=mutate))
                                 shot_paths.append(out / f"{state}-{width}.png")
                         finally:
                             if serve is not None:
@@ -1544,7 +3035,6 @@ JARGON_COUNT = r"""(() => {
 })()"""
 
 
-CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
 SHORT_CONTROLS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
   (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
   (n) => [n, n.getBoundingClientRect().height]).filter(([n, h]) => h < 32).map(
@@ -1554,8 +3044,56 @@ SCROLL_TOP = "window.scrollTo(0, 0)"
 SCROLL_Y = "window.scrollY"
 
 
+def read_style(page, rows: Sequence[StyleCheck], *, mutation: str | None = None,
+               only: str | None = None) -> tuple[str, ...]:
+    """Read each row's computed style on `page`, leaving no probe and no mutation behind."""
+    read = [row for row in rows if only is None or row.name == only]
+    page.evaluate(STYLE_CLEAR)
+    if mutation is not None:
+        page.evaluate(STYLE_MUTATE, mutation)
+    # Only the rows read are placed: a mutated read of one row would otherwise lay out every
+    # other row's probe again, which takes the whole run past an hour.
+    page.evaluate(STYLE_PLACE, [asdict(row) for row in read])
+    page.evaluate(STYLE_SETTLE)
+    found: list[str] = []
+    plain = [row for row in read if not row.forced and not row.reduced_motion]
+    if plain:
+        found += page.evaluate(STYLE_READING, [asdict(row) for row in plain])
+    for row in (row for row in read if row.forced):
+        session = page.context.new_cdp_session(page)
+        for method in ("DOM.enable", "CSS.enable"):
+            session.send(method)
+        root = session.send("DOM.getDocument")["root"]["nodeId"]
+        if row.probe:
+            mark = f'[data-style-probe="{row.name}"]'
+            selector = f":is({mark}, {mark} *):is({row.selector})"
+        else:
+            selector = f":is({row.selector}):not([data-style-probe], [data-style-probe] *)"
+        nodes = session.send("DOM.querySelectorAll", {"nodeId": root, "selector": selector})
+        nodes = nodes["nodeIds"] if row.every else nodes["nodeIds"][:1]
+        for node in nodes:
+            session.send("CSS.forcePseudoState",
+                         {"nodeId": node, "forcedPseudoClasses": list(row.forced)})
+        page.evaluate(STYLE_SETTLE)
+        found += page.evaluate(STYLE_READING, [asdict(row)])
+        for node in nodes:
+            session.send("CSS.forcePseudoState", {"nodeId": node, "forcedPseudoClasses": []})
+    moving = [row for row in read if row.reduced_motion]
+    if moving:
+        page.emulate_media(reduced_motion="reduce")
+        page.evaluate(STYLE_SETTLE)
+        found += page.evaluate(STYLE_READING, [asdict(row) for row in moving])
+        page.emulate_media(reduced_motion="no-preference")
+    page.evaluate(STYLE_CLEAR)
+
+    def place(miss: str) -> int:
+        return next((n for n, row in enumerate(read) if miss.startswith(row.name + ": ")), len(read))
+
+    return tuple(sorted(found, key=place))
+
+
 def _shoot(browser, url: str, state: str, width: int, out: Path, *,
-           question: str = READ_QUESTION) -> Shot:
+           question: str = READ_QUESTION, canonical: bool = True, mutate: bool = False) -> Shot:
     page = browser.new_page(viewport={"width": width, "height": HEIGHT})
     try:
         page.goto(url)
@@ -1689,11 +3227,40 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         acts = tuple(page.evaluate(ACTS_ROW))
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
+        style: tuple[str, ...] = ()
+        checked: tuple[str, ...] = ()
+        broke: tuple[str, ...] = ()
+        if style_applies():
+            for selector in STYLE_STEPS.get(state, ()):
+                if page.query_selector(selector) is not None:
+                    page.click(selector)
+                    page.evaluate(STYLE_SETTLE)
+            reads = [(width, [row for row in STYLE_CHECKS
+                              if state in row.states and width in row.widths
+                              and (canonical or not row.fixture)])]
+            if width == WIDTHS[0]:
+                reads += [(between, [row for row in STYLE_CHECKS
+                                     if state in row.states and between in row.widths
+                                     and (canonical or not row.fixture)])
+                          for between in BETWEEN_WIDTHS]
+            for at, rows in reads:
+                if not rows:
+                    continue
+                if at != width:
+                    page.set_viewport_size({"width": at, "height": HEIGHT})
+                    page.evaluate(STYLE_SETTLE)
+                style += read_style(page, rows)
+                checked += tuple(row.name for row in rows)
+                if mutate:
+                    broke += tuple(
+                        row.name for row in rows
+                        if any(miss.startswith(row.name + ": ") for miss in read_style(
+                            page, rows, mutation=row.broken, only=row.name)))
     finally:
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                card=card, activation=activation, register=register)
+                card=card, activation=activation, register=register, style=style, checked=checked, broke=broke)
 
 
 def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
@@ -1821,8 +3388,12 @@ def main(argv: list[str] | None = None) -> int:
     for shot in short:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
+    broken = [shot for shot in taken if shot.style]
+    for shot in broken:
+        print(f"console-screenshots: {shot.path.name} breaks a page style "
+              f"({'; '.join(shot.style)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or unlined or proposals or uncarded or offrow or scrolled or short) else 0
+                 or unlined or proposals or uncarded or offrow or scrolled or short or broken) else 0
 
 
 if __name__ == "__main__":

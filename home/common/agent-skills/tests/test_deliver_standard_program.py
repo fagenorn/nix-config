@@ -29,10 +29,11 @@ SHA = "a" * 40
 ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\b")
 ARGS = {"repo_root": "/r", "issue": 9, "session_id": "s1"}
 HOLDER = "h1/session-s1"
+# #1372: a security task keeps the Codex plan review in every default run; a small plan of no security task skips it.
 PLAN = {
     "status": "planned", "plan_root": "/g/plan.md",
     "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
-    "tasks": [{"n": 1, "title": "one", "file": "/g/task-1.md", "risk": "standard"}],
+    "tasks": [{"n": 1, "title": "one", "file": "/g/task-1.md", "risk": "security"}],
 }
 
 
@@ -1480,6 +1481,215 @@ class ReviewSizingPlanTest(unittest.TestCase):
         text = prompt(calls, "plan-review")
         self.assertIn(FULL_RUBRIC, text)
         self.assertNotIn(CODEX_OWNS, text)
+
+
+class SmallPlanCodexSkipTest(unittest.TestCase):
+    """#1372: a small plan (at most three tasks, none of risk security) skips the Codex plan review."""
+
+    SKIP = "codex plan review: skipped, a small plan ({} of at most 3 tasks, none of risk security)"
+    MIXED = [tasks(2)[0], dict(tasks(2)[1], risk="security")]
+    UNAVAILABLE = {"available": False, "verdict": "pass", "findings": []}
+
+    def small(self, n=2):
+        return dict(PLAN, tasks=tasks(n))
+
+    def test_a_small_plan_runs_no_codex_plan_review_and_logs_why(self):
+        mixed_risks = [dict(task, risk=risk) for task, risk in zip(tasks(3), ("mechanical", "low", "standard"))]
+        for task_list in (tasks(1), tasks(2), tasks(3, "low"), mixed_risks):
+            with self.subTest(tasks=[t["risk"] for t in task_list]):
+                out = run_out(replies={"plan": dict(PLAN, tasks=task_list)})
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertNotIn("plan-codex", labels(out["calls"]))
+                self.assertIn("plan-review", labels(out["calls"]))
+                self.assertEqual([l for l in out["logs"] if l.startswith("codex plan review: ")],
+                                 [self.SKIP.format(len(task_list))])
+
+    def test_a_small_plan_never_stops_for_an_unavailable_codex(self):
+        result, calls = run(replies={"plan": self.small(2), "plan-codex": self.UNAVAILABLE})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("plan-codex", labels(calls))
+
+    def test_a_fourth_task_or_a_security_task_keeps_the_codex_plan_review(self):
+        for task_list in (tasks(4), tasks(5, "low"), tasks(1, "security"), self.MIXED):
+            with self.subTest(tasks=[t["risk"] for t in task_list]):
+                out = run_out(replies={"plan": dict(PLAN, tasks=task_list)})
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertEqual(labels(out["calls"]).count("plan-codex"), 1)
+                self.assertIn("codex plan review: 0 blocking findings", out["logs"])
+                self.assertFalse([l for l in out["logs"] if "codex plan review: skipped" in l])
+
+    def test_sizing_on_with_a_skipped_codex_plan_review_keeps_the_full_rubric(self):
+        _, calls = run(args=SIZED, replies={"plan": self.small(2)})
+        text = prompt(calls, "plan-review")
+        self.assertNotIn("plan-codex", labels(calls))
+        self.assertIn(FULL_RUBRIC, text)
+        self.assertNotIn(CODEX_OWNS, text)
+
+    def test_a_resumed_unreviewed_small_plan_skips_too(self):
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": self.small(2), "plan_reviewed": False, "done": []}
+        result, calls = run(args=dict(ARGS, cont=cont))
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("plan-review", labels(calls))
+        self.assertNotIn("plan-codex", labels(calls))
+
+    def test_no_skip_line_without_a_configured_codex_plan_review(self):
+        out = run_out(replies={"plan": self.small(2)},
+                      patch={"setup": {"review_state": {"code": "available", "plan": "unsupported"}}})
+        self.assertNotIn("plan-codex", labels(out["calls"]))
+        self.assertFalse([l for l in out["logs"] if l.startswith("codex plan review: ")])
+
+    def test_a_small_plan_keeps_the_codex_diff_review(self):
+        _, calls = run(replies={"plan": self.small(2)})
+        stopped, _ = run(replies={"plan": self.small(2), "final-codex": self.UNAVAILABLE})
+        self.assertEqual(labels(calls).count("final-codex"), 1)
+        self.assertNotIn("plan-codex", labels(calls))
+        call = next(c for c in calls if c["label"] == "final-codex")
+        self.assertEqual((call["agentType"], call["effort"]), ("clerk", "high"))
+        self.assertEqual(set(schema_of(calls, "final-codex")["properties"]), {"available", "verdict", "findings", "raw_summary"})
+        self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "code"))
+
+    FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+
+    def grown(self, task_list):
+        return dict(PLAN, tasks=task_list, criteria_edited=[])
+
+    def test_an_amended_unreviewed_small_plan_keeps_the_codex_plan_review(self):
+        cont = dict(AMEND_CONT, plan=self.small(2), plan_reviewed=False, done=[])
+        out = run_out(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]))
+        names = labels(out["calls"])
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertLess(names.index("amend"), names.index("plan-codex"))
+        self.assertFalse([l for l in out["logs"] if "codex plan review: skipped" in l])
+
+    OPEN = {"close-out": {"issue_state": "OPEN"}}
+
+    def kept_small(self, revised_tasks):
+        """A two-task plan skips Codex, the rules revise gives it revised_tasks, and the rules re-review stops the run on a rule finding."""
+        rule = PlanRulesTest.RULE_FINDING
+        plan = with_criteria(HUMAN, tasks=tasks(2))
+        first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": with_criteria(HUMAN, tasks=revised_tasks),
+                                "plan-review": rule, "plan-rules-review": rule})
+        self.assertEqual(first["stage"], "plan-review")
+        self.assertTrue(first["cont"]["codex_plan_skipped"])
+        return first["cont"]
+
+    def test_a_rules_only_resume_runs_the_codex_plan_review_a_revise_made_due(self):
+        grown = with_criteria(HUMAN, tasks=tasks(2) + [dict(tasks(3)[2], risk="security")])
+        for name, revised in (("fourth", tasks(4)), ("security", grown["tasks"])):
+            with self.subTest(name):
+                cont = self.kept_small(revised)
+                result, calls = run(args=dict(ARGS, cont=cont), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=revised)}, patch=self.OPEN)
+                names = labels(calls)
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertLess(names.index("plan-rules-review"), names.index("plan-codex"))
+                self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_a_rules_only_resume_of_a_plan_that_stays_small_runs_no_codex_plan_review(self):
+        cont = self.kept_small(tasks(3))
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(3))}, patch=self.OPEN)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("plan-codex", labels(calls))
+
+    def test_a_rules_only_resume_with_an_amend_runs_the_codex_plan_review_it_skipped(self):
+        cont = self.kept_small(tasks(2))
+        cont = dict(cont, setup=dict(cont["setup"], plan_dir="/g"))
+        replies = {"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2))}
+        stopped, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]),
+                             replies=dict(replies, **{"plan-codex": self.UNAVAILABLE}))
+        names = labels(calls)
+        self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "plan"))
+        self.assertLess(names.index("amend"), names.index("plan-codex"))
+        self.assertNotIn("impl-1", names)
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        # The stop keeps the review owed: a resume without the amend, on a plan that reads small again, still runs it.
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=self.OPEN)
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(names.count("plan-codex"), 1)
+        self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_an_amend_keeps_the_codex_plan_review_owed_through_a_stop_before_it_passes(self):
+        # (a) A kept plan with no rules revise spent: the amend resume leaves a rule finding and stops at plan-review, with the plan kept and
+        # before any Codex call; the next resume has no amend.
+        cont = self.kept_small(tasks(2))
+        cont = dict(cont, setup=dict(cont["setup"], plan_dir="/g"), plan_findings=dict(cont["plan_findings"], rounds=0))
+        stopped, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]),
+                             replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2)), "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertEqual(stopped["stage"], "plan-review")
+        self.assertTrue(stopped["amended"])
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        self.assertNotIn("plan-codex", labels(calls))
+        self.assertTrue(stopped["cont"]["codex_plan_owed"])
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2))}, patch=self.OPEN)
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(names.count("plan-codex"), 1)
+        self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_an_amend_on_an_unreviewed_plan_keeps_the_codex_plan_review_owed_through_each_stop(self):
+        kept = self.kept_small(tasks(2))
+        base = {k: v for k, v in kept.items() if k not in ("plan_findings", "codex_plan_skipped")}
+        base = dict(base, setup=dict(base["setup"], plan_dir="/g"))
+        silent_reviewer = {"plan-review": None}
+        for name, replies, stage in (("codex unavailable", {"plan-codex": self.UNAVAILABLE}, "codex-unavailable"),
+                                     ("silent claude reviewer", silent_reviewer, "plan-review")):
+            with self.subTest(name):
+                stopped, calls = run(args=dict(ARGS, cont=base, amend=[AMEND_EDIT]), replies=replies)
+                self.assertEqual(stopped["stage"], stage)
+                self.assertFalse(stopped["cont"]["plan_reviewed"])
+                self.assertTrue(stopped["cont"]["codex_plan_owed"])
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=self.OPEN)
+                names = labels(calls)
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+        # A passed review clears the mark: the cont of a run that reaches the tasks no longer carries it.
+        out = run_out(args=dict(ARGS, cont=base, amend=[AMEND_EDIT]), patch=self.OPEN)
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("codex_plan_owed", out["result"].get("cont", {}))
+
+    def test_a_late_codex_finding_on_a_rules_only_resume_stops_at_plan_review(self):
+        cont = self.kept_small(tasks(4))
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "bad"}]}
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(4)), "plan-codex": codex})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([f["summary"] for f in result["findings"]], ["bad"])
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_revise_that_leaves_the_plan_small_runs_no_codex_plan_review(self):
+        out = run_out(replies={"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": self.grown(tasks(3))})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("plan-codex", labels(out["calls"]))
+
+    def test_a_revise_that_leaves_the_plan_not_small_runs_the_codex_plan_review_on_it(self):
+        added = tasks(2) + [dict(tasks(3)[2], risk="security")]
+        for name, task_list in (("security", added), ("fourth", tasks(4))):
+            with self.subTest(name):
+                out = run_out(replies={"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": self.grown(task_list)})
+                names = labels(out["calls"])
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertGreater(names.index("plan-codex"), names.index("plan-revise"))
+                self.assertIn("codex plan review: 0 blocking findings", out["logs"])
+                self.assertEqual(names.count("impl-%d" % len(task_list)), 1)
+
+    def test_the_codex_plan_review_of_a_grown_plan_stops_on_unavailable_and_on_findings(self):
+        grown = self.grown(tasks(4))
+        base = {"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": grown}
+        stopped, calls = run(replies=dict(base, **{"plan-codex": self.UNAVAILABLE}))
+        self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "plan"))
+        self.assertNotIn("impl-1", labels(calls))
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "bad"}]}
+        stopped, calls = run(replies=dict(base, **{"plan-codex": codex}))
+        self.assertEqual(stopped["stage"], "plan-review")
+        self.assertEqual([f["summary"] for f in stopped["findings"]], ["bad"])
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        self.assertNotIn("impl-1", labels(calls))
 
 
 class PlanRulesTest(unittest.TestCase):
@@ -3238,9 +3448,10 @@ class ReviewAndVerifyTest(unittest.TestCase):
     def test_codex_finding_drives_the_fix_wave(self):
         codex = {"available": True, "verdict": "findings",
                  "findings": [{"severity": "important", "summary": "edge", "failing_input": "x"}]}
-        _, calls = run(replies={"final-codex": codex})
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(2)), "final-codex": codex})
         self.assertIn("edge", prompt(calls, "fix-wave"))
         self.assertIn("fix-wave-review", labels(calls))
+        self.assertNotIn("plan-codex", labels(calls))
 
     def test_missing_or_unearned_results_and_dirty_tree_fail_verification(self):
         for reply in ({"head": SHA, "clean": True, "results": []},
@@ -4100,6 +4311,7 @@ RED = {"state": "failed", "head": SHA, "failing": ["ci-tests"], "details": "FAIL
 FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped the new call site", "failing_input": "x"}]}
 # The cont every ship stop of the default fresh run carries (observed at the base commit of #801).
 SHIP_PINNED = {"lane": "standard", "plan_reviewed": True, "fix_waves": 0, "final_reviewed": {"head": "c0ffee"},
+               "review_rounds": 1, "reviewed": {"head": "c0ffee"},
                "done": [{"n": 1, "commit": "c0ffee", "review_rounds": 0, "reviewer": "reviewer"}]}
 
 
@@ -4827,8 +5039,8 @@ class ResolveBeforeLockTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": MERGE, "since_reviewed": "merge_only"}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertIn("final-1", names)
-        self.assertLess(names.index("final-1"), names.index("merge"))
+        self.assertIn("final-scoped", names)
+        self.assertLess(names.index("final-scoped"), names.index("merge"))
 
     def test_lost_and_refused_replies_on_the_new_step_order_keep_the_lock_accounting(self):
         refused = lambda v: {"lock": {"verdict": v, "lock_sha": self.M2}}
@@ -5717,7 +5929,7 @@ class ThirdFixWaveTest(unittest.TestCase):
         self.assertIn("race in expire", third)
         self.assertNotIn("race in release", third)
         # The same prompt, wave for wave: only the fix's range and the findings under re-review differ.
-        blank = lambda text: re.sub(r"Findings: \[.*?\]\. Report", "Findings: []. Report", re.sub(r"\b[def]{40}\b", "SHA", text))
+        blank = lambda text: re.sub(r"Findings: \[.*?\]\. ", "Findings: []. ", re.sub(r"\b[def]{40}\b", "SHA", text))
         self.assertEqual(blank(second), blank(third))
 
     def test_each_clause_of_the_admission_refuses_the_third_wave(self):
@@ -5780,10 +5992,10 @@ class ThirdFixWaveTest(unittest.TestCase):
         result, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": new})
         self.assertEqual(result["cont"]["fix_findings"], [{"severity": "critical", "summary": "leak", "failing_input": "x"}])
 
-    def test_a_lost_rereview_and_a_clean_delivery_carry_nothing(self):
+    def test_a_lost_rereview_keeps_its_findings_and_a_clean_delivery_carries_nothing(self):
         lost, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": None})
         self.assertEqual(lost["stage"], "fix-wave-review")
-        self.assertNotIn("fix_findings", lost["cont"])
+        self.assertEqual([f["summary"] for f in lost["cont"]["fix_findings"]], ["race in acquire"])
         later, _ = run(replies=self.replies(verify=None))
         self.assertEqual(later["stage"], "verify")
         self.assertNotIn("fix_findings", later["cont"])
@@ -5806,6 +6018,20 @@ class ThirdFixWaveTest(unittest.TestCase):
         self.assertEqual(again["stage"], "final-review")
         self.assertEqual(again["cont"]["fix_findings"], kept)
 
+    def test_findings_the_bound_cut_bring_a_full_review_on_resume(self):
+        many = narrow(*[f"race {i} " + "x" * 900 for i in range(14)], failing_input="y" * 900)
+        stopped, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": self.AFTER_1, "fix-wave-review-2": many})
+        self.assertEqual(stopped["cont"]["fix_findings_dropped"], 4)
+        out = run_out(args=dict(ARGS, cont=stopped["cont"]), replies={"verify": None}, patch={"setup": {"head": "e" * 40}})
+        self.assertIn("final-1", labels(out["calls"]))
+        self.assertNotIn("final-scoped", labels(out["calls"]))
+        wave = prompt(out["calls"], "fix-wave")
+        for i in range(10):
+            self.assertIn(f"race {i} ", wave)
+        self.assertIn("4 open finding(s) were not kept in cont: this round reviews the whole delivery", json.dumps(out["logs"]))
+        self.assertEqual(out["result"]["stage"], "verify")
+        self.assertNotIn("fix_findings_dropped", out["result"]["cont"])
+
     def stopped(self):
         left = narrow("race in adopt", failing_input="two adopters")
         result, _ = run(replies=self.replies(**{"fix-wave-review-3": left}))
@@ -5813,10 +6039,10 @@ class ThirdFixWaveTest(unittest.TestCase):
 
     def test_a_resume_feeds_the_carried_findings_to_the_first_wave(self):
         fresh = {"verdict": "findings", "findings": [{"severity": "important", "file": "lock.py", "summary": "stale lock"}]}
-        result, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-1": fresh})
+        result, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-scoped": fresh})
         self.assertEqual((result["stage"], result["fix_waves"]), ("done", 4))
         self.assertEqual(waves(calls), self.THREE[:2])
-        self.assertIn("final-1", labels(calls))
+        self.assertIn("final-scoped", labels(calls))
         wave = prompt(calls, "fix-wave")
         for needle in ("stale lock", "race in adopt", "two adopters",
                        "The last 1 were left open by an earlier run's fix waves and may repeat the ones before them: "
@@ -5862,7 +6088,7 @@ class ThirdFixWaveTest(unittest.TestCase):
         self.assertNotIn("declared branch", rereview)
         # The head check covers every wave-1 finding, the fresh ones too: nothing was committed for any of them.
         fresh = {"verdict": "findings", "findings": [{"severity": "important", "file": "lock.py", "summary": "stale lock"}]}
-        _, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-1": fresh}, patch={"fix-wave": self.NOTHING})
+        _, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-scoped": fresh}, patch={"fix-wave": self.NOTHING})
         rereview = prompt(calls, "fix-wave-review")
         for needle in ("the fix wave committed nothing", "stale lock", "race in adopt"):
             self.assertIn(needle, rereview)
@@ -5919,7 +6145,7 @@ class ThirdFixWaveTest(unittest.TestCase):
 
     def test_a_finding_the_fresh_review_raises_again_is_passed_once(self):
         fresh = {"verdict": "findings", "findings": [{"severity": "critical", "file": "claim.py", "summary": "Race  in ADOPT"}]}
-        _, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-1": fresh})
+        _, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-scoped": fresh})
         wave = prompt(calls, "fix-wave")
         self.assertIn("Race  in ADOPT", wave)
         self.assertNotIn("race in adopt", wave)
@@ -5927,23 +6153,23 @@ class ThirdFixWaveTest(unittest.TestCase):
 
     def test_the_carried_findings_last_until_a_wave_takes_them(self):
         cont = self.stopped()
-        for replies in ({"final-1": None}, {"fix-wave": None}):
+        for replies in ({"final-scoped": None}, {"fix-wave": None}):
             with self.subTest(replies=replies):
                 result, _ = run(args=dict(ARGS, cont=cont), replies=replies)
                 self.assertIn(result["stage"], ("final-review", "fix-wave"))
                 self.assertEqual(result["cont"]["fix_findings"], cont["fix_findings"])
-        # A wave that answered and failed has had them: the resume's fresh review decides.
+        # #1370: a wave that answered and failed, and a lost re-review, keep them too: the next round re-checks each against the head.
         for reply in ({"status": "blocked", "notes": "no"}, {"status": "done", "start_head": "d" * 40, "notes": "nothing to do"}):
             with self.subTest(reply=reply):
                 out = run_out(args=dict(ARGS, cont=cont), replies={"fix-wave": reply})
                 self.assertEqual(out["result"]["stage"], "fix-wave")
-                self.assertNotIn("fix_findings", out["result"]["cont"])
-                self.assertIn("1 carried finding(s) dropped after a wave that answered and failed", json.dumps(out))
+                self.assertEqual(out["result"]["cont"]["fix_findings"], cont["fix_findings"])
+                self.assertIn("fix-wave: 1 open finding(s) kept in cont after a wave that failed", json.dumps(out))
         taken, _ = run(args=dict(ARGS, cont=cont), replies={"verify": None})
         self.assertEqual(taken["stage"], "verify")
         self.assertNotIn("fix_findings", taken["cont"])
         resolved, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": None})
-        self.assertNotIn("fix_findings", resolved["cont"])
+        self.assertEqual(resolved["cont"]["fix_findings"], cont["fix_findings"])
 
     def test_a_resumed_run_gets_its_own_three_waves(self):
         result, calls = run(args=dict(ARGS, cont=self.stopped()), replies=self.replies())
@@ -6042,7 +6268,7 @@ class FixWavesConvergeTest(unittest.TestCase):
         self.assertNotIn("diverging", first)
         # Waves at the bound, but nothing carried in (the earlier run stopped elsewhere): no earlier finding named the file.
         cont = {k: v for k, v in self.stopped(fix_waves=6).items() if k != "fix_findings"}
-        result, _ = run(args=dict(ARGS, cont=cont), replies={"final-1": self.left(), "fix-wave-review": self.left()})
+        result, _ = run(args=dict(ARGS, cont=cont), replies={"final-scoped": self.left(), "fix-wave-review": self.left()})
         self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 7))
         self.assertNotIn("diverging", result)
 
@@ -6066,6 +6292,786 @@ class FixWavesConvergeTest(unittest.TestCase):
         self.assertLessEqual(len(result["reason"]), 300)
         self.assertNotIn("\n", result["reason"])
         self.assertIn("after 4 waves; an owner decision on the design is needed", result["reason"])
+
+
+R = "d" * 40
+H = "e" * 40
+SCOPED_FIRST = {"verdict": "findings", "findings": [{"severity": "critical", "file": "lock.py", "summary": "leak"}]}
+SCOPED_NEW = {"verdict": "findings", "findings": [{"severity": "important", "file": "claim.py", "summary": "race in steal", "relation": "new"}]}
+AMENDED = (" The owner amended the plan since the last review (plan.md, Amendments): grade the head against the amended tasks "
+           "and acceptance criteria, not only the commits above.")
+
+
+def scoped_first_stop():
+    """#1370: the cont of a first run stopped after its re-review, one finding left open in claim.py."""
+    result, _ = run(replies={"final-1": SCOPED_FIRST, "fix-wave-review": SCOPED_NEW},
+                    patch={"fix-wave": {"start_head": "c0ffee", "commit": R}})
+    assert result["stage"] == "fix-wave-review", result["stage"]
+    cont = result["cont"]
+    assert [f["summary"] for f in cont["fix_findings"]] == ["race in steal"], cont["fix_findings"]
+    assert cont["reviewed"] == {"head": R}, cont["reviewed"]
+    return cont
+
+
+def scoped_resume(cont, replies=None, patch=None, args=None):
+    return run(args=dict(args or ARGS, cont=cont), replies=replies, patch=dict({"setup": {"head": H}}, **(patch or {})))
+
+
+class ScopedReviewRoundTest(unittest.TestCase):
+    """#1370: the rounds after the first full final review read only what changed since the head the last review read."""
+
+    def test_a_first_full_review_counts_one_round_and_records_the_head_it_read(self):
+        cont = scoped_first_stop()
+        self.assertEqual((cont["review_rounds"], cont["reviewed"]), (1, {"head": R}))
+        clean, _ = run(replies={"verify": None})
+        self.assertEqual(clean["stage"], "verify")
+        self.assertEqual((clean["cont"]["review_rounds"], clean["cont"]["reviewed"]), (1, {"head": "c0ffee"}))
+        lost, _ = run(replies={"final-1": None})
+        self.assertEqual(lost["stage"], "final-review")
+        self.assertNotIn("review_rounds", lost["cont"])
+        self.assertNotIn("reviewed", lost["cont"])
+
+    def test_a_resume_reviews_only_the_new_commits_and_the_carried_findings(self):
+        first = run_out(args=SIZED, replies=dict(sized(1501), **{"final-1": SCOPED_FIRST, "fix-wave-review": SCOPED_NEW}),
+                        patch={"fix-wave": {"start_head": "c0ffee4", "commit": R}})
+        for label in ("diff-size", "final-1", "final-2", "final-codex", "final-integration"):
+            self.assertIn(label, labels(first["calls"]))
+        self.assertEqual(first["result"]["stage"], "fix-wave-review")
+        self.assertEqual(first["result"]["cont"]["reviewed"], {"head": R})
+        result, calls = run(args=dict(SIZED, cont=first["result"]["cont"]), replies={"verify": None}, patch={"setup": {"head": H}})
+        names = labels(calls)
+        self.assertIn("final-scoped", names)
+        for label in ("final-1", "final-2", "final-codex", "final-integration", "diff-size"):
+            self.assertNotIn(label, names)
+        scoped = prompt(calls, "final-scoped")
+        wt = "git -C /r/.wt/w-issue-9-x"
+        for needle in (f"{wt} merge-base --is-ancestor {R} {H}", f"{wt} log -p --no-merges {R}..{H} ^origin/dev",
+                       f"{wt} rev-list --merges {R}..{H} ^origin/dev", "show --remerge-diff", f"{wt} diff {R} {H}",
+                       "race in steal", "return closed"):
+            self.assertIn(needle, scoped)
+        self.assertNotIn("origin/dev...HEAD", scoped)
+        self.assertIn("race in steal", prompt(calls, "fix-wave"))
+        self.assertEqual((result["stage"], result["cont"]["review_rounds"]), ("verify", 2))
+        self.assertEqual({c["label"]: c for c in calls}["final-scoped"]["agentType"], "reviewer")
+        props = schema_of(calls, "final-scoped")["properties"]
+        self.assertEqual(props["closed"], {"type": "array", "items": {"type": "integer"}})
+        self.assertEqual(props["head"], {"type": "string"})
+
+    def test_a_carried_finding_the_scoped_reviewer_closes_needs_no_fix_wave(self):
+        cont = scoped_first_stop()
+        closed, calls = scoped_resume(cont, replies={"final-scoped": {"verdict": "pass", "findings": [], "closed": [1]}, "verify": None})
+        self.assertFalse([name for name in labels(calls) if name.startswith("fix-wave")])
+        self.assertEqual(closed["stage"], "verify")
+        self.assertNotIn("fix_findings", closed["cont"])
+        self.assertEqual((closed["cont"]["review_rounds"], closed["cont"]["reviewed"]), (2, {"head": H}))
+        for numbers in ([7], [], [0], [1.5], ["1"]):
+            with self.subTest(closed=numbers):
+                _, calls = scoped_resume(cont, replies={"final-scoped": {"verdict": "pass", "findings": [], "closed": numbers}, "verify": None})
+                wave = prompt(calls, "fix-wave")
+                self.assertIn("race in steal", wave)
+                self.assertIn("The last 1 were left open by an earlier run's fix waves", wave)
+
+    def test_a_resume_on_the_reviewed_head_still_runs_the_scoped_reviewer(self):
+        result, calls = run(args=dict(ARGS, cont=scoped_first_stop()), replies={"verify": None}, patch={"setup": {"head": R}})
+        self.assertIn("final-scoped", labels(calls))
+        self.assertNotIn("final-1", labels(calls))
+        self.assertEqual(result["cont"]["review_rounds"], 2)
+
+    def test_a_resume_with_no_head_read_reviews_up_to_HEAD_and_records_the_head_the_reviewer_read(self):
+        cont = scoped_first_stop()
+        for said, expected in (("9" * 40, "9" * 40), ("HEAD", R)):
+            with self.subTest(head=said):
+                result, calls = run(args=dict(ARGS, cont=cont), replies={
+                    "final-scoped": {"verdict": "pass", "findings": [], "closed": [1], "head": said}, "verify": None})
+                scoped = prompt(calls, "final-scoped")
+                self.assertIn(f"log -p --no-merges {R}..HEAD ^origin/dev", scoped)
+                self.assertIn("rev-parse HEAD", scoped)
+                self.assertEqual(result["cont"]["reviewed"], {"head": expected})
+
+    def test_a_failed_wave_and_a_lost_re_review_keep_the_open_findings(self):
+        failed, _ = run(replies={"final-1": SCOPED_FIRST, "fix-wave": {"status": "blocked", "notes": "no"}})
+        lost, _ = run(replies={"final-1": SCOPED_FIRST, "fix-wave-review": None}, patch={"fix-wave": {"start_head": "c0ffee", "commit": R}})
+        for stage, result in (("fix-wave", failed), ("fix-wave-review", lost)):
+            with self.subTest(stage=stage):
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["leak"])
+                self.assertEqual(result["cont"]["reviewed"], {"head": "c0ffee"})
+                self.assertEqual(result["cont"]["review_rounds"], 1)
+
+    def test_a_re_review_moves_the_reviewed_head(self):
+        result, _ = run(replies={"final-1": SCOPED_FIRST, "fix-wave-review": FixWaveTest.narrowing(), "fix-wave-review-2": SCOPED_NEW},
+                        patch={"fix-wave": {"start_head": "c0ffee", "commit": R}, "fix-wave-2": {"start_head": R, "commit": H}})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual(result["cont"]["reviewed"], {"head": H})
+        self.assertEqual(result["cont"]["review_rounds"], 1)
+
+    def test_a_lost_scoped_review_keeps_the_round_and_the_findings(self):
+        cont = scoped_first_stop()
+        result, _ = scoped_resume(cont, replies={"final-scoped": None})
+        self.assertEqual(result["stage"], "final-review")
+        self.assertIn("the scoped reviewer", result["reason"])
+        self.assertEqual(result["cont"]["review_rounds"], 1)
+        self.assertEqual(result["cont"]["reviewed"], {"head": R})
+        self.assertEqual(result["cont"]["fix_findings"], cont["fix_findings"])
+
+    def branch_stop(self):
+        new = {"verdict": "findings", "findings": [{"severity": "important", "summary": "leak on cand", "relation": "new"}]}
+        at_e = {"start_head": TIP, "commit": TIP, "branch_heads": [{"name": "cand", "head": "e" * 40}]}
+        stopped, _ = run(replies={"plan": bplan(), "final-1": SCOPED_FIRST, "fix-wave-review": new},
+                         patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}, "fix-wave": at_e})
+        self.assertEqual(stopped["stage"], "fix-wave-review")
+        self.assertEqual(stopped["cont"]["reviewed"], {"head": TIP, "branches": {"cand": "e" * 40}})
+        return stopped["cont"]
+
+    def branch_resume(self, cont, **replies):
+        facts = [{"name": "cand", "head": "f" * 40, "current": "cand", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git"}]
+        wave = {"start_head": TIP, "commit": TIP, "branch_heads": [{"name": "cand", "head": "f" * 40}]}
+        return run(args=dict(ARGS, cont=cont), replies=dict({"verify": None}, **replies),
+                   patch={"setup": {"head": TIP, "branch_heads": facts}, "fix-wave": wave})
+
+    def test_a_declared_branch_is_reviewed_from_its_recorded_head(self):
+        _, calls = self.branch_resume(self.branch_stop())
+        scoped = prompt(calls, "final-scoped")
+        e, f = "e" * 40, "f" * 40
+        for needle in (f"git -C /r/.wt/cand merge-base --is-ancestor {e} {f}", f"git -C /r/.wt/cand log -p --no-merges {e}..{f} ^{BR['base']}",
+                       f"git -C /r/.wt/cand rev-list --merges {e}..{f} ^{BR['base']}", f"git -C /r/.wt/cand diff {e} {f}"):
+            self.assertIn(needle, scoped)
+        self.assertNotIn(f"diff {BR['base']}...cand", scoped)
+
+    def test_a_completed_full_review_is_never_run_in_full_again(self):
+        legacy = {k: v for k, v in FinalReviewedResumeTest.stopped_after_review()["cont"].items() if k not in ("review_rounds", "reviewed")}
+        self.assertEqual(legacy["final_reviewed"], {"head": TIP})
+        result, calls = run(args=dict(ARGS, cont=legacy), replies={"verify": None}, patch={"setup": {"head": H}})
+        self.assertIn("final-scoped", labels(calls))
+        self.assertNotIn("final-1", labels(calls))
+        self.assertIn(f"{TIP}..{H}", prompt(calls, "final-scoped"))
+        self.assertEqual(result["cont"]["review_rounds"], 2)
+        bare = {k: v for k, v in scoped_first_stop().items() if k not in ("review_rounds", "reviewed")}
+        _, calls = scoped_resume(bare, replies={"verify": None})
+        self.assertIn("final-1", labels(calls))
+        self.assertNotIn("final-scoped", labels(calls))
+        only = dict(PLAN, branches=[dict(BR)], tasks=[dict(PLAN["tasks"][0], file="/g/task-1.md", branch="cand")])
+        result, calls = run(replies={"plan": only, "final-1": {"verdict": "pass", "findings": [], "head": "9" * 40}, "verify": None})
+        self.assertIn("rev-parse HEAD", prompt(calls, "final-1"))
+        self.assertEqual(result["cont"]["reviewed"]["head"], "9" * 40)
+        self.assertIn("cand", result["cont"]["reviewed"]["branches"])
+
+    def test_a_malformed_reviewed_marker_is_not_used(self):
+        cont = scoped_first_stop()
+        for head in ("HEAD", "x" * 40):
+            with self.subTest(head=head):
+                _, calls = scoped_resume(dict(cont, reviewed={"head": head}))
+                self.assertIn("final-1", labels(calls))
+                self.assertNotIn("final-scoped", labels(calls))
+        branch = self.branch_stop()
+        bad = dict(branch, reviewed=dict(branch["reviewed"], branches={"cand": "HEAD", "../x": "e" * 40}))
+        _, calls = self.branch_resume(bad)
+        scoped = prompt(calls, "final-scoped")
+        self.assertIn(f"git -C /r/.wt/cand diff {BR['base']}...cand", scoped)
+        self.assertNotIn("HEAD..f", scoped)
+        # What a stop hands back is the marker as read: the invalid entries are gone from it.
+        lost, _ = self.branch_resume(bad, **{"final-scoped": None})
+        self.assertEqual(lost["stage"], "final-review")
+        self.assertEqual(lost["cont"]["reviewed"], {"head": TIP})
+
+    def test_an_amended_plan_is_graded_by_the_scoped_round(self):
+        cont = FinalReviewedResumeTest.stopped_after_review()["cont"]
+        _, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), patch={"setup": {"head": TIP}})
+        names = labels(calls)
+        self.assertLess(names.index("amend"), names.index("final-scoped"))
+        self.assertLess(names.index("final-scoped"), names.index("verify"))
+        self.assertNotIn("final-1", names)
+        self.assertIn(AMENDED, prompt(calls, "final-scoped"))
+        stopped, _ = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), replies={"amend": None}, patch={"setup": {"head": TIP}})
+        self.assertEqual(stopped["stage"], "amend")
+        self.assertEqual(stopped["cont"]["reviewed"], {"head": TIP, "amended": True})
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"verify": None}, patch={"setup": {"head": TIP}})
+        self.assertIn(AMENDED, prompt(calls, "final-scoped"))
+        self.assertEqual(result["cont"]["reviewed"], {"head": TIP})
+
+    def test_an_applied_amend_is_kept_by_a_stop_before_the_next_verdict(self):
+        cont = FinalReviewedResumeTest.stopped_after_review()["cont"]
+        lost, _ = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), replies={"final-scoped": None}, patch={"setup": {"head": TIP}})
+        self.assertEqual(lost["stage"], "final-review")
+        self.assertEqual(lost["cont"]["reviewed"], {"head": TIP, "amended": True})
+        _, calls = run(args=dict(ARGS, cont=lost["cont"]), replies={"verify": None}, patch={"setup": {"head": TIP}})
+        self.assertIn(AMENDED, prompt(calls, "final-scoped"))
+
+
+def open_(summary, file="claim.py"):
+    return {"verdict": "findings", "findings": [{"severity": "important", "file": file, "summary": summary, "relation": "new"}]}
+
+
+class ReviewRoundCapTest(unittest.TestCase):
+    """#1370: a round's verdict that leaves findings open after one full and two scoped rounds stops before any fix wave; only the owner reopens it."""
+
+    DECISION = "Accept the renew race; fix only the leak."
+    DECIDED = ' The owner decided how to settle the findings left open at the review round cap, and the decision is binding: "Accept the renew race; fix only the leak."'
+    REASON = ("fix-wave-review: the review round cap is reached after 3 rounds (one full and two scoped); an owner decision is needed "
+              "on the 1 finding(s) still open: race in renew")
+    EIGHT = {"setup": {"head": "8" * 40}}
+
+    def second(self):
+        out = run_out(args=dict(ARGS, cont=scoped_first_stop()),
+                      replies={"final-scoped": open_("race in steal"), "fix-wave-review": open_("race in renew")},
+                      patch={"setup": {"head": "e" * 40}, "fix-wave": {"start_head": "e" * 40, "commit": "9" * 40}})
+        self.assertEqual((out["result"]["stage"], out["result"]["cont"]["review_rounds"], out["result"]["fix_waves"]), ("fix-wave-review", 2, 2))
+        return out
+
+    def capped(self, replies=None):
+        return run_out(args=dict(ARGS, cont=self.second()["result"]["cont"]),
+                       replies=dict({"final-scoped": open_("race in renew")}, **(replies or {})), patch={"setup": {"head": "f" * 40}})
+
+    def test_a_third_round_left_open_stops_at_the_cap(self):
+        second = self.second()
+        self.assertIn("fix-wave", labels(second["calls"]))
+        self.assertNotIn("round_cap", second["result"])
+        self.assertNotIn("round_cap", second["result"]["cont"])
+        out = self.capped()
+        result, cont = out["result"], out["result"]["cont"]
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual(result["round_cap"], {"rounds": 3, "findings": ["race in renew"]})
+        self.assertEqual(cont["round_cap"], result["round_cap"])
+        self.assertTrue(result["reason"].startswith(self.REASON), result["reason"])
+        self.assertLessEqual(len(result["reason"]), 300)
+        self.assertEqual(waves(out["calls"]), [])
+        self.assertEqual((result["fix_waves"], cont["fix_waves"]), (2, 2))
+        self.assertEqual(cont["review_rounds"], 3)
+        self.assertEqual([f["summary"] for f in cont["fix_findings"]], ["race in renew"])
+        passed, _ = run(args=dict(ARGS, cont=second["result"]["cont"]), patch={"setup": {"head": "f" * 40}},
+                        replies={"final-scoped": {"verdict": "pass", "findings": [], "closed": [1]}, "verify": None})
+        self.assertEqual(passed["stage"], "verify")
+        self.assertNotIn("round_cap", passed["cont"])
+
+    def test_a_resume_of_a_capped_cont_starts_no_agent(self):
+        cont = self.capped()["result"]["cont"]
+        held = dict(cont, decisions=["An earlier answer."])
+        for name, c, more in (("none", cont, {}), ("blank", cont, {"decisions": "  "}), ("rerun", cont, {"decisions": "rerun"}),
+                              ("already held", held, {"decisions": "An earlier answer."})):
+            with self.subTest(name):
+                result, calls = run(args=dict(ARGS, cont=c, **more))
+                self.assertEqual(calls, [])
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertEqual(result["cont"], c)
+                self.assertEqual(result["round_cap"], cont["round_cap"])
+                if name == "none":
+                    self.assertEqual(result["reason"], f"{self.REASON}; not run again: this resume brings nothing new from the owner; "
+                                     "resume with decisions (how to settle the open findings), or amend")
+        _, calls = run(args=dict(ARGS, cont={k: v for k, v in cont.items() if k != "fix_findings"}))
+        self.assertNotEqual(calls, [])
+
+    def test_only_a_cap_stop_gates_the_resume(self):
+        lost, _ = run(args=dict(ARGS, cont=scoped_first_stop()), replies={"final-scoped": open_("race in steal"), "fix-wave": None},
+                      patch={"setup": {"head": "e" * 40}})
+        self.assertEqual(lost["stage"], "fix-wave")
+        self.assertNotIn("round_cap", lost)
+        self.assertNotIn("round_cap", lost["cont"])
+        self.assertEqual([f["summary"] for f in lost["cont"]["fix_findings"]], ["race in steal"])
+        _, calls = run(args=dict(ARGS, cont=dict(lost["cont"], review_rounds=3)), patch={"setup": {"head": "e" * 40}})
+        self.assertEqual(labels(calls)[0], "setup")
+        self.assertIn("final-scoped", labels(calls))
+        cont = self.capped()["result"]["cont"]
+        out = run_out(args=dict(ARGS, cont=cont, decisions=self.DECISION),
+                      replies={"final-scoped": open_("race in renew"), "fix-wave-review": None}, patch=self.EIGHT)
+        self.assertEqual(out["result"]["stage"], "fix-wave-review")
+        self.assertNotIn("round_cap", out["result"]["cont"])
+        self.assertIn(self.DECISION, out["result"]["cont"]["decisions"])
+        _, calls = run(args=dict(ARGS, cont=out["result"]["cont"]), patch=self.EIGHT)
+        self.assertIn("final-scoped", labels(calls))
+        out = run_out(args=dict(ARGS, cont=cont, decisions=self.DECISION),
+                      replies={"final-scoped": open_("race in renew"), "fix-wave": None}, patch=self.EIGHT)
+        self.assertEqual(out["result"]["stage"], "fix-wave")
+        self.assertEqual(out["result"]["cont"]["round_cap"]["rounds"], 3)
+        self.assertNotIn(self.DECISION, out["result"]["cont"].get("decisions", []))
+        result, calls = run(args=dict(ARGS, cont=out["result"]["cont"]))
+        self.assertEqual(calls, [])
+
+    def test_an_owner_decision_admits_one_more_scoped_round(self):
+        cont = self.capped()["result"]["cont"]
+        out = run_out(args=dict(ARGS, cont=cont, decisions=self.DECISION), replies={"final-scoped": open_("race in renew"), "verify": None}, patch=self.EIGHT)
+        result, calls = out["result"], out["calls"]
+        for label in ("final-scoped", "fix-wave", "fix-wave-review"):
+            self.assertIn(label, labels(calls))
+            self.assertIn(self.DECIDED, prompt(calls, label))
+        for label in ("final-scoped", "fix-wave-review"):
+            self.assertIn(f"{self.DECIDED}. Report no finding that only disputes it.", prompt(calls, label))
+        self.assertEqual((result["stage"], result["cont"]["review_rounds"]), ("verify", 4))
+        self.assertIn(self.DECISION, result["cont"]["decisions"])
+        self.assertNotIn("round_cap", result["cont"])
+        again = run_out(args=dict(ARGS, cont=cont, decisions=self.DECISION),
+                        replies={"final-scoped": open_("race in renew"), "fix-wave-review": open_("race in lease")}, patch=self.EIGHT)["result"]
+        self.assertEqual(again["stage"], "fix-wave-review")
+        self.assertEqual(again["round_cap"], {"rounds": 4, "findings": ["race in lease"]})
+        self.assertEqual(again["cont"]["round_cap"], again["round_cap"])
+
+    def test_an_amend_admits_one_more_scoped_round(self):
+        cont = self.capped()["result"]["cont"]
+        out = run_out(args=dict(ARGS, cont=cont, amend=[dict(AMEND_EDIT, file="task-1.md")]),
+                      replies={"final-scoped": open_("race in renew"), "verify": None}, patch=self.EIGHT)
+        for label in ("amend", "fix-wave"):
+            self.assertIn(label, labels(out["calls"]))
+        self.assertIn(" The owner amended the plan after the review round cap (plan.md, Amendments): it is binding.", prompt(out["calls"], "fix-wave"))
+        self.assertEqual(out["result"]["stage"], "verify")
+
+    def test_the_existing_bounds_still_apply_inside_the_cap(self):
+        first = run(args=dict(ARGS, cont=FixWavesConvergeTest().stopped()), replies={"fix-wave-review": FixWavesConvergeTest.left()},
+                    patch={"setup": {"head": "e" * 40}})[0]
+        self.assertEqual(first["diverging"], {"file": "claim.py", "waves": 4})
+        self.assertNotIn("round_cap", first)
+        cont = dict(self.capped()["result"]["cont"], fix_waves=3)
+        result, _ = run(args=dict(ARGS, cont=cont, decisions=self.DECISION),
+                        replies={"final-scoped": open_("race in renew"), "fix-wave-review": FixWavesConvergeTest.left()}, patch=self.EIGHT)
+        self.assertEqual(result["diverging"], {"file": "claim.py", "waves": 4})
+        self.assertEqual(result["round_cap"]["rounds"], 4)
+        self.assertTrue(result["reason"].startswith("fix-wave-review: the fix waves do not converge on claim.py after 4 waves"), result["reason"])
+        self.assertIn("the review round cap is reached", result["reason"])
+        decision = FixWaveHistoryTest.DECISION
+        oscillating = dict(FixWaveHistoryTest().stopped()["cont"], review_rounds=3)
+        _, calls = run(args=dict(ARGS, cont=oscillating, decisions=decision), patch={"setup": {"head": "e" * 40}})
+        for label in ("final-scoped", "fix-wave"):
+            self.assertIn(label, labels(calls))
+        self.assertIn(json.dumps(decision), prompt(calls, "fix-wave"))
+
+
+class ReviewRoundFindingsTest(unittest.TestCase):
+    """#1370: the final review's findings on the scoped rounds, the round cap and the reviewed head."""
+
+    NARROW = {"verdict": "findings", "changed_files": ["tools/grader.json"],
+              "findings": [{"severity": "important", "file": "src/lock.py", "summary": "lock race on another path", "relation": "narrowing"}]}
+
+    def test_a_wave_lost_after_the_first_leaves_no_oscillating_marker(self):
+        history = FixWaveHistoryTest()
+        cont = history.stopped()["cont"]
+        self.assertIn("oscillating", cont)
+        args = dict(ARGS, cont=cont, decisions=history.DECISION)
+        late, _ = run(args=args, replies={"fix-wave-review": self.NARROW, "fix-wave-2": None}, patch={"fix-wave": history.ONLY})
+        self.assertEqual(late["stage"], "fix-wave")
+        self.assertNotIn("oscillating", late["cont"])
+        self.assertEqual([f["summary"] for f in late["cont"]["fix_findings"]], ["lock race on another path"])
+        self.assertEqual(late["cont"]["decisions"], [history.DECISION])
+        _, calls = run(args=dict(ARGS, cont=late["cont"]))
+        self.assertIn("final-scoped", labels(calls))
+        first, _ = run(args=args, replies={"fix-wave": None})
+        self.assertEqual(first["stage"], "fix-wave")
+        self.assertIn("oscillating", first["cont"])
+
+    def test_a_fix_wave_that_starts_elsewhere_does_not_move_the_reviewed_head(self):
+        for start, moved in ((R, True), ("b" * 40, False)):
+            with self.subTest(start_head=start):
+                out = run_out(replies={"final-1": SCOPED_FIRST, "fix-wave-review": SCOPED_NEW},
+                              patch={"fix-wave": {"start_head": start, "commit": H}, "impl-1": {"commit": R}})
+                self.assertEqual(out["result"]["cont"]["reviewed"], {"head": H if moved else R})
+        # The commits between the head the review read and the wave's reported start were never re-reviewed: the next round reads them.
+        stopped, _ = run(replies={"final-1": SCOPED_FIRST, "fix-wave-review": SCOPED_NEW},
+                         patch={"fix-wave": {"start_head": "b" * 40, "commit": H}, "impl-1": {"commit": R}})
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": "f" * 40}})
+        self.assertIn(f"{R}..{'f' * 40}", prompt(calls, "final-scoped"))
+
+    def test_a_later_wave_never_moves_the_reviewed_head_past_a_gap_an_earlier_wave_left(self):
+        # Wave 1 started at b..., not at the reviewed head: R..b... was never re-reviewed. Wave 2 starts at wave 1's commit, which is no reason to move the head.
+        gap = {"fix-wave": {"start_head": "b" * 40, "commit": H}, "fix-wave-2": {"start_head": H, "commit": "a" * 40}, "impl-1": {"commit": R}}
+        narrow = dict(self.NARROW, changed_files=["tools/grader.json"])
+        stopped = run_out(replies={"final-1": SCOPED_FIRST, "fix-wave-review": narrow, "fix-wave-review-2": SCOPED_NEW}, patch=gap)["result"]
+        self.assertEqual(stopped["stage"], "fix-wave-review")
+        self.assertEqual(stopped["cont"]["reviewed"], {"head": R})
+        passed = run_out(replies={"final-1": SCOPED_FIRST, "fix-wave-review": narrow, "fix-wave-review-2": {"verdict": "pass", "findings": []}, "verify": None}, patch=gap)["result"]
+        self.assertEqual(passed["stage"], "verify")
+        self.assertEqual(passed["cont"]["reviewed"], {"head": R})
+        # The pass records no head as reviewed, so a resume at that head reads the gap in a scoped round instead of skipping the review.
+        self.assertNotIn("final_reviewed", passed["cont"])
+        _, calls = run(args=dict(ARGS, cont=passed["cont"]), patch={"setup": {"head": "a" * 40}})
+        self.assertIn(f"{R}..{'a' * 40}", prompt(calls, "final-scoped"))
+        # Without a gap the same two waves move the head and record the pass.
+        clean = dict(gap, **{"fix-wave": {"start_head": R, "commit": H}})
+        ok = run_out(replies={"final-1": SCOPED_FIRST, "fix-wave-review": narrow, "fix-wave-review-2": {"verdict": "pass", "findings": []}, "verify": None}, patch=clean)["result"]
+        self.assertEqual(ok["cont"]["reviewed"], {"head": "a" * 40})
+        self.assertEqual(ok["cont"]["final_reviewed"]["head"], "a" * 40)
+
+    def test_a_round_without_a_known_tip_requires_the_head_its_reviewers_read(self):
+        only = dict(PLAN, branches=[dict(BR)], tasks=[dict(PLAN["tasks"][0], file="/g/task-1.md", branch="cand")])
+        _, calls = run(replies={"plan": only, "verify": None})
+        self.assertIn("head", schema_of(calls, "final-1")["required"])
+        _, calls = run(replies={"verify": None})
+        self.assertNotIn("head", schema_of(calls, "final-1")["required"])
+
+    def test_two_carried_findings_alike_but_for_the_failing_input_are_two_findings(self):
+        cont = dict(scoped_first_stop(), fix_findings=[
+            {"severity": "important", "file": "claim.py", "summary": "race in steal", "failing_input": "input-one"},
+            {"severity": "important", "file": "claim.py", "summary": "race in steal", "failing_input": "input-two"}])
+        again = {"verdict": "findings", "closed": [], "findings": [dict(cont["fix_findings"][0])]}
+        _, calls = scoped_resume(cont, replies={"final-scoped": again, "verify": None})
+        wave = prompt(calls, "fix-wave")
+        self.assertIn('"failing_input":"input-one"', wave)
+        self.assertIn('"failing_input":"input-two"', wave)
+        self.assertIn("The last 1 were left open", wave)
+        both = dict(again, findings=cont["fix_findings"])
+        _, calls = scoped_resume(cont, replies={"final-scoped": both, "verify": None})
+        self.assertIn("input-two", prompt(calls, "fix-wave"))
+        self.assertNotIn("were left open by an earlier run's fix waves", prompt(calls, "fix-wave"))
+
+    def test_an_amended_round_may_report_what_the_amended_plan_requires_and_the_head_lacks(self):
+        cont = FinalReviewedResumeTest.stopped_after_review()["cont"]
+        _, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), patch={"setup": {"head": TIP}})
+        amended = prompt(calls, "final-scoped")
+        self.assertIn("in those commits, among the findings above or in a requirement of the amended plan the head does not meet. Do not edit anything.", amended)
+        _, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": H}})
+        plain = prompt(calls, "final-scoped")
+        self.assertIn("in those commits or among the findings above. Do not edit anything.", plain)
+        self.assertNotIn("requirement of the amended plan", plain)
+
+    def test_a_stored_head_that_is_no_commit_id_reaches_no_git_command_and_skips_no_review(self):
+        legacy = {k: v for k, v in FinalReviewedResumeTest.stopped_after_review()["cont"].items() if k not in ("review_rounds", "reviewed")}
+        for bad in ("HEAD~1", "x" * 40, "d" * 40 + "; rm"):
+            with self.subTest(head=bad):
+                cont = dict(legacy, final_reviewed={"head": bad, "accepted": ["HEAD~2", "$(id)"]})
+                _, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": H, "since_reviewed": "merge_only"}})
+                setup = prompt(calls, "setup")
+                for needle in (bad, "HEAD~2", "$(id)", "since_reviewed"):
+                    self.assertNotIn(needle, setup)
+                self.assertIn("final-1", labels(calls))
+                self.assertNotIn("final-scoped", labels(calls))
+        good = dict(legacy, final_reviewed={"head": TIP, "accepted": ["a" * 40, "HEAD~2"]})
+        _, calls = run(args=dict(ARGS, cont=good), patch={"setup": {"head": H, "since_reviewed": "merge_only"}})
+        self.assertIn(f"passed at {TIP}", prompt(calls, "setup"))
+        self.assertIn(f"is one of {'a' * 40} or", prompt(calls, "setup"))
+        self.assertNotIn("HEAD~2", prompt(calls, "setup"))
+
+    def test_an_oscillation_decision_binds_the_scoped_reviewer_of_a_capped_cont(self):
+        history = FixWaveHistoryTest()
+        cont = dict(history.stopped()["cont"], review_rounds=3, round_cap={"rounds": 3, "findings": ["pattern too wide again"]})
+        _, calls = run(args=dict(ARGS, cont=cont, decisions=history.DECISION), patch={"setup": {"head": H}, "fix-wave": history.ONLY})
+        scoped = prompt(calls, "final-scoped")
+        self.assertIn(f"{json.dumps(history.DECISION)}", scoped)
+        self.assertIn("the decision is binding", scoped)
+        self.assertIn("Report no finding that only disputes it.", scoped)
+        self.assertEqual(prompt(calls, "fix-wave").count(json.dumps(history.DECISION)), 1)
+
+
+def program_const(name):
+    found = re.search(rf"^const {name} = '([^'\\]*)'$", PROGRAM.read_text(encoding="utf-8"), re.M)
+    if found is None:
+        raise AssertionError(f"no const {name} in the program")
+    return found.group(1)
+
+
+def items(calls, label):
+    return json.loads(prompt(calls, label).split("Follow-ups: ", 1)[1].split("\n", 1)[0])
+
+
+def filings(calls):
+    return [name for name in labels(calls) if re.fullmatch(r"follow-ups-\d+", name)]
+
+
+class ScopedRoundFollowUpTest(unittest.TestCase):
+    """#1386: after the first full review only a critical finding, or one naming an unmet criterion, blocks; the rest are filed as follow-up issues."""
+
+    HARDENING = {"severity": "important", "file": "src/guard.py", "summary": "guard could also check the length", "relation": "new", "commit": H}
+    DOC = {"severity": "important", "file": "src/doc.py", "summary": "doc example is stale", "relation": "new", "commit": H}
+    SECURITY = {"severity": "critical", "file": "src/auth.py", "summary": "token written to the log", "relation": "new", "commit": H}
+    RENEW = {"severity": "important", "file": "claim.py", "summary": "race in renew", "relation": "new", "commit": "9" * 40}
+    FILED = [{"issue": 911, "file": "src/guard.py", "summary": "guard could also check the length", "commit": H}]
+
+    @staticmethod
+    def unmet(severity):
+        return {"severity": severity, "file": "src/flow.py", "summary": "AC1 has no test", "ac": "AC1", "relation": "new", "commit": H}
+
+    @staticmethod
+    def scoped(*findings, **more):
+        return dict({"verdict": "findings", "findings": list(findings), "closed": [1]}, **more)
+
+    def test_a_non_critical_scoped_finding_is_filed_and_the_delivery_lands(self):
+        cont = scoped_first_stop()
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"final-scoped": self.scoped(self.HARDENING, head=H)})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("merge", labels(calls))
+        self.assertEqual(waves(calls), [])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual(result["follow_ups"], self.FILED)
+        entries = items(calls, "follow-ups-1")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["n"], 1)
+        for needle in ("#9", "src/guard.py", H, "guard could also check the length"):
+            self.assertIn(needle, entries[0]["body"])
+        self.assertLess(labels(calls).index("follow-ups-1"), labels(calls).index("verify"))
+        self.assertEqual(schema_of(calls, "follow-ups-1")["required"], ["filed"])
+        cmd = re.search(r"forge-issue create --repo owner/repo [^\n]*?--body-file", prompt(calls, "follow-ups-1"))
+        self.assertIsNotNone(cmd)
+        self.assertNotIn("--blocked-by", cmd.group(0))
+        self.assertNotIn("--blocks", cmd.group(0))
+
+    def test_a_critical_security_finding_in_a_scoped_round_never_reaches_the_merge(self):
+        cont = scoped_first_stop()
+        result, calls = scoped_resume(cont, replies={"final-scoped": self.scoped(self.SECURITY, self.HARDENING),
+                                                     "fix-wave-review": {"verdict": "findings", "findings": [self.SECURITY]}})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertNotIn("pr", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+        self.assertIn("token written to the log", prompt(calls, "fix-wave"))
+        self.assertNotIn("guard could also check the length", prompt(calls, "fix-wave"))
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["token written to the log"])
+        self.assertEqual(result["cont"]["follow_ups"], self.FILED)
+
+    def test_a_finding_naming_an_unmet_criterion_blocks_in_every_round(self):
+        ac_item = {"type": "string"}
+        for sev in ("important", "minor"):
+            with self.subTest(round="scoped", severity=sev):
+                _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.unmet(sev)), "verify": None})
+                self.assertEqual(schema_of(calls, "final-scoped")["properties"]["findings"]["items"]["properties"]["ac"], ac_item)
+                self.assertIn("AC1 has no test", prompt(calls, "fix-wave"))
+                self.assertEqual(filings(calls), [])
+            with self.subTest(round="re-review", severity=sev):
+                result, calls = scoped_resume(scoped_first_stop(), replies={
+                    "final-scoped": self.scoped(self.SECURITY), "fix-wave-review": {"verdict": "findings", "findings": [self.unmet(sev)]}})
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertIn("AC1 has no test", [f["summary"] for f in result["cont"]["fix_findings"]])
+                self.assertEqual(filings(calls), [])
+            with self.subTest(round="full", severity=sev):
+                _, calls = run(replies={"final-1": {"verdict": "findings", "findings": [self.unmet(sev)]}, "verify": None})
+                self.assertEqual(schema_of(calls, "final-1")["properties"]["findings"]["items"]["properties"]["ac"], ac_item)
+                self.assertIn("AC1 has no test", prompt(calls, "fix-wave"))
+                self.assertEqual(filings(calls), [])
+
+    def test_a_scoped_fix_wave_review_files_its_non_critical_findings(self):
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": self.scoped(self.SECURITY), "fix-wave-review": {"verdict": "findings", "findings": [self.RENEW]}, "verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual(waves(calls), ["fix-wave", "fix-wave-review"])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual(result["cont"]["follow_ups"], [{"issue": 911, "file": "claim.py", "summary": "race in renew", "commit": "9" * 40}])
+        self.assertNotIn("fix_findings", result["cont"])
+        review = schema_of(calls, "fix-wave-review")
+        self.assertIn("changed_files", review["properties"])
+        self.assertEqual(review["properties"]["findings"]["items"]["required"], ["severity", "summary", "file", "commit"])
+
+    def test_a_reworded_re_report_of_a_first_review_finding_still_blocks(self):
+        """A still-open finding of the first full review, re-reported by the re-review with another summary, is the same defect: it blocks, never filed."""
+        reworded = {"severity": "important", "file": "claim.py", "summary": "race in steal is still open after the fix", "relation": "narrowing", "commit": "e" * 40}
+        again = {"verdict": "findings", "findings": [reworded]}
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "closed": [], "findings": []},
+            "fix-wave-review": again, "fix-wave-review-2": again, "fix-wave-review-3": again, "verify": None})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual(filings(calls), [])
+        self.assertNotIn("verify", labels(calls))
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["race in steal is still open after the fix"])
+        self.assertNotIn("follow_ups", result["cont"])
+        elsewhere = dict(reworded, file="other.py")
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "closed": [], "findings": []},
+            "fix-wave-review": {"verdict": "findings", "findings": [elsewhere]}, "verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+
+    def test_an_unconfirmed_filing_stops_before_verify_and_the_resume_files_it_once(self):
+        both = ["guard could also check the length", "doc example is stale"]
+        for name, reply, left in (("partial", {"filed": [{"n": 1, "issue": 901}]}, ["doc example is stale"]), ("lost", None, both), ("thrown", "throw", both)):
+            with self.subTest(name):
+                stopped, calls = run(args=dict(ARGS, cont=scoped_first_stop()), replies={
+                    "final-scoped": self.scoped(self.HARDENING, self.DOC, head=H), "follow-ups-1": reply, "follow-ups-2": {"filed": []}})
+                self.assertEqual(stopped["stage"], "final-review")
+                self.assertNotIn("verify", labels(calls))
+                self.assertNotIn("merge", labels(calls))
+                self.assertEqual(waves(calls), [])
+                self.assertEqual(filings(calls), ["follow-ups-1", "follow-ups-2"])
+                self.assertEqual([f["summary"] for f in stopped["cont"]["follow_ups_pending"]], left)
+                self.assertTrue(all(f["commit"] == H for f in stopped["cont"]["follow_ups_pending"]))
+                if name == "partial":
+                    self.assertEqual(stopped["cont"]["follow_ups"], [dict(self.FILED[0], issue=901)])
+                else:
+                    self.assertNotIn("follow_ups", stopped["cont"])
+                if name == "thrown":
+                    self.assertIn("follow-ups-1", stopped["dead_agents"])
+                done, calls = run(args=dict(ARGS, cont=stopped["cont"]))
+                self.assertEqual(done["stage"], "done")
+                self.assertEqual(filings(calls), ["follow-ups-1"])
+                entries = items(calls, "follow-ups-1")
+                self.assertEqual(len(entries), len(left))
+                for entry, summary in zip(entries, left):
+                    self.assertIn(summary, entry["body"])
+                self.assertLess(labels(calls).index("follow-ups-1"), labels(calls).index("verify"))
+                self.assertLess(labels(calls).index("follow-ups-1"), labels(calls).index("merge"))
+                self.assertEqual(sorted(f["summary"] for f in done["follow_ups"]), sorted(both))
+                self.assertNotIn("follow_ups_pending", done)
+
+    def test_findings_alike_in_title_are_two_issues_and_a_shared_number_confirms_neither(self):
+        a = dict(self.HARDENING, file="src/a.py", summary="missing test for the error path")
+        b = dict(a, file="src/b.py")
+        result, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(a, b), "verify": None})
+        first, second = items(calls, "follow-ups-1")
+        self.assertNotEqual(first["title"], second["title"])
+        self.assertNotEqual(first["body"], second["body"])
+        self.assertIn("src/a.py", first["title"])
+        self.assertIn("src/b.py", second["title"])
+        self.assertEqual([(f["issue"], f["file"]) for f in result["cont"]["follow_ups"]], [(911, "src/a.py"), (912, "src/b.py")])
+        shared = {"filed": [{"n": 1, "issue": 901}, {"n": 2, "issue": 901}]}
+        stopped, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(a, b), "follow-ups-1": shared, "follow-ups-2": shared})
+        self.assertEqual(stopped["stage"], "final-review")
+        self.assertNotIn("follow_ups", stopped["cont"])
+        self.assertEqual([f["file"] for f in stopped["cont"]["follow_ups_pending"]], ["src/a.py", "src/b.py"])
+        _, again = scoped_resume(stopped["cont"], replies={"verify": None})
+        self.assertEqual([i["body"] for i in items(again, "follow-ups-1")], [i["body"] for i in items(calls, "follow-ups-1")])
+        self.assertIn("gh issue list --repo owner/repo --state all", prompt(again, "follow-ups-1"))
+
+    def test_a_minor_scoped_finding_is_filed(self):
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": self.scoped(dict(self.HARDENING, severity="minor")), "verify": None})
+        self.assertEqual(waves(calls), [])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertIn("minor", items(calls, "follow-ups-1")[0]["body"])
+        self.assertEqual(result["cont"]["follow_ups"], self.FILED)
+
+    def test_a_follow_up_names_the_commit_its_reviewer_read_it_at(self):
+        branch = ScopedReviewRoundTest()
+        found = dict(self.HARDENING, file="/r/.wt/cand/src/c.py", commit="c" * 40)
+        result, calls = branch.branch_resume(branch.branch_stop(), **{"final-scoped": self.scoped(found, closed=[])})
+        self.assertEqual([f["commit"] for f in result["cont"]["follow_ups"]], ["c" * 40])
+        self.assertIn("c" * 40, items(calls, "follow-ups-1")[0]["body"])
+        bare = {k: v for k, v in self.HARDENING.items() if k != "commit"}
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(bare), "verify": None})
+        self.assertIn("guard could also check the length", prompt(calls, "fix-wave"))
+        self.assertEqual(filings(calls), [])
+
+    def test_closures_are_reconciled_before_the_triage(self):
+        cont = ReviewRoundCapTest().second()["result"]["cont"]
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": "f" * 40}},
+                            replies={"final-scoped": self.scoped(dict(self.RENEW, commit="f" * 40)), "verify": None})
+        self.assertNotIn("round_cap", result)
+        self.assertEqual(waves(calls), [])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual(result["stage"], "verify")
+        two = [dict(SCOPED_NEW["findings"][0], commit=H, failing_input=x) for x in ("input-one", "input-two")]
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(*two, closed=[]), "verify": None})
+        self.assertIn("input-one", prompt(calls, "fix-wave"))
+        self.assertNotIn("input-two", prompt(calls, "fix-wave"))
+        self.assertIn("input-two", items(calls, "follow-ups-1")[0]["body"])
+
+    def test_every_final_reviewer_is_told_what_critical_means(self):
+        critical, blocks = program_const("CRITICAL_MEANS"), program_const("SCOPED_BLOCKS")
+        _, calls = run(replies={"final-1": SCOPED_FIRST, "verify": None})
+        for label in ("final-1", "final-codex", "fix-wave-review"):
+            self.assertIn(critical, prompt(calls, label))
+        for label in ("final-1", "fix-wave-review"):
+            self.assertNotIn(blocks, prompt(calls, label))
+        _, calls = run(args=SIZED, replies=dict(sized(1501), verify=None))
+        self.assertIn(critical, prompt(calls, "final-integration"))
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.SECURITY), "verify": None})
+        for label in ("final-scoped", "fix-wave-review"):
+            self.assertIn(critical, prompt(calls, label))
+            self.assertIn(blocks, prompt(calls, label))
+
+    def test_a_quoted_summary_reaches_the_title_without_shell_quotes(self):
+        said = "don't log \"token\" via $HOME or `env` \\ here"
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(dict(self.HARDENING, summary=said)), "verify": None})
+        entry = items(calls, "follow-ups-1")[0]
+        for char in "'\"`$\\":
+            self.assertNotIn(char, entry["title"])
+        self.assertIn("src/guard.py", entry["title"])
+        self.assertIn(said, entry["body"])
+
+    def test_filed_follow_ups_outlive_a_stop_and_are_not_filed_twice(self):
+        stopped, _ = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.SECURITY, self.HARDENING),
+                                                                 "fix-wave-review": {"verdict": "findings", "findings": [self.SECURITY]}})
+        self.assertEqual(stopped["cont"]["follow_ups"], self.FILED)
+        result, calls = scoped_resume(stopped["cont"], replies={"final-scoped": self.scoped(self.HARDENING), "verify": None})
+        self.assertEqual(filings(calls), [])
+        self.assertEqual(waves(calls), [])
+        self.assertEqual(result["cont"]["follow_ups"], self.FILED)
+
+    def test_a_reworded_re_report_of_a_first_review_finding_blocks_whatever_its_relation(self):
+        """The re-review may call a still-open finding new; the report in its file stands for it, never filed."""
+        reworded = {"severity": "important", "file": "claim.py", "summary": "race in steal is still open on the retry path", "relation": "new", "commit": H}
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "findings": [], "closed": []},
+            "fix-wave-review": {"verdict": "findings", "findings": [reworded]}, "verify": None})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual(filings(calls), [])
+        self.assertNotIn("verify", labels(calls))
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], [reworded["summary"]])
+        self.assertNotIn("follow_ups", result["cont"])
+
+    def test_one_wave_finding_absorbs_one_report_and_the_others_are_filed(self):
+        repeat = {"severity": "important", "file": "claim.py", "summary": "race in steal", "relation": "new", "commit": H}
+        other = {"severity": "important", "file": "claim.py", "summary": "race in renew", "relation": "narrowing", "commit": H}
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "findings": [], "closed": []},
+            "fix-wave-review": {"verdict": "findings", "findings": [repeat, other]}, "verify": None})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["race in steal"])
+        self.assertEqual(filings(calls), ["follow-ups-1"])
+        self.assertEqual([f["summary"] for f in result["cont"]["follow_ups"]], ["race in renew"])
+
+    def test_a_minor_repeat_of_a_critical_or_unmet_criterion_finding_still_blocks(self):
+        for name, wave, repeat in (("critical", self.SECURITY, dict(self.SECURITY, severity="minor")),
+                                   ("unmet criterion", self.unmet("important"), dict(self.unmet("important"), severity="minor", ac=None))):
+            with self.subTest(name):
+                repeat = {k: v for k, v in repeat.items() if v is not None}
+                result, calls = scoped_resume(scoped_first_stop(), replies={
+                    "final-scoped": self.scoped(wave), "fix-wave-review": {"verdict": "findings", "findings": [repeat]}, "verify": None})
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertNotIn("verify", labels(calls))
+                self.assertEqual(filings(calls), [])
+                kept = [f for f in result["cont"]["fix_findings"] if f["summary"] == wave["summary"]]
+                self.assertEqual([(f["severity"], f.get("ac")) for f in kept], [(wave["severity"], wave.get("ac"))])
+
+    def test_a_minor_repeat_of_an_ordinary_finding_is_still_dropped(self):
+        repeat = {"severity": "minor", "file": "claim.py", "summary": "race in steal", "relation": "new", "commit": H}
+        result, calls = scoped_resume(scoped_first_stop(), replies={
+            "final-scoped": {"verdict": "findings", "findings": [], "closed": []},
+            "fix-wave-review": {"verdict": "findings", "findings": [repeat]}, "verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual(filings(calls), [])
+
+    def test_an_unrelated_minor_report_in_a_critical_findings_file_is_filed_not_upgraded(self):
+        """A fix wave resolves a critical finding; the re-review adds a minor note of its own in the same file: it is filed, never carried as the critical one."""
+        for name, wave in (("critical", self.SECURITY), ("unmet criterion", self.unmet("important"))):
+            with self.subTest(name):
+                note = {"severity": "minor", "file": wave["file"], "summary": "a docstring typo in an unrelated helper", "relation": "new", "commit": H}
+                result, calls = scoped_resume(scoped_first_stop(), replies={
+                    "final-scoped": self.scoped(wave), "fix-wave-review": {"verdict": "findings", "findings": [note]}, "verify": None})
+                self.assertEqual(result["stage"], "verify")
+                self.assertEqual(filings(calls), ["follow-ups-1"])
+                self.assertEqual([e["title"].endswith(note["summary"]) for e in items(calls, "follow-ups-1")], [True])
+
+    def test_the_independent_codex_review_reports_an_unmet_criterion_at_any_severity(self):
+        item = schema_of(run(args=SIZED, replies=dict(sized(1501), verify=None))[1], "final-codex")["properties"]["findings"]["items"]
+        self.assertEqual(item["properties"]["ac"], {"type": "string"})
+        codex = {"available": True, "verdict": "findings", "findings": [self.unmet("minor")], "raw_summary": ""}
+        _, calls = run(args=SIZED, replies=dict(sized(1501), **{"final-codex": codex, "verify": None}))
+        self.assertIn("AC1 has no test", prompt(calls, "fix-wave"))
+        style = {"severity": "minor", "file": "src/flow.py", "summary": "style", "relation": "new"}
+        _, calls = run(args=SIZED, replies=dict(sized(1501), **{"final-codex": dict(codex, findings=[style]), "verify": None}))
+        self.assertEqual(waves(calls), [])
+
+    def test_the_filing_clerk_is_told_only_to_use_tools_it_has(self):
+        clerk = (REPO_ROOT / "home/common/claude-code/agents/clerk.md").read_text(encoding="utf-8")
+        tools = {t.strip() for t in re.search(r"^tools:\s*(.+)$", clerk, re.M).group(1).split(",")}
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.HARDENING), "verify": None})
+        text = prompt(calls, "follow-ups-1")
+        named = set(re.findall(r"\b([A-Z][A-Za-z]+) tool\b", text))
+        self.assertLessEqual(named, tools)
+
+    def test_the_recovery_lookup_is_complete_before_an_issue_is_created_again(self):
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(self.HARDENING), "verify": None})
+        text = prompt(calls, "follow-ups-1")
+        lookups = re.findall(r"gh issue list [^\n]*?--limit (\d+)", text)
+        self.assertEqual(lookups, ["1000", "1000"])
+        self.assertLess(text.index("--limit 1000"), text.index("forge-issue create"))
+
+    def test_two_findings_that_differ_only_past_the_clip_are_two_follow_ups(self):
+        head = "x" * 300
+        a = dict(self.HARDENING, failing_input=head + "-first")
+        b = dict(self.HARDENING, failing_input=head + "-second")
+        result, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(a, b), "verify": None})
+        entries = items(calls, "follow-ups-1")
+        self.assertEqual(len(entries), 2)
+        self.assertNotEqual(entries[0]["body"], entries[1]["body"])
+        self.assertEqual(len(result["cont"]["follow_ups"]), 2)
+        self.assertEqual(len({f["key"] for f in result["cont"]["follow_ups"]}), 2)
+        _, calls = scoped_resume(result["cont"], replies={"final-scoped": self.scoped(a, closed=[]), "verify": None})
+        self.assertEqual(filings(calls), [])
+        again = dict(self.HARDENING, failing_input=head + "-first")
+        _, calls = scoped_resume(scoped_first_stop(), replies={"final-scoped": self.scoped(a, again), "verify": None})
+        self.assertEqual(len(items(calls, "follow-ups-1")), 1)
 
 
 class FixDiffFindingTest(unittest.TestCase):
@@ -6433,7 +7439,8 @@ class FixWaveHistoryTest(unittest.TestCase):
                       "lines back.", wave)
         self.assertIn("pattern too wide again", wave)
         self.assertIn(f"{decided} Report no finding that only disputes it. tools/grader.json was judged more than once in the same place "
-                      f"before this fix; its history, oldest first: {history}. Report any still unresolved", prompt(calls, "fix-wave-review"))
+                      f"before this fix; its history, oldest first: {history}. {program_const('CRITICAL_MEANS')} {program_const('SCOPED_BLOCKS')} ", prompt(calls, "fix-wave-review"))
+        self.assertIn(" Report any still unresolved", prompt(calls, "fix-wave-review"))
 
     AMENDED = " The owner amended the plan for tools/grader.json (plan.md, Amendments): it is binding."
 
@@ -6660,7 +7667,7 @@ class ModeTest(unittest.TestCase):
                 if patch.get("dirty"):
                     self.assertEqual(result["stage"], "dirty")
                     continue
-                for label in ("final-1", "verify"):
+                for label in ("final-scoped", "verify"):
                     self.assertIn(label, labels(calls))
 
     def test_cached_verification_is_reused_only_for_the_same_contract(self):
@@ -6747,7 +7754,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
             with self.subTest(patch=patch):
                 result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": patch})
                 self.assertEqual(result["stage"], "done")
-                self.assertIn("final-1", labels(calls))
+                self.assertIn("final-scoped", labels(calls))
         stopped, _ = run(args=dict(ARGS, cont=cont), replies={"verify": None}, patch={"setup": {"head": "e" * 40}})
         self.assertEqual(stopped["cont"]["final_reviewed"], {"head": "e" * 40})
 
@@ -6756,7 +7763,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertLess(names.index("impl-1"), names.index("final-1"))
+        self.assertLess(names.index("impl-1"), names.index("final-scoped"))
 
     def test_ready_cont_on_a_merge_only_head_skips_review_but_verifies_again(self):
         ready, _ = run(args=dict(ARGS, mode="ready"))
@@ -6790,8 +7797,8 @@ class FinalReviewedResumeTest(unittest.TestCase):
                                     patch={"setup": {"head": MERGE, "since_reviewed": "merge_only"}})
                 self.assertEqual(result["stage"], "done")
                 names = labels(calls)
-                self.assertIn("final-1", names)
-                self.assertLess(names.index("final-1"), names.index("merge"))
+                self.assertIn("final-scoped", names)
+                self.assertLess(names.index("final-scoped"), names.index("merge"))
                 self.assertNotIn("since_reviewed", prompt(calls, "setup"))
 
     def test_an_accepted_conflicted_merge_keeps_the_skip(self):
@@ -6815,7 +7822,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
         self.assertIn("merge-tree --write-tree <merge>^1 <merge>^2", setup)
         self.assertIn("rev-parse <merge>^{tree}", setup)
         self.assertNotIn("prints nothing); else", setup)
-        self.assertIn("final-1", labels(calls))
+        self.assertIn("final-scoped", labels(calls))
 
     def test_the_merge_tree_check_flags_a_one_sided_resolution_that_show_cc_misses(self):
         """The setup's clean-merge test, run on real git: a conflict resolved by taking one side whole."""
@@ -6858,7 +7865,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
 
     def test_a_review_that_must_run_again_drops_the_stale_marker(self):
         cont = self.stopped_after_review()["cont"]
-        stopped, _ = run(args=dict(ARGS, cont=cont), replies={"final-1": None}, patch={"setup": {"head": "e" * 40}})
+        stopped, _ = run(args=dict(ARGS, cont=cont), replies={"final-scoped": None}, patch={"setup": {"head": "e" * 40}})
         self.assertEqual(stopped["stage"], "final-review")
         self.assertNotIn("final_reviewed", stopped["cont"])
 
@@ -6866,7 +7873,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
         cont = dict(self.stopped_after_review()["cont"], partial=1)
         result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "dirty": True}})
         self.assertEqual(result["stage"], "done")
-        self.assertIn("final-1", labels(calls))
+        self.assertIn("final-scoped", labels(calls))
 
     def test_the_direct_lane_never_keeps_a_marker(self):
         direct = dict(ARGS, lane="direct")
@@ -6879,7 +7886,8 @@ class FinalReviewedResumeTest(unittest.TestCase):
 
     def test_cont_without_the_marker_still_resumes(self):
         cont = self.stopped_after_review()["cont"]
-        del cont["final_reviewed"]
+        for member in ("final_reviewed", "review_rounds", "reviewed"):
+            del cont[member]
         result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
         self.assertEqual(result["stage"], "done")
         self.assertIn("final-1", labels(calls))
@@ -7617,7 +8625,7 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertIn("--git-common-dir", prompt(calls, "setup"))
         moved, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40)}})
         self.assertEqual(moved["stage"], "done")
-        self.assertIn("final-1", labels(calls))
+        self.assertIn("final-scoped", labels(calls))
         again, _ = run(args=dict(ARGS, cont=cont), replies={"verify": None},
                        patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40)}})
         self.assertEqual(again["cont"]["final_reviewed"], {"head": TIP, "branches": {"cand": "e" * 40}})
@@ -7641,7 +8649,7 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertNotIn("final-1", labels(calls))
         self.assertNotIn("verify", labels(calls))
         _, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA, "branch_heads": self.facts("e" * 40)}})
-        self.assertIn("final-1", labels(calls))
+        self.assertIn("final-scoped", labels(calls))
         self.assertIn("verify", labels(calls))
 
     def test_claim_lost_resume_rereads_the_declared_heads(self):
@@ -7669,7 +8677,7 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "branches": {"constructor": "d" * 40}})
         again, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"verify": None},
                            patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40, name="constructor")}})
-        self.assertIn("final-1", labels(calls))
+        self.assertIn("final-scoped", labels(calls))
         self.assertEqual(again["cont"]["final_reviewed"], {"head": TIP, "branches": {"constructor": "e" * 40}})
 
 
@@ -7697,10 +8705,12 @@ LOOK_CONT = {
     "lane": "standard",
     "plan": {"status": "planned", "plan_root": "/r/.git/worktrees/w/deliver-standard/plan.md",
              "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
-             "tasks": [{"n": 1, "title": "one", "file": "task-1.md", "risk": "standard"}]},
+             "tasks": [{"n": 1, "title": "one", "file": "task-1.md", "risk": "security"}]},
     "plan_reviewed": True,
     "done": [{"n": 1, "commit": "c0ffee", "review_rounds": 0, "reviewer": "reviewer"}],
     "fix_waves": 0,
+    "review_rounds": 1,
+    "reviewed": {"head": "c0ffee"},
     "verified": {"head": SHA, "results": [{"id": "build", "status": "pass", "summary": "ok"}],
                  "contract": '[{"argv":["make","build"],"cwd":".","id":"build"}]'},
     "look": {"pr": 42, "head": SHA},
@@ -7709,13 +8719,14 @@ LOOK_CONT = {
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
-    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
+    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend", "follow-ups-",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
-             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify")),
+             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify",
+             "look-checks-", "look-reverify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-", "look-fix", "fix-retest")),
-    (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "fix-wave-review",
+    (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "final-scoped", "fix-wave-review",
            "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-", "look-fix-review")),
     # #923: a review with no diff range (a no-commit task, a fix answered with no commit) runs on reviewer.
     (EITHER, ("review-", "direct-review", "rereview-")),
@@ -7761,6 +8772,9 @@ SCENARIOS = (
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
     # #1139: a marked issue stops at awaiting look; a head behind its base is synced and pushed first.
     {"patch": {"setup": {"look": MARKED}, "look-pr": {"behind": True}, "sync-1": {"merge_commit": D, "head": D}}},
+    # #1373: a red check before the look stop gets the one fix and a push, the stop waits for green and re-verifies the fixed head.
+    {"replies": {"look-checks-1": {"state": "failed", "head": SHA, "behind": False, "required": ["ci"], "failing": ["ci"], "details": "x"}},
+     "patch": {"setup": {"look": MARKED}, "fix-ci": {"start_head": SHA, "commit": F}}},
     # #1139: the owner's approve and changes answers resume an awaiting-look cont.
     {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": SHA}), "patch": RESUME},
     {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "changes", "words": "make the label bold"}),
@@ -7784,6 +8798,11 @@ SCENARIOS = (
     {"args": dict(ARGS, cont=dict(LOOK_CONT, untested={"stage": "look-fix", "start_head": SHA, "head": F})),
      "patch": dict(RESUME, setup={"look": MARKED, "head": F}, verify={"head": F})},
     WS_SCENARIO,
+    # #1370: a resume of a cont that holds the commit the last review read runs a scoped round.
+    {"args": dict(ARGS, cont=dict({k: v for k, v in AMEND_CONT.items() if k != "partial"}, plan=PLAN, done=[{"n": 1, "commit": "c1"}],
+                                  review_rounds=1, reviewed={"head": "abcd"})),
+     "replies": {"final-scoped": {"verdict": "findings", "closed": [], "findings": [
+         {"severity": "important", "file": "a.py", "summary": "could cache", "relation": "new", "commit": "a" * 40}]}}},
 )
 
 
@@ -8922,8 +9941,8 @@ class AmendTest(unittest.TestCase):
         self.assertEqual(ready["stage"], "ready")
         stopped, _ = run(replies={"verify": None}, patch={"impl-1": {"commit": TIP}})
         self.assertEqual(stopped["stage"], "verify")
-        for name, cont, head, skipped in (("verified", ready["cont"], SHA, ("final-1", "verify")),
-                                          ("final reviewed", stopped["cont"], TIP, ("final-1",))):
+        for name, cont, head, skipped in (("verified", ready["cont"], SHA, ("final-1", "final-scoped", "verify")),
+                                          ("final reviewed", stopped["cont"], TIP, ("final-1", "final-scoped"))):
             plain, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": head}})
             with self.subTest(name, amend=False):
                 self.assertEqual(plain["stage"], "done")
@@ -8932,9 +9951,10 @@ class AmendTest(unittest.TestCase):
             result, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), patch={"setup": {"head": head}})
             with self.subTest(name, amend=True):
                 self.assertEqual(result["stage"], "done")
-                self.assertLess(labels(calls).index("amend"), labels(calls).index("final-1"))
-                self.assertIn("verify", labels(calls))
-                self.assertIn("final-1", labels(calls))
+                # #1370: the amended plan is graded by the scoped round, never skipped and never run in full again.
+                self.assertLess(labels(calls).index("amend"), labels(calls).index("final-scoped"))
+                self.assertLess(labels(calls).index("final-scoped"), labels(calls).index("verify"))
+                self.assertNotIn("final-1", labels(calls))
 
     def test_an_edit_already_recorded_still_invalidates_the_cached_review(self):
         # A relaunch after a run that died between the clerk and any stop finds every edit recorded already, and its only
@@ -8946,7 +9966,7 @@ class AmendTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=ready["cont"], amend=[AMEND_EDIT]),
                             replies={"amend": done}, patch={"setup": {"head": SHA}})
         self.assertEqual(result["stage"], "done")
-        self.assertIn("final-1", labels(calls))
+        self.assertIn("final-scoped", labels(calls))
         self.assertIn("verify", labels(calls))
 
     def test_an_amend_that_stops_after_the_clerk_ran_drops_the_cached_review_and_verify(self):
@@ -8967,7 +9987,7 @@ class AmendTest(unittest.TestCase):
                     result, calls = run(args=dict(ARGS, cont=first["cont"], amend=[AMEND_EDIT]),
                                         replies={"amend": recorded}, patch={"setup": {"head": head}})
                     self.assertEqual(result["stage"], "done")
-                    self.assertIn("final-1", labels(calls))
+                    self.assertIn("final-scoped", labels(calls))
                     self.assertIn("verify", labels(calls))
 
     def test_a_confirmed_refusal_returns_the_cont_unchanged(self):
@@ -9289,17 +10309,17 @@ class StructuredReplyTest(unittest.TestCase):
 
     def test_every_review_reply_is_read_through_the_one_wrapper(self):
         source = PROGRAM.read_text(encoding="utf-8")
-        schemas = (r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(FINDINGS\)|SYNC_REVIEW_SCHEMA\(followup\)|FINDINGS|PLAN_REVIEW"
-                   r"|GRADED_FINDINGS|DIRECT_FINDINGS) \}")
+        schemas = (r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(SCOPED \? withItems\(FINDINGS, SCOPED_ITEM\) : FINAL_FINDINGS\)|SYNC_REVIEW_SCHEMA\(followup\)|FINDINGS|PLAN_REVIEW"
+                   r"|GRADED_FINDINGS|DIRECT_FINDINGS|FINAL_SCHEMA|SCOPED_FINDINGS) \}")
         sites = [m.end() for m in re.finditer(schemas, source)]
-        self.assertEqual(len(sites), 16)
+        self.assertEqual(len(sites), 17)
         # The options object of a review call closes the readReview() call, or one of its three named options does.
         tails = [source[end:source.index(")", end) + 1] for end in sites]
         self.assertEqual(sorted(set(tails)), sorted([")", ", { fileless })", ", { ruled: true })", ", { optional: true })"]))
         self.assertEqual((tails.count(", { fileless })"), tails.count(", { ruled: true })"), tails.count(", { optional: true })")), (4, 2, 1))
-        self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 16)
+        self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 17)
         # No schema that carries findings is built anywhere else: each is one of the named ones above, FINDINGS spread into it.
-        self.assertEqual(len(re.findall(r"\.\.\.(?:GRADED_)?FINDINGS,", source)), 5)
+        self.assertEqual(len(re.findall(r"\.\.\.(?:GRADED_)?FINDINGS,", source)), 6)
         self.assertEqual(source.count(", { fileless })"), 4)
         self.assertEqual(source.count("const fileless = !diffReviewed\n"), 1)
         self.assertEqual(source.count("{ ruled: true }"), 2)
@@ -10360,8 +11380,9 @@ class LookStopTest(unittest.TestCase):
                          (9, 42, SHA, AWAIT_REASON, ["the settings page"]))
         self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
         self.assertEqual(result["cont"]["verified"]["head"], SHA)
-        self.assertEqual(got[-1], "look-pr")
+        self.assertEqual(got[-1], "look-checks-1")
         self.assertLess(got.index("verify"), got.index("look-pr"))
+        self.assertLess(got.index("look-pr"), got.index("look-checks-1"))
         for label in ("pr", "merge", "hold", "close-out", "land-unlock"):
             self.assertNotIn(label, got)
         self.assertEqual([l for l in got if l.startswith(("land-", "checks-"))], [])
@@ -10382,7 +11403,7 @@ class LookStopTest(unittest.TestCase):
     def test_a_marked_branch_behind_its_base_is_synced_and_pushed_before_the_stop(self):
         result, calls = run(patch={"setup": {"look": MARKED}, "look-pr": {"behind": True}, "sync-1": {"merge_commit": D, "head": D}})
         got = labels(calls)
-        self.assertEqual(got[got.index("look-pr") + 1:], ["sync-1", "look-push"])
+        self.assertEqual(got[got.index("look-pr") + 1:], ["sync-1", "look-push", "look-checks-1", "look-reverify", "look-checks-2"])
         self.assertIn("at the head " + D, prompt(calls, "look-push"))
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], D)
@@ -10434,6 +11455,221 @@ class LookStopTest(unittest.TestCase):
         direct, direct_calls = run(args=DIRECT)
         self.assertEqual(direct["stage"], "done")
         self.assertEqual([l for l in labels(direct_calls) if l.startswith("look-")], [])
+
+
+class LookChecksTest(unittest.TestCase):
+    """#1373: a marked delivery stops at awaiting look only once the checks of the head the owner will see are green."""
+
+    PENDING = {"state": "pending", "head": SHA, "behind": False, "pending": ["ci"]}
+    GREEN = {"state": "passed", "head": SHA, "behind": False, "required": ["ci"], "passed": ["ci"]}
+    RED = {"state": "failed", "head": SHA, "behind": False, "required": ["ci"], "failing": ["ci"],
+           "details": "FAIL test_cache: host-installed state"}
+    FIXED = {"fix-ci": {"start_head": SHA, "commit": F}}
+    MARK = {"setup": {"look": MARKED}}
+
+    def go(self, replies=None, patch=None, **kw):
+        return run(replies=replies, patch=dict(self.MARK, **(patch or {})), **kw)
+
+    @staticmethod
+    def after_pr(calls):
+        got = labels(calls)
+        return got[got.index("look-pr") + 1:]
+
+    def test_a_marked_delivery_stops_only_after_its_pending_checks_turn_green(self):
+        result, calls = self.go(replies={"look-checks-1": self.PENDING, "look-checks-2": self.GREEN})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], SHA)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "look-checks-2"])
+        self.assertEqual([l for l in got if l.startswith(("land-", "checks-"))], [])
+        self.assertNotIn("merge", got)
+        for call in calls:
+            self.assertNotIn("forge-claim land", call["prompt"], call["label"])
+        text = prompt(calls, "look-checks-1")
+        self.assertIn("forge-claim renew", text)
+        self.assertIn("look at the head " + SHA, text)
+        w = text.index("gh pr checks 42 --repo owner/repo --watch")
+        r = text.index("gh pr view 42 --repo owner/repo --json headRefOid,statusCheckRollup", w)
+        text.index("git -C /r/.wt/w-issue-9-x merge-base --is-ancestor origin/dev", r)
+        self.assertNotIn("ahead of origin/issue-9-x", text)
+
+    def test_a_passed_reply_without_a_required_list_is_never_green(self):
+        # #1373 C1: an omitted list hides a required check that has not reported yet, so it is read as pending, never as proof.
+        unlisted = {"state": "passed", "head": SHA, "behind": False, "passed": ["lint"]}
+        result, calls = self.go(replies={"look-checks-1": unlisted, "look-checks-2": self.GREEN})
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "look-checks-2"])
+        with self.subTest(reply="never listed"):
+            result, calls = self.go(replies={f"look-checks-{k}": unlisted for k in (1, 2, 3)})
+            self.assertEqual(result["stage"], "checks-pending")
+            self.assertNotIn("look-checks-4", labels(calls))
+        with self.subTest(reply="an explicit empty list"):
+            result, calls = self.go(replies={"look-checks-1": dict(unlisted, required=[])})
+            self.assertEqual(self.after_pr(calls), ["look-checks-1"])
+            self.assertEqual(result["stage"], "awaiting-look")
+
+    def test_the_poll_reads_the_required_checks_of_both_sources_and_matches_their_app(self):
+        # #1373 C2, C3: the rulesets and classic protection are both read, and a required check is judged by the app its entry names.
+        text = prompt(self.go()[1], "look-checks-1")
+        self.assertIn("gh api repos/owner/repo/rules/branches/dev", text)
+        self.assertIn("gh api repos/owner/repo/branches/dev/protection", text)
+        self.assertIn("integration_id", text)
+        self.assertIn("app_id", text)
+        self.assertNotIn("whenever that reply lists no required status checks", text)
+
+    def test_the_poll_reads_the_app_of_each_run_from_a_source_that_carries_it(self):
+        # #1373 C2: the pull request rollup has no app field, so the app of a run is read from the check runs of the head the rollup names.
+        text = prompt(self.go()[1], "look-checks-1")
+        view = text.index("gh pr view 42 --repo owner/repo --json headRefOid,statusCheckRollup")
+        runs = text.index("gh api repos/owner/repo/commits/<its headRefOid>/check-runs --paginate", view)
+        self.assertIn("app.id", text[runs:])
+        self.assertLess(runs, text.index("Classify", runs))
+        self.assertNotIn("that one read alone", text)
+
+    def test_the_poll_has_one_watch_and_one_deadline(self):
+        # #1373 I1: a stuck check must end a poll so the three-wait counter advances.
+        text = prompt(self.go()[1], "look-checks-1")
+        self.assertEqual(text.count("--watch"), 1)
+        self.assertNotIn("run it again", text)
+
+    def test_a_forge_that_moved_during_the_verification_is_read_again_before_the_stop(self):
+        # #1373 I2: after the look-reverify call the stop waits on the forge once more: its checks and its head.
+        moved = {"sync-1": {"merge_commit": D, "head": D}}
+        base = {"look-checks-1": dict(self.GREEN, behind=True)}
+        result, calls = self.go(replies=dict(base, **{"look-checks-3": dict(self.PENDING, head=D)}), patch=moved)
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "sync-1", "look-push", "look-checks-2", "look-reverify", "look-checks-3", "look-checks-4"])
+        self.assertEqual((result["stage"], result["head"]), ("awaiting-look", D))
+        with self.subTest(read="head moved"):
+            result, calls = self.go(replies=dict(base, **{"look-checks-3": dict(self.GREEN, head=B)}), patch=moved)
+            self.assertEqual((result["stage"], result["head"]), ("head-moved", B))
+            self.assertNotIn("look", result["cont"])
+        with self.subTest(read="red"):
+            red = dict(self.RED, head=D)
+            result, calls = self.go(replies=dict(base, **{"look-checks-3": red, "look-checks-4": dict(self.GREEN, head=F)}),
+                                    patch=dict(moved, **{"fix-ci": {"start_head": D, "commit": F}}))
+            self.assertEqual(self.after_pr(calls)[-7:], ["look-checks-3", "fix-ci", "fix-ci-review", "look-push", "look-checks-4", "look-reverify", "look-checks-5"])
+    def test_a_head_with_no_check_reported_yet_is_polled_again(self):
+        result, calls = self.go(replies={"look-checks-1": {"state": "passed", "head": SHA, "behind": False, "passed": []},
+                                         "look-checks-2": self.GREEN})
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "look-checks-2"])
+
+    def test_a_passed_reply_missing_a_required_check_is_polled_again(self):
+        partial = {"state": "passed", "head": SHA, "behind": False, "required": ["lint", "build"], "passed": ["lint"]}
+        result, calls = self.go(replies={"look-checks-1": partial, "look-checks-2": dict(partial, passed=["lint", "build"])})
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "look-checks-2"])
+        with self.subTest(reply="still partial"):
+            result, calls = self.go(replies={f"look-checks-{k}": partial for k in (1, 2, 3)})
+            self.assertEqual(result["stage"], "checks-pending")
+            self.assertEqual(result["pending"], ["build"])
+            self.assertNotIn("look-checks-4", labels(calls))
+
+    def test_checks_still_pending_after_three_waits_stop_before_the_look(self):
+        result, calls = self.go(replies={f"look-checks-{k}": self.PENDING for k in (1, 2, 3)})
+        self.assertEqual(result["stage"], "checks-pending")
+        self.assertEqual(result["pending"], ["ci"])
+        self.assertNotIn("look", result["cont"])
+        self.assertNotIn("look-checks-4", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_red_check_gets_the_one_fix_and_the_stop_names_the_fixed_head(self):
+        result, calls = self.go(replies={"look-checks-1": self.RED, "look-checks-2": dict(self.GREEN, head=F)}, patch=self.FIXED)
+        got = labels(calls)
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "fix-ci", "fix-ci-review", "look-push", "look-checks-2", "look-reverify", "look-checks-3"])
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], F)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": F})
+        self.assertEqual(result["cont"]["checks_fixes"], 1)
+        self.assertEqual(result["cont"]["verified"]["head"], F)
+        self.assertIn("at the head " + F, prompt(calls, "look-push"))
+        self.assertIn("look at the head " + F, prompt(calls, "look-checks-2"))
+        self.assertIn("moved to the head " + F, prompt(calls, "look-reverify"))
+        self.assertIn("FAIL test_cache: host-installed state", prompt(calls, "fix-ci"))
+        self.assertIn("run no forge-claim command", prompt(calls, "fix-ci"))
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-ci"], ["implementer"])
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-ci-review"], ["reviewer"])
+        self.assertEqual([l for l in got if l.startswith("land-")], [])
+        for call in calls:
+            self.assertNotIn("forge-claim land", call["prompt"], call["label"])
+
+    def test_a_second_red_check_stops_at_checks_not_at_the_look(self):
+        result, calls = self.go(replies={"look-checks-1": self.RED, "look-checks-2": dict(self.RED, head=F)}, patch=self.FIXED)
+        got = labels(calls)
+        self.assertEqual(result["stage"], "checks")
+        self.assertEqual(result["failing"], ["ci"])
+        self.assertEqual(result["cont"]["checks_fixes"], 1)
+        self.assertEqual(got.count("fix-ci"), 1)
+        self.assertNotIn("look", result["cont"])
+        self.assertNotIn("look-reverify", got)
+
+    def test_a_rerun_at_the_unchanged_head_polls_again_with_the_stale_question(self):
+        rerun = {"fix-ci": {"start_head": SHA, "commit": SHA, "notes": "cache restore failed; failed jobs rerun"}}
+        result, calls = self.go(replies={"look-checks-1": self.RED, "look-checks-2": self.GREEN}, patch=rerun)
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "fix-ci", "look-checks-2"])
+        self.assertEqual((result["stage"], result["head"]), ("awaiting-look", SHA))
+        self.assertIn("This poll follows a rerun of failed jobs at this head", prompt(calls, "look-checks-2"))
+        self.assertNotIn("This poll follows a rerun of failed jobs at this head", prompt(calls, "look-checks-1"))
+
+    def test_a_base_that_moved_during_the_wait_is_synced_pushed_and_verified_before_the_stop(self):
+        result, calls = self.go(replies={"look-checks-1": dict(self.GREEN, behind=True)},
+                                patch={"sync-1": {"merge_commit": D, "head": D}, "look-reverify": {"pictures": LookStopTest.PICS}})
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "sync-1", "look-push", "look-checks-2", "look-reverify", "look-checks-3"])
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertEqual(result["cont"]["look"]["head"], D)
+        self.assertEqual(result["cont"]["verified"]["head"], D)
+        self.assertEqual(result["pictures"], LookStopTest.PICS)
+        self.assertEqual([l for l in labels(calls) if l.startswith("land-")], [])
+
+    def test_a_sync_after_the_fix_is_verified_at_the_head_the_stop_names(self):
+        result, calls = self.go(replies={"look-checks-1": self.RED, "look-checks-2": dict(self.GREEN, head=F, behind=True)},
+                                patch=dict(self.FIXED, **{"sync-1": {"merge_commit": D, "head": D}, "look-reverify": {"pictures": LookStopTest.PICS}}))
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "fix-ci", "fix-ci-review", "look-push", "look-checks-2", "sync-1",
+                                                "look-push", "look-checks-3", "look-reverify", "look-checks-4"])
+        self.assertEqual(result["head"], D)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
+        self.assertEqual(result["cont"]["verified"]["head"], D)
+        self.assertEqual(result["cont"]["verified"]["pictures"], LookStopTest.PICS)
+        self.assertEqual(result["pictures"], LookStopTest.PICS)
+        self.assertIn("moved to the head " + D, prompt(calls, "look-reverify"))
+        self.assertEqual(labels(calls).count("look-reverify"), 1)
+
+    def test_a_base_that_keeps_moving_stops_at_sync_contention(self):
+        result, calls = self.go(replies={f"look-checks-{k}": dict(self.GREEN, behind=True) for k in (1, 2, 3)})
+        self.assertEqual(result["stage"], "sync-contention")
+        self.assertEqual(self.after_pr(calls), ["look-checks-1", "sync-1", "look-checks-2", "sync-2", "look-checks-3"])
+
+    def test_a_poll_that_reads_another_pull_request_head_stops_as_head_moved(self):
+        result, _ = self.go(replies={"look-checks-1": dict(self.GREEN, head=B)})
+        self.assertEqual(result["stage"], "head-moved")
+        self.assertEqual(result["head"], B)
+        self.assertNotIn("look", result["cont"])
+
+    def test_an_approve_of_the_head_the_stop_named_lands_it_with_no_new_push(self):
+        def landing(first, head, patch):
+            result, calls = run(args=dict(ARGS, cont=first["cont"], look={"answer": "approve", "head": head}), patch=patch)
+            got = labels(calls)
+            self.assertEqual(result["stage"], "done")
+            self.assertEqual([l for l in got if l in ("look-head", "look-read", "look-post", "pr", "merge")], ["look-head", "look-read", "pr", "merge"])
+            for label in got:
+                self.assertFalse(label in ("verify", "look-verify", "look-push", "look-reverify") or label.startswith(("final-", "land-push-", "sync-", "fix-ci", "look-checks-")), label)
+            self.assertNotIn("Push the branch (", prompt(calls, "pr"))
+            self.assertIn("reuse the open pull request #42", prompt(calls, "pr"))
+            for call in calls:
+                self.assertNotIn("Then push the branch", call["prompt"], call["label"])
+            self.assertIn("--match-head-commit " + head, prompt(calls, "merge"))
+
+        first, _ = self.go(replies={"look-checks-1": self.RED}, patch=self.FIXED)
+        self.assertEqual(first["head"], F)
+        self.assertEqual(first["cont"]["verified"]["head"], F)
+        landing(first, F, {"setup": {"look": MARKED, "head": F}, "look-head": {"head": F},
+                           "pr": {"head": F, "lock": {"verdict": "already_held", "lock_sha": F},
+                                  "checks": {"state": "passed", "head": F, "required": ["ci"], "passed": ["ci"]}}})
+        with self.subTest(run="unfixed"):
+            unfixed, _ = self.go(replies={"look-checks-1": self.PENDING, "look-checks-2": self.GREEN})
+            landing(unfixed, SHA, RESUME)
 
 
 class LookResumeTest(unittest.TestCase):
@@ -10573,6 +11809,62 @@ class LookResumeTest(unittest.TestCase):
                 self.assertIn("cont", result)
                 self.assertNotIn("merge", got)
                 self.assertIn("land-unlock", got)
+
+    def test_a_marked_landing_reads_an_omitted_required_list_as_pending(self):
+        # #1373 C1: a passed reply with no required list proves no required check passed.
+        short = {"state": "passed", "head": D, "passed": ["ci"]}
+        patch = dict(self.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None}}, pr={"checks": {"state": "behind", "head": SHA}})
+        result, calls = self.approve(patch=patch, replies={f"checks-{k}": short for k in range(2, 7)})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "checks-pending")
+        self.assertNotIn("look-status", got)
+        self.assertNotIn("merge", got)
+
+    def test_every_landing_checks_prompt_asks_for_a_required_list_even_when_empty(self):
+        # #1373: a marked landing reads an omitted required list as pending, so the clerk is told to always return one.
+        patch = dict(self.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None}}, pr={"checks": {"state": "behind", "head": SHA}})
+        _, calls = self.approve(patch=patch)
+        text = prompt(calls, "checks-2")
+        self.assertIn("Return required always, even as an empty list", text)
+        self.assertNotIn("none only when neither lists any", text)
+
+    def test_a_marked_landing_reads_a_missing_required_check_as_pending(self):
+        # #1373, D8: a passed reply that leaves a required name out of passed is pending for a marked landing too.
+        short = {"state": "passed", "head": D, "required": ["ci", "build"], "passed": ["ci"]}
+        patch = dict(self.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None}},
+                     pr={"checks": {"state": "behind", "head": SHA}}, **{f"checks-{k}": short for k in range(2, 7)})
+        result, calls = self.approve(patch=patch)
+        got = labels(calls)
+        self.assertEqual(result["stage"], "checks-pending")
+        self.assertNotIn("look-status", got)
+        self.assertNotIn("merge", got)
+
+    def test_an_approve_for_a_moved_head_waits_for_its_checks_before_asking_again(self):
+        # #1373, D5: the re-ask waits for the checks of the head it shows, and fixes, syncs and pushes nothing.
+        moved = {"look-head": {"head": B, "state": "OPEN", "renew": {"verdict": "renewed"}}}
+        pending = {"state": "pending", "head": B, "behind": False, "pending": ["ci"]}
+        result, calls = self.approve(head=SHA, replies=dict(moved, **{f"look-checks-{k}": pending for k in (1, 2, 3)}))
+        got = labels(calls)
+        self.assertEqual(result["stage"], "checks-pending")
+        self.assertTrue(result["reason"].startswith("the approval of " + SHA + " was not recorded: PR #42's head is now " + B), result["reason"])
+        for label in ("look-read", "look-post", "look-verify", "look-push", "look-pr", "pr", "merge", "fix-ci"):
+            self.assertNotIn(label, got)
+        self.assertIn("look at the head " + B, prompt(calls, "look-checks-1"))
+        with self.subTest(reply="green"):
+            green = {"state": "passed", "head": B, "behind": True, "required": ["ci"], "passed": ["ci"]}
+            result, calls = self.approve(head=SHA, replies=dict(moved, **{"look-checks-1": green}))
+            got = labels(calls)
+            self.assertEqual((result["stage"], result["head"]), ("awaiting-look", B))
+            self.assertEqual(got[got.index("look-head") + 1:], ["look-checks-1"])
+
+    def test_a_fix_for_a_moved_head_with_a_red_check_stops_at_checks(self):
+        red = {"state": "failed", "head": B, "behind": False, "required": ["ci"], "failing": ["ci"], "details": "x"}
+        result, calls = self.fix(head=SHA, replies={"look-head": {"head": B, "state": "OPEN", "renew": {"verdict": "renewed"}}, "look-checks-1": red})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "checks")
+        self.assertEqual(result["failing"], ["ci"])
+        for label in ("look-post", "look-fix", "fix-ci", "merge"):
+            self.assertNotIn(label, got)
 
     def approved_cont(self):
         result, _ = self.approve(replies={"merge": None})
@@ -10836,7 +12128,9 @@ class LookResumeTest(unittest.TestCase):
             self.assertIn(part, prompt(calls, "look-verify"))
         self.assertIn("look-approval status --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "look-read"))
         self.assertIn("--sha " + D, prompt(calls, "pr"))
-        self.assertIn('"summary":"verified at the approved head"', prompt(calls, "pr"))
+        # #1373: the approved head is already pushed, so the pr call reuses its pull request and carries no body text.
+        self.assertIn("reuse the open pull request #42", prompt(calls, "pr"))
+        self.assertNotIn("Push the branch (", prompt(calls, "pr"))
         self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
         self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
 

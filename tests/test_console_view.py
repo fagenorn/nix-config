@@ -41,6 +41,7 @@ from agent_tools.console.movement import (
     merged,
     pulls_from_answer,
 )
+from agent_tools.console import sprints as sprints_module
 from agent_tools.console.sprints import (
     APPROVED,
     CHANGES,
@@ -2961,6 +2962,80 @@ class NoticeViewTest(unittest.TestCase):
 
         self.assertEqual({e["project_id"]: e["notice_post"] for e in view_["entries"]},
                          {"p00": True, "p01": False, "p02": False})
+
+    PATH = "python/agent_tools/console/page.html"
+
+    def claim(self, sid, notice_id, minute, text, issue, live_fault=True, what=None):
+        return with_notices(started(sid), Notice(
+            notice_id, at_min(minute), "claim", text, what=what or self.PATH, until=text + " lands",
+            issue=issue, live_fault=live_fault))
+
+    def line(self, sa, sb):
+        return (sprint_title(sa) + " and " + sprint_title(sb) + " both fix a live fault in "
+                + self.PATH + "; the rule could not decide which lands first")
+
+    def overlaps(self, states, projects=(("p00", 1),)):
+        return {e["project_id"]: e["overlaps"] for e in derive_view(
+            [state(pid, seq) for pid, seq in projects], sprints=states,
+            now_ms=T0_MS + 10 * MIN)["entries"]}
+
+    def test_an_unsettled_overlap_is_one_line_and_raises_no_question(self):
+        sa = self.claim(A, 3, 3, "the form", 12)
+        sb = self.claim(B, 5, 5, "the upload row", 13)
+
+        v = derive_view([state("p00", 1)], sprints={A: sa, B: sb}, now_ms=T0_MS + 10 * MIN)
+
+        self.assertEqual(v["entries"][0]["overlaps"],
+                         [{"sprints": [A, B], "files": [self.PATH], "text": self.line(sa, sb)}])
+        self.assertEqual(v["statement"]["inbox_items"], 0)
+        self.assertEqual([i for i in v["inbox"]["open"] if i.get("reason") == "question"], [])
+
+    def test_the_overlap_line_goes_when_either_claim_ends(self):
+        sa = self.claim(A, 3, 3, "the form", 12)
+        sb = self.claim(B, 5, 5, "the upload row", 13)
+        before = {A: sa, B: sb}
+        self.assertTrue(sprints_module.takes_notices(sa))
+        self.assertTrue(sprints_module.takes_notices(sb))
+        self.assertEqual(sb.state, sprints_module.STARTING)
+        self.assertEqual(self.overlaps(before)["p00"],
+                         [{"sprints": [A, B], "files": [self.PATH], "text": self.line(sa, sb)}])
+        withdrawn = sprint_states([Event(
+            20, at_min(7), event_log.NOTICE_WITHDRAWN, "p00",
+            {"sprint_id": A, "goal": "Fix the settings page", "notice": 3})], before)
+        landed = sprint_states([Event(
+            21, at_min(7), event_log.SPRINT_REPORTED, "p00",
+            {"sprint_id": B, "goal": "Add resumable uploads",
+             "report": {**REPORT_ROW,
+                        "issues": [{"issue": 12, "stage": "building"},
+                                   {"issue": 13, "stage": "landed"}],
+                        "inbox": []}})], before)
+        for name, after, other in (("withdrawn", withdrawn, "the upload row"),
+                                   ("landed", landed, "the form")):
+            with self.subTest(name):
+                v = derive_view([state("p00", 1)], sprints=after, now_ms=T0_MS + 10 * MIN)
+                self.assertEqual(v["entries"][0]["overlaps"], [])
+                self.assertEqual([n["text"] for n in v["entries"][0]["notices"]], [other])
+
+    def test_two_claims_on_one_bracketed_file_draw_a_line(self):
+        path = "app/[[]id]/page.tsx"
+        sa = self.claim(A, 3, 3, "the form", 12, what=path)
+        sb = self.claim(B, 5, 5, "the upload row", 13, what=path)
+        self.assertEqual(self.overlaps({A: sa, B: sb})["p00"], [{
+            "sprints": [A, B], "files": [path],
+            "text": self.line(sa, sb).replace(self.PATH, path)}])
+
+    def test_a_settled_overlap_draws_no_line(self):
+        for name, fault_a, fault_b in (("one fault", False, True), ("none", False, False)):
+            with self.subTest(name):
+                sa = self.claim(A, 3, 3, "the form", 12, live_fault=fault_a)
+                sb = self.claim(B, 5, 5, "the upload row", 13, live_fault=fault_b)
+                self.assertEqual(self.overlaps({A: sa, B: sb})["p00"], [])
+        sa = self.claim(A, 3, 3, "the form", 12)
+        sb = self.claim(B, 5, 5, "the upload row", 13)
+        every = self.overlaps({A: sa, B: sb}, (("p00", 1), ("p01", 2)))
+        self.assertEqual(sorted(every), ["p00", "p01"])
+        self.assertEqual(every["p01"], [])
+        self.assertEqual(len(every["p00"]), 1)
 
 
 class SprintMessageViewTest(unittest.TestCase):

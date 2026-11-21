@@ -41,7 +41,8 @@ mkdir -p "$WORK/forge"
 jq -n --arg tip "$(git -C "$worktree" rev-parse HEAD)" --arg branch "$branch" '[{
   number: 7, title: "Rename list --all to --include-done", state: "OPEN", headRefName: $branch,
   headRefOid: $tip, baseRefName: "main", url: "https://github.com/fixture/tinytask/pull/7",
-  isDraft: false, body: "Closes #3"}]' >"$WORK/forge/pulls.json"
+  isDraft: false, body: "Closes #3",
+  checks: [{name: "ci", bucket: "pass", link: "https://github.com/fixture/tinytask/actions/runs/1"}]}]' >"$WORK/forge/pulls.json"
 
 cat >"$WORK/bin/forge-claim" <<STANDIN
 #!/usr/bin/env bash
