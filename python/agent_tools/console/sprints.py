@@ -292,6 +292,9 @@ text)`; `parse_inbox_request(body)` reads the manager's `{"sprint_id", "secret"}
 `(sprint_id, secret)`; `parse_message_reply_request(body)` reads the manager's `{"sprint_id",
 "secret", "message": <int of at least 1>, "reply": <str>}` and returns `(sprint_id, secret,
 message_id, reply)`. All three are as strict as `parse_reply` (`ValueError` otherwise).
+`parse_permit_request(body)` reads the manager's `{"sprint_id", "secret", "phase": "judge" | "landed",
+"session_id": <1 to 128 characters>, "command": <at most 8192 characters>}` and returns the frozen
+`PermitRequest` of those five members, `ValueError` for any other body (#1377).
 `inbox_entry(message)` is the wire entry `{"id", "kind", "version", "text", "at"}`, and for a
 `MESSAGE_ANSWER` message also `"question"`, `"round"`, `"chosen"` and `"words"` (see below).
 
@@ -1417,6 +1420,37 @@ def parse_inbox_request(body: bytes) -> tuple[str, str]:
     if not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
     return sprint_id, value["secret"]
+
+
+PERMIT_PHASES = ("judge", "landed")
+MAX_PERMIT_SESSION_CHARS = 128
+MAX_PERMIT_COMMAND_CHARS = 8192
+
+
+@dataclass(frozen=True)
+class PermitRequest:
+    sprint_id: str
+    secret: str
+    phase: str
+    session_id: str
+    command: str
+
+
+def parse_permit_request(body: bytes) -> PermitRequest:
+    """The manager's permit request: an object of exactly the five members, none repeated (#1377)."""
+    value = _object(body, {"sprint_id", "secret", "phase", "session_id", "command"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    if value["phase"] not in PERMIT_PHASES:
+        raise ValueError("phase must be judge or landed")
+    session_id = value["session_id"]
+    if not isinstance(session_id, str) or not 1 <= len(session_id) <= MAX_PERMIT_SESSION_CHARS:
+        raise ValueError("session_id must be a string of 1 to 128 characters")
+    command = value["command"]
+    if not isinstance(command, str) or len(command) > MAX_PERMIT_COMMAND_CHARS:
+        raise ValueError("command must be a string of at most 8192 characters")
+    return PermitRequest(sprint_id, value["secret"], value["phase"], session_id, command)
 
 
 def parse_message_reply_request(body: bytes) -> tuple[str, str, int, str]:

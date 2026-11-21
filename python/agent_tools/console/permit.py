@@ -54,6 +54,8 @@ merge shape and None otherwise. `NOT_ACTIVE`, `NOT_MANAGER` and `MOVED` are the 
 itself gives (the sprint is not active, the caller is not its manager, the sprint changed between
 the first judgement and the second).
 
+`verb_of(command)` is the verb `mentions` found (`merge`, `rerun` or `release`), None when it found none.
+
 `memoized(forge)` caches each reader's result, or the `ForgeUnreadable` it raised, by its arguments;
 its `.frozen()` is a `Forge` over the same cache that raises `ForgeUnreadable("not read before")`
 for a call not already cached, so the console judges again without a second forge read.
@@ -312,6 +314,11 @@ def _verb_of(command: str) -> str | None:
         if name == "release" and rest in (["transaction", "run"], ["transaction", "abandon"]):
             return RELEASE
     return None
+
+
+def verb_of(command: str) -> str | None:
+    """`merge`, `rerun` or `release` when `mentions(command)`, else None."""
+    return _verb_of(command)
 
 
 def mentions(command: str) -> bool:

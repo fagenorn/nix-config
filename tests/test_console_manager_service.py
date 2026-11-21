@@ -19,10 +19,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import (account_add, capacity, console, exclusion, guest, manager, nudge, permission,
-                                 pin, probe, service, sessions, signin, sprints)
-from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_SENT, GOAL_STATED, MANAGER_WAITING,
-                                           SPRINT_REPORTED, EventLog)
+from agent_tools.console import (account_add, capacity, console, deliveries, exclusion, guest, manager, nudge,
+                                 permission, permit, pin, probe, service, sessions, signin, sprint, sprints)
+from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_SENT, GOAL_STATED, MANAGER_STARTED,
+                                           MANAGER_WAITING, SESSION_SEEN, SPRINT_REPORTED,
+                                           SPRINT_STOP_REQUESTED, EventLog)
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -30,6 +31,9 @@ from .test_console_briefs import PARTS
 from .test_console_notices import CLAIM
 from .test_console_sprints import REPORT
 from .test_console_guest_service import COLLEAGUE, TAILNET, GuestCase
+from .test_console_permit import FakeForge, HEAD, SHA
+from .test_console_reports import CLOSING
+from .test_console_sprints import RELEASE, RELEASE_QUESTION
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -1546,6 +1550,297 @@ class ColleagueAccountLaunchTest(GuestCase):
 
     def test_a_launch_prepared_on_his_account_stays_while_it_has_room(self):
         self.assertEqual(self.launch_after(lambda svc: None), ["colleague-1"])
+
+PERMIT = "/api/permit"
+SLUG = "o/r"
+MERGE = f"gh pr merge 7 --repo {SLUG} --merge --match-head-commit {SHA} --delete-branch"
+ROOT = "/srv/p01"
+RELEASE_RUN = (f"release transaction run --repo-root {ROOT} --commit {'a' * 40} --version v1.2.0 "
+               "--title 'v1.2.0 notes' --notes-file /tmp/n --confirm publish:0123456789ab")
+
+
+def issues_report(*numbers):
+    return {**REPORT, "issues": [{"issue": n, "stage": "building"} for n in numbers], "inbox": []}
+
+
+class PermitCase(Case):
+    """A started, approved sprint of a registered project, its manager session and a fake forge (#1377)."""
+
+    def boot(self, **kwargs):
+        """A fresh console (a new store) with one approved sprint reporting issue 12, run by `s-1`."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.store = root / "state/console/events.sqlite3"
+        self.registry = root / "state/fleet/registry.json"
+        support.write_registry(self.registry, support.entries(2))
+        self.fake = FakeForge()
+        kwargs.setdefault("permit_forge", self.fake.forge())
+        svc = self.svc = self.start(
+            launcher=support.Launches(), session_poll_seconds=3600, slug_of=lambda root: SLUG,
+            merge_binding_of=lambda root: ("merge", True),
+            branch_pattern_of=lambda root: "issue-<num>-<slug>", **kwargs)
+        sid = self.sprint(svc, "make the importer resumable")
+        self.seen(svc, sid, "s-1")
+        svc.send_report(sid, self.secret(sid), issues_report(12))
+        self.deliver(svc, "s-1", 12)
+        return svc, sid
+
+    def secret(self, sid):
+        return (self.store.parent / "sprint-secrets" / sid).read_text().removesuffix("\n")
+
+    def sprint(self, svc, goal):
+        sid = svc.state_goal("owner/p01", goal)
+        svc.send_brief(sid, self.secret(sid), PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        return sid
+
+    def seen(self, svc, sid, session_id):
+        with svc._ingest:
+            svc._apply(svc.log.append([(SESSION_SEEN, "owner/p01", {
+                "name": manager.session_name("owner/p01", sid), "session_id": session_id})]))
+
+    def deliver(self, svc, session_id, *numbers, run="r-1"):
+        svc._deliveries[(session_id, run)] = deliveries.DeliveryState(
+            session_id, run, 1, tuple(deliveries.IssueStage(n, "building") for n in numbers))
+
+    def append(self, svc, kind, payload):
+        with svc._ingest:
+            svc._apply(svc.log.append([(kind, "owner/p01", payload)]))
+
+    def rows(self, kind):
+        return [json.loads(row[4]) for row in support.log_rows(self.store) if row[2] == kind]
+
+    def judge(self, svc, sid, command, session="s-1"):
+        return svc.permit(sid, self.secret(sid), session, command)
+
+    def approve_release(self, svc, sid):
+        round_id, _ = svc.ask_questions(sid, self.secret(sid), {"questions": [RELEASE_QUESTION]})
+        svc.answer_question("owner/p01", sid, round_id, 0, 0, None)
+
+
+class PermitServiceTest(PermitCase):
+    def test_a_release_run_with_no_approved_card_is_refused(self):
+        svc, sid = self.boot()
+        verdict = self.judge(svc, sid, RELEASE_RUN)
+        self.assertEqual((verdict.decision, verdict.reason), (
+            "deny", permit.NO_CARD.format(commit="a" * 40, version="v1.2.0")))
+        (row,) = self.rows("permit.judged")
+        self.assertEqual((row["decision"], row["session_id"], row["repo"], row["verb"]),
+                         ("deny", "s-1", SLUG, "release"))
+        self.assertEqual(row["sprint_id"], sid)
+
+    def test_a_release_run_the_owner_approved_is_allowed(self):
+        svc, sid = self.boot()
+        self.approve_release(svc, sid)
+        self.assertEqual(self.judge(svc, sid, RELEASE_RUN).decision, "allow")
+        other = RELEASE_RUN.replace("publish:0123456789ab", "publish:ba9876543210")
+        verdict = self.judge(svc, sid, other)
+        self.assertEqual((verdict.decision, verdict.reason), (
+            "deny", permit.NO_CARD.format(commit="a" * 40, version="v1.2.0")))
+
+    def test_the_sprints_delivered_reported_pull_request_merges(self):
+        svc, sid = self.boot()
+        verdict = self.judge(svc, sid, MERGE)
+        self.assertEqual((verdict.decision, verdict.verb, dict(verdict.target)),
+                         ("allow", "merge", {"pr": 7, "head": SHA}))
+        (row,) = self.rows("permit.judged")
+        self.assertEqual(row, {"sprint_id": sid, "session_id": "s-1", "repo": SLUG,
+                               "verb": "merge", "decision": "allow", "reason": "",
+                               "target": {"pr": 7, "head": SHA}})
+
+    def test_a_reported_issue_no_manager_delivery_carries_is_refused(self):
+        svc, sid = self.boot()
+        svc.send_report(sid, self.secret(sid), issues_report(12, 40))
+        self.fake.pr = {**self.fake.pr, "branch": "issue-40-x"}
+        self.deliver(svc, "s-other", 40, run="r-2")
+        verdict = self.judge(svc, sid, MERGE)
+        self.assertEqual((verdict.decision, verdict.reason),
+                         ("deny", permit.NOT_OWN_PR.format(pr=7)))
+
+    def test_an_issue_another_open_sprint_reports_is_refused(self):
+        svc, sid = self.boot()
+        other = self.sprint(svc, "make the exporter resumable")
+        svc.send_report(other, self.secret(other), issues_report(12))
+        verdict = self.judge(svc, sid, MERGE)
+        self.assertEqual((verdict.decision, verdict.reason),
+                         ("deny", permit.SHARED_ISSUE.format(issue=12)))
+
+    def test_another_session_is_refused(self):
+        svc, sid = self.boot()
+        for session in ("s-2", ""):
+            with self.subTest(session=session):
+                verdict = self.judge(svc, sid, MERGE, session)
+                self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.NOT_MANAGER))
+        self.assertEqual(self.fake.calls, [])
+
+    def test_a_manager_not_yet_seen_is_refused(self):
+        svc, sid = self.boot()
+        other = self.sprint(svc, "make the exporter resumable")
+        verdict = self.judge(svc, other, MERGE)
+        self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.NOT_MANAGER))
+
+    def test_a_sprint_that_is_not_running_is_refused(self):
+        def stop(svc, sid):
+            svc.stop_sprint("owner/p01", sid)
+
+        def close(svc, sid):
+            svc.send_closing(sid, self.secret(sid), CLOSING)
+
+        def redraft(svc, sid):
+            svc.send_brief(sid, self.secret(sid), {**PARTS, "title": "Importer resumes, again"})
+
+        for name, act in (("stop requested", stop), ("closed", close), ("second brief", redraft)):
+            with self.subTest(name):
+                svc, sid = self.boot()
+                act(svc, sid)
+                verdict = self.judge(svc, sid, MERGE)
+                self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.NOT_ACTIVE))
+                self.assertEqual(self.rows("permit.judged")[-1]["decision"], "deny")
+                self.assertEqual(self.fake.calls, [])
+
+    def test_a_sprint_that_changes_during_the_forge_read_is_refused(self):
+        def stop(svc, sid):
+            self.append(svc, SPRINT_STOP_REQUESTED, {"sprint_id": sid, "goal": "g"})
+
+        def restart(svc, sid):
+            self.append(svc, MANAGER_STARTED, {
+                "profile": "work", "session_name": manager.session_name("owner/p01", sid),
+                "sprint_id": sid})
+
+        def share(svc, sid):
+            other = self.sprint(svc, "make the exporter resumable")
+            svc.send_report(other, self.secret(other), issues_report(12))
+
+        for name, act in (("stop", stop), ("restart", restart), ("shared issue", share)):
+            with self.subTest(name):
+                svc, sid = self.boot()
+                read = self.fake.read_pr
+
+                def moving(slug, number, read=read, act=act, svc=svc, sid=sid):
+                    found = read(slug, number)
+                    act(svc, sid)
+                    return found
+
+                svc._permit_forge = permit.Forge(moving, self.fake.read_run, self.fake.read_required)
+                verdict = self.judge(svc, sid, MERGE)
+                self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.MOVED))
+                last = self.rows("permit.judged")[-1]
+                self.assertEqual((last["decision"], last["reason"]), ("deny", permit.MOVED))
+
+    def test_the_forge_is_read_once_for_both_judgements(self):
+        svc, sid = self.boot()
+        self.assertEqual(self.judge(svc, sid, MERGE).decision, "allow")
+        self.assertEqual(self.fake.calls, [("pr", SLUG, 7)])
+
+    def test_an_unrelated_command_is_not_judged_or_logged(self):
+        svc, sid = self.boot()
+        before = support.log_rows(self.store)
+        verdict = self.judge(svc, sid, "git status")
+        self.assertIsNone(verdict.decision)
+        self.assertEqual(support.log_rows(self.store), before)
+        self.assertEqual(self.rows("permit.judged"), [])
+
+    def test_a_wrong_secret_is_refused(self):
+        svc, sid = self.boot()
+        with self.assertRaises(sprints.SecretRefused):
+            svc.permit(sid, "A" * 43, "s-1", MERGE)
+
+    def test_a_landed_merge_is_recorded_only_after_its_allow(self):
+        svc, sid = self.boot()
+        secret = self.secret(sid)
+        self.assertFalse(svc.permit_landed(sid, secret, "s-1", MERGE))
+        self.assertEqual(self.rows("permit.landed"), [])
+        self.assertEqual(self.judge(svc, sid, MERGE).decision, "allow")
+        for session, command in (("s-2", MERGE), ("s-1", MERGE + " --admin"),
+                                 ("s-1", MERGE.replace(" 7 ", " 8 "))):
+            with self.subTest(session=session, command=command[-20:]):
+                self.assertFalse(svc.permit_landed(sid, secret, session, command))
+        self.assertEqual(self.rows("permit.landed"), [])
+        self.assertTrue(svc.permit_landed(sid, secret, "s-1", MERGE))
+        self.assertEqual(self.rows("permit.landed"), [{
+            "sprint_id": sid, "session_id": "s-1", "repo": SLUG, "verb": "merge",
+            "target": {"pr": 7, "head": SHA}}])
+
+    def test_a_landing_after_thirty_minutes_is_not_recorded(self):
+        now = [NOW]
+        svc, sid = self.boot(clock=lambda: now[0])
+        self.assertEqual(self.judge(svc, sid, MERGE).decision, "allow")
+        now[0] += 30 * 60
+        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", MERGE))
+        now[0] += 1
+        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", MERGE))
+        self.assertEqual(len(self.rows("permit.landed")), 1)
+
+    def test_a_denied_merge_is_never_recorded_as_landed(self):
+        svc, sid = self.boot()
+        self.fake.pr = {**self.fake.pr, "branch": "issue-99-x"}
+        self.assertEqual(self.judge(svc, sid, MERGE).decision, "deny")
+        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", MERGE))
+
+    def post(self, svc, body, **headers):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        return support.post_page(svc.address, PERMIT, {**JSON, **headers}, data)
+
+    def request(self, sid, **change):
+        return {"sprint_id": sid, "secret": self.secret(sid), "phase": "judge",
+                "session_id": "s-1", "command": MERGE, **change}
+
+    def test_the_permit_route_answers_a_manager_only(self):
+        svc, sid = self.boot()
+        status, _, body = self.post(svc, self.request(sid))
+        self.assertEqual((status, json.loads(body)), (200, {"decision": "allow", "reason": ""}))
+        status, _, body = self.post(svc, self.request(sid, command="git status"))
+        self.assertEqual((status, json.loads(body)), (200, {"decision": None, "reason": ""}))
+        status, _, body = self.post(svc, self.request(sid, phase="landed"))
+        self.assertEqual((status, json.loads(body)), (200, {"recorded": True}))
+        status, _, body = self.post(svc, self.request(sid, secret="A" * 43))
+        self.assertEqual((status, body), (403, sprints.SECRET_REFUSED.encode() + b"\n"))
+        status, _, body = self.post(svc, self.request(sid, sprint_id="e" * 16))
+        self.assertEqual((status, body), (409, sprints.NOT_OPEN.encode() + b"\n"))
+        duplicated = json.dumps(self.request(sid)).replace(
+            '"phase": "judge"', '"phase": "judge", "phase": "judge"').encode()
+        bad = [duplicated, self.request(sid, phase="other"), {**self.request(sid), "extra": 1},
+               self.request(sid, session_id=""), self.request(sid, session_id="x" * 129),
+               self.request(sid, command="x" * 8193), self.request(sid, command=3), b"not json"]
+        for body in bad:
+            with self.subTest(body=str(body)[:60]):
+                status, _, text = self.post(svc, body)
+                self.assertEqual((status, text), (400, b"bad permit\n"))
+        status, _, text = self.post(svc, b" " * 16385)
+        self.assertEqual((status, text), (413, b"too large\n"))
+        with mock.patch.object(svc, "permit", side_effect=RuntimeError("boom")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            status, _, text = self.post(svc, self.request(sid))
+        self.assertEqual((status, text), (500, b"permit failed\n"))
+
+    def test_the_permit_route_is_manager_only(self):
+        self.assertIn(service.PERMIT_PATH, service.MANAGER_WRITES)
+        self.assertIn(service.PERMIT_PATH, service.OWNER_ONLY)
+        self.assertIn(service.PERMIT_PATH, service.ROUTES)
+
+
+class PermitWireTest(PermitCase):
+    def test_the_command_and_the_route_agree(self):
+        svc, sid = self.boot()
+        hook = {"session_id": "s-1", "tool_name": "Bash", "tool_input": {"command": MERGE}}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \
+                contextlib.redirect_stdout(out):
+            code = sprint.main(["permit", "--port", str(svc.address[1])])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue()), {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason": ""}})
+        self.assertEqual(len(out.getvalue().splitlines()), 1)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \
+                contextlib.redirect_stdout(out):
+            code = sprint.main(["permit", "--landed", "--port", str(svc.address[1])])
+        self.assertEqual((code, out.getvalue()), (0, ""))
+        self.assertEqual(len(self.rows("permit.landed")), 1)
 
 
 if __name__ == "__main__":

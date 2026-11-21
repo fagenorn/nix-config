@@ -13,6 +13,7 @@
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint picture [--sprint <id>] [--secret-file <path>] --file <path> [--port N]
     sprint status [--sprint <id>] [--secret-file <path>] [--port N]
+    sprint permit [--landed] [--sprint <id>] [--secret-file <path>] [--port N]
     sprint contract
 
 `--sprint` is the sprint id (16 lowercase hex characters, `agent_tools.console.sprints.SPRINT_ID`),
@@ -202,6 +203,19 @@ from `$CONSOLE_SPRINT_ID` (not beside `--sprint`), else none; with none, or when
 /api/notices` as `sprint inbox` does and prints the same `sprints.notice_block` after the line;
 a refused notices request is exit 1. A status with no secret is not an error.
 
+`sprint permit` is the hook a manager's settings run before (and, with `--landed`, after) each Bash call
+(#1377, ADR-console-093). It reads the hook input document from stdin (a JSON object with a string
+`session_id` and a string `tool_input.command`), resolves the sprint and secret as `sprint inbox` does and
+sends `POST /api/permit` with `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id",
+"command"}`; it prints at most one line and is always exit 0. For a command that
+`agent_tools.console.permit.mentions` rejects it contacts nothing and prints nothing. Otherwise, in the
+judge phase, the console's `allow` or `deny` is printed as `{"hookSpecificOutput": {"hookEventName":
+"PreToolUse", "permissionDecision": <decision>, "permissionDecisionReason": <reason>}}` and a null
+decision prints nothing; any failure (stdin that is not such an object, no sprint id or secret, a console
+that is unreachable or answers other than 200, a reply that is not `{"decision", "reason"}`) prints the
+same object with `deny` and the reason `the console could not judge this command: <why>`. With
+`--landed` the command tells the console the merge ran and prints nothing in every case.
+
 `sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
 beside this module, to stdout exactly as packaged and exit 0. It takes no sprint id, secret or
 port, reads no environment and sends no request; the console's launch prompt tells the manager to
@@ -231,7 +245,7 @@ import time
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import manager, service, sprints
+from agent_tools.console import manager, permit, service, sprints
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
@@ -346,6 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
                        ("recap", "print what a manager needs to pick the sprint up"),
                        ("reply", "answer one of the owner's messages"),
                        ("picture", "send one PNG picture to the console"),
+                       ("permit", "judge one Bash command of the manager's session (a hook)"),
                        ("status", "print the owner's answer to the sprint's brief")):
         epilog = {"report": REPORT_HELP, "close": CLOSING_HELP}.get(name)
         each = commands.add_parser(
@@ -371,6 +386,9 @@ def build_parser() -> argparse.ArgumentParser:
             if name == "close":
                 each.add_argument("--closing-file", required=True,
                                   help="the closing report as a JSON object; - reads stdin")
+        if name == "permit":
+            each.add_argument("--landed", action="store_true",
+                              help="report that the permitted merge ran; prints nothing")
         if name == "picture":
             each.add_argument("--file", type=Path, required=True, help="the PNG file to send")
         if name == "withdraw-question":
@@ -460,6 +478,69 @@ def resolve_secret(args: argparse.Namespace) -> str:
     if secret is None:
         raise Unreadable(f"sprint: no secret: pass --secret-file or set {manager.SECRET_ENV}")
     return secret.removesuffix("\n")
+
+
+PERMIT_FAILED = "the console could not judge this command: {reason}"
+
+
+class HookFailure(Exception):
+    """A hook input or a console reply `sprint permit` cannot use; `str(error)` is the reason."""
+
+
+def hook_command(text: str) -> tuple[str, str]:
+    """The session id and the Bash command of a hook input document, else `HookFailure`."""
+    try:
+        document = json.loads(text, object_pairs_hook=reject_duplicate_keys,
+                              parse_constant=reject_nonfinite_literal)
+    except ValueError as error:
+        raise HookFailure(f"the hook input is not JSON: {error}") from error
+    tool = document.get("tool_input") if isinstance(document, dict) else None
+    session = document.get("session_id") if isinstance(document, dict) else None
+    command = tool.get("command") if isinstance(tool, dict) else None
+    if not isinstance(session, str) or not isinstance(command, str):
+        raise HookFailure("the hook input has no session_id and tool_input.command")
+    return session, command
+
+
+def permit_reply(text: str) -> tuple[str | None, str]:
+    """The decision and reason of the console's judge answer, else `HookFailure`."""
+    try:
+        reply = json.loads(text)
+    except ValueError as error:
+        raise HookFailure(f"the console's answer is not JSON: {error}") from error
+    decision = reply.get("decision") if isinstance(reply, dict) else None
+    reason = reply.get("reason") if isinstance(reply, dict) else None
+    if (not isinstance(reply, dict) or "decision" not in reply
+            or decision not in ("allow", "deny", None) or not isinstance(reason, str)):
+        raise HookFailure("the console's answer is not a decision")
+    return decision, reason
+
+
+def permit_line(decision: str, reason: str) -> str:
+    return json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": decision,
+        "permissionDecisionReason": reason}})
+
+
+def run_permit(args: argparse.Namespace) -> int:
+    """The `sprint permit` hook: at most one printed line, always exit 0."""
+    try:
+        session, command = hook_command(sys.stdin.read())
+        if not permit.mentions(command):
+            return 0
+        body = json.dumps({"sprint_id": resolve_sprint(args), "secret": resolve_secret(args),
+                           "phase": "landed" if args.landed else "judge", "session_id": session,
+                           "command": command}).encode()
+        text = ask(args.port, "POST", service.PERMIT_PATH, body)
+        decision, reason = (None, "") if args.landed else permit_reply(text)
+    except (HookFailure, Unreadable, Refused, UnicodeDecodeError) as error:
+        if not args.landed:
+            print(permit_line("deny", PERMIT_FAILED.format(
+                reason=str(error).removeprefix("sprint: "))))
+        return 0
+    if decision is not None:
+        print(permit_line(decision, reason))
+    return 0
 
 
 def part_pictures(value: dict) -> list[dict]:
@@ -756,6 +837,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "contract":
         sys.stdout.write(CONTRACT.read_text(encoding="utf-8"))
         return 0
+    if args.command == "permit":
+        return run_permit(args)
     try:
         sprint = resolve_sprint(args)
         if args.command == "brief":

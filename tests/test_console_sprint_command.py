@@ -1344,6 +1344,118 @@ class ManagerContractTest(unittest.TestCase):
         for stage in sprints.REPORT_STAGES:
             self.assertIn(stage, run_sprint("report", "--help").stdout)
 
+GREEN = "gh pr merge 7 --repo o/r --merge --match-head-commit " + "b" * 40 + " --delete-branch"
+
+
+class PermitCommandTest(unittest.TestCase):
+    """`sprint permit` is a PreToolUse and PostToolUse hook that asks the console and prints its verdict (#1377)."""
+
+    ENV = {manager.ID_ENV: "a" * 16, manager.SECRET_ENV: "secret"}
+
+    def run_permit(self, stdin, reply=None, *flags):
+        sent, out = [], StringIO()
+
+        def fake(port, method, path, body=None, headers=None):
+            sent.append((port, method, path, json.loads(body)))
+            if isinstance(reply, sprint.Refused):
+                raise reply
+            return reply
+
+        with mock.patch.object(sprint, "ask", side_effect=fake), \
+                mock.patch.dict(os.environ, self.ENV), \
+                mock.patch.object(sys, "stdin", StringIO(stdin)), redirect_stdout(out), \
+                redirect_stderr(StringIO()):
+            code = sprint.main(["permit", *flags])
+        return code, out.getvalue(), sent
+
+    @staticmethod
+    def hook(command=GREEN, **change):
+        return json.dumps({"session_id": "s-1", "tool_name": "Bash",
+                           "tool_input": {"command": command}, **change})
+
+    @staticmethod
+    def decision(decision, reason=""):
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "permissionDecision": decision,
+                                       "permissionDecisionReason": reason}}
+
+    def test_permit_prints_the_consoles_decision(self):
+        reply = json.dumps({"decision": "allow", "reason": ""})
+        code, out, sent = self.run_permit(self.hook(), reply)
+        self.assertEqual((code, json.loads(out)), (0, self.decision("allow")))
+        self.assertEqual(len(out.splitlines()), 1)
+        ((port, method, path, body),) = sent
+        self.assertEqual((method, path), ("POST", service.PERMIT_PATH))
+        self.assertEqual(body, {"sprint_id": "a" * 16, "secret": "secret", "phase": "judge",
+                                "session_id": "s-1", "command": GREEN})
+        reply = json.dumps({"decision": "deny", "reason": "no"})
+        code, out, _ = self.run_permit(self.hook(), reply)
+        self.assertEqual((code, json.loads(out)), (0, self.decision("deny", "no")))
+
+    def test_permit_prints_nothing_when_the_console_gives_no_decision(self):
+        code, out, sent = self.run_permit(
+            self.hook(), json.dumps({"decision": None, "reason": ""}))
+        self.assertEqual((code, out, len(sent)), (0, "", 1))
+
+    def test_permit_denies_when_the_console_cannot_answer(self):
+        for name, reply in (("unreachable", sprint.Refused("sprint: console unreachable on x")),
+                            ("refused", sprint.Refused("sprint: refused 403: secret refused")),
+                            ("not json", "nope"), ("not an object", "[]"),
+                            ("unknown decision", json.dumps({"decision": "ask", "reason": ""})),
+                            ("no reason", json.dumps({"decision": "allow"}))):
+            with self.subTest(name):
+                code, out, _ = self.run_permit(self.hook(), reply)
+                self.assertEqual(code, 0)
+                hook = json.loads(out)["hookSpecificOutput"]
+                self.assertEqual(hook["permissionDecision"], "deny")
+                self.assertTrue(hook["permissionDecisionReason"].startswith(
+                    "the console could not judge this command: "), hook)
+
+    def test_permit_is_silent_on_a_command_it_does_not_judge(self):
+        for command in ("npm test", "git status", "gh pr view 7"):
+            with self.subTest(command):
+                self.assertEqual(self.run_permit(self.hook(command), "{}"), (0, "", []))
+
+    def test_permit_denies_a_bad_hook_input(self):
+        for name, stdin in (("not json", "not json"), ("an array", "[]"),
+                            ("no session", json.dumps({"tool_input": {"command": GREEN}})),
+                            ("a numeric session", self.hook(session_id=3)),
+                            ("no tool input", json.dumps({"session_id": "s-1"})),
+                            ("no command", json.dumps({"session_id": "s-1", "tool_input": {}})),
+                            ("a list command", self.hook(["gh"]))):
+            with self.subTest(name):
+                code, out, sent = self.run_permit(stdin)
+                self.assertEqual((code, sent), (0, []))
+                hook = json.loads(out)["hookSpecificOutput"]
+                self.assertEqual(hook["permissionDecision"], "deny")
+                self.assertTrue(hook["permissionDecisionReason"].startswith(
+                    "the console could not judge this command: "))
+
+    def test_permit_denies_without_a_sprint_or_secret(self):
+        with mock.patch.dict(os.environ, {}, clear=False) as environ:
+            environ.pop(manager.ID_ENV, None)
+            environ.pop(manager.SECRET_ENV, None)
+            out = StringIO()
+            with mock.patch.object(sys, "stdin", StringIO(self.hook())), redirect_stdout(out):
+                code = sprint.main(["permit"])
+        self.assertEqual(code, 0)
+        hook = json.loads(out.getvalue())["hookSpecificOutput"]
+        self.assertEqual(hook["permissionDecision"], "deny")
+
+    def test_permit_landed_posts_and_prints_nothing(self):
+        code, out, sent = self.run_permit(self.hook(), json.dumps({"recorded": True}), "--landed")
+        self.assertEqual((code, out), (0, ""))
+        ((_, _, path, body),) = sent
+        self.assertEqual((path, body["phase"], body["command"]), (service.PERMIT_PATH, "landed", GREEN))
+
+    def test_permit_landed_prints_nothing_in_every_case(self):
+        for stdin, reply in ((self.hook(), sprint.Refused("sprint: console unreachable")),
+                             (self.hook(), "nope"), ("not json", None),
+                             (self.hook("npm test"), None)):
+            with self.subTest(stdin=stdin[:20]):
+                code, out, _ = self.run_permit(stdin, reply, "--landed")
+                self.assertEqual((code, out), (0, ""))
+
 
 class CommandContractTest(unittest.TestCase):
     def test_the_command_table_names_the_module_and_its_docstring_states_the_contract(self):

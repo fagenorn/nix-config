@@ -87,6 +87,13 @@ the newest row of each kind in place whatever its age, because the console folds
 activation's state at construction and a failed activation must still show its reason and next step
 while its commit stays pending (ADR-system-004 D9).
 
+Two rows record a manager's permit (#1377, ADR-console-093): `PERMIT_JUDGED` (`permit.judged`, one per
+decided verdict on a merge, rerun or release command: payload `sprint_id`, `session_id`, `repo` (the
+project's slug, null when unknown), `verb`, `decision`, `reason` and `target`) and `PERMIT_LANDED`
+(`permit.landed`, one per merge the manager's session ran after the console allowed it: `sprint_id`,
+`session_id`, `repo`, `verb` `merge` and `target` `{"pr", "head"}`). Neither is in `KEPT_KINDS`, so
+retention removes them like any other row, and no fold reads them.
+
 One kind is kept in part (#1010): `SIGNIN_READING` (`signin.reading`) is not in `KEPT_KINDS`, but the
 retention pass leaves the newest row of each profile (by sequence number, the profile being the
 payload's `profile`) in place whatever its age, and also the newest row of each profile whose
@@ -250,6 +257,8 @@ SESSION_PROFILE = "session.profile"
 PICTURE_STORED = "picture.stored"
 ACTIVATION_STARTED = "activation.started"
 ACTIVATION_FINISHED = "activation.finished"
+PERMIT_JUDGED = "permit.judged"
+PERMIT_LANDED = "permit.landed"
 SHARING_TAILNET = "sharing.tailnet"
 SHARING_COLLEAGUE = "sharing.colleague"
 SHARING_REMOVED = "sharing.removed"
