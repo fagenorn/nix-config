@@ -1454,6 +1454,12 @@ STYLE_CHECKS += (
     # (#1313).
     _row("guest-tick-width", _GUEST_PAGES, ".guest-tick", "width", "min", "32", "20px"),
     _row("guest-tick-height", _GUEST_PAGES, ".guest-tick", "height", "min", "32", "20px"),
+    # A hidden owner control in the top bar stays hidden before the guest script removes it; the
+    # probe is the capacity button as the guest bytes carry it (#1313).
+    _row("guest-top-hidden-display", _GUEST_PAGES, ".top-in > [hidden]", "display", "equals", "none",
+         "inline-flex",
+         probe='<button type="button" class="cap btn-quiet btn-bare" hidden data-style-probe></button>',
+         host=".top-in"),
 )
 STYLE_PLACE = r"""((rows) => {
   let placed = 0;

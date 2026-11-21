@@ -547,7 +547,6 @@ class GuestPageTest(unittest.TestCase):
         for ident in ("spend-link", "sharing-open", "accounts", "sharing", "goal", "capacity"):
             (tag,) = re.findall(r'<[^>]*\bid="' + ident + r'"[^>]*>', markup)
             self.assertRegex(tag, r"\shidden(\s|>|$)", tag)
-        self.assertIn(".top-in > [hidden] { display: none; }", markup)
         snap = harness([START, {"frame": view([])}, SNAP], None)[-1]
         self.assertFalse(snap["spend_link"]["hidden"])
         self.assertFalse(snap["sharing_open"]["hidden"])

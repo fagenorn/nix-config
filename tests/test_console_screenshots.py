@@ -943,6 +943,10 @@ MOVED += (
     moved(_TICK, ".guest-tick", "width", BOTH, "guest-tick-width"),
     moved(_TICK, ".guest-tick", "height", BOTH, "guest-tick-height"),
 )
+GUEST_PAGE = "tests/test_console_guest_page.py"
+_GUEST_HIDE = (f"{GUEST_PAGE}::GuestPageTest::"
+               "test_the_guest_bytes_hide_the_owner_header_before_the_script")
+MOVED += (moved(_GUEST_HIDE, ".top-in > [hidden]", "display", BOTH, "guest-top-hidden-display"),)
 STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled",
     f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
@@ -954,6 +958,7 @@ STRIPPED: frozenset[str] = frozenset({
     "tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
     _TOP_BAR, _ARROW, _BREAKS, _BLOCKS, _HEADINGS, _DIGEST, _STRIP_THREE, _STRIP_480, _STRIP_DIM,
     _NOW_CLAMP, _PIPS, _WAIT, _PROJECT, _ANSWERED, _VIEWER_ARROWS, _VIEWER_BAR, _PRESSED,
+    _GUEST_HIDE,
 })
 RENAMED: dict[str, str] = {
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled":
@@ -979,7 +984,8 @@ SOURCE_READING = re.compile(
     r"style_rules|css_rules|css_decls|css_declared|page_css|media_block|margin_top_at|"
     r"fold_colour_faults|PAGE_TEXT|PAGE\.read_text|SPEND\.read_text|<style>|base_rules|rules_of|"
     r"controls_block|desk_block|outside_blocks|page_style|spend_style|short_rules|decls_of|"
-    r"kind_owned|self\.style\b")
+    r"kind_owned|self\.style\b|"
+    r"\{ ?-?[a-z]+(?:-[a-z]+)*: [^{};]+; ?\}")
 
 
 def uncovered(moved, rows) -> list[str]:
