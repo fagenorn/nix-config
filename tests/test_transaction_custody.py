@@ -65,10 +65,11 @@ class CustodyCase(unittest.TestCase):
         self.clock = FakeClock()
         self.store = TransactionStore(self.root, clock=self.clock)
 
-    def new(self, key="k", keys=KEYS):
+    def new(self, key="k", keys=KEYS, rerun_denied=()):
+        named = {"rerun_denied": rerun_denied} if rerun_denied else {}
         return self.store.create(key, SUBJECT, concurrency_keys=keys,
                                  proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY,
-                                 authority_class=AUTHORITY).transaction_id
+                                 authority_class=AUTHORITY, **named).transaction_id
 
     def acquire(self, transaction_id, executor="exec-a", path=PATH, ttl=TTL):
         return self.store.acquire(transaction_id, executor_id=executor, subject_path=path,

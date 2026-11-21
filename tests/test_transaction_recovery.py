@@ -481,6 +481,47 @@ class EdgeTest(RecoveryCase):
                                "is not_selected in recovering")
 
 
+class RerunDeniedRecoveryTest(RecoveryCase):
+    DENIED = ("rejected", "authorization_denied")
+    UNIT = {"unit": "start"}
+
+    def start_with(self, recovery, key="recovery", keys=KEYS):
+        self.transaction_id = self.store.create(
+            key, SUBJECT, concurrency_keys=keys, proof=PROOF, recovery=recovery,
+            authority_class=AUTHORITY, rerun_denied=("restore",)).transaction_id
+        self.custody = self.acquire(self.transaction_id)
+
+    def denied_in_recovering(self):
+        self.parked()
+        self.grant()
+        self.begin()
+        self.run_action("restore", self.UNIT, outcome="absent", results=[self.DENIED])
+
+    def test_a_named_action_stays_not_retryable_after_a_denial_in_recovering(self):
+        self.denied_in_recovering()
+        self.store.inspect_action(self.custody, name="restore", parameters=self.UNIT,
+                                  effect=FakeEffect(self.world))
+        error = self.assertRefusedUnchanged(
+            InvocationRefused, lambda: self.store.invoke_action(
+                self.custody, name="restore", parameters=self.UNIT,
+                effect=FakeEffect(self.world, during=self.fail)))
+        self.assertEqual(error.reason, "not_retryable")
+
+    def test_a_retry_after_a_denial_in_recovering_fails_to_load(self):
+        self.denied_in_recovering()
+        self.store.inspect_action(self.custody, name="restore", parameters=self.UNIT,
+                                  effect=FakeEffect(self.world))
+        document = self.state_doc(self.transaction_id)
+        identity = self.act("restore", **self.UNIT)
+        first = next(e for e in document["events"]
+                     if e["type"] == "invocation_intended" and e["action_id"] == identity)
+        document["events"].append({**first, "seq": len(document["events"]) + 1, "attempt": 2})
+        document["revision"] = len(document["events"])
+        self.assertRuleRefuses(
+            self.transaction_id, document,
+            "invocation_intended retry follows an attempt that is not retry-safe")
+
+
 class RecoveryVocabularyTest(unittest.TestCase):
     def test_the_refusal_reasons_are_closed(self):
         self.assertEqual(RECOVERY_REFUSAL_REASONS, (

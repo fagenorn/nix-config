@@ -1,6 +1,6 @@
 # ADR-release-011 — A two-branch release holds the integration land lock until it has merged
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-release-014
 - **Decided in:** issue 875 (design comment), amended by issue 901; applies ADR-claims-009, extends ADR-release-006, ADR-release-008 and ADR-release-010
 
 ## Context

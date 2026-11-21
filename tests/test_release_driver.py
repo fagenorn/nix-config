@@ -6,7 +6,7 @@ import re
 import unittest
 from unittest import mock
 
-from agent_tools.release import forge_adapter, release_driver, release_profile
+from agent_tools.release import forge_adapter, release_driver, release_lock, release_profile
 from agent_tools.canonical import telemetry_digest
 from agent_tools.release import transaction_core, transaction_storage
 from agent_tools.release.transaction_core import TransactionStore
@@ -332,6 +332,7 @@ class AbandonTest(DriverCase):
         driver = self.driver(registry={"github-forge": forge})
         _, result = rs.release(driver, rs.candidate())
         self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        self.assertNotIn("rerun_denied", driver.current()[1].events[0])
         self.assertEqual(driver.abandon()["state"], "abandoned")
         self.assertEqual(pushes(self.world), [])
         self.world.invoke_ready()
@@ -588,6 +589,7 @@ class MergePreviewTest(DriverCase):
         super().setUp()
         self.world.verification_ready(integration="dev")
         self.world.merge_observation_ready()
+        self.world.land_lock_ready()
 
     def two_branch(self):
         return self.driver(rs.project(self, profiles={"two-branch": support.merge_profile()},
@@ -641,9 +643,17 @@ class MergePreviewTest(DriverCase):
         driver = self.two_branch()
         rs.seed(driver, merge=support.MERGE)
         self.world.reset()
-        document = driver.preview(None)
+        seen = []
+
+        def recorder(*args):
+            seen.append(args)
+            return {"verdict": "already_held", "lock_sha": CANONICAL["commit"], "detail": None}
+
+        with mock.patch.object(release_lock, "call", side_effect=recorder):
+            document = driver.preview(None)
         self.assertEqual((document["mode"], document["candidate"]["merge"]), ("resume", support.MERGE))
         self.assertEqual(self.world.calls(), [])
+        self.assertEqual(seen, [("acquire", CANONICAL["slug"], "dev", CANONICAL["commit"])])
 
 
 class RailwayActivationWatchTest(DriverCase):
