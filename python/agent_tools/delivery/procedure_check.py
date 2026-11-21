@@ -13,7 +13,8 @@ distinct `run.<input>` paths: the one keep-alive command and where its
 arguments come from), `inputs` (distinct names matching `^[a-z][a-z0-9_]*$`),
 `stops` (stop name -> object with exactly `need`, one of `NEEDS`, and
 `reenter`, a step id) and `steps` (a non-empty list). A stop is never named
-`done` or like a step.
+`done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared
+verdict or reply enum value carries it.
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`),
 `kind` (one of `KINDS`), `in` (distinct paths, `<step id>.<member>` or
@@ -50,7 +51,8 @@ and `undeclared_verdicts` (a `command` step or `keep_alive` against
 `verdicts`-form declaration, is the first; a `null` declaration, or a
 `subcommands`-form declaration that lacks the named subcommand, is the
 second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply`
-(no such file in the procedure directory), `invalid_reply` (the reply schema
+(no such file in the procedure directory, a file that resolves outside it,
+or for `missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema
 is not a strict-JSON object with a `properties` object, a `required` list of
 strings that contains `outcome_from`, and an `enum` of distinct non-empty
 strings under `properties[outcome_from]`), `unknown_grader` (not in
@@ -75,7 +77,8 @@ entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
 of `step_graph` also produces `exhausted`, any step may map it, and a group
 member's `pass` entries are checked at the group) and `unbounded_cycle` (a
 cycle among steps with no `max_visits`, refused at its first step, or a step
-on a cycle whose `exhausted` target re-enters the loop). An outcome check whose
+on a cycle whose `exhausted` target re-enters the loop, or a loop of `exhausted`
+entries alone, which never ends once every bound is spent). An outcome check whose
 reference failed phase B is skipped for that step.
 
 Phase C, data flow (after the graph checks; in step order, the header's
@@ -197,15 +200,20 @@ class CommandDeclaration:
 
 
 def _strict_load(path: Path) -> object:
-    return json.loads(path.read_text(encoding="utf-8"),
-                      object_pairs_hook=reject_duplicate_keys,
-                      parse_constant=reject_nonfinite_literal)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"),
+                          object_pairs_hook=reject_duplicate_keys,
+                          parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise ValueError("the document is nested too deeply") from error
 
 
 def _verdict_list(value: object, where: str) -> tuple[str, ...]:
     if (not isinstance(value, list) or not all(isinstance(item, str) and item for item in value)
             or len(set(value)) != len(value)):
         raise DeclarationError(f"{where}: verdicts are distinct non-empty strings")
+    if EXHAUSTED in value:
+        raise DeclarationError(f"{where}: {EXHAUSTED!r} is reserved, not a verdict")
     return tuple(value)
 
 
@@ -219,7 +227,7 @@ def _declaration(key: str, value: object) -> CommandDeclaration | None:
         if not isinstance(listed, dict) or not listed:
             raise DeclarationError(f"{key}: subcommands is a non-empty object")
         for subcommand in listed:
-            if not NAME_RE.match(subcommand):
+            if not NAME_RE.fullmatch(subcommand):
                 raise DeclarationError(f"{key}: subcommand {subcommand!r} is not a name")
         return CommandDeclaration(None, {
             subcommand: _verdict_list(verdicts, f"{key} {subcommand}")
@@ -237,7 +245,7 @@ def load_commands(path: Path | None = None) -> dict[str, CommandDeclaration | No
         raise DeclarationError(f"{path.name} is not an object")
     commands: dict[str, CommandDeclaration | None] = {}
     for key, value in document.items():
-        if not NAME_RE.match(key):
+        if not NAME_RE.fullmatch(key):
             raise DeclarationError(f"{key!r} is not a command id")
         commands[key] = _declaration(key, value)
     return commands
@@ -281,7 +289,7 @@ def _paths(value: object, only_run: bool, found: _Findings, step: str | None,
         found.add("invalid_field", f"{where} is a list of distinct paths.", step)
         return
     for path in value:
-        match = PATH_RE.match(path)
+        match = PATH_RE.fullmatch(path)
         if match is None:
             found.add("invalid_field", f"{where} path {path!r} is not <step>.<member> or run.<input>.", step)
         elif only_run and match.group(1) != "run":
@@ -300,13 +308,13 @@ def _header(doc: dict, found: _Findings) -> None:
             _members(keep_alive, ("command", "in"), ("subcommand",), found, None, "keep_alive")
             for member in ("command", "subcommand"):
                 if member in keep_alive and not (
-                        isinstance(keep_alive[member], str) and NAME_RE.match(keep_alive[member])):
+                        isinstance(keep_alive[member], str) and NAME_RE.fullmatch(keep_alive[member])):
                     found.add("invalid_field", f"keep_alive {member} must match {NAME_RE.pattern}.")
             if "in" in keep_alive:
                 _paths(keep_alive["in"], True, found, None, "keep_alive in")
     if "inputs" in doc:
         inputs = doc["inputs"]
-        if not _distinct_strings(inputs) or not all(INPUT_RE.match(name) for name in inputs):
+        if not _distinct_strings(inputs) or not all(INPUT_RE.fullmatch(name) for name in inputs):
             found.add("invalid_field", f"inputs is a list of distinct names matching {INPUT_RE.pattern}.")
 
 
@@ -318,10 +326,10 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
         found.add("invalid_field", "stops must be an object.")
         return
     for name, stop in stops.items():
-        if not NAME_RE.match(name):
+        if not NAME_RE.fullmatch(name):
             found.add("invalid_field", f"stop name {name!r} must match {NAME_RE.pattern}.")
-        elif name == "done" or name in ids:
-            found.add("invalid_field", f"stop name {name!r} is `done` or a step id.")
+        elif name in ("done", EXHAUSTED) or name in ids:
+            found.add("invalid_field", f"stop name {name!r} is `done`, `{EXHAUSTED}` or a step id.")
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue
@@ -360,7 +368,7 @@ def _layout(doc: dict, steps: list) -> _Layout:
 
 
 def _file_name(value: object, suffix: str) -> bool:
-    return (isinstance(value, str) and FILE_RE.match(value) is not None
+    return (isinstance(value, str) and FILE_RE.fullmatch(value) is not None
             and value.endswith(suffix) and value != suffix)
 
 
@@ -369,9 +377,9 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
         found.add("invalid_field", detail, label)
 
     if kind == "command":
-        if "command" in item and not (isinstance(item["command"], str) and NAME_RE.match(item["command"])):
+        if "command" in item and not (isinstance(item["command"], str) and NAME_RE.fullmatch(item["command"])):
             invalid("command must be a command id.")
-        if "subcommand" in item and not (isinstance(item["subcommand"], str) and NAME_RE.match(item["subcommand"])):
+        if "subcommand" in item and not (isinstance(item["subcommand"], str) and NAME_RE.fullmatch(item["subcommand"])):
             invalid(f"subcommand must match {NAME_RE.pattern}.")
     elif kind == "agent":
         if "role" in item and not _is_text(item["role"]):
@@ -388,7 +396,7 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
     elif kind == "group":
         _group_members(item, label, found)
     elif kind == "call":
-        if "procedure" in item and not (isinstance(item["procedure"], str) and NAME_RE.match(item["procedure"])):
+        if "procedure" in item and not (isinstance(item["procedure"], str) and NAME_RE.fullmatch(item["procedure"])):
             invalid("procedure must be a procedure name.")
         if "each" in item and not (isinstance(item["each"], str) and item["each"] in _listed(item)):
             invalid("each must be one of the step's in paths.")
@@ -412,7 +420,7 @@ def _group_members(item: dict, label: str | None, found: _Findings) -> None:
             found.add("invalid_field", "a group member must be an object.", label)
             continue
         _members(member, ("step", "pass"), (), found, label, "a group member")
-        if "step" in member and not (isinstance(member["step"], str) and NAME_RE.match(member["step"])):
+        if "step" in member and not (isinstance(member["step"], str) and NAME_RE.fullmatch(member["step"])):
             found.add("invalid_field", "a group member step must be a step id.", label)
         passing = member.get("pass")
         if "pass" in member and not (_distinct_strings(passing) and passing):
@@ -432,7 +440,7 @@ def _step(item: dict, index: int, layout: _Layout, found: _Findings) -> None:
                  found, label, "a step")
         if "kind" in item:
             found.add("invalid_field", f"kind must be one of {', '.join(KINDS)}.", label)
-    if "id" in item and not (isinstance(item["id"], str) and NAME_RE.match(item["id"])
+    if "id" in item and not (isinstance(item["id"], str) and NAME_RE.fullmatch(item["id"])
                              and item["id"] not in ("run", "done")):
         found.add("invalid_field", f"id must match {NAME_RE.pattern} and not be run or done.", label)
     if "stage" in item:
@@ -530,6 +538,8 @@ def _reply_schema(path: Path, outcome_from: str) -> _Reply | str:
     if (not isinstance(enum, list) or not enum or not all(_is_text(v) for v in enum)
             or len(set(enum)) != len(enum)):
         return f"properties.{outcome_from} has no enum of distinct non-empty strings."
+    if EXHAUSTED in enum:
+        return f"properties.{outcome_from} enum names {EXHAUSTED!r}, which is reserved."
     return _Reply(frozenset(properties), frozenset(required), tuple(enum))
 
 
@@ -553,24 +563,39 @@ def _command_outcomes(reference: dict, commands: Mapping[str, CommandDeclaration
     return outcomes
 
 
+def _inside(directory: Path, name: str) -> Path | None:
+    """The named file when it is a file that resolves inside `directory`."""
+    path = directory / name
+    if not path.is_file():
+        return None
+    try:
+        path.resolve().relative_to(directory.resolve())
+    except ValueError:
+        return None
+    return path
+
+
 def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | str],
                       found: _Findings, label: str) -> StepResolved:
     if item["role"] not in ROLES:
         found.add("unknown_role", f"{item['role']!r} is not one of {', '.join(ROLES)}.", label)
     prompt = None
-    if not (directory / item["prompt"]).is_file():
-        found.add("missing_prompt", f"{item['prompt']!r} is not in the procedure directory.", label)
+    prompt_path = _inside(directory, item["prompt"])
+    if prompt_path is None:
+        found.add("missing_prompt", f"{item['prompt']!r} is not a file in the procedure directory.", label)
     else:
         try:
-            prompt = (directory / item["prompt"]).read_text(encoding="utf-8")
-        except (OSError, ValueError):
-            prompt = None
-    if not (directory / item["reply"]).is_file():
-        found.add("missing_reply", f"{item['reply']!r} is not in the procedure directory.", label)
+            prompt = prompt_path.read_text(encoding="utf-8")
+        except (OSError, ValueError) as error:
+            found.add("missing_prompt",
+                      " ".join(f"{item['prompt']!r} cannot be read as UTF-8 text: {error}".split()), label)
+    reply_path = _inside(directory, item["reply"])
+    if reply_path is None:
+        found.add("missing_reply", f"{item['reply']!r} is not a file in the procedure directory.", label)
         return StepResolved(prompt=prompt)
     key = f"{item['reply']}\0{item['outcome_from']}"
     if key not in replies:
-        replies[key] = _reply_schema(directory / item["reply"], item["outcome_from"])
+        replies[key] = _reply_schema(reply_path, item["outcome_from"])
     reply = replies[key]
     if isinstance(reply, str):
         found.add("invalid_reply", reply, label)
@@ -623,9 +648,12 @@ def check_references(name: str, doc: dict, directory: Path,
 def _load_procedure(path: Path) -> tuple[object | None, list[Refusal]]:
     """Read one file and run phase A on it."""
     name = path.stem
-    if not NAME_RE.match(name):
+    if not NAME_RE.fullmatch(name):
         return None, [Refusal(name, None, "invalid_field",
                               f"the procedure name must match {NAME_RE.pattern}.")]
+    if _inside(path.parent, path.name) is None:
+        return None, [Refusal(name, None, "unreadable_procedure",
+                              "the file does not resolve inside the procedure directory.")]
     try:
         doc = _strict_load(path)
     except (OSError, ValueError) as error:
@@ -841,25 +869,37 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
                       f"on maps {', '.join(map(repr, unknown))}, which the step cannot produce.", label)
 
 
+def _loop_heads(graph: Mapping[str, tuple[str, ...]], order: list[str]) -> list[str]:
+    """The first step, in `order`, of each loop of `graph`."""
+    looping = on_cycle(graph)
+    heads = []
+    for node in order:
+        loop = {other for other in looping if other == node
+                or (other in _reach(graph, node) and node in _reach(graph, other))}
+        if node in looping and node == next(other for other in order if other in loop):
+            heads.append(node)
+    return heads
+
+
 def _check_cycles(procedure: dict, found: _Findings) -> None:
     graph = step_graph(procedure)
     bounded = {item["id"] for item in procedure["steps"] if "max_visits" in item}
     unbounded = {node: tuple(t for t in targets if t not in bounded)
                  for node, targets in graph.items() if node not in bounded}
     refused: dict[str, str] = {}
-    looping = on_cycle(unbounded)
     order = [item["id"] for item in procedure["steps"]]
-    for node in order:
-        loop = {other for other in looping if other == node
-                or (other in _reach(unbounded, node) and node in _reach(unbounded, other))}
-        if node in looping and node == next(other for other in order if other in loop):
-            refused[node] = "it is on a cycle in which no step declares max_visits."
+    for node in _loop_heads(unbounded, order):
+        refused[node] = "it is on a cycle in which no step declares max_visits."
     for item in procedure["steps"]:
         label = item["id"]
         target = item["on"].get(EXHAUSTED) if "on" in item else None
         if (label in on_cycle(graph) and label not in refused and target in graph
                 and (target == label or label in _reach(graph, target))):
             refused[label] = f"its exhausted target {target!r} re-enters the loop it ends."
+    handed_over = {item["id"]: (item["on"][EXHAUSTED],) for item in procedure["steps"]
+                   if item["id"] in graph and item["on"].get(EXHAUSTED) in graph}
+    for node in _loop_heads(handed_over, order):
+        refused.setdefault(node, "its exhausted outcomes hand control around a loop that never ends.")
     for item in procedure["steps"]:
         if item["id"] in refused:
             found.add("unbounded_cycle", refused[item["id"]], item["id"])

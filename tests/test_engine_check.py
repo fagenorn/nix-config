@@ -187,6 +187,43 @@ def _append_to_review_prompt(directory: Path) -> None:
         prompt.write("\n{{draft.items}}\n")
 
 
+def _link_outside(name: str) -> Callable[[Path], None]:
+    """Replace one file of the procedure directory with a symlink to a copy outside it."""
+    def mutate(directory: Path) -> None:
+        outside = directory.parent / f"outside-{name}"
+        outside.write_bytes((directory / name).read_bytes())
+        (directory / name).unlink()
+        (directory / name).symlink_to(outside)
+    return mutate
+
+
+def _write_bytes(name: str, data: bytes) -> Callable[[Path], None]:
+    def mutate(directory: Path) -> None:
+        (directory / name).write_bytes(data)
+    return mutate
+
+
+def _two_exhausted_steps_hand_over(child: dict) -> None:
+    child["steps"] = [
+        {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
+         "in": ["run.item"], "max_visits": 1,
+         "on": {"ok": own, "failed": "done", "exhausted": other}}
+        for own, other in (("a", "b"), ("b", "a"))]
+    child["stops"]["child-stop"]["reenter"] = "a"
+
+
+def _exhausted_stop(toy: dict) -> None:
+    toy["stops"]["exhausted"] = {"need": "retry", "reenter": "draft"}
+
+
+def _entry_id_with_newline(toy: dict) -> None:
+    step(toy, "scope")["id"] = "scope\n"
+
+
+def _exhausted_reply_value(schema: dict) -> None:
+    schema["properties"]["status"]["enum"].append("exhausted")
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -301,6 +338,25 @@ CASES = [
          [("toy", "children", "unknown_member")]),
     Case("placeholder_outside_in", _append_to_review_prompt,
          [("toy", "review-a", "unknown_placeholder")]),
+    Case("prompt_symlinked_outside_the_directory", _link_outside("toy-draft.md"),
+         [("toy", "draft", "missing_prompt")]),
+    Case("reply_symlinked_outside_the_directory", _link_outside("toy-draft.reply.json"),
+         [("toy", "draft", "missing_reply")]),
+    Case("procedure_symlinked_outside_the_directory", _link_outside("toy-child.json"),
+         [("toy-child", None, "unreadable_procedure")]),
+    Case("prompt_that_is_not_utf8", _write_bytes("toy-draft.md", b"\xff\xfe"),
+         [("toy", "draft", "missing_prompt")]),
+    Case("procedure_nested_too_deeply", _write_bytes("toy-child.json", b"[" * 2000 + b"]" * 2000),
+         [("toy-child", None, "unreadable_procedure")]),
+    Case("exhausted_steps_hand_over_to_each_other",
+         editing("toy-child", _two_exhausted_steps_hand_over),
+         [("toy-child", "a", "unbounded_cycle")]),
+    Case("step_id_with_a_trailing_newline", editing("toy", _entry_id_with_newline),
+         [("toy", "scope\n", "invalid_field")]),
+    Case("stop_named_exhausted", editing("toy", _exhausted_stop),
+         [("toy", None, "invalid_field")]),
+    Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
+         [("toy", "draft", "invalid_reply")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -486,6 +542,8 @@ class DeclarationTest(unittest.TestCase):
                '{"x": {"verdicts": ["a", "a"]}}',
                '{"x": {"subcommands": {}}}',
                '{"x": {"argv": ["a"]}}',
+               '{"x": {"verdicts": ["ok", "exhausted"]}}',
+               '{"x": {"subcommands": {"a": ["exhausted"]}}}',
                '{"X": null}']
         with tempfile.TemporaryDirectory() as tmp:
             for index, text in enumerate(bad):
