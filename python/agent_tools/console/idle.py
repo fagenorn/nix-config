@@ -28,15 +28,18 @@ The first rule that matches wins:
 2. `has_work(state, waiting)` is false: `None`.
 3. `session` is None or its state is not in `IDLE_STATES` (`idle`, `limit`): `None`.
 4. `out`: `None`, forced or not.
-5. Unless `forced`: `now_ms - max(session.last_at, active_ms or 0)` is under `IDLE_AFTER_MS`:
+5. `sprints.stated_hold(state, now_ms)` is not None (the report states a `paused` reason, or a
+   `wait_until` that `now_ms` has not reached; #1380): `None`, forced or not, so neither the nudge
+   nor the no-progress card comes while the manager has said it is waiting or paused.
+6. Unless `forced`: `now_ms - max(session.last_at, active_ms or 0)` is under `IDLE_AFTER_MS`:
    `None`.
-6. Unless `forced`: `run_ms` is set and either under `RUN_STILL_MS` old or `run_wait` is true:
+7. Unless `forced`: `run_ms` is set and either under `RUN_STILL_MS` old or `run_wait` is true:
    `None`. A manager waiting on its own delivery is waiting on purpose; one step of a delivery can
    run long with no journal row, and a delivery waiting on CI, a commit, a release step or the land
-   lock waits however long that takes, so neither a nudge nor the give-up of rule 8 follows.
-7. Unless `forced`: `idle_nudged_at` is set and `NUDGE_EVERY_MS` have not passed since it: `None`.
-8. `idle_nudges >= LIMIT`: `GIVE_UP`.
-9. `NUDGE`.
+   lock waits however long that takes, so neither a nudge nor the give-up of rule 9 follows.
+8. Unless `forced`: `idle_nudged_at` is set and `NUDGE_EVERY_MS` have not passed since it: `None`.
+9. `idle_nudges >= LIMIT`: `GIVE_UP`.
+10. `NUDGE`.
 
 `last_moved(events, moved=None)` folds `delivery.seen` rows into a dict of session id to the largest
 `moved_ms` any row of that session carried. A row whose payload is not a dict, whose `session_id`
@@ -77,6 +80,8 @@ def next_step(state: SprintState, waiting: int, session: SessionState | None,
     if session is None or session.state not in IDLE_STATES:
         return None
     if out:
+        return None
+    if sprints.stated_hold(state, now_ms) is not None:
         return None
     if not forced:
         if now_ms - max(sprints._ms(session.last_at), active_ms or 0) < IDLE_AFTER_MS:

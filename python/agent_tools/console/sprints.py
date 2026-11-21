@@ -170,7 +170,11 @@ constants are `QUOTA` (a view state), `QUOTA_TEXT` (the manager's waiting text, 
 until`), `NO_PROGRESS_TEXT` (`the manager has stopped making progress on {title}`) and `NOT_STUCK`
 (the service's refusal of a continue with no item open). `parse_continue(body)` reads the owner's
 continue write, exactly `parse_withdraw`'s shape and refusals, and returns `(project_id,
-sprint_id)`. `idle` (which this module does not import) reads these fields.
+sprint_id)`. `idle` (which this module does not import) reads these fields. `stated_hold(state, now_ms)` (#1380) is
+the hold the report's own `paused` or `wait_until` puts on them: `(PAUSED, reason)` or `(WAIT_UNTIL,
+time)` while it stands, else `None`; a `wait_until` holds while `now_ms * 1000` is under its
+microseconds (`_wait_us`, exact, never the truncating `_ms`), so a fractional-millisecond deadline holds
+through its own millisecond.
 
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
 `(manager_state, manager_text, retry)`; its docstring holds the rules. `failed_start(state, listed,
@@ -189,16 +193,18 @@ reads the manager's body and returns `(sprint_id, secret, report, dry_run)`:
      "report": {"status": "<one line>", "phase": "running", "milestone": "<one line>",
                 "tracker_url": "https://<host>/<path>",
                 "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
-                "inbox": [12], "next": "<one line>", "pictures": [...]}}
+                "inbox": [12], "next": "<one line>", "pictures": [...],
+                "wait_until": "<ISO 8601 UTC time>", "paused": "<one line>"}}
 
 It accepts only a UTF-8 JSON object of exactly `sprint_id`, `secret` and `report` (plus an optional
 `"dry_run": true`, as a brief's), a valid sprint id, a string secret and a `report` object whose
-keys are a subset of `REPORT_MEMBERS` and `pictures`; anything
+keys are a subset of `REPORT_MEMBERS`, `REPORT_OPTIONAL` and `pictures`; anything
 else, a repeated key, a NaN literal or nesting too deep is `ValueError`. A missing member is not (the
 service answers it with the member). `checked_report(report)` checks the members in `REPORT_MEMBERS`
 order and refuses with `Refused("the report has no valid <member>")` the first that is missing or
 invalid; right after a valid `status` it refuses `STATUS_NUMBER` when the stripped status matches
-`#` and a digit. `status`, `milestone` and `next` are a one-line text (a string, non-empty after stripping,
+`#` and a digit. `checked_report(report, now_ms=None)` takes the clock in milliseconds of the service
+that judges the report; the fold calls it without one. `status`, `milestone` and `next` are a one-line text (a string, non-empty after stripping,
 no line break, at most `MAX_LINE_CHARS` code points after stripping); `phase` is one of
 `REPORT_PHASES`; `tracker_url` is a string of at most `MAX_LINE_CHARS` code points starting with
 `https://` whose every character is printable and not whitespace; `issues` is a list of at most
@@ -210,11 +216,25 @@ given, plus `"pictures"` on the same rule as a brief's: after the seven members 
 `checked_pictures("report", report["pictures"])` checks a `pictures` list, and the checked members
 are returned only when it is non-empty. `pictures` is not one of `REPORT_MEMBERS`.
 
+A report may state a wait or a pause (#1380), the two `REPORT_OPTIONAL` members, checked after the
+seven members and `STATUS_NUMBER` and before `pictures`, in this order. `wait_until` is a string
+`WAIT_TIME` matches: `YYYY-MM-DDTHH:MM`, optional `:SS` with any number of fractional digits, and a
+UTC zone (`Z`, `+00:00`, `+0000` or `+00`); naive, any other offset (a fractional one included), a
+number, `null` or a word is `REPORT_MEMBER`. Only when `now_ms` is given (an int or a `Fraction`, so
+the service passes its clock without truncating it): a time at or before the clock is `WAIT_PAST` and
+one more than `MAX_WAIT_HOURS` hours (24) ahead is `WAIT_TOO_FAR`, both compared exactly (`_wait_us`,
+a `Fraction` of microseconds: no float, never `_ms`, which truncates to the millisecond). `paused` is a one-line text as `status` is (else `REPORT_MEMBER`),
+stripped, and `PAUSED_NUMBER` when it matches `#` and a digit. A report that states both is
+`WAIT_AND_PAUSE`. The returned dict carries `"wait_until"` (as `isoformat()` of the UTC time rounded up to the
+microsecond, so `Z` reads `+00:00` and a fractional part is kept to the microsecond) and `"paused"` (stripped) only when given, so a report
+without either is exactly the dict above.
+
 The fold keeps each open sprint's `Report(at, status, phase, milestone, tracker_url, issues, inbox,
-next_step, pictures)`. `sprint.reported` changes an open sprint only when its brief is approved
+next_step, pictures, wait_until, paused)`. `sprint.reported` changes an open sprint only when its brief is approved
 (`STARTING`) and `checked_report` accepts the dict `report` without its `pictures` key; the report
 is then replaced (`at` is the event's `at`, `issues` a tuple of `(issue, stage)`, `inbox` a tuple,
-`next_step` the `next` member, `pictures` the read-back below) and the sprint's observations are
+`next_step` the `next` member, `pictures` the read-back below, `wait_until` and `paused` the checked
+members or None; the fold checks without a clock, so a stored wait whose time has passed folds) and the sprint's observations are
 cleared; its movement (`moved_ms`) is kept (#1109). Every other report row changes nothing.
 
 Movement and observations (#1109): a `delivery.seen` row carries no sprint id and is read as the
@@ -238,7 +258,8 @@ plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
-A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
+A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER`, `BALL_NOBODY`, or, while its report
+states a wait or a pause that holds (#1380), `BALL_WAITING` or `BALL_PAUSED`, worded by
 `BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants (among them the wait sentences
 `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` (#1110) and `NOW_LOCK_TEXT` (#1184)) or
 the stage phrase (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
@@ -725,6 +746,7 @@ The module reads no clock and no environment; only the secret helpers touch the 
 
 import fnmatch
 import json
+import math
 import os
 import posixpath
 import re
@@ -732,7 +754,8 @@ import secrets
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
@@ -785,6 +808,8 @@ QUOTA_TEXT = MANAGER_WAITING_TEXT
 NO_PROGRESS_TEXT = "the manager has stopped making progress on {title}"
 NOT_STUCK = "this sprint's manager is not waiting for you"
 REPORT_MEMBERS = ("status", "phase", "milestone", "tracker_url", "issues", "inbox", "next")
+REPORT_OPTIONAL = ("wait_until", "paused")
+MAX_WAIT_HOURS = 24
 REPORT_PHASES = ("running", "closing", "done")
 LANDED = "landed"
 HELD = "held"
@@ -837,8 +862,11 @@ STOPPED_TEXT = "stopped by you"
 BALL_MANAGER = "manager"
 BALL_OWNER = "owner"
 BALL_NOBODY = "nobody"
+BALL_WAITING = "waiting"
+BALL_PAUSED = "paused"
 BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
-             BALL_NOBODY: "nothing running, may be stuck"}
+             BALL_NOBODY: "nothing running, may be stuck",
+             BALL_WAITING: "waiting", BALL_PAUSED: "paused"}
 NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
 NOW_ANSWER_TEXT = "waiting for your answer in the manager's terminal"
 NOW_PERMISSION_TEXT = "waiting for your permission in the manager's terminal"
@@ -853,6 +881,8 @@ NOW_STALLED_TEXT = "waiting for you: its managers keep failing"
 NOW_FAILED_START_TEXT = "waiting for you: the manager failed to start"
 NOW_NO_PROGRESS_TEXT = "waiting for you: the manager has stopped making progress"
 NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
+NOW_WAIT_TEXT = "waiting until"
+NOW_PAUSED_TEXT = "paused: {reason}"
 NOW_UNREAD_TEXT = "waiting for the manager to read your message"
 NOW_STARTING_TEXT = "starting the work"
 NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
@@ -875,6 +905,12 @@ SECRET_REFUSED = "secret refused"
 MISSING_PART = "the brief has no {part}"
 REPORT_MEMBER = "the report has no valid {member}"
 STATUS_NUMBER = "the status line names an issue number"
+WAIT_PAST = "the report's wait_until is not in the future"
+WAIT_TOO_FAR = f"the report's wait_until is more than {MAX_WAIT_HOURS} hours ahead"
+PAUSED = "paused"
+WAIT_UNTIL = "wait_until"
+PAUSED_NUMBER = "the pause reason names an issue number"
+WAIT_AND_PAUSE = "a report states a wait_until or a paused reason, not both"
 CLOSING_MEMBER = "the closing report has no valid {member}"
 SUMMARY_NUMBER = "the summary's first line names an issue number"
 NOT_ENDED = "an issue of this sprint is neither landed nor dropped"
@@ -1072,6 +1108,8 @@ class Report:
     inbox: tuple[int, ...]
     next_step: str
     pictures: tuple["QuestionPicture", ...] = ()
+    wait_until: str | None = None
+    paused: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1339,7 +1377,7 @@ def parse_brief_request(body: bytes) -> tuple[str, str, dict, bool]:
 
 
 def parse_report_request(body: bytes) -> tuple[str, str, dict, bool]:
-    return _manager_request(body, "report", REPORT_MEMBERS)
+    return _manager_request(body, "report", (*REPORT_MEMBERS, *REPORT_OPTIONAL))
 
 
 ROUND_KEYS = ("questions", "blocker")
@@ -1627,18 +1665,81 @@ def _valid_report_member(member: str, value: object) -> bool:
         _number(item) for item in value)
 
 
-def checked_report(report: dict) -> dict:
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+EPOCH_NAIVE = datetime(1970, 1, 1)
+
+
+WAIT_TIME = re.compile(
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2})[T ]([0-9]{2}:[0-9]{2})(?::([0-9]{2})(?:[.,]([0-9]+))?)?"
+    r"(?:Z|z|[+-]00(?::?00)?)")
+
+
+def _wait_us(value: object) -> Fraction | None:
+    """The exact microseconds since the epoch a `wait_until` states, or None when it is not one.
+
+    A date, a time to the minute, optional seconds with any number of fractional digits, and a UTC
+    zone (`Z`, `+00:00`, `+0000` or `+00`): nothing else, so an offset that is not zero, a
+    fractional offset and a time with no zone are not times. Integer and `Fraction` arithmetic
+    only: no float and no truncation to the millisecond or the microsecond.
+    """
+    if not isinstance(value, str) or len(value) > MAX_LINE_CHARS:
+        return None
+    found = WAIT_TIME.fullmatch(value)
+    if found is None:
+        return None
+    day, minute, seconds, fraction = found.groups()
+    try:
+        whole = datetime.fromisoformat(f"{day}T{minute}:{seconds or '00'}")
+    except ValueError:
+        return None
+    return ((whole - EPOCH_NAIVE) // timedelta(microseconds=1)
+            + Fraction(int(fraction or 0), 10 ** len(fraction or "")) * 1_000_000)
+
+
+def _wait_text(us: Fraction) -> str:
+    """The `isoformat()` of a wait's UTC time rounded up to the microsecond.
+
+    The hold compares whole milliseconds with the time, and a whole number is under the time
+    exactly when it is under the time rounded up, so the rounding changes no release.
+    """
+    return (EPOCH + timedelta(microseconds=math.ceil(us))).isoformat()
+
+
+def checked_report(report: dict, now_ms: int | Fraction | None = None) -> dict:
     for member in REPORT_MEMBERS:
         if not _valid_report_member(member, report.get(member)):
             raise Refused(REPORT_MEMBER.format(member=member))
         if member == "status" and re.search(r"#\d", report["status"].strip()):
             raise Refused(STATUS_NUMBER)
+    wait = None
+    if "wait_until" in report:
+        wait = _wait_us(report["wait_until"])
+        if wait is None:
+            raise Refused(REPORT_MEMBER.format(member="wait_until"))
+        if now_ms is not None:
+            if wait <= now_ms * 1000:
+                raise Refused(WAIT_PAST)
+            if wait > (now_ms + MAX_WAIT_HOURS * 3_600_000) * 1000:
+                raise Refused(WAIT_TOO_FAR)
+    paused = None
+    if "paused" in report:
+        if not _line(report["paused"]):
+            raise Refused(REPORT_MEMBER.format(member="paused"))
+        paused = report["paused"].strip()
+        if re.search(r"#\d", paused):
+            raise Refused(PAUSED_NUMBER)
+    if wait is not None and paused is not None:
+        raise Refused(WAIT_AND_PAUSE)
     pictures = checked_pictures("report", report["pictures"]) if "pictures" in report else []
     checked = {"status": report["status"].strip(), "phase": report["phase"],
                "milestone": report["milestone"].strip(), "tracker_url": report["tracker_url"],
                "issues": sorted(({"issue": row["issue"], "stage": row["stage"]}
                                  for row in report["issues"]), key=lambda row: row["issue"]),
                "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
+    if wait is not None:
+        checked["wait_until"] = _wait_text(wait)
+    if paused is not None:
+        checked["paused"] = paused
     if pictures:
         checked["pictures"] = pictures
     return checked
@@ -2916,7 +3017,8 @@ def _folded_report(state: SprintState, event: Event) -> SprintState:
                                  checked["milestone"], checked["tracker_url"],
                                  tuple((row["issue"], row["stage"]) for row in checked["issues"]),
                                  tuple(checked["inbox"]), checked["next"],
-                                 _read_back_pictures("report", report)))
+                                 _read_back_pictures("report", report),
+                                 checked.get("wait_until"), checked.get("paused")))
 
 
 def _folded_stop_request(state: SprintState, event: Event) -> SprintState:
@@ -3083,6 +3185,27 @@ def merge_refused(state: SprintState) -> str | None:
     if state.report is None or state.closing is not None:
         return None
     return refused_reason(state.report.status)
+
+
+def stated_hold(state: SprintState, now_ms: int | None) -> tuple[str, str] | None:
+    """The wait or pause the sprint's report states and that still holds, else None (#1380).
+
+    `(PAUSED, report.paused)` while the report carries a `paused` reason, `(WAIT_UNTIL,
+    report.wait_until)` while it carries a `wait_until` that `now_ms` has not reached (`now_ms`
+    None counts as not reached). The deadline is compared in microseconds (`_wait_us`), never
+    through `_ms`, which truncates: a deadline with a fractional millisecond holds through the
+    millisecond it falls in and releases on the next, and a whole-millisecond deadline releases at
+    `now_ms` equal to it. A sprint without a report holds nothing.
+    """
+    report = state.report
+    if report is None:
+        return None
+    if report.paused is not None:
+        return PAUSED, report.paused
+    if report.wait_until is not None and (
+            now_ms is None or now_ms * 1000 < _wait_us(report.wait_until)):
+        return WAIT_UNTIL, report.wait_until
+    return None
 
 
 def ended_at(state: SprintState) -> str | None:
