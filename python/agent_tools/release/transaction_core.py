@@ -68,7 +68,7 @@ from agent_tools.release.transaction_history import (
     Custody, Transaction, append_events, bound_path, edge_allowed, fenced_id_violation,
     format_at, is_id, is_subject_path, json_object_violation, key_set_violation,
     owner_result_event, parked_since, reap_events, require_custody_shape, require_texts,
-    snapshot, span_issued, validate_state)
+    rerun_names_violation, snapshot, span_issued, validate_state)
 from agent_tools.release.transaction_invocation import (
     EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
     action_violation, effect_request, fold_actions, inspect_result_violation,
@@ -143,9 +143,9 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
 
 
 def _require_creatable(root: Path, creation_key: Any, subject: Any, concurrency_keys: Any,
-                       authority_class: Any) -> None:
+                       authority_class: Any, rerun_denied: Any = ()) -> None:
     """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v6 document,
-    `authority_class` last (#209 D11)."""
+    `authority_class` then `rerun_denied` last (#209 D11; ADR-release-015)."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -162,6 +162,9 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any, concurrency_
     if type(authority_class) is not str or not authority_class:
         raise StateInvalid(f"{where}: authority_class {authority_class!r} is not a non-empty "
                            f"string")
+    violation = rerun_names_violation(rerun_denied)
+    if violation is not None:
+        raise StateInvalid(f"{where}: rerun_denied {violation}")
 
 
 def _capture_result(result: Any, validator: Callable[[Any], str | None], *,
@@ -343,7 +346,8 @@ class TransactionStore:
         return _read_index(self.root, creation_key)
 
     def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
-               proof: dict, recovery: dict, authority_class: str) -> Transaction:
+               proof: dict, recovery: dict, authority_class: str,
+               rerun_denied: Collection[str] = ()) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names.
 
         The concurrency key set is fixed here, stored sorted, and compared with the
@@ -358,32 +362,40 @@ class TransactionStore:
         `authority_class`; a same-key create whose subject, key set, proof plan digest,
         recovery plan digest or authority class differs is a `CreationConflict` (#207 D2,
         D3; #208 D2, D5, D6; #209 D11).
+
+        `rerun_denied` names the actions whose guard-refused attempt may run again on a later
+        invoke (ADR-release-015). It must be distinct non-empty strings, else `StateInvalid`
+        before any lock. It is stored sorted on the `created` event only when it holds a name,
+        and a same-key create whose sorted names differ (absent reads as none) is a
+        `CreationConflict` naming `rerun_denied`.
         """
         return self._create(creation_key, subject, concurrency_keys, proof, recovery, None,
-                            authority_class)
+                            authority_class, rerun_denied)
 
     def _create(self, creation_key: str, subject: dict, concurrency_keys: Collection[str],
                 proof: dict, recovery: dict, recovers: str | None,
-                authority_class: str) -> Transaction:
+                authority_class: str, rerun_denied: Collection[str] = ()) -> Transaction:
         """`create`, with the `created` event's `recovers` back-link set to `recovers`, which
         a same-key create must match too (#208 D11)."""
-        _require_creatable(self.root, creation_key, subject, concurrency_keys, authority_class)
+        _require_creatable(self.root, creation_key, subject, concurrency_keys, authority_class,
+                           rerun_denied)
         where = f"{self.root}: creation_key {creation_key!r}"
         compiled_recovery = compile_recovery(recovery, where=where)
         compiled = compile_proof(proof, where=where)
         bound = bind_recovery(compiled_recovery, compiled, where=where)
         keys = sorted(concurrency_keys)
+        names = sorted(rerun_denied)
         at = format_at(self._now())
         descriptor = open_lock(self.root / "creation.lock")
         try:
             return self._create_locked(creation_key, subject, keys, compiled, bound, recovers,
-                                       authority_class, at)
+                                       authority_class, at, names)
         finally:
             os.close(descriptor)
 
     def _create_locked(self, creation_key: str, subject: dict, keys: list[str],
                        compiled: dict, bound: dict, recovers: str | None,
-                       authority_class: str, at: str) -> Transaction:
+                       authority_class: str, at: str, names: list[str]) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
@@ -420,7 +432,9 @@ class TransactionStore:
                      != document["events"][0]["recovery_plan_digest"]),
                     ("recovers", document["events"][0]["recovers"] != recovers),
                     ("authority class",
-                     document["events"][0]["authority_class"] != authority_class)) if differ]
+                     document["events"][0]["authority_class"] != authority_class),
+                    ("rerun_denied",
+                     document["events"][0].get("rerun_denied", []) != names)) if differ]
                 if differs:
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "
@@ -433,7 +447,8 @@ class TransactionStore:
                 "events": [{"seq": 1, "type": "created", "at": at,
                             "proof_plan_digest": telemetry_digest(plan),
                             "recovery_plan_digest": telemetry_digest(recovery_plan),
-                            "recovers": recovers, "authority_class": authority_class}],
+                            "recovers": recovers, "authority_class": authority_class,
+                            **({"rerun_denied": names} if names else {})}],
                 "concurrency_keys": keys, "custody": None, "proof_plan": plan,
                 "recovery_plan": recovery_plan,
             }
@@ -769,7 +784,9 @@ class TransactionStore:
         An action whose latest inspection reads `satisfied` returns the unchanged snapshot
         with no write and no call. Otherwise the admission rules refuse, in order,
         `inspection_required`, `not_absent`, `not_retryable`, `budget_exhausted` and
-        `window_closed`, each before any write or call. An admitted attempt `n` appends
+        `window_closed`, each before any write or call; an action the `created` event names in
+        `rerun_denied` skips `not_retryable` and `window_closed` after a guard refusal
+        (`rejected`, `authorization_denied`) only (ADR-release-015). An admitted attempt `n` appends
         `invocation_intended` stamped with the held fence, and the lock is released.
         `effect.invoke` and then `effect.inspect` run with no lock held, on one request
         whose `attempt` is `n`; a result outside its closed shape is `EffectResultInvalid`
@@ -793,7 +810,8 @@ class TransactionStore:
             if satisfied(entry):
                 return snapshot(prior)
             fence = prior["custody"]["fence"]
-            reason = refusal(entry, held_fence=fence, now_ms=now)
+            reason = refusal(entry, held_fence=fence, now_ms=now,
+                             rerun_denied=name in prior["events"][0].get("rerun_denied", ()))
             if reason is not None:
                 raise refused_error(transaction_id, identity, reason)
             attempt = entry.attempts + 1

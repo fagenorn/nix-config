@@ -521,6 +521,37 @@ class LockAndSchemaGuardTest(AdvanceCase):
                                   recovery=EMPTY_RECOVERY, authority_class=AUTHORITY)
             self.assertEqual(self.tree(), ["creation.lock"])
 
+    def test_a_malformed_rerun_denied_is_refused_before_the_creation_lock(self):
+        with open(self.root / "creation.lock", "a+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for value in ("merge", ["merge", "merge"], [""], [1], None):
+                with self.subTest(rerun_denied=value):
+                    with self.assertRaises(StateInvalid) as caught:
+                        self.store.create("k", SUBJECT, concurrency_keys=KEYS,
+                                          proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY,
+                                          authority_class=AUTHORITY, rerun_denied=value)
+                    self.assertIn("rerun_denied", str(caught.exception))
+            self.assertEqual(self.tree(), ["creation.lock"])
+
+    def test_rerun_denied_is_stored_sorted_and_compared_on_a_same_key_create(self):
+        def create(key, **named):
+            return self.store.create(key, SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF,
+                                     recovery=EMPTY_RECOVERY, authority_class=AUTHORITY,
+                                     **named)
+
+        first = create("a", rerun_denied=("tag", "merge"))
+        self.assertEqual(first.events[0]["rerun_denied"], ["merge", "tag"])
+        self.assertEqual(create("a", rerun_denied=("merge", "tag")).transaction_id,
+                         first.transaction_id)
+        with self.assertRaises(CreationConflict) as caught:
+            create("a", rerun_denied=("merge",))
+        self.assertIn("rerun_denied", str(caught.exception))
+        plain = create("b")
+        self.assertNotIn("rerun_denied", plain.events[0])
+        with self.assertRaises(CreationConflict) as caught:
+            create("b", rerun_denied=("merge",))
+        self.assertIn("rerun_denied", str(caught.exception))
+
     def test_a_schema_invalid_state_refuses_advance_before_any_write(self):
         transaction_id = self.reach("k", ())
         self.write(transaction_id, {**self.document(transaction_id), "extra": 1})

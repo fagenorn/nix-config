@@ -157,6 +157,12 @@ A resumed release whose pull request is no longer open at the candidate commit (
 does not refuse: its commit is fixed, so every run would refuse alike. It parks
 `attention_required` with reason `<merge>: release pull request no longer at <commit>`, the
 lock is released as on any `attention`, and the release can be abandoned.
+The merge of a profile with a sync is named at creation, so a merge parked after the guard
+refused it is invoked again by the next run, which asks the guard again, past the core's retry
+window and within its attempt budget (ADR-release-015). After the third refusal the release
+parks, the next run parks with `merge: refused budget_exhausted`, and abandoning it is a
+separate `abandon` call. Any other refusal of an invoke parks with the core's reason as
+`<name>: refused <reason>`, which is `not_retryable` for every other non-retry-safe class.
 `acquired` or `moved` refuses `land_lock_lost` (the lock was lost and is now taken again, so a
 landing may have moved the head), `held_by` or `lost_to` refuses `land_lock_held`, and `error`
 refuses `land_lock_unavailable`; each detail names the verdict and the repair: wait for the
@@ -767,7 +773,8 @@ class Driver:
                 creation_key(self.project.project_id, self.profile_id, plan.ordinal),
                 inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
                 proof=inputs["proof"], recovery=inputs["recovery"],
-                authority_class=AUTHORITY_CLASS)
+                authority_class=AUTHORITY_CLASS,
+                rerun_denied=() if self.sync is None else (self.sync["action"],))
         except (CreationConflict, LeaseUnavailable, TransactionBusy) as error:
             raise Refusal("release_busy", str(error)) from error
 

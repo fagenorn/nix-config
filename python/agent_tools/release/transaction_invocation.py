@@ -12,8 +12,13 @@ Admission is decided here too: `satisfied` says an invoke is a no-op, and `refus
 home of the four admission rules, in order: a fresh `absent` inspection under the held fence
 (`inspection_required`, `not_absent`), a retry-safe predecessor (`not_retryable`), at most
 `MAX_ATTEMPTS` attempts (`budget_exhausted`) and a retry within `RETRY_WINDOW_MS` of the first
-retryable failure, inclusive (`window_closed`). `refused_error` is the one construction path
-for `InvocationRefused` and raises `ValueError` for a reason outside `REFUSAL_REASONS`.
+retryable failure, inclusive (`window_closed`). An action the `created` event names in
+`rerun_denied` also runs again after a guard refusal (`denied`: `rejected`,
+`authorization_denied`, which applied nothing): that predecessor passes `not_retryable` and is
+not closed by `window_closed`, while `budget_exhausted` still bounds it; every other
+non-retry-safe class stays `not_retryable` (ADR-release-015). `refused_error` is the one
+construction path for `InvocationRefused` and raises `ValueError` for a reason outside
+`REFUSAL_REASONS`.
 
 Two predicates over the fold tie the actions to custody and the lifecycle (#206 D9, D20):
 `observed` is true while some action is `open` or last read `in_progress`, which keeps a
@@ -27,7 +32,7 @@ name (#209 D21). The module reads no file, lock or clock; the caller passes the 
 
 import copy
 import dataclasses
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
@@ -42,6 +47,7 @@ ERROR_CLASSES = ("transient_transport", "provider_throttled", "provider_unavaila
                  "invalid_input", "authorization_denied", "precondition_failed",
                  "unsupported_operation")
 RETRY_SAFE_CLASSES = frozenset(ERROR_CLASSES[:3])
+DENIED_CLASS = "authorization_denied"
 MAX_ATTEMPTS = 3
 RETRY_WINDOW_MS = 900_000
 EFFECT_STATES = ("publishing", "activating", "recovering")
@@ -146,10 +152,11 @@ def inspect_result_violation(result: Any) -> str | None:
 
 def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
                            transaction_id: str, keys: list[str], open_fence: dict | None,
-                           state: str) -> str | None:
+                           state: str, rerun_denied: Collection[str] = ()) -> str | None:
     """The rule one envelope-checked action event breaks against the actions folded before
     it, the open span's fence (None outside a span) and the folded `state`, or None
-    (#206 D2, D14, D17)."""
+    (#206 D2, D14, D17). `rerun_denied` holds the names the `created` event lets run again
+    after a guard refusal (ADR-release-015)."""
     event_type = event["type"]
     identity = event["action_id"]
     if type(identity) is not str:
@@ -193,7 +200,8 @@ def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
         if (entry.open or inspection is None or inspection["outcome"] != "absent"
                 or inspection["fence"] != event["fence"]):
             return "invocation_intended does not follow an absent inspection under its fence"
-        if attempt > 1 and not retry_safe(entry):
+        if attempt > 1 and not (retry_safe(entry)
+                                or (denied(entry) and entry.name in rerun_denied)):
             return "invocation_intended retry follows an attempt that is not retry-safe"
         return None
     if event_type == "invocation_returned":
@@ -253,26 +261,38 @@ def retry_safe(entry: ActionFold) -> bool:
                                 and returned["error_class"] in RETRY_SAFE_CLASSES)
 
 
+def denied(entry: ActionFold) -> bool:
+    """Whether the latest attempt returned a guard refusal: `rejected` with the class
+    `authorization_denied`, which applied nothing (ADR-release-015)."""
+    returned = entry.returned
+    return (returned is not None and returned["result"] == "rejected"
+            and returned["error_class"] == DENIED_CLASS)
+
+
 def satisfied(entry: ActionFold | None) -> bool:
     """Whether the action exists, has no open attempt and last read `satisfied` (#206 D7)."""
     return (entry is not None and not entry.open and entry.inspection is not None
             and entry.inspection["outcome"] == "satisfied")
 
 
-def refusal(entry: ActionFold | None, *, held_fence: dict, now_ms: int) -> str | None:
+def refusal(entry: ActionFold | None, *, held_fence: dict, now_ms: int,
+            rerun_denied: bool = False) -> str | None:
     """The reason the next attempt is not admitted at `now_ms` under `held_fence`, or None:
-    rules 1-4 in order (#206 D5, D6)."""
+    rules 1-4 in order (#206 D5, D6). `rerun_denied` says the `created` event names this
+    action, so a guard-refused predecessor skips `not_retryable` and `window_closed`
+    (ADR-release-015)."""
     inspection = None if entry is None or entry.open else entry.inspection
     if inspection is None or inspection["fence"] != held_fence:
         return "inspection_required"
     if inspection["outcome"] != "absent":
         return "not_absent"
     attempt = entry.attempts + 1
-    if attempt > 1 and not retry_safe(entry):
+    rerun = rerun_denied and attempt > 1 and denied(entry)
+    if attempt > 1 and not (rerun or retry_safe(entry)):
         return "not_retryable"
     if attempt > MAX_ATTEMPTS:
         return "budget_exhausted"
-    if attempt > 1 and now_ms - entry.first_failure_ms > RETRY_WINDOW_MS:
+    if attempt > 1 and not rerun and now_ms - entry.first_failure_ms > RETRY_WINDOW_MS:
         return "window_closed"
     return None
 

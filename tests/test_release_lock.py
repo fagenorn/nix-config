@@ -12,6 +12,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.release import release_driver, release_lock
 from . import release_driver_support as rs
 from . import release_test_support as support
+from . import forge_world
 from .forge_world import CANONICAL, LAND_LOCK, SYNC_ROWS, ForgeWorld
 
 SLUG, COMMIT = CANONICAL["slug"], CANONICAL["commit"]
@@ -385,3 +386,84 @@ class SingleBranchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+GUARD = "claude-bash-lifecycle-guard"
+
+
+class TagDenied(rs.StatefulForge):
+    """A forge whose guard starts refusing right after the merge landed."""
+
+    def land(self, request):
+        super().land(request)
+        if request["operation"] == "pr_merge":
+            self.world.respond(GUARD, [], exit=2, stderr="lifecycle guard: refused")
+
+
+class DeniedMergeTest(LockCase):
+    def deny(self):
+        self.world.respond(GUARD, [], exit=2, stderr="lifecycle guard: refused")
+
+    def admit(self):
+        self.world.respond(GUARD, [], exit=0)
+
+    def again(self, driver):
+        self.clock.advance(16_200_000)
+        tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+        return driver.run(None, tokens)
+
+    def merge_asks(self):
+        return [c for c in self.world.calls()
+                if c["tool"] == GUARD and "pr merge" in c["stdin"]]
+
+    def action(self, driver, name):
+        return next(a for a in driver.status()["release"]["actions"] if a["name"] == name)
+
+    def test_a_merge_the_guard_refused_runs_again_and_merges_once_the_guard_admits_it(self):
+        self.deny()
+        driver = self.driver()
+        prefix = "merge: absent after rejected authorization_denied: guard:"
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        self.assertTrue(driver.status()["release"]["reason"].startswith(prefix))
+        self.assertEqual((self.merges(), result["lock"]), ([], RELEASED))
+        self.assertEqual(driver.current()[1].events[0]["rerun_denied"], ["merge"])
+        result = self.again(driver)
+        self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        self.assertTrue(driver.status()["release"]["reason"].startswith(prefix))
+        self.assertEqual(self.action(driver, "merge")["attempts"], 2)
+        self.admit()
+        result = self.again(driver)
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(len(self.merges()), 1)
+        self.assertEqual(self.action(driver, "merge")["attempts"], 3)
+        self.assertEqual(result["lock"], RELEASED)
+        self.assertEqual(len(self.merge_asks()), 3)
+
+    def test_a_merge_refused_for_another_class_still_parks_not_retryable(self):
+        floor = forge_world.FLOOR_PROTECTION
+        self.world.merge_ready(protection={**floor, "enforce_admins": {"enabled": False}})
+        driver = self.driver()
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "attention")
+        self.assertEqual(driver.status()["release"]["reason"],
+                         "merge: absent after rejected precondition_failed: "
+                         "protection_floor_unmet: enforce_admins")
+        self.assertEqual(self.merges(), [])
+        self.world.merge_ready()
+        result = self.again(driver)
+        self.assertEqual(result["next"], "attention")
+        self.assertEqual(driver.status()["release"]["reason"], "merge: refused not_retryable")
+        self.assertEqual(self.merges(), [])
+
+    def test_a_guard_refusal_of_an_action_other_than_the_merge_stays_not_retryable(self):
+        driver = self.driver(TagDenied(self.world))
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "attention")
+        self.assertTrue(driver.status()["release"]["reason"].startswith(
+            "tag: absent after rejected authorization_denied"))
+        self.assertEqual(self.action(driver, "merge")["status"], "satisfied")
+        self.admit()
+        result = self.again(driver)
+        self.assertEqual(result["next"], "attention")
+        self.assertEqual(driver.status()["release"]["reason"], "tag: refused not_retryable")

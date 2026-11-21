@@ -332,6 +332,7 @@ class AbandonTest(DriverCase):
         driver = self.driver(registry={"github-forge": forge})
         _, result = rs.release(driver, rs.candidate())
         self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        self.assertNotIn("rerun_denied", driver.current()[1].events[0])
         self.assertEqual(driver.abandon()["state"], "abandoned")
         self.assertEqual(pushes(self.world), [])
         self.world.invoke_ready()
