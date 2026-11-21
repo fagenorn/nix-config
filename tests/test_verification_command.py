@@ -534,22 +534,28 @@ class StubLogTest(JustCase):
                          [(checkout, "build --flag")])
 
 
+def git_in(repo: Path, *args: str) -> str:
+    """Run `git -C repo ...` with no `GIT_*` variable inherited, so the repository acted on is
+    `repo` whatever the caller exported."""
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "-c", "commit.gpgsign=false", *args],
+        check=True, capture_output=True, text=True, env=git_env()).stdout
+
+
 class ScratchCheckoutTest(JustCase):
     def test_repository_selection_variables_do_not_reach_the_callers_checkout(self):
         caller = self.tmp()
-        git = ["git", "-C", str(caller), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-               "-c", "commit.gpgsign=false"]
-        subprocess.run([*git, "init", "-q"], check=True, capture_output=True)
+        git_in(caller, "init", "-q")
         (caller / "f").write_text("one\n", "utf-8")
-        subprocess.run([*git, "add", "f"], check=True, capture_output=True)
-        subprocess.run([*git, "commit", "-qm", "base"], check=True, capture_output=True)
+        git_in(caller, "add", "f")
+        git_in(caller, "commit", "-qm", "base")
         (caller / "f").write_text("two\n", "utf-8")
-        subprocess.run([*git, "add", "f"], check=True, capture_output=True)
+        git_in(caller, "add", "f")
         (caller / "f").write_text("three\n", "utf-8")
 
         def state():
-            return [subprocess.run([*git, *args], check=True, capture_output=True,
-                                   text=True).stdout
+            return [git_in(caller, *args)
                     for args in (["rev-parse", "HEAD"], ["diff", "--cached"], ["diff"])]
 
         before = state()
@@ -561,10 +567,33 @@ class ScratchCheckoutTest(JustCase):
         self.addCleanup(shutil.rmtree, scratch, True)
         self.assertEqual(state(), before)
         self.assertTrue((scratch / ".git").is_dir())
-        self.assertEqual(
-            subprocess.run(["git", "-C", str(scratch), "log", "--format=%s"], check=True,
-                           capture_output=True, text=True, env=git_env()).stdout.split(),
-            ["scratch"])
+        self.assertEqual(git_in(scratch, "log", "--format=%s").split(), ["scratch"])
+
+
+class ScratchCheckoutUnderGitDirTest(JustCase):
+    def test_the_scratch_checkout_test_leaves_a_repository_named_by_git_dir_alone(self):
+        # A hook or wrapper exports GIT_DIR with no GIT_WORK_TREE; the test's own git
+        # calls must not stage, commit or read in that repository.
+        caller = self.tmp()
+        git_in(caller, "init", "-q")
+        (caller / "g").write_text("one\n", "utf-8")
+        git_in(caller, "add", "g")
+        git_in(caller, "commit", "-qm", "base")
+        (caller / "g").write_text("two\n", "utf-8")
+        git_in(caller, "add", "g")
+        before = [git_in(caller, *args) for args in (
+            ["rev-parse", "HEAD"], ["diff", "--cached", "--name-status"], ["status", "--short"])]
+        env = {**os.environ, "GIT_DIR": str(caller / ".git"), "PYTHONPATH": str(REPO_ROOT / "python")}
+        env.pop("GIT_WORK_TREE", None)
+        env.pop("GIT_INDEX_FILE", None)
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest", "tests.test_verification_command."
+             "ScratchCheckoutTest.test_repository_selection_variables_do_not_reach_the_callers_checkout"],
+            cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=600)
+        after = [git_in(caller, *args) for args in (
+            ["rev-parse", "HEAD"], ["diff", "--cached", "--name-status"], ["status", "--short"])]
+        self.assertEqual(after, before)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class CiParserTest(JustCase):
