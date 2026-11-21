@@ -1,6 +1,6 @@
 # ADR-console-074 — The console records a look approval itself when the owner approves a look card
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-092
 - **Decided in:** #1260
 
 ## Context
