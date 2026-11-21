@@ -1563,6 +1563,64 @@ class SmallPlanCodexSkipTest(unittest.TestCase):
         self.assertLess(names.index("amend"), names.index("plan-codex"))
         self.assertFalse([l for l in out["logs"] if "codex plan review: skipped" in l])
 
+    OPEN = {"close-out": {"issue_state": "OPEN"}}
+
+    def kept_small(self, revised_tasks):
+        """A two-task plan skips Codex, the rules revise gives it revised_tasks, and the rules re-review stops the run on a rule finding."""
+        rule = PlanRulesTest.RULE_FINDING
+        plan = with_criteria(HUMAN, tasks=tasks(2))
+        first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": with_criteria(HUMAN, tasks=revised_tasks),
+                                "plan-review": rule, "plan-rules-review": rule})
+        self.assertEqual(first["stage"], "plan-review")
+        self.assertTrue(first["cont"]["codex_plan_skipped"])
+        return first["cont"]
+
+    def test_a_rules_only_resume_runs_the_codex_plan_review_a_revise_made_due(self):
+        grown = with_criteria(HUMAN, tasks=tasks(2) + [dict(tasks(3)[2], risk="security")])
+        for name, revised in (("fourth", tasks(4)), ("security", grown["tasks"])):
+            with self.subTest(name):
+                cont = self.kept_small(revised)
+                result, calls = run(args=dict(ARGS, cont=cont), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=revised)}, patch=self.OPEN)
+                names = labels(calls)
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(names.count("plan-codex"), 1)
+                self.assertLess(names.index("plan-rules-review"), names.index("plan-codex"))
+                self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_a_rules_only_resume_of_a_plan_that_stays_small_runs_no_codex_plan_review(self):
+        cont = self.kept_small(tasks(3))
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(3))}, patch=self.OPEN)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("plan-codex", labels(calls))
+
+    def test_a_rules_only_resume_with_an_amend_runs_the_codex_plan_review_it_skipped(self):
+        cont = self.kept_small(tasks(2))
+        cont = dict(cont, setup=dict(cont["setup"], plan_dir="/g"))
+        replies = {"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(2))}
+        stopped, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]),
+                             replies=dict(replies, **{"plan-codex": self.UNAVAILABLE}))
+        names = labels(calls)
+        self.assertEqual((stopped["stage"], stopped["step"]), ("codex-unavailable", "plan"))
+        self.assertLess(names.index("amend"), names.index("plan-codex"))
+        self.assertNotIn("impl-1", names)
+        self.assertFalse(stopped["cont"]["plan_reviewed"])
+        # The stop keeps the review owed: a resume without the amend, on a plan that reads small again, still runs it.
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=self.OPEN)
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(names.count("plan-codex"), 1)
+        self.assertLess(names.index("plan-codex"), names.index("impl-1"))
+
+    def test_a_late_codex_finding_on_a_rules_only_resume_stops_at_plan_review(self):
+        cont = self.kept_small(tasks(4))
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "bad"}]}
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            replies={"plan-rules-revise": with_criteria(HUMAN, tasks=tasks(4)), "plan-codex": codex})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([f["summary"] for f in result["findings"]], ["bad"])
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        self.assertNotIn("impl-1", labels(calls))
+
     def test_a_revise_that_leaves_the_plan_small_runs_no_codex_plan_review(self):
         out = run_out(replies={"plan": self.small(2), "plan-review": self.FINDING, "plan-revise": self.grown(tasks(3))})
         self.assertEqual(out["result"]["stage"], "done")

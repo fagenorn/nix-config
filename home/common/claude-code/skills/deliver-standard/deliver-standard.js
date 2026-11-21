@@ -656,6 +656,10 @@ let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
 // A plan-review stop keeps the revised plan and the findings left on it; a resume runs one rules-only revise on it.
 const KEPT = CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules) ? CONT.plan_findings : null
 let planFindingsKept = KEPT ? { rules: KEPT.rules, findings: Array.isArray(KEPT.findings) ? KEPT.findings : [], rounds: Number.isInteger(KEPT.rounds) ? KEPT.rounds : 0, ...(Array.isArray(KEPT.noted) && KEPT.noted.length ? { noted: KEPT.noted } : {}) } : null
+// #1372: the Codex plan review was skipped for this unreviewed plan's size (codexSkipped), or is owed on it after a stop (codexOwed); both are
+// kept in cont while the plan is unreviewed, so a resume that marks it reviewed without the full plan review still checks the skip.
+let codexSkipped = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.codex_plan_skipped === true)
+let codexOwed = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.codex_plan_owed === true)
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete) || CLAIM_TAKEN
 // A partial task's edits stay claimed through any stop until that task is done.
@@ -695,6 +699,8 @@ const dropPlan = (left = []) => {
   priorFindings = priorOf(left.concat(planFindingsKept ? planFindingsKept.rules.concat(planFindingsKept.findings) : [], priorFindings))
   plan = null
   planFindingsKept = null
+  codexSkipped = false
+  codexOwed = false
 }
 const CARRIED_AT_START = carried
 // #940: fix waves that do not converge. A fix-wave-review stop that leaves findings open once the waves spent across runs (cont.fix_waves
@@ -773,7 +779,7 @@ const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog
 let lookWhy = null
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(plan && !planReviewed && codexSkipped ? { codex_plan_skipped: true } : {}), ...(plan && !planReviewed && codexOwed ? { codex_plan_owed: true } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 // A look marker the setup could not read is neither marked nor unmarked: a fix answer and a merged replay stop here, before any hold.
@@ -1620,6 +1626,24 @@ if (BLOCKED_TASK && newDecision !== null) {
   verified = null
   finalReviewed = null
 }
+const codexPlanCall = () => call(`${CTX}
+Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${JSON.stringify(plan.acceptance)}.${SPEC}
+Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. ${CX_USE} plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; ${CX_WAIT} Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. ${CX_NONE}
+${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX })
+// #1372: the skip was decided on the plan before a revise or an amend; a plan that is no longer small gets the Codex plan review it skipped,
+// before it is marked reviewed. Owed from the first call, so a stop of it keeps the review due on a resume. null = nothing owed or it passed.
+const lateCodexPlan = async () => {
+  if (!(REVIEW_PLAN && codexSkipped && !codexSkippable(plan))) return null
+  log('codex plan review: the plan is no longer small, running it on the plan as it stands')
+  codexOwed = true
+  const late = await codexPlanCall()
+  if (!late || !late.available) return codexStop('plan', late)
+  codexSkipped = false
+  codexOwed = false
+  const lateFindings = findingsOf(late).map(f => ({ ...f, source: 'codex' }))
+  log(`codex plan review: ${lateFindings.length} blocking findings`)
+  return lateFindings.length ? reviewStop([], lateFindings, 1) : null
+}
 if (RESUME_RULES) {
   const { rules, findings, rounds } = planFindingsKept
   const noted = notedOn(planFindingsKept.noted, rules)
@@ -1628,14 +1652,14 @@ if (RESUME_RULES) {
   if (r.silent) return reviewStop(r.before, findings, r.rounds, SILENT(), r.was)
   if (r.rules.length) return reviewStop(r.rules, findings, r.rounds, r.extra, r.noted)
   planFindingsKept = null
+  const lateStop = await lateCodexPlan()
+  if (lateStop) return lateStop
   planReviewed = true
 }
 if (!planReviewed) {
-  const codexPlanCall = () => call(`${CTX}
-Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${JSON.stringify(plan.acceptance)}.${SPEC}
-Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. ${CX_USE} plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; ${CX_WAIT} Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. ${CX_NONE}
-${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX })
-  const PLAN_CODEX = REVIEW_PLAN && !codexSkippable(plan) ? REVIEW_PLAN : null
+  const PLAN_CODEX = REVIEW_PLAN && (!codexSkippable(plan) || codexOwed) ? REVIEW_PLAN : null
+  codexOwed = false
+  codexSkipped = !!REVIEW_PLAN && !PLAN_CODEX
   if (REVIEW_PLAN && !PLAN_CODEX) log(`codex plan review: skipped, a small plan (${plan.tasks.length} of at most ${SMALL_PLAN_TASKS} tasks, none of risk security)`)
   const planCodexP = PLAN_CODEX ? codexPlanCall() : Promise.resolve(null)
   const ruleFindings = planRules(plan)
@@ -1656,15 +1680,8 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion again in other words is not a change; an empty list when you changed none): ${JSON.stringify(planFindings)}`, REVISE_PACE), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const unsettled = await settleRevise(revised, planFindings, reviewedFacts, reviewedCriteria)
     if (unsettled) return unsettled
-    // #1372: the skip was decided on the plan before the revise; a revised plan that is no longer small gets the Codex plan review it skipped.
-    if (REVIEW_PLAN && !PLAN_CODEX && !codexSkippable(plan)) {
-      log('codex plan review: the revised plan is no longer small, running it on the revised plan')
-      const late = await codexPlanCall()
-      if (!late || !late.available) return codexStop('plan', late)
-      const lateFindings = findingsOf(late).map(f => ({ ...f, source: 'codex' }))
-      log(`codex plan review: ${lateFindings.length} blocking findings`)
-      if (lateFindings.length) return reviewStop([], lateFindings, 1)
-    }
+    const lateStop = await lateCodexPlan()
+    if (lateStop) return lateStop
   }
   planFindingsKept = null
   planReviewed = true
