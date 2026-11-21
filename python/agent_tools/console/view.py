@@ -336,7 +336,9 @@ is none. Its entry is
 (#1263); a colleague never answers it. `consequential` is present, and true, on a question the
 manager marked consequential and on every look card (a `look`, or a before and an after picture);
 the page opens such a card with no option picked (#1265, ADR-console-092). Absent, the card opens
-with its recommendation picked, as before.
+with its recommendation picked, as before. On a consequential card the question's `recommended` and
+`recommended_index` are null and `badge_index` (an `int`, present only there) names the option that
+carries the Recommended badge, so a page still open from before the mark preselects nothing.
 
 `look` (#1260) is null for a question that carries no look. For one that does, `approve_index` is the index
 among the logged options of the option that approves the head (the page never starts that option picked, so
@@ -2086,6 +2088,11 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
     if (question.consequential or question.look is not None
             or is_look(picture.pair for picture in question.pictures)):
         entry["consequential"] = True
+        # A page from before the mark preselects `recommended_index`, or `recommended` by text:
+        # the badge travels only in `badge_index`, so such a page picks nothing (#1265).
+        shown = entry["questions"][0]
+        shown["badge_index"] = shown["recommended_index"]
+        shown["recommended"] = shown["recommended_index"] = None
     return entry
 
 

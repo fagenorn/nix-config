@@ -5213,8 +5213,11 @@ class PageConsequentialTest(unittest.TestCase):
 
     @staticmethod
     def asked() -> dict:
-        return question(0, "May the release run now?", ["Run it now", "Wait for Monday"],
+        card = question(0, "May the release run now?", ["Run it now", "Wait for Monday"],
                         "Run it now", consequential=True)
+        # The view's consequential shape: the recommendation only in `badge_index` (#1265).
+        card["questions"][0].update(recommended=None, recommended_index=None, badge_index=0)
+        return card
 
     def test_a_consequential_question_opens_with_nothing_picked_and_enter_sends_nothing(self) -> None:
         (opened, after) = render([

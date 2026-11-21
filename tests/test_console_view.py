@@ -1867,6 +1867,33 @@ class QuestionViewTest(unittest.TestCase):
                 else:
                     self.assertNotIn("consequential", entries[0])
 
+    def test_a_consequential_card_hides_its_recommendation_from_a_page_that_preselects_it(self):
+        # A page from before the mark preselects `recommended_index`, or `recommended` by text,
+        # so a consequential card names the badge only in `badge_index` (#1265).
+        before = QuestionPicture("a" * 64, "the page before", "before")
+        after = QuestionPicture("b" * 64, "the page after", "after")
+        for name, change in (("marked", {"consequential": True}),
+                             ("look", {"look": QuestionLook(12, 34, "a" * 40, "files")}),
+                             ("pair", {"pictures": (before, after)})):
+            with self.subTest(name):
+                state_ = asked(started(A))
+                first, *rest = state_.questions
+                state_ = dataclasses.replace(
+                    state_, questions=(dataclasses.replace(first, **change), *rest))
+                (found, *_) = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+                (shown,) = found["questions"]
+                self.assertIsNone(shown["recommended"])
+                self.assertIsNone(shown["recommended_index"])
+                self.assertEqual(shown["badge_index"], first.options.index(first.recommended))
+
+    def test_an_ordinary_card_keeps_its_recommendation_and_names_no_badge_field(self):
+        state_ = asked(started(A))
+        (found, *_) = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+        (shown,) = found["questions"]
+        self.assertIsNotNone(shown["recommended"])
+        self.assertIsNotNone(shown["recommended_index"])
+        self.assertNotIn("badge_index", shown)
+
     def test_questions_follow_briefs_and_lead_tracker_items(self):
         b = "b" * 16
         records = {("p00", "k1"): InboxRecord(

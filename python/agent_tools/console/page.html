@@ -3937,6 +3937,12 @@ function recommendedIndex(q) {
   if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
   return q.options.indexOf(q.recommended);
 }
+// The option that carries the Recommended badge: a consequential card names it in badge_index and leaves recommended null (#1265).
+function badgeIndex(q) {
+  const i = q.badge_index;
+  if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
+  return recommendedIndex(q);
+}
 function soleOption(item) {
   return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
 }
@@ -4687,7 +4693,7 @@ function answerBox(item, state, lead) {
       if (!guestDoor) button.appendChild(el("kbd", "", String(oi + 1)));
       button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
       button.appendChild(pathWords(el("span", "ot"), option === q.chosen ? "chosen: " + option : option));
-      if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
+      if (oi === badgeIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
         choose(state, qi, isQuestion(item) && state.picks[qi] === oi ? null : oi);
