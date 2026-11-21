@@ -4061,7 +4061,12 @@ function begin(item, state, pending) {
   return true;
 }
 function roundBody(item, answer) {
-  return { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
+  const body = { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
+  const release = releaseOf(item);
+  if (release !== null) {
+    body.release = { commit: release.commit, version: release.version, title: release.title, confirmations: release.confirmations };
+  }
+  return body;
 }
 // A plan's answer replans it and replaces every one of its questions, so one answer at a time stands for a plan until a frame shows its outcome.
 function planBusy(item, state) {

@@ -21,8 +21,11 @@ redirection, an expansion, a glob, a comment, a tilde, a brace, a newline outsid
 
 `mentions(command)` is True when, after deleting every quote and backslash and splitting on
 whitespace and on `;|&()<>$` and the backtick, some word whose basename is `gh` is followed by `pr
-merge` or `run rerun`, or some word whose basename is `release` is followed by `transaction run`
-or `transaction abandon`. It reads through every spelling the shell would accept for those words.
+merge` or `run rerun`, or some word whose basename is `release` or `release.py`, or the module
+`agent_tools.release.release` (alone or glued to `-m`), is followed by `transaction run` or
+`transaction abandon`. It reads through every spelling the shell would accept for those words. Only
+the `release` executable's own form is ever granted: the module and script spellings of the same
+verb are `DENY` with `ALONE`, never undecided.
 
 `judge` returns a `Verdict`. A command that `mentions` no granted verb gets `Verdict(None, "", None, {})`
 and no reader is called. A command that does is `ALLOW` only in a granted shape and `DENY` otherwise,
@@ -33,17 +36,21 @@ never None. The checks run in this order, the first that applies deciding:
   `--repo` (or `-R`) value other than the slug is `OTHER_REPO`; words other than the exact shape are
   `NOT_GRANTED`. Then `forge.read_pr` is read: a head repository other than the slug, a branch that
   carries no issue under `grant.branch_pattern`, or an issue not in `grant.issues` is `NOT_OWN_PR`,
-  except that an issue in `grant.others` is `SHARED_ISSUE`. Else `ALLOW` with target `{"pr", "head"}`.
+  except that an issue in `grant.others` is `SHARED_ISSUE`; a pull request whose head differs from
+  the command's `--match-head-commit` is `STALE_HEAD`. Else `ALLOW` with target `{"pr", "head"}`.
 - Rerun: another `--repo` is `OTHER_REPO`; other words are `NOT_GRANTED`. Then `read_run`: an event
   other than `pull_request` is `DEPLOY_RERUN`; another repository or an issue not own is
   `NOT_OWN_RUN` (`SHARED_ISSUE` for an issue in `others`); no pull request among the run's whose
   `read_pr` has the slug as repository and the run's branch is `NOT_OWN_RUN`; that pull request's
-  head other than the run's head is `STALE_RUN`; no job named by `read_required(slug, base)` is
+  head other than the run's head is `STALE_RUN`; no job that the rerun would run (every job of the
+  run's latest attempt, all pages, whose conclusion is not `success`: a failed rerun also runs the
+  skipped dependents of a failed job) or one not named by `read_required(slug, base)` is
   `NOT_CHECK_RUN`. Else `ALLOW` with target `{"run", "pr"}`.
 - Release: `abandon`, or `--dispose` or `--reference`, is `OWNERS_RELEASE_STEP`. A flag outside the
   six above, a flag with no value, or a repeated flag other than `--confirm` is `NOT_GRANTED`; none
-  of the four candidate flags is `RESUME`; some but not all is `NOT_GRANTED`; a `--repo-root` whose
-  real path differs from `grant.root`'s is `WRONG_ROOT`; no `--confirm` is `NOT_GRANTED`; no
+  of the four candidate flags is `RESUME`; some but not all is `NOT_GRANTED`; a `--repo-root` that is
+  not an absolute path (the console's working directory is not the manager's) or whose real path
+  differs from `grant.root`'s is `WRONG_ROOT`; no `--confirm` is `NOT_GRANTED`; no
   `ReleaseApproval` with the same commit, version and title and exactly the `--confirm` values as
   its confirmations is `NO_CARD`. Else `ALLOW` with target `{"commit", "version"}`.
 - A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`.
@@ -62,7 +69,9 @@ for a call not already cached, so the console judges again without a second forg
 
 Readers (`read_pr`, `read_run`, `read_required`) read the forge once and raise `ForgeUnreadable` with
 a fixed sentence for a failed read or a missing or malformed member; no raw forge text reaches a
-reason. `merge_binding(root)` is the project contract's `bindings.vcs.merge` `strategy` and
+reason. `read_run`'s `rerun` is the names of the jobs a failed-job rerun would run, read across every
+page of the run's jobs. `read_required` names only the checks a GitHub Actions job can satisfy: a
+check bound to another app is left out, even when the legacy `contexts` list repeats its name. `merge_binding(root)` is the project contract's `bindings.vcs.merge` `strategy` and
 `delete_branch`, `(None, False)` on any failure.
 """
 import os
@@ -86,17 +95,19 @@ SHARED_ISSUE = "Issue {issue} belongs to another open sprint."
 DEPLOY_RERUN = "Run {run} is a {event} run, not a pull request check run, so it is not rerun."
 NOT_OWN_RUN = "Run {run} is not a check run of this sprint's own pull request."
 STALE_RUN = "Run {run} is not at the head of its pull request."
-NOT_CHECK_RUN = "Run {run} has no job of a required check."
+NOT_CHECK_RUN = "Run {run} would rerun a job that is not a required check."
+STALE_HEAD = "Pull request {pr} is not at the head the merge names."
 NO_CARD = "No release card the owner approved names commit {commit} at version {version} with this preview."
 RESUME = "A release resume names no release, so no approved card covers it."
 OWNERS_RELEASE_STEP = "Abandoning or disposing of a release is the owner's step."
-WRONG_ROOT = "The release runs in another repository root than this project's."
+WRONG_ROOT = "The release runs in another repository root than this project's, or names it by a relative path."
 FORGE_UNREADABLE = "The forge could not be read to judge this command: {reason}"
 NOT_ACTIVE = "This sprint is not active."
 NOT_MANAGER = "Only the sprint's manager session may run this command."
 MOVED = "The sprint changed while the command was judged."
 
 MERGE, RERUN, RELEASE = "merge", "rerun", "release"
+ACTIONS_APP, ANY_APP = 15368, -1
 
 _PLAIN = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
 _NUMBER = re.compile(r"[1-9][0-9]*")
@@ -231,17 +242,34 @@ def read_pr(slug: str, number: int) -> Mapping:
             "base": _member(base, "ref", str, what)}
 
 
+def _pages(path: str, what: str) -> list:
+    try:
+        return forge_api.api_pages(path)
+    except forge_api.ForgeError:
+        raise ForgeUnreadable(f"{what} could not be read") from None
+
+
 def read_run(slug: str, run_id: int) -> Mapping:
     what = f"run {run_id}"
     run = _get(f"repos/{slug}/actions/runs/{run_id}", what)
-    jobs = _get(f"repos/{slug}/actions/runs/{run_id}/jobs", what)
+    pages = _pages(f"repos/{slug}/actions/runs/{run_id}/jobs?per_page=100", what)
+    if not pages:
+        raise ForgeUnreadable(f"{what} has no readable jobs")
     prs = _member(run, "pull_requests", list, what)
     numbers = [_member(pull, "number", int, what) for pull in prs]
-    names = [_member(job, "name", str, what) for job in _member(jobs, "jobs", list, what)]
+    rerun = []
+    for page in pages:
+        for job in _member(page, "jobs", list, what):
+            name = _member(job, "name", str, what)
+            conclusion = job.get("conclusion")
+            if conclusion is not None and not isinstance(conclusion, str):
+                raise ForgeUnreadable(f"{what} has no readable conclusion")
+            if conclusion != "success":
+                rerun.append(name)
     return {"event": _member(run, "event", str, what),
             "branch": _member(run, "head_branch", str, what),
             "repo": _member(_member(run, "head_repository", dict, what), "full_name", str, what),
-            "head": _member(run, "head_sha", str, what), "prs": numbers, "jobs": names}
+            "head": _member(run, "head_sha", str, what), "prs": numbers, "rerun": rerun}
 
 
 def read_required(slug: str, base: str) -> frozenset[str]:
@@ -249,11 +277,20 @@ def read_required(slug: str, base: str) -> frozenset[str]:
     payload = _get(f"repos/{slug}/branches/{base}/protection/required_status_checks", what)
     checks = _member(payload, "checks", list, what)
     contexts = _member(payload, "contexts", list, what)
-    found = {_member(entry, "context", str, what) for entry in checks}
+    found, bound = set(), set()
+    for entry in checks:
+        context = _member(entry, "context", str, what)
+        app = entry.get("app_id")
+        if app is not None and (not isinstance(app, int) or isinstance(app, bool)):
+            raise ForgeUnreadable(f"{what} has no readable app_id")
+        bound.add(context)
+        if app in (None, ANY_APP, ACTIONS_APP):
+            found.add(context)
     for context in contexts:
         if not isinstance(context, str):
             raise ForgeUnreadable(f"{what} has no readable contexts")
-        found.add(context)
+        if context not in bound:
+            found.add(context)
     return frozenset(found)
 
 
@@ -301,17 +338,20 @@ def words(command: str) -> list[str] | None:
 
 
 _SPLIT = re.compile(r"[\s;|&()<>$`]+")
+_RELEASE_PROGRAMS = ("release", "release.py")
+_RELEASE_MODULE = "agent_tools.release.release"
 
 
 def _verb_of(command: str) -> str | None:
     parts = _SPLIT.split(re.sub(r"['\"\\]", "", command))
     for index, part in enumerate(parts):
         name, rest = os.path.basename(part), parts[index + 1:index + 3]
+        module = part[2:] if part.startswith("-m") else part
         if name == "gh" and rest == ["pr", "merge"]:
             return MERGE
         if name == "gh" and rest == ["run", "rerun"]:
             return RERUN
-        if name == "release" and rest in (["transaction", "run"], ["transaction", "abandon"]):
+        if (name in _RELEASE_PROGRAMS or module == _RELEASE_MODULE) and rest in (["transaction", "run"], ["transaction", "abandon"]):
             return RELEASE
     return None
 
@@ -383,7 +423,11 @@ def _judge_merge(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
     if pull["repo"] != grant.slug:
         return _deny(MERGE, NOT_OWN_PR.format(pr=target["pr"]))
     refusal = _own_issue(grant, pull["branch"], NOT_OWN_PR.format(pr=target["pr"]))
-    return _with_verb(refusal, MERGE) if refusal else _allow(MERGE, target)
+    if refusal:
+        return _with_verb(refusal, MERGE)
+    if pull["head"] != target["head"]:
+        return _deny(MERGE, STALE_HEAD.format(pr=target["pr"]))
+    return _allow(MERGE, target)
 
 
 def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
@@ -411,7 +455,7 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         return _deny(RERUN, not_own)
     if pull["head"] != run["head"]:
         return _deny(RERUN, STALE_RUN.format(run=run_id))
-    if not set(run["jobs"]) & forge.read_required(slug, pull["base"]):
+    if not run["rerun"] or not set(run["rerun"]) <= forge.read_required(slug, pull["base"]):
         return _deny(RERUN, NOT_CHECK_RUN.format(run=run_id))
     return _allow(RERUN, {"run": run_id, "pr": number})
 
@@ -445,7 +489,8 @@ def _judge_release(parts: list[str], grant: Grant) -> Verdict:
         return _deny(RELEASE, RESUME)
     if len(named) != len(_CANDIDATE_FLAGS) or "--repo-root" not in flags:
         return _deny(RELEASE, NOT_GRANTED)
-    if os.path.realpath(flags["--repo-root"][0]) != os.path.realpath(grant.root):
+    root = flags["--repo-root"][0]
+    if not os.path.isabs(root) or os.path.realpath(root) != os.path.realpath(grant.root):
         return _deny(RELEASE, WRONG_ROOT)
     if "--confirm" not in flags:
         return _deny(RELEASE, NOT_GRANTED)

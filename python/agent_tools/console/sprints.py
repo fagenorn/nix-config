@@ -225,7 +225,9 @@ report, and a report never clears it. Observations are narrower: only when the s
 and the run moved after it (`moved_ms` greater than the report's `at` in milliseconds), each of the
 run's stages for an issue in the report's `issues` becomes that issue's `Observed(issue, moved_ms,
 session_id, run_id, stage)` when `(moved_ms, session_id, run_id)` is at least the kept one's.
-`delivery.gone` changes nothing: the last stage and movement outlive the run.
+`delivery.gone` changes nothing: the last stage and movement outlive the run. A run of the sprint's
+manager session also adds each of its issues to `SprintState.delivered` (#1377), which only grows, so
+the record that the manager delivered an issue outlives the run and its cleanup.
 `SprintState.observed` is ordered by issue. Folding `a + b` equals folding `b` onto the fold of `a`.
 
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
@@ -293,8 +295,8 @@ text)`; `parse_inbox_request(body)` reads the manager's `{"sprint_id", "secret"}
 "secret", "message": <int of at least 1>, "reply": <str>}` and returns `(sprint_id, secret,
 message_id, reply)`. All three are as strict as `parse_reply` (`ValueError` otherwise).
 `parse_permit_request(body)` reads the manager's `{"sprint_id", "secret", "phase": "judge" | "landed",
-"session_id": <1 to 128 characters>, "command": <at most 8192 characters>}` and returns the frozen
-`PermitRequest` of those five members, `ValueError` for any other body (#1377).
+"session_id": <1 to 128 characters>, "tool_use_id": <1 to 128 characters>, "command": <at most 8192
+characters>}` and returns the frozen `PermitRequest` of those six members, `ValueError` for any other body (#1377).
 `inbox_entry(message)` is the wire entry `{"id", "kind", "version", "text", "at"}`, and for a
 `MESSAGE_ANSWER` message also `"question"`, `"round"`, `"chosen"` and `"words"` (see below).
 
@@ -422,8 +424,9 @@ order.
 keys, plus an optional `"dry_run"` that must be `true`) and returns `(sprint_id, secret, round,
 dry_run)`, `round` an object whose keys are a subset of
 `questions, blocker`; `parse_round_answer(body)` reads the page's body, one or both of `choice` and
-`text`, and returns `(project_id, sprint_id, round_id, index, choice, text)` with an absent one
-None; `parse_look_retry(body)` reads the page's retry of a look card's approval, exactly
+`text` and optionally (#1377) `release`, an object of exactly `commit`, `version`, `title` and
+`confirmations` (a list of strings): what the page showed of a release card. It returns
+`(project_id, sprint_id, round_id, index, choice, text, release)` with an absent one None; `parse_look_retry(body)` reads the page's retry of a look card's approval, exactly
 `{"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>}`, and returns
 `(project_id, sprint_id, round_id, index)`. All three are `ValueError` on anything else, a
 repeated key, NaN or nesting too deep.
@@ -471,8 +474,9 @@ card when it was issued (`QuestionLook.repo`; a card without one accepts the log
 ordinary one; any other answer to a look question is an ordinary answer (`look_state` None, not held).
 An answer to a question with a `release` whose row has no `by` member at all (a present `by`, even
 malformed, which `actor_of` reads as the owner, approves nothing), no `words` member and a `chosen`
-equal to `release.approve` appends that `QuestionRelease` to `SprintState.approved_releases`, in
-answer order and once; any other answer to it is an ordinary answer and changes nothing there, and a
+equal to `release.approve` and `release_seen` true (the console sets it only when the page echoed the
+card's exact release, so a page that never showed the release approves nothing) appends that
+`QuestionRelease` to `SprintState.approved_releases`, in answer order and once; any other answer to it is an ordinary answer and changes nothing there, and a
 withdrawn question takes no answer. A `brief.sent` row that applies, with a higher version, clears
 `approved_releases` (#1377). A `look.recorded` row names a question by its `round` and `index`: `posted`
 applies when `look_state` is `"posting"` or `"failed"` and `message` is the held answer's id
@@ -888,6 +892,8 @@ RELEASE_APPROVE = "question {n}'s release approve is not one of its options"
 RELEASE_OWNER_ONLY = "question {n} is a release card and must be owner_only and consequential"
 RELEASE_APPROVE_WORDS = ("question {n}'s release approve is also in its needs_words: choosing it "
                          "takes no words, so no answer could approve")
+RELEASE_STALE = ("This release card was shown by an older page, so it cannot approve the release: "
+                 "reload the console and read the card again.")
 RELEASE_WITH_LOOK = "question {n} has both a look and a release: a card is one or the other"
 LOOK_PAIR = ('question {n} is a look card and needs a picture marked "pair": "before" and one '
              'marked "pair": "after": attach the pictures with pictures')
@@ -1218,6 +1224,7 @@ class SprintState:
     permission: Permission | None = None
     started_by: str | None = None
     approved_releases: tuple[QuestionRelease, ...] = ()
+    delivered: frozenset[int] = frozenset()
 
     @property
     def state(self) -> str:
@@ -1329,13 +1336,22 @@ def _count(value: object, least: int) -> int:
     return value
 
 
-def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str | None]:
+def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str | None,
+                                             dict | None]:
     value = _decoded(body)
     base = {"project_id", "sprint_id", "round", "question"}
     if (not isinstance(value, dict)
-            or set(value) not in (base | {"choice"}, base | {"text"}, base | {"choice", "text"})):
+            or set(value) - {"release"} not in (base | {"choice"}, base | {"text"},
+                                                base | {"choice", "text"})):
         raise ValueError("the body must be an object of project_id, sprint_id, round, question "
                          "and one or both of choice and text")
+    release = value.get("release")
+    if "release" in value and not (
+            isinstance(release, dict) and set(release) == {"commit", "version", "title", "confirmations"}
+            and all(isinstance(release[key], str) for key in ("commit", "version", "title"))
+            and isinstance(release["confirmations"], list)
+            and all(isinstance(token, str) for token in release["confirmations"])):
+        raise ValueError("release must be an object of commit, version, title and confirmations")
     project_id = value["project_id"]
     if not isinstance(project_id, str) or not project_id:
         raise ValueError("project_id must be a non-empty string")
@@ -1344,7 +1360,7 @@ def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str
         raise ValueError("text must be a string")
     choice = _count(value["choice"], 0) if "choice" in value else None
     return (project_id, _sprint_id(value["sprint_id"]), _count(value["round"], 1),
-            _count(value["question"], 0), choice, text)
+            _count(value["question"], 0), choice, text, release)
 
 
 def parse_look_retry(body: bytes) -> tuple[str, str, int, int]:
@@ -1433,12 +1449,14 @@ class PermitRequest:
     secret: str
     phase: str
     session_id: str
+    tool_use_id: str
     command: str
 
 
 def parse_permit_request(body: bytes) -> PermitRequest:
     """The manager's permit request: an object of exactly the five members, none repeated (#1377)."""
-    value = _object(body, {"sprint_id", "secret", "phase", "session_id", "command"}, project=False)
+    value = _object(body, {"sprint_id", "secret", "phase", "session_id", "tool_use_id", "command"},
+                    project=False)
     sprint_id = _sprint_id(value["sprint_id"])
     if not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
@@ -1447,10 +1465,13 @@ def parse_permit_request(body: bytes) -> PermitRequest:
     session_id = value["session_id"]
     if not isinstance(session_id, str) or not 1 <= len(session_id) <= MAX_PERMIT_SESSION_CHARS:
         raise ValueError("session_id must be a string of 1 to 128 characters")
+    tool_use_id = value["tool_use_id"]
+    if not isinstance(tool_use_id, str) or not 1 <= len(tool_use_id) <= MAX_PERMIT_SESSION_CHARS:
+        raise ValueError("tool_use_id must be a string of 1 to 128 characters")
     command = value["command"]
     if not isinstance(command, str) or len(command) > MAX_PERMIT_COMMAND_CHARS:
         raise ValueError("command must be a string of at most 8192 characters")
-    return PermitRequest(sprint_id, value["secret"], value["phase"], session_id, command)
+    return PermitRequest(sprint_id, value["secret"], value["phase"], session_id, tool_use_id, command)
 
 
 def parse_message_reply_request(body: bytes) -> tuple[str, str, int, str]:
@@ -2598,6 +2619,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
         release = question.release
         approved = state.approved_releases
         if (release is not None and "by" not in payload and "words" not in payload
+                and payload.get("release_seen") is True
                 and chosen == release.approve and release not in approved):
             approved = (*approved, release)
         return _with_message(
@@ -2842,6 +2864,7 @@ def _observed(folded: dict[str, SprintState], event: Event) -> None:
             if not own and not any(stage.issue in named for stage in run.issues):
                 continue
             moved = max(state.moved_ms or 0, run.moved_ms)
+            delivered = state.delivered | {stage.issue for stage in run.issues} if own else state.delivered
             observed = state.observed
             if report is not None and run.moved_ms > int(
                     datetime.fromisoformat(report.at).timestamp() * 1000):
@@ -2856,7 +2879,7 @@ def _observed(folded: dict[str, SprintState], event: Event) -> None:
                         kept[stage.issue] = Observed(stage.issue, run.moved_ms, run.session_id,
                                                      run.run_id, stage)
                 observed = tuple(kept[issue] for issue in sorted(kept))
-            folded[sprint_id] = replace(state, moved_ms=moved, observed=observed)
+            folded[sprint_id] = replace(state, moved_ms=moved, observed=observed, delivered=delivered)
 
 
 def sprint_states(events: Iterable[Event],

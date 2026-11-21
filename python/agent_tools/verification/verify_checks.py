@@ -188,20 +188,23 @@ whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` i
 (`line`, `ball`, `retry`, `reason`) otherwise. It reads only that endpoint and its report never names a
 project, root, title or reason, since the repository is public.
 
-`console-manager-merge --repo OWNER/NAME --since SHA [--log PATH] [--repo-root DIR]`
-(`verify_checks.console_manager_merge`, issue 1377) is met when a manager merged its own sprint's pull request
-through the console's permit after the change was activated. It reads the console's event log read-only (`--log`,
+`console-manager-merge --repo OWNER/NAME --since SHA --issue N [--log PATH] [--repo-root DIR]`
+(`verify_checks.console_manager_merge`, issue 1377) is met when the manager of the sprint that delivered issue N
+merged its own sprint's pull request through the console's permit after the change was activated. It reads the console's event log read-only (`--log`,
 default `events.sqlite3` under the console's state directory), the repository at `--repo-root` (default `.`) and
 the forge's pull request. The anchor is the earliest `activation.finished` row that is `ok` and whose `commit` has
-`--since` as an ancestor or equal (`git merge-base --is-ancestor`); with none the check is `not_yet` (75). The window
-is from that row's time to seven days after it. It is met (0) when, inside the window, a `permit.judged` row with
-verb `merge`, decision `allow` and `repo` equal to `--repo` names a session that a `session.seen` row called
-`<project> sprint <that row's sprint id>`, a `permit.landed` row with the same sprint, session, repo and target is
-at or after it, and the forge's `repos/REPO/pulls/PR` is merged at the target's head with a `merged_at` from the
-judged second to the landed time. Otherwise it is `not_yet` (75) while the verifier's clock is inside the window and
+`--since` as an ancestor or equal (`git merge-base --is-ancestor`: its exit 1 means not an ancestor, any other
+failure, a missing object included, is an unreadable git, 2); with none the check is `not_yet` (75). The window
+is from that row's time to seven days after it. The sprint is the one whose `sprint.reported` row lists issue N,
+so another sprint's merge never counts. It is met (0) when, inside the window, a `permit.judged` row of that
+sprint with verb `merge`, decision `allow`, `repo` equal to `--repo` and a `tool_use_id` names a session that a
+`session.seen` row called `<project> sprint <that row's sprint id>`, a `permit.landed` row with the same sprint,
+session, repo, target and `tool_use_id` (the one tool call that ran, as the client reports it after the call
+succeeded) is at or after it, and the forge's `repos/REPO/pulls/PR` is merged at the target's head with a
+`merged_at` from the judged second to the landed time. Otherwise it is `not_yet` (75) while the verifier's clock is inside the window and
 `not_met` (1) once it is past, whenever the verifier runs. The report is `{"met", "verdict", "pr", "head",
 "judged_at", "landed_at", "merged_at", "activated_at"}`, the last six null unless met, and names no project, root,
-sprint or session. A malformed `--repo` or `--since` is a usage error (2) before any read; an unreadable log, git or
+sprint or session. A malformed `--repo`, `--since` or `--issue` is a usage error (2) before any read; an unreadable log, git or
 forge is 2.
 
 `console-no-card --port N --key K [--key K ...]` (`verify_checks.console_no_card`, issue 1327) reads
@@ -1806,22 +1809,41 @@ def _manager_merge_anchor(rows, since: str, repo_root: Path) -> datetime | None:
         if (kind != "activation.finished" or payload.get("ok") is not True or not isinstance(commit, str)
                 or not re.fullmatch(r"[0-9a-f]{40}", commit)):
             continue
-        if _git(repo_root, "merge-base", "--is-ancestor", since, commit).returncode == 0:
+        done = _git(repo_root, "merge-base", "--is-ancestor", since, commit)
+        if done.returncode == 0:
             return when
+        if done.returncode != 1:
+            raise GitError(f"git merge-base: exit {done.returncode}")
     return None
 
 
-def console_manager_merge(repo: str, since: str, *, log: Path | None = None,
+def _reported_sprints(rows, issue: int) -> set[str]:
+    """The ids of the sprints whose `sprint.reported` row lists `issue`."""
+    found = set()
+    for _, kind, payload in rows:
+        report = payload.get("report")
+        listed = report.get("issues") if isinstance(report, dict) else None
+        if (kind == "sprint.reported" and isinstance(payload.get("sprint_id"), str)
+                and isinstance(listed, list)
+                and any(isinstance(entry, dict) and entry.get("issue") == issue
+                        and _is_int(entry.get("issue")) for entry in listed)):
+            found.add(payload["sprint_id"])
+    return found
+
+
+def console_manager_merge(repo: str, since: str, issue: int, *, log: Path | None = None,
                           repo_root: Path = Path(".")) -> tuple[int, dict]:
     """Issue 1377: a manager merged its own sprint's pull request through the console's permit after activation."""
     store = log if log is not None else agent_platform.state_root() / "console" / "events.sqlite3"
-    rows = _log_rows(store, ("activation.finished", "session.seen", "permit.judged", "permit.landed"))
+    rows = _log_rows(store, ("activation.finished", "session.seen", "sprint.reported", "permit.judged",
+                             "permit.landed"))
     start = _manager_merge_anchor(rows, since, repo_root)
     if start is None:
         return 75, {"met": False, "verdict": "not_yet", **_MANAGER_MERGE_EMPTY}
     end = start + MANAGER_MERGE_WINDOW
     named = {(payload.get("session_id"), payload.get("name"))
              for _, kind, payload in rows if kind == "session.seen"}
+    delivering = _reported_sprints(rows, issue)
 
     def target_of(payload):
         target = payload.get("target")
@@ -1836,15 +1858,18 @@ def console_manager_merge(repo: str, since: str, *, log: Path | None = None,
                 if kind == "permit.landed" and in_window(when)]
     for judged_at, kind, judged in rows:
         sprint, session, target = judged.get("sprint_id"), judged.get("session_id"), target_of(judged)
+        call = judged.get("tool_use_id")
         if (kind != "permit.judged" or not in_window(judged_at) or judged.get("verb") != "merge"
                 or judged.get("decision") != "allow" or judged.get("repo") != repo or target is None
                 or not isinstance(sprint, str) or not isinstance(session, str)
+                or sprint not in delivering or not isinstance(call, str) or not call
                 or not any(seen == session and isinstance(name, str) and name.endswith(f" sprint {sprint}")
                            and len(name) > len(f" sprint {sprint}") for seen, name in named)):
             continue
         for landed_at, landed, landed_target in landings:
             if (landed_at < judged_at or landed_target != target or landed.get("sprint_id") != sprint
-                    or landed.get("session_id") != session or landed.get("repo") != repo):
+                    or landed.get("session_id") != session or landed.get("repo") != repo
+                    or landed.get("tool_use_id") != call):
                 continue
             pull = forge_api.api_get(f"repos/{repo}/pulls/{target[0]}")
             head = pull.get("head") if isinstance(pull, dict) else None
@@ -2677,6 +2702,7 @@ def main(argv: Sequence[str] | None = None) -> int:
              "after activation")
     manager_merge.add_argument("--repo", type=_repo, required=True)
     manager_merge.add_argument("--since", type=_merge_sha, required=True)
+    manager_merge.add_argument("--issue", type=_issue_number, required=True)
     manager_merge.add_argument("--log", type=Path)
     manager_merge.add_argument("--repo-root", type=Path, default=Path("."))
     no_card = checks.add_parser(
@@ -2743,7 +2769,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.check == "console-manager-merge":
         try:
-            code, report = console_manager_merge(args.repo, args.since, log=args.log,
+            code, report = console_manager_merge(args.repo, args.since, args.issue, log=args.log,
                                                  repo_root=args.repo_root)
         except (ToolError, GitError) as error:
             print(f"verify-checks: {getattr(error, 'kind', 'git_error')}: {error}", file=sys.stderr)

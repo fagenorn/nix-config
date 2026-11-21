@@ -1251,6 +1251,23 @@ def listing(seq):
                   "name": "owner/p00 sprint " + SID})
 
 
+class DeliveredFoldTest(unittest.TestCase):
+    ROWS = BASE[:3] + [listing(4), reported(5, SID, REPORT)]
+
+    def test_the_issues_of_the_managers_runs_stay_delivered_after_the_run_is_gone(self):
+        rows = [*self.ROWS, seen(6, "wf_a", ms(5), ((12, "building"), (40, "queued"))),
+                seen(7, "wf_b", ms(5), ((13, "landing"),), session_id="s-other"), gone(8, "wf_a")]
+        self.assertEqual(sprints.sprint_states(rows[:5])[SID].delivered, frozenset())
+        self.assertEqual(sprints.sprint_states(rows[:6])[SID].delivered, frozenset({12, 40}))
+        self.assertEqual(sprints.sprint_states(rows)[SID].delivered, frozenset({12, 40}))
+        later = [*rows, seen(9, "wf_c", ms(5), ((14, "building"),))]
+        self.assertEqual(sprints.sprint_states(later)[SID].delivered, frozenset({12, 14, 40}))
+        for cut in range(len(later) + 1):
+            with self.subTest(cut=cut):
+                self.assertEqual(sprints.sprint_states(later[cut:], sprints.sprint_states(later[:cut])),
+                                 sprints.sprint_states(later))
+
+
 class SprintMovementFoldTest(unittest.TestCase):
     def test_a_run_that_moved_before_the_report_still_moves_the_sprint(self):
         rows = BASE + [seen(5, "wf_a", ms(4) - 60_000, ((12, "building"),))]
@@ -2161,13 +2178,19 @@ class RoundParseTest(unittest.TestCase):
             return json.dumps({k: v for k, v in value.items() if v is not ...}).encode()
 
         self.assertEqual(sprints.parse_round_answer(answer()),
-                         ("owner/p01", SID, 41, 0, 1, None))
+                         ("owner/p01", SID, 41, 0, 1, None, None))
         self.assertEqual(
             sprints.parse_round_answer(answer(question=1, choice=..., text="use the reader")),
-            ("owner/p01", SID, 41, 1, None, "use the reader"))
+            ("owner/p01", SID, 41, 1, None, "use the reader", None))
         self.assertEqual(sprints.parse_round_answer(answer(text="make it shorter")),
-                         ("owner/p01", SID, 41, 0, 1, "make it shorter"))
-        for body in (answer(choice=...), answer(round=0), answer(round=True),
+                         ("owner/p01", SID, 41, 0, 1, "make it shorter", None))
+        shown = {"commit": "a" * 40, "version": "v1", "title": "t", "confirmations": ["publish:0123456789ab"]}
+        self.assertEqual(sprints.parse_round_answer(answer(release=shown)),
+                         ("owner/p01", SID, 41, 0, 1, None, shown))
+        for body in (answer(release=[]), answer(release={**shown, "extra": 1}),
+                     answer(release={**shown, "commit": 3}), answer(release={**shown, "confirmations": [3]}),
+                     answer(release={k: v for k, v in shown.items() if k != "title"}),
+                     answer(choice=...), answer(round=0), answer(round=True),
                      answer(question=-1), answer(choice=True), answer(choice=-1),
                      answer(choice=..., text=5), answer(extra=1), answer(sprint_id="ABC"),
                      answer(project_id=""), b"[1]", b"\xff", b"[" * 100000,
@@ -3452,10 +3475,11 @@ class ReleaseCardTest(unittest.TestCase):
     def state(self, *more):
         return sprints.sprint_states(self.rows(*more))[SID]
 
-    def pick(self, seq=42, chosen="Run the release", words=None, **by):
+    def pick(self, seq=42, chosen="Run the release", words=None, release_seen=True, **by):
         row = answer_row(seq, SID, 41, 0, chosen, chosen, question=RELEASE_QUESTION["question"],
                          recommended="Not yet", words=words)
-        return Event(row.seq, row.at, row.kind, row.project, {**row.payload, **by})
+        seen_mark = {"release_seen": True} if release_seen else {}
+        return Event(row.seq, row.at, row.kind, row.project, {**row.payload, **seen_mark, **by})
 
     def refused(self, question):
         with self.assertRaises(sprints.Refused) as caught:
@@ -3520,6 +3544,11 @@ class ReleaseCardTest(unittest.TestCase):
             replace(self.pick(42), payload={**self.pick(42).payload, "index": 0}),
             replace(self.pick(43), payload={**self.pick(43).payload, "index": 1})])[SID]
         self.assertEqual(twice.approved_releases, (RELEASED,))
+
+    def test_a_pick_the_page_never_showed_the_release_for_approves_nothing(self):
+        state = self.state(self.pick(release_seen=False))
+        self.assertEqual(state.approved_releases, ())
+        self.assertEqual(state.messages[-1].kind, sprints.MESSAGE_ANSWER)
 
     def test_words_another_option_or_any_by_approve_nothing(self):
         for name, row in {"words": self.pick(words="but wait"),

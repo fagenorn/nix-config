@@ -5114,6 +5114,16 @@ class PageReleaseTest(unittest.TestCase):
         (rowline,) = [n for n in nodes(row) if has_class(n, "release-line")]
         self.assertEqual(full(rowline), RELEASE_LINE)
 
+    def test_answering_a_release_card_echoes_the_release_the_page_showed(self) -> None:
+        asked = question(1, "Run release v1.2.0?", ["Run it", "Hold"], "Hold", release=release_of(RELEASE_LINE))
+        (snap,) = render([START, {"frame": frame([asked])}, {"key": "1"}, {"key": "Enter"},
+                          {"clock": 5000}, {"snapshot": True}])
+        (post,) = round_posts(snap)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 1, "choice": 0,
+            "release": {"commit": "a" * 40, "version": "v1.3.0", "title": "v1.3.0 notes",
+                        "confirmations": ["publish:0123456789ab"]}})
+
     def test_a_question_without_a_release_shows_no_release_line(self) -> None:
         for name, fields in (("null", {"release": None}), ("absent", {})):
             with self.subTest(name):

@@ -2477,6 +2477,7 @@ class ConsoleManagerMergeTest(unittest.TestCase):
     """`console-manager-merge` (issue 1377): a manager merged its own pull request after activation."""
 
     SPRINT = "a" * 16
+    OTHER_SPRINT = "b" * 16
     SESSION = "manager-session"
     REPO = "octo/widgets"
     HEAD = "b" * 40
@@ -2499,6 +2500,11 @@ class ConsoleManagerMergeTest(unittest.TestCase):
         self.addCleanup(self.log._connection.close)
         self.pulls = {}
         self.calls = []
+        self.reported(self.SPRINT, 1377)
+
+    def reported(self, sprint, *issues):
+        self.append("sprint.reported", {"sprint_id": sprint, "goal": "g", "report": {
+            "issues": [{"issue": number, "stage": "building"} for number in issues]}}, timedelta(0))
 
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.root), *args], capture_output=True, text=True,
@@ -2516,9 +2522,9 @@ class ConsoleManagerMergeTest(unittest.TestCase):
         self.append("session.seen", {"session_id": session or self.SESSION, "cwd": "/r", "repo": None,
                                      "state": "idle", "name": f"p00 sprint {sprint or self.SPRINT}"}, when)
 
-    def permit(self, kind, when, repo=None, session=None, pr=7, head=None):
-        payload = {"sprint_id": self.SPRINT, "session_id": session or self.SESSION,
-                   "repo": repo or self.REPO, "verb": "merge",
+    def permit(self, kind, when, repo=None, session=None, pr=7, head=None, sprint=None, call="call-1"):
+        payload = {"sprint_id": sprint or self.SPRINT, "session_id": session or self.SESSION,
+                   "tool_use_id": call, "repo": repo or self.REPO, "verb": "merge",
                    "target": {"pr": pr, "head": head or self.HEAD}}
         if kind == "permit.judged":
             payload.update(decision="allow", reason="allowed")
@@ -2544,7 +2550,7 @@ class ConsoleManagerMergeTest(unittest.TestCase):
             return self.pulls[int(path[len(prefix):])]
 
         out = io.StringIO()
-        args = ["console-manager-merge", "--repo", self.REPO, "--since", self.shas["S"],
+        args = ["console-manager-merge", "--repo", self.REPO, "--since", self.shas["S"], "--issue", "1377",
                 "--log", str(self.log_path), "--repo-root", str(self.root), *argv]
         with mock.patch.object(verify_checks.forge_api, "api_get", api_get), \
                 mock.patch.object(verify_checks, "_utcnow", lambda: self.T0 + now), \
@@ -2610,6 +2616,58 @@ class ConsoleManagerMergeTest(unittest.TestCase):
                 self.pull(merged_at)
                 self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
 
+    def test_a_merge_only_another_sprint_made_is_not_counted(self):
+        self.activated()
+        self.seen()
+        self.seen(sprint=self.OTHER_SPRINT)
+        self.reported(self.OTHER_SPRINT, 999)
+        self.landed_merge(sprint=self.OTHER_SPRINT)
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+        self.assertEqual(self.run_check(timedelta(days=10))[0], 1)
+
+    def test_the_sprint_that_reported_the_issue_is_the_one_that_counts(self):
+        self.activated()
+        self.seen(sprint=self.OTHER_SPRINT)
+        self.reported(self.OTHER_SPRINT, 999)
+        self.landed_merge(sprint=self.OTHER_SPRINT)
+        self.seen()
+        self.landed_merge(call="call-2")
+        code, report = self.run_check(timedelta(days=2))
+        self.assertEqual((code, report["verdict"]), (0, "met"))
+
+    def test_a_landing_of_another_tool_call_does_not_complete_the_allowed_one(self):
+        self.activated()
+        self.seen()
+        start = timedelta(days=1, hours=10)
+        self.permit("permit.judged", start, call="call-1")
+        self.permit("permit.landed", start + timedelta(minutes=1), call="call-2")
+        self.pull(start + timedelta(seconds=30))
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+
+    def test_rows_that_name_no_tool_call_are_not_counted(self):
+        self.activated()
+        self.seen()
+        start = timedelta(days=1, hours=10)
+        for call in ("", None):
+            self.permit("permit.judged", start, call=call)
+            self.permit("permit.landed", start + timedelta(minutes=1), call=call)
+        self.pull(start + timedelta(seconds=30))
+        self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
+
+    def test_a_git_that_cannot_answer_the_ancestry_is_an_error_not_pending(self):
+        self.append("activation.finished", {"root": "/r", "commit": "d" * 40, "ok": True,
+                                            "reason": None, "next_step": None}, timedelta(0))
+        self.activated(when=timedelta(hours=1))
+        stderr = io.StringIO()
+        with mock.patch.object(verify_checks.forge_api, "api_get") as api_get, \
+                contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            code = verify_checks.main(["console-manager-merge", "--repo", self.REPO, "--since",
+                                       self.shas["S"], "--issue", "1377", "--log", str(self.log_path),
+                                       "--repo-root", str(self.root)])
+        self.assertEqual(code, 2)
+        self.assertIn("git", stderr.getvalue())
+        api_get.assert_not_called()
+
     def test_a_permit_of_another_repository_or_session_is_not_counted(self):
         self.activated()
         self.seen()
@@ -2625,7 +2683,12 @@ class ConsoleManagerMergeTest(unittest.TestCase):
         self.assertEqual(self.run_check(timedelta(days=2))[0], 75)
 
     def test_bad_arguments_are_a_usage_error(self):
-        for argv in (["--repo", "bad", "--since", self.shas["S"]], ["--repo", self.REPO, "--since", "abc"]):
+        issue = ["--issue", "1377"]
+        for argv in (["--repo", "bad", "--since", self.shas["S"], *issue],
+                     ["--repo", self.REPO, "--since", "abc", *issue],
+                     ["--repo", self.REPO, "--since", self.shas["S"], "--issue", "0"],
+                     ["--repo", self.REPO, "--since", self.shas["S"], "--issue", "x"],
+                     ["--repo", self.REPO, "--since", self.shas["S"]]):
             with self.subTest(argv=argv):
                 with mock.patch.object(verify_checks.forge_api, "api_get") as api_get, \
                         contextlib.redirect_stderr(io.StringIO()):

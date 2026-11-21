@@ -4,6 +4,7 @@
 and calls it directly: the three granted shapes, each refusal reason, the literal-word grammar, the
 memo the console re-judges with, and the readers' fail-closed parsing.
 """
+import contextlib
 import importlib.util
 import os
 import tempfile
@@ -27,9 +28,9 @@ class FakeForge:
 
     def __init__(self):
         self.calls = []
-        self.pr = {"branch": "issue-12-x", "repo": "o/r", "head": HEAD, "base": "main"}
-        self.run = {"event": "pull_request", "branch": "issue-12-x", "repo": "o/r", "head": HEAD,
-                    "prs": [7], "jobs": ["Nix Eval"]}
+        self.pr = {"branch": "issue-12-x", "repo": "o/r", "head": SHA, "base": "main"}
+        self.run = {"event": "pull_request", "branch": "issue-12-x", "repo": "o/r", "head": SHA,
+                    "prs": [7], "rerun": ["Nix Eval"]}
         self.required = frozenset({"Nix Eval"})
         self.pr_error = None
 
@@ -118,6 +119,11 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(ALLOW, self.judge(command, grant).decision)
         self.assertRefused(command + " --delete-branch", permit.NOT_GRANTED, grant)
 
+    def test_a_merge_at_another_head_than_the_pull_requests_is_refused(self):
+        self.fake.pr = {**self.fake.pr, "head": HEAD}
+        self.assertRefused(self.merge, permit.STALE_HEAD.format(pr=7))
+        self.assertEqual([("pr", "o/r", 7)], self.fake.calls)
+
     def test_a_merge_in_another_repository_is_refused(self):
         self.assertRefused(self.merge.replace("--repo o/r", "--repo x/y"), permit.OTHER_REPO)
         self.assertEqual([], self.fake.calls)
@@ -187,8 +193,17 @@ class JudgeTest(unittest.TestCase):
                 self.assertRefused(self.rerun, permit.DEPLOY_RERUN.format(run=55, event=event))
 
     def test_a_pull_request_triggered_deploy_run_is_refused(self):
-        self.fake.run = {**self.fake.run, "jobs": ["deploy-preview"]}
+        self.fake.run = {**self.fake.run, "rerun": ["deploy-preview"]}
         self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55))
+
+    def test_a_rerun_that_would_also_run_a_job_that_is_no_required_check_is_refused(self):
+        self.fake.run = {**self.fake.run, "rerun": ["Nix Eval", "deploy-preview"]}
+        self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55))
+        self.fake.run = {**self.fake.run, "rerun": []}
+        self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55))
+        self.fake.required = frozenset({"Nix Eval", "Budget"})
+        self.fake.run = {**self.fake.run, "rerun": ["Nix Eval", "Budget"]}
+        self.assertEqual(ALLOW, self.judge(self.rerun).decision)
 
     def test_a_rerun_of_every_job_or_of_another_pull_request_is_refused(self):
         self.assertRefused("gh run rerun 55 --repo o/r", permit.NOT_GRANTED)
@@ -249,6 +264,9 @@ class JudgeTest(unittest.TestCase):
 
     def test_a_release_run_elsewhere_or_with_extra_flags_is_refused(self):
         self.assertRefused(self.release.replace(self.root, "/elsewhere"), permit.WRONG_ROOT)
+        relative = os.path.relpath(self.root)
+        self.assertFalse(os.path.isabs(relative))
+        self.assertRefused(self.release.replace(self.root, relative), permit.WRONG_ROOT)
         self.assertRefused(self.release + " --force", permit.NOT_GRANTED)
         self.assertRefused(self.release + f" --commit {'a' * 40}", permit.NOT_GRANTED)
         self.assertRefused(self.release.replace(" --version v1.2.0", ""), permit.NOT_GRANTED)
@@ -262,6 +280,23 @@ class JudgeTest(unittest.TestCase):
         link.symlink_to(self.root)
         self.addCleanup(link.unlink)
         self.assertEqual(ALLOW, self.judge(self.release.replace(self.root, str(link))).decision)
+
+    def test_the_release_module_entry_points_are_judged_and_never_granted(self):
+        run = self.release.removeprefix("release ")
+        for prefix in ("python3 -m agent_tools.release.release", "python -m agent_tools.release.release",
+                       "PYTHONPATH=python python3 -m agent_tools.release.release",
+                       "python3 -magent_tools.release.release", "python3 -m 'agent_tools.release.release'",
+                       "python3 python/agent_tools/release/release.py"):
+            command = f"{prefix} {run}"
+            with self.subTest(prefix):
+                self.assertTrue(mentions(command))
+                self.assertEqual("release", permit.verb_of(command))
+                self.assertRefused(command, permit.ALONE)
+        for command in ("python3 -m agent_tools.release.release transaction preview --repo-root r",
+                        "python3 -m agent_tools.release.release_driver", "python3 -m agent_tools.sprint"):
+            with self.subTest(command):
+                self.assertFalse(mentions(command))
+        self.assertEqual([], self.fake.calls)
 
     def test_an_unreadable_forge_is_refused(self):
         self.fake.pr_error = ForgeUnreadable("boom")
@@ -334,14 +369,27 @@ class ReaderTest(unittest.TestCase):
             "base": {"ref": "main"}}
     RUN = {"event": "pull_request", "head_branch": "issue-12-x", "head_sha": HEAD,
            "head_repository": {"full_name": "o/r"}, "pull_requests": [{"number": 7}]}
-    JOBS = {"jobs": [{"name": "Nix Eval"}, {"name": "Other"}]}
-    PROTECTION = {"checks": [{"context": "Nix Eval", "app_id": 1}], "contexts": ["Nix Eval", "Budget"]}
+    JOBS = [{"jobs": [{"name": "Nix Eval", "conclusion": "success"},
+                      {"name": "Other", "conclusion": "failure"}]},
+            {"jobs": [{"name": "deploy", "conclusion": "skipped"}, {"name": "Late", "conclusion": None}]}]
+    JOBS_PATH = "repos/o/r/actions/runs/55/jobs?per_page=100"
+    PROTECTION = {"checks": [{"context": "Nix Eval", "app_id": 15368}, {"context": "Budget", "app_id": None},
+                             {"context": "Any", "app_id": -1}, {"context": "Bound", "app_id": 1}],
+                  "contexts": ["Nix Eval", "Budget", "Any", "Bound", "Legacy"]}
 
     def reply(self, payloads):
-        return mock.patch.object(permit.forge_api, "api_get", side_effect=lambda path, *a: payloads[path])
+        paged = {path: value for path, value in payloads.items() if path.endswith("per_page=100")}
+        plain = {path: value for path, value in payloads.items() if path not in paged}
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(
+            permit.forge_api, "api_get", side_effect=lambda path, *a: plain[path]))
+        stack.enter_context(mock.patch.object(
+            permit.forge_api, "api_pages", side_effect=lambda path: paged[path]))
+        return stack
 
     def test_readers_raise_on_a_malformed_reply(self):
-        with mock.patch.object(permit.forge_api, "api_get", return_value={}):
+        with mock.patch.object(permit.forge_api, "api_get", return_value={}), \
+                mock.patch.object(permit.forge_api, "api_pages", return_value=[{}]):
             for name, args in (("read_pr", ("o/r", 7)), ("read_run", ("o/r", 55)),
                                ("read_required", ("o/r", "main"))):
                 with self.subTest(name), self.assertRaises(ForgeUnreadable):
@@ -349,7 +397,8 @@ class ReaderTest(unittest.TestCase):
 
     def test_readers_raise_when_the_forge_fails(self):
         error = permit.forge_api.ForgeError("gh_failed", "HTTP 502 secret detail")
-        with mock.patch.object(permit.forge_api, "api_get", side_effect=error):
+        with mock.patch.object(permit.forge_api, "api_get", side_effect=error), \
+                mock.patch.object(permit.forge_api, "api_pages", side_effect=error):
             for name, args in (("read_pr", ("o/r", 7)), ("read_run", ("o/r", 55)),
                                ("read_required", ("o/r", "main"))):
                 with self.subTest(name), self.assertRaises(ForgeUnreadable) as caught:
@@ -368,10 +417,12 @@ class ReaderTest(unittest.TestCase):
         for run, jobs in (({**self.RUN, "head_repository": None}, self.JOBS),
                           ({**self.RUN, "pull_requests": [{"number": "7"}]}, self.JOBS),
                           ({**self.RUN, "event": None}, self.JOBS),
-                          (self.RUN, {"jobs": [{"name": 3}]}),
-                          (self.RUN, {})):
+                          (self.RUN, [{"jobs": [{"name": 3}]}]),
+                          (self.RUN, [{"jobs": [{"name": "x", "conclusion": 3}]}]),
+                          (self.RUN, [{}]),
+                          (self.RUN, [])):
             with self.subTest(run=run, jobs=jobs), self.reply({
-                    "repos/o/r/actions/runs/55": run, "repos/o/r/actions/runs/55/jobs": jobs}):
+                    "repos/o/r/actions/runs/55": run, self.JOBS_PATH: jobs}):
                 with self.assertRaises(ForgeUnreadable):
                     permit.read_run("o/r", 55)
 
@@ -379,20 +430,22 @@ class ReaderTest(unittest.TestCase):
         payloads = {
             "repos/o/r/pulls/7": self.PULL,
             "repos/o/r/actions/runs/55": self.RUN,
-            "repos/o/r/actions/runs/55/jobs": self.JOBS,
+            self.JOBS_PATH: self.JOBS,
             "repos/o/r/branches/main/protection/required_status_checks": self.PROTECTION,
         }
         with self.reply(payloads):
             self.assertEqual({"branch": "issue-12-x", "repo": "o/r", "head": HEAD, "base": "main"},
                              permit.read_pr("o/r", 7))
             self.assertEqual({"event": "pull_request", "branch": "issue-12-x", "repo": "o/r",
-                              "head": HEAD, "prs": [7], "jobs": ["Nix Eval", "Other"]},
+                              "head": HEAD, "prs": [7], "rerun": ["Other", "deploy", "Late"]},
                              permit.read_run("o/r", 55))
-            self.assertEqual(frozenset({"Nix Eval", "Budget"}), permit.read_required("o/r", "main"))
+            self.assertEqual(frozenset({"Nix Eval", "Budget", "Any", "Legacy"}),
+                             permit.read_required("o/r", "main"))
 
     def test_a_protection_with_a_malformed_member_is_unreadable(self):
         path = "repos/o/r/branches/main/protection/required_status_checks"
         for broken in ({"checks": [{"app_id": 1}], "contexts": []},
+                       {"checks": [{"context": "x", "app_id": "1"}], "contexts": []},
                        {"checks": [], "contexts": [3]},
                        {"checks": "x", "contexts": []},
                        {"contexts": []}):

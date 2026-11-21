@@ -320,7 +320,11 @@ stop_failed <Type>: <message>` and 500 `stop failed`; success is an empty `204`.
 `sprints.Refused` is one stderr line `console: round_answer_refused <reason>` and 409 with the
 reason, a `ForgeError` (the read of a look card's pull request, below) is 502 with
 `answer.tracker_words`, any other exception is `console: round_answer_failed <Type>: <message>` and 500 `round
-answer failed`; success is an empty `204`. `POST /api/look-retry` (#1260) runs the same checks with
+answer failed`; success is an empty `204`. A body may carry `release` (#1377), the `commit`, `version`,
+`title` and `confirmations` the page showed of a release card; choosing the card's approve option with
+no words and no matching `release` is refused 409 `sprints.RELEASE_STALE` (an older page never showed
+the release), and a matching one adds `release_seen` to the answer row, without which the fold approves
+nothing. `POST /api/look-retry` (#1260) runs the same checks with
 `MAX_LOOK_RETRY_BYTES` (4096) and `sprints.parse_look_retry`: 400 `bad look retry`, `sprints.Refused` is one
 stderr line `console: look_retry_refused <reason>` and 409 with the reason, a `ForgeError` or `answer.Refused`
 from the post is 502 with the plain reason recorded for it (`tracker_words`, or the refusal's text), any other
@@ -1019,28 +1023,32 @@ reason `the nudge could not start: <Type>: <message>`, and the post still answer
 
 Permit (#1377, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
 through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
-`{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "command"}`, else 400 `bad permit`;
+`{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
 a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
 other exception 500 `permit failed`, each with one stderr line `console: permit_refused <sprint_id>
 <reason>` or `console: permit_failed <Type>: <message>`. Success is 200: phase `judge` answers
 `{"decision": "allow" | "deny" | null, "reason": <str>}` and phase `landed` `{"recorded": <bool>}`.
-`permit(sprint_id, secret, session_id, command)` answers a `permit.Verdict`: under the ingest lock it
+`permit(sprint_id, secret, session_id, tool_use_id, command)` answers a `permit.Verdict`: under the ingest lock it
 checks the secret (`_manager_sprint`), returns no decision (`decision` None, no row) for a command
-`permit.mentions` rejects, and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` with no
-closing, no stop request and no stop, and `permit.NOT_MANAGER` unless `session_id` is the sprint's
+`permit.mentions` rejects, and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and
+`sprints.takes_questions` (no closing, no stop request, no stop, and not ended by a done report), and
+`permit.NOT_MANAGER` unless `session_id` is the sprint's
 `manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
-delivery of the manager's own session carries; `others`: the issues the newest report of every other
+delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery
+run the console has since cleaned up still counts; `others`: the issues the newest report of every other
 open sprint of the project lists; `releases`: the owner-approved release cards) and, off the lock,
 the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge binding
 (`merge_binding_of`), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the
 lock again takes the sprint, its checks and the grant afresh and judges once more over the memo's
 frozen replay: any refusal, any difference or any read the memo did not hold is `permit.MOVED`. Each
-decided verdict appends one `permit.judged` row under that lock `{"sprint_id", "session_id", "repo",
-"verb", "decision", "reason", "target"}`; an allowed merge is also remembered in memory as
-`(sprint_id, session_id, repo, pr, head)` with the service's clock. `permit_landed(...)` is True, and
-appends one `permit.landed` row `{"sprint_id", "session_id", "repo", "verb": "merge", "target": {"pr",
-"head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and the allow was
-judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago; otherwise it is False and appends nothing.
+decided verdict appends one `permit.judged` row under that lock `{"sprint_id", "session_id",
+"tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge is also remembered in
+memory as `(sprint_id, session_id, tool_use_id, repo, pr, head)` with the service's clock.
+`permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and
+appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge",
+"target": {"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and
+the allow of that same tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago;
+otherwise it is False and appends nothing.
 
 Owner notices (#1120, ADR-console-053): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
 `MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
@@ -2997,11 +3005,13 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         try:
             if request.phase == "judge":
                 verdict = self.server.console.permit(
-                    request.sprint_id, request.secret, request.session_id, request.command)
+                    request.sprint_id, request.secret, request.session_id, request.tool_use_id,
+                    request.command)
                 reply = {"decision": verdict.decision, "reason": verdict.reason}
             else:
                 reply = {"recorded": self.server.console.permit_landed(
-                    request.sprint_id, request.secret, request.session_id, request.command)}
+                    request.sprint_id, request.secret, request.session_id, request.tool_use_id,
+                    request.command)}
         except sprints.SecretRefused:
             print(f"console: permit_refused {request.sprint_id} {sprints.SECRET_REFUSED}",
                   file=sys.stderr)
@@ -4347,7 +4357,7 @@ class ConsoleService:
         self._branch_pattern_of = branch_pattern_of
         self._permit_forge = permit_forge
         self._merge_binding_of = merge_binding_of
-        self._permit_allows: dict[tuple[str, str, str | None, int, str], float] = {}
+        self._permit_allows: dict[tuple[str, str, str, str | None, int, str], float] = {}
         self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
@@ -8469,8 +8479,8 @@ class ConsoleService:
 
     @staticmethod
     def _permit_active(sprint: sprints.SprintState) -> bool:
-        return (sprint.state == sprints.STARTING and sprint.closing is None
-                and sprint.stop_at is None and sprint.stopped_at is None)
+        return (sprint.state == sprints.STARTING and sprints.takes_questions(sprint)
+                and sprint.stop_at is None)
 
     def _permit_refusal(self, sprint: sprints.SprintState, session_id: str,
                         verb: str | None) -> permit.Verdict | None:
@@ -8487,8 +8497,6 @@ class ConsoleService:
                                                                 frozenset[permit.ReleaseApproval]]:
         """Under the ingest lock: the issues the sprint may merge, its siblings' issues, its approved releases."""
         reported = {number for number, _ in sprint.report.issues} if sprint.report else set()
-        delivered = {stage.issue for (session, _), state in self._deliveries.items()
-                     if session == sprint.manager_session for stage in state.issues}
         others = {number for key, other in self._sprints.items()
                   if key != sprint.sprint_id and other.project_id == sprint.project_id
                   and sprints.takes_questions(other) and other.report is not None
@@ -8496,7 +8504,7 @@ class ConsoleService:
         releases = frozenset(
             permit.ReleaseApproval(card.commit, card.version, card.title, frozenset(card.confirmations))
             for card in sprint.approved_releases)
-        return frozenset(reported & delivered), frozenset(others), releases
+        return frozenset(reported & sprint.delivered), frozenset(others), releases
 
     def _permit_reads(self, root: str | None) -> tuple[str | None, str | None, str | None, bool]:
         """Off the lock: the project's slug, branch pattern, merge strategy and whether a merge deletes its branch."""
@@ -8512,16 +8520,17 @@ class ConsoleService:
         return (read(self._slug_of, None), read(self._branch_pattern_of, None), strategy,
                 delete_branch)
 
-    def _permit_record(self, sprint: sprints.SprintState, session_id: str, slug: str | None,
-                       verdict: permit.Verdict) -> permit.Verdict:
+    def _permit_record(self, sprint: sprints.SprintState, session_id: str, tool_use_id: str,
+                       slug: str | None, verdict: permit.Verdict) -> permit.Verdict:
         """Under the ingest lock: append the `permit.judged` row of a decided verdict and return it."""
         self._apply(self.log.append([(PERMIT_JUDGED, sprint.project_id, {
-            "sprint_id": sprint.sprint_id, "session_id": session_id, "repo": slug,
-            "verb": verdict.verb, "decision": verdict.decision, "reason": verdict.reason,
+            "sprint_id": sprint.sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
+            "repo": slug, "verb": verdict.verb, "decision": verdict.decision, "reason": verdict.reason,
             "target": dict(verdict.target)})]))
         return verdict
 
-    def permit(self, sprint_id: str, secret: str, session_id: str, command: str) -> permit.Verdict:
+    def permit(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
+               command: str) -> permit.Verdict:
         """The console's verdict on one command of the sprint's manager session (#1377, ADR-console-094)."""
         verb = permit.verb_of(command)
         with self._ingest:
@@ -8536,7 +8545,7 @@ class ConsoleService:
         slug, pattern, strategy, delete_branch = reads
         if refusal is not None:
             with self._ingest:
-                return self._permit_record(sprint, session_id, slug, refusal)
+                return self._permit_record(sprint, session_id, tool_use_id, slug, refusal)
         memo = permit.memoized(self._permit_forge)
         first = permit.judge(command, permit.Grant(
             slug, root, strategy, delete_branch, pattern, *sets), memo)
@@ -8554,11 +8563,12 @@ class ConsoleService:
             except sprints.Refused:
                 verdict = permit.Verdict(permit.DENY, permit.MOVED, verb, {})
             if verdict.decision == permit.ALLOW and verdict.verb == permit.MERGE:
-                self._permit_allows[(sprint_id, session_id, slug, verdict.target["pr"],
+                self._permit_allows[(sprint_id, session_id, tool_use_id, slug, verdict.target["pr"],
                                      verdict.target["head"])] = self._clock()
-            return self._permit_record(sprint, session_id, slug, verdict)
+            return self._permit_record(sprint, session_id, tool_use_id, slug, verdict)
 
-    def permit_landed(self, sprint_id: str, secret: str, session_id: str, command: str) -> bool:
+    def permit_landed(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
+                      command: str) -> bool:
         """Record a merge the console allowed and the manager's session ran; False records nothing."""
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
@@ -8571,15 +8581,15 @@ class ConsoleService:
             slug, root, strategy, delete_branch, None, frozenset(), frozenset(), frozenset()))
         if target is None:
             return False
-        key = (sprint_id, session_id, slug, target["pr"], target["head"])
+        key = (sprint_id, session_id, tool_use_id, slug, target["pr"], target["head"])
         with self._ingest:
             self._manager_sprint(sprint_id, secret)
             judged = self._permit_allows.get(key)
             if judged is None or self._clock() - judged > PERMIT_LANDED_SECONDS:
                 return False
             self._apply(self.log.append([(PERMIT_LANDED, sprint.project_id, {
-                "sprint_id": sprint_id, "session_id": session_id, "repo": slug,
-                "verb": permit.MERGE, "target": dict(target)})]))
+                "sprint_id": sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
+                "repo": slug, "verb": permit.MERGE, "target": dict(target)})]))
             return True
 
     def withdraw_notice(self, sprint_id: str, secret: str, notice_id: int) -> int:
@@ -8621,7 +8631,7 @@ class ConsoleService:
             "recommended": asked.recommended, "differs": chosen != asked.recommended, **extra})
 
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
-                        choice: int | None, text: str | None, *,
+                        choice: int | None, text: str | None, release: dict | None = None, *,
                         by: "guest.GuestActor | None" = None) -> int:
         """Append one `question.answered` event, a message to the manager; its id."""
         slot = (sprint_id, round_id, index)
@@ -8646,6 +8656,13 @@ class ConsoleService:
             else:
                 chosen, said = None, sprints.checked_message(text)
             extra = {} if words is None else {"words": words}
+            card = asked.release
+            if card is not None and chosen == card.approve and words is None:
+                shown = {"commit": card.commit, "version": card.version, "title": card.title,
+                         "confirmations": list(card.confirmations)}
+                if release != shown:
+                    raise sprints.Refused(sprints.RELEASE_STALE)
+                extra["release_seen"] = True
             look = asked.look
             plain = look is None or chosen != look.approve or words is not None
             if plain:

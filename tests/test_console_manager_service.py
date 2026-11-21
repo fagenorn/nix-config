@@ -22,6 +22,7 @@ from unittest import mock
 
 from agent_tools.console import (account_add, capacity, console, deliveries, exclusion, guest, manager, nudge,
                                  permission, permit, pin, probe, service, sessions, signin, sprint, sprints)
+from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_SENT, GOAL_STATED, MANAGER_STARTED,
                                            MANAGER_WAITING, SESSION_SEEN, SPRINT_REPORTED,
                                            SPRINT_STOP_REQUESTED, EventLog)
@@ -1556,6 +1557,8 @@ PERMIT = "/api/permit"
 SLUG = "o/r"
 MERGE = f"gh pr merge 7 --repo {SLUG} --merge --match-head-commit {SHA} --delete-branch"
 ROOT = "/srv/p01"
+SHOWN_RELEASE = {"commit": RELEASE["commit"], "version": RELEASE["version"], "title": RELEASE["title"],
+                 "confirmations": RELEASE["confirmations"]}
 RELEASE_RUN = (f"release transaction run --repo-root {ROOT} --commit {'a' * 40} --version v1.2.0 "
                "--title 'v1.2.0 notes' --notes-file /tmp/n --confirm publish:0123456789ab")
 
@@ -1602,8 +1605,12 @@ class PermitCase(Case):
                 "name": manager.session_name("owner/p01", sid), "session_id": session_id})]))
 
     def deliver(self, svc, session_id, *numbers, run="r-1"):
-        svc._deliveries[(session_id, run)] = deliveries.DeliveryState(
+        state = deliveries.DeliveryState(
             session_id, run, 1, tuple(deliveries.IssueStage(n, "building") for n in numbers))
+        self.append(svc, DELIVERY_SEEN, deliveries.seen_payload(state))
+
+    def clean_up(self, svc, session_id, run="r-1"):
+        self.append(svc, DELIVERY_GONE, {"session_id": session_id, "run_id": run})
 
     def append(self, svc, kind, payload):
         with svc._ingest:
@@ -1612,12 +1619,13 @@ class PermitCase(Case):
     def rows(self, kind):
         return [json.loads(row[4]) for row in support.log_rows(self.store) if row[2] == kind]
 
-    def judge(self, svc, sid, command, session="s-1"):
-        return svc.permit(sid, self.secret(sid), session, command)
+    def judge(self, svc, sid, command, session="s-1", call="t-1"):
+        return svc.permit(sid, self.secret(sid), session, call, command)
 
     def approve_release(self, svc, sid):
         round_id, _ = svc.ask_questions(sid, self.secret(sid), {"questions": [RELEASE_QUESTION]})
-        svc.answer_question("owner/p01", sid, round_id, 0, 0, None)
+        svc.answer_question("owner/p01", sid, round_id, 0, 0, None, SHOWN_RELEASE)
+        return round_id
 
 
 class PermitServiceTest(PermitCase):
@@ -1646,7 +1654,7 @@ class PermitServiceTest(PermitCase):
         self.assertEqual((verdict.decision, verdict.verb, dict(verdict.target)),
                          ("allow", "merge", {"pr": 7, "head": SHA}))
         (row,) = self.rows("permit.judged")
-        self.assertEqual(row, {"sprint_id": sid, "session_id": "s-1", "repo": SLUG,
+        self.assertEqual(row, {"sprint_id": sid, "session_id": "s-1", "tool_use_id": "t-1", "repo": SLUG,
                                "verb": "merge", "decision": "allow", "reason": "",
                                "target": {"pr": 7, "head": SHA}})
 
@@ -1745,22 +1753,23 @@ class PermitServiceTest(PermitCase):
     def test_a_wrong_secret_is_refused(self):
         svc, sid = self.boot()
         with self.assertRaises(sprints.SecretRefused):
-            svc.permit(sid, "A" * 43, "s-1", MERGE)
+            svc.permit(sid, "A" * 43, "s-1", "t-1", MERGE)
 
     def test_a_landed_merge_is_recorded_only_after_its_allow(self):
         svc, sid = self.boot()
         secret = self.secret(sid)
-        self.assertFalse(svc.permit_landed(sid, secret, "s-1", MERGE))
+        self.assertFalse(svc.permit_landed(sid, secret, "s-1", "t-1", MERGE))
         self.assertEqual(self.rows("permit.landed"), [])
         self.assertEqual(self.judge(svc, sid, MERGE).decision, "allow")
-        for session, command in (("s-2", MERGE), ("s-1", MERGE + " --admin"),
-                                 ("s-1", MERGE.replace(" 7 ", " 8 "))):
-            with self.subTest(session=session, command=command[-20:]):
-                self.assertFalse(svc.permit_landed(sid, secret, session, command))
+        for session, call, command in (("s-2", "t-1", MERGE), ("s-1", "t-1", MERGE + " --admin"),
+                                       ("s-1", "t-1", MERGE.replace(" 7 ", " 8 ")),
+                                       ("s-1", "t-2", MERGE)):
+            with self.subTest(session=session, call=call, command=command[-20:]):
+                self.assertFalse(svc.permit_landed(sid, secret, session, call, command))
         self.assertEqual(self.rows("permit.landed"), [])
-        self.assertTrue(svc.permit_landed(sid, secret, "s-1", MERGE))
+        self.assertTrue(svc.permit_landed(sid, secret, "s-1", "t-1", MERGE))
         self.assertEqual(self.rows("permit.landed"), [{
-            "sprint_id": sid, "session_id": "s-1", "repo": SLUG, "verb": "merge",
+            "sprint_id": sid, "session_id": "s-1", "tool_use_id": "t-1", "repo": SLUG, "verb": "merge",
             "target": {"pr": 7, "head": SHA}}])
 
     def test_a_landing_after_thirty_minutes_is_not_recorded(self):
@@ -1768,16 +1777,51 @@ class PermitServiceTest(PermitCase):
         svc, sid = self.boot(clock=lambda: now[0])
         self.assertEqual(self.judge(svc, sid, MERGE).decision, "allow")
         now[0] += 30 * 60
-        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", MERGE))
+        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", MERGE))
         now[0] += 1
-        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", MERGE))
+        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", MERGE))
         self.assertEqual(len(self.rows("permit.landed")), 1)
 
     def test_a_denied_merge_is_never_recorded_as_landed(self):
         svc, sid = self.boot()
         self.fake.pr = {**self.fake.pr, "branch": "issue-99-x"}
         self.assertEqual(self.judge(svc, sid, MERGE).decision, "deny")
-        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", MERGE))
+        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", MERGE))
+
+    def test_a_sprint_a_done_report_ended_refuses_even_a_retained_release_approval(self):
+        svc, sid = self.boot()
+        self.approve_release(svc, sid)
+        self.assertEqual(self.judge(svc, sid, RELEASE_RUN).decision, "allow")
+        svc.send_report(sid, self.secret(sid), {**issues_report(12), "phase": "done"})
+        self.assertIsNotNone(sprints.ended_at(svc._sprints[sid]))
+        for command in (RELEASE_RUN, MERGE):
+            with self.subTest(command=command[:20]):
+                verdict = self.judge(svc, sid, command)
+                self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.NOT_ACTIVE))
+
+    def test_a_merge_after_the_delivery_run_was_cleaned_up_is_still_allowed(self):
+        svc, sid = self.boot()
+        self.clean_up(svc, "s-1")
+        self.assertEqual(svc._deliveries, {})
+        self.assertEqual(self.judge(svc, sid, MERGE).decision, "allow")
+
+    def test_a_release_pick_from_a_page_that_never_showed_it_approves_nothing(self):
+        svc, sid = self.boot()
+        round_id, _ = svc.ask_questions(sid, self.secret(sid), {"questions": [RELEASE_QUESTION]})
+        for shown in (None, {**SHOWN_RELEASE, "version": "v9.9.9"}):
+            with self.subTest(shown=shown), self.assertRaises(sprints.Refused) as caught:
+                svc.answer_question("owner/p01", sid, round_id, 0, 0, None, shown)
+            self.assertEqual(str(caught.exception), sprints.RELEASE_STALE)
+        self.assertEqual(svc._sprints[sid].approved_releases, ())
+        svc.answer_question("owner/p01", sid, round_id, 0, 1, None)
+        self.assertEqual(svc._sprints[sid].approved_releases, ())
+        self.assertEqual(self.judge(svc, sid, RELEASE_RUN).decision, "deny")
+
+    def test_a_release_pick_the_page_showed_approves(self):
+        svc, sid = self.boot()
+        self.approve_release(svc, sid)
+        self.assertEqual(len(svc._sprints[sid].approved_releases), 1)
+        self.assertEqual(self.judge(svc, sid, RELEASE_RUN).decision, "allow")
 
     def post(self, svc, body, **headers):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -1785,7 +1829,7 @@ class PermitServiceTest(PermitCase):
 
     def request(self, sid, **change):
         return {"sprint_id": sid, "secret": self.secret(sid), "phase": "judge",
-                "session_id": "s-1", "command": MERGE, **change}
+                "session_id": "s-1", "tool_use_id": "t-1", "command": MERGE, **change}
 
     def test_the_permit_route_answers_a_manager_only(self):
         svc, sid = self.boot()
@@ -1803,6 +1847,8 @@ class PermitServiceTest(PermitCase):
             '"phase": "judge"', '"phase": "judge", "phase": "judge"').encode()
         bad = [duplicated, self.request(sid, phase="other"), {**self.request(sid), "extra": 1},
                self.request(sid, session_id=""), self.request(sid, session_id="x" * 129),
+               self.request(sid, tool_use_id=""), self.request(sid, tool_use_id="x" * 129),
+               {k: v for k, v in self.request(sid).items() if k != "tool_use_id"},
                self.request(sid, command="x" * 8193), self.request(sid, command=3), b"not json"]
         for body in bad:
             with self.subTest(body=str(body)[:60]):
@@ -1846,7 +1892,8 @@ class PermitHookTest(PermitCase):
         [post] = hooks["PostToolUse"][0]["hooks"]
 
         def call(command):
-            return {"session_id": "s-1", "tool_name": "Bash", "tool_input": {"command": command}}
+            return {"session_id": "s-1", "tool_use_id": "t-1", "tool_name": "Bash",
+                    "tool_input": {"command": command}}
 
         out = self.hook(svc, sid, pre["command"], call(MERGE))
         self.assertEqual(json.loads(out), {"hookSpecificOutput": {
@@ -1868,7 +1915,8 @@ class PermitHookTest(PermitCase):
 class PermitWireTest(PermitCase):
     def test_the_command_and_the_route_agree(self):
         svc, sid = self.boot()
-        hook = {"session_id": "s-1", "tool_name": "Bash", "tool_input": {"command": MERGE}}
+        hook = {"session_id": "s-1", "tool_use_id": "t-1", "tool_name": "Bash",
+                "tool_input": {"command": MERGE}}
         out = io.StringIO()
         with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
                 mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \

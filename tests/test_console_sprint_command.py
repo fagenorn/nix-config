@@ -1370,7 +1370,7 @@ class PermitCommandTest(unittest.TestCase):
 
     @staticmethod
     def hook(command=GREEN, **change):
-        return json.dumps({"session_id": "s-1", "tool_name": "Bash",
+        return json.dumps({"session_id": "s-1", "tool_use_id": "t-1", "tool_name": "Bash",
                            "tool_input": {"command": command}, **change})
 
     @staticmethod
@@ -1387,7 +1387,7 @@ class PermitCommandTest(unittest.TestCase):
         ((port, method, path, body),) = sent
         self.assertEqual((method, path), ("POST", service.PERMIT_PATH))
         self.assertEqual(body, {"sprint_id": "a" * 16, "secret": "secret", "phase": "judge",
-                                "session_id": "s-1", "command": GREEN})
+                                "session_id": "s-1", "tool_use_id": "t-1", "command": GREEN})
         reply = json.dumps({"decision": "deny", "reason": "no"})
         code, out, _ = self.run_permit(self.hook(), reply)
         self.assertEqual((code, json.loads(out)), (0, self.decision("deny", "no")))
@@ -1430,6 +1430,17 @@ class PermitCommandTest(unittest.TestCase):
                 self.assertEqual(hook["permissionDecision"], "deny")
                 self.assertTrue(hook["permissionDecisionReason"].startswith(
                     "the console could not judge this command: "))
+
+    def test_permit_denies_a_judged_command_that_names_no_tool_call(self):
+        for stdin in (self.hook(tool_use_id=None), self.hook(tool_use_id=""), self.hook(tool_use_id=3),
+                      json.dumps({"session_id": "s-1", "tool_input": {"command": GREEN}})):
+            with self.subTest(stdin=stdin[:40]):
+                code, out, sent = self.run_permit(stdin)
+                self.assertEqual((code, sent), (0, []))
+                hook = json.loads(out)["hookSpecificOutput"]
+                self.assertEqual(hook["permissionDecision"], "deny")
+                self.assertIn("tool_use_id", hook["permissionDecisionReason"])
+        self.assertEqual(self.run_permit(self.hook("git status", tool_use_id=None), "{}"), (0, "", []))
 
     def test_permit_denies_without_a_sprint_or_secret(self):
         with mock.patch.dict(os.environ, {}, clear=False) as environ:

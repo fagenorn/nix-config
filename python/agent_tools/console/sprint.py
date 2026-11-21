@@ -207,8 +207,11 @@ a refused notices request is exit 1. A status with no secret is not an error.
 (#1377, ADR-console-094). It reads the hook input document from stdin (a JSON object with a string
 `session_id` and a string `tool_input.command`), resolves the sprint and secret as `sprint inbox` does and
 sends `POST /api/permit` with `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id",
-"command"}`; it prints at most one line and is always exit 0. For a command that
-`agent_tools.console.permit.mentions` rejects it contacts nothing and prints nothing. Otherwise, in the
+"tool_use_id", "command"}`; it prints at most one line and is always exit 0. For a command that
+`agent_tools.console.permit.mentions` rejects it contacts nothing and prints nothing. The request also
+carries the hook input's string `tool_use_id`, which names the one tool call, so a landed merge is paired
+with the allow of that same call; a command `mentions` accepts whose input has none is the failure below.
+Otherwise, in the
 judge phase, the console's `allow` or `deny` is printed as `{"hookSpecificOutput": {"hookEventName":
 "PreToolUse", "permissionDecision": <decision>, "permissionDecisionReason": <reason>}}` and a null
 decision prints nothing; any failure (stdin that is not such an object, no sprint id or secret, a console
@@ -487,8 +490,8 @@ class HookFailure(Exception):
     """A hook input or a console reply `sprint permit` cannot use; `str(error)` is the reason."""
 
 
-def hook_command(text: str) -> tuple[str, str]:
-    """The session id and the Bash command of a hook input document, else `HookFailure`."""
+def hook_command(text: str) -> tuple[str, str | None, str]:
+    """The session id, tool call id (None when absent) and Bash command of a hook input, else `HookFailure`."""
     try:
         document = json.loads(text, object_pairs_hook=reject_duplicate_keys,
                               parse_constant=reject_nonfinite_literal)
@@ -497,9 +500,10 @@ def hook_command(text: str) -> tuple[str, str]:
     tool = document.get("tool_input") if isinstance(document, dict) else None
     session = document.get("session_id") if isinstance(document, dict) else None
     command = tool.get("command") if isinstance(tool, dict) else None
+    call = document.get("tool_use_id") if isinstance(document, dict) else None
     if not isinstance(session, str) or not isinstance(command, str):
         raise HookFailure("the hook input has no session_id and tool_input.command")
-    return session, command
+    return session, call if isinstance(call, str) and call else None, command
 
 
 def permit_reply(text: str) -> tuple[str | None, str]:
@@ -525,12 +529,14 @@ def permit_line(decision: str, reason: str) -> str:
 def run_permit(args: argparse.Namespace) -> int:
     """The `sprint permit` hook: at most one printed line, always exit 0."""
     try:
-        session, command = hook_command(sys.stdin.read())
+        session, call, command = hook_command(sys.stdin.read())
         if not permit.mentions(command):
             return 0
+        if call is None:
+            raise HookFailure("the hook input has no tool_use_id")
         body = json.dumps({"sprint_id": resolve_sprint(args), "secret": resolve_secret(args),
                            "phase": "landed" if args.landed else "judge", "session_id": session,
-                           "command": command}).encode()
+                           "tool_use_id": call, "command": command}).encode()
         text = ask(args.port, "POST", service.PERMIT_PATH, body)
         decision, reason = (None, "") if args.landed else permit_reply(text)
     except (HookFailure, Unreadable, Refused, UnicodeDecodeError) as error:
