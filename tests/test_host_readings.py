@@ -338,18 +338,19 @@ class SelectTest(unittest.TestCase):
             self.assertEqual("owner-activation" in selected, host == "eleven-m5")
             self.assertFalse(pure)
 
-    def test_the_platform_package_reading_never_joins_a_pure_darwin_evaluation(self):
-        # Reading `home.file` forces an import-from-derivation, which the pure evaluation forbids.
-        for host in host_readings.DARWIN_HOSTS:
-            for builder in (False, True):
-                selected, pure = host_readings.select(
-                    host, host_readings.PARTS, darwin_machine=False, linux_builder=builder)
-                self.assertTrue(pure)
-                self.assertNotIn("agent-platform", selected)
-            selected, pure = host_readings.select(
-                host, host_readings.PARTS, darwin_machine=True, linux_builder=False)
-            self.assertIn("agent-platform", selected)
-            self.assertFalse(pure)
+    def test_the_platform_package_reading_joins_every_host_on_every_machine(self):
+        # It reads the definitions of `home.file`, never the merged option (an import-from-derivation), so the
+        # required CI job on Linux reads the darwin hosts too, and a darwin host stays in a pure evaluation.
+        for host in host_readings.ALL_HOSTS:
+            for darwin in (False, True):
+                for builder in (False, True):
+                    selected, pure = host_readings.select(
+                        host, host_readings.PARTS, darwin_machine=darwin, linux_builder=builder)
+                    self.assertIn("agent-platform", selected, (host, darwin, builder))
+                    self.assertNotIn("agent-platform-linux", selected)
+        selected, pure = host_readings.select(
+            "mbp", host_readings.PARTS, darwin_machine=False, linux_builder=False)
+        self.assertTrue(pure)
 
     def test_the_linux_host_is_never_pure_and_takes_the_console_only_with_a_builder(self):
         for darwin in (False, True):
@@ -606,6 +607,75 @@ def refusing_nix(directory, real_nix, refused):
     return wrapper
 
 
+def linked(source, target):
+    return {"source": source, "enable": True, "target": target, "recursive": False}
+
+
+PKG = "/nix/store/" + "a" * 32 + "-agent-platform"
+
+
+def stub_reading(definitions):
+    """The `agent-platform` part applied to a stub host whose `home.file` definitions are `definitions` (Nix text)."""
+    expression = f"""let
+      package = {{ outPath = "{PKG}"; python = "/nix/store/{'b' * 32}-python3";
+        launchers = {{ tool = "{PKG}/bin/tool"; }}; }};
+      channel = {{ legacyPackages.x86_64-linux.python3 = "/nix/store/{'b' * 32}-python3"; }};
+      host = {{
+        config.networking.hostName = "stub";
+        options.home-manager.users.valueMeta.attrs.tester.configuration.options.home.file.definitionsWithLocations =
+          [ {definitions} ];
+      }};
+      c = {{
+        nixpkgs.hostPlatform.system = "x86_64-linux";
+        networking.hostName = "stub";
+        home-manager.extraSpecialArgs.inputs = {{
+          self = {{ packages.x86_64-linux.agent-platform = package;
+            {host_readings.HOSTS['mbp']} = {{ }}; {host_readings.HOSTS['anis-desktop']}.stub = host; }};
+          nixpkgs = channel; nixpkgs-darwin = channel;
+        }};
+      }};
+    in ({host_readings.AGENT_PLATFORM}) c {{ home.username = "tester"; }}"""
+    done = subprocess.run(
+        [*host_readings.NIX, "--json", "--expr", expression],
+        capture_output=True, text=True, timeout=120, env=accounts_sandbox.unsandboxed_environment())
+    if done.returncode != 0:
+        raise AssertionError(f"stub evaluation failed:\n{done.stderr[-4000:]}")
+    return json.loads(done.stdout)
+
+
+def definition(*entries):
+    return "{ file = \"stub\"; value = { " + " ".join(entries) + " }; }"
+
+
+TOOL = f'".agents/bin/tool" = {{ source = "{PKG}/bin/tool"; }};'
+STANDARDS = f'".agents/standards" = {{ source = "{PKG}/share/agent-platform/standards"; }};'
+
+
+class AgentPlatformPartTest(unittest.TestCase):
+    def test_a_plain_entry_reads_as_a_link(self):
+        got = stub_reading(definition(TOOL, STANDARDS))
+        self.assertEqual(got["bin"]["tool"], linked(f"{PKG}/bin/tool", ".agents/bin/tool"))
+        self.assertEqual(got["binEntries"], [".agents/bin/tool"])
+
+    def test_an_enabled_entry_redirected_into_the_bin_directory_is_listed_by_its_target(self):
+        got = stub_reading(definition(TOOL, 'extraTool = { source = "/x"; target = ".agents/bin/extra"; };'))
+        self.assertEqual(sorted(got["binEntries"]), [".agents/bin/extra", ".agents/bin/tool"])
+
+    def test_a_disabled_entry_in_the_bin_directory_is_not_listed(self):
+        got = stub_reading(definition(TOOL, '".agents/bin/extra" = { source = "/x"; enable = false; };'))
+        self.assertEqual(got["binEntries"], [".agents/bin/tool"])
+
+    def test_a_second_entry_for_one_path_is_not_a_link(self):
+        got = stub_reading(definition(TOOL, STANDARDS, 'other = { source = "/y"; target = ".agents/standards"; };'))
+        self.assertIsInstance(got["standards"], list)
+        self.assertNotEqual(got["standards"], linked(f"{PKG}/share/agent-platform/standards", ".agents/standards"))
+
+    def test_a_forced_source_does_not_read_as_a_plain_link(self):
+        forced = '".agents/bin/tool" = { source = { _type = "override"; priority = 50; content = "/x"; }; };'
+        got = stub_reading(definition(forced))
+        self.assertNotEqual(got["bin"]["tool"], linked(f"{PKG}/bin/tool", ".agents/bin/tool"))
+
+
 class MeasureTest(unittest.TestCase):
     """The sweep's measurement tells a set-up read from a read made anywhere else."""
 
@@ -688,7 +758,7 @@ class RunReadsEachHostOnce(unittest.TestCase):
         "tests.test_system_packages": ("system-packages",),
         "tests.test_owner_services_units": ("owner-services", "owner-activation"),
         "tests.test_github_runners": ("runners", "runner-triples"),
-        "tests.test_platform_package_hosts": ("agent-platform", "agent-platform-linux"),
+        "tests.test_platform_package_hosts": ("agent-platform",),
     }
     # test ids the sweep does not run because they evaluate for real
     REAL_EVALUATIONS = ("tests.test_github_runners.RegisterRunnersTest.test_one_recipe_run_evaluates_the_real_configuration",)
