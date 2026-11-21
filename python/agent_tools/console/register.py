@@ -186,7 +186,8 @@ for any other row), and `draft_more` `contract_draft.more_line(draft)` under the
 counted line for the shown settings outside the main ones; None otherwise, including when no such
 setting is shown); else None (D4). The keys `adoption` and `approve` are None in the `running` entry
 and carry the given values (the `approve.entry` object and the action the page offers, #1054) in the
-`done` entry. `remote` (#1233) is None for the running entry and, for a done entry, the latest row's
+`done` entry; its `questions` are `[]` when `plans_again(adoption["step"], adoption["state"])` is false, so a plan
+with an applied, pushed, open or merged adoption offers no card that would plan it again (#1445). `remote` (#1233) is None for the running entry and, for a done entry, the latest row's
 `remote` when it is a string, else None; a `dismissed` row keeps it. `line` is the entry's state in one line (D6, D7): the running headline while a run is
 under way; the given adoption's headline when there is one (the adoption is then the plan's latest
 state, so a ready plan never says `ready to apply` beside an applied branch); else `line_of(latest)`:
@@ -818,6 +819,16 @@ def cancellable(latest: Mapping | None, adoption: Mapping | None) -> bool:
             and (adoption is None or adoption["step"] == "apply_failed"))
 
 
+def plans_again(step: str | None, pull_state: str | None) -> bool:
+    """Whether a registration may plan again given its plan id's adoption step and pull state (#1445).
+
+    True with no adoption (`step` None), a failed apply or a pull request closed without merging, the
+    cases the Apply action offers again; False once the adoption is applied, pushed, open, merged or
+    registered, when a new plan would offer a second adoption of a root already adopted.
+    """
+    return step is None or step == "apply_failed" or (step == "opened" and pull_state == "closed")
+
+
 def again_headline(name: str) -> str:
     return f"Planning the adoption of {name} again with your answer…"
 
@@ -861,7 +872,9 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
             "outcome": latest["outcome"], "headline": latest["headline"],
             "lines": lines, "note": latest["note"], "at": latest["at"],
             "plan_id": latest["plan_id"], "state": latest["state"],
-            "questions": latest["questions"], "refusal": refusal["text"] if mine else None,
+            "questions": (latest["questions"] if adoption is None
+                          or plans_again(adoption.get("step"), adoption.get("state")) else []),
+            "refusal": refusal["text"] if mine else None,
             "line": line,
             "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
             "draft": contract_draft.shown(draft) if isinstance(draft, list) else None,

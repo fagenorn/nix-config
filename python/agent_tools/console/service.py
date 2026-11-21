@@ -6316,6 +6316,10 @@ class ConsoleService:
             latest = self._registration
             if latest is None or latest["plan_id"] != plan_id:
                 raise sprints.Refused(plan_questions.STALE)
+            adopted = self._adoptions.get(plan_id)
+            if adopted is not None and not register.plans_again(adopted["step"],
+                                                                adopted["pull_state"]):
+                raise sprints.Refused(plan_questions.ADOPTED)
             root = latest["root"]
             changed = None
             if question == contract_draft.QUESTION_ID:

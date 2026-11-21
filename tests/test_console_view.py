@@ -3693,6 +3693,19 @@ class ProposedEnvironmentViewTest(unittest.TestCase):
             "environments": ["devenv.nix"]})
         return {**self.LATEST, "draft": fields}
 
+    def test_an_adopted_registration_offers_no_project_id_card(self):
+        latest = {**self.LATEST, "result": "drafting", "state": "drafting", "outcome": None,
+                  "questions": [{"id": contract_draft.QUESTION_ID, "subject": "project-id",
+                                 "ask": "What is the project id?", "why": "It names the project.",
+                                 "options": [], "text": True}]}
+        adoption = {"status": "done", "step": "opened", "state": "merged", "headline": "adopted",
+                    "lines": [], "note": None, "branch": None, "commit": None, "url": None}
+        self.assertEqual(
+            [e["reason"] for e in view._register_entries(register.view_entry(None, latest))],
+            ["register"])
+        self.assertEqual(
+            view._register_entries(register.view_entry(None, latest, adoption=adoption)), [])
+
     def test_the_ready_apply_card_states_the_proposal_first_and_hides_the_draft(self):
         latest = self.latest()
         items = approve.apply_items(latest, None, None, "approve", deferred=set())

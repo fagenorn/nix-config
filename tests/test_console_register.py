@@ -1018,6 +1018,28 @@ class RowTest(unittest.TestCase):
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
         self.assertEqual((found["plan_id"], found["state"]), (PLAN_ID, "drafting"))
 
+    def adoption_entry(self, step, state=None):
+        return {"status": "done", "step": step, "state": state, "headline": "adopted",
+                "lines": [], "note": None, "branch": None, "commit": None, "url": None}
+
+    def test_a_replanned_registration_with_an_adoption_past_a_failed_apply_has_no_question(self):
+        _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        for step, state in (("applied", None), ("push_failed", None), ("open_failed", None),
+                            ("opened", "ready"), ("opened", "failing"), ("opened", "merged")):
+            with self.subTest(step=step, state=state):
+                shown = register.view_entry(None, found, adoption=self.adoption_entry(step, state))
+                self.assertEqual(shown["questions"], [])
+                self.assertFalse(register.plans_again(step, state))
+        for step, state in ((None, None), ("apply_failed", None), ("opened", "closed")):
+            with self.subTest(step=step, state=state):
+                shown = register.view_entry(None, found, adoption=self.adoption_entry(step, state))
+                self.assertEqual([q["subject"] for q in shown["questions"]], ["project-id"])
+                self.assertTrue(register.plans_again(step, state))
+        self.assertEqual([q["subject"] for q in register.view_entry(None, found)["questions"]],
+                         ["project-id"])
+
     def test_a_ready_plan_whose_light_lane_was_none_keeps_its_plan(self):
         _, row = self.planned_with_light_lane("none", state="ready")
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])

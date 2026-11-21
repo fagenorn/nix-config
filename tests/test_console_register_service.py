@@ -1224,6 +1224,26 @@ class PlanAnswerRefusalTest(Case):
                      "that plan is no longer the one shown; answer the plan shown now")
         self.assertEqual(fake.calls, [("plan", str(repo))])
 
+    def test_an_answer_for_a_plan_with_an_adoption_past_a_failed_apply_is_refused(self):
+        fake = Fake(plan=DRAFT)
+        svc = self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        adoption = {"root": str(repo), "plan_id": PID_A, "step": "applied", "branch": "b",
+                    "commit": "c" * 40, "base": "main", "reason": None, "note": None,
+                    "pull_request": None, "pull_state": None}
+        for step, state, refused in (("applied", None, True), ("opened", "merged", True),
+                                     ("apply_failed", None, False), ("opened", "closed", False)):
+            with self.subTest(step=step, state=state):
+                with svc._ingest:
+                    svc._adoptions[PID_A] = {**adoption, "step": step, "pull_state": state}
+                if refused:
+                    self.refused(answer_of(PID_A, A1),
+                                 "that plan is already being adopted; there is nothing left to answer")
+                else:
+                    self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+                    self.wait_for(lambda found: found["status"] == "done")
+
     def test_an_answer_while_a_run_is_under_way_is_refused(self):
         gate = threading.Event()
         fake = Fake(plan=DRAFT, block=gate)
