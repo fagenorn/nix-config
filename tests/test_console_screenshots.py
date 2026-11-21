@@ -31,7 +31,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing")
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing", "prompting")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -1034,14 +1034,16 @@ def uncovered(moved, rows) -> list[str]:
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifty_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 50)
+    def test_the_set_is_fifty_two_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 52)
         self.assertEqual(shots.STATES[-8:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors", "owner-accounts"))
         self.assertIn("guest-steer", shots.SHARING_STATES)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
+        self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:2],
+                         ("permission-stale", "permission-card"))
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
                          ("inbox-card", "question-words", "question-refused"))
         self.assertEqual(shots.STATES.index("waiting-its-turn"),

@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-two screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -22,7 +22,18 @@ Contract:
   `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
   has a transcript whose last peer-message record is one the client held and did not deliver
   (#1229), read once through the movement poll, so its line reads that the manager cannot hear
-  the console; `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
+  the console; `permission-stale` is a running sprint whose manager session (listed, named for
+  the sprint) folded working, then a `PermissionRequest` hook row for a Bash prompt, then a
+  transcript whose `user` record is stamped after that hook (the 21 Nov reading: the manager's own
+  hook refused the prompt at once and it went on working); on the branch's console the heading reads
+  "Nothing needs you" and the session reads working after the first session poll, on the base
+  commit's the same seed reads "1 thing needs you" with the terminal sentence, the before picture
+  (#1424); `permission-card` is that sprint with its manager's held Bash prompt, `git worktree add
+  ../.worktrees/issue-12` with the words "Create the delivery's worktree", posted to
+  `/api/permission-prompt` by its literal path with the sprint's secret and kept held while shooting
+  (a phase `wait` right before each width's shot), so the branch's console shows the card with Allow
+  once and Refuse under "1 thing needs you"; on a console that does not know the route (the base answers 405) the seed
+  is the `PermissionRequest` hook row only, which is the before picture; `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
   so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
@@ -231,7 +242,7 @@ import tempfile
 import threading
 import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -242,14 +253,15 @@ from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret, read_secret
 from agent_tools.system.forge_api import ForgeError
 
 from .console_test_support import hook_body, write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
+          "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
+          "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
@@ -282,6 +294,7 @@ REGISTER_STATES = ("register-apply", "register-draft", "register-reconcile-apply
                    "register-reconcile-draft")
 ADOPTION_STATES = ("adoption-merge", "adoption-moved", "adoption-failed")
 CLICKED_STATES = ("adoption-failed",)
+PERMISSION_STATES = ("permission-stale", "permission-card")
 ADOPTION_BRANCH = "adopt-" + "5" * 12
 ADOPTION_COMMIT = "a" * 40
 ADOPTION_MOVED_HEAD = "d" * 40
@@ -343,6 +356,10 @@ OPEN_THREAD = (True, FOLLOW_READ_LINE, True)
 BASE_THREAD = (False, FOLLOW_READ_LINE, False)
 DESK_OUTSIDE = "outside-1136"
 DEAF_MANAGER = "manager-1229"
+PERMISSION_MANAGER = "manager-1424"
+PERMISSION_PROMPT = "/api/permission-prompt"
+PERMISSION_COMMAND = "git worktree add ../.worktrees/issue-12"
+PERMISSION_WORDS = "Create the delivery's worktree"
 READING_PANEL = "section#reading"
 ACTIVATION_COMMIT = "1258" * 10
 ACTIVATION_PATHS = {
@@ -490,6 +507,7 @@ class Fixture:
     registering: bool = False
     adopting: bool = False
     refusing: bool = False
+    prompting: str = ""
 
 
 @dataclass(frozen=True)
@@ -2300,6 +2318,17 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.put(MINUTE, sessions.SEEN, web, {
             "session_id": DEAF_MANAGER, "cwd": web_root, "repo": web_root, "state": "working",
             "name": manager.session_name(web, sid)})
+    elif state in PERMISSION_STATES:
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
+                             report=45 * MINUTE)
+        seed.put(20 * MINUTE, sessions.SEEN, web, {
+            "session_id": PERMISSION_MANAGER, "cwd": web_root, "repo": web_root,
+            "state": "working", "name": manager.session_name(web, sid)})
+        if state == "permission-stale":
+            seed.put(10 * MINUTE, sessions.HOOK, web, {
+                "event": "PermissionRequest", "session_id": PERMISSION_MANAGER, "cwd": web_root,
+                "repo": web_root, "tool_name": "Bash"})
+        return (sid,)
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state in (*SHARING_STATES, "owner-actors", "owner-accounts"):
@@ -2541,6 +2570,58 @@ def _write_held_manager(fixture: Fixture, now_s: float) -> None:
                                       "you approve it at this terminal"}]))
 
 
+def _write_permission_manager(fixture: Fixture, now_s: float) -> None:
+    """The stale-wait manager's transcript: a `user` record stamped after the seeded `PermissionRequest` hook."""
+    slug = fixture.config / "projects" / "-web"
+    slug.mkdir(parents=True, exist_ok=True)
+    (slug / f"{PERMISSION_MANAGER}.jsonl").write_bytes(_transcript([
+        {"type": "user", "timestamp": _iso(now_s - 5 * MINUTE), "message": {"content": "carry on"}}]))
+
+
+def _permission_post(service: ConsoleService, body: Mapping) -> tuple[int, dict]:
+    """One POST of `body` to the manager's permission route by its literal path: its status and JSON."""
+    connection = http.client.HTTPConnection(*service.address, timeout=10)
+    try:
+        connection.request("POST", PERMISSION_PROMPT, body=json.dumps(body),
+                           headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        raw = response.read()
+        return response.status, json.loads(raw) if response.status == 200 else {}
+    finally:
+        connection.close()
+
+
+def hold_permission(service: ConsoleService, fixture: Fixture) -> int | None:
+    """The manager's held Bash prompt of `permission-card`: its id, or None on a console without the route.
+
+    A console that does not know the route (the base commit answers 405, another 404) gets the `PermissionRequest` hook row
+    alone, which is what its manager's hook produces there.
+    """
+    sprint_id = fixture.prompting
+    status, answer = _permission_post(service, {
+        "sprint_id": sprint_id, "secret": read_secret(fixture.secrets, sprint_id), "phase": "ask",
+        "session_id": PERMISSION_MANAGER, "command": PERMISSION_COMMAND,
+        "description": PERMISSION_WORDS})
+    if status in (404, 405):
+        service.ingest_hook(hook_body("permission prompt", session_id=PERMISSION_MANAGER,
+                                      cwd=str(fixture.projects[0])))
+        return None
+    if status != 200 or not isinstance(answer.get("prompt"), int):
+        raise RuntimeError(f"the permission prompt was not held ({status})")
+    return answer["prompt"]
+
+
+def keep_permission(service: ConsoleService, fixture: Fixture, prompt: int | None) -> None:
+    """Renew the held prompt's contact right before a shot, as its hook's wait does."""
+    if prompt is None:
+        return
+    status, answer = _permission_post(service, {
+        "sprint_id": fixture.prompting, "secret": read_secret(fixture.secrets, fixture.prompting),
+        "phase": "wait", "session_id": PERMISSION_MANAGER, "prompt": prompt})
+    if status != 200 or answer.get("state") != "open":
+        raise RuntimeError(f"the permission prompt is not held open ({status})")
+
+
 def build_fixture(root: Path, state: str, now_s: float, *,
                   read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> Fixture:
     root = Path(root)
@@ -2579,6 +2660,11 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         log.close()
     if state == "manager-cannot-hear":
         _write_held_manager(fixture, now_s)
+    if state == "permission-stale":
+        _write_permission_manager(fixture, now_s)
+    if state == "permission-card":
+        create_secret(fixture.secrets, sprint_ids[0])
+        fixture = replace(fixture, prompting=sprint_ids[0])
     if state == "spend-page":
         _write_spend(fixture, now_s, sprint_ids[0])
     elif state == "desk-spend":
@@ -2879,19 +2965,24 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                     with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
                             tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
                         now_s = datetime.now(timezone.utc).timestamp()
+                        fixture = build_fixture(Path(tmp).resolve(), state, now_s, read=read)
                         service = start_service(
-                            build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
+                            fixture, now_s,
                             guest_dir=Path(door) if state in SHARING_STATES else None,
                             tailnet_readable=state != "sharing-unreadable")
                         serve = None
                         try:
                             host, port = service.address
+                            if state == "permission-card":
+                                held = hold_permission(service, fixture)
                             if state in SHARING_PANELS:
                                 guest_requests(state, guest_door(service))
                             elif state in ("guest-page", "guest-steer"):
                                 serve = _Serve(guest_door(service))
                                 host, port = serve.address
                             for width in group:
+                                if state == "permission-card":
+                                    keep_permission(service, fixture, held)
                                 path = "spend" if state == "spend-page" else ""
                                 taken.append(
                                     _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
