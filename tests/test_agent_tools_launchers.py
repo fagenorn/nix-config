@@ -23,11 +23,12 @@ SYSTEM_RESULT_ENV = "AGENT_TOOLS_SYSTEM_RESULT"
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 PACKAGE_BYTES = b"agent_tools"
 # The platform package (lib/agent-tools.nix) writes each launcher as a `-p` shebang line, the
-# `unset`, the root export and the `exec`, then a newline.
+# `unset`, the root and tools exports and the `exec`, then a newline.
 LAUNCHER = re.compile(
     rb"#![^\n]+\n"
     rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
     rb"export AGENT_PLATFORM_ROOT=(?P<root>/nix/store/[0-9a-z]{32}-agent-platform/share/agent-platform)\n"
+    rb"export AGENT_PLATFORM_TOOLS=/nix/store/[0-9a-z]{32}-agent-platform-tools/bin\n"
     rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
     rb' -I -m agent_tools\.(?P<module>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?) "\$@"\n*'
 )
@@ -54,6 +55,7 @@ def launcher_bytes(module: bytes) -> bytes:
         b"#!/nix/store/" + b"a" * 32 + b"-bash/bin/bash -p\n"
         b"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
         b"export AGENT_PLATFORM_ROOT=/nix/store/" + b"c" * 32 + b"-agent-platform/share/agent-platform\n"
+        b"export AGENT_PLATFORM_TOOLS=/nix/store/" + b"d" * 32 + b"-agent-platform-tools/bin\n"
         b"exec /nix/store/" + b"b" * 32 + b"-python3-env/bin/python3 -I -m agent_tools."
         + module + b' "$@"\n'
     )
