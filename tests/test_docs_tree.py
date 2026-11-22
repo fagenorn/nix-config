@@ -8,6 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.project_contract.adopt_inspection import (
+    blob_at,
+    evidence_records_at,
+    parses_as_evidence_record,
+    parses_as_migration_map,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
@@ -143,6 +150,26 @@ def working_artifact_hits(path: str, lines: list[str], archived: frozenset[str])
     return hits
 
 
+def index_destinations(text: str) -> list[str]:
+    """Each repo-relative destination the docs index (the first table of `docs/README.md`) links to.
+
+    The index is the first run of consecutive lines starting with `|`; its header and separator rows are
+    skipped, only the first cell of a row is read, and a URL is not a destination.
+    """
+    rows: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("|"):
+            rows.append(line)
+        elif rows:
+            break
+    found = []
+    for row in rows[2:]:
+        for target in MD_LINK_RE.findall(row.split("|")[1]):
+            if "://" not in target:
+                found.append(posixpath.normpath(posixpath.join("docs", target.split("#", 1)[0])))
+    return found
+
+
 class DocsTreeTest(unittest.TestCase):
     def test_the_index_routes_each_working_artifact_off_the_tree(self):
         lines = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8").splitlines()
@@ -164,6 +191,43 @@ class DocsTreeTest(unittest.TestCase):
         for line in table:
             self.assertNotIn(".agents/artifacts/", line)
             self.assertNotIn("archive/", line)
+
+    def test_no_file_is_tracked_under_a_working_artifact_directory(self):
+        listing = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", *WORKING_ARTIFACT_DIRS],
+            check=True, capture_output=True,
+        )
+        paths = [p for p in listing.stdout.decode("utf-8").split("\0") if p]
+        self.assertEqual(paths, [ADOPTION_RECORD])
+
+    def test_the_adoption_records_survive_the_deletion(self):
+        tree = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "write-tree"], check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        parsed = {
+            p: r
+            for p in evidence_records_at(REPO_ROOT, tree)
+            if (r := parses_as_evidence_record(blob_at(REPO_ROOT, tree, p))) is not None
+        }
+        self.assertEqual(list(parsed), [ADOPTION_RECORD])
+        self.assertEqual(parsed[ADOPTION_RECORD]["path_migration_map"], ADOPTION_MAP)
+        self.assertIsNotNone(parses_as_migration_map(blob_at(REPO_ROOT, tree, ADOPTION_MAP)))
+
+    def test_the_index_has_no_archive_or_spikes_entry(self):
+        text = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
+        hits = [
+            d for d in index_destinations(text)
+            if any(d == w or d.startswith(w + "/") for w in ("docs/archive", "docs/spikes"))
+        ]
+        self.assertEqual(hits, [])
+
+    def test_index_destinations_resolve_each_entry_relative_to_the_index(self):
+        text = (
+            "# x\n\n| Entry | What |\n|---|---|\n| [Past reports](archive/) | old |\n"
+            "| [g](./guides/#top) | g |\n| [w](https://example.invalid/) | w |\n\n**Where**\n\n"
+            "| K | H |\n|---|---|\n| [s](./spikes/) | s |\n"
+        )
+        self.assertEqual(index_destinations(text), ["docs/archive", "docs/guides"])
 
     def test_the_docs_tree_passes_the_context_map_lint(self):
         map_path = REPO_ROOT / "docs/CONTEXT-MAP.md"
