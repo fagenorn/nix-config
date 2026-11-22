@@ -1,29 +1,29 @@
 """Finding, running and grading one command step of an engine procedure (#1512).
 
-A `command` step names an id, looked up in the platform table (`PLATFORM_MODULES`)
-first, then in the snapshot's project commands; an id in neither is an
-`UnknownCommand` that starts no process. A platform id runs as its packaged
-sibling module (`siblings.sibling_argv`, agent-helpers rule 3) in the snapshot's
-project root, with its subcommand then its arguments; a project id runs its
-snapshot argv then its arguments, in the entry's own cwd, with no subcommand.
+A `command` step names an id, looked up in the platform table (`PLATFORM_MODULES`) first, then in the
+snapshot's project commands; an id in neither is an `UnknownCommand` that starts no process. A
+platform id runs as its packaged sibling module (`siblings.sibling_argv`, agent-helpers rule 3) in
+the snapshot's project root, with its subcommand then its arguments; a project id runs its snapshot
+argv then its arguments, in the entry's own cwd, with no subcommand. `PLATFORM_MODULES` mirrors the
+`lib/agent-tools.nix` rows of the commands that have a declaration in `command_verdicts.json`;
+tests/test_engine_commands.py pins the mirror.
 
-`PLATFORM_MODULES` mirrors the `lib/agent-tools.nix` rows of the commands that
-have a declaration in `command_verdicts.json`; tests/test_engine_commands.py
-pins the mirror.
+Grading: stdout is parsed strictly as one JSON document; the outcome is its `verdict` when that is a
+non-empty string, else `ok` for exit 0 and `failed` otherwise. A document that is not an object is no
+result (`{}`).
 
-Grading: stdout is parsed strictly as one JSON document; the outcome is its
-`verdict` when that is a non-empty string, else `ok` for exit 0 and `failed`
-otherwise. A document that is not an object is no result (`{}`).
-
-A command that cannot start (an `OSError` from the spawn) is `failed` with exit
-127 and no pid, and `on_start` is not called. When `on_start` raises, the process
-is killed and reaped before the error propagates. The module runs processes, so
-the pure engine core never imports it.
+A command that cannot start (an `OSError` from the spawn) is `failed` with exit 127 and no pid, and
+`on_start` is not called. When `on_start` raises, the process is killed and reaped before the error
+propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group at
+the timeout and bounds the drain by `DRAIN_SECONDS`. `Ran.stdout`/`stderr` are what it printed
+(stderr is empty untimed). The module runs processes, so the pure engine core never imports it.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -41,6 +41,8 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
 })
 PROJECT_DECLARATION = CommandDeclaration((), {})
 NOT_STARTED = 127
+TIMED_OUT = "timeout"
+DRAIN_SECONDS = 5
 
 
 class UnknownCommand(LookupError):
@@ -119,16 +121,21 @@ class Ran:
     result: dict
     exit_code: int
     wall_seconds: float
+    stdout: bytes = b""
+    stderr: bytes = b""
 
 
 def run(table: CommandTable, command: str, subcommand: str | None,
-        args: Sequence[tuple[str, object]], *, on_start: Callable[[int], None]) -> Ran:
+        args: Sequence[tuple[str, object]], *, on_start: Callable[[int], None],
+        timeout: float | None = None) -> Ran:
     """Run one command step to its end; `on_start(pid)` is called once, before waiting."""
     invocation = table.invocation(command, subcommand, args)
     started = time.monotonic()
     try:
-        process = subprocess.Popen(invocation.argv, cwd=invocation.cwd,
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        process = subprocess.Popen(
+            invocation.argv, cwd=invocation.cwd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
+            start_new_session=timeout is not None)
     except OSError:
         return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
     try:
@@ -137,6 +144,24 @@ def run(table: CommandTable, command: str, subcommand: str | None,
         process.kill()
         process.communicate()
         raise
-    stdout, _ = process.communicate()
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=DRAIN_SECONDS)
+        except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
+            stdout, stderr = late.output or b"", late.stderr or b""
+            process.stdout.close(), process.stderr.close(), process.wait()
+        return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr)
+    except BaseException:  # an interrupt must not leave a timed run's group alive
+        if timeout is not None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        raise
     outcome, result = grade(stdout, process.returncode)
-    return Ran(outcome, result, process.returncode, time.monotonic() - started)
+    return Ran(outcome, result, process.returncode, time.monotonic() - started,
+               stdout, stderr or b"")

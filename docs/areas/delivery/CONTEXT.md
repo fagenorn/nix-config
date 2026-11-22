@@ -54,7 +54,7 @@ An acceptance criterion of kind human written exactly `- [ ] [human] before merg
 The one named result a step's grade produces; the only thing a transition reads.
 
 **Procedure**:
-One JSON file in the platform package that describes a delivery as a finite state machine: a header (its `format`, a keep-alive command, its stops) and a flat list of steps, with no expression and no code. Its prompts are sibling Markdown files.
+One JSON file in the platform package that describes a delivery as a finite state machine: a header (its `format`, an optional keep-alive command, its stops) and a flat list of steps, with no expression and no code. Its prompts are sibling Markdown files.
 
 **Standard**:
 One rule under one heading in a layer file, with a stable id, applied to every change within its layer file's scope: the bar to every change, a stack or project shard to the changes its globs match (issue 1412).

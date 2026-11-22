@@ -9,17 +9,21 @@ Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
 held run lock answers `EXIT_RUNNING` first; `<procedures_dir>/deliver.json` must
 pass `procedure_check.check_directory` against the platform declarations plus
-every project command, hold only `command` and `decide` steps, no step with
-`mutates: true`, and no input but `issue`. The same checks run again on the run's
-staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
+every project command, hold only `command` and `decide` steps, a `mutates: true`
+step only as a `command` step, and no input but `issue`. The same checks run again
+on the run's staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
 
-An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done`
-or `stop_reached`.
+Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
+the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
+only on the verdict `renewed` with exit 0; an `error` whose `transient` is the boolean
+`true` is called once more. Otherwise the run ends at `claim-lost` without entering the
+step, its detail carrying the verdict and what the call printed on stdout and stderr.
 
-Single writer: under the issue's creation lock the shell takes `<run>/lock`, an
-exclusive `flock` held until `deliver` returns. A run whose lock is held makes
-the call exit `EXIT_RUNNING`; a run not done and not locked is refused
-(continuing a run is a later slice).
+An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done` or `stop_reached`.
+
+Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
+until `deliver` returns. A run whose lock is held makes the call exit `EXIT_RUNNING`; a run not done and
+not locked is refused (continuing a run is a later slice).
 
 Exit codes: `engine.py` lists them; `Fault` and `Refused` print nothing on stdout.
 """
@@ -44,6 +48,7 @@ EXIT_FAULT = 1
 EXIT_REFUSED = 2
 EXIT_STOP = 3
 EXIT_RUNNING = 4
+KEEP_ALIVE_SECONDS = 1200
 LOCK_NAME = "lock"
 ENTRY = "deliver"
 SUPPLIED_INPUTS = ("issue",)
@@ -87,9 +92,9 @@ def _refuse_unrunnable(procedure: dict) -> None:
         if item["kind"] not in RUNNABLE_KINDS:
             raise Refused(f"step {item['id']} is a {item['kind']} step, "
                           "which the engine does not run yet")
-    for item in procedure["steps"]:
-        if item.get("mutates") is True:
-            raise Refused(f"step {item['id']} mutates, which the engine does not run yet")
+        if item.get("mutates") is True and item["kind"] != "command":
+            raise Refused(f"step {item['id']} is a {item['kind']} step marked mutates, and the "
+                          "engine renews the claim only before a command step")
     for name in procedure["inputs"]:
         if name not in SUPPLIED_INPUTS:
             raise Refused(f"input {name} is not supplied by the engine")
@@ -282,7 +287,6 @@ def _release(held: list[int]) -> None:
 def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
     procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
     steps = {item["id"]: item for item in procedure["steps"]}
-    run_id = run_dir.name
     ran = 0
     while True:
         ledger = engine_ledger.replay(run_dir / "events.jsonl")
@@ -293,20 +297,50 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
             return EXIT_DONE, {
                 "detail": f"The {ENTRY} procedure reached done after {ran} command "
                           f"{'visit' if ran == 1 else 'visits'}.",
-                "end": "done", "need": None, "run": run_id}
+                "end": "done", "need": None, "run": run_dir.name}
         if isinstance(action, engine_core.Stop):
             step = walk.transitions[-1].step
-            engine_ledger.append_event(run_dir, {
-                "event": "stop_reached", "at": _now(), "step": step,
-                "stop": action.name, "need": action.need})
-            return EXIT_STOP, {
-                "detail": f"The {ENTRY} procedure stopped at step {step} with "
-                          f"{action.name}, which needs {action.need}.",
-                "end": action.name, "need": action.need, "run": run_id}
+            return _stop(run_dir, step, action.name, action.need,
+                         f"The {ENTRY} procedure stopped at step {step} with "
+                         f"{action.name}, which needs {action.need}.")
         if not isinstance(action, engine_core.RunCommand):
             raise Fault(f"step {action.step} needs a session, which the engine does not run yet")
+        if steps[action.step].get("mutates") is True and "keep_alive" in procedure:
+            lost = _renew(run_dir, table, procedure, inputs, action)
+            if lost is not None:
+                return lost
         _visit(run_dir, table, steps[action.step], action)
         ran += 1
+
+
+def _stop(run_dir: Path, step: str, name: str, need: str, detail: str) -> tuple[int, dict]:
+    engine_ledger.append_event(run_dir, {"event": "stop_reached", "at": _now(), "step": step,
+                                         "stop": name, "need": need})
+    return EXIT_STOP, {"detail": detail, "end": name, "need": need, "run": run_dir.name}
+
+
+def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
+           action: engine_core.RunCommand) -> tuple[int, dict] | None:
+    """None when the claim is renewed before `action`'s step, else the `claim-lost` stop."""
+    keep_alive = procedure["keep_alive"]
+    args = tuple((path, inputs[path.split(".", 1)[1]]) for path in keep_alive["in"])
+    for attempt in (1, 2):
+        ran = engine_commands.run(table, keep_alive["command"], keep_alive.get("subcommand"),
+                                  args, on_start=lambda pid: None, timeout=KEEP_ALIVE_SECONDS)
+        verdict = "failed" if ran.outcome == "renewed" and ran.exit_code != 0 else ran.outcome
+        engine_ledger.append_event(run_dir, {
+            "event": "keep_alive_ran", "at": _now(), "step": action.step,
+            "visit": action.visit, "attempt": attempt, "verdict": verdict})
+        if verdict == "renewed":
+            return None
+        if verdict != "error" or ran.result.get("transient") is not True:
+            break
+    text = " ".join(ran.stdout.decode("utf-8", "replace").split()
+                    + ran.stderr.decode("utf-8", "replace").split()) or "no output"
+    need = procedure["stops"][procedure_check.CLAIM_LOST]["need"]
+    return _stop(run_dir, action.step, procedure_check.CLAIM_LOST, need,
+                 f"The claim was not renewed before step {action.step}, the keep-alive "
+                 f"answered {verdict}: {text}.")
 
 
 def _visit(run_dir: Path, table: CommandTable, step: dict,
