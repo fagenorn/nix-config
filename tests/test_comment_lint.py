@@ -247,6 +247,15 @@ class CommentSyntaxTest(unittest.TestCase):
             comment_syntax.blocks("a.jsx", "const el = <p>ok</p>; // TODO\n"),
             (Block(1, 1, ("// TODO",), False),))
 
+    def test_a_jsx_self_closing_slash_after_an_attribute_expression_is_not_a_regex(self):
+        for text in (
+            "const el = <Foo bar={x} />; // TODO\n",
+            "const el = <Foo {...props} />; // TODO\n",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    comment_syntax.blocks("a.tsx", text), (Block(1, 1, ("// TODO",), False),))
+
     def test_a_csharp_interpolation_lexes_its_nested_string(self):
         for text in (
             'var s = $"{Get("/* TODO */")}"; // yes\n',

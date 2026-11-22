@@ -640,6 +640,8 @@ class _JavaScript(_Scan):
     def regex_allowed(self) -> bool:
         if self.i > 0 and self.text[self.i - 1] == "<" and self.prev == "<":
             return False
+        if self.prev == "}" and self.text.startswith("/>", self.i):
+            return False
         return self.prev == "" or self.prev in _REGEX_AFTER or self.prev in _REGEX_KEYWORDS
 
     def regex(self) -> None:
