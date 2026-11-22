@@ -20,6 +20,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -61,6 +62,7 @@ from .test_resolve_project import (
 REPO_ROOT = Path(__file__).resolve().parents[4]
 GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
 BASE = "b" * 40
+TREE = "e" * 40
 
 INSPECTION = {
     "profile": {"admissible": True},
@@ -140,10 +142,10 @@ class FakeRunner:
             return Completed(1, "", "")
         if "--git-common-dir" in argv:
             return Completed(0, f"{self.common}\n", "")
-        if argv[-2:] == ("rev-parse", "HEAD"):
-            return Completed(0, BASE + "\n", "")
+        if "rev-parse" in argv and "HEAD^{tree}" in argv:
+            return Completed(0, f"{BASE}\n{TREE}\n", "")
         if "log" in argv and "-1" in argv:
-            return Completed(0, f"{BASE}\n{COMMIT_PROBE_MESSAGE}\n", "")
+            return Completed(0, f"{BASE}\n{COMMIT_PROBE_MESSAGE}\n{TREE}\n", "")
         if "inspect" in argv and "profile" in argv:
             return Completed(0, json.dumps(self.inspection), "")
         if "preview" in argv and "transaction" in argv:
@@ -154,6 +156,13 @@ class FakeRunner:
 
     def argvs(self) -> list[tuple[str, ...]]:
         return [call[0] for call in self.calls]
+
+
+def load_guard():
+    spec = importlib.util.spec_from_file_location("lifecycle_guard_source", GUARD_SOURCE)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    return guard
 
 
 def refused_answer(code: str, **shape: Any) -> str:
@@ -311,6 +320,56 @@ class ReadinessChecksTest(ReadinessCase):
             self.assertTrue(detail.startswith(f"the commit hooks of {self.root} could not be read: "))
             self.assertTrue(detail.endswith("exited 128: fatal: bad config"))
             self.assertFalse(any(a[-1] == COMMIT_PROBE_MESSAGE for a in runner.argvs()))
+
+    def test_a_hooks_path_inside_git_gets_the_registered_checkouts_hooks(self):
+        hooks = self.root / ".git/hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "pre-commit").write_bytes(b"#!/bin/sh\nexit 1\n")
+        (hooks / "pre-commit").chmod(0o755)
+        runner = FakeRunner(self.common)
+        runner.when(lambda argv: "--get" in argv, Completed(0, ".git/hooks\n", ""))
+        checks, _ = self.run_it(runner=runner)
+        self.assertEqual(b"#!/bin/sh\nexit 1\n", (self.clone / ".git/hooks/pre-commit").read_bytes())
+        self.assertTrue(next(c for c in checks if c.id == "commit-hook").passed)
+        runner = FakeRunner(self.common)
+        runner.when(lambda argv: "--get" in argv, Completed(0, "../../../outside\n", ""))
+        checks, _ = self.run_it(runner=runner)
+        self.assertTrue(line(checks, "commit-hook").endswith(
+            "core.hooksPath ../../../outside is outside the clean checkout"))
+
+    def test_the_probe_commit_is_empty_and_proves_it(self):
+        checks, runner = self.run_it()
+        argvs = runner.argvs()
+        reset = ("git", "-C", str(self.clone), "reset", "--quiet")
+        self.assertIn(reset, argvs)
+        self.assertLess(argvs.index(reset),
+                        next(i for i, a in enumerate(argvs) if a[-1] == COMMIT_PROBE_MESSAGE))
+        runner = FakeRunner(self.common)
+        runner.when(lambda argv: "log" in argv,
+                    Completed(0, f"{BASE}\n{COMMIT_PROBE_MESSAGE}\n{'d' * 40}\n", ""))
+        checks, _ = self.run_it(runner=runner)
+        self.assertEqual("fail commit-hook: the probe commit exited 0 but was not empty",
+                         line(checks, "commit-hook"))
+
+    def test_a_relative_origin_is_read_from_the_registered_checkout(self):
+        for url, expected in (("../origin.git", os.path.normpath(self.root / "../origin.git")),
+                              ("/srv/origin.git", "/srv/origin.git"),
+                              ("https://example.invalid/o.git", "https://example.invalid/o.git"),
+                              ("git@example.invalid:o/p.git", "git@example.invalid:o/p.git")):
+            with self.subTest(url=url):
+                runner = FakeRunner(self.common)
+                runner.when(lambda argv: "get-url" in argv, Completed(0, url + "\n", ""))
+                self.run_it(runner=runner)
+                clone = next(a for a in runner.argvs() if a[:2] == ("git", "clone"))
+                self.assertEqual([expected, str(self.clone)], list(clone[-2:]))
+
+    def test_a_login_probe_that_times_out_names_the_timeout(self):
+        row = "release-login github-release forge-keyring"
+        runner = FakeRunner(self.common)
+        runner.when(lambda argv: argv[:2] == ("gh", "auth"), Completed(None, "", ""))
+        checks, _ = self.run_it(runner=runner)
+        self.assertEqual(f"fail {row}: gh auth status --hostname github.com did not finish "
+                         "within 30 s", line(checks, row))
 
     def test_a_commit_environment_that_makes_no_commit_fails(self):
         runner = FakeRunner(self.common)
@@ -566,6 +625,35 @@ class RefusalTest(ReadinessCase):
             with self.subTest(argv=argv):
                 self.assertEqual("would run production command deploy", refusal(argv, snap))
 
+    def test_a_one_word_production_verb_behind_a_shell_prefix_is_refused(self):
+        guard = load_guard()
+        rules = {"fagenorn/ready": {
+            "changes": [{"id": "deploy", "argv": ["deploy"]}], "read_only": [],
+            "release_profile": "github-release"}}
+        snap = fake_snapshot(self.root, **{
+            "bindings.commands": {"deploy": {"argv": ["deploy"], "cwd": str(self.root), "env": []}},
+            "production.read_only": {"commands": [], "mcp_tools": []}})
+        production = "would run production command deploy"
+        for argv in (["sh", "-c", "true\ndeploy"], ["time", "deploy"],
+                     ["sh", "-c", "{ deploy; }"], ["sh", "-c", "if true; then deploy; fi"],
+                     ["sh", "-c", "x=1 deploy"], ["sh", "-c", "! deploy"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
+                self.assertEqual(production, refusal(argv, snap))
+        for argv in (["sh", "-c", "true # note\ndeploy"], ["sh", "-c", "A=1 B=2 time deploy"],
+                     ["sh", "-c", "for x in a; do deploy; done"],
+                     ["sh", "-c", "while true; do x=1 deploy; done"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(production, refusal(argv, snap))
+        for argv in (["sh", "-c", "echo deploy"], ["sh", "-c", "true\necho deploy"],
+                     ["sh", "-c", "x=1 echo deploy"], ["sh", "-c", "{ echo deploy; }"]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(refusal(argv, snap))
+        probe = fake_snapshot(self.root, **{
+            "bindings.commands": {"deploy": {"argv": ["./probe"], "cwd": str(self.root), "env": []}},
+            "production.read_only": {"commands": [], "mcp_tools": []}})
+        self.assertEqual(production, refusal(["sh", "-c", "MODE=ci ./probe"], probe))
+
     def test_a_project_root_with_a_quote_or_a_space_is_a_plain_path_argument(self):
         base = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, base, True)
@@ -630,6 +718,26 @@ class LeashedRunTest(unittest.TestCase):
         done = leashed_run(["sh", "-c", "sleep 30 & sleep 30"], self.tmp, 1.0)
         self.assertIsNone(done.returncode)
         self.assertLess(time.monotonic() - started, 10)
+
+    def test_a_daemon_in_a_session_of_its_own_ends_with_its_check(self):
+        script = ("import subprocess, sys, time\n"
+                  "p = subprocess.Popen(['sleep', '300'], start_new_session=True)\n"
+                  "open(sys.argv[1], 'w').write(str(p.pid))\n"
+                  "time.sleep(float(sys.argv[2]))\n")
+        for name, hold, limit in (("timeout", "60", 2.0), ("exit", "0.5", 30.0)):
+            with self.subTest(name):
+                pid_file = self.tmp / f"{name}.pid"
+                leashed_run([sys.executable, "-c", script, str(pid_file), hold], self.tmp, limit)
+                pid = int(pid_file.read_text(encoding="utf-8"))
+                for _ in range(50):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.1)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+                    self.fail("the daemon outlived its check")
 
     def test_a_child_gets_no_forge_token_or_git_redirect_and_a_missing_program_is_127(self):
         env = {"GH_TOKEN": "x", "GITHUB_TOKEN": "y", "GIT_DIR": "/nowhere",
@@ -792,6 +900,40 @@ class HostReadinessCommandTest(FleetFixtures, ResolverTestCase):
                       done.stdout.splitlines())
         self.assertEqual(text, hook.read_text(encoding="utf-8"))
 
+    def test_a_hooks_path_inside_git_is_carried_to_the_clone(self):
+        root = self.world()
+        git(root, "config", "core.hooksPath", ".git/hooks")
+        write_executable(root / ".git/hooks/pre-commit",
+                         "#!/bin/sh\necho hook refused >&2\nexit 1\n")
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual(1, done.returncode, done.stdout)
+        self.assertIn("fail commit-hook: the probe commit exited 1: hook refused",
+                      done.stdout.splitlines())
+
+    def test_a_file_a_verification_command_staged_is_not_in_the_probe_commit(self):
+        def edit(contract):
+            contract["bindings"]["commands"]["stage"] = {
+                "argv": ["git", "mv", "only-on-main", "moved"], "cwd": ".", "env": []}
+            contract["bindings"]["workflow"]["verification"].append("stage")
+
+        root = self.world(edit=edit)
+        write_executable(
+            root / ".git/hooks/pre-commit",
+            "#!/bin/sh\ngit diff --cached --quiet && { echo empty commit refused >&2; exit 1; }\n"
+            "exit 0\n")
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual(1, done.returncode, done.stdout)
+        self.assertIn("pass verification stage", done.stdout.splitlines())
+        self.assertIn("fail commit-hook: the probe commit exited 1: empty commit refused",
+                      done.stdout.splitlines())
+
+    def test_a_relative_origin_clones_the_registered_checkouts_origin(self):
+        root = self.world()
+        git(root, "remote", "set-url", "origin", os.path.relpath(self.bare, root))
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("pass checkout", done.stdout.splitlines())
+
     def test_a_commit_environment_that_never_runs_git_fails(self):
         def edit(contract):
             contract["bindings"]["commands"]["commit-environment"] = {
@@ -903,6 +1045,26 @@ class ScratchTest(unittest.TestCase):
         self.assertTrue(directory.exists())
         remove_scratch(directory)
 
+    def test_a_directory_that_cannot_be_made_openable_reports_false_without_recursing(self):
+        parent = Path(tempfile.mkdtemp()).resolve()
+        dead = parent / "host-readiness-dead"
+        (dead / "sub").mkdir(parents=True)
+        (dead / "owner").write_text(f"{reaped_pid()}\n", encoding="utf-8")
+        (dead / "sub").chmod(0o000)
+        real_chmod = Path.chmod
+
+        def refuse(path, mode, **kwargs):
+            if path.name == "sub":
+                raise PermissionError("held")
+            return real_chmod(path, mode, **kwargs)
+
+        with mock.patch.object(Path, "chmod", refuse):
+            self.assertFalse(remove_scratch(dead))
+            self.assertEqual([], sweep_stale_scratch(parent))
+        self.assertTrue(dead.exists())
+        (dead / "sub").chmod(0o700)
+        self.assertTrue(remove_scratch(dead))
+
     def test_a_stale_scratch_with_an_unopenable_directory_is_swept(self):
         parent = Path(tempfile.mkdtemp()).resolve()
         dead = parent / "host-readiness-dead"
@@ -926,6 +1088,7 @@ class ScratchTest(unittest.TestCase):
         dead = scratch("host-readiness-dead", reaped_pid())
         live = scratch("host-readiness-live", os.getpid())
         old = scratch("host-readiness-unowned-old", None)
+        (old / "notes.txt").write_text("a user's own files", encoding="utf-8")
         two_hours_ago = time.time() - 7200
         os.utime(old, (two_hours_ago, two_hours_ago))
         new = scratch("host-readiness-unowned-new", None)
@@ -934,9 +1097,8 @@ class ScratchTest(unittest.TestCase):
         (target / "owner").write_text(f"{reaped_pid()}\n", encoding="utf-8")
         (parent / "host-readiness-link").symlink_to(target)
         removed = sweep_stale_scratch(parent)
-        self.assertEqual({dead, old}, set(removed))
-        self.assertEqual(2, len(removed))
-        for kept in (live, new, other, parent / "host-readiness-link", target):
+        self.assertEqual([dead], removed)
+        for kept in (live, old, new, other, parent / "host-readiness-link", target):
             self.assertTrue(kept.exists(), kept)
 
 

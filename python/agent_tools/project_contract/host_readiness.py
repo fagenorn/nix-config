@@ -14,8 +14,9 @@ Check ids, in the order `run_checks` returns them:
    `origin`, made in the scratch directory.
 2. `verification <id>` for each id of the workflow's verification list, run in
    the clone.
-3. `commit-hook`: one empty probe commit in the clone, under the registered
-   checkout's commit hooks.
+3. `commit-hook`: one empty probe commit in the clone (its index reset to HEAD
+   first, so a file a verification command staged is not in it), under the
+   registered checkout's commit hooks.
 4. The release rows, by the release capability's state: `unsupported` gives one
    passing `release` row; `blocked` gives a failing `release` row naming the
    reason, then the rows below; `available` gives the rows below. They are
@@ -46,15 +47,21 @@ extends it lifts the match, as the lifecycle guard lifts it), or a
 is not run, and its check fails with `<reason>; not run`. A word of shell text
 is split into commands and read the same way; text that cannot be read is
 refused whole. The project root, and an existing absolute path with no operator
-character, is a plain path argument and never shell text. A one-word production
-verb hits only as a command's program or behind a program that runs a later
-word (`timeout`, `env`, `devenv`), never as another program's argument.
+character, is a plain path argument and never shell text. A newline ends a
+command like `;`. A one-word production verb hits only as a command's program,
+read past its shell keywords (`{`, `!`, `then`) and `NAME=value` assignments, or behind a program that runs a later word (`timeout`, `env`,
+`time`, `devenv`), never as another program's argument.
 
 The probe commit proves itself: after the commit the clone's HEAD must have the
-old HEAD as its parent and the probe subject (D6). The release preview carries
+old HEAD as its parent, the probe subject and the old HEAD's tree (D6). The
+registered checkout's commit hooks reach the clone whether they are in its own
+`.git/hooks` or in a `core.hooksPath` directory the branch does not track. A
+relative origin URL is read from the registered checkout. The release preview carries
 `--read-only` and no candidate, so it never takes the land lock (D7). A child
 runs leashed, so its whole process tree ends at its limit, with no forge token
-and no Git repository redirect in its environment (D10).
+and no Git repository redirect in its environment (D10); a process it left
+running in a session of its own, which carries the child's tagged environment,
+is killed when the child is done.
 
 The command
 -----------
@@ -67,8 +74,8 @@ registered root, makes a scratch directory under the temporary directory
 `run_checks` in it, prints `render` on stdout and removes the scratch on every
 outcome the process lives through. When the scratch cannot be removed, one more
 row, `fail scratch: <path> could not be removed`, is printed. A scratch a killed
-run left behind is removed by the next run: it is stale when its owner pid is
-not alive, or, with no readable owner, when it is over an hour old. A live run's
+run left behind is removed by the next run: it is stale when its `owner` file
+names a pid that is not alive. A directory with no readable owner, a live run's
 scratch, another user's directory and a symlink are never touched. Nothing
 outside the scratch changes: the registered checkout, the registry and the
 origin are only read.
@@ -87,13 +94,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
@@ -122,19 +132,24 @@ GIT_REDIRECT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FIL
                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
                     "GIT_NAMESPACE", "GIT_PREFIX")
 STRIPPED_ENV = TOKEN_ENV + GIT_REDIRECT_ENV
+LEASH_TAG_ENV = "HOST_READINESS_LEASH"
 
 SHELL_CHARACTERS = frozenset(";&|()<>$`")
-OPERATOR_CHARACTERS = frozenset(";&|()")
+OPERATOR_CHARACTERS = frozenset(";&|()\n")
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+# Words that begin a shell command without being its program: they are read past to find it.
+SHELL_PREFIX_WORDS = frozenset({
+    "{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "case",
+    "esac", "for", "select", "function", "coproc"})
 # Programs that run a later word of their own as a command (the lifecycle guard's runners and
-# command wrappers, copied: package code never loads the guard). A one-word production verb
-# hits at a later word only behind one of these.
+# command wrappers, copied: package code never loads the guard, plus `time`, `nohup` and `setsid`).
+# A one-word production verb hits at a later word only behind one of these.
 PASS_THROUGH_PROGRAMS = frozenset({
     "xargs", "timeout", "nice", "ionice", "stdbuf", "watch", "chrt", "taskset", "flock",
     "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
-    "devenv", "direnv", "command", "builtin", "exec", "env", "sudo"})
+    "devenv", "direnv", "command", "builtin", "exec", "env", "sudo", "time", "nohup", "setsid"})
 BUDGET_EXIT = 3
 SCRATCH_PREFIX = "host-readiness-"
-STALE_UNOWNED_SECONDS = 3600
 READ_DEPTH = 4
 UNREADABLE = "would run shell text it cannot read"
 DETAIL_LIMIT = 200
@@ -204,8 +219,12 @@ def _split_shell_text(text: str) -> list[list[str]] | None:
     """The commands of shell text split at its operators, or None when it cannot be read."""
     if "$(" in text or "`" in text:
         return None
-    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+    # A newline ends a command like `;`, and a `#` is an ordinary character, so a comment never
+    # swallows the newline behind it.
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>\n")
     lexer.whitespace_split = True
+    lexer.whitespace = " \t\r"
+    lexer.commenters = ""
     try:
         tokens = list(lexer)
     except ValueError:
@@ -248,6 +267,19 @@ def _commands(argv: Sequence[str], depth: int, root: str) -> list[list[str]] | N
     return found
 
 
+def _program_start(words: Sequence[str]) -> int:
+    """The index of the word a command runs as its program: past the shell keywords
+    (`{`, `!`, `then`) and the `NAME=value` assignments that precede it."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in SHELL_PREFIX_WORDS or ASSIGNMENT.match(word):
+            i += 1
+        else:
+            break
+    return i
+
+
 def _verb(argv: Sequence[str]) -> list[str]:
     return [_basename(argv[0]), *argv[1:]]
 
@@ -281,8 +313,11 @@ def _production_reason(words: Sequence[str], snapshot: Mapping, commands: Sequen
             continue
         verb = _verb(bound[name]["argv"])
         for each in commands:
-            for i, word in enumerate(each):
-                if len(verb) == 1 and i > 0 and _basename(each[0]) not in PASS_THROUGH_PROGRAMS:
+            start = _program_start(each)
+            for i in range(start, len(each)):
+                word = each[i]
+                if (len(verb) == 1 and i > start
+                        and _basename(each[start]) not in PASS_THROUGH_PROGRAMS):
                     break
                 if (_basename(word) == verb[0] and _occurs_in_order(each[i + 1:], verb[1:])
                         and not _lifted([_basename(each[i]), *each[i + 1:]], verb, read_only)):
@@ -315,7 +350,6 @@ def refusal(argv: Sequence[str], snapshot: Mapping) -> str | None:
     commands = _commands(argv, 0, str((snapshot.get("project") or {}).get("root", "")))
     if commands is None:
         return UNREADABLE
-    commands = [[_basename(w) if i == 0 else w for i, w in enumerate(each)] for each in commands]
     return _production_reason(commands[0], snapshot, commands) or _release_reason(commands)
 
 
@@ -340,9 +374,53 @@ def exit_code(checks: Sequence[Check]) -> int:
     return BUDGET_EXIT if all(check.spent for check in failed) else 1
 
 
+def _tagged_pids(tag: str) -> list[int]:
+    """The pids of the other processes that carry `tag` in their environment."""
+    needle = tag.encode()
+    me = os.getpid()
+    found = []
+    if Path("/proc/self/environ").exists():
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit() or int(entry.name) == me:
+                continue
+            try:
+                if needle in (entry / "environ").read_bytes():
+                    found.append(int(entry.name))
+            except OSError:
+                continue
+        return found
+    try:
+        listing = subprocess.run(["ps", "-axwwE", "-o", "pid=,command="], capture_output=True,
+                                 timeout=PROBE_LIMIT_SECONDS, check=False).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return found
+    for text in listing.splitlines():
+        parts = text.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) != me and needle in parts[1]:
+            found.append(int(parts[0]))
+    return found
+
+
+def _end_stragglers(tag: str) -> None:
+    """Kill every process that still carries `tag`: a daemon a child started in a session of
+    its own is out of the leash's reach, but it inherited the child's environment."""
+    for _ in range(3):
+        pids = _tagged_pids(tag)
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
 def leashed_run(argv: Sequence[str], cwd: Path, timeout: float) -> Completed:
-    """Run `argv` leashed, with no forge token and no Git redirect in its environment."""
+    """Run `argv` leashed, with no forge token and no Git redirect in its environment, and end
+    every process that is still running with the child's environment when the child is done."""
+    tag = f"{LEASH_TAG_ENV}={uuid.uuid4().hex}"
     env = {name: value for name, value in os.environ.items() if name not in STRIPPED_ENV}
+    env[LEASH_TAG_ENV] = tag.split("=", 1)[1]
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
             code: int | None = adopt_apply.run_leashed(
@@ -351,6 +429,8 @@ def leashed_run(argv: Sequence[str], cwd: Path, timeout: float) -> Completed:
             code = None
         except OSError as error:
             return Completed(127, "", f"{argv[0]} cannot start: {error.strerror or error}")
+        finally:
+            _end_stragglers(tag)
         out.seek(0)
         err.seek(0)
         return Completed(code, out.read().decode("utf-8", errors="replace"),
@@ -470,13 +550,21 @@ class _Run:
         what = f"git clone of {self.branch}"
         done = self.child(
             ["git", "clone", "--quiet", "--no-tags", "--single-branch", "--branch", self.branch,
-             "--", url.stdout.strip(), str(self.clone)],
+             "--", self._origin(url.stdout.strip()), str(self.clone)],
             self.scratch, CLONE_LIMIT_SECONDS, what)
         if isinstance(done, _Failure):
             return done
         if done.returncode != 0:
             return _Failure(_exited(what, done))
         return None
+
+    def _origin(self, url: str) -> str:
+        """`url` as the clone sees it: a relative path is the registered checkout's, not the
+        scratch's. A URL and an `host:path` address are left as they are."""
+        colon, slash = url.find(":"), url.find("/")
+        if os.path.isabs(url) or "://" in url or (colon != -1 and (slash == -1 or colon < slash)):
+            return url
+        return os.path.normpath(os.path.join(self.root, url))
 
     def _no_checkout(self, check_id: str) -> Check:
         return Check(check_id, False, f"no clean checkout of {self.branch}",
@@ -519,22 +607,32 @@ class _Run:
             return Check(check_id, False,
                          f"the commit hooks of {self.root} could not be read: {problem.detail}",
                          problem.spent)
-        head = self.child(["git", "-C", str(self.clone), "rev-parse", "HEAD"],
+        # A verification command may have staged a file: the probe commit must be empty.
+        reset = self.child(["git", "-C", str(self.clone), "reset", "--quiet"],
+                           self.clone, PROBE_LIMIT_SECONDS)
+        if isinstance(reset, _Failure):
+            return Check(check_id, False, reset.detail, reset.spent)
+        if reset.returncode != 0:
+            return Check(check_id, False, _exited("git reset", reset))
+        head = self.child(["git", "-C", str(self.clone), "rev-parse", "HEAD", "HEAD^{tree}"],
                           self.clone, PROBE_LIMIT_SECONDS)
         if isinstance(head, _Failure):
             return Check(check_id, False, head.detail, head.spent)
-        if head.returncode != 0:
+        if head.returncode != 0 or len(head.stdout.split()) != 2:
             return Check(check_id, False, _exited("git rev-parse HEAD", head))
-        base = head.stdout.strip()
+        base, tree = head.stdout.split()
         failure = self._probe_commit()
         if failure is not None:
             return Check(check_id, False, failure.detail, failure.spent)
-        proof = self.child(["git", "-C", str(self.clone), "log", "-1", "--format=%P%n%s"],
+        proof = self.child(["git", "-C", str(self.clone), "log", "-1", "--format=%P%n%s%n%T"],
                            self.clone, PROBE_LIMIT_SECONDS)
         if isinstance(proof, _Failure):
             return Check(check_id, False, proof.detail, proof.spent)
-        if proof.returncode != 0 or proof.stdout.splitlines() != [base, COMMIT_PROBE_MESSAGE]:
+        lines = proof.stdout.splitlines()
+        if proof.returncode != 0 or lines[:2] != [base, COMMIT_PROBE_MESSAGE]:
             return Check(check_id, False, "the probe commit exited 0 but made no commit")
+        if lines[2:] != [tree]:
+            return Check(check_id, False, "the probe commit exited 0 but was not empty")
         return Check(check_id, True, None)
 
     def _carry_hooks(self) -> _Failure | None:
@@ -550,8 +648,19 @@ class _Run:
                 self.clone, PROBE_LIMIT_SECONDS)
             if isinstance(done, _Failure):
                 return done
-            return None if done.returncode == 0 else _Failure(_exited(
-                f"git config core.hooksPath {path}", done))
+            if done.returncode != 0:
+                return _Failure(_exited(f"git config core.hooksPath {path}", done))
+            # Git reads a relative path from the working tree, so the clone looks in its own
+            # copy of it: a directory the branch does not track (`.git/hooks`) has no hooks
+            # there until they are carried over.
+            if os.path.isabs(path):
+                source = target = Path(path)
+            else:
+                source = self.root / path
+                target = (self.clone / path).resolve()
+                if target != self.clone and self.clone not in target.parents:
+                    return _Failure(f"core.hooksPath {path} is outside the clean checkout")
+            return self._copy_hooks(source, target)
         if configured.returncode != 1:
             return _Failure(_exited(shlex.join(read), configured))
         common = self.child(
@@ -561,14 +670,18 @@ class _Run:
             return common
         if common.returncode != 0:
             return _Failure(_exited("git rev-parse --git-common-dir", common))
-        hooks = Path(common.stdout.strip()) / "hooks"
+        return self._copy_hooks(Path(common.stdout.strip()) / "hooks",
+                                self.clone / ".git" / "hooks")
+
+    @staticmethod
+    def _copy_hooks(source: Path, target: Path) -> _Failure | None:
+        """Copy each executable commit hook of `source` that `target` lacks."""
         try:
             for name in COMMIT_HOOKS:
-                source = hooks / name
-                if source.is_file() and os.access(source, os.X_OK):
-                    target = self.clone / ".git" / "hooks" / name
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, target)
+                if (source / name).is_file() and os.access(source / name, os.X_OK) \
+                        and not (target / name).exists():
+                    target.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source / name, target / name)
         except OSError as error:
             return _Failure(f"{error.strerror or error}")
         return None
@@ -695,7 +808,7 @@ class _Run:
             return Check(check_id, False, f"no login check is defined for credential class {klass}")
         done = self.child(probe.argv, self.root, PROBE_LIMIT_SECONDS)
         if isinstance(done, _Failure):
-            return Check(check_id, False, probe.cause if not done.spent else done.detail, done.spent)
+            return Check(check_id, False, done.detail, done.spent)
         if done.returncode != 0:
             return Check(check_id, False, probe.cause)
         if probe.judge is None:
@@ -725,6 +838,8 @@ def run_checks(snapshot: Mapping, scratch: Path, *, run: Runner, on_path: Callab
 def remove_scratch(path: Path) -> bool:
     """Remove `path` even when a part of it is read-only; whether it is gone."""
 
+    retried: set[str] = set()
+
     def make_writable(function: Callable, failed: str, error: BaseException) -> None:
         entry = Path(failed)
         for target in (entry.parent, entry) if entry.is_dir() and not entry.is_symlink() \
@@ -735,7 +850,10 @@ def remove_scratch(path: Path) -> bool:
                 pass
         try:
             if function is os.open or function is os.scandir:
-                shutil.rmtree(failed, onexc=make_writable)
+                # One nested removal per path: a chmod that changed nothing must not loop.
+                if failed not in retried:
+                    retried.add(failed)
+                    shutil.rmtree(failed, onexc=make_writable)
             elif function in (os.unlink, os.rmdir, os.lstat):
                 function(failed)
         except OSError:
@@ -758,16 +876,18 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _is_stale(entry: Path, mtime: float, now: Callable[[], float]) -> bool:
+def _is_stale(entry: Path) -> bool:
+    """True when `entry` names a run by its `owner` file and that run is gone. A directory
+    with no readable owner is not known to be a readiness scratch, so it is never stale."""
     try:
         pid = int((entry / "owner").read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
-        return now() - mtime > STALE_UNOWNED_SECONDS
+        return False
     return not _pid_alive(pid)
 
 
-def sweep_stale_scratch(parent: Path, *, now: Callable[[], float] = time.time) -> list[Path]:
-    """Remove each scratch directory of this user that no live run owns; the removed paths."""
+def sweep_stale_scratch(parent: Path) -> list[Path]:
+    """Remove each scratch directory of this user whose owning run is gone; the removed paths."""
     removed = []
     for entry in sorted(parent.iterdir()):
         if not entry.name.startswith(SCRATCH_PREFIX):
@@ -778,7 +898,7 @@ def sweep_stale_scratch(parent: Path, *, now: Callable[[], float] = time.time) -
             continue
         if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
             continue
-        if _is_stale(entry, status.st_mtime, now) and remove_scratch(entry):
+        if _is_stale(entry) and remove_scratch(entry):
             removed.append(entry)
     return removed
 
