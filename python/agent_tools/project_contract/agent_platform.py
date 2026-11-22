@@ -43,7 +43,10 @@ non-empty root never falls back to `HOME`: a manifest missing under it is
 refused even when `HOME` holds a valid one, and a root that is not absolute is
 refused as a missing manifest before any read. An empty root is an unset one.
 An explicit manifest path ignores the root. The package's standards directory
-is `<root>/standards`, else `$HOME/.agents/standards`. There is no default, no
+is `<root>/standards`, else `$HOME/.agents/standards`. The revision the package
+was built from is the record `<root>/platform-revision.json`, else
+`$HOME/.agents/share/platform-revision.json`, which `platform_revision` reads
+for adoption's lock entry (issue 1454). There is no default, no
 other fallback path and no discovery ladder: a missing, unreadable, malformed
 or schema-invalid manifest is a platform installation defect and is refused
 loudly, never replaced by an assumed version (R1.3).
@@ -479,6 +482,65 @@ def standards_dir() -> Path:
     if root is not None:
         return root / "standards"
     return Path(os.environ["HOME"]) / ".agents" / "standards"
+
+
+PLATFORM_REVISION_FILE = "platform-revision.json"
+
+# The record's members besides `schema_version`: a `devenv.lock` `locked` node.
+_REVISION_MEMBERS = frozenset(("type", "owner", "repo", "rev", "narHash", "lastModified"))
+_REVISION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_REVISION_REV = re.compile(r"[0-9a-f]{40}")
+_REVISION_NAR_HASH = re.compile(r"sha256-[A-Za-z0-9+/]{43}=")
+
+
+def revision_path() -> Path:
+    """The installed revision record: under the named root, else under `HOME`."""
+    root = platform_root()
+    if root is not None:
+        return root / PLATFORM_REVISION_FILE
+    return Path(os.environ["HOME"]) / ".agents" / "share" / PLATFORM_REVISION_FILE
+
+
+def _matches(pattern: re.Pattern, value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def valid_revision(record: object) -> bool:
+    """True exactly when `record` is a dict of the six `locked` members, each in shape.
+
+    `rev` is a 40-character lower-case hex string, never null. One rule serves
+    the installed record and a lock node an adoption finds.
+    """
+    if not isinstance(record, dict) or set(record) != _REVISION_MEMBERS:
+        return False
+    modified = record["lastModified"]
+    return (record["type"] == "github"
+            and _matches(_REVISION_NAME, record["owner"])
+            and _matches(_REVISION_NAME, record["repo"])
+            and _matches(_REVISION_REV, record["rev"])
+            and _matches(_REVISION_NAR_HASH, record["narHash"])
+            and type(modified) is int and modified >= 0)
+
+
+def platform_revision() -> dict | None:
+    """The revision the platform package was built from, or None when unknown.
+
+    The installed record without its `schema_version`. An absent, unreadable,
+    non-regular, malformed or out-of-shape record, and one whose `rev` is null
+    (a build from a dirty tree), is None; this never raises. A set root never
+    falls back to `HOME`.
+    """
+    try:
+        record = json.loads(read_regular_file(revision_path()).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    version = record.get("schema_version")
+    if type(version) is not int or version != 1:
+        return None
+    revision = {key: value for key, value in record.items() if key != "schema_version"}
+    return revision if valid_revision(revision) else None
 
 
 class _NonFiniteNumber(ValueError):

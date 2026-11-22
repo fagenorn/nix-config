@@ -1373,8 +1373,8 @@ def documented_plan_id(doc: object) -> str:
     }
     if "contract_draft" in doc["plan"]:
         source["contract_draft"] = doc["plan"]["contract_draft"]
-    if "commit_environment" in doc["plan"]:
-        source["commit_environment"] = doc["plan"]["commit_environment"]
+    source.update({key: doc["plan"][key] for key in ("commit_environment", "conformance")
+                   if key in doc["plan"]})
     payload = json.dumps(source, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
@@ -2115,7 +2115,8 @@ class TypedOperationTest(AdoptTestCase):
                          "after": entry["target"]}
                         for entry in doc["evidence"]],
             "checks": [{"id": gate["id"], "status": gate["status"]}
-                       for gate in doc["verification"]["ready_gates"]],
+                       for gate in doc["verification"]["ready_gates"]
+                       if gate["id"] != "conformance-plannable"],
             "link_rewrites": doc["link_rewrites"],
             "path_references": doc["path_references"],
             "reference_policies": doc["reference_policies"],
@@ -2669,9 +2670,8 @@ class LinkRewritePlanTest(AdoptTestCase):
                         "target"},
             doc["plan"]["blockers"])
 
-    def test_the_link_gate_is_the_last_ready_gate(self):
-        self.assertEqual(adopt_inspection.READY_GATES[-2:],
-                         ("no-secret-path-in-moves", "no-unrewritable-link"))
+    def test_the_conformance_gate_is_the_last_ready_gate(self):
+        self.assertEqual(adopt_inspection.READY_GATES[-1], "conformance-plannable")
 
     def test_a_markdown_file_any_other_operation_names_is_a_derivation_bug(self):
         op = adopt_planning.operation

@@ -10,7 +10,7 @@ Project contract is how a repository tells the agent skills everything project-s
 ## Language
 
 **Adoption**:
-Moving a repository onto a platform version by planning and then applying a set of file moves, rewritten links and generated projections. Adoption plans first and edits nothing without an answer.
+Moving a repository onto a platform version by planning and then applying a set of file moves, rewritten links and generated projections, and, for a project with a devenv lock, the platform lock entry, the conformance workflow and the required Conformance check. Adoption plans first and edits nothing without an answer.
 _Avoid_: onboarding
 
 **Deprecation**:
