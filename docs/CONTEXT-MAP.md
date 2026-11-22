@@ -52,6 +52,7 @@
 | Detaching word | Guard |
 | Digest | Console |
 | Drafted contract | Console |
+| Enforcer | Delivery |
 | Excluded profile | Console |
 | Fleet registry | Project contract |
 | Folder trust | Console |
@@ -60,6 +61,7 @@
 | Held issue | Verification |
 | Held work | Console |
 | Inbox item | Console |
+| Judged rule | Delivery |
 | Keepalive ping | Hosts |
 | Land lock | Claims |
 | Lane | Delivery |
@@ -118,6 +120,7 @@
 | Spend page | Console |
 | Sprint | Console |
 | Stale claim | Claims |
+| Standard | Delivery |
 | Suite member | Delivery |
 | Transaction | Release |
 | Triage record | Delivery |

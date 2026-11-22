@@ -20,6 +20,13 @@ _Avoid_: context file, index
 **Delivery**:
 The work of carrying one issue from claim to merge on its own branch and worktree. A delivery ends when the integration branch holds the change and its evidence criteria are met or handed to a Verify block.
 
+**Enforcer**:
+A test or lint that fails when a standard is broken (issue 1412).
+_Avoid_: check (a check is the Verification area's)
+
+**Judged rule**:
+A standard no enforcer cites, applied by a reviewer (issue 1412).
+
 **Lane**:
 The route an issue takes to merge: the direct lane for a small concrete change, the standard lane for a specced and planned one. The triage record decides which applies.
 _Avoid_: track, tier
@@ -35,6 +42,9 @@ The path globs, declared per area in `.github/look-files.json` on the integratio
 
 **Look marker**:
 An acceptance criterion of kind human written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`; it makes the issue need the owner's look at its pull request head before merge (issue 1138). Read only by `agent_tools.delivery.look_marker`. `look-lint` refuses a body with a criterion line that is a near miss of it (issue 1141). An ordinary `[human]` criterion or a hold in prose is not one.
+
+**Standard**:
+One rule under one heading in a layer file, with a stable id, applied to every change within its layer file's scope: the bar to every change, a stack or project shard to the changes its globs match (issue 1412).
 
 **Suite member**:
 One test file or script named in the project's declared agent-workflow test recipe. The suite runner schedules the members by recorded duration, and the last member is pinned.

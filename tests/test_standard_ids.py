@@ -10,7 +10,8 @@ import re
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery.context_map_lint import CODE_RE, section, table_rows
+from agent_tools.delivery.context_map_lint import (
+    CODE_RE, MAP_BUDGET, TERM_DEF_RE, section, table_rows)
 from agent_tools.delivery.rule_ids import RULE_ID_HEADING
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +124,24 @@ def layer_files() -> tuple[list, list, list]:
     project = [(f"docs/standards/{path.name}", table["docs/standards/"], path.read_text())
                for path in sorted(PROJECT.glob("*.md")) if path.name != "README.md"]
     return bar, stacks, project
+
+
+def glossary_entries(text: str) -> dict[str, str]:
+    """Term to its definition: the text after `**Term**:` up to the next term or heading.
+
+    Every line starting `_Avoid_:` is dropped.
+    """
+    entries: dict[str, str] = {}
+    marks = list(TERM_DEF_RE.finditer(text))
+    for index, mark in enumerate(marks):
+        end = marks[index + 1].start() if index + 1 < len(marks) else len(text)
+        heading = re.search(r"^#", text[mark.end():end], re.M)
+        if heading:
+            end = mark.end() + heading.start()
+        lines = [line for line in text[mark.end():end].splitlines()
+                 if not line.startswith("_Avoid_:")]
+        entries[mark.group(1).strip()] = "\n".join(lines).strip()
+    return entries
 
 
 def id_count(files: list[tuple[str, str, str]]) -> int:
@@ -251,6 +270,26 @@ class LiveStandardsTest(unittest.TestCase):
                 self.assertIn(clause, found["B16"])
         prose = re.sub(r"\(?\[[^\]]*\]\([^)]*\)\)?", "", found["B16"])
         self.assertIn(len(re.findall(r"[.!?](?:\s|$)", prose)), (1, 2))
+
+
+class GlossaryTest(unittest.TestCase):
+    def test_glossary_entries_drop_the_avoid_line(self):
+        self.assertEqual(
+            glossary_entries("**A**:\nDef a.\n_Avoid_: x\n\n**B**:\n_Avoid_: y\n\n## Next\n"),
+            {"A": "Def a.", "B": ""})
+
+    def test_the_delivery_glossary_defines_the_three_terms(self):
+        terms = {"Standard", "Enforcer", "Judged rule"}
+        glossary = (REPO_ROOT / "docs/areas/delivery/CONTEXT.md").read_text()
+        entries = glossary_entries(glossary)
+        map_text = (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text()
+        rows = [row[:2] for row in table_rows(section(map_text, "Terms"))]
+        self.assertLessEqual(terms, {t.strip() for t in TERM_DEF_RE.findall(glossary)})
+        for term in sorted(terms):
+            with self.subTest(term=term):
+                self.assertTrue(entries[term])
+                self.assertEqual(rows.count([term, "Delivery"]), 1)
+        self.assertLessEqual(len(map_text.splitlines()), MAP_BUDGET)
 
 
 if __name__ == "__main__":
