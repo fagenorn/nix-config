@@ -1,8 +1,8 @@
 """`question_check`: the verify script that the fixed project questions are each answered from the console's own records (#1271).
 
 `python -m agent_tools.console.question_check --project ID [--run NAME] [--url URL]
-[--token-file PATH] [--state-file PATH] [--result-file PATH] [--wait SECONDS]` asks this host's
-console three fixed questions of one project and judges the answers it shows. The questions are
+[--token-file PATH] [--state-file PATH] [--result-file PATH] [--wait SECONDS] [--deep [--compare
+agree|disagree]]` asks this host's console three fixed questions of one project and judges the answers it shows. The questions are
 `QUESTIONS` (what shipped and what is live in the last 7 days; what costs the most time or tokens
 per issue and whether the backlog holds an improvement) and a third about a failed production run:
 `NAMED_RUN` with `--run`, else `LAST_FAILED_RUN` (P7). The check asks them through the page's own
@@ -11,14 +11,30 @@ starts at most three read-only `sonnet` sessions, which is why its verify check 
 The answers, and any refusal text the console returns, go only to the result file, where the owner
 reads them; stdout never carries them (P10).
 
+The fixed set also holds issue 1274's deeper question, `DEEP_QUESTION` (where agents spend time and tokens on
+issues, which parts of an issue take long, and what could be improved). `--deep` asks it alone, with each POST
+body `{"project_id", "question", "request_key", "deep": true}`, and judges it by its own rule (Verdicts below)
+and by the lead's comparison (below); without `--deep` the three questions and their bodies are unchanged.
+
 Options. `--url` defaults to `http://127.0.0.1:27184`; only `http` on `127.0.0.1` or `localhost` is
 accepted, else exit 2. `--token-file` defaults to `<state dir>/page-token`, `--state-file` to
 `<state dir>/checks/question-check.json` and `--result-file` to
 `<state dir>/checks/question-check-result.json`, where the state dir is `<state_root()>/console`.
-`--wait` defaults to `WAIT_SECONDS` (480, below verify_exec's 600-second limit).
+`--wait` defaults to `WAIT_SECONDS` (480, below verify_exec's 600-second limit). With `--deep` the state file
+defaults to `<state dir>/checks/question-check-deep.json` and the result file to
+`<state dir>/checks/question-check-deep-result.json`, so an ordinary check at another revision never replaces the
+deep key or the deep result.
+
+`--compare agree|disagree` (only with `--deep`, else status `bad_usage`, exit 2) is the lead's comparison of the
+deeper answer with the lead's hand analysis on its main figures. It posts nothing and asks nothing. Under the
+state lock it reads the deep state entry of the project: when its revision is the current revision and the deep
+result file holds, for that revision and the saved key, a question with verdict `grounded`, it writes
+`"comparison": {"question_id", "request_key", "revision", "agrees", "at"}` into that entry and prints
+`{"status": "compared", "agrees": BOOL}`, exit 0; otherwise `{"status": "nothing_to_compare"}`, exit 2, nothing
+written. A new revision replaces the entry, comparison included (step 4).
 
 The state file is `{"projects": {ID: {"revision": SHA, "keys": {QUESTION TEXT: REQUEST KEY}}}}`; its
-`keys` hold every question text this revision has been asked, not only the current run's three, so
+`keys` hold (with the entry's optional `comparison`, above) every question text this revision has been asked, not only the current run's three, so
 `--run A`, `--run B` and `--run A` again finds A's question the second time. The
 result file is `{"project", "revision", "checked_at", "status", "questions": [{"question",
 "request_key", "verdict", "post", "shown"}]}`: `post` is None when this run sent nothing for the
@@ -68,11 +84,18 @@ Order of one run:
    cost question's (`QUESTIONS[1]`) answer is also grounded only when `spend_figure(answer, spend_figures(records
    text))` holds and `cites_part(read_text, question_id + RECORDS_SUFFIX, SPEND_PART)` holds, so a cost answer
    that quotes no figure of its own records' spend section, or does not cite the spend part of its own file, is
-   `ungrounded` (ADR-console-090). The records text is the question's own retained file,
+   `ungrounded` (ADR-console-090). The deeper question's (`DEEP_QUESTION`) answer is grounded iff it is answered with a non-blank
+   answer, `cites(read_text, id + RECORDS_SUFFIX)`, `cites_part(read_text, name, TRANSCRIPTS_PART)` and
+   `spend_figure(answer, section_figures(records text, TRANSCRIPTS_PART))` hold, else `ungrounded`. The records
+   text is the question's own retained file,
    `<state dir>/project-question-settings/<question id>.records.json` (the console keeps it for an answered
    question, `project_question.RECORDS_KEPT_SECONDS`); a file that cannot be read leaves the answer `ungrounded`.
 8. Status, first match wins: any `failed` or `ungrounded` is `not_met`, exit 1; any `pending` or
-   `refused` is `waiting`, 75; else `met`, 0. A usage or setup error is 2.
+   `refused` is `waiting`, 75; else `met`, 0. A usage or setup error is 2. The deeper status: `met` only when the
+   verdict is `grounded` and the state's `comparison` names the same question id, key and revision with `agrees`
+   true; `not_met` when the verdict is `ungrounded` or `failed`, or the comparison says `agrees` false; `waiting`
+   when the verdict is `grounded` and no matching comparison exists, or the verdict is pending or refused. The
+   deep result file gains `"comparison"`, the matching comparison or None.
 9. The result file is written whenever step 3 found the project. Stdout is exactly one JSON line with
    sorted keys, `{"status", "verdicts", "result_file"}`, holding no question text, no answer text
    and no text the console returned (P10); a refused post shows only as the verdict `refused`. The
@@ -95,7 +118,9 @@ failure or error next to `activation`, `run`, `build`, `deploy`, `production`, `
 `step`, `test`, `switch`, `delivery`, `release`, `commit` or `merge`, unless `to` follows, as in `run failed
 to open`) is removed first (`_FAILED_RUN`), so `q.records.json (failed activation)` is a citation.
 
-`spend_figures(records)` is the set of spend values the records text prints: parsed as JSON, every number under
+`section_figures(records, part)` applies `spend_figures`' rule to the top-level member `part`, and for
+`TRANSCRIPTS_PART` also takes every int under a `seconds` key as its digits; `spend_figures(records)` is
+`section_figures(records, SPEND_PART)`: the set of spend values the records text prints: parsed as JSON, every number under
 a `tokens` key (an int) of its `spend` member, at any depth, as its digits, and every number under a `dollars`
 key as `$` and two decimals (`$0.42`, `$38.10`); text that is no JSON, or has no `spend` object, gives the empty
 set. `spend_figure(text, figures)` is False for None, else whether the text quotes one of them: it finds each
@@ -113,7 +138,7 @@ of a line or after whitespace, `/`, a backquote, a quote, `(`, `[`, `<` or `*`, 
 closing backquotes, quotes or asterisks, an optional line range (`:120-400`) and optional whitespace and then a
 parenthesized group one of whose words equals `part` (case-insensitively; the group is split at whitespace and
 at `,`, `;`, `:`, `/`, `&` and the brackets and marks around a word, and every word must be a section name of
-`question_records.SECTIONS`, `held`, `checks`, `offset`, `limit`, `part`, `parts`, `section`, `sections`, `only`,
+`question_records.DEEP_SECTIONS`, `held`, `checks`, `offset`, `limit`, `part`, `parts`, `section`, `sections`, `only`,
 `and`, `line`, `lines` or a number, so `spend offset 3 limit 40` marks the spend part and a group with any
 other word, `excluding`, `not`, `skipped`, `but` or `unread`, marks none, as in `deliveries only, spend skipped`), so the part is bound to the citation of the
 question's own file: `<path> (deliveries), old-profile.md (spend)` does not cite the spend part.
@@ -143,6 +168,8 @@ QUESTIONS = (
 )
 NAMED_RUN = "Why did production run {run} fail?"
 LAST_FAILED_RUN = "Why did the most recent failed production run fail?"
+DEEP_QUESTION = "Where do agents spend time and tokens on issues, which parts of an issue take long, and what could be improved?"
+TRANSCRIPTS_PART = "transcripts"
 WAIT_SECONDS = 480
 POLL_SECONDS = 5
 NOT_YET = manager_check.NOT_YET
@@ -167,15 +194,17 @@ _AMOUNT = re.compile(r"(?<![\w.,])(\$\s?)?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?!\w)
 # The words a parenthesized group may hold besides the part it marks: the records' section names, the prompt's
 # `offset`/`limit` pair and numbers. Any other word (`excluding`, `skipped`, `but`, `unread`) can say the part
 # was not read, so a group that holds one marks no part.
-_PART_WORDS = frozenset((*question_records.SECTIONS, "held", "checks", "offset", "limit", "part", "parts",
+_PART_WORDS = frozenset((*question_records.DEEP_SECTIONS, "held", "checks", "offset", "limit", "part", "parts",
                          "section", "sections", "only", "and", "line", "lines"))
 _PART_NUMBER = re.compile(r"[\d,.-]+")
 _PART_SPLIT = re.compile(r"[\s,;:/&()\[\]<>`'\"*]+")
 _EXIT = {"met": 0, "not_met": 1, "waiting": NOT_YET}
 
 
-def questions(run: str | None) -> tuple[str, str, str]:
-    """The three fixed question texts, the third naming `run` when given."""
+def questions(run: str | None, deep: bool = False) -> tuple[str, ...]:
+    """The three fixed question texts, the third naming `run` when given; `deep` is #1274's deeper question alone."""
+    if deep:
+        return (DEEP_QUESTION,)
     third = LAST_FAILED_RUN if run is None else NAMED_RUN.format(run=run)
     return (*QUESTIONS, third)
 
@@ -192,8 +221,14 @@ def cites(read_text: str | None, name: str) -> bool:
 
 def spend_figures(records: str | None) -> frozenset[str]:
     """The spend values the records print: each token count as its digits, each dollar amount as `$` and two places."""
+    return section_figures(records, SPEND_PART)
+
+
+def section_figures(records: str | None, part: str) -> frozenset[str]:
+    """The values the top-level member `part` of the records prints: `spend_figures`' rule, and for the transcripts
+    part also each int under a `seconds` key as its digits."""
     try:
-        spend = json.loads(records)["spend"] if records is not None else None
+        spend = json.loads(records)[part] if records is not None else None
     except (ValueError, TypeError, KeyError, RecursionError):
         return frozenset()
     found: set[str] = set()
@@ -206,6 +241,8 @@ def spend_figures(records: str | None) -> frozenset[str]:
                     found.add(str(value))
                 elif number and name == "dollars":
                     found.add(f"${value:.2f}")
+                elif number and name == "seconds" and part == TRANSCRIPTS_PART and isinstance(value, int):
+                    found.add(str(value))
                 else:
                     walk(value)
         elif isinstance(node, list):
@@ -278,6 +315,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="question_check", description=__doc__.splitlines()[0])
     parser.add_argument("--project", required=True, help="the project id to ask the questions of")
     parser.add_argument("--run", default=None, help="the production run the third question names")
+    parser.add_argument("--deep", action="store_true", help="ask the deeper question (#1274) alone, and deep")
+    parser.add_argument("--compare", choices=("agree", "disagree"), default=None,
+                        help="with --deep: record the lead's comparison of the deeper answer, posting nothing")
     parser.add_argument("--url", type=manager_check._loopback_url, default=manager_check.DEFAULT_URL)
     parser.add_argument("--token-file", type=Path, default=None)
     parser.add_argument("--state-file", type=Path, default=None)
@@ -344,8 +384,9 @@ def _locked(state_file: Path):
         os.close(descriptor)
 
 
-def _verdict(shown: dict | None, refused: bool, records=None) -> str:
-    """`records` is the cost question's reader of a question's records text (None: any answer needs no spend figure)."""
+def _verdict(shown: dict | None, refused: bool, records=None, part: str = SPEND_PART) -> str:
+    """`records` is the reader of a question's records text for a question that must quote a figure of its `part`
+    (None: any answer needs no figure)."""
     state = shown.get("state") if shown else None
     if state in ("failed", "timed_out"):
         return "failed"
@@ -353,8 +394,8 @@ def _verdict(shown: dict | None, refused: bool, records=None) -> str:
         answer = shown.get("answer")
         name = str(shown.get("id")) + project_question.RECORDS_SUFFIX
         if (isinstance(answer, str) and answer.strip() and cites(shown.get("read_text"), name)
-                and (records is None or (spend_figure(answer, spend_figures(records(str(shown.get("id")))))
-                                         and cites_part(shown.get("read_text"), name, SPEND_PART)))):
+                and (records is None or (spend_figure(answer, section_figures(records(str(shown.get("id"))), part))
+                                         and cites_part(shown.get("read_text"), name, part)))):
             return "grounded"
         return "ungrounded"
     return "refused" if refused else "pending"
@@ -368,13 +409,70 @@ def _status(verdicts: list[str]) -> str:
     return "met"
 
 
+def _deep_status(verdict: str, comparison: dict | None) -> str:
+    """The deeper question's status: `met` only for a grounded answer the lead's comparison agrees with."""
+    if verdict in ("failed", "ungrounded"):
+        return "not_met"
+    if verdict != "grounded":
+        return "waiting"
+    if comparison is None:
+        return "waiting"
+    return "met" if comparison.get("agrees") is True else "not_met"
+
+
+def _matching_comparison(state_file: Path, project: str, rev: str, shown: dict | None, key: str) -> dict | None:
+    """The saved comparison of `project` when it names this revision, this key and the shown question's id."""
+    saved = _read_state(state_file)
+    kept = saved["projects"].get(project) if saved is not None else None
+    comparison = kept.get("comparison") if kept is not None and kept["revision"] == rev else None
+    if (isinstance(comparison, dict) and shown is not None and comparison.get("revision") == rev
+            and comparison.get("request_key") == key and comparison.get("question_id") == shown.get("id")):
+        return comparison
+    return None
+
+
+def _grounded_deep_question(result_file: Path, project: str, rev: str, key: str | None) -> str | None:
+    """The id of the deeper question the result file judged `grounded` for this revision and key, else None."""
+    try:
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(result, dict) or result.get("project") != project or result.get("revision") != rev:
+        return None
+    for judged in result.get("questions") or []:
+        shown = judged.get("shown") if isinstance(judged, dict) else None
+        if (isinstance(judged, dict) and key is not None and judged.get("request_key") == key
+                and judged.get("verdict") == "grounded" and isinstance(shown, dict)
+                and isinstance(shown.get("id"), str)):
+            return shown["id"]
+    return None
+
+
+def _compare(finish, project: str, agrees: bool, state_file: Path, result_file: Path, rev: str, now) -> int:
+    """Record the lead's comparison against the grounded deeper answer of this revision; post and ask nothing."""
+    with _locked(state_file):
+        saved = _read_state(state_file)
+        if saved is None:
+            return finish("bad_state", 2)
+        kept = saved["projects"].get(project)
+        key = kept["keys"].get(DEEP_QUESTION) if kept is not None and kept["revision"] == rev else None
+        question_id = _grounded_deep_question(result_file, project, rev, key)
+        if question_id is None:
+            return finish("nothing_to_compare", 2)
+        manager_check._write_json(state_file, {**saved, "projects": {**saved["projects"], project: {
+            **kept, "comparison": {"question_id": question_id, "request_key": key, "revision": rev,
+                                   "agrees": agrees, "at": now().isoformat()}}}})
+    return finish("compared", 0, agrees=agrees)
+
+
 def main(argv: list[str] | None = None, *, state=None, post=None, now=None, sleep=None,
          new_key=None, revision=None, records=None) -> int:
     args = build_parser().parse_args(argv)
     state_dir = manager_check._state_dir()
     token_file = args.token_file or state_dir / "page-token"
-    state_file = args.state_file or state_dir / "checks" / "question-check.json"
-    result_file = args.result_file or state_dir / "checks" / "question-check-result.json"
+    suffix = "-deep" if args.deep else ""
+    state_file = args.state_file or state_dir / "checks" / f"question-check{suffix}.json"
+    result_file = args.result_file or state_dir / "checks" / f"question-check{suffix}-result.json"
     state = state or (lambda url: manager_check.Console(url).state())
     post = post or (lambda url, token, document: manager_check.Console(url, token).post(
         service.PROJECT_QUESTION_PATH, document))
@@ -389,16 +487,20 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
         print(json.dumps({"status": status, **more}, sort_keys=True))
         return _EXIT.get(status, NOT_YET) if code is None else code
 
+    if args.compare is not None and not args.deep:
+        return finish("bad_usage", 2)
     rev = revision()
     if rev is None:
         return finish("no_revision", 2)
+    if args.compare is not None:
+        return _compare(finish, args.project, args.compare == "agree", state_file, result_file, rev, now)
     current = state(args.url)
     if current is None:
         return finish("not_running")
     if _project_entry(current, args.project) is None:
         return finish("not_registered")
 
-    texts = questions(args.run)
+    texts = questions(args.run, args.deep)
     with _locked(state_file):
         saved = _read_state(state_file)
         if saved is None:
@@ -409,7 +511,7 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
             kept = {"revision": rev, "keys": {}}
         keys = {text: kept["keys"][text] if text in kept["keys"] else new_key() for text in texts}
         manager_check._write_json(state_file, {**saved, "projects": {
-            **projects, args.project: {"revision": rev, "keys": {**kept["keys"], **keys}}}})
+            **projects, args.project: {**kept, "revision": rev, "keys": {**kept["keys"], **keys}}}})
 
     entry = _project_entry(current, args.project)
     posts: dict[str, str] = {}
@@ -424,7 +526,8 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
         except OSError:
             return False
         status, detail = post(args.url, token, {
-            "project_id": args.project, "question": text, "request_key": keys[text]})
+            "project_id": args.project, "question": text, "request_key": keys[text],
+            **({"deep": True} if args.deep else {})})
         posts[text] = "posted" if status == 204 else f"refused: {status}: {detail}"
         stale = True
         return True
@@ -451,7 +554,7 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
                     keys[text] = new_key() if text in rotate else held["keys"].get(text, keys[text])
                 manager_check._write_json(state_file, {**saved, "projects": {
                     **saved["projects"], args.project: {
-                        "revision": rev, "keys": {**held["keys"], **{t: keys[t] for t in expired}}}}})
+                        **held, "revision": rev, "keys": {**held["keys"], **{t: keys[t] for t in expired}}}}})
             for text in rotate:
                 if not ask(text):
                     return _finish_result(finish, result_file, args.project, rev, now, "no_token",
@@ -468,20 +571,25 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
         if fresh is not None and _project_entry(fresh, args.project) is not None:
             current, entry, stale = fresh, _project_entry(fresh, args.project), False
 
+    part = TRANSCRIPTS_PART if args.deep else SPEND_PART
     verdicts = [_verdict(_shown(entry, keys[text]), posts.get(text, "").startswith("refused"),
-                         records=records if text == QUESTIONS[1] else None)
+                         records=records if args.deep or text == QUESTIONS[1] else None, part=part)
                 for text in texts]
-    return _finish_result(finish, result_file, args.project, rev, now, _status(verdicts), texts, keys,
-                          verdicts, posts, entry)
+    if not args.deep:
+        return _finish_result(finish, result_file, args.project, rev, now, _status(verdicts), texts, keys,
+                              verdicts, posts, entry)
+    comparison = _matching_comparison(state_file, args.project, rev, _shown(entry, keys[texts[0]]), keys[texts[0]])
+    return _finish_result(finish, result_file, args.project, rev, now, _deep_status(verdicts[0], comparison),
+                          texts, keys, verdicts, posts, entry, {"comparison": comparison})
 
 
 def _finish_result(finish, result_file, project, rev, now, status, texts, keys, verdicts, posts,
-                   entry) -> int:
+                   entry, more=None) -> int:
     manager_check._write_json(result_file, {
         "project": project, "revision": rev, "checked_at": now().isoformat(), "status": status,
         "questions": [{"question": text, "request_key": keys[text], "verdict": verdict,
                        "post": posts.get(text), "shown": _shown(entry, keys[text])}
-                      for text, verdict in zip(texts, verdicts)]})
+                      for text, verdict in zip(texts, verdicts)], **(more or {})})
     return finish(status, verdicts=verdicts, result_file=str(result_file))
 
 
