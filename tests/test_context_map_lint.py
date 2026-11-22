@@ -14,7 +14,7 @@ from pathlib import Path
 
 from agent_tools.delivery import context_map_lint, never_rise, rule_ids
 from agent_tools.delivery.context_map_lint import (
-    RECORD_ENFORCERS, RECORD_FORM_RULE, RECORD_SIZE_RULE, find_record_form,
+    RECORD_ENFORCERS, RECORD_SIZE_ENFORCER, RECORD_FORM_RULE, RECORD_SIZE_RULE, find_record_form,
     find_record_size, is_record_migration, is_record_path, record_violations)
 
 
@@ -290,6 +290,23 @@ class RecordFormTest(unittest.TestCase):
                 branch = never_rise.Snapshot("b" * 40, {}, blobs)
                 self.assertEqual(
                     never_rise.compare(base, branch, renamed, RECORD_ENFORCERS), expected)
+
+    def test_moving_a_record_over_the_size_cap_is_not_a_rise(self):
+        moved = "docs/areas/b/adr/001-a.md"
+        header = "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-a-001\n".encode()
+        over = b"\n" + b"x" * 1600 + b"\n"
+        near_cap = b"\n" + b"x" * 1470 + b"\n"
+        rows = {
+            "over the cap": (H + over, header + over, ()),
+            "under the cap, over it after the move": (H + near_cap, header + near_cap, ()),
+            "body amended": (H + over, header + over + b"More.\n", ("B18",)),
+        }
+        for name, (old, new, expected) in rows.items():
+            with self.subTest(name):
+                base = never_rise.Snapshot("a" * 40, {}, {P: old})
+                branch = never_rise.Snapshot("b" * 40, {}, {moved: new})
+                found = never_rise.compare(base, branch, {moved: P}, (RECORD_SIZE_ENFORCER,))
+                self.assertEqual(tuple(rise.rule for rise in found), expected if expected else ())
 
     def test_the_record_rules_are_rules_of_the_bar(self):
         rules = rule_ids.sections(BAR.read_text(encoding="utf-8"))

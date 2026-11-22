@@ -30,7 +30,9 @@ violation of that rule, or one whose measure is smaller: a violation's `measure`
 when it carries one, else its `line`. A rename git pairs carries the source's
 violation to the target unless the enforcer has a `carries` function and it
 refuses the pair's bytes (old, new); a refused target is judged as if the base
-held no violation for it. A move git does not pair is a new file.
+held no violation for it. With `exempts_carried`, a rename the enforcer carries
+never rises, whatever its measure: a move that only adds bytes the rule does not
+judge (a header, a pointer line) cannot turn the rule red. A move git does not pair is a new file.
 
 A `Verdict` also lists the blob paths the head adds over the base (`added`, a
 rename target included), the renames git pairs (`renamed`, new path to old
@@ -117,6 +119,7 @@ class Enforcer:
     find: Callable[[Snapshot], list[Violation]]
     per_file: bool = False
     carries: Callable[[bytes, bytes], bool] | None = None
+    exempts_carried: bool = False
 
 
 class Rise(NamedTuple):
@@ -240,6 +243,13 @@ def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     return found
 
 
+def _is_carried(enforcer: Enforcer, base: Snapshot, branch: Snapshot,
+                renamed: Mapping[str, str], violation: Violation) -> bool:
+    source = renamed.get(violation.path)
+    return source is not None and (enforcer.carries is None or enforcer.carries(
+        base.blobs.get(source, b""), branch.blobs.get(violation.path, b"")))
+
+
 def _base_measure(enforcer: Enforcer, base: Snapshot, branch: Snapshot,
                   renamed: Mapping[str, str], base_measure: Mapping[str, int],
                   violation: Violation) -> int:
@@ -262,7 +272,9 @@ def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
         if enforcer.per_file:
             base_measure = {v.path: v.magnitude() for v in before}
             new = [v for v in after
-                   if _base_measure(enforcer, base, branch, renamed, base_measure, v)
+                   if not (enforcer.exempts_carried
+                           and _is_carried(enforcer, base, branch, renamed, v))
+                   and _base_measure(enforcer, base, branch, renamed, base_measure, v)
                    < v.magnitude()]
         elif len(after) > len(before):
             remaining = Counter((v.path, v.line) for v in before)

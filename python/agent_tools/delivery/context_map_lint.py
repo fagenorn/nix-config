@@ -225,7 +225,8 @@ def find_record_form(snapshot: Snapshot) -> list[Violation]:
 
 
 RECORD_SIZE_ENFORCER = Enforcer(
-    RECORD_SIZE_RULE, find_record_size, per_file=True, carries=is_record_migration)
+    RECORD_SIZE_RULE, find_record_size, per_file=True, carries=is_record_migration,
+    exempts_carried=True)  # a move adds header and Formerly bytes the cap must not count
 RECORD_FORM_ENFORCER = Enforcer(
     RECORD_FORM_RULE, find_record_form, per_file=True, carries=is_record_migration)
 RECORD_ENFORCERS = (RECORD_SIZE_ENFORCER, RECORD_FORM_ENFORCER)
