@@ -14,7 +14,8 @@ failed git read is no verdict (`None`), never a pass.
 Both sides are judged by the enforcers passed in, so a rule introduced by the
 branch itself is measured on the base by the same code and passes while its
 violations only persist. Each enforcer is a `rule` id and a `find` function
-over a `Snapshot` (the revision and every tracked text file's line count); it
+over a `Snapshot` (the revision and every tracked text file's line count and
+committed bytes); it
 may emit only its own rule id, else the comparison raises `ValueError`.
 
 The comparison, per enforcer in the order given. A count rule (the default)
@@ -46,11 +47,27 @@ given (a NUL in a branch name) is a failed read, never an error.
 A file is text or binary by its committed bytes alone: a NUL among its first
 8,000 bytes makes it binary, as git decides it for `grep -I`, whatever a
 `diff` or `binary` attribute says, so no attribute hides a file from an
-enforcer.
+enforcer. A snapshot holds each text file's line count and its committed
+bytes, never the working tree's, so a file is in `line_counts` and in `texts`
+or in neither.
+
+The command core `run_lint(command, find, argv)` is the contract every enforcer
+command shares: `<command> --repo-root <absolute directory> [--revision <rev>]`
+prints each violation `find` returns for the snapshot at the revision (default
+`HEAD`), one `Violation.text()` line on stdout in `find` order. It exits 1 when
+it printed any and 0 when none. It exits 2 with one line `<command>: <reason>`
+on stderr and nothing on stdout for a relative or missing root, a root below the
+repository's top level, an unresolvable revision or a failed git read.
 """
 
+import argparse
+import argparse
 import os
 import subprocess
+import sys
+import types
+import sys
+import types
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -94,6 +111,7 @@ class Violation(NamedTuple):
 class Snapshot(NamedTuple):
     revision: str
     line_counts: Mapping[str, int]
+    texts: Mapping[str, bytes] = types.MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -160,7 +178,7 @@ BINARY_PROBE_BYTES = 8000
 
 
 def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
-    """Every text file's line count at a revision.
+    """Every text file's line count and committed bytes at a revision.
 
     Lines are counted as `git grep -c` counts them: the newline-terminated lines
     plus an unterminated last line, empty files not listed. A file with a NUL in
@@ -179,12 +197,13 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
         if kind == "blob":
             paths[os.fsdecode(name)] = oid
     if not paths:
-        return Snapshot(revision, {})
+        return Snapshot(revision, {}, types.MappingProxyType({}))
     out = _git(root, ["cat-file", "--batch"], timeout,
                stdin="".join(f"{oid}\n" for oid in paths.values()).encode("ascii"))
     if out is None:
         return None
     counts: dict[str, int] = {}
+    texts: dict[str, bytes] = {}
     position = 0
     for path in paths:
         end = out.find(b"\n", position)
@@ -197,7 +216,8 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
         position = stop + 1
         if content and b"\0" not in content[:BINARY_PROBE_BYTES]:
             counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
-    return Snapshot(revision, counts)
+            texts[path] = content
+    return Snapshot(revision, counts, texts)
 
 
 def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str, str] | None:
@@ -259,3 +279,31 @@ def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
     if base_snapshot is None or branch_snapshot is None or renamed is None:
         return None
     return Verdict(base, head, compare(base_snapshot, branch_snapshot, renamed, enforcers))
+
+
+def run_lint(command: str, find: Callable[[Snapshot], list[Violation]],
+             argv: Sequence[str] | None = None) -> int:
+    """Print `find`'s violations at a revision and exit 0, 1 or 2 as the module docstring says."""
+    parser = argparse.ArgumentParser(prog=command)
+    parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--revision", default="HEAD")
+    args = parser.parse_args(argv)
+    root = Path(args.repo_root)
+    if not root.is_absolute():
+        print(f"{command}: --repo-root must be absolute: {root}", file=sys.stderr)
+        return 2
+    if not root.is_dir():
+        print(f"{command}: not a directory: {root}", file=sys.stderr)
+        return 2
+    if in_subdirectory(root, timeout=None):
+        print(f"{command}: --repo-root is not the repository top level: {root}", file=sys.stderr)
+        return 2
+    sha = resolve_commit(root, args.revision, timeout=None)
+    snapshot = read_snapshot(root, sha, timeout=None) if sha else None
+    if snapshot is None:
+        print(f"{command}: cannot read {args.revision} in {root}", file=sys.stderr)
+        return 2
+    found = find(snapshot)
+    for violation in found:
+        print(violation.text())
+    return 1 if found else 0

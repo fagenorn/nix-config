@@ -20,15 +20,12 @@ the gate.
 The command `size-lint --repo-root <absolute directory> [--revision <rev>]`
 prints every over-budget file at the revision (default `HEAD`), one line each on
 stdout, `<rule> <path>:<line>` with the path escaped as
-`agent_tools.delivery.never_rise.Violation.text` defines. It exits 1 when it
-printed any and 0 when none. It exits 2 with `size-lint: <reason>` on stderr for
-a relative or missing root, a root below the repository's top level, an
-unresolvable revision or a failed git read.
+`agent_tools.delivery.never_rise.Violation.text` defines. Its exits (1 when it
+printed any, 0 when none, 2 with `size-lint: <reason>` on stderr when the root
+or revision cannot be read) are those of `agent_tools.delivery.never_rise.run_lint`.
 """
 
-import argparse
-import sys
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from agent_tools.delivery import never_rise
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
@@ -56,34 +53,8 @@ def find(snapshot: Snapshot) -> list[Violation]:
 ENFORCER = Enforcer(RULE_ID, find, per_file=True)
 
 
-def resolve(root: Path, revision: str) -> str | None:
-    return never_rise.resolve_commit(root, revision, timeout=None)
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog=COMMAND)
-    parser.add_argument("--repo-root", required=True)
-    parser.add_argument("--revision", default="HEAD")
-    args = parser.parse_args(argv)
-    root = Path(args.repo_root)
-    if not root.is_absolute():
-        print(f"{COMMAND}: --repo-root must be absolute: {root}", file=sys.stderr)
-        return 2
-    if not root.is_dir():
-        print(f"{COMMAND}: not a directory: {root}", file=sys.stderr)
-        return 2
-    if never_rise.in_subdirectory(root, timeout=None):
-        print(f"{COMMAND}: --repo-root is not the repository top level: {root}", file=sys.stderr)
-        return 2
-    sha = resolve(root, args.revision)
-    snapshot = never_rise.read_snapshot(root, sha, timeout=None) if sha else None
-    if snapshot is None:
-        print(f"{COMMAND}: cannot read {args.revision} in {root}", file=sys.stderr)
-        return 2
-    found = find(snapshot)
-    for violation in found:
-        print(violation.text())
-    return 1 if found else 0
+    return never_rise.run_lint(COMMAND, find, argv)
 
 
 if __name__ == "__main__":

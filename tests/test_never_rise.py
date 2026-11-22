@@ -12,6 +12,8 @@ The suite holds `standard:B17`, the 1,500-line size rule, by judging its enforce
 this enforcer.
 """
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -23,6 +25,8 @@ from unittest import mock
 from agent_tools.delivery import never_rise, rule_ids, size_lint
 from agent_tools.delivery.never_rise import (
     Enforcer, Rise, Snapshot, Violation)
+
+from .never_rise_world import (commit_all, fixture_env, git, mark_base, repo, write)
 
 TIER = "integration"
 
@@ -36,49 +40,6 @@ WORSE = Enforcer("FX3", lambda snap: [
 LONG = Enforcer("FX2", lambda snap: [
     Violation("FX2", p, n) for p, n in sorted(snap.line_counts.items()) if n > 3],
     per_file=True)
-
-
-def fixture_env(extra=None):
-    env = {k: v for k, v in os.environ.items() if k not in never_rise.SELECTION_VARIABLES}
-    env.update({
-        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-        "GIT_AUTHOR_NAME": "fixture", "GIT_COMMITTER_NAME": "fixture",
-        "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
-        "GIT_COMMITTER_EMAIL": "fixture@example.invalid"})
-    env.update(extra or {})
-    return env
-
-
-def git(root, *args, env=None):
-    return subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=60,
-        check=True, env=env or fixture_env()).stdout
-
-
-def repo(tmp):
-    root = Path(tmp) / "repo"
-    root.mkdir()
-    git(root, "init", "-q", "-b", "main")
-    return root
-
-
-def write(root, relative, text):
-    path = Path(root) / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(text, bytes):
-        path.write_bytes(text)
-    else:
-        path.write_text(text)
-
-
-def commit_all(root, message="commit"):
-    git(root, "add", "-A")
-    git(root, "commit", "-q", "-m", message)
-
-
-def mark_base(root):
-    git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
-    return git(root, "rev-parse", "HEAD").strip()
 
 
 def lines(count, prefix="line"):
@@ -106,6 +67,19 @@ FIRST_RISES = (Rise("FX1", 1, 2, (Violation("FX1", "b.bad", 1),)),)
 class NeverRiseTest(unittest.TestCase):
     def judge(self, root, enforcers=(BAD,)):
         return never_rise.judge(root, "main", list(enforcers), timeout=60)
+
+    def test_the_snapshot_holds_each_text_files_committed_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", b"x\ny")
+            write(root, "empty.txt", b"")
+            write(root, "bin.dat", b"ab\0cd")
+            commit_all(root)
+            head = git(root, "rev-parse", "HEAD").strip()
+            write(root, "a.py", b"changed\n")
+            snapshot = never_rise.read_snapshot(root, head, 60)
+            self.assertEqual(dict(snapshot.texts), {"a.py": b"x\ny"})
+            self.assertEqual(set(snapshot.texts), set(snapshot.line_counts))
 
     def test_one_more_violation_on_the_branch_fails_naming_the_rule(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -562,6 +536,25 @@ class SizeLintOutputTest(unittest.TestCase):
             done = self.run_command("--repo-root", str(root))
             self.assertEqual((done.returncode, done.stdout), (1, "B17 x\\ny.py:1501\n"))
 
+    def test_a_lint_command_core_prints_each_violation_and_exits_by_the_size_lint_rules(self):
+        def run(argv):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = never_rise.run_lint("fx-lint", BAD.find, argv)
+            return code, out.getvalue(), err.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.bad", "x\n")
+            write(root, "b/c.bad", "x\n")
+            write(root, "d.txt", "x\n")
+            commit_all(root)
+            code, out, _ = run(["--repo-root", str(root)])
+            self.assertEqual((code, out), (1, "FX1 a.bad:1\nFX1 b/c.bad:1\n"))
+            code, out, err = run(["--repo-root", "repo"])
+            self.assertEqual((code, out), (2, ""))
+            self.assertTrue(err.startswith("fx-lint: "), err)
+
     def test_a_subdirectory_root_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.committed(tmp, {"a.py": 1501, "docs/standards/s.md": 3})
@@ -581,7 +574,7 @@ class SizeLintOutputTest(unittest.TestCase):
             git(Path(tmp), "clone", "-q", "--no-checkout", "--filter=blob:none",
                 f"file://{bare}", str(partial))
             blob = git(partial, "rev-parse", "HEAD:x.py").strip()
-            self.assertIsNone(size_lint.resolve(partial, blob))
+            self.assertIsNone(never_rise.resolve_commit(partial, blob, timeout=None))
             probe = subprocess.run(
                 ["git", "-C", str(partial), "cat-file", "-e", blob],
                 env=fixture_env({"GIT_NO_LAZY_FETCH": "1"}), capture_output=True)
