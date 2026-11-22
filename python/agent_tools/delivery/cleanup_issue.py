@@ -44,17 +44,63 @@ Run. `run` lists the open issues first. Any open cleanup issue answers
 no rule above zero it answers `Outcome("clean", None, None)` and files nothing;
 else it files exactly one issue for the selected rule and answers
 `Outcome("filed", <issue number>, <rule id>)`.
+
+Tracker. `GitHubTracker(slug)` lists the open issues of `<owner>/<name>` through
+`agent_tools.system.forge_api.api_pages` and files through
+`forge_api.create_issue`, with no label. It reads every page before it decides
+anything, keeps an item that is no pull request and has a trusted author, and
+raises `ForgeError("payload_invalid", ...)` for a page that is not a list of
+objects, a kept item whose number is not an integer or whose body is neither text
+nor null (a null body reads as empty). An author is trusted (`trusted`) when the
+login is `FILER`, the account the workflow token files as, or the author
+association is one of `TRUSTED` (`OWNER`, `MEMBER`); a marker in an issue by
+anyone else is invisible to `file` and `open`. The command reads no environment
+token: `forge_api` drops `GITHUB_TOKEN` and `GH_TOKEN`, so `gh` answers from its
+stored credential alone.
+
+Command. `cleanup-issue <subcommand>`, also `python3 -m
+agent_tools.delivery.cleanup_issue`:
+
+- `file --repo-root <absolute dir> --repo <owner/name> [--revision HEAD]` runs
+  `run` on the snapshot at the revision and prints one JSON line
+  `{"action": ..., "issue": ..., "rule": ...}`; it exits 0. It never asks,
+  labels, comments or closes anything.
+- `counts --repo-root <absolute dir> [--revision HEAD]` prints `<rule> <count>`
+  per rule, in the order of `RULES`; it exits 0.
+- `violations --repo-root <absolute dir> --rule <id> [--revision HEAD]` prints
+  the `Violation.text` of each violation of that rule, one per line in the
+  enforcer's order; it exits 0. It is the measurement a filed issue's criterion
+  names.
+- `open --repo <owner/name>` prints `{"open": [<numbers ascending>]}` of the open
+  cleanup issues by trusted authors; it exits 0 when exactly one is open and 1
+  for none or several.
+
+Every failure exits 2 with one line `cleanup-issue: <reason>` on stderr and
+nothing on stdout: a relative root, a root that is not a directory, a root below
+its repository's top level, a revision that does not resolve or a snapshot that
+cannot be read, a `--rule` that is not in `RULES`, a `--repo` that is not
+`<owner>/<name>`, and any `ForgeError`; after a failed or malformed listing no
+issue is created. A usage error keeps argparse's exit 2.
 """
 
+import argparse
+import json
 import re
+import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NamedTuple, Protocol
 
 from agent_tools.delivery import never_rise, size_lint
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
+from agent_tools.system import forge_api
 
+COMMAND = "cleanup-issue"
+SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+FILER = "github-actions[bot]"
+TRUSTED: tuple[str, ...] = ("OWNER", "MEMBER")
 MARKER = re.compile(r"<!-- agent:cleanup v1 rule=(?P<rule>[A-Za-z0-9._:/@+-]+) -->")
 B17_GUIDANCE = ("Split each listed file so that no file is over 1,500 lines, without changing "
                 "behaviour. Move code with its history (B9) and keep every test.")
@@ -169,3 +215,111 @@ def run(tracker: Tracker, snapshot: Snapshot, rules: Sequence[CleanupRule] = RUL
         return Outcome("clean", None, None)
     issue = draft(rule, found[rule.enforcer.rule], snapshot.revision)
     return Outcome("filed", tracker.create(issue.title, issue.body), issue.rule)
+
+
+def trusted(item: Mapping) -> bool:
+    user = item.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    return login == FILER or item.get("author_association") in TRUSTED
+
+
+class GitHubTracker:
+    def __init__(self, slug: str) -> None:
+        self.slug = slug
+
+    def open_issues(self) -> list[Issue]:
+        pages = forge_api.api_pages(f"repos/{self.slug}/issues?state=open&per_page=100")
+        if not all(isinstance(page, list) and all(isinstance(item, dict) for item in page)
+                   for page in pages):
+            raise forge_api.ForgeError("payload_invalid", "issues are not an array of objects")
+        issues = []
+        for page in pages:
+            for item in page:
+                if "pull_request" in item or not trusted(item):
+                    continue
+                number, body = item.get("number"), item.get("body")
+                if isinstance(number, bool) or not isinstance(number, int):
+                    raise forge_api.ForgeError("payload_invalid", "an issue has no number")
+                if body is not None and not isinstance(body, str):
+                    raise forge_api.ForgeError("payload_invalid", f"issue {number} has no text body")
+                issues.append(Issue(number, body or ""))
+        return issues
+
+    def create(self, title: str, body: str) -> int:
+        return forge_api.create_issue(self.slug, title, body)
+
+
+class Refusal(Exception):
+    pass
+
+
+def snapshot_at(args: argparse.Namespace) -> Snapshot:
+    root = Path(args.repo_root)
+    if not root.is_absolute():
+        raise Refusal(f"--repo-root must be absolute: {root}")
+    if not root.is_dir():
+        raise Refusal(f"not a directory: {root}")
+    if never_rise.in_subdirectory(root, timeout=None):
+        raise Refusal(f"--repo-root is not the repository top level: {root}")
+    sha = never_rise.resolve_commit(root, args.revision, timeout=None)
+    snapshot = never_rise.read_snapshot(root, sha, timeout=None) if sha else None
+    if snapshot is None:
+        raise Refusal(f"cannot read {args.revision} in {root}")
+    return snapshot
+
+
+def tracker_for(args: argparse.Namespace) -> GitHubTracker:
+    if not SLUG.fullmatch(args.repo):
+        raise Refusal(f"--repo is not <owner>/<name>: {args.repo}")
+    return GitHubTracker(args.repo)
+
+
+def parser() -> argparse.ArgumentParser:
+    top = argparse.ArgumentParser(prog=COMMAND)
+    commands = top.add_subparsers(dest="command", required=True)
+    for name, wants_root, wants_repo in (("file", True, True), ("counts", True, False),
+                                         ("violations", True, False), ("open", False, True)):
+        sub = commands.add_parser(name)
+        if wants_root:
+            sub.add_argument("--repo-root", required=True)
+            sub.add_argument("--revision", default="HEAD")
+        if wants_repo:
+            sub.add_argument("--repo", required=True)
+        if name == "violations":
+            sub.add_argument("--rule", required=True)
+    return top
+
+
+def execute(args: argparse.Namespace) -> tuple[int, list[str]]:
+    if args.command == "open":
+        numbers = open_cleanup(tracker_for(args).open_issues())
+        return (0 if len(numbers) == 1 else 1), [json.dumps({"open": numbers})]
+    if args.command == "violations":
+        if args.rule not in {rule.enforcer.rule for rule in RULES}:
+            raise Refusal(f"unknown rule: {args.rule}")
+        return 0, [v.text() for v in counts(snapshot_at(args))[args.rule]]
+    tracker = tracker_for(args) if args.command == "file" else None
+    snapshot = snapshot_at(args)
+    if tracker is None:
+        return 0, [f"{rule} {len(found)}" for rule, found in counts(snapshot).items()]
+    outcome = run(tracker, snapshot)
+    return 0, [json.dumps({"action": outcome.action, "issue": outcome.issue, "rule": outcome.rule})]
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    try:
+        code, lines = execute(args)
+    except Refusal as refusal:
+        print(f"{COMMAND}: {refusal}", file=sys.stderr)
+        return 2
+    except forge_api.ForgeError as error:
+        print(f"{COMMAND}: {error}", file=sys.stderr)
+        return 2
+    for line in lines:
+        print(line)
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
