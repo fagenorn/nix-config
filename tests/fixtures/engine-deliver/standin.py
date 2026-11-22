@@ -13,6 +13,10 @@ prints at most one compact JSON line.
                                  marker-hold-err to stderr, starts a 60 s grandchild holding both
                                  (in its own session when <escape> is 1), writes its pid to
                                  <pidfile>, sleeps 60 s, exits 0
+  answers <log> <answers.json> rest... appends {"argv": rest} to <log>; takes answer
+                                 min(lines already in <log>, last) of <answers.json> (a list of
+                                 {"stdout", "stderr"?, "exit", "sleep"?}), writes its stdout and
+                                 stderr, flushes, sleeps "sleep" seconds, exits "exit"
 """
 
 import json
@@ -63,6 +67,25 @@ def main(argv: list[str]) -> int:
             handle.write(str(grandchild.pid))
         time.sleep(60)
         return 0
+    if mode == "answers":
+        log, answers_file, rest = words[0], words[1], words[2:]
+        try:
+            with open(log, encoding="utf-8") as handle:
+                count = len(handle.readlines())
+        except FileNotFoundError:
+            count = 0
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"argv": rest}, separators=(",", ":")) + "\n")
+        with open(answers_file, encoding="utf-8") as handle:
+            answers = json.load(handle)
+        answer = answers[min(count, len(answers) - 1)]
+        sys.stdout.write(answer["stdout"])
+        sys.stdout.flush()
+        if "stderr" in answer:
+            sys.stderr.write(answer["stderr"])
+            sys.stderr.flush()
+        time.sleep(answer.get("sleep", 0))
+        return answer["exit"]
     return 2
 
 

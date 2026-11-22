@@ -45,6 +45,8 @@ class EngineProject:
         self.tmp = Path(tempfile.mkdtemp(dir=self.world.tmp))
         self.record = self.tmp / "record.log"
         self.release = self.tmp / "release"
+        self.renewals = self.tmp / "renewals.log"
+        self.answers = self.tmp / "answers.json"
         self.root = self.world.project("example/engine", "example/engine", register=False,
                                        mutate=self.add_standins)
         self.bin = self.tmp / "bin"
@@ -69,15 +71,29 @@ class EngineProject:
             "standin-says-exhausted": entry("verdict", "exhausted", "0"),
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
+            "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
         })
 
-    def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None) -> Path:
+    def answer(self, *answers: dict) -> None:
+        self.answers.write_text(json.dumps(list(answers)), encoding="utf-8")
+
+    def renewal_calls(self) -> list[dict]:
+        if not self.renewals.exists():
+            return []
+        return [json.loads(line) for line in self.renewals.read_text(encoding="utf-8").splitlines()]
+
+    def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None,
+                   keep_alive: dict | None = None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
+        default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
+        if keep_alive:
+            default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
         document = {"format": 1,
                     "inputs": list(inputs),
-                    "stops": stops or {"needs-owner": {"need": "owner-decision",
-                                                       "reenter": steps[0]["id"]}},
+                    "stops": stops or default,
                     "steps": steps}
+        if keep_alive:
+            document["keep_alive"] = keep_alive
         (directory / "deliver.json").write_text(json.dumps(document), encoding="utf-8")
         return directory
 
@@ -117,11 +133,16 @@ class EngineProject:
 
 
 def step(id: str, command: str, ok: str | None, *, failed: str = "needs-owner",
-         subcommand: str | None = None, on: dict | None = None) -> dict:
+         subcommand: str | None = None, on: dict | None = None, mutates: bool = False,
+         max_visits: int | None = None) -> dict:
     document = {"id": id, "stage": "setup", "kind": "command", "command": command,
                 "in": ["run.issue"], "on": on or {"ok": ok, "failed": failed}}
     if subcommand:
         document["subcommand"] = subcommand
+    if mutates:
+        document["mutates"] = True
+    if max_visits is not None:
+        document["max_visits"] = max_visits
     return document
 
 
@@ -338,10 +359,18 @@ class RefusalTest(unittest.TestCase):
             (directory / "toy.json").rename(directory / "deliver.json")
             return directory
 
-        def with_mutation(project: EngineProject) -> Path:
-            first = step("a", "standin-record", "done")
-            first["mutates"] = True
-            return project.procedures([first])
+        keep_alive = {"command": "standin-keep-alive", "in": ["run.issue"]}
+
+        def no_claim_lost(project: EngineProject) -> Path:
+            return project.procedures(
+                [step("a", "standin-record", "done")], keep_alive=keep_alive,
+                stops={"needs-owner": {"need": "owner-decision", "reenter": "a"}})
+
+        def mutating_decide(project: EngineProject) -> Path:
+            return project.procedures([{
+                "id": "d", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+                "mutates": True, "on": {"accept": "done", "revise": "needs-owner"}}],
+                keep_alive=keep_alive)
 
         def empty(project: EngineProject) -> Path:
             return Path(tempfile.mkdtemp(dir=project.tmp))
@@ -350,7 +379,8 @@ class RefusalTest(unittest.TestCase):
             "an undeclared input": (
                 "repo", lambda p: p.procedures([step("a", "standin-record", "done")],
                                                inputs=("issue", "repo"))),
-            "a mutating step": ("mutates", with_mutation),
+            "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
+            "a mutating decide step": ("marked mutates", mutating_decide),
             "an agent step": ("agent", shipped),
             "no deliver.json": ("deliver.json", empty),
         }
