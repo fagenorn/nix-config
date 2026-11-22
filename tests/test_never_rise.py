@@ -451,6 +451,110 @@ class NeverRiseTest(unittest.TestCase):
                 self.assertEqual(text, expected)
                 self.assertEqual(len(text.splitlines()), 1)
 
+    def test_an_enforcer_that_cannot_judge_is_raised_not_passed(self):
+        def find(snapshot):
+            raise never_rise.EnforcerFailed("fx", "broken")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            one_more_bad(root)
+            broken = Enforcer("FX9", find)
+            with self.assertRaises(never_rise.EnforcerFailed) as caught:
+                self.judge(root, (BAD, broken))
+            self.assertEqual(caught.exception.enforcer, "fx")
+            self.assertEqual(caught.exception.reason, "broken")
+            self.assertEqual(str(caught.exception), "fx: broken")
+
+    def test_an_enforcer_whose_history_read_fails_is_no_verdict(self):
+        def find(snapshot):
+            raise never_rise.HistoryUnavailable()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            one_more_bad(root)
+            unreadable = Enforcer("FX8", find)
+            self.assertIsNone(self.judge(root, (BAD, unreadable)))
+
+
+def committed_snapshot(root):
+    return never_rise.read_snapshot(root, never_rise.resolve_commit(root, "HEAD", 60), 60)
+
+
+class SnapshotFilesTest(unittest.TestCase):
+    def test_a_snapshot_reads_the_committed_bytes_not_the_working_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "pkg/a.py", "one\n")
+            commit_all(root)
+            write(root, "pkg/a.py", "two\n")
+            snap = committed_snapshot(root)
+            self.assertEqual(never_rise.read_files(snap, ["pkg/a.py"]), {"pkg/a.py": b"one\n"})
+            self.assertEqual(snap.root, root)
+            self.assertEqual(set(snap.files), {"pkg/a.py"})
+
+    def test_a_symlink_is_counted_but_is_no_file_to_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", "x = 1\n")
+            os.symlink("a.py", root / "link.py")
+            commit_all(root)
+            snap = committed_snapshot(root)
+            with self.assertRaises(ValueError):
+                never_rise.read_files(snap, ["link.py"])
+            self.assertIn("link.py", snap.line_counts)
+            self.assertNotIn("link.py", snap.files)
+
+    def test_an_empty_file_is_a_file_with_no_line_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "pyproject.toml", "")
+            write(root, "m.py", "x = 1\n")
+            write(root, "b.bin", b"\0x")
+            commit_all(root)
+            snap = committed_snapshot(root)
+            self.assertIn("pyproject.toml", snap.files)
+            self.assertNotIn("pyproject.toml", snap.line_counts)
+            self.assertNotIn("b.bin", snap.files)
+            self.assertNotIn("b.bin", snap.line_counts)
+            self.assertEqual(never_rise.read_files(snap, ["pyproject.toml"]),
+                             {"pyproject.toml": b""})
+
+    def test_a_hand_built_snapshot_reads_nothing(self):
+        with self.assertRaises(ValueError):
+            never_rise.read_files(Snapshot("a" * 40, {"a": 1}), ["a"])
+        self.assertEqual(never_rise.read_files(Snapshot("a" * 40, {"a": 1}), []), {})
+
+    def test_reading_files_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", "one\n")
+            commit_all(root)
+            snap = committed_snapshot(root)
+            before = recordings(root)
+            never_rise.read_files(snap, ["a.py"])
+            self.assertEqual(recordings(root), before)
+
+    def test_a_malformed_batch_is_history_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", "one\n")
+            commit_all(root)
+            snap = committed_snapshot(root)
+            oid = snap.files["a.py"]
+            other = "f" * 40
+            answers = {
+                "child failed": None,
+                "another oid": f"{other} blob 4\none\n\n".encode(),
+                "size not digits": f"{oid} blob x\none\n\n".encode(),
+                "payload short": f"{oid} blob 9\none\n".encode(),
+                "no terminator": f"{oid} blob 4\none\nX".encode(),
+                "missing": f"{oid} missing\n".encode(),
+                "not a blob": f"{oid} tree 4\none\n\n".encode()}
+            for name, answer in answers.items():
+                with self.subTest(name):
+                    with mock.patch.object(never_rise, "_git", return_value=answer):
+                        with self.assertRaises(never_rise.HistoryUnavailable):
+                            never_rise.read_files(snap, ["a.py"])
+            self.assertEqual(never_rise.read_files(snap, ["a.py"]), {"a.py": b"one\n"})
+
 
 def numbered(count):
     return "".join(f"{i}\n" for i in range(count))
