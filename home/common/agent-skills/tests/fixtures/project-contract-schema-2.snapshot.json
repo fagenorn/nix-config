@@ -14,7 +14,7 @@
           "codex-companion",
           "task",
           "--fresh",
-          "--reviewer",
+          "\u002d\u002dreviewer",
           "diff-review"
         ],
         "cwd": "<root>",
@@ -25,7 +25,7 @@
           "codex-companion",
           "task",
           "--fresh",
-          "--reviewer",
+          "\u002d\u002dreviewer",
           "plan-review"
         ],
         "cwd": "<root>",
