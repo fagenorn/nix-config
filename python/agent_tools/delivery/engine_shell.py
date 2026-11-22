@@ -17,8 +17,8 @@ which is the copy the loop reads (`<run>/procedure/deliver.json`).
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
 run's `sessions/`, `session_starting` is on disk before the process is spawned,
-and only the `outcome_from` member of the session's structured reply grades the
-step. A session with no structured reply is a `Fault`, so neither the prose nor
+and a session that ends normally is graded only by the `outcome_from` member of its
+structured reply. A session with no structured reply is a `Fault`, so neither the prose nor
 the exit code selects an outcome, and so is a session denied a shell command,
 whose reply may rest on a check it never ran. A session ended by a bound is graded
 `out-of-bounds` before either fault is considered: the bounds are a turn cap or a spend cap
@@ -26,13 +26,18 @@ whose reply may rest on a check it never ran. A session ended by a bound is grad
 (`engine_session.bounds`), past which `engine_session.launch` ends the session's group. Its stored result names the bound (`wall-time` for the wall bound), its
 measurements are recorded, and the engine never resumes or retries the step.
 
+A command step runs within its command's wall bound (`CommandTable.wall_seconds`), counted from the
+spawn: past it the step's group is killed, its stored result is `{"bound": "wall-time"}` and it is
+graded `out-of-bounds`. A command's stderr is forwarded to the engine's own. A command that prints
+the verdict `out-of-bounds` is a `Fault`: only the engine grades a fired bound.
+
 Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
 only on the verdict `renewed` with exit 0; an `error` whose `transient` is the boolean
 `true` is called once more. Otherwise the run ends at `claim-lost` without entering the
 step, its detail carrying the verdict and what the call printed on stdout and stderr.
 
-An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done` or `stop_reached`.
+An outcome the step's `on` does not map is a `Fault` (a fired bound is graded first). A run ends with `run_done` or `stop_reached`.
 
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
 until `deliver` returns. A run whose lock is held makes the call exit `EXIT_RUNNING`; a run not done and
@@ -47,6 +52,7 @@ import fcntl
 import json
 import os
 import socket
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -403,10 +409,20 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
                                              "started": _now()})
 
     ran = engine_commands.run(table, action.command, action.subcommand, action.args,
-                              on_start=started)
+                              on_start=started, timeout=table.wall_seconds(action.command))
+    sys.stderr.buffer.write(ran.stderr)
+    sys.stderr.buffer.flush()
+    if ran.timed_out:
+        engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": "wall-time"},
+                                   at=_now(), wall_seconds=ran.wall_seconds, turns=0,
+                                   tokens=dict(NO_TOKENS), spend_usd=0)
+        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True)
+        return
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
                                spend_usd=0)
+    if ran.outcome == procedure_check.OUT_OF_BOUNDS:  # only the engine grades a fired bound
+        raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
     _graded(run_dir, step, visit, ran.outcome)
 
 

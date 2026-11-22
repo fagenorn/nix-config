@@ -15,8 +15,13 @@ result (`{}`).
 A command that cannot start (an `OSError` from the spawn) is `failed` with exit 127 and no pid, and
 `on_start` is not called. When `on_start` raises, the process is killed and reaped before the error
 propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group at
-the timeout and bounds the drain by `DRAIN_SECONDS`. `Ran.stdout`/`stderr` are what it printed
-(stderr is empty untimed). The module runs processes, so the pure engine core never imports it.
+the timeout and bounds the drain by `DRAIN_SECONDS`; the timeout counts from the spawn, `on_start`
+included, and a SIGTERM to the engine ends the group too. `Ran.timed_out` says the timeout fired.
+`Ran.stdout`/`stderr` are what it printed (stderr is empty untimed).
+
+The platform command table holds each platform id's wall bound (`PLATFORM_WALL_SECONDS`) and the one
+bound of every project command (`PROJECT_WALL_SECONDS`); the engine times every step run by it and
+captures its stderr. The module runs processes, so the pure engine core never imports it.
 """
 
 from __future__ import annotations
@@ -39,6 +44,11 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "diff-scope": "delivery.diff_scope",
     "forge-claim": "claims.forge_claim",
 })
+PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
+    "diff-scope": 300,
+    "forge-claim": 1200,
+})
+PROJECT_WALL_SECONDS = 3600
 PROJECT_DECLARATION = CommandDeclaration((), {})
 NOT_STARTED = 127
 TIMED_OUT = "timeout"
@@ -99,6 +109,14 @@ class CommandTable:
             raise UnknownCommand(f"{command}: a project command takes no subcommand")
         raise UnknownCommand(f"{command}: not a platform or project command")
 
+    def wall_seconds(self, command: str) -> float:
+        """The wall bound of a command step: its platform row, else the project bound."""
+        if command in self.platform:
+            return PLATFORM_WALL_SECONDS[command]
+        if command in self.project:
+            return PROJECT_WALL_SECONDS
+        raise UnknownCommand(f"{command}: not a platform or project command")
+
 
 def grade(stdout: bytes, exit_code: int) -> tuple[str, dict]:
     """The outcome and the result object of a finished command."""
@@ -123,6 +141,11 @@ class Ran:
     wall_seconds: float
     stdout: bytes = b""
     stderr: bytes = b""
+    timed_out: bool = False
+
+
+def _terminate(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
 
 
 def run(table: CommandTable, command: str, subcommand: str | None,
@@ -138,28 +161,58 @@ def run(table: CommandTable, command: str, subcommand: str | None,
             start_new_session=timeout is not None)
     except OSError:
         return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
+    previous = None
+    if timeout is not None:
+        try:
+            previous = signal.signal(signal.SIGTERM, _terminate)
+        except ValueError:  # not the main thread: no handler can be installed
+            pass
+    try:
+        return _wait(process, on_start, started, timeout)
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _kill(process: subprocess.Popen, timeout: float | None) -> None:
+    """End the command: its own group when it has one, else the leader alone."""
+    try:
+        if timeout is not None:
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _wait(process: subprocess.Popen, on_start: Callable[[int], None], started: float,
+          timeout: float | None) -> Ran:
     try:
         on_start(process.pid)
     except BaseException:
-        process.kill()
+        _kill(process, timeout)
         process.communicate()
         raise
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        if timeout is None:
+            stdout, stderr = process.communicate()
+        else:
+            remaining = started + timeout - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            stdout, stderr = process.communicate(timeout=remaining)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill(process, timeout)
         try:
             stdout, stderr = process.communicate(timeout=DRAIN_SECONDS)
         except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
             stdout, stderr = late.output or b"", late.stderr or b""
             process.stdout.close(), process.stderr.close(), process.wait()
-        return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr)
+        return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr,
+                   timed_out=True)
     except BaseException:  # an interrupt must not leave a timed run's group alive
         if timeout is not None:
-            os.killpg(process.pid, signal.SIGKILL)
+            _kill(process, timeout)
             process.wait()
         raise
     outcome, result = grade(stdout, process.returncode)

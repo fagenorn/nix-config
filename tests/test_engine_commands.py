@@ -21,7 +21,8 @@ from unittest import mock
 
 from agent_tools.delivery import engine_commands
 from agent_tools.delivery.engine_commands import (
-    PLATFORM_MODULES, CommandTable, Invocation, UnknownCommand, argument, grade, run)
+    PLATFORM_MODULES, PLATFORM_WALL_SECONDS, PROJECT_WALL_SECONDS, CommandTable, Invocation,
+    UnknownCommand, argument, grade, run)
 from agent_tools.delivery.procedure_check import load_commands
 from agent_tools.system.siblings import sibling_argv
 
@@ -106,6 +107,23 @@ class TableTest(unittest.TestCase):
             self.assertEqual(PLATFORM_MODULES[name], rows[name])
 
 
+class WallBoundTest(unittest.TestCase):
+    def test_every_platform_command_declares_a_wall_bound(self):
+        self.assertEqual(set(PLATFORM_WALL_SECONDS), set(PLATFORM_MODULES))
+        for name, seconds in PLATFORM_WALL_SECONDS.items():
+            with self.subTest(command=name):
+                self.assertGreater(seconds, 0)
+
+    def test_wall_seconds_reads_the_platform_row_then_the_project_bound(self):
+        commands = table(mine=project("json", "0"))
+        self.assertEqual(commands.wall_seconds("diff-scope"), 300)
+        self.assertEqual(commands.wall_seconds("forge-claim"), 1200)
+        self.assertEqual(commands.wall_seconds("mine"), PROJECT_WALL_SECONDS)
+        self.assertEqual(PROJECT_WALL_SECONDS, 3600)
+        with self.assertRaises(UnknownCommand):
+            commands.wall_seconds("nothing")
+
+
 class GradeTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -185,6 +203,7 @@ class GradeTest(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertEqual(ran.outcome, "timeout")
         self.assertEqual(ran.outcome, engine_commands.TIMED_OUT)
+        self.assertTrue(ran.timed_out)
         self.assertEqual(ran.result, {})
         self.assertNotEqual(ran.exit_code, 0)
         self.assertLess(elapsed, 20, "a grandchild held the pipes open")
@@ -253,6 +272,16 @@ class GradeTest(unittest.TestCase):
                 self.assertEqual(ran.stdout, b'{"argv":["5"],"verdict":"renewed"}\n')
                 self.assertEqual(ran.stderr, b"")
                 self.assertEqual((ran.outcome, ran.exit_code), ("renewed", 0))
+                self.assertFalse(ran.timed_out)
+
+    def test_time_spent_recording_the_start_counts_against_the_timeout(self):
+        entry = {"argv": [sys.executable, "-c",
+                          "import time; time.sleep(1.5); print('{\"verdict\": \"ok\"}')"],
+                 "cwd": self.tmp, "env": []}
+        ran = run(table(slow=entry), "slow", None, (), on_start=lambda pid: time.sleep(1.2),
+                  timeout=1)
+        self.assertTrue(ran.timed_out)
+        self.assertEqual(ran.outcome, engine_commands.TIMED_OUT)
 
     def test_arguments_are_text_integers_and_compact_json(self):
         self.assertEqual(argument("a b"), "a b")
