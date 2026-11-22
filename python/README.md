@@ -32,5 +32,5 @@ Every agent-workflow helper is a module of one standard-library Python package, 
 
 - A command's contract is its module docstring.
 - A decision is an ADR under `docs/areas/<area>/adr/`, and each area's terms are in its `CONTEXT.md`. [`docs/CONTEXT-MAP.md`](../docs/CONTEXT-MAP.md) is the one place that says which area governs a module.
-- A measurement is kept under `docs/archive/`, and a procedure is a guide under `docs/guides/`.
+- A measurement is a comment or attachment on the pull request or issue it proves, and a procedure is a guide under `docs/guides/`.
 - [`docs/README.md`](../docs/README.md) routes new knowledge, procedures included.

@@ -13,7 +13,7 @@ For a repository that has a row, the guard re-derives that one row at use with t
 
 The check is bounded by a 15-second limit inside a shared 27-second invocation deadline that keeps the verdict ahead of the hook's 30-second timeout, and the guard kills its whole process group on the bound. An unreachable `origin` or provider fails the check and refuses the verb: there is no fallback to a ref already present or to the unchecked row.
 
-The cost of the check per verb is the measurement archived in [guard-row-check-cost-2026-10-13](../../../archive/guard-row-check-cost-2026-10-13.md): a remote listing, a fetch only for a branch whose listed commit the checkout lacks, a sparse export of the contract and one provider read. A provider read that fails is repeated once inside that read's own bound, so no limit above grows; a second failure refuses (issue 844).
+The cost of the check per verb is the measurement recorded in [guard-row-check-cost-2026-10-13](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/docs/archive/guard-row-check-cost-2026-10-13.md): a remote listing, a fetch only for a branch whose listed commit the checkout lacks, a sparse export of the contract and one provider read. A provider read that fails is repeated once inside that read's own bound, so no limit above grows; a second failure refuses (issue 844).
 
 ## Consequences
 
