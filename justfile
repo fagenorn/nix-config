@@ -134,6 +134,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
     home/common/agent-skills/tests/test_conformance_suppressions.py \
+    home/common/agent-skills/tests/test_node_lint.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_adopt_project.py \
     home/common/agent-skills/tests/test_adopt_migrate.py \

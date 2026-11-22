@@ -58,6 +58,26 @@ pkgs.runCommand "agent-platform-check"
         sys.exit(1)
     PY
 
+    python3 - "$root/node-tools.json" <<'PY'
+    import json, subprocess, sys
+    record = json.load(open(sys.argv[1]))
+    problems = []
+    if set(record) != {"schema_version", "node", "eslint"}:
+        problems.append(f"members are {sorted(record)}")
+    elif record["schema_version"] != 1:
+        problems.append("schema_version is not 1")
+    else:
+        for name in ("node", "eslint"):
+            run = subprocess.run([record[name], "--version"], capture_output=True, text=True, env={})
+            if run.returncode != 0:
+                problems.append(f"{name} does not run: {run.stderr.strip()}")
+            elif name == "eslint" and not run.stdout.startswith("v9."):
+                problems.append(f"eslint reports {run.stdout.strip()!r}, not v9.*")
+    if problems:
+        print("node-tools.json: " + "; ".join(problems), file=sys.stderr)
+        sys.exit(1)
+    PY
+
     if [ -n "$(ls -A "$HOME")" ]; then
       echo "HOME is no longer empty: $(ls -A "$HOME")" >&2
       exit 1

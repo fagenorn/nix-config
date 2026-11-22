@@ -130,6 +130,15 @@ let
     )
   );
 
+  # The never-rise Node enforcers run the tools the package pins, by these store paths (D6).
+  nodeTools = pkgs.writeText "node-tools.json" (
+    builtins.toJSON {
+      schema_version = 1;
+      node = "${pkgs.nodejs}/bin/node";
+      eslint = "${pkgs.eslint}/bin/eslint";
+    }
+  );
+
   package =
     pkgs.runCommand "agent-platform"
       {
@@ -142,6 +151,7 @@ let
         mkdir -p "$out/bin" "$out/share/agent-platform"
         cp ${../home/common/agent-skills/platform-manifest.json} "$out/share/agent-platform/platform-manifest.json"
         cp ${revisionRecord} "$out/share/agent-platform/platform-revision.json"
+        cp ${nodeTools} "$out/share/agent-platform/node-tools.json"
         cp -R ${../home/common/agent-skills/standards} "$out/share/agent-platform/standards"
         chmod -R u+w "$out/share/agent-platform"
         ${lib.concatStrings (lib.mapAttrsToList writeLauncher commands)}

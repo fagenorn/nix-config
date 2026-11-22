@@ -42,6 +42,9 @@ in
     # The revision the platform package was built from; adoption's lock entry reads it.
     ".agents/share/platform-revision.json".source = "${agentTools}/share/agent-platform/platform-revision.json";
 
+    # The pinned node and eslint the never-rise check runs from a source run.
+    ".agents/share/node-tools.json".source = "${agentTools}/share/agent-platform/node-tools.json";
+
     # The host declaration: authored host policy -- per route, whether it is
     # supported and how many agent slots one root session may hold -- read by
     # the conformance check through `agent_tools.delivery.host_admission`.

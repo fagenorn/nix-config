@@ -46,7 +46,9 @@ An explicit manifest path ignores the root. The package's standards directory
 is `<root>/standards`, else `$HOME/.agents/standards`. The revision the package
 was built from is the record `<root>/platform-revision.json`, else
 `$HOME/.agents/share/platform-revision.json`, which `platform_revision` reads
-for adoption's lock entry (issue 1454). There is no default, no
+for adoption's lock entry (issue 1454). The pinned Node tools record is
+`<root>/node-tools.json`, else `$HOME/.agents/share/node-tools.json`, refused
+when missing or malformed (issue 1467). There is no default, no
 other fallback path and no discovery ladder: a missing, unreadable, malformed
 or schema-invalid manifest is a platform installation defect and is refused
 loudly, never replaced by an assumed version (R1.3).
@@ -482,6 +484,49 @@ def standards_dir() -> Path:
     if root is not None:
         return root / "standards"
     return Path(os.environ["HOME"]) / ".agents" / "standards"
+
+
+NODE_TOOLS_FILE = "node-tools.json"
+
+
+class NodeToolsError(ValueError):
+    """The pinned Node tools record is missing or malformed; the message names it."""
+
+
+def node_tools_path() -> Path:
+    """The pinned Node tools record: under the named root, else under `HOME`.
+
+    No other location and no `PATH` lookup.
+    """
+    root = platform_root()
+    if root is not None:
+        return root / NODE_TOOLS_FILE
+    return Path(os.environ["HOME"]) / ".agents" / "share" / NODE_TOOLS_FILE
+
+
+def node_tools() -> tuple[str, str]:
+    """`(node, eslint)`: the absolute store paths the record names.
+
+    Raises `NodeToolsError` when the record is missing, unreadable, not JSON,
+    not an object of exactly `schema_version`, `node` and `eslint`, has a
+    `schema_version` other than the integer 1, or names a tool that is not a
+    non-empty absolute path. It does not check that the files exist.
+    """
+    path = node_tools_path()
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise NodeToolsError(f"{path}: cannot be read as JSON ({type(error).__name__})") from error
+    if not isinstance(record, dict) or set(record) != {"schema_version", "node", "eslint"}:
+        raise NodeToolsError(f"{path}: must be an object of schema_version, node and eslint")
+    version = record["schema_version"]
+    if type(version) is not int or version != 1:
+        raise NodeToolsError(f"{path}: schema_version must be the integer 1")
+    for name in ("node", "eslint"):
+        value = record[name]
+        if not isinstance(value, str) or not value or not os.path.isabs(value):
+            raise NodeToolsError(f"{path}: {name} must be a non-empty absolute path")
+    return record["node"], record["eslint"]
 
 
 PLATFORM_REVISION_FILE = "platform-revision.json"
