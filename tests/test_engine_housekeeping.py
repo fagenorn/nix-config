@@ -390,6 +390,14 @@ class SweepTest(unittest.TestCase):
             self.assertEqual(self.sweep(tracker), [])
             self.assertEqual(tracker.asked, [])
 
+    def test_a_deeply_nested_run_document_is_kept_and_the_other_runs_are_swept(self):
+        gone = seed(self.root, 101)
+        deep = self.root / "5-20260101T000000Z-abcd"
+        deep.mkdir(parents=True)
+        (deep / "run.json").write_text("[" * 100000 + "]" * 100000)
+        self.assertEqual(self.sweep(FakeTracker({101: ago(20), 5: ago(20)})), [gone.name])
+        self.assertEqual(left(self.root), [deep.name])
+
     def test_no_tracker_read_starts_after_the_sweep_budget(self):
         kept, gone = seed(self.root, 102), seed(self.root, 101)
         tracker = FakeTracker({101: ago(20), 102: ago(20)})

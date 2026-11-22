@@ -233,7 +233,7 @@ def _strict_load(path: Path) -> object:
         return json.loads(path.read_text(encoding="utf-8"),
                           object_pairs_hook=reject_duplicate_keys,
                           parse_constant=reject_nonfinite_literal)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         raise LedgerError(f"cannot read {path.name}: {error}") from error
 
 
