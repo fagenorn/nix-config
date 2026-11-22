@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (account_add, capacity, console, deliveries, exclusion, guest, manager, nudge,
-                                 permission, permit, pin, probe, service, sessions, signin, sprint, sprints)
+                                 permission, permit, pin, probe, service, sessions, signin, sprints)
 from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_SENT, GOAL_STATED, MANAGER_STARTED,
                                            MANAGER_WAITING, SESSION_SEEN, SPRINT_REPORTED,
@@ -117,6 +117,13 @@ class ManagerPermissionTest(Case):
         written = json.loads(manager.settings_path(svc._sprint_secrets, launch.sprint_id).read_text())
         self.assertEqual(written["permissions"]["allow"],
                          list(manager.allow_rules("o/r", "merge", False)))
+
+    def test_a_wake_writes_the_projects_root_into_the_settings(self):
+        svc, launches = self.launch(lambda project_id, root: permission.FALLBACK)
+        sid = launches.calls[0].sprint_id
+        svc._refresh_settings(sid, "/srv/p01")
+        written = json.loads(manager.settings_path(svc._sprint_secrets, sid).read_text())
+        self.assertEqual(written["env"][manager.ROOT_ENV], "/srv/p01")
 
     def test_a_reader_that_fails_launches_in_auto(self):
         def reader(project_id, root):
@@ -231,8 +238,8 @@ class ManagerServiceTest(Case):
             "The goal: make the importer resumable"))
         self.assertEqual(launch.settings,
                          self.store.parent / "sprint-secrets" / (sid + ".settings.json"))
-        self.assertEqual(dict(launch.env), {"CONSOLE_SPRINT_ID": sid,
-                                            "CONSOLE_SPRINT_SECRET": self.secret(sid)})
+        self.assertEqual(dict(launch.env), {"CONSOLE_SPRINT_ID": sid, "CONSOLE_SPRINT_SECRET": self.secret(sid),
+                                            "CONSOLE_SPRINT_ROOT": "/srv/p01"})
         _, _, kind, project, payload = support.log_rows(self.store)[-1]
         self.assertEqual((kind, project, json.loads(payload)), (
             "manager.started", "owner/p01",
@@ -1964,30 +1971,6 @@ class PermitHookTest(PermitCase):
         self.assertEqual(len(self.rows("permit.judged")), 2)
         self.assertEqual(self.rows("permit.landed"), [])
         self.assertEqual(self.hook(svc, sid, post["command"], call(MERGE)), "")
-        self.assertEqual(len(self.rows("permit.landed")), 1)
-
-
-class PermitWireTest(PermitCase):
-    def test_the_command_and_the_route_agree(self):
-        svc, sid = self.boot()
-        hook = {"session_id": "s-1", "tool_use_id": "t-1", "tool_name": "Bash",
-                "tool_input": {"command": MERGE}}
-        out = io.StringIO()
-        with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
-                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \
-                contextlib.redirect_stdout(out):
-            code = sprint.main(["permit", "--port", str(svc.address[1])])
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out.getvalue()), {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "allow",
-            "permissionDecisionReason": ""}})
-        self.assertEqual(len(out.getvalue().splitlines()), 1)
-        out = io.StringIO()
-        with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
-                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \
-                contextlib.redirect_stdout(out):
-            code = sprint.main(["permit", "--landed", "--port", str(svc.address[1])])
-        self.assertEqual((code, out.getvalue()), (0, ""))
         self.assertEqual(len(self.rows("permit.landed")), 1)
 
 

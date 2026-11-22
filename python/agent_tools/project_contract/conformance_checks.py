@@ -22,7 +22,8 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    context_map_lint, host_admission, never_rise, size_lint, standards_lint,
+    context_map_lint, host_admission, never_rise, ruff_lint, size_lint,
+    standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
@@ -776,7 +777,7 @@ def check_standards_lint(context: "Context") -> "Outcome":
     return Outcome("passed")
 
 
-NEVER_RISE_ENFORCERS = (size_lint.ENFORCER,)
+NEVER_RISE_ENFORCERS = (size_lint.ENFORCER, *ruff_lint.ENFORCERS)
 
 
 def check_never_rise(context: "Context") -> "Outcome":
@@ -785,14 +786,20 @@ def check_never_rise(context: "Context") -> "Outcome":
 
     It starts only read-only, bounded git children, which read committed
     history and never the working tree; the authored contract supplies the
-    branch. No readable merge base is a failed check, never a pass. A reasoned
+    branch. No readable merge base is a failed check, never a pass, and an
+    enforcer that cannot judge is a failed check, never a pass. A reasoned
     suppression the branch adds is listed in the facts, passed or failed, and
     never fails the check (ADR-project-contract-019). Each listed line holds its
     rule, path, line and reason within the fact string bound (`Suppression.text`).
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
-    verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
-                               CHILD_TIMEOUT_SECONDS)
+    try:
+        verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
+                                   CHILD_TIMEOUT_SECONDS)
+    except never_rise.EnforcerFailed as error:
+        return Outcome("failed", "enforcer_failed", "violations.enforcer.repair", {
+            "enforcer": bound_fact(error.enforcer),
+            "reason": bound_fact(error.reason)})
     if verdict is None:
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})

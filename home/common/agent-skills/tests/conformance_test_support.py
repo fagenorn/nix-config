@@ -12,7 +12,9 @@ tool the fixture did not place. HERMETIC_ENV points PATH at a stub bin holding
 one exit-0 script per tool the contract names, except `git`, which is a link to
 the real one (the never-rise check reads real history); a case that needs a
 different tool outcome builds its own bin with make_stub_bin and overrides
-PATH.
+PATH. The platform's pinned tools directory, `AGENT_PLATFORM_TOOLS`, passes
+through as `git` does when the suite's environment has it, so the never-rise
+check can run its pinned Ruff; no other inherited variable passes.
 
 HERMETIC_ENV's HOME also holds the platform installation the resolver ladder
 binds first — the committed manifest, host declaration and standards
@@ -86,6 +88,8 @@ HERMETIC_ENV = {
     # package under test (parent D8). Outside a recipe this raises at import.
     "PYTHONPATH": os.pathsep.join(os.path.abspath(entry) for entry
                                   in os.environ["PYTHONPATH"].split(os.pathsep)),
+    **({"AGENT_PLATFORM_TOOLS": os.environ["AGENT_PLATFORM_TOOLS"]}
+       if "AGENT_PLATFORM_TOOLS" in os.environ else {}),
 }
 
 
