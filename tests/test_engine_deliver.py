@@ -22,15 +22,29 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import engine, engine_ledger, engine_shell
+from agent_tools.delivery.engine_commands import command_text
+from agent_tools.delivery.engine_guard import Hook, judge, payload
 from agent_tools.delivery.engine_ledger import RUN_ID_RE
 from agent_tools.delivery.engine_shell import creation_lock_path, lock_holder, platform_revision
-from tests.guard_policy_world import GuardPolicyWorld
+from tests.engine_guards import (
+    GUARD_NAME, STANDIN_GUARD, payloads, real_guard, real_pre_push_hooks, recorder, script,
+    standin_guard, write_settings)
+from tests.guard_policy_world import REAL_GIT, GuardPolicyWorld
 
 TIER = "integration"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDIN = REPO_ROOT / "tests/fixtures/engine-deliver/standin.py"
 SHIPPED = REPO_ROOT / "python/agent_tools/delivery/procedures"
+
+LIFECYCLE_SPELLINGS: dict[str, list[str]] = {
+    "publish": ["git", "-C", ".", "push", "origin", "HEAD:refs/heads/issue-7-topic"],
+    "open-review": ["gh", "--repo", "example/engine", "pr", "create", "--title", "t", "--body", "b"],
+    "land": ["/usr/bin/env", "gh", "pr", "merge", "7", "--repo", "example/engine", "--merge",
+             "--delete-branch"],
+    "tidy": ["git", "branch", "--delete", "issue-7-topic"],
+    "cut": ["gh", "release", "new", "v1.0.0"],
+}
 
 
 def ANY_SENTENCE(test: unittest.TestCase, value: object) -> None:
@@ -46,6 +60,7 @@ class EngineProject:
         self.world = GuardPolicyWorld(test_case)
         self.tmp = Path(tempfile.mkdtemp(dir=self.world.tmp))
         self.record = self.tmp / "record.log"
+        self.guard_log = self.tmp / "guard.log"
         self.release = self.tmp / "release"
         self.renewals = self.tmp / "renewals.log"
         self.answers = self.tmp / "answers.json"
@@ -61,6 +76,33 @@ class EngineProject:
         self.env = {key: value for key, value in self.world.env.items()
                     if key != "AGENT_PLATFORM_ROOT"}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.world.env['PATH']}"
+        write_settings(self.world.home, str(standin_guard(
+            self.tmp, "allow-guard", "allow", str(self.guard_log))))
+
+    def use_guard(self, command: Path | str, timeout: object = 30, **extra) -> None:
+        write_settings(self.world.home, str(command), timeout, extra=extra or None)
+
+    def use_settings_text(self, text: str) -> None:
+        path = self.world.home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def record_tools(self) -> None:
+        shims = self.tmp / "tool-shims"
+        log = self.tmp / "tools.log"
+        recorder(shims, "git", log, REAL_GIT)
+        recorder(shims, "gh", log, None)
+        self.env["PATH"] = f"{shims}{os.pathsep}{self.env['PATH']}"
+
+    def git(self, *words: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run([REAL_GIT, *words], cwd=self.root, env=self.env,
+                              capture_output=True, text=True, check=check)
+
+    def guard_repository(self) -> None:
+        self.git("remote", "remove", "origin", check=False)
+        self.git("remote", "add", "origin", "git@github.com:example/engine.git")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
 
     def add_standins(self, contract: dict) -> None:
         def entry(*words: str) -> dict:
@@ -77,6 +119,16 @@ class EngineProject:
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
             "standin-hold": entry("hold", str(self.hold), "0"),
         })
+        land = ["gh", "pr", "merge", "7", "--repo", "example/engine", "--merge"]
+        contract["bindings"]["commands"].update(
+            {name: {"argv": argv, "cwd": ".", "env": []} for name, argv in {
+                "land-bare": land, "land-subject": [*land, "--subject", "Land it"],
+                "land-word": [*land, "--subject", "Land"],
+                "tidy-merged": ["git", "branch", "-d", "issue-7-topic"],
+                "ship-wrapper": ["/bin/sh", str(self.tmp / "ship.sh")]}.items()})
+        contract["bindings"]["commands"].update(
+            {name: {"argv": list(argv), "cwd": ".", "env": []}
+             for name, argv in LIFECYCLE_SPELLINGS.items()})
 
     def answer(self, *answers: dict) -> None:
         self.answers.write_text(json.dumps(list(answers)), encoding="utf-8")
@@ -138,9 +190,10 @@ class EngineProject:
 
 def step(id: str, command: str, ok: str | None, *, failed: str = "needs-owner",
          subcommand: str | None = None, on: dict | None = None, mutates: bool = False,
-         max_visits: int | None = None) -> dict:
+         max_visits: int | None = None, refused: str | None = None) -> dict:
     document = {"id": id, "stage": "setup", "kind": "command", "command": command,
-                "in": ["run.issue"], "on": on or {"ok": ok, "failed": failed}}
+                "in": ["run.issue"],
+                "on": on or {"ok": ok, "failed": failed, "refused": refused or failed}}
     if subcommand:
         document["subcommand"] = subcommand
     if mutates:
@@ -220,7 +273,7 @@ class DeliverTest(unittest.TestCase):
         procedures = project.procedures([step(
             "a", "forge-claim", None, subcommand="status",
             on={"free": "needs-owner", "held_by": "needs-owner", "stale": "needs-owner",
-                "error": "done"})])
+                "error": "done", "refused": "needs-owner"})])
         done = project.deliver(procedures)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         run = project.runs()[0]
@@ -243,7 +296,8 @@ class DeliverTest(unittest.TestCase):
     def test_the_reserved_exhausted_verdict_is_a_fault_with_no_outcome_or_transition(self):
         project = EngineProject(self)
         bounded = step("a", "standin-says-exhausted", None, on={
-            "ok": "done", "failed": "needs-owner", "exhausted": "needs-owner"})
+            "ok": "done", "failed": "needs-owner", "refused": "needs-owner",
+            "exhausted": "needs-owner"})
         bounded["max_visits"] = 2
         faulted = project.deliver(project.procedures([bounded]))
         self.assertEqual(faulted.returncode, 1)
@@ -339,6 +393,233 @@ class FindingsTest(unittest.TestCase):
         elsewhere = subprocess.run(argv, capture_output=True, timeout=120, **options)
         self.assertEqual(elsewhere.returncode, 1, elsewhere.stdout + elsewhere.stderr)
         self.assertIn("unknown_command", elsewhere.stdout)
+
+    def test_engine_check_refuses_each_lifecycle_spelling_that_does_not_map_refused(self):
+        project = EngineProject(self)
+        ids = list(LIFECYCLE_SPELLINGS)
+
+        def steps(*, mapped: bool) -> list[dict]:
+            return [{"id": name, "stage": "landing", "kind": "command", "command": name,
+                     "on": {"ok": ids[i + 1] if i + 1 < len(ids) else "done",
+                            "failed": "needs-owner",
+                            **({"refused": "needs-owner"} if mapped else {})}}
+                    for i, name in enumerate(ids)]
+
+        def check(directory: Path):
+            argv, options = project.command("check", "--procedures", str(directory))
+            return subprocess.run(argv, capture_output=True, timeout=120, **options)
+
+        unmapped = check(project.procedures(steps(mapped=False)))
+        self.assertEqual(unmapped.returncode, 1, unmapped.stdout + unmapped.stderr)
+        refusals = json.loads(unmapped.stdout)["refusals"]
+        self.assertEqual([(r["defect"], r["step"]) for r in refusals],
+                         [("unmapped_outcome", name) for name in ids])
+        for refusal in refusals:
+            self.assertIn("'refused'", refusal["detail"])
+        mapped = check(project.procedures(steps(mapped=True)))
+        self.assertEqual(mapped.returncode, 0, mapped.stdout + mapped.stderr)
+
+
+def literal(name: str, on: dict, command: str | None = None) -> dict:
+    """A command step with no `in`, so the judged text carries no issue number."""
+    return {"id": name, "stage": "landing", "kind": "command", "command": command or name,
+            "on": on}
+
+
+ALLOW_ON = {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}
+
+
+class GuardDeliverTest(unittest.TestCase):
+    def tee(self, project: EngineProject, name: str = "tee") -> Path:
+        log = project.tmp / f"{name}.log"
+        project.use_guard(standin_guard(
+            project.tmp, name, "tee", str(log), str(real_guard(project.tmp / "guard-fixture"))))
+        return log
+
+    def test_a_merge_without_delete_branch_is_refused_by_the_real_guard_and_runs_nothing(self):
+        on = {"ok": "done", "failed": "needs-owner", "refused": "guard-refused"}
+        cases = {
+            "land-bare": "gh pr merge 7 --repo example/engine --merge",
+            "land-subject": 'gh pr merge 7 --repo example/engine --merge --subject "Land it"',
+            "land-word": 'gh pr merge 7 --repo example/engine --merge --subject "Land"',
+        }
+        for command, text in cases.items():
+            with self.subTest(command):
+                project = EngineProject(self)
+                project.guard_repository()
+                project.record_tools()
+                log = self.tee(project)
+                stops = {"guard-refused": {"need": "owner-decision", "reenter": command},
+                         "needs-owner": {"need": "owner-decision", "reenter": command}}
+                stopped = project.deliver(project.procedures(
+                    [literal(command, on)], stops=stops))
+                self.assertEqual(stopped.returncode, 3, stopped.stdout + stopped.stderr)
+                self.assertEqual(json.loads(stopped.stdout)["end"], "guard-refused")
+                run = project.runs()[0]
+                self.assertEqual(
+                    [e["event"] for e in project.events(run)],
+                    ["step_entered", "result_stored", "outcome_graded", "transition_taken",
+                     "stop_reached"])
+                graded = [e for e in project.events(run) if e["event"] == "outcome_graded"]
+                self.assertEqual([e["outcome"] for e in graded], ["refused"])
+                logged = payloads(log)
+                self.assertEqual(len(logged), 1)
+                judged = logged[0]["payload"]
+                self.assertEqual(judged["tool_input"]["command"], text)
+                direct = subprocess.run(
+                    [str(project.tmp / "guard-fixture/bin" / GUARD_NAME)],
+                    input=payload(judged["tool_input"]["command"], judged["cwd"]),
+                    capture_output=True, cwd=judged["cwd"])
+                reason = direct.stderr.decode("utf-8")
+                self.assertTrue(reason.endswith("\n"))
+                reason = reason[:-1]
+                stored = json.loads((run / f"results/{command}.1.json").read_text())
+                self.assertEqual(stored, {"reason": reason, "verdict": "refused"})
+                self.assertIn("missing --delete-branch", reason)
+                if command != "land-bare":
+                    self.assertIn("missing --delete-branch: it may be omitted only in a "
+                                  "repository with a declared integration branch", reason)
+                tools = payloads(project.tmp / "tools.log")
+                self.assertNotIn(["pr", "merge", "7", "--repo", "example/engine", "--merge"],
+                                 [line["argv"] for line in tools])
+                self.assertFalse([line for line in tools if "merge" in line["argv"]])
+
+    def test_an_allowed_branch_delete_runs_the_text_the_real_guard_judged(self):
+        project = EngineProject(self)
+        project.git("branch", "issue-7-topic")
+        project.record_tools()
+        log = self.tee(project)
+        done = project.deliver(project.procedures([literal("tidy-merged", ALLOW_ON)]))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        logged = payloads(log)
+        self.assertEqual(len(logged), 1)
+        judged = logged[0]["payload"]
+        self.assertEqual(os.path.realpath(judged["cwd"]), os.path.realpath(project.root))
+        self.assertEqual(judged, {"cwd": judged["cwd"], "hook_event_name": "PreToolUse",
+                                  "tool_input": {"command": "git branch -d issue-7-topic"},
+                                  "tool_name": "Bash"})
+        self.assertEqual(payloads(project.tmp / "tools.log"),
+                         [{"argv": ["branch", "-d", "issue-7-topic"]}])
+        self.assertEqual(project.git("rev-parse", "--verify", "--quiet",
+                                     "refs/heads/issue-7-topic", check=False).returncode, 1)
+
+    def refused_once(self, project: EngineProject, reason_word: str) -> dict:
+        done = project.deliver(project.procedures([literal("a", ALLOW_ON, "standin-record")]))
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        run = project.runs()[0]
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        stored = json.loads((run / "results/a.1.json").read_text())
+        self.assertEqual(stored["verdict"], "refused")
+        self.assertIn(reason_word, stored["reason"])
+        self.assertFalse(project.record.exists())
+        self.assertEqual([e for e in project.events(run) if e["event"] == "process_started"], [])
+        return stored
+
+    def test_a_guard_past_its_timeout_or_unusable_is_refused_and_runs_nothing(self):
+        with self.subTest("timeout"):
+            project = EngineProject(self)
+            pidfile = project.tmp / "pids"
+            project.use_guard(standin_guard(project.tmp, "g", "sleep", str(pidfile)), timeout=1)
+            started = time.monotonic()
+            self.refused_once(project, "did not answer within")
+            self.assertLess(time.monotonic() - started, 15)
+            pids = [int(word) for word in pidfile.read_text().split()]
+            self.assertEqual(len(pids), 2)
+            deadline = time.monotonic() + 5
+            for pid in pids:
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail(f"process {pid} outlived the guard timeout")
+        missing = "missing/bin/claude-bash-lifecycle-guard"
+        for name in ("missing", "arguments", "nul", "huge timeout", "other hook"):
+            with self.subTest(name):
+                project = EngineProject(self)
+                other = project.tmp / "other.log"
+                word = {"missing": "missing", "arguments": "arguments", "nul": "absolute path",
+                        "huge timeout": "timeout", "other hook": "not the lifecycle guard"}[name]
+                if name == "missing":
+                    project.use_guard(project.tmp / missing)
+                elif name == "arguments":
+                    project.use_guard(project.tmp / missing, args=["--x"])
+                elif name == "nul":
+                    project.use_guard("/g\u0000x/bin/claude-bash-lifecycle-guard")
+                elif name == "huge timeout":
+                    project.use_settings_text(json.dumps({"hooks": {"PreToolUse": [
+                        {"matcher": "Bash", "hooks": [{
+                            "type": "command", "command": "/g/bin/claude-bash-lifecycle-guard",
+                            "timeout": "TIMEOUT"}]}]}}).replace('"TIMEOUT"', "1e400"))
+                else:
+                    project.use_guard(script(project.tmp / "other-hook", sys.executable,
+                                             str(STANDIN_GUARD), "allow", str(other)))
+                self.refused_once(project, word)
+                if name == "other hook":
+                    self.assertEqual(payloads(other), [])
+
+    def test_each_lifecycle_verb_by_another_id_or_spelling_gets_the_guard_call(self):
+        for name, argv in LIFECYCLE_SPELLINGS.items():
+            with self.subTest(name):
+                project = EngineProject(self)
+                project.record_tools()
+                log = project.tmp / "g.log"
+                project.use_guard(standin_guard(
+                    project.tmp, "g", "refuse", str(log),
+                    "lifecycle guard: refused by the stand-in."))
+                done = project.deliver(project.procedures([literal(name, ALLOW_ON)]))
+                self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+                logged = payloads(log)
+                self.assertEqual(len(logged), 1)
+                self.assertEqual(logged[0]["payload"]["tool_input"]["command"],
+                                 command_text(argv))
+                stored = json.loads((project.runs()[0] / f"results/{name}.1.json").read_text())
+                self.assertEqual(stored, {"reason": "lifecycle guard: refused by the stand-in.",
+                                          "verdict": "refused"})
+                run_argv = argv[2:] if argv[0] == "/usr/bin/env" else argv[1:]
+                self.assertNotIn(run_argv,
+                                 [line["argv"] for line in payloads(project.tmp / "tools.log")])
+
+    def test_a_wrapper_entry_that_pushes_is_judged_by_the_pre_push_hook_as_in_a_session(self):
+        project = EngineProject(self)
+        project.guard_repository()
+        remote = project.tmp / "remote.git"
+        subprocess.run([REAL_GIT, "init", "--bare", "--quiet", str(remote)], check=True)
+        (project.tmp / "ship.sh").write_text(
+            f"exec {REAL_GIT} -C {project.root} push {remote} HEAD:refs/heads/issue-7-topic\n",
+            encoding="utf-8")
+        hooks = real_pre_push_hooks(project.tmp / "pre-push-fixture")
+        gitconfig = project.tmp / "gitconfig"
+        gitconfig.write_text(f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+        project.env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
+        project.env.pop("CLAUDECODE", None)
+        done = project.deliver(project.procedures([literal("ship-wrapper", ALLOW_ON)]))
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        logged = payloads(project.guard_log)
+        self.assertEqual(len(logged), 1)
+        self.assertEqual(logged[0]["payload"]["tool_input"]["command"],
+                         command_text(["/bin/sh", str(project.tmp / "ship.sh")]))
+        self.assertIn("lifecycle guard pre-push", done.stderr)
+        self.assertEqual(subprocess.run(
+            [REAL_GIT, "--git-dir", str(remote), "rev-parse", "--verify", "--quiet",
+             "refs/heads/issue-7-topic"], capture_output=True).returncode, 1)
+
+    def test_a_flag_shaped_release_title_keeps_the_spelling_the_real_guard_accepts(self):
+        project = EngineProject(self)
+        project.guard_repository()
+        hook = Hook(str(real_guard(project.tmp / "guard-fixture")), 30)
+        argv = ["gh", "release", "create", "v1.0.0", "--repo", "example/engine", "--verify-tag",
+                "--title", "--body", "--notes-file", "/tmp/n.md"]
+        good = judge(hook, command_text(argv), str(project.root))
+        bad = judge(hook, 'gh release create v1.0.0 --repo example/engine --verify-tag '
+                          '--title "--body" "--notes-file" /tmp/n.md', str(project.root))
+        self.assertFalse(bad.allowed)
+        self.assertTrue("does not match an accepted form" in bad.reason
+                        or "exactly as the accepted form" in bad.reason, bad.reason)
+        self.assertTrue(good.allowed, good.reason)
 
 
 class RefusalTest(unittest.TestCase):

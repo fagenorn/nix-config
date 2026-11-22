@@ -67,7 +67,6 @@ from agent_tools.delivery import (
     engine_graders,
     engine_ledger,
     engine_shell,
-    engine_stop,
     procedure_check,
 )
 
@@ -144,9 +143,8 @@ def _stop_run(issue: int, project: str | None) -> int:
     try:
         runs = engine_ledger.find_runs(engine_ledger.runs_root(), issue, project)
         for run_dir in runs:
-            holder = engine_shell.lock_holder(run_dir)
+            holder = engine_shell.request_stop(run_dir)
             if holder is not None:
-                engine_stop.write_request(run_dir, holder)
                 sys.stdout.write(compact({
                     "detail": f"Asked the {engine_shell.ENTRY} procedure of issue {issue} "
                               "to stop at the end of its current step's process.",

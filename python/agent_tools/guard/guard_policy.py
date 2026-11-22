@@ -459,7 +459,7 @@ def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.Verification
     if status != 0:
         raise ProjectRefused("contract_unresolved", "the resolver refused the contract on "
                              f"{source.ref}: {adopt_inspection.resolver_repair_id(payload)}")
-    contract = resolve_project.load_contract(source.resolver_root)
+    contract = resolve_project.load_contract_view(source.resolver_root)
     compiled = _compiled_profiles(target_profiles(entry, slug, payload), contract)
     vcs = payload["bindings"]["vcs"]
     if vcs["integration_branch"] != source.branch or vcs["default_branch"] != source.remote_default:

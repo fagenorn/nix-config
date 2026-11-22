@@ -26,9 +26,11 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.canonical import parse_rfc3339_utc
+from agent_tools.delivery.engine_guard import Hook
 from agent_tools.delivery import (
     engine, engine_commands, engine_ledger, engine_session, engine_shell, engine_stop,
 )
+from tests.engine_guards import standin_guard
 from tests.test_engine_commands import project, table
 from tests.test_engine_deliver import ANY_SENTENCE, EngineProject, step
 from tests.test_engine_keep_alive import KEEP_ALIVE
@@ -101,6 +103,11 @@ class StopRequestTest(unittest.TestCase):
                 engine_stop.request_path(directory).write_text(text)
                 self.assertFalse(engine_stop.requested(directory, holder))
 
+    def test_a_request_file_that_cannot_be_read_is_an_error_not_an_absent_request(self):
+        engine_stop.request_path(self.dir).mkdir()  # reading a directory raises an OSError
+        with self.assertRaises(OSError):
+            engine_stop.requested(self.dir, HOLDER)
+
     def test_write_request_publishes_only_the_request_file(self):
         path = engine_stop.write_request(self.dir, {"pid": 7, "started": "2026-11-22T00:00:00Z"})
         self.assertEqual(path, engine_stop.request_path(self.dir))
@@ -124,6 +131,8 @@ class StopPollTest(unittest.TestCase):
         self.addCleanup(reap_from, self.pidfile)
         self.begun: float | None = None
         self.started: list[tuple[int, int]] = []
+        self.allow = Hook(str(standin_guard(self.dir, "allow", "allow",
+                                            str(self.dir / "allow.log"))), 5)
 
     def on_start(self, pid: int) -> None:
         self.addCleanup(reap, pid)
@@ -138,7 +147,7 @@ class StopPollTest(unittest.TestCase):
         entry = project("hold", str(self.pidfile), "0", cwd=self.tmp.name)
         began = time.monotonic()
         try:
-            return engine_commands.run(table(hold=entry), "hold", None, (),
+            return engine_commands.run(table(hold=entry), "hold", None, (), guard=self.allow,
                                        on_start=self.on_start, **keywords)
         finally:
             self.elapsed = time.monotonic() - began
@@ -174,10 +183,108 @@ class StopPollTest(unittest.TestCase):
             with self.subTest(**keywords):
                 ran = engine_commands.run(
                     table(verdict=entry), "verdict", None, (("run.issue", 5),),
-                    on_start=lambda pid: None, stop=lambda: False, **keywords)
+                    guard=self.allow, on_start=lambda pid: None, stop=lambda: False, **keywords)
                 self.assertEqual(ran.stdout, b'{"argv":["5"],"verdict":"renewed"}\n')
                 self.assertEqual(ran.stderr, b"")
                 self.assertEqual((ran.outcome, ran.exit_code), ("renewed", 0))
+
+    def test_a_request_made_before_a_fast_command_ends_is_never_graded_past(self):
+        entry = project("verdict", "renewed", "0", cwd=self.tmp.name)
+        for keywords in ({}, {"timeout": 60}):
+            with self.subTest("requested while it runs", **keywords):
+                started: list[int] = []
+                with self.assertRaises(engine_stop.Stopped):
+                    engine_commands.run(
+                        table(verdict=entry), "verdict", None, (("run.issue", 5),),
+                        guard=self.allow, on_start=started.append, stop=lambda: bool(started),
+                        **keywords)
+                self.assertEqual(len(started), 1)
+                gone(self, started[0], group=True)
+            with self.subTest("requested before it starts", **keywords):
+                started = []
+                with self.assertRaises(engine_stop.Stopped):
+                    engine_commands.run(
+                        table(verdict=entry), "verdict", None, (("run.issue", 5),),
+                        guard=self.allow, on_start=started.append, stop=lambda: True, **keywords)
+                self.assertEqual(started, [])
+
+    def test_a_request_made_before_a_fast_session_ends_is_never_graded_past(self):
+        argv = [sys.executable, "-c", "pass"]
+        started: list[int] = []
+        with self.assertRaises(engine_stop.Stopped):
+            engine_session.launch(argv, self.tmp.name, "p", on_start=started.append,
+                                  stop=lambda: bool(started))
+        self.assertEqual(len(started), 1)
+        started.clear()
+        with self.assertRaises(engine_stop.Stopped):
+            engine_session.launch(argv, self.tmp.name, "p", on_start=started.append,
+                                  stop=lambda: True)
+        self.assertEqual(started, [])
+
+    def test_a_stopped_session_does_not_wait_for_a_descendant_outside_its_group(self):
+        code = ("import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', "
+                "\"import os,sys,time; open(sys.argv[1], 'w').write(str(os.getpid())); "
+                "time.sleep(60)\", sys.argv[1]], start_new_session=True); time.sleep(60)")
+        timer = threading.Timer(10, reap_from, args=(self.pidfile,))  # frees the pipe if it hangs
+        self.addCleanup(timer.cancel)
+        timer.start()
+        launcher: list[int] = []
+
+        def on_start(pid: int) -> None:
+            self.addCleanup(reap, pid)
+            launcher.append(pid)
+
+        began = time.monotonic()
+        with self.assertRaises(engine_stop.Stopped):
+            engine_session.launch([sys.executable, "-c", code, str(self.pidfile)], self.tmp.name,
+                                  "p", on_start=on_start, stop=lambda: pid_in(self.pidfile))
+        self.assertLess(time.monotonic() - began, 8, "the pipes' far end held the stop open")
+        gone(self, launcher[0], group=True)
+
+    def test_a_failing_on_start_does_not_wait_for_a_child_holding_the_pipe(self):
+        entry = project("hold", str(self.pidfile), "0", cwd=self.tmp.name)
+        timer = threading.Timer(10, reap_from, args=(self.pidfile,))  # frees the pipe if it hangs
+        self.addCleanup(timer.cancel)
+        timer.start()
+
+        def refuse(pid: int) -> None:
+            self.addCleanup(reap, pid)
+            until(self, lambda: pid_in(self.pidfile), 8)
+            raise OSError("the ledger refused the event")
+
+        began = time.monotonic()
+        with self.assertRaises(OSError):
+            engine_commands.run(table(hold=entry), "hold", None, (), guard=self.allow,
+                                on_start=refuse)
+        self.assertLess(time.monotonic() - began, 8, "the child held the callback failure open")
+        gone(self, int(self.pidfile.read_text()))
+
+    def test_a_sigterm_to_the_engine_ends_a_running_commands_whole_group(self):
+        entry = project("hold", str(self.pidfile), "0", cwd=self.tmp.name)
+
+        def probe(signum, frame):
+            raise RuntimeError("the SIGTERM reached the handler the command run left in place")
+
+        before = signal.signal(signal.SIGTERM, probe)
+        self.addCleanup(signal.signal, signal.SIGTERM, before)
+
+        def on_start(pid: int) -> None:
+            self.addCleanup(reap, pid)
+            self.started.append((pid, os.getpgid(pid)))
+
+            def terminate() -> None:
+                until(self, lambda: pid_in(self.pidfile), 10)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+            threading.Thread(target=terminate, daemon=True).start()
+
+        with self.assertRaises(SystemExit) as raised:
+            engine_commands.run(table(hold=entry), "hold", None, (), guard=self.allow,
+                                on_start=on_start)
+        self.assertEqual(raised.exception.code, 143)
+        self.assertIs(signal.getsignal(signal.SIGTERM), probe)
+        gone(self, self.started[0][0], group=True)
+        gone(self, int(self.pidfile.read_text()))
 
     def test_a_stop_ends_a_running_sessions_whole_group(self):
         before = signal.getsignal(signal.SIGTERM)
@@ -315,7 +422,9 @@ class EngineStopTest(unittest.TestCase):
         self.ended_with_stop(project_, running, run)
         events = project_.events(run)
         self.assertEqual((events[-1]["event"], events[-1]["step"]), ("stop_reached", "a"))
-        self.assertNotIn("result_stored", {e["event"] for e in events})
+        kinds = {e["event"] for e in events}
+        self.assertFalse(kinds & {"result_stored", "outcome_graded", "transition_taken"})
+        self.assertEqual(list((run / "results").iterdir()), [])
         (process,) = [e for e in events if e["event"] == "process_started"]
         gone(self, process["pid"], group=True)
         gone(self, int(project_.hold.read_text()))
@@ -403,6 +512,48 @@ class EngineStopTest(unittest.TestCase):
         self.assertEqual(code, engine_shell.EXIT_STOP)
         self.assertEqual(line["end"], "stopped-by-request")
         self.assertEqual(seen, [("stop_reached", True)])
+        self.assertFalse((project_.runs()[0] / "stop-request").exists())
+
+    def test_a_second_stop_racing_the_engines_stop_leaves_no_request_behind(self):
+        project_ = EngineProject(self)
+        procedures = project_.procedures([step("a", "standin-hold", "done")])
+        real_clear, real_write = engine_stop.clear, engine_stop.write_request
+        cleared = threading.Event()
+        second: list[threading.Thread] = []
+        late: list[int] = []
+
+        def clear(run_dir):
+            real_clear(run_dir)
+            cleared.set()
+
+        def write(run_dir, holder):
+            if threading.current_thread() is second[0]:
+                cleared.wait(2)  # without the lock the engine records, clears, then this writes
+            return real_write(run_dir, holder)
+
+        def second_caller():
+            with contextlib.redirect_stdout(io.StringIO()):
+                late.append(engine._stop_run(1512, None))
+
+        def request():
+            until(self, lambda: bool(project_.runs()) and self.started(project_, "a"))
+            run = project_.runs()[0]
+            real_write(run, json.loads((run / "lock").read_text()))
+            second.append(threading.Thread(target=second_caller))
+            second[0].start()
+
+        first = threading.Thread(target=request)
+        self.addCleanup(first.join)
+        self.addCleanup(lambda: second and second[0].join())
+        self.addCleanup(lambda: pid_in(project_.hold) and reap(int(project_.hold.read_text())))
+        self.addCleanup(reap_recorded, project_)
+        first.start()
+        with project_.inside(), mock.patch.object(engine_stop, "clear", side_effect=clear), \
+                mock.patch.object(engine_stop, "write_request", side_effect=write):
+            code, line = engine_shell.deliver(1512, procedures)
+            second[0].join(10)
+        self.assertEqual((code, line["end"]), (engine_shell.EXIT_STOP, "stopped-by-request"))
+        self.assertEqual(len(late), 1)
         self.assertFalse((project_.runs()[0] / "stop-request").exists())
 
     def test_engine_stop_with_no_running_run_leaves_no_file_and_says_so(self):

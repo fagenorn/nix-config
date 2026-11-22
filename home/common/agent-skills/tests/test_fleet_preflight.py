@@ -279,7 +279,7 @@ class FleetPreflightTest(FleetFixtures, ResolverTestCase):
             self.assertEqual(code, 0, err)
             payload = json.loads(out)
             self.assertEqual(payload["refused"], [])
-            self.assertEqual(payload["platform_version"], "2.0.0")
+            self.assertEqual(payload["platform_version"], "2.1.0")
         with self.subTest("installed is older"):
             self.set_manifest(committed_manifest())
             manifest_file.write_text(json.dumps(committed_manifest()),
@@ -370,7 +370,7 @@ class FleetPreflightCheckTest(FleetFixtures, ResolverTestCase):
 
     def test_a_refused_project_is_not_met(self):
         alpha, _ = self.project("fagenorn/alpha")
-        ahead, _ = self.project("fagenorn/ahead", min_inclusive="2.1.0")
+        ahead, _ = self.project("fagenorn/ahead", min_inclusive="2.2.0")
         install_registry(self.home, registry(alpha, ahead))
         code, out, err = self.check()
         self.assertEqual(code, 1, err)

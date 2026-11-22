@@ -6,22 +6,31 @@ written. `requested` answers true only for that holder, so a request left by an 
 never ends a later one. `write_request` publishes it atomically with mode 0600; `clear` removes it.
 
 `communicate` is `Popen.communicate` that, given a `stop` predicate, waits in `POLL_SECONDS` slices
-and raises `Stopped` once `stop()` is true. It kills nothing: the caller's handler ends the process
-group. A retry passes no input, because CPython keeps the unsent offset of the first call.
+and raises `Stopped` once `stop()` is true, also when the process ended inside the first slice: a
+request made before the process ended is never graded past. It kills nothing: the caller's handler
+calls `end_group`. A retry passes no input, because CPython keeps the unsent offset of the first
+call. `requested` treats only a missing file as no request; any other read error propagates.
+
+`publication` is the exclusive flock on the run directory that orders a request's publication
+against the engine's recording of the stop and removal of the file (`engine_shell.request_stop`).
+`sigterm_exits` makes a SIGTERM to the engine raise `SystemExit` while a process group runs.
 
 The module imports no other engine module, so `engine_commands` and `engine_session` can use it.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import random
+import signal
 import string
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Iterator, Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
@@ -68,7 +77,7 @@ def write_request(run_dir: Path, holder: Mapping[str, object]) -> Path:
 def requested(run_dir: Path, holder: Mapping[str, object]) -> bool:
     try:
         raw = request_path(run_dir).read_bytes()
-    except OSError:
+    except FileNotFoundError:
         return False
     try:
         document = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
@@ -83,6 +92,51 @@ def clear(run_dir: Path) -> None:
     request_path(run_dir).unlink(missing_ok=True)
 
 
+@contextlib.contextmanager
+def publication(run_dir: Path) -> Iterator[None]:
+    """Hold the run directory's exclusive flock: a request is published or removed one at a time."""
+    descriptor = os.open(run_dir, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _terminate(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
+@contextlib.contextmanager
+def sigterm_exits() -> Iterator[None]:
+    """A SIGTERM raises `SystemExit(143)` inside the block; the previous handler returns after."""
+    try:
+        previous = signal.signal(signal.SIGTERM, _terminate)
+    except ValueError:  # not the main thread: no handler can be installed
+        previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def end_group(process: subprocess.Popen) -> None:
+    """Kill `process`'s whole group, reap its leader and close its pipes, waiting for no EOF.
+
+    A descendant that left the group may still hold a pipe's far end; closing ours frees the caller.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            with contextlib.suppress(OSError):
+                pipe.close()
+
+
 def communicate(process: subprocess.Popen, data: bytes | None, *,
                 stop: Callable[[], bool] | None,
                 timeout: float | None = None) -> tuple[bytes, bytes | None]:
@@ -95,10 +149,14 @@ def communicate(process: subprocess.Popen, data: bytes | None, *,
         wait = POLL_SECONDS if deadline is None else max(
             0, min(POLL_SECONDS, deadline - time.monotonic()))
         try:
-            return process.communicate(data if first else None, timeout=wait)
+            output = process.communicate(data if first else None, timeout=wait)
         except subprocess.TimeoutExpired:
             first = False
             if stop():
                 raise Stopped from None
             if deadline is not None and time.monotonic() >= deadline:
                 raise
+        else:
+            if stop():
+                raise Stopped
+            return output

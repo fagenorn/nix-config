@@ -46,9 +46,10 @@ fault, never a transition.
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
-other exception, `engine_stop.Stopped` from a polled `stop` included, both do. A launcher that cannot start gives exit 127 and the
-`OSError` text as its stderr. Its stderr is
-captured so the launcher's own error is never a second line on the engine's
+other exception, `engine_stop.Stopped` from a polled `stop` included, both do; the
+kill reaps the launcher and closes the pipes without waiting for EOF, so a descendant
+outside the group that holds a pipe cannot hold the engine. A launcher that cannot
+start gives exit 127 and the `OSError` text as its stderr. Its stderr is captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line.
 
 This module imports no `engine_core`.
@@ -309,7 +310,8 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
            stop: Callable[[], bool] | None = None) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written.
 
-    A `stop` that turns true raises `Stopped` after the group is killed."""
+    A `stop` that is true before the launcher starts, or turns true while it runs or by the time it
+    ended, raises `Stopped` (after the group is killed, once it started)."""
     started = time.monotonic()
     try:
         previous = signal.signal(signal.SIGTERM, _terminate)
@@ -317,6 +319,8 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         previous = None
     process = None
     try:
+        if stop is not None and stop():
+            raise engine_stop.Stopped
         try:
             process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -328,11 +332,7 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         stdout, stderr = engine_stop.communicate(process, prompt.encode("utf-8"), stop=stop)
     except BaseException:
         if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.communicate()
+            engine_stop.end_group(process)
         raise
     finally:
         if previous is not None:
