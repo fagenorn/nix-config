@@ -2,7 +2,7 @@
 
 Schema 3 is schema 2 minus everything the platform decides or the repository
 states. `fill(source, derived)` returns a copy of a schema-3 contract with each
-constant written at the schema-2 pointer it always had, the four derived values
+constant written at the schema-2 pointer it always had, the derived values
 (`DERIVED`) written from `derived`, each retired member removed and every
 authored command given the platform's `cwd` and `env`, so the resolver
 validates and resolves the result with the schema-2 rules. The snapshot is
@@ -12,10 +12,14 @@ therefore schema 2 without the retired members (`RETIRED`).
 derived value, a retired member or a platform command is refused by name,
 never silently overwritten.
 
+The derived values are the four the repository's files state, derived by
+`derived_values` (ADR-project-contract-014), and the attempt budget with its
+basis, which the resolver reads from the recorded attempt history through
+`resolve_project.derive_for` (ADR-project-contract-016). The basis is a
+snapshot member only: `fill` never writes it into the view.
+
 The module imports only `copy` and `agent_platform`, never the resolver or
-`derived_values`, so adoption can import it later (ADR-project-contract-010 D1);
-the values themselves are derived by `derived_values`
-(ADR-project-contract-014).
+`derived_values`, so adoption can import it later (ADR-project-contract-010 D1).
 """
 
 from __future__ import annotations
@@ -53,7 +57,6 @@ CONSTANTS: dict[str, object] = {
     "/bindings/workflow/review/plan": "codex-plan-review",
     "/bindings/workflow/review/code": "codex-diff-review",
     "/bindings/workflow/orchestration/max_parallel": 2,
-    "/bindings/workflow/orchestration/attempt_budget_minutes": 240,
 }
 
 # The objects whose every member is a constant or retired: a contract that
@@ -66,12 +69,19 @@ CONSTANT_CONTAINERS = (
     "/bindings/workflow/review",
 )
 
-# The four values the repository states, as the schema-2 pointers they fill.
+# The attempt budget and the basis it was derived from. The basis is carried by the snapshot only.
+ATTEMPT_BUDGET = "/bindings/workflow/orchestration/attempt_budget_minutes"
+ATTEMPT_BUDGET_BASIS = "/bindings/workflow/orchestration/attempt_budget_basis"
+
+# The four values the repository states and the attempt budget with its basis, as the
+# schema-2 pointers they fill.
 DERIVED = (
     "/project/id",
     "/bindings/tracker/repo_slug",
     "/bindings/vcs/merge/required_checks",
     "/platform",
+    ATTEMPT_BUDGET,
+    ATTEMPT_BUDGET_BASIS,
 )
 
 # Objects a contract may not author because the derived value is its only member.
@@ -169,7 +179,8 @@ def fill(source: dict, derived: Mapping[str, object]) -> dict:
         bindings.setdefault(namespace, {})
     for pointer, value in CONSTANTS.items():
         _write(view, pointer, value)
-    for pointer in ("/bindings/tracker/repo_slug", "/bindings/vcs/merge/required_checks"):
+    for pointer in ("/bindings/tracker/repo_slug", "/bindings/vcs/merge/required_checks",
+                    ATTEMPT_BUDGET):
         if pointer in derived:
             _write(view, pointer, derived[pointer])
     commands = bindings["commands"]

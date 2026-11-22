@@ -4551,3 +4551,309 @@ class DevenvShellCheckTest(unittest.TestCase):
         self.assertEqual(committed_mode(f"{CHECKS}/devenv-shell"), "100755")
         result = self.world.run([str(ROOT / CHECKS / "devenv-shell")])
         self.assertEqual(result.returncode, 2)
+
+
+T_ATTEMPTS = datetime(2026, 11, 22, 12, tzinfo=timezone.utc)
+ATTEMPT_SLUG = "fagenorn/nix-config"
+ATTEMPT_SNAPSHOT = {"bindings": {
+    "tracker": {"repo_slug": ATTEMPT_SLUG},
+    "vcs": {"integration_branch": "main", "branch_pattern": "issue-<num>-<slug>"}}}
+ATTEMPT_PR_LIST = [
+    "pr", "list", "--repo", ATTEMPT_SLUG, "--state", "merged", "--base", "main", "--limit", None,
+    "--json", "number,headRefName,mergedAt,isCrossRepository"]
+
+
+def attempt_stamp(moment):
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class AttemptWorld:
+    """Twenty delivered attempts (issue i, pull 100 + i), as the command reports them and as the
+    tracker holds them, the tracker's times 30 s after the report's."""
+
+    TRACKER_SHIFT = timedelta(seconds=30)
+
+    def __init__(self):
+        self.next_comment = 1000
+        self.pulls = []
+        self.comments = {}
+        self.deliveries = []
+        for i in range(1, 21):
+            merged = T_ATTEMPTS - timedelta(days=30) + timedelta(days=i)
+            self.deliver(i, 100 + i, merged, merged - timedelta(seconds=i * 3600 + 30))
+        self.listing_key = lambda pull: -pull["number"]
+        self.viewed = []
+        self.unreadable = set()
+        self.report = self.report_of(self.window())
+
+    def comment_id(self):
+        self.next_comment += 1
+        return self.next_comment
+
+    def add_comment(self, issue, body, created):
+        comment_id = self.comment_id()
+        self.comments.setdefault(issue, []).append({
+            "body": body, "createdAt": attempt_stamp(created),
+            "url": f"https://github.com/{ATTEMPT_SLUG}/issues/{issue}#issuecomment-{comment_id}"})
+        return comment_id
+
+    def claim(self, issue, created):
+        return self.add_comment(issue, forge_markers.render(
+            "claim", {"issue": str(issue), "holder": "h/b"}, "Claimed by h/b."), created)
+
+    def end(self, issue, claim_id, created):
+        return self.add_comment(issue, forge_markers.end_body(claim_id, "done"), created)
+
+    def pull(self, number, issue, merged, cross=False):
+        self.pulls.append({"number": number, "headRefName": f"issue-{issue}-x",
+                           "mergedAt": attempt_stamp(merged), "isCrossRepository": cross})
+
+    def deliver(self, issue, number, merged, claimed):
+        """A delivery in report time: the tracker holds both instants 30 s later."""
+        self.claim(issue, claimed + self.TRACKER_SHIFT)
+        self.pull(number, issue, merged + self.TRACKER_SHIFT)
+        self.deliveries.append((issue, number, claimed, merged))
+
+    def window(self):
+        return sorted(self.deliveries, key=lambda d: d[3], reverse=True)[:20]
+
+    def report_of(self, deliveries):
+        seconds = sorted(int((merged - claimed).total_seconds()) for _, _, claimed, merged in deliveries)
+        percentile = seconds[(9 * len(seconds) + 9) // 10 - 1] if seconds else 0
+        return {
+            "command": "report", "repo": ATTEMPT_SLUG, "integration_branch": "main",
+            "recorded_at": attempt_stamp(T_ATTEMPTS),
+            "budget_minutes": max(1, -(-3 * percentile // 120)),
+            "percentile_90_minutes": round(percentile / 60, 1),
+            "basis": {"source": "history", "delivered": 20, "percentile_90_seconds": percentile,
+                      "recorded_at": attempt_stamp(T_ATTEMPTS)},
+            "attempts": [{"issue": issue, "pull": number, "claimed_at": attempt_stamp(claimed),
+                          "merged_at": attempt_stamp(merged),
+                          "duration_minutes": round((merged - claimed).total_seconds() / 60, 1)}
+                         for issue, number, claimed, merged in deliveries]}
+
+    def gh_json(self, argv, *args, **kwargs):
+        if argv[:2] == ["pr", "list"]:
+            limit = int(argv[argv.index("--limit") + 1])
+            expected = [str(limit) if part is None else part for part in ATTEMPT_PR_LIST]
+            if argv != expected:
+                raise AssertionError(argv)
+            return [dict(p) for p in sorted(self.pulls, key=self.listing_key)][:limit]
+        if argv[:2] == ["issue", "view"] and argv[3:] == ["--repo", ATTEMPT_SLUG, "--json", "comments"]:
+            self.viewed.append(int(argv[2]))
+            if int(argv[2]) in self.unreadable:
+                raise forge_api.ForgeError("gh_failed", f"issue {argv[2]} unreadable")
+            return {"comments": [dict(c) for c in self.comments.get(int(argv[2]), [])]}
+        raise AssertionError(argv)
+
+    def check(self, *overrides):
+        stack = contextlib.ExitStack()
+        with stack:
+            stack.enter_context(mock.patch.object(
+                verify_checks.resolve_project, "resolve", return_value=ATTEMPT_SNAPSHOT))
+            stack.enter_context(mock.patch.object(
+                verify_checks, "_attempt_budget_report", side_effect=lambda root: self.report))
+            stack.enter_context(mock.patch.object(forge_api, "gh_json", side_effect=self.gh_json))
+            for override in overrides:  # entered last, so each wins over the world's own reads
+                stack.enter_context(override)
+            return verify_checks.attempt_budget_tracker(Path("/repo"))
+
+
+class AttemptBudgetTrackerTest(unittest.TestCase):
+    GREEN = (0, {"verdict": "green", "attempts": 20})
+
+    def test_a_report_that_matches_the_tracker_within_a_minute_is_met(self):
+        self.assertEqual(AttemptWorld().check(), self.GREEN)
+
+    def test_the_standard_window_has_the_hand_computed_budget(self):
+        report = AttemptWorld().report
+        self.assertEqual(report["basis"]["percentile_90_seconds"], 64830)  # the 18th of 20: 18 h 30 s
+        self.assertEqual((report["budget_minutes"], report["percentile_90_minutes"]), (1621, 1080.5))
+
+    def test_a_wrong_or_absent_budget_or_percentile_is_not_met(self):
+        cases = {
+            "budget_minutes": lambda r: r.__setitem__("budget_minutes", 240),
+            "percentile_90_seconds": lambda r: r["basis"].__setitem__("percentile_90_seconds", 1),
+            "percentile_90_minutes": lambda r: r.__setitem__("percentile_90_minutes", 1.0),
+        }
+        for field, change in cases.items():
+            with self.subTest(field):
+                world = AttemptWorld()
+                change(world.report)
+                code, report = world.check()
+                self.assertEqual((code, report["verdict"]), (1, "red"))
+                self.assertIn({"pull": None, "field": field}, report["mismatches"])
+        with self.subTest("absent budget_minutes"):
+            world = AttemptWorld()
+            del world.report["budget_minutes"]
+            code, report = world.check()
+            self.assertNotEqual(code, 0)
+            self.assertNotEqual(report["verdict"], "green")
+
+    def test_a_budget_one_minute_off_is_still_met(self):
+        world = AttemptWorld()
+        world.report["budget_minutes"] += 1
+        self.assertEqual(world.check(), self.GREEN)
+
+    def test_a_non_finite_duration_or_figure_is_unreadable(self):
+        nan = float("nan")
+        cases = {
+            "duration": lambda r: r["attempts"][2].__setitem__("duration_minutes", nan),
+            "budget": lambda r: r.__setitem__("budget_minutes", nan),
+            "percentile": lambda r: r["basis"].__setitem__("percentile_90_seconds", float("inf")),
+        }
+        for name, change in cases.items():
+            with self.subTest(name):
+                world = AttemptWorld()
+                change(world.report)
+                code, report = world.check()
+                self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+
+    def test_a_tie_on_both_instants_at_the_last_slot_goes_to_the_larger_pull_not_the_larger_claim(self):
+        world = AttemptWorld()
+        first = world.deliveries[0]  # issue 1, pull 101, its claim the earliest of the window
+        world.deliver(21, 50, first[3], first[2])  # same instants, a later claim id, a smaller pull
+        self.assertEqual(world.report["attempts"][-1]["pull"], 101)
+        self.assertEqual(world.check(), self.GREEN)
+        world.report = world.report_of([d for d in world.window() if d[1] != 101] + [first])
+        code, report = world.check()
+        self.assertEqual(code, 0)
+
+    def test_only_the_issues_the_window_needs_are_read(self):
+        world = AttemptWorld()
+        world.deliver(30, 130, T_ATTEMPTS - timedelta(days=100), T_ATTEMPTS - timedelta(days=101))
+        world.unreadable.add(30)
+        self.assertEqual(world.check(), self.GREEN)
+        self.assertNotIn(30, world.viewed)
+        self.assertEqual(sorted(world.viewed), list(range(1, 21)))
+
+    def test_an_unreadable_issue_the_window_needs_is_unreadable(self):
+        world = AttemptWorld()
+        world.unreadable.add(7)
+        code, report = world.check()
+        self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+
+    def test_a_claim_sixty_one_seconds_off_is_not_met(self):
+        world = AttemptWorld()
+        claimed = world.deliveries[4][2]  # issue 5
+        world.comments[5][0]["createdAt"] = attempt_stamp(claimed + timedelta(seconds=61))
+        code, report = world.check()
+        self.assertEqual((code, report["verdict"]), (1, "red"))
+        self.assertIn({"pull": 105, "field": "claimed_at"}, report["mismatches"])
+
+    def test_a_duration_more_than_a_minute_off_is_not_met(self):
+        world = AttemptWorld()
+        world.report["attempts"][3]["duration_minutes"] += 1.5
+        pull = world.report["attempts"][3]["pull"]
+        code, report = world.check()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["mismatches"], [{"pull": pull, "field": "duration_minutes"}])
+
+    def test_a_delivery_missing_from_the_report_is_not_met(self):
+        world = AttemptWorld()
+        world.deliver(21, 121, T_ATTEMPTS - timedelta(hours=1), T_ATTEMPTS - timedelta(hours=3))
+        world.report = world.report_of(world.window())
+        dropped = world.report["attempts"].pop(5)
+        code, report = world.check()
+        self.assertEqual(code, 1)
+        self.assertIn({"pull": dropped["pull"], "field": "missing"}, report["mismatches"])
+        self.assertIn({"pull": None, "field": "count"}, report["mismatches"])
+
+    def test_a_fallback_report_is_not_met(self):
+        world = AttemptWorld()
+        world.report["basis"] = {"source": "fallback", "reason": "no_history"}
+        code, report = world.check()
+        self.assertEqual(code, 1)
+        self.assertIn({"pull": None, "field": "basis"}, report["mismatches"])
+
+    def test_a_second_merge_with_the_same_claim_is_not_a_delivery(self):
+        world = AttemptWorld()
+        world.pull(200, 5, T_ATTEMPTS - timedelta(hours=1))
+        self.assertEqual(world.check(), self.GREEN)
+
+    def test_a_command_or_forge_failure_is_unreadable(self):
+        failure = forge_api.ForgeError("payload_invalid", "x")
+        refusal = verify_checks.resolve_project.ContractError("invalid_contract", "contract.x", [])
+        cases = {
+            "command": mock.patch.object(verify_checks, "_attempt_budget_report", side_effect=failure),
+            "forge": mock.patch.object(forge_api, "gh_json", side_effect=failure),
+            "contract": mock.patch.object(verify_checks.resolve_project, "resolve", side_effect=refusal),
+        }
+        for name, patch in cases.items():
+            with self.subTest(name):
+                code, report = AttemptWorld().check(patch)
+                self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+
+    def test_the_wrapper_is_committed_executable_and_needs_its_root(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/attempt-budget-tracker"), "100755")
+        self.assertEqual(run_from_root([str(ROOT / CHECKS / "attempt-budget-tracker")]).returncode, 2)
+
+    def test_a_report_for_another_target_is_not_met(self):
+        for field, value in (("repo", "o/other"), ("integration_branch", "dev")):
+            with self.subTest(field):
+                world = AttemptWorld()
+                world.report[field] = value
+                code, report = world.check()
+                self.assertEqual(code, 1)
+                self.assertEqual(report["mismatches"], [{"pull": None, "field": field}])
+
+    def test_a_fork_pull_with_a_matching_branch_is_not_a_delivery(self):
+        world = AttemptWorld()
+        world.claim(21, T_ATTEMPTS - timedelta(hours=5))
+        world.pull(300, 21, T_ATTEMPTS - timedelta(hours=1), cross=True)
+        self.assertEqual(world.check(), self.GREEN)
+
+    def test_a_claim_released_before_a_later_merge_is_not_delivered_by_it(self):
+        world = AttemptWorld()
+        claimed = T_ATTEMPTS - timedelta(hours=5)
+        claim_id = world.claim(21, claimed)
+        world.end(21, claim_id, claimed + timedelta(hours=1))
+        world.pull(301, 21, claimed + timedelta(hours=2))
+        self.assertEqual(world.check(), self.GREEN)
+
+    def test_the_window_is_complete_wherever_the_listing_puts_a_delivery(self):
+        with mock.patch.object(verify_checks, "ATTEMPT_LISTING_LIMIT", 25):
+            with self.subTest("the latest delivery is listed last"):
+                world = AttemptWorld()
+                world.deliver(21, 50, T_ATTEMPTS - timedelta(hours=1), T_ATTEMPTS - timedelta(hours=3))
+                world.deliver(22, 51, T_ATTEMPTS - timedelta(hours=2), T_ATTEMPTS - timedelta(hours=4))
+                self.assertEqual(len(world.pulls), 22)
+                self.assertEqual(world.gh_json(self.pr_list())[-1]["number"], 50)
+                world.report = world.report_of(world.window())
+                self.assertEqual(world.check(), self.GREEN)
+                ranked = sorted(world.deliveries, key=lambda d: d[3], reverse=True)
+                world.report = world.report_of(ranked[:19] + [ranked[20]])
+                code, report = world.check()
+                self.assertEqual(code, 1)
+                self.assertIn({"pull": ranked[19][1], "field": "missing"}, report["mismatches"])
+            with self.subTest("a listing at the limit may be truncated"):
+                world = AttemptWorld()
+                for number in (60, 61, 62, 63, 64):
+                    world.pull(number, 90, T_ATTEMPTS - timedelta(days=60))
+                self.assertEqual(len(world.pulls), 25)
+                code, report = world.check()
+                self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+
+    @staticmethod
+    def pr_list():
+        return [str(verify_checks.ATTEMPT_LISTING_LIMIT) if part is None else part for part in ATTEMPT_PR_LIST]
+
+    def test_a_merge_after_the_cutoff_is_ignored(self):
+        world = AttemptWorld()
+        world.claim(22, T_ATTEMPTS - timedelta(hours=1))
+        world.pull(302, 22, T_ATTEMPTS + timedelta(seconds=30))
+        self.assertEqual(world.check(), self.GREEN)
+
+    def test_the_report_comes_from_the_commands_own_argv(self):
+        argv = siblings.sibling_argv("delivery.attempt_budget") + ["report", "--repo-root", "/repo"]
+        done = subprocess.CompletedProcess(argv, 0, stdout='{"command": "report"}', stderr="")
+        with mock.patch.object(verify_checks.subprocess, "run", return_value=done) as run:
+            self.assertEqual(verify_checks._attempt_budget_report(Path("/repo")), {"command": "report"})
+        self.assertEqual(run.call_args.args[0], argv)
+        self.assertEqual(run.call_args.kwargs["cwd"], Path("/repo"))
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        failed = subprocess.CompletedProcess(argv, 1, stdout="", stderr="no")
+        with mock.patch.object(verify_checks.subprocess, "run", return_value=failed):
+            with self.assertRaises(forge_api.ForgeError) as raised:
+                verify_checks._attempt_budget_report(Path("/repo"))
+        self.assertEqual(raised.exception.code, "payload_invalid")

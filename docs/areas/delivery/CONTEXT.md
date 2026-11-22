@@ -9,6 +9,10 @@ Delivery turns one tracker issue into a merged change through the agent skills, 
 
 ## Language
 
+**Attempt**:
+One try at delivering an issue, from the claim that starts it to the end of that claim. A delivered attempt ended with its change merged into the integration branch, and its duration runs from the claim's creation to that merge, both read on the tracker; an attempt that stopped or still runs is not delivered. A schema-3 project's attempt budget is 1.5 times the 90th percentile of its last 20 delivered attempts' durations, or 240 minutes until it has 20 (ADR-project-contract-016).
+_Avoid_: run (a run is the engine's)
+
 **Awaiting look**:
 The stage a delivery of a marked issue stops at after verify, with its branch up to date with the integration branch, pushed, its pull request open and every required check at that head green (a red one fixed first, within the delivery's one red-check fix; issue 1373), holding no land lock and merging nothing; the owner's approve or changes answer resumes it (issue 1139).
 _Avoid_: hold (a hold is the post-merge verification hold)
