@@ -3,10 +3,12 @@
 Run: just agent-workflow-tests
 """
 
+import fcntl
 import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,7 @@ import time
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery import verify_slot
 from agent_tools.delivery.verify_slot import NO_SLOT_EXIT, NO_SLOT_LINE, SLOT_DIR_ENV, WAITING_LINE
 from .process_liveness import process_alive
 
@@ -159,6 +162,90 @@ class VerifySlotTest(unittest.TestCase):
         first_code, _ = self.finish(first)
         self.assertEqual(first_code, 0)
         self.assertTrue(self.mark("a", "end").exists())
+
+    def test_a_live_run_started_last_takes_the_freed_slot_before_the_ordinary_waiters(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        for name in ("b", "c", "d"):
+            self.release(name)
+        waiting = WAITING_LINE.format(count=1)
+        second = self.start("b")
+        self.assertEqual(second.stderr.readline().rstrip("\n"), waiting)
+        third = self.start("c")
+        self.assertEqual(third.stderr.readline().rstrip("\n"), waiting)
+        live = self.start("d", "--live")
+        self.assertEqual(live.stderr.readline().rstrip("\n"), waiting)
+        self.release("a")
+        codes = [self.finish(proc) for proc in (first, second, third, live)]
+        self.assertEqual([code for code, _ in codes], [0, 0, 0, 0])
+        self.assertGreaterEqual(float(self.mark("d", "start").read_text()),
+                                float(self.mark("a", "end").read_text()))
+        live_end = float(self.mark("d", "end").read_text())
+        self.assertLessEqual(live_end, float(self.mark("b", "start").read_text()))
+        self.assertLessEqual(live_end, float(self.mark("c", "start").read_text()))
+        self.assertEqual(len(WAITED_PATTERN.findall(codes[3][1])), 1)
+        marker = self.slots / verify_slot.LIVE_MARKER
+        self.assertEqual(stat.S_IMODE(os.stat(marker).st_mode), 0o666)
+
+    def test_a_live_run_never_stops_a_run_in_progress(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        code, err = self.finish(self.start("d", "--live", "--wait-limit", "1"))
+        self.assertEqual(code, NO_SLOT_EXIT)
+        self.assertIn(NO_SLOT_LINE.format(limit=1), err.splitlines())
+        self.assertFalse(self.mark("d", "start").exists())
+        self.assertTrue(process_alive(int(self.mark("a", "pid").read_text())))
+        self.release("a")
+        self.assertEqual(self.finish(first)[0], 0)
+        self.assertTrue(self.mark("a", "end").exists())
+
+    def test_an_ordinary_run_defers_to_a_waiting_live_run_even_with_a_free_slot(self):
+        self.slots.mkdir(parents=True)
+        marker = os.open(self.slots / verify_slot.LIVE_MARKER, os.O_RDWR | os.O_CREAT, 0o666)
+        fcntl.flock(marker, fcntl.LOCK_SH)
+        self.release("b")
+        self.release("c")
+        try:
+            code, err = self.finish(self.start("b", "--wait-limit", "1"))
+        finally:
+            os.close(marker)
+        later_code, later_err = self.finish(self.start("c", "--wait-limit", "5"))
+        self.assertEqual(code, NO_SLOT_EXIT)
+        self.assertFalse(self.mark("b", "start").exists())
+        self.assertEqual(err.splitlines().count(verify_slot.DEFERRING_LINE), 1)
+        self.assertNotIn(WAITING_LINE.format(count=1), err)
+        self.assertEqual(later_code, 0)
+        self.assertNotIn(verify_slot.DEFERRING_LINE, later_err)
+
+    def test_an_ordinary_run_goes_on_once_the_live_waiter_is_gone(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        live = self.start("d", "--live")
+        self.assertEqual(live.stderr.readline().rstrip("\n"), WAITING_LINE.format(count=1))
+        os.kill(live.pid, signal.SIGKILL)
+        live.wait()
+        live.stderr.close()
+        self.release("b")
+        second = self.start("b", "--wait-limit", "10")
+        self.release("a")
+        self.finish(first)
+        code, err = self.finish(second)
+        self.assertEqual(code, 0)
+        self.assertTrue(self.mark("b", "start").exists())
+        self.assertNotIn(verify_slot.DEFERRING_LINE, err)
+        self.assertFalse(self.mark("d", "start").exists())
+
+    def test_a_live_run_holding_a_slot_holds_back_no_ordinary_run(self):
+        self.declare(verify_slots=2)
+        live = self.start("d", "--live")
+        self.assertTrue(wait_for(self.mark("d", "start")))
+        self.release("b")
+        code, err = self.finish(self.start("b", "--wait-limit", "5"))
+        self.assertEqual(code, 0)
+        self.assertTrue(self.mark("b", "start").exists())
+        self.assertNotIn(verify_slot.DEFERRING_LINE, err)
+        self.release("d")
+        self.assertEqual(self.finish(live)[0], 0)
 
     def test_the_childs_exit_is_returned_and_the_slot_freed(self):
         self.release("a")
