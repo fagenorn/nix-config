@@ -27,6 +27,9 @@ from .conformance_test_support import (
     mutated_manifest, platform_env, run,
 )
 from .test_resolve_project import make_project_root, source_contract
+from .test_resolve_schema_three import (
+    make_schema_three_root, schema_three_contract, schema_two_equivalent,
+)
 
 
 def valid_report() -> dict:
@@ -578,6 +581,37 @@ class SchemaTwoContractTest(ReportAssertions, unittest.TestCase):
         contract["schema_version"] = 1
         got = self.statuses(contract)
         self.assertNotEqual(got["compatibility.contract.schema_supported"][0], "passed")
+
+
+class SchemaThreeContractTest(ReportAssertions, unittest.TestCase):
+    """Conformance judges a schema-3 contract as it judges its schema-2 equivalent."""
+
+    def test_a_schema_three_contract_is_judged_like_its_schema_two_equivalent(self):
+        root3 = make_schema_three_root(schema_three_contract())
+        self.addCleanup(shutil.rmtree, root3, ignore_errors=True)
+        root2 = make_schema_three_root(schema_two_equivalent(schema_three_contract()))
+        self.addCleanup(shutil.rmtree, root2, ignore_errors=True)
+        report3, by3 = doctor(self, root3, "--offline")
+        report2, by2 = doctor(self, root2, "--offline")
+        self.assert_validates(report3)
+        self.assert_validates(report2)
+        self.assertEqual(by3["repository.contract.resolvable"]["status"], "passed")
+        self.assertEqual(by3["compatibility.contract.schema_supported"]["status"], "passed")
+        self.assertEqual(
+            by3["compatibility.contract.schema_supported"]["facts"]["project_schema_version"], 3)
+        self.assertEqual(sorted(by3), sorted(by2))
+        for check_id in sorted(by3):
+            with self.subTest(check_id):
+                self.assertEqual(
+                    [by3[check_id]["status"], by3[check_id]["reason_code"]],
+                    [by2[check_id]["status"], by2[check_id]["reason_code"]])
+                if check_id == "compatibility.contract.schema_supported":
+                    continue
+                facts3 = json.dumps(by3[check_id]["facts"], sort_keys=True).replace(
+                    str(root3), "<root>")
+                facts2 = json.dumps(by2[check_id]["facts"], sort_keys=True).replace(
+                    str(root2), "<root>")
+                self.assertEqual(facts3, facts2)
 
 
 class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):

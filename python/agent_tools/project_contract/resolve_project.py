@@ -96,6 +96,13 @@ ids together, so a contract may name a platform command without authoring it.
 Schema 2 is unchanged: a supported `review.plan` or `review.code` still needs
 its authored `bindings.workflow.review` id.
 
+Project schema 3 authors only what the platform cannot decide. The resolver
+fills the constants from `schema_three` (`contract_view`), validates that view
+with the schema-2 rules, and builds the snapshot from it, so the snapshot is
+schema 2 without the four retired members (`schema_three.RETIRED`). Schema 3
+also defines the platform command `commit-environment` (`platform_commands`),
+which the filled commit environment names.
+
 `write-projections` is the tool's only writer. It renders each declared
 projection from the single instruction source and brings its native entry
 target into sync: a wholly generated file for one agent, one managed import
@@ -127,7 +134,7 @@ import shutil
 import sys
 
 from agent_tools.release import release_adapter, release_profile
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import agent_platform, schema_three
 from agent_tools.system import semver
 
 
@@ -235,7 +242,7 @@ COMMIT_MEMBERS = ("co_authored_by", "signed")
 # Issue 1449 (decided in #1430): attribution is decided only by the generated
 # Claude Code settings, so nothing reads or asks for a co-author setting.
 # Schema 2 still requires the member, so a writer of a schema-2 contract writes
-# it with this value; the schema-3 migration (#1453) deletes it.
+# it with this value; schema 3 does not have it (`schema_three.RETIRED`).
 RETIRED_COMMIT_MEMBERS: dict[str, bool] = {"co_authored_by": False}
 # Issue 1249 / ADR-project-contract-008: the id of the `bindings.commands`
 # entry the adoption commit runs through. Absent means the commit runs git
@@ -256,9 +263,11 @@ WORKFLOW_MEMBERS = ("verification", "orchestration", "review")
 # The workflow members an author may leave out: `light_lane` (#279) and
 # `verification_conditions` (issue 437). For each, `null` and absent both mean
 # none (every declared verification id runs), and the resolver never inserts
-# either member itself. `light_lane` is accepted on a schema-2 contract until
-# the schema-3 slice (#1453) removes it, and no tool reads it.
+# either member itself. `light_lane` is accepted on a schema-2 contract, and no
+# tool reads it; schema 3 does not have it (`schema_three.RETIRED`).
 WORKFLOW_OPTIONAL_MEMBERS = ("light_lane", "verification_conditions")
+# What a schema-3 contract may leave out: `light_lane` is retired.
+SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS = ("verification_conditions",)
 # #310: the one orchestration member an author may leave out; never defaulted.
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
 LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
@@ -715,17 +724,19 @@ def raise_for_platform_range(platform: dict, platform_version: str) -> None:
     raise unsupported_schema(verdict, "/platform")
 
 
-def validate_project(source: dict, violations: list[dict]) -> None:
+def validate_project(source: dict, violations: list[dict], *,
+                     members: tuple[str, ...] = ("id", "name")) -> None:
     value = source.get("project")
     if not check_object(value, "/project", "project", violations):
         return
-    check_exact_members(value, "/project", ("id", "name"), "project", violations)
-    for name in ("id", "name"):
+    check_exact_members(value, "/project", members, "project", violations)
+    for name in members:
         if name in value:
             check_string(value[name], f"/project/{name}", "project", violations)
 
 
-def validate_vcs(vcs: dict, commands: dict | None, violations: list[dict]) -> None:
+def validate_vcs(vcs: dict, commands: dict | None, violations: list[dict], *,
+                 commit_members: tuple[str, ...] = COMMIT_MEMBERS) -> None:
     check_exact_members(vcs, "/bindings/vcs", VCS_MEMBERS, "vcs", violations)
     for name in ("kind", "default_branch", "integration_branch", "branch_pattern"):
         if name in vcs:
@@ -745,9 +756,9 @@ def validate_vcs(vcs: dict, commands: dict | None, violations: list[dict]) -> No
             vcs["commit"], "/bindings/vcs/commit", "vcs", violations):
         commit = vcs["commit"]
         check_exact_members(
-            commit, "/bindings/vcs/commit", COMMIT_MEMBERS, "vcs", violations,
+            commit, "/bindings/vcs/commit", commit_members, "vcs", violations,
             optional=COMMIT_OPTIONAL_MEMBERS)
-        for name in COMMIT_MEMBERS:
+        for name in commit_members:
             if name in commit:
                 check_boolean(
                     commit[name], f"/bindings/vcs/commit/{name}", "vcs", violations)
@@ -816,8 +827,9 @@ def validate_tracker(tracker: dict, violations: list[dict]) -> None:
                     entry, f"{entries_pointer}/{index}", "tracker", violations)
 
 
-def validate_paths(paths: dict, violations: list[dict]) -> None:
-    check_exact_members(paths, "/bindings/paths", PATHS_MEMBERS, "paths", violations)
+def validate_paths(paths: dict, violations: list[dict], *,
+                   members: tuple[str, ...] = PATHS_MEMBERS) -> None:
+    check_exact_members(paths, "/bindings/paths", members, "paths", violations)
     if "artifacts" in paths and check_object(
             paths["artifacts"], "/bindings/paths/artifacts", "paths", violations):
         artifacts = paths["artifacts"]
@@ -884,10 +896,11 @@ def check_command_id(value: object, pointer: str, commands: dict | None,
 
 
 def validate_workflow(workflow: dict, commands: dict | None,
-                      violations: list[dict]) -> None:
+                      violations: list[dict], *,
+                      optional: tuple[str, ...] = WORKFLOW_OPTIONAL_MEMBERS) -> None:
     check_exact_members(
         workflow, "/bindings/workflow", WORKFLOW_MEMBERS, "workflow", violations,
-        optional=WORKFLOW_OPTIONAL_MEMBERS)
+        optional=optional)
     pointer = "/bindings/workflow/verification"
     if "verification" in workflow and check_list(
             workflow["verification"], pointer, "workflow", violations):
@@ -985,7 +998,9 @@ def validate_verification_conditions(workflow: dict, violations: list[dict]) -> 
                      "unconditional", "contract.workflow.no_unconditional_verification"))
 
 
-def validate_bindings(source: dict, violations: list[dict]) -> None:
+def validate_bindings(source: dict, violations: list[dict], *,
+                      schema: int = 2) -> None:
+    three = schema == schema_three.SCHEMA_VERSION
     bindings = source.get("bindings")
     if not check_object(bindings, "/bindings", "bindings", violations):
         return
@@ -1000,17 +1015,23 @@ def validate_bindings(source: dict, violations: list[dict]) -> None:
                 violations):
             present[namespace] = bindings[namespace]
     commands = present.get("commands")
-    known = effective_commands(commands)
+    known = effective_commands(commands, platform_commands(source))
     if "vcs" in present:
-        validate_vcs(present["vcs"], known, violations)
+        validate_vcs(
+            present["vcs"], known, violations,
+            **({"commit_members": ("signed",)} if three else {}))
     if "tracker" in present:
         validate_tracker(present["tracker"], violations)
     if "paths" in present:
-        validate_paths(present["paths"], violations)
+        validate_paths(
+            present["paths"], violations,
+            **({"members": PATHS_LIST_MEMBERS} if three else {}))
     if commands is not None:
         validate_commands(commands, violations)
     if "workflow" in present:
-        validate_workflow(present["workflow"], known, violations)
+        validate_workflow(
+            present["workflow"], known, violations,
+            **({"optional": SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS} if three else {}))
 
 
 def validate_capabilities(source: dict, violations: list[dict]) -> None:
@@ -1186,7 +1207,23 @@ def check_production_entries(
                 "contract.production.route_both_ways"))
 
 
-def effective_commands(authored: dict | None) -> dict | None:
+def platform_commands(source: object) -> dict:
+    """The platform command table the contract's schema reads: schema 3 adds `commit-environment`."""
+    if isinstance(source, dict) and source.get("schema_version") == schema_three.SCHEMA_VERSION:
+        return schema_three.COMMANDS
+    return agent_platform.PLATFORM_COMMANDS
+
+
+def contract_view(source: dict) -> dict:
+    """The contract the shape rules and the snapshot read: schema 3 with its constants filled, else `source`."""
+    if (isinstance(source, dict)
+            and source.get("schema_version") == schema_three.SCHEMA_VERSION):
+        return schema_three.fill(source)
+    return source
+
+
+def effective_commands(authored: dict | None,
+                       platform: dict = agent_platform.PLATFORM_COMMANDS) -> dict | None:
     """The authored commands plus every platform command the contract does not author.
 
     None stays None. An authored id always wins whole (ADR-project-contract-010);
@@ -1195,7 +1232,7 @@ def effective_commands(authored: dict | None) -> dict | None:
     if authored is None:
         return None
     merged = {command_id: copy.deepcopy(entry)
-              for command_id, entry in agent_platform.PLATFORM_COMMANDS.items()
+              for command_id, entry in platform.items()
               if command_id not in authored}
     merged.update(authored)
     return merged
@@ -1205,7 +1242,8 @@ def production_commands(source: dict) -> dict | None:
     """The authored `bindings.commands` object with the platform's, or None when it is not one (as `validate_bindings`)."""
     bindings = source.get("bindings")
     commands = bindings.get("commands") if isinstance(bindings, dict) else None
-    return effective_commands(commands if isinstance(commands, dict) else None)
+    return effective_commands(
+        commands if isinstance(commands, dict) else None, platform_commands(source))
 
 
 def validate_production(source: dict, violations: list[dict]) -> None:
@@ -1314,6 +1352,10 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
     violations: list[dict] = []
     validate_schema_version(
         source, violations, manifest["project_schema_versions"])
+    # Schema 3 is judged through its filled view: the shape rules are schema 2's,
+    # over the member lists schema 3 keeps.
+    source = contract_view(source)
+    three = source.get("schema_version") == schema_three.SCHEMA_VERSION
     for name in TOP_LEVEL_MEMBERS:
         # `schema_version` reports its own absence above, with the repair id
         # that names the version rather than the generic missing-member one.
@@ -1327,9 +1369,11 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
                 f"/{name}", "member is not part of this schema",
                 "contract.top_level.member_unexpected"))
     if "project" in source:
-        validate_project(source, violations)
+        validate_project(source, violations, **({"members": ("id",)} if three else {}))
     if "bindings" in source:
-        validate_bindings(source, violations)
+        validate_bindings(
+            source, violations,
+            schema=schema_three.SCHEMA_VERSION if three else 2)
     if "capabilities" in source:
         validate_capabilities(source, violations)
     if "projections" in source:
@@ -1352,19 +1396,22 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
 # --------------------------------------------------------------------------
 
 
-def normalize_bindings(source_bindings: dict, root: Path) -> dict:
+def normalize_bindings(source_bindings: dict, root: Path,
+                       platform: dict = agent_platform.PLATFORM_COMMANDS) -> dict:
     """The source bindings with every authored path made absolute under `root`.
 
-    The platform commands the contract does not author are added first. Exactly
-    the artifact paths, the six knowledge path lists and each command's `cwd`
-    are rewritten; every other value is passed through byte-for-byte.
+    The platform commands (`platform`) the contract does not author are added
+    first. Exactly the artifact paths (when present), the six knowledge path
+    lists and each command's `cwd` are rewritten; every other value is passed
+    through byte-for-byte.
     """
     bindings = copy.deepcopy(source_bindings)
-    bindings["commands"] = effective_commands(bindings["commands"])
+    bindings["commands"] = effective_commands(bindings["commands"], platform)
     paths = bindings["paths"]
-    artifacts = paths["artifacts"]
-    for name in ("specs", "plans"):
-        artifacts[name] = str(root / artifacts[name])
+    artifacts = paths.get("artifacts")
+    if artifacts is not None:
+        for name in ("specs", "plans"):
+            artifacts[name] = str(root / artifacts[name])
     for name in PATHS_LIST_MEMBERS:
         paths[name] = [str(root / entry) for entry in paths[name]]
     for entry in bindings["commands"].values():
@@ -1528,19 +1575,19 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # `resolved_schema_version`, the schema this platform resolves *to*. It is
     # not the contract's declared `schema_version`, which may legally be an
     # older supported schema (R2.5).
-    bindings = normalize_bindings(source["bindings"], root)
+    view = contract_view(source)
+    bindings = normalize_bindings(view["bindings"], root, platform_commands(source))
+    project = {"root": str(root), "id": view["project"]["id"]}
+    if "name" in view["project"]:
+        project["name"] = view["project"]["name"]
     return {
         "schema_version": manifest["resolved_schema_version"],
-        "project": {
-            "root": str(root),
-            "id": source["project"]["id"],
-            "name": source["project"]["name"],
-        },
+        "project": project,
         "bindings": bindings,
         "capabilities": compute_capabilities(
-            bindings, root, source["capabilities"], source["release"], source),
-        "release": {"targets": release_profile.release_targets(source["release"])},
-        "production": production_rules(source),
+            bindings, root, view["capabilities"], view["release"], view),
+        "release": {"targets": release_profile.release_targets(view["release"])},
+        "production": production_rules(view),
     }
 
 

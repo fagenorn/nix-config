@@ -359,7 +359,8 @@ class CoAuthorMemberTest(unittest.TestCase):
                         continue
                     if b"co_authored_by" in path.read_bytes():
                         found.append(path.relative_to(REPO_ROOT).as_posix())
-        self.assertEqual(sorted(found), ["python/agent_tools/project_contract/resolve_project.py"])
+        self.assertEqual(sorted(found), ["python/agent_tools/project_contract/resolve_project.py",
+                          "python/agent_tools/project_contract/schema_three.py"])
 
     def test_the_retired_member_is_written_false_and_is_a_schema_two_commit_member(self):
         self.assertEqual(dict(resolve_project.RETIRED_COMMIT_MEMBERS), {"co_authored_by": False})
