@@ -9,22 +9,31 @@ schema-2 contract that spells every constant out.
 
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 import os
 import re
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.project_contract import resolve_project, schema_three
+from agent_tools.project_contract import derived_values, resolve_project, schema_three
+from agent_tools.project_contract.derived_values import TREE_MANIFEST
 from agent_tools.release import release
 
 from .test_resolve_project import (
+    MANIFEST,
     REPO_ROOT,
+    InProcessTestCase,
     ResolverTestCase,
+    committed_manifest,
+    git,
     make_project_root,
+    mutated_manifest,
     run,
     source_contract,
 )
@@ -110,9 +119,45 @@ def schema_three_contract() -> dict:
     return json.loads(SCHEMA_THREE_FIXTURE.read_text("utf-8"))
 
 
-def make_schema_three_root(contract: object, *, projections: bool = True) -> Path:
-    """A project root whose knowledge homes exist, so every authored capability is judged ready."""
+FIXTURE_REMOTE = "git@github.com:fagenorn/nix-config.git"
+FIXTURE_PROTECTION = {"required_status_checks": {
+    "strict": True, "checks": [{"context": "Nix Eval"}, {"context": "Agent Workflow Tests"}]}}
+
+
+def _next_major(version: str) -> str:
+    return f"{int(version.split('.')[0]) + 1}.0.0"
+
+
+EXPECTED_DERIVED = {
+    "/project/id": "fagenorn/nix-config",
+    "/bindings/tracker/repo_slug": "fagenorn/nix-config",
+    "/bindings/vcs/merge/required_checks": ["Nix Eval", "Agent Workflow Tests"],
+    "/platform": {
+        "min_inclusive": committed_manifest()["platform_version"],
+        "max_exclusive": _next_major(committed_manifest()["platform_version"])},
+}
+
+
+def make_schema_three_root(contract: object, *, projections: bool = True,
+                           remote: str | None = FIXTURE_REMOTE,
+                           protection: object = FIXTURE_PROTECTION,
+                           tree_manifest: bool = True) -> Path:
+    """A project root whose knowledge homes exist, so every authored capability is judged ready.
+
+    It also holds what a schema-3 contract's four derived values come from: an
+    origin remote, the branch-protection source and, as the platform's own
+    repository does, the platform manifest.
+    """
     root = make_project_root(contract, projections=projections)
+    if remote is not None:
+        git(root, "remote", "add", "origin", remote)
+    if protection is not None:
+        (root / ".github").mkdir()
+        (root / ".github" / "branch-protection.json").write_text(
+            json.dumps(protection), encoding="utf-8")
+    if tree_manifest:
+        (root / TREE_MANIFEST).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(MANIFEST, root / TREE_MANIFEST)
     (root / "docs" / "guides").mkdir(parents=True)
     (root / "docs" / "CONTEXT-MAP.md").write_text("# map\n", encoding="utf-8")
     (root / "docs" / "guides" / "architecture.md").write_text("# arch\n", encoding="utf-8")
@@ -120,6 +165,18 @@ def make_schema_three_root(contract: object, *, projections: bool = True) -> Pat
     (root / ".agents" / "knowledge" / "hints").mkdir(parents=True)
     (root / ".agents" / "knowledge" / "rejections").mkdir(parents=True)
     return root
+
+
+def stage_locked_platform(root: Path, store: Path, version: str) -> None:
+    """Pin the `agent-platform` input in `root`'s `devenv.lock` and put its tree in `store`."""
+    nar = "sha256-" + base64.b64encode(hashlib.sha256(version.encode()).digest()).decode()
+    (root / "devenv.lock").write_text(json.dumps({
+        "nodes": {"root": {"inputs": {"agent-platform": "agent-platform_2"}},
+                  "agent-platform_2": {"locked": {"narHash": nar}}},
+        "root": "root", "version": 7}), encoding="utf-8")
+    manifest = Path(derived_values.store_path(nar, str(store))) / TREE_MANIFEST
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"platform_version": version}), encoding="utf-8")
 
 
 def named_member_paths() -> dict[str, list[str]]:
@@ -208,7 +265,9 @@ def schema_two_equivalent(contract: dict) -> dict:
     """The schema-2 contract that spells out every constant the schema-3 contract leaves to the platform."""
     out = copy.deepcopy(contract)
     out["schema_version"] = 2
-    out["project"]["name"] = "nix-config"
+    set_pointer(out, "/project/name", "nix-config")
+    for pointer, value in EXPECTED_DERIVED.items():
+        set_pointer(out, pointer, value)
     for pointer, value in EXPECTED_CONSTANTS.items():
         set_pointer(out, pointer, value)
     commands = out["bindings"]["commands"]
@@ -231,8 +290,8 @@ class SchemaThreeCase(ResolverTestCase):
         self.addCleanup(shutil.rmtree, path, ignore_errors=True)
         return path
 
-    def schema_three_root(self, contract: object, *, projections: bool = True) -> Path:
-        return self.owned(make_schema_three_root(contract, projections=projections))
+    def schema_three_root(self, contract: object, **sources: object) -> Path:
+        return self.owned(make_schema_three_root(contract, **sources))
 
 
 class ProgramReadsTest(SchemaThreeCase):
@@ -351,29 +410,35 @@ class SchemaThreeFillTest(unittest.TestCase):
         source = schema_three_contract()
         source["bindings"]["commands"]["codex-plan-review"] = {"argv": ["true"]}
         before = copy.deepcopy(source)
-        view = schema_three.fill(source)
+        view = schema_three.fill(source, EXPECTED_DERIVED)
         self.assertEqual(source, before)
         self.assertNotIn("codex-plan-review", view["bindings"]["commands"])
         self.assertNotIn("paths", source["bindings"])
 
     def test_fill_drops_a_retired_member_a_contract_still_carries(self):
         source = schema_three_contract()
-        source["project"]["name"] = "nix-config"
+        source["project"] = {"name": "nix-config"}
         source["bindings"]["vcs"]["commit"] = {"co_authored_by": True}
         source["bindings"]["workflow"]["light_lane"] = {"mode": "shadow"}
-        view = schema_three.fill(source)
-        self.assertEqual(sorted(view["project"]), ["id"])
+        view = schema_three.fill(source, {"/project/id": "fagenorn/nix-config"})
+        self.assertEqual(view["project"], {"id": "fagenorn/nix-config"})
         self.assertEqual(sorted(view["bindings"]["vcs"]["commit"]), ["environment", "signed"])
         self.assertNotIn("light_lane", view["bindings"]["workflow"])
 
 
     def test_fill_drops_a_retired_member_when_bindings_is_not_an_object(self):
         source = schema_three_contract()
-        source["project"]["name"] = "nix-config"
+        source["project"] = {"name": "nix-config"}
         source["bindings"] = []
-        view = schema_three.fill(source)
-        self.assertEqual(sorted(view["project"]), ["id"])
+        view = schema_three.fill(source, {
+            "/project/id": "fagenorn/nix-config", "/platform": EXPECTED_DERIVED["/platform"]})
+        self.assertEqual(view["project"], {"id": "fagenorn/nix-config"})
+        self.assertEqual(view["platform"], EXPECTED_DERIVED["/platform"])
         self.assertEqual(view["bindings"], [])
+
+    def test_fill_with_nothing_derived_creates_no_top_level_member(self):
+        source = schema_three_contract()
+        self.assertEqual(sorted(schema_three.fill(source, {})), sorted(source))
 
 
 class SchemaThreeRefusalTest(SchemaThreeCase):
@@ -382,12 +447,16 @@ class SchemaThreeRefusalTest(SchemaThreeCase):
     @staticmethod
     def section(pointer: str) -> str:
         keys = pointer.split("/")[1:]
-        return "project" if keys[0] == "project" else keys[1]
+        return keys[0] if keys[0] in ("project", "platform") else keys[1]
 
     def refused_rows(self) -> list[tuple[str, str, object, str]]:
         """(label, pointer set, value, pointer refused) for each authored constant or retired member."""
         rows = [(f"constant {pointer}", pointer, value, pointer)
                 for pointer, value in EXPECTED_CONSTANTS.items()]
+        for pointer, value in EXPECTED_DERIVED.items():
+            rows.append((f"derived {pointer}", pointer, value, pointer))
+        rows.append(("empty /project", "/project", {}, "/project"))
+        rows.append(("project not an object", "/project", "nix-config", "/project"))
         for container in schema_three.CONSTANT_CONTAINERS:
             rows.append((f"empty {container}", container, {}, container))
         rows.append(("paths not an object", "/bindings/paths", None, "/bindings/paths"))
@@ -421,11 +490,14 @@ class SchemaThreeRefusalTest(SchemaThreeCase):
                 code, payload, _ = self.resolve(self.schema_three_root(contract))
                 error = self.assert_refusal(code, payload, "invalid_contract")
                 self.assertEqual([v["pointer"] for v in error["violations"]], [refused])
-                retired = refused in schema_three.RETIRED
+                if refused in schema_three.RETIRED:
+                    kind = "retired_member"
+                elif refused in schema_three.DERIVED + schema_three.DERIVED_CONTAINERS:
+                    kind = "derived_value"
+                else:
+                    kind = "platform_constant"
                 self.assertEqual(
-                    error["repair_id"],
-                    f"contract.{self.section(refused)}."
-                    f"{'retired_member' if retired else 'platform_constant'}")
+                    error["repair_id"], f"contract.{self.section(refused)}.{kind}")
                 for violation in error["violations"]:
                     self.assertTrue(violation["message"])
 
@@ -443,7 +515,7 @@ class SchemaThreeRefusalTest(SchemaThreeCase):
 
     def test_a_retired_member_beside_a_malformed_bindings_is_refused_once(self):
         contract = schema_three_contract()
-        contract["project"]["name"] = "nix-config"
+        contract["project"] = {"name": "nix-config"}
         contract["bindings"] = []
         code, payload, _ = self.resolve(self.schema_three_root(contract))
         error = self.assert_refusal(code, payload, "invalid_contract")
@@ -502,6 +574,150 @@ class SchemaThreeRefusalTest(SchemaThreeCase):
         self.assertEqual(snap["bindings"]["commands"]["codex-plan-review"]["argv"], ["true"])
 
 
+class DerivedValuesTest(SchemaThreeCase):
+    """The tracker repo, project id, required checks and platform range come from the repository."""
+
+    def refused(self, root: Path) -> dict:
+        code, payload, _ = self.resolve(root)
+        return self.assert_refusal(code, payload, "invalid_contract")
+
+    def test_a_schema_three_snapshot_takes_its_tracker_repo_and_project_id_from_the_remote(self):
+        # The release profile names the repository it publishes to, and it must
+        # be the tracker's: move it with the remote.
+        contract = schema_three_contract()
+        profile = contract["release"]["profiles"]["github-release"]
+        profile["bindings"]["targets"]["repository"]["repository"] = "fagenorn/scratch-derived"
+        profile["target"]["concurrency_keys"] = ["release/fagenorn/scratch-derived"]
+        root = self.schema_three_root(
+            contract, remote="https://github.com/fagenorn/scratch-derived.git")
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["project"]["id"], "fagenorn/scratch-derived")
+        self.assertEqual(snap["bindings"]["tracker"]["repo_slug"], "fagenorn/scratch-derived")
+
+    def test_a_missing_remote_refuses_by_name(self):
+        error = self.refused(self.schema_three_root(schema_three_contract(), remote=None))
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/bindings/tracker/repo_slug", "/project/id"])
+        self.assertEqual(error["repair_id"], "contract.tracker.not_derivable")
+        for violation in error["violations"]:
+            self.assertIn("git remote origin", violation["message"])
+
+    def test_required_checks_equal_the_protection_sources_contexts(self):
+        code, snap, err = self.resolve(self.schema_three_root(schema_three_contract()))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["bindings"]["vcs"]["merge"]["required_checks"],
+                         ["Nix Eval", "Agent Workflow Tests"])
+
+    def test_a_protection_source_that_lists_none_gives_none(self):
+        for label, protection in (
+                ("null", {"required_status_checks": None}),
+                ("empty", {"required_status_checks": {"strict": True, "checks": []}})):
+            with self.subTest(label):
+                root = self.schema_three_root(schema_three_contract(), protection=protection)
+                code, snap, err = self.resolve(root)
+                self.assertEqual(code, 0, err)
+                self.assertNotIn("required_checks", snap["bindings"]["vcs"]["merge"])
+
+    def test_an_unreadable_protection_source_refuses_by_name(self):
+        for label, protection in (
+                ("absent", None),
+                ("no checks", {"required_status_checks": {"contexts": ["Nix Eval"]}})):
+            with self.subTest(label):
+                error = self.refused(self.schema_three_root(
+                    schema_three_contract(), protection=protection))
+                self.assertEqual([v["pointer"] for v in error["violations"]],
+                                 ["/bindings/vcs/merge/required_checks"])
+                self.assertEqual(error["repair_id"], "contract.vcs.not_derivable")
+                self.assertIn(".github/branch-protection.json", error["violations"][0]["message"])
+
+    def test_the_platforms_own_tree_takes_its_range_from_its_own_manifest_with_no_lock(self):
+        root = self.schema_three_root(schema_three_contract())
+        code, _, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        for version, reason in (("2.2.0", "platform_too_old"), ("1.9.0", "platform_too_new")):
+            with self.subTest(version):
+                (root / TREE_MANIFEST).write_text(
+                    json.dumps(mutated_manifest(platform_version=version)), encoding="utf-8")
+                code, payload, _ = self.resolve(root)
+                error = self.assert_refusal(code, payload, "unsupported_schema")
+                self.assertEqual(error["reason_code"], reason)
+                self.assertEqual([v["pointer"] for v in error["violations"]], ["/platform"])
+
+    def test_an_unparseable_lock_beside_the_trees_own_manifest_still_resolves(self):
+        root = self.schema_three_root(schema_three_contract())
+        (root / "devenv.lock").write_text("not json", encoding="utf-8")
+        code, _, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+
+    def test_the_resolver_cites_the_input_rule_record(self):
+        source = Path(resolve_project.__file__).read_text(encoding="utf-8")
+        self.assertIn("ADR-project-contract-014", source)
+        record = (REPO_ROOT / "docs/areas/project-contract/adr/"
+                  "014-schema-3-derives-four-values-from-files-the-repository-holds.md")
+        self.assertTrue(record.read_text(encoding="utf-8").startswith(
+            "# ADR-project-contract-014 \u2014 "))
+
+    def test_an_underivable_id_hides_no_other_missing_member(self):
+        contract = schema_three_contract()
+        del contract["bindings"]
+        error = self.refused(self.schema_three_root(contract, remote=None))
+        by_pointer = {v["pointer"]: v["message"] for v in error["violations"]}
+        self.assertEqual(by_pointer.get("/bindings"), "required member is absent")
+        self.assertIn("/bindings/tracker/repo_slug", by_pointer)
+        self.assertIn("/project/id", by_pointer)
+        self.assertNotIn("/project", by_pointer)
+
+
+    def test_an_underivable_value_hides_the_shape_errors_beneath_it(self):
+        contract = schema_three_contract()
+        contract["platform"] = {"min_inclusive": "2"}
+        error = self.refused(self.schema_three_root(contract, tree_manifest=False))
+        self.assertEqual([v["pointer"] for v in error["violations"]], ["/platform", "/platform"])
+        messages = [v["message"] for v in error["violations"]]
+        self.assertEqual(sum("is derived from the repository" in m for m in messages), 1)
+        self.assertEqual(sum("cannot be derived" in m for m in messages), 1)
+
+
+class LockedPlatformTest(InProcessTestCase):
+    """A repository that is not the platform's own takes its range from the locked revision."""
+
+    def locked(self, version: str) -> tuple[Path, Path]:
+        store = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, store, ignore_errors=True)
+        root = make_schema_three_root(schema_three_contract(), tree_manifest=False)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        stage_locked_platform(root, store, version)
+        patch = mock.patch.object(derived_values, "STORE_DIR", str(store))
+        patch.start()
+        self.addCleanup(patch.stop)
+        return root, store
+
+    def test_a_locked_revision_gives_the_range_up_to_the_next_major(self):
+        root, _ = self.locked("2.0.0")
+        snapshot = resolve_project.resolve(str(root))
+        self.assertEqual(snapshot["project"]["id"], "fagenorn/nix-config")
+        for version, reason in (("2.3.0", "platform_too_old"), ("1.0.0", "platform_too_new")):
+            with self.subTest(version):
+                other, store = self.locked(version)
+                with self.assertRaises(resolve_project.ContractError) as raised:
+                    resolve_project.resolve(str(other))
+                self.assertEqual(raised.exception.code, "unsupported_schema")
+                self.assertEqual(raised.exception.reason_code, reason)
+
+    def test_a_locked_revision_not_in_the_store_refuses_by_name(self):
+        root, store = self.locked("2.0.0")
+        shutil.rmtree(store)
+        store.mkdir()
+        with self.assertRaises(resolve_project.ContractError) as raised:
+            resolve_project.resolve(str(root))
+        error = raised.exception
+        self.assertEqual(error.code, "invalid_contract")
+        self.assertEqual(error.repair_id, "contract.platform.not_derivable")
+        self.assertEqual([v["pointer"] for v in error.violations], ["/platform"])
+        self.assertIn("Nix store", error.violations[0]["message"])
+
+
 class SnapshotRetirementTest(SchemaThreeCase):
     def test_a_schema_three_snapshot_is_resolved_schema_two_without_retired_members(self):
         root = self.schema_three_root(schema_three_contract())
@@ -545,8 +761,6 @@ class SnapshotRetirementTest(SchemaThreeCase):
         cases = [
             ("integration_branch", delete(["bindings", "vcs", "integration_branch"]),
              ["/bindings/vcs/integration_branch"], "contract.vcs.member_missing"),
-            ("repo_slug", delete(["bindings", "tracker", "repo_slug"]),
-             ["/bindings/tracker/repo_slug"], "contract.tracker.member_missing"),
             ("empty argv", assign(["bindings", "commands", "lint", "argv"], []),
              ["/bindings/commands/lint/argv"], "contract.commands.empty_argv"),
             ("vcs extra", assign(["bindings", "vcs", "extra"], "x"),
