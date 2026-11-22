@@ -25,7 +25,7 @@ A test or lint that fails when a standard is broken (issue 1412).
 _Avoid_: check (a check is the Verification area's)
 
 **Engine**:
-The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run. A run is recorded as a directory under `~/.agents/state/engine/runs/` whose append-only `events.jsonl` is the single source of truth, and `engine status <issue>` prints the state one fold derives from it (issue 1511).
+The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run. A run is recorded as a directory under `~/.agents/state/engine/runs/` whose append-only `events.jsonl` is the single source of truth, and `engine status <issue>` prints the state one fold derives from it (issue 1511), and `engine deliver <issue>` runs a procedure of command steps to `done` or a stop and prints one result line (issue 1512).
 
 **Grader**:
 A pure function in the engine that turns stored results into an outcome for a `decide` step.
