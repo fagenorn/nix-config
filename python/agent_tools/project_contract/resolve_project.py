@@ -378,7 +378,7 @@ ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MCP_TOOL_NAME_PATTERN = re.compile(r"^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
 
 # The two rendered forms (D11), single-homed in `agent_platform` so adoption
-# reads them without importing this module (ADR-project-contract-019 D10).
+# reads them without importing this module (ADR-project-contract-021 D10).
 GENERATED_HEADER_TEMPLATE = agent_platform.GENERATED_HEADER_TEMPLATE
 MANAGED_IMPORT_TEMPLATE = agent_platform.MANAGED_IMPORT_TEMPLATE
 render_conformance_workflow = conformance_workflow.render

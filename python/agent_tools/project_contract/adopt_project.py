@@ -239,7 +239,7 @@ and only with `--register`) refuses `not_integrated` before any write when no
 evidence record on the pinned commit carries that plan id, so the adoption of
 one plan is never mistaken for an earlier adoption of the same project.
 
-`plan` converts hand-written root entry files (`adopt_entries`, ADR-019): with
+`plan` converts hand-written root entry files (`adopt_entries`, ADR-021): with
 a contract or draft, their authored text joins `.agents/instructions/bootstrap.md`
 (evidence `convert-to-source`), `CLAUDE.md` becomes the managed line, `AGENTS.md`
 is regenerated and both entry projections are declared. A relative link or

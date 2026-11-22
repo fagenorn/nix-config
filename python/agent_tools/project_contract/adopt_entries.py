@@ -1,5 +1,5 @@
 """Adoption's entry-file conversion: hand-written root entry files become the
-bootstrap source (ADR-project-contract-019).
+bootstrap source (ADR-project-contract-021).
 
 A repository's own `AGENTS.md` and `CLAUDE.md` are the projections the platform
 generates from `.agents/instructions/bootstrap.md`. When a checkout has a

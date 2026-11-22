@@ -209,7 +209,7 @@ LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)
 NATIVE_AGENT_PATHS = (".claude", ".codex", "AGENTS.md", "CLAUDE.md",
                       ".mcp.json")
 
-# The bootstrap source and the two mandatory entry projections (ADR-019): a
+# The bootstrap source and the two mandatory entry projections (ADR-021): a
 # hand-written root entry file converts into the source, and these rows then
 # render the files back out of it.
 BOOTSTRAP_SOURCE = ".agents/instructions/bootstrap.md"

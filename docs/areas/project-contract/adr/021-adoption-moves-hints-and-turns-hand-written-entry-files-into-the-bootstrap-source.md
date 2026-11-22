@@ -1,4 +1,4 @@
-# ADR-project-contract-019 — Adoption moves hints and turns hand-written entry files into the bootstrap source
+# ADR-project-contract-021 — Adoption moves hints and turns hand-written entry files into the bootstrap source
 
 - **Status:** accepted
 - **Decided in:** #1468 (per #1413)
