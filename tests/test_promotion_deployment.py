@@ -64,6 +64,16 @@ class DeploymentTest(LifecycleFixture, unittest.TestCase):
         self.assertEqual([after["state"], after["deployment"]["deferred_repositories"]],
                          ["promoted", ["fagenorn/argus"]])
 
+    def test_a_rule_id_does_not_satisfy_an_anchor_of_another_heading_level(self):
+        destination = dict(draft()["destination"], anchor="## Retry policy")
+        path = self.capture(draft(destination=destination,
+                                  local_duplicates=[duplicate("fagenorn/argus", "AGENTS.md"),
+                                                    duplicate("fagenorn/argus", "CLAUDE.md")]))
+        self.walk(path, "authorized", "approved")
+        (self.root / DESTINATION).parent.mkdir(parents=True)
+        (self.root / DESTINATION).write_text("# The bar\n## RFC1. Retry policy\n", encoding="utf-8")
+        self.assert_refused(path, "promoted", "destination_missing")
+
     def test_an_unchanged_leftover_is_duplicate_present(self):
         self.put("docs/lesson.md")
         path = self.authorized([duplicate(HERE, "docs/lesson.md",

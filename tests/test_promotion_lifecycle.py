@@ -59,6 +59,18 @@ class ClassificationTest(LifecycleFixture, unittest.TestCase):
                                                      encoding="utf-8")
                 self.assertEqual(self.classification(name=f"{i}.json")["rule"], 4)
 
+    def test_a_rule_id_is_ignored_only_at_level_three_in_a_standards_destination(self):
+        for index, (anchor, line, layer, rule) in enumerate((
+                ("## Retry policy", "## RFC1. Retry policy", "standard_layer", 4),
+                ("#### Retry policy", "#### RFC1. Retry policy", "standard_layer", 4),
+                (HEADING, "### B17. Investigate before changing", "project_local", 2))):
+            with self.subTest(line=line, layer=layer):
+                (self.root / DESTINATION).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / DESTINATION).write_text(f"# The bar\n{line}\n", encoding="utf-8")
+                destination = dict(draft()["destination"], layer=layer, anchor=anchor)
+                got = self.classification(draft(destination=destination), name=f"{index}.json")
+                self.assertEqual([got["rule"], got["overridden_by_rule_1"]], [rule, False])
+
     def test_prefix_headings_and_symlinked_components_never_match_rule_one(self):
         real = self.root / "real"
         real.mkdir()

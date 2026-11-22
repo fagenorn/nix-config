@@ -101,6 +101,8 @@ class AgnosticTest(unittest.TestCase):
             f"{self.ISSUE}/12%20x",
             f"{self.ISSUE}/12.5",
             f"{self.ISSUE}/12,notes",
+            f"{self.ISSUE}/1417(extra)",
+            f"([x]({self.ISSUE}/1417(extra)))",
         ]
         for line in refused:
             with self.subTest(line=line):

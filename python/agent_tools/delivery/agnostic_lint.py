@@ -39,10 +39,15 @@ AGNOSTIC_ALLOW = {
 
 
 def without_tracker_links(line: str) -> str:
-    """The line with each URL that is exactly a tracker issue link (bar trailing punctuation) blanked out."""
+    """The line with each URL that is exactly a tracker issue link (bar trailing punctuation) blanked out.
+
+    A span followed by `(` is part of a longer destination and stays.
+    """
     def blank(match):
         span = match.group(0)
         url = span.rstrip(".,;:!?")
+        if match.string[match.end():match.end() + 1] == "(":  # the destination goes on past the span
+            return span
         return " " + span[len(url):] if TRACKER_ISSUE_LINK.fullmatch(url) else span
     return URL_SPAN.sub(blank, line)
 

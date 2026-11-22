@@ -12,7 +12,9 @@ from pathlib import Path
 
 from agent_tools.delivery.context_map_lint import (
     CODE_RE, MAP_BUDGET, TERM_DEF_RE, section, table_rows)
+from agent_tools.delivery.look_marker import body_lines
 from agent_tools.delivery.rule_ids import RULE_ID_HEADING
+from agent_tools.project_contract.adopt_links import links
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GLOBAL = REPO_ROOT / "home/common/agent-skills/standards"
@@ -21,19 +23,13 @@ README = GLOBAL / "README.md"
 PROJECT = REPO_ROOT / "docs/standards"
 
 SECOND_ID = re.compile(r"(?<![A-Za-z0-9])[A-Z]+[0-9]+\.(?=\s|$)")
-HEADING_LINE = re.compile(r"^#{1,6}(\s|$)")
+HEADING_LINE = re.compile(r"^ {0,3}#{1,6}(\s|$)")
 NUMBERED_ITEM = re.compile(r"^[0-9]+\. ")
 
 
 def unfenced(text: str):
-    """`(line number, line)` of every line outside a ``` fence, fence lines excluded."""
-    fenced = False
-    for number, line in enumerate(text.splitlines(), 1):
-        if line.strip().startswith("```"):
-            fenced = not fenced
-            continue
-        if not fenced:
-            yield number, line
+    """`(line number, line)` of every line outside a ``` or ~~~ fence, fence lines excluded."""
+    return body_lines(text.removesuffix("\n"))
 
 
 def rule_match(line: str):
@@ -79,7 +75,7 @@ def sections(text: str) -> dict[str, str]:
 
 
 def link_destinations(body: str) -> list[str]:
-    return re.findall(r"\]\(([^)\s]+)\)", body)
+    return [link.target for link in links(body)]
 
 
 def numbered_items(text: str) -> list[int]:
@@ -182,6 +178,20 @@ class RuleHeadingTest(unittest.TestCase):
         text = "# T\n```sh\n# comment\n1. step\n```\n### B1. x\n"
         self.assertEqual(rule_headings(text)[1], [])
         self.assertEqual(numbered_items(text), [])
+
+    def test_an_indented_heading_is_read_and_a_code_block_line_is_not(self):
+        self.assertEqual(len(rule_headings("# T\n ### Missing ID\n")[1]), 1)
+        self.assertEqual(len(rule_headings("# T\n   ### Missing ID\n")[1]), 1)
+        self.assertEqual(rule_headings("# T\n    ### Missing ID\n"), ([], []))
+
+    def test_a_tilde_fence_hides_its_lines(self):
+        text = "# T\n~~~md\n### P1. x\nbody\n~~~\n### P2. y\nbody\n"
+        self.assertEqual(set(sections(text)), {"P2"})
+        self.assertEqual(rule_headings(text)[0], [("P", 2, 6)])
+        self.assertEqual(numbered_items("# T\n~~~\n1. step\n~~~\n"), [])
+
+    def test_a_link_in_a_code_span_is_no_destination(self):
+        self.assertEqual(link_destinations("a `[d](https://x/y)` b"), [])
 
     def test_numbered_items_are_found(self):
         self.assertEqual(numbered_items("# T\n\n1. **A.** a\n\n2. **B.** b\n"), [3, 5])
