@@ -27,9 +27,21 @@ settings or its permissions. The prompt is never in the argv: the tool options
 are variadic and would swallow a positional prompt, so `launch` writes it on
 stdin.
 
+The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
+permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
+shell command is denied, so a session cannot write to the worktree through it.
+
+`reply_problem` checks a structured reply against the reply schema's keywords
+`type`, `enum`, `const`, `required`, `properties`, `additionalProperties` and
+`items` (the engine carries no schema library) so an incomplete reply is a
+fault, never a transition.
+
 `launch` starts the argv as its own process group (`start_new_session`) because
 the account launcher waits on its Claude child instead of replacing itself, so
-a session is a process tree and ending it means killing the group. Its stderr is
+a session is a process tree and ending it means killing the group, which a
+SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
+other exception both do. A launcher that cannot start gives exit 127 and the
+`OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line.
 
@@ -62,6 +74,9 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
 NOT_STARTED = 127
+READ_ONLY_BASH: tuple[str, ...] = tuple(
+    f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
+                                      "blame", "merge-base"))
 DIAGNOSTIC_CHARS = 300
 _USAGE_KEYS = {"input": "input_tokens", "cache_write": "cache_creation_input_tokens",
                "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
@@ -206,10 +221,56 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) 
             "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
             "--model", role.model, "--effort", role.effort]
     if role.tools is not None:
-        argv += ["--tools", ",".join(role.tools), "--allowedTools", ",".join(role.tools)]
+        allowed = [entry for name in role.tools
+                   for entry in (READ_ONLY_BASH if name == "Bash" else (name,))]
+        argv += ["--tools", ",".join(role.tools), "--allowedTools", ",".join(allowed)]
     if role.disallowed is not None:
         argv += ["--disallowedTools", ",".join(role.disallowed)]
     return (*argv, "--append-system-prompt-file", str(system_prompt))
+
+
+_TYPES: dict[str, Callable[[object], bool]] = {
+    "object": lambda v: isinstance(v, dict),
+    "array": lambda v: isinstance(v, list),
+    "string": lambda v: isinstance(v, str),
+    "boolean": lambda v: isinstance(v, bool),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "null": lambda v: v is None,
+}
+
+
+def reply_problem(schema: Mapping, value: object, where: str = "reply") -> str | None:
+    """The first way `value` breaks `schema`, or None when it conforms."""
+    kind = schema.get("type")
+    if kind is not None:
+        kinds = kind if isinstance(kind, list) else [kind]
+        if not any(name in _TYPES and _TYPES[name](value) for name in kinds):
+            return f"{where} is not of type {kind}"
+    if "enum" in schema and not any(value == item and type(value) is type(item)
+                                    for item in schema["enum"]):
+        return f"{where} is {value!r}, not one of {schema['enum']}"
+    if "const" in schema and not (value == schema["const"]
+                                  and type(value) is type(schema["const"])):
+        return f"{where} is not {schema['const']!r}"
+    if isinstance(value, dict):
+        for name in schema.get("required", ()):
+            if name not in value:
+                return f"{where} lacks the required {name!r}"
+        properties = schema.get("properties", {})
+        for name, member in value.items():
+            if name in properties:
+                problem = reply_problem(properties[name], member, f"{where}.{name}")
+                if problem:
+                    return problem
+            elif schema.get("additionalProperties") is False:
+                return f"{where} has the member {name!r} the schema does not allow"
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, member in enumerate(value):
+            problem = reply_problem(schema["items"], member, f"{where}[{index}]")
+            if problem:
+                return problem
+    return None
 
 
 @dataclass(frozen=True)
@@ -227,24 +288,38 @@ def diagnostic(stderr: bytes) -> str:
     return " ".join(lines[-1].split())[:DIAGNOSTIC_CHARS] if lines else ""
 
 
+def _terminate(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
            on_start: Callable[[int], None]) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
     started = time.monotonic()
     try:
-        process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=True)
-    except OSError:
-        return Launched(NOT_STARTED, b"", b"", time.monotonic() - started)
+        previous = signal.signal(signal.SIGTERM, _terminate)
+    except ValueError:  # not the main thread: no handler can be installed
+        previous = None
+    process = None
     try:
+        try:
+            process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       start_new_session=True)
+        except OSError as error:
+            return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
+                            time.monotonic() - started)
         on_start(process.pid)
         stdout, stderr = process.communicate(prompt.encode("utf-8"))
     except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.communicate()
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
         raise
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
     return Launched(process.returncode, stdout, stderr, time.monotonic() - started)

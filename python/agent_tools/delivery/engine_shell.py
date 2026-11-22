@@ -395,6 +395,9 @@ def _visit_session(run_dir: Path, root: str, step: dict,
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=reply, at=_now(),
                                wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
                                spend_usd=reading.spend_usd)
+    problem = engine_session.reply_problem(schema, reply)
+    if problem is not None:
+        raise Fault(f"step {name} gave a reply that breaks its schema: {problem}")
     outcome = reply.get(step["outcome_from"])
     if (not isinstance(outcome, str) or outcome == engine_core.EXHAUSTED
             or outcome not in step["on"]):

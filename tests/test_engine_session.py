@@ -14,6 +14,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -207,7 +208,20 @@ LAUNCHER_STANDIN = (
     "sys.argv[1]]).wait()")
 
 
+GIT_READ_ONLY = ("Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),"
+                 "Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git blame:*),"
+                 "Bash(git merge-base:*)")
+
+
 class LaunchArgvTest(unittest.TestCase):
+    def test_bash_is_never_preapproved_as_a_whole(self):
+        role = Role("reviewer", "opus", "high", ("Read", "Bash", "Skill"), None, "")
+        argv = launch_argv(role, SCHEMA, SESSION, SYSTEM)
+        self.assertEqual(after(list(argv), "--tools"), "Read,Bash,Skill")
+        allowed = after(list(argv), "--allowedTools").split(",")
+        self.assertNotIn("Bash", allowed)
+        self.assertEqual(allowed, ["Read", *GIT_READ_ONLY.split(","), "Skill"])
+
     def test_the_argv_is_the_launcher_print_form_with_the_role_by_flags(self):
         self.assertEqual(launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM), (
             "claude-account", "run", "-p", "--output-format", "json", "--json-schema",
@@ -215,7 +229,7 @@ class LaunchArgvTest(unittest.TestCase):
             '"required":["verdict"],"type":"object"}',
             "--session-id", "0b0b8a8e-6f0e-4d47-9d6a-3f1f2b9c1a11", "--strict-mcp-config",
             "--permission-mode", "dontAsk", "--model", "opus", "--effort", "high",
-            "--tools", "Read,Bash", "--allowedTools", "Read,Bash",
+            "--tools", "Read,Bash", "--allowedTools", f"Read,{GIT_READ_ONLY}",
             "--append-system-prompt-file", "/run/sessions/review.1.system.md"))
 
     def test_a_role_with_disallowed_tools_passes_only_disallowed_tools(self):
@@ -274,13 +288,62 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(diagnostic(b"a   b\n"), "a b")
         self.assertEqual(len(diagnostic(b"x" * 1000)), 300)
 
-    def test_a_launcher_that_cannot_start_reports_127_and_never_calls_on_start(self):
-        started: list[int] = []
-        launched = launch(["/nonexistent/claude-account"], tempfile.gettempdir(), "p",
-                          on_start=started.append)
-        self.assertEqual((launched.exit_code, launched.stdout, launched.stderr),
-                         (NOT_STARTED, b"", b""))
-        self.assertEqual(started, [])
+    def test_a_launcher_that_cannot_start_reports_127_with_the_oserror_and_never_calls_on_start(self):
+        for name, argv, cwd, word in (
+                ("missing launcher", ["/nonexistent/claude-account"], tempfile.gettempdir(),
+                 "/nonexistent/claude-account"),
+                ("invalid cwd", [sys.executable, "-c", "pass"], "/nonexistent/directory",
+                 "/nonexistent/directory")):
+            with self.subTest(name):
+                started: list[int] = []
+                launched = launch(argv, cwd, "p", on_start=started.append)
+                self.assertEqual((launched.exit_code, launched.stdout), (NOT_STARTED, b""))
+                self.assertIn("No such file or directory", diagnostic(launched.stderr))
+                self.assertIn(word, diagnostic(launched.stderr))
+                self.assertEqual(started, [])
+
+    def test_a_sigterm_to_the_engine_ends_the_launchers_whole_group_and_restores_the_handler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pidfile = Path(directory) / "child.pid"
+            seen: dict[str, int] = {}
+            before = signal.getsignal(signal.SIGTERM)
+
+            def on_start(pid: int) -> None:
+                seen["launcher"] = pid
+
+                def terminate() -> None:
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        if pidfile.exists() and pidfile.read_text():
+                            seen["child"] = int(pidfile.read_text())
+                            break
+                        time.sleep(0.05)
+                    os.kill(os.getpid(), signal.SIGTERM)
+
+                threading.Thread(target=terminate, daemon=True).start()
+
+            try:
+                with self.assertRaises(SystemExit) as raised:
+                    launch([sys.executable, "-c", LAUNCHER_STANDIN, str(pidfile)], directory,
+                           "p", on_start=on_start)
+                self.assertEqual(raised.exception.code, 143)
+                self.assertIn("child", seen)
+                self.assertIs(signal.getsignal(signal.SIGTERM), before)
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        os.kill(seen["child"], 0)
+                    except ProcessLookupError:
+                        break
+                    if time.monotonic() > deadline:
+                        self.fail("the launcher's child outlived the SIGTERM")
+                    time.sleep(0.05)
+            finally:
+                if "child" in seen:
+                    try:
+                        os.kill(seen["child"], signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def test_a_failing_on_start_ends_the_launchers_whole_group(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -462,7 +525,8 @@ class DeliverSessionTest(unittest.TestCase):
                                  names(frontmatter(text, "disallowedTools")))
             else:
                 self.assertEqual(after(argv, "--tools"), names(tools))
-                self.assertEqual(after(argv, "--allowedTools"), names(tools))
+                self.assertEqual(after(argv, "--allowedTools"),
+                                 names(tools).replace("Bash", GIT_READ_ONLY))
                 self.assertNotIn("--disallowedTools", argv)
             self.assertEqual(Path(after(argv, "--append-system-prompt-file")).read_text(
                 encoding="utf-8"), text.partition("\n---\n")[2])
@@ -510,7 +574,7 @@ class DeliverSessionTest(unittest.TestCase):
         self.assertEqual(session, asked)
         self.assertNotIn("process_started", events)
 
-    def test_the_outcome_is_the_member_outcome_from_names_and_prose_or_exit_change_nothing(self):
+    def test_the_outcome_is_the_structured_reply_and_prose_naming_another_changes_nothing(self):
         with self.subTest("outcome_from status"):
             project = EngineProject(self)
             project.env.pop("CLAUDE_ACCOUNT", None)
@@ -643,6 +707,27 @@ class DeliverSessionTest(unittest.TestCase):
                 kinds = [e["event"] for e in events]
                 self.assertNotIn("outcome_graded", kinds)
                 self.assertNotIn("transition_taken", kinds)
+
+    def test_a_reply_that_breaks_its_schema_is_a_fault_before_any_grade(self):
+        cases = {"missing members": {"status": "drafted"},
+                 "wrong member type": {"status": "drafted", "summary": 3, "items": []},
+                 "wrong item type": {"status": "drafted", "summary": "s", "items": [1]}}
+        for name, reply in cases.items():
+            with self.subTest(name):
+                project = EngineProject(self)
+                project.env.pop("CLAUDE_ACCOUNT", None)
+                copy_roles(project, "implementer")
+                install_stub(project, canned_result(structured_output=reply))
+                done = project.deliver(one_step(project), issue=1514)
+                self.assertEqual(done.returncode, 1)
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                self.assertIn("draft", done.stderr)
+                self.assertIn("schema", done.stderr)
+                kinds = [e["event"] for e in project.events(project.runs()[0])]
+                self.assertNotIn("outcome_graded", kinds)
+                self.assertNotIn("transition_taken", kinds)
+                self.assertNotIn("run_done", kinds)
 
     def test_a_role_file_that_does_not_read_refuses_the_run_before_any_session(self):
         for name in ("no file", "a model that is an option"):
