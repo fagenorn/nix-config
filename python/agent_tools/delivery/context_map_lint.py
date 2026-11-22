@@ -250,6 +250,11 @@ def check(root: Path, map_path: Path) -> list[str]:
     for name, (area_file, _globs) in areas.items():
         if area_file is None:
             continue
+        if root.resolve() not in area_file.parents:
+            # Contained before it is opened: an area file the map points outside
+            # the checkout is a finding, never read.
+            errors.append(f"{rel_map}: area '{name}' points at {rel(area_file)}, outside the repository")
+            continue
         if not area_file.is_file():
             errors.append(f"{rel_map}: area '{name}' points at missing file {rel(area_file)}")
             continue

@@ -1847,6 +1847,22 @@ def validate_projections(root: Path, contract: dict) -> None:
     )
 
 
+def target_directory_is_contained(root: Path, target: Path) -> bool:
+    """Whether the directory a write would replace `target` in lies inside `root`.
+
+    `os.replace` swaps the target's own entry, so a symlinked target is
+    harmless, but a symlinked parent directory sends the replacement into
+    whatever it points at. Resolved without requiring existence, because a
+    missing directory is created by the write.
+    """
+    try:
+        anchor = root.resolve()
+        parent = target.parent.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return parent == anchor or anchor in parent.parents
+
+
 def apply_projection(root: Path, entry: dict, contract: dict,
                     violations: list[dict]) -> str | None:
     """Bring one target into sync and name the action taken.
@@ -1857,6 +1873,14 @@ def apply_projection(root: Path, entry: dict, contract: dict,
     """
     rendered = rendered_target(root, entry, contract)
     target = root / entry["target"]
+    if not target_directory_is_contained(root, target):
+        violations.append({
+            "pointer": f"/projections/{entry['id']}",
+            "message": ("the projection target's directory resolves outside "
+                        "the repository; replace the symlink with a real "
+                        "directory and rerun"),
+        })
+        return None
     status = projection_status(root, entry, contract)
     if status == "in_sync":
         return "unchanged"

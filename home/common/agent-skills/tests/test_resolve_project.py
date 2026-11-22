@@ -2121,6 +2121,22 @@ class ConformanceWorkflowProjectionTest(ResolverTestCase):
         self.assertEqual(self.run_in("write-projections", root)[0], 0)
         self.assertEqual(target.read_bytes(), EXPECTED_WORKFLOW.encode())
 
+    def test_a_symlinked_workflow_directory_is_refused_and_nothing_is_written_through_it(self):
+        root = self.workflow_root()
+        with tempfile.TemporaryDirectory() as outside_name:
+            outside = Path(outside_name)
+            (root / ".github").mkdir()
+            (root / ".github" / "workflows").symlink_to(outside)
+            before = sorted(outside.iterdir())
+            code, payload, err = self.run_in("write-projections", root)
+            self.assertEqual(code, 2, err)
+            error = payload["error"]
+            self.assertEqual(error["code"], "invalid_projection")
+            self.assertEqual([v["pointer"] for v in error["violations"]],
+                             ["/projections/conformance.workflow"])
+            self.assertEqual(sorted(outside.iterdir()), before)
+            self.assertEqual(list(outside.iterdir()), [])
+
     def test_a_workflow_entry_carries_only_id_kind_and_target(self):
         base = source_contract()
         for member, value in (("agent", "codex"),

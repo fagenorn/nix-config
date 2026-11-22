@@ -1974,6 +1974,25 @@ class TypedOperationTest(AdoptTestCase):
             sorted(op["targets"][0] for op in regenerations),
             ["AGENTS.md", "CLAUDE.md"])
 
+    def test_a_declared_conformance_workflow_is_regenerated_from_the_contract(self):
+        root = nix_config_shape_repo(self.home)
+        contract = json.loads(
+            (root / ".agents" / "project.json").read_text("utf-8"))
+        contract["projections"].append({
+            "id": "conformance.workflow", "kind": "conformance_workflow",
+            "target": ".github/workflows/conformance.yaml"})
+        write(root, ".agents/project.json", json.dumps(contract, indent=2) + "\n")
+        commit(root, "declare the conformance workflow")
+        doc = self.ready_plan(root)
+        workflow = [op for op in self.ops(doc, "regenerate-projection")
+                    if op["targets"] == [".github/workflows/conformance.yaml"]]
+        self.assertEqual(len(workflow), 1)
+        self.assertEqual(workflow[0]["sources"], [".agents/project.json"])
+        self.assertIsNone(workflow[0]["before"])
+        self.assertEqual(
+            [op["op"] for op in doc["changes"]][-3:],
+            ["regenerate-projection"] * 3)
+
     def test_no_operation_targets_a_file_outside_the_planned_set(self):
         root = nix_config_shape_repo(self.home)
         write(root, "home/common/agent-skills/skills/writing-plans/SKILL.md",

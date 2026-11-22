@@ -17,6 +17,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path, PurePosixPath
 import subprocess
 
@@ -630,15 +631,24 @@ def check_conformance_workflow_fresh(context: "Context") -> "Outcome":
 
     Interim: it judges the file whether or not the contract declares a
     `conformance_workflow` projection, until the contract declares one and the
-    projection check owns it. Only an absent file is tolerated; any other read
+    projection check owns it. Only an absent entry is tolerated; an entry that
+    is not a regular file (a symlink included) is stale, and any other read
     error reaches the engine boundary.
     """
     resolver = context.resolver
     target = resolver.CONFORMANCE_WORKFLOW_TARGET
+    path = context.root / target
     try:
-        committed = (context.root / target).read_bytes()
+        entry_mode = path.lstat().st_mode
     except FileNotFoundError:
         return Outcome("passed")
+    # Judged on the entry itself: a symlink, dangling or not, is not the
+    # rendered file even when what it points at matches the bytes.
+    if not stat.S_ISREG(entry_mode):
+        return Outcome("failed", "conformance_workflow_stale",
+                       "conformance.workflow.regenerate",
+                       {"target": bound_fact(target), "state": "stale"})
+    committed = path.read_bytes()
     try:
         expected = resolver.render_conformance_workflow(
             context.contract["bindings"]["vcs"]["integration_branch"],

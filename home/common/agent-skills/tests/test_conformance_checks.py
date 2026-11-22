@@ -13,6 +13,7 @@ import json
 import os
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agent_tools.delivery import context_map_lint, standards_lint
@@ -331,6 +332,27 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
                 self.assertEqual([check["status"], check["facts"]], ["passed", {}])
                 self.assertEqual(report["outcome"]["status"], "passed")
 
+    def test_a_workflow_entry_that_is_not_a_regular_file_is_stale(self):
+        rendered = resolve_project.render_conformance_workflow("main", 2)
+        for label in ("dangling symlink", "symlink to the rendered bytes"):
+            with self.subTest(entry=label), fixture() as tmp:
+                root = make_root(tmp)
+                target = root / self.TARGET
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if label == "dangling symlink":
+                    target.symlink_to(tmp / "missing.yaml")
+                else:
+                    (tmp / "elsewhere.yaml").write_bytes(rendered)
+                    target.symlink_to(tmp / "elsewhere.yaml")
+                code, report = self.ci(root)
+                self.assertEqual(code, 1)
+                check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["facts"]],
+                    ["failed", "conformance_workflow_stale",
+                     {"target": self.TARGET, "state": "stale"}])
+                self.assert_validates(report)
+
     def test_an_unrenderable_branch_is_a_finding(self):
         with fixture() as tmp:
             root = make_root(tmp)
@@ -620,6 +642,36 @@ class LintChecksTest(ReportAssertions, unittest.TestCase):
                 self.summary(by_id[self.MAP_ID]),
                 ["failed", "context_map_outside_root", self.MAP_REPAIR,
                  {"paths": ["docs/CONTEXT-MAP.md"], "count": 1}])
+
+    def test_an_area_file_outside_the_root_is_a_finding_and_is_never_read(self):
+        for label, link in (("relative", "../../outside/CONTEXT.md"),
+                            ("absolute", None)):
+            with self.subTest(link=label), fixture() as tmp:
+                root = make_root(tmp)
+                outside = tmp / "outside" / "CONTEXT.md"
+                write_file(tmp, "outside/CONTEXT.md", "no front matter\n")
+                write_file(root, "docs/CONTEXT-MAP.md", CLEAN_MAP.replace(
+                    "./fixture-CONTEXT.md", link or str(outside)))
+                opened = []
+                original = Path.read_text
+
+                def recording(path, *args, **kwargs):
+                    opened.append(Path(path).resolve())
+                    return original(path, *args, **kwargs)
+
+                with unittest.mock.patch.object(Path, "read_text", recording):
+                    problems = context_map_lint.check(
+                        root, root / "docs/CONTEXT-MAP.md")
+                self.assertNotIn(outside.resolve(), opened)
+                self.assertTrue(
+                    any("outside the repository" in problem
+                        for problem in problems), problems)
+                code, _, by_id = self.ci(root)
+                self.assertEqual(code, 1)
+                self.assertEqual(
+                    self.summary(by_id[self.MAP_ID]),
+                    ["failed", "context_map_lint_failed", self.MAP_REPAIR,
+                     {"paths": ["docs/CONTEXT-MAP.md"], "count": len(problems)}])
 
     def test_lint_facts_carry_no_absolute_path_or_authored_text(self):
         with self.subTest(case="long path"), fixture() as tmp:
