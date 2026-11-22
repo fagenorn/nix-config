@@ -23,6 +23,8 @@ Every rule in the three layers is one `###` heading that opens with its id, writ
 
 A heading carries one id, and a new rule takes the next unused number of its prefix. Ids are never renumbered or reused. Project ids are local to their repository, so a report that spans projects prefixes the repository name. `R1` to `R9` keep their ids and form and stay outside the layers.
 
+An enforcer (a test or lint that fails when a standard is broken) cites a rule by writing `standard:` and the id with no space, as in `standard:B12`, anywhere in its text; the rule names no enforcer. A `P` id resolves against the project's own shards and every other id against the platform's standards directory. A standards lint, where the project runs one, fails on a citation of an id no applicable layer defines (a deleted rule's included) and on `standard:` followed by something that is not an id. On demand it prints each rule with the enforcers citing it, the count of judged rules and the count of enforcers citing neither a rule id nor a decision-record id.
+
 ## Precedence
 
 Direct user instruction > Layer 2 (project) > Layer 1 (stack) > Layer 0 (the bar) > general convention. More specific always overrides more general — the same rule that makes "match the file you're editing" beat personal preference. A recurring conflict between a layer and what the code actually does is a bug in one of them; fix it in the work that touches it, not as a separate refactor.
