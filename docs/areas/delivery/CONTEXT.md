@@ -9,6 +9,10 @@ Delivery turns one tracker issue into a merged change through the agent skills, 
 
 ## Language
 
+**Attempt**:
+One try at delivering an issue, from the claim that starts it to the end of that claim. A delivered attempt ended with its change merged into the integration branch, and its duration runs from the claim's creation to that merge, both read on the tracker; an attempt that stopped or still runs is not delivered. A schema-3 project's attempt budget is 1.5 times the 90th percentile of its last 20 delivered attempts' durations, or 240 minutes until it has 20 (ADR-project-contract-016).
+_Avoid_: run (a run is the engine's)
+
 **Awaiting look**:
 The stage a delivery of a marked issue stops at after verify, with its branch up to date with the integration branch, pushed, its pull request open and every required check at that head green (a red one fixed first, within the delivery's one red-check fix; issue 1373), holding no land lock and merging nothing; the owner's approve or changes answer resumes it (issue 1139).
 _Avoid_: hold (a hold is the post-merge verification hold)
@@ -25,7 +29,7 @@ A test or lint that fails when a standard is broken (issue 1412).
 _Avoid_: check (a check is the Verification area's)
 
 **Engine**:
-The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run. A run is recorded as a directory under `~/.agents/state/engine/runs/` whose append-only `events.jsonl` is the single source of truth, and `engine status <issue>` prints the state one fold derives from it (issue 1511), and `engine deliver <issue>` runs a procedure of command, agent and decide steps to `done` or a stop and prints one result line (issue 1512); an `agent` step runs as one headless session through the account launcher and is graded only by its structured reply (issue 1514); each run end in `done` or a stop appends one summary line to `~/.agents/state/engine/history.jsonl`, kept 180 days, and the engine's start deletes a run directory 14 days after its issue closed (issue 1519). Before every command it runs, `engine deliver` calls the lifecycle guard the host's settings name as the Bash hook, and a refusal, a timeout or an unrunnable guard is the outcome `refused`. A command runs marked as an agent session, so the pre-push hook judges a push inside a wrapper as it does in a session; like a session, the guard does not see another lifecycle verb inside a wrapper script (ADR-guard-004, ADR-guard-009) (issue 1515).
+The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run. A run is recorded as a directory under `~/.agents/state/engine/runs/` whose append-only `events.jsonl` is the single source of truth, and `engine status <issue>` prints the state one fold derives from it (issue 1511), and `engine deliver <issue>` runs a procedure of command, agent and decide steps to `done` or a stop and prints one result line (issue 1512); an `agent` step runs as one headless session through the account launcher and is graded by its structured reply (issue 1514) unless a bound fires. Every step runs within platform-held bounds, its role's wall time, turns and spend for an agent step and its command's wall time for a command step, and a fired bound is the outcome `out-of-bounds`, which an agent step outside a group must map (issue 1520). Before every command it runs, `engine deliver` calls the lifecycle guard the host's settings name as the Bash hook, and a refusal, a timeout or an unrunnable guard is the outcome `refused`. A command runs marked as an agent session, so the pre-push hook judges a push inside a wrapper as it does in a session; like a session, the guard does not see another lifecycle verb inside a wrapper script (ADR-guard-004, ADR-guard-009) (issue 1515). An agent step with no valid structured answer is resumed once on the same session, then ends as `no-reply`; reply schemas keep to one subset; and `engine deliver` starts no run on a host whose settings load no lifecycle guard hook (issue 1525). `engine stop <issue>` asks the running run to end its current step's process group and stop at `stopped-by-request`, which needs a retry (issue 1524). A run that ends in `done` or a stop appends one summary line to `~/.agents/state/engine/history.jsonl`, kept 180 days, and the engine's start deletes a run directory 14 days after its issue closed (issue 1519).
 
 **Grader**:
 A pure function in the engine that turns stored results into an outcome for a `decide` step.
@@ -68,3 +72,6 @@ A named end state of a run that is not `done`, with what it needs (an owner deci
 **Suite member**:
 One test file or script named in the project's declared agent-workflow test recipe. The suite runner schedules the members by recorded duration, and the last member is pinned.
 _Avoid_: test target
+
+**Suppression**:
+The marker that names a rule id and a reason and leaves its line's finding out of that rule's count; without either it is itself a violation (ADR-project-contract-019).

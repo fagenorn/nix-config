@@ -2,7 +2,7 @@
 
 Schema 3 is schema 2 minus everything the platform decides or the repository
 states. `fill(source, derived)` returns a copy of a schema-3 contract with each
-constant written at the schema-2 pointer it always had, the four derived values
+constant written at the schema-2 pointer it always had, the derived values
 (`DERIVED`) written from `derived`, each retired member removed and every
 authored command given the platform's `cwd` and `env`, so the resolver
 validates and resolves the result with the schema-2 rules. The snapshot is
@@ -12,10 +12,14 @@ therefore schema 2 without the retired members (`RETIRED`).
 derived value, a retired member or a platform command is refused by name,
 never silently overwritten.
 
+The derived values are the four the repository's files state, derived by
+`derived_values` (ADR-project-contract-014), and the attempt budget with its
+basis, which the resolver reads from the recorded attempt history through
+`resolve_project.derive_for` (ADR-project-contract-016). The basis is a
+snapshot member only: `fill` never writes it into the view.
+
 The module imports only `copy` and `agent_platform`, never the resolver or
-`derived_values`, so adoption can import it later (ADR-project-contract-010 D1);
-the values themselves are derived by `derived_values`
-(ADR-project-contract-014).
+`derived_values`, so adoption can import it later (ADR-project-contract-010 D1).
 """
 
 from __future__ import annotations
@@ -53,7 +57,6 @@ CONSTANTS: dict[str, object] = {
     "/bindings/workflow/review/plan": "codex-plan-review",
     "/bindings/workflow/review/code": "codex-diff-review",
     "/bindings/workflow/orchestration/max_parallel": 2,
-    "/bindings/workflow/orchestration/attempt_budget_minutes": 240,
 }
 
 # The objects whose every member is a constant or retired: a contract that
@@ -66,12 +69,19 @@ CONSTANT_CONTAINERS = (
     "/bindings/workflow/review",
 )
 
-# The four values the repository states, as the schema-2 pointers they fill.
+# The attempt budget and the basis it was derived from. The basis is carried by the snapshot only.
+ATTEMPT_BUDGET = "/bindings/workflow/orchestration/attempt_budget_minutes"
+ATTEMPT_BUDGET_BASIS = "/bindings/workflow/orchestration/attempt_budget_basis"
+
+# The four values the repository states and the attempt budget with its basis, as the
+# schema-2 pointers they fill.
 DERIVED = (
     "/project/id",
     "/bindings/tracker/repo_slug",
     "/bindings/vcs/merge/required_checks",
     "/platform",
+    ATTEMPT_BUDGET,
+    ATTEMPT_BUDGET_BASIS,
 )
 
 # Objects a contract may not author because the derived value is its only member.
@@ -135,7 +145,7 @@ def _write(view: dict, pointer: str, value: object) -> None:
     node[keys[-1]] = copy.deepcopy(value)
 
 
-def _delete(view: dict, pointer: str) -> None:
+def remove_at(view: dict, pointer: str) -> None:
     keys = _segments(pointer)
     node = view
     for key in keys[:-1]:
@@ -158,7 +168,7 @@ def fill(source: dict, derived: Mapping[str, object]) -> dict:
     # An authored derived value is refused by `refusals`; it is never read as the value, so a
     # value the repository cannot state stays absent instead of falling back to the authored one.
     for pointer in RETIRED + DERIVED:
-        _delete(view, pointer)
+        remove_at(view, pointer)
     for pointer in ("/project/id", "/platform"):
         if pointer in derived:
             _write(view, pointer, derived[pointer])
@@ -169,7 +179,8 @@ def fill(source: dict, derived: Mapping[str, object]) -> dict:
         bindings.setdefault(namespace, {})
     for pointer, value in CONSTANTS.items():
         _write(view, pointer, value)
-    for pointer in ("/bindings/tracker/repo_slug", "/bindings/vcs/merge/required_checks"):
+    for pointer in ("/bindings/tracker/repo_slug", "/bindings/vcs/merge/required_checks",
+                    ATTEMPT_BUDGET):
         if pointer in derived:
             _write(view, pointer, derived[pointer])
     commands = bindings["commands"]
@@ -182,15 +193,15 @@ def fill(source: dict, derived: Mapping[str, object]) -> dict:
     return view
 
 
-_ABSENT = object()
+ABSENT = object()
 
 
-def _present(source: dict, pointer: str) -> object:
-    """The value authored at `pointer`, or `_ABSENT` when an object on the way lacks it."""
+def authored_at(source: dict, pointer: str) -> object:
+    """The value authored at `pointer`, or `ABSENT` when an object on the way lacks it."""
     node: object = source
     for key in _segments(pointer):
         if not isinstance(node, dict) or key not in node:
-            return _ABSENT
+            return ABSENT
         node = node[key]
     return node
 
@@ -232,18 +243,18 @@ def refusals(source: dict) -> list[dict]:
     if not isinstance(source, dict):
         return found
     for pointer in RETIRED:
-        if _present(source, pointer) is not _ABSENT:
+        if authored_at(source, pointer) is not ABSENT:
             refuse(pointer, "retired_member")
     for pointer in CONSTANTS:
-        if _present(source, pointer) is not _ABSENT:
+        if authored_at(source, pointer) is not ABSENT:
             refuse(pointer, "platform_constant")
     for pointer in DERIVED:
-        if _present(source, pointer) is not _ABSENT:
+        if authored_at(source, pointer) is not ABSENT:
             refuse(pointer, "derived_value")
     for pointer, kind in ([(c, "platform_constant") for c in CONSTANT_CONTAINERS]
                           + [(c, "derived_value") for c in DERIVED_CONTAINERS]):
-        value = _present(source, pointer)
-        if value is not _ABSENT and (not isinstance(value, dict) or not value):
+        value = authored_at(source, pointer)
+        if value is not ABSENT and (not isinstance(value, dict) or not value):
             refuse(pointer, kind)
     bindings = source.get("bindings")
     if not isinstance(bindings, dict):

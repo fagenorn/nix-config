@@ -247,6 +247,45 @@ class LocateTest(unittest.TestCase):
                 self.locate(self.settings(self.entry("Bash", self.hook(timeout=3600)))),
                 Hook(GUARD, 3600))
 
+    def test_a_hook_switch_that_is_on_is_unavailable(self):
+        doc = json.loads(self.settings(self.entry()))
+        for name, value in (("disableAllHooks", True), ("allowManagedHooksOnly", True),
+                            ("disableAllHooks", "yes"), ("disableAllHooks", 0)):
+            with self.subTest(name=name, value=value):
+                found = self.locate(json.dumps({**doc, name: value}))
+                self.assertIsInstance(found, Unavailable)
+                self.assertIn(name, found.reason)
+        for name in ("disableAllHooks", "allowManagedHooksOnly"):
+            with self.subTest(name=name, value=False):
+                self.assertEqual(self.locate(json.dumps({**doc, name: False})), Hook(GUARD, 30))
+
+    def test_a_guard_hook_with_an_if_filter_is_unavailable(self):
+        documents = {
+            "on the hook": self.settings(
+                self.entry("Bash", self.hook(**{"if": "Bash(git push *)"}))),
+            "empty on the hook": self.settings(self.entry("Bash", self.hook(**{"if": ""}))),
+            "on the entry": self.settings({**self.entry(), "if": "Bash(*)"}),
+        }
+        for name, text in documents.items():
+            with self.subTest(name):
+                found = self.locate(text)
+                self.assertIsInstance(found, Unavailable)
+                self.assertIn("if filter", found.reason)
+        self.assertEqual(self.locate(self.settings(self.entry())), Hook(GUARD, 30))
+
+    def test_an_asynchronous_guard_hook_is_unavailable(self):
+        for name, value in (("async", True), ("async", "true"), ("async", 1),
+                            ("asyncRewake", True), ("asyncRewake", "yes")):
+            with self.subTest(name=name, value=value):
+                found = self.locate(self.settings(self.entry("Bash", self.hook(**{name: value}))))
+                self.assertIsInstance(found, Unavailable)
+                self.assertIn("asynchronous", found.reason)
+        for name in ("async", "asyncRewake"):
+            with self.subTest(name=name, value=False):
+                self.assertEqual(
+                    self.locate(self.settings(self.entry("Bash", self.hook(**{name: False})))),
+                    Hook(GUARD, 30))
+
     def test_every_other_shape_is_unavailable_with_a_reason(self):
         def with_hook(**changes) -> str:
             return self.settings(self.entry("Bash", self.hook(**changes)))

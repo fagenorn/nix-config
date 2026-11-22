@@ -177,7 +177,7 @@ class PlatformStatusTest(ResolverTestCase):
 
     def test_an_unsupported_project_schema_is_a_verdict_on_exit_zero(self):
         contract = source_contract()
-        # Platform 2.1.0 reads schemas 2 and 3; 4 is an unsupported integer.
+        # Platform 2.2.0 reads schemas 2 and 3; 4 is an unsupported integer.
         contract["schema_version"] = 4
         code, payload, err = self.status(
             "--repo-root", str(self.make_root(contract)))
@@ -720,6 +720,35 @@ REMOVAL = {"id": "legacy-file", "kind": "project_file",
            "subject": ".claude/skills.config.json", "since": "1.1.0",
            "successor": "resolve-project resolve",
            "migration": "legacy-file.retire"}
+
+
+class CommittedSchemaDeprecationTest(ResolverTestCase):
+    """Issue 1469: the committed manifest deprecates project schema 2, so
+    `platform-status` warns a schema-2 root and not a schema-3 one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+
+    def status(self, root: Path) -> dict:
+        code, out, err = run("platform-status", "--repo-root", str(root),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def test_the_committed_manifest_warns_a_schema_two_root_and_not_a_schema_three_one(self):
+        two = self.make_root()
+        self.addCleanup(shutil.rmtree, two, ignore_errors=True)
+        three = make_schema_three_root(schema_three_contract())
+        self.addCleanup(shutil.rmtree, three, ignore_errors=True)
+        warned = self.status(two)
+        self.assertEqual(warned["project"]["deprecated_uses"],
+                         ["platform-constants"])
+        self.assertTrue(warned["compatibility"]["compatible"])
+        self.assertEqual(warned["platform"]["deprecations"],
+                         committed_manifest()["deprecations"])
+        clean = self.status(three)
+        self.assertEqual(clean["project"]["deprecated_uses"], [])
 
 
 class PlatformStatusRemovedUsesTest(ResolverTestCase):

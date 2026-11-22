@@ -76,7 +76,8 @@ Settings file. `claude --bg` hands the session to one supervisor per configurati
 and a supervisor that is already running may start the session with its own environment, not the
 launching client's. So `run_launch` writes the sprint's id and secret as `{"env": {...}}` to a
 per-sprint settings file (mode 0600, replaced on a retry) and passes `--settings <file>`; Claude
-Code applies a settings file's `env` to that session. Only the path is on argv. The file holds
+Code applies a settings file's `env` to that session. The `env` also holds the project root as
+`CONSOLE_SPRINT_ROOT`, which the prompt hook reads (ADR-console-103). Only the path is on argv. The file holds
 three more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}`, because a manager
 writes no code and every delivery makes its own worktree, and `hooks`, which hold three. One `PermissionRequest`
 command hook runs `PROMPT_COMMAND` (`sprint permit --prompt`, `timeout` `PROMPT_TIMEOUT`) and, should it
@@ -88,15 +89,20 @@ crash, prints the client's deny decision with `REFUSAL`, one fixed sentence, thr
 sprint's own merge and rerun (ADR-console-094) and the plain `release transaction run`, never abandon
 or dispose (ADR-console-098); an `if` filter would let a
 spelling it missed fall to the owner's global `gh pr merge` allow. The third member is
-`"permissions": {"defaultMode": <mode>, "deny": [...]}`, the mode the launch's `Permission` chose
-for the project (ADR-console-060, #1151) and the `MANAGER_DENY` rules (an `--admin` merge, and a
-`release transaction abandon`, which is defence in depth beside the permit's own denial) that block in
-every mode; no rule names a release run or a `--dispose`, since the permit judges those from the parsed
-words (ADR-console-098); there is no
-allow rule, no ask rule, no `autoMode` and no `disableAllHooks`. A launch built without a
-permission carries `permission.FALLBACK`,
-so `auto`. `settings_document(env, permission)` is that content and `write_settings(path, env,
-permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a
+`"permissions": {"defaultMode": <mode>, "deny": [...], "allow": [...]}`, the mode the launch's
+`Permission` chose for the project (ADR-console-060, #1151), the `MANAGER_DENY` rules and the allow
+rules. The 11 deny rules (an `--admin` merge matched at an argument boundary, bare and behind each
+`env -u` credential spelling, and a `release transaction abandon`, which is defence in depth beside the
+permit's own denial) block in every mode. The allow rules are generated per verb from the project's
+facts: the merge (a valid slug and the strategy `merge`, `--delete-branch` per the binding) and the
+rerun (a valid slug), each bare and behind each `env -u` credential spelling, and always `release
+transaction run *`; there is no `unset` rule. A rule's `*` matches more than the grant, and the permit
+hook decides every text a rule matches, so auto mode resolves the permitted forms without the classifier
+while the hooks still judge each call (ADR-console-102). No rule names a `--dispose`, which the permit
+judges from the parsed words (ADR-console-098). There is no ask rule, no `autoMode` and no
+`disableAllHooks`. A launch built without a permission carries `permission.FALLBACK`,
+so `auto`. `settings_document(env, permission, allow)` is that content and `write_settings(path, env,
+permission, allow)` writes it (mode 0600, atomically); the console writes it again before every wake of a
 stopped or removed session (`service._refresh_settings`). A manager's Bash prompt the permit does
 not decide is held by its hook for `PROMPT_HOLD_SECONDS`, polled every `PROMPT_POLL_SECONDS`, and the hook's
 `timeout` is `PROMPT_TIMEOUT` seconds (#1424); the constants live here so the cycle `sprint -> manager` stays
@@ -172,12 +178,14 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from agent_tools.claims import owner_actions
 from agent_tools.console import permission as permissions
+from agent_tools.console import permit
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN
 
@@ -191,6 +199,7 @@ TAKEOVER_LEAD = ("You take over one sprint whose manager is gone, started by the
                  + GOAL_MARK)
 ID_ENV = "CONSOLE_SPRINT_ID"
 SECRET_ENV = "CONSOLE_SPRINT_SECRET"
+ROOT_ENV = "CONSOLE_SPRINT_ROOT"
 ACCOUNT_ENV = "CLAUDE_ACCOUNT"
 LAUNCH_TIMEOUT = 60
 STOP_TIMEOUT = 60
@@ -208,7 +217,12 @@ PROMPT_COMMAND = "sprint permit --prompt"
 PROMPT_HOLD_SECONDS = 600
 PROMPT_POLL_SECONDS = 2
 PROMPT_TIMEOUT = 660
-MANAGER_DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)")
+ENV_SPELLINGS = tuple(spelling for spelling in permit.SCRUB_PREFIXES if spelling.startswith("env -u"))
+MERGE_STRATEGY = "merge"
+MANAGER_DENY = tuple(
+    rule for prefix in ("", *ENV_SPELLINGS)
+    for rule in (f"Bash({prefix}gh pr merge --admin*)", f"Bash({prefix}gh pr merge * --admin*)")
+) + ("Bash(release transaction abandon*)",)
 LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 
 OUT_OF_TIME_TEXT = "this run has no time left for the next stop or removal"
@@ -245,7 +259,7 @@ _PLAIN_TABLE = (
 
 # `AGENT_PLATFORM_ROOT` is the console launcher's own package root: a session's commands set it
 # again through their launchers, and a source-run child must read `$HOME`'s manifest (ADR-system-005).
-_DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV, "AGENT_PLATFORM_ROOT")
+_DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV, ROOT_ENV, "AGENT_PLATFORM_ROOT")
 
 
 def plain_reason(reason: str | None) -> str:
@@ -293,6 +307,7 @@ class Launch:
     takeover: bool = False
     seen_after: int = 0
     permission: permissions.Permission = permissions.FALLBACK
+    allow: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -315,7 +330,8 @@ def remove_settings(directory: Path, sprint_id: str) -> None:
 def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: str,
                secret: str, settings_dir: Path, takeover: bool = False,
                seen_after: int = 0, notices: str = "",
-               permission: permissions.Permission = permissions.FALLBACK) -> Launch:
+               permission: permissions.Permission = permissions.FALLBACK,
+               allow: tuple[str, ...] = ()) -> Launch:
     lead = TAKEOVER_LEAD if takeover else PROMPT_LEAD
     if notices:
         lead = lead.removesuffix(GOAL_MARK).rstrip() + "\n\n" + notices + "\n\n" + GOAL_MARK
@@ -324,8 +340,8 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
         session_name=session_name(project_id, sprint_id),
         prompt=lead + goal,
         settings=settings_path(settings_dir, sprint_id),
-        env={ID_ENV: sprint_id, SECRET_ENV: secret}, takeover=takeover,
-        seen_after=seen_after, permission=permission)
+        env={ID_ENV: sprint_id, SECRET_ENV: secret, ROOT_ENV: root}, takeover=takeover,
+        seen_after=seen_after, permission=permission, allow=allow)
 
 
 def choose_profile(capacity: Mapping, last_use: Mapping[str, str], starter: str | None = None,
@@ -520,8 +536,32 @@ def launcher_for(platform: str) -> Callable[[Launch], None] | None:
     return run_launch if supported(platform) else None
 
 
-def settings_document(env: Mapping[str, str], permission: permissions.Permission) -> dict:
-    """The settings a manager's session runs under: its environment, no isolation guard, a Bash prompt held for the owner, the mode, the permit hooks and the deny rule."""
+def allow_rules(slug: str | None, strategy: str | None, delete_branch: bool) -> tuple[str, ...]:
+    """The allow rules a manager's settings carry, from the project's facts (#1592, ADR-console-102).
+
+    The merge rule needs a valid slug and the strategy `merge`, and ends `--delete-branch` when the binding
+    deletes the branch; the rerun rule needs a valid slug; the release run needs neither. The merge and
+    rerun rules come bare and behind each `ENV_SPELLINGS` member. A rule's `*` admits more than the grant,
+    and the permit hook decides every text a rule matches. A slug `SLUG_PATTERN` does not fullmatch, or
+    another strategy, is never interpolated.
+    """
+    valid = isinstance(slug, str) and owner_actions.SLUG_PATTERN.fullmatch(slug) is not None
+    prefixes = ("", *ENV_SPELLINGS)
+    rules: list[str] = []
+    if valid and strategy == MERGE_STRATEGY:
+        merge = f"gh pr merge * --repo {slug} --merge --match-head-commit *"
+        if delete_branch is True:
+            merge += " --delete-branch"
+        rules += [f"Bash({prefix}{merge})" for prefix in prefixes]
+    if valid:
+        rules += [f"Bash({prefix}gh run rerun * --failed --repo {slug})" for prefix in prefixes]
+    rules.append("Bash(release transaction run *)")
+    return tuple(rules)
+
+
+def settings_document(env: Mapping[str, str], permission: permissions.Permission,
+                      allow: Sequence[str] = ()) -> dict:
+    """The settings a manager's session runs under: its environment, no isolation guard, a Bash prompt held for the owner, the mode, the permit hooks, the allow rules and the deny rules."""
     refusal = json.dumps({"hookSpecificOutput": {
         "hookEventName": "PermissionRequest",
         "decision": {"behavior": "deny", "message": REFUSAL}}})
@@ -536,12 +576,14 @@ def settings_document(env: Mapping[str, str], permission: permissions.Permission
                     "type": "command", "command": PERMIT_COMMAND, "timeout": PERMIT_TIMEOUT}]}],
                 "PostToolUse": [{"matcher": "Bash", "hooks": [{
                     "type": "command", "command": LANDED_COMMAND, "timeout": LANDED_TIMEOUT}]}]},
-            "permissions": {"defaultMode": permission.mode, "deny": list(MANAGER_DENY)}}
+            "permissions": {"defaultMode": permission.mode, "deny": list(MANAGER_DENY),
+                            **({"allow": list(allow)} if allow else {})}}
 
 
-def write_settings(path: Path, env: Mapping[str, str], permission: permissions.Permission) -> None:
-    """Replace the file at `path` with `settings_document(env, permission)`; `LaunchFailed` when it cannot be written."""
-    document = json.dumps(settings_document(env, permission))
+def write_settings(path: Path, env: Mapping[str, str], permission: permissions.Permission,
+                   allow: Sequence[str] = ()) -> None:
+    """Replace the file at `path` with `settings_document(env, permission, allow)`; `LaunchFailed` when it cannot be written."""
+    document = json.dumps(settings_document(env, permission, allow))
     temporary = None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -665,7 +707,7 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
     if not Path(launch.cwd).is_dir():
         raise fail(f"the project root {launch.cwd} is not a directory")
     try:
-        write_settings(launch.settings, launch.env, launch.permission)
+        write_settings(launch.settings, launch.env, launch.permission, launch.allow)
     except LaunchFailed as error:
         raise fail(str(error)) from error
     env = client_environment(launch.profile, environ)

@@ -77,9 +77,12 @@ missing or invalid `PATH` refuses `resolver_failure` exactly as a broken
 installed manifest does. The cutover preflight runs the candidate's own code
 this way against the candidate's own manifest.
 
-Platform 2.1.0 reads project schemas 2 and 3 (`project_schema_versions` is
+Platform 2.2.0 reads project schemas 2 and 3 (`project_schema_versions` is
 `[2, 3]`) and resolves to schema 2 (`resolved_schema_version` is 2). It
-declares the migration `bindings-deploy.retire` from schema 1 to 2 (issue 579). Schema 2 is schema 1
+declares the migrations `bindings-deploy.retire` (schema 1 to 2, issue 579)
+and `platform-constants.retire` (schema 2 to 3, #1469), and deprecates schema 2
+(`platform-constants`), so `platform-status` lists that id in the
+`deprecated_uses` of every schema-2 root. Schema 2 is schema 1
 without the deploy watch: `bindings.deploy` and `capabilities.deploy` are not
 members of it, so an authored one is refused like any member outside the
 schema, and the resolved snapshot has neither. A schema-1 contract is refused
@@ -105,7 +108,7 @@ fills the constants from `schema_three` and the four derived values from
 `derived_values` (`contract_view`), validates that view with the schema-2
 rules, and builds the snapshot from it, so the snapshot is schema 2 without the
 four retired members (`schema_three.RETIRED`). The derived values are the
-project id and the tracker repo slug (the `owner/repo` of the git remote
+attempt budget (below) and the project id and the tracker repo slug (the `owner/repo` of the git remote
 `origin`, read from the repository's git config), the merge's required checks
 (the contexts of `.github/branch-protection.json`) and the platform range (up
 to the next major from the `platform_version` of the platform manifest: the
@@ -114,7 +117,18 @@ of the revision `devenv.lock` pins as `agent-platform`, found in the Nix
 store). They are read from files, never through a child process or the network.
 A contract that authors one is refused `contract.<section>.derived_value`, and
 one the repository cannot state is refused `contract.<section>.not_derivable`
-at its pointer (ADR-project-contract-014). Schema 3
+at its pointer (ADR-project-contract-014).
+
+The attempt budget `bindings.workflow.orchestration.attempt_budget_minutes` is
+derived too, from one more file the resolver only reads, never writes:
+`<git common dir>/agent-platform/attempt-history.json`, through
+`attempt_history.read` (ADR-project-contract-016). The snapshot also carries
+`attempt_budget_basis` beside it: the history's delivered count, its 90th
+percentile and its `recorded_at`, or the fallback of 240 minutes with its
+reason (`no_history`, `unreadable`, `invalid`, `other_repository` or
+`too_few`). No state of that file refuses resolution, and an authored budget
+or basis is refused `contract.workflow.derived_value`. Schema 2 keeps its
+authored budget and reads no history. Schema 3
 also defines the platform command `commit-environment` (`platform_commands`),
 which the filled commit environment names. A schema-3 contract that authors a
 platform constant, a retired member, a platform command id or a command's `cwd`
@@ -136,7 +150,10 @@ A third kind, `conformance_workflow`, projects no instruction source: the
 entry carries only `id`, `kind` and `target` (an `agent` or a `source` is
 `contract.projections.member_unexpected`), its target is always
 `.github/workflows/conformance.yaml`, at most one is declared, and the file is
-rendered from the schema version and `bindings.vcs.integration_branch` alone.
+rendered from the schema version, `bindings.vcs.integration_branch` and whether
+the tree is the platform's own (it holds `home/common/agent-skills/platform-manifest.json`).
+The platform's own tree runs `nix shell .#agent-platform`; every other tree runs
+the platform revision its `devenv.lock` pins as the `agent-platform` input.
 A branch outside `[A-Za-z0-9][A-Za-z0-9._/-]*` is refused while such an entry
 is declared, so the branch can always be written as a quoted YAML string.
 `check-projections` and `write-projections` judge and rewrite it as they do a
@@ -165,7 +182,8 @@ import shutil
 import sys
 
 from agent_tools.release import release_adapter, release_profile
-from agent_tools.project_contract import agent_platform, derived_values, schema_three
+from agent_tools.project_contract import (
+    agent_platform, attempt_history, conformance_workflow, derived_values, schema_three)
 from agent_tools.system import semver
 
 
@@ -318,9 +336,7 @@ PROJECTION_KIND_MEMBERS = {
 # source, so the source-collision check cannot protect an authored file; the
 # fixed target does.
 CONFORMANCE_WORKFLOW_TARGET = ".github/workflows/conformance.yaml"
-# A branch the rendered workflow may carry as a double-quoted YAML string: no
-# quote, backslash, space or control character can reach it.
-WORKFLOW_BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+WORKFLOW_BRANCH_PATTERN = conformance_workflow.WORKFLOW_BRANCH_PATTERN
 
 # D6: what each capability demands of the bindings when it is declared
 # `supported`. A row is the binding member's path under `/bindings` and the
@@ -361,59 +377,12 @@ ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # name (`mcp__<server>`) has no tool part and is not a tool.
 MCP_TOOL_NAME_PATTERN = re.compile(r"^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
 
-# The two rendered forms (D11). Both read only the entry and the schema
-# version, so nothing machine-specific can reach a generated target.
-GENERATED_HEADER_TEMPLATE = (
-    "<!-- generated by resolve-project from {source} (project schema {version}). "
-    "Do not edit; edit the source and run `resolve-project write-projections`. -->"
-)
-MANAGED_IMPORT_TEMPLATE = "@{source}"
-# The third rendered form: a wire format, so `{version}` and `{branch}` are the
-# only substitutions and the file ends with one newline.
-CONFORMANCE_WORKFLOW_TEMPLATE = """\
-# Generated by resolve-project (project schema {version}). Do not edit: the
-# Conformance check fails while this file differs from what resolve-project renders.
-name: Conformance
-
-on:
-  pull_request:
-    branches:
-      - "{branch}"
-  push:
-    branches:
-      - "{branch}"
-
-permissions:
-  contents: read
-
-jobs:
-  conformance:
-    name: Conformance
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v4
-      - name: Run conformance
-        run: nix shell .#agent-platform --command conformance run --purpose ci
-"""
-
-
-def render_conformance_workflow(integration_branch: str,
-                                schema_version: int) -> bytes:
-    """Contract: the exact bytes of the committed conformance workflow.
-
-    A pure function of its two arguments. The branch is written as a
-    double-quoted YAML string, so `null`, `true` or `123` stays a string; a
-    branch outside `WORKFLOW_BRANCH_PATTERN` is a `ValueError`.
-    """
-    if WORKFLOW_BRANCH_PATTERN.fullmatch(integration_branch) is None:
-        raise ValueError(
-            f"integration branch is not workflow-safe: {integration_branch!r}")
-    return CONFORMANCE_WORKFLOW_TEMPLATE.format(
-        version=schema_version, branch=integration_branch).encode("utf-8")
+# The two rendered forms (D11), single-homed in `agent_platform` so adoption
+# reads them without importing this module (ADR-project-contract-021 D10).
+GENERATED_HEADER_TEMPLATE = agent_platform.GENERATED_HEADER_TEMPLATE
+MANAGED_IMPORT_TEMPLATE = agent_platform.MANAGED_IMPORT_TEMPLATE
+render_conformance_workflow = conformance_workflow.render
+conformance_workflow_locked = conformance_workflow.locked
 
 
 class ContractError(Exception):
@@ -1291,6 +1260,10 @@ def projection_paths(source: object) -> list[str]:
     that is not a list, an entry that is not an object, and a member that is
     absent or not a safe relative path each contribute nothing, because the
     resolver itself refuses those shapes.
+
+    When an entry is a `conformance_workflow`, the platform marker
+    (`derived_values.TREE_MANIFEST`) is listed last, once: the render reads it
+    to choose the workflow's form, so an export must carry it.
     """
     if not isinstance(source, dict) or not isinstance(source.get("projections"), list):
         return []
@@ -1302,6 +1275,10 @@ def projection_paths(source: object) -> list[str]:
             path = entry.get(name)
             if is_safe_relative_path(path) and path not in paths:
                 paths.append(path)
+    if any(isinstance(entry, dict) and entry.get("kind") == "conformance_workflow"
+           for entry in source["projections"]):
+        paths = [path for path in paths if path != derived_values.TREE_MANIFEST]
+        paths.append(derived_values.TREE_MANIFEST)
     return paths
 
 
@@ -1342,9 +1319,9 @@ def platform_commands(source: object) -> dict:
 
 
 def derive_for(root: Path, source: object) -> derived_values.Derived:
-    """The values `root` states for a schema-3 `source`; nothing, and no file read, for any other schema."""
+    """The values `root` states for a schema-3 `source`, with its attempt budget and basis; nothing, and no file read, for any other schema."""
     if schema_three.declares(source):
-        return derived_values.derive(root)
+        return attempt_history.derive_schema_three(root)
     return derived_values.Derived({}, [])
 
 
@@ -1737,6 +1714,9 @@ def build_snapshot(root: Path, source: dict, manifest: dict,
     # older supported schema (R2.5).
     view = contract_view(source, derived)
     bindings = normalize_bindings(view["bindings"], root, platform_commands(source))
+    if schema_three.ATTEMPT_BUDGET_BASIS in derived.values:
+        bindings["workflow"]["orchestration"]["attempt_budget_basis"] = copy.deepcopy(
+            derived.values[schema_three.ATTEMPT_BUDGET_BASIS])
     project = {"root": str(root), "id": view["project"]["id"]}
     if "name" in view["project"]:
         project["name"] = view["project"]["name"]
@@ -1874,13 +1854,15 @@ def managed_line_occurrences(target_bytes: bytes, entry: dict) -> int:
 def rendered_target(root: Path, entry: dict, contract: dict) -> bytes:
     """The bytes a target holding the whole rendered file must equal.
 
-    A `conformance_workflow` entry renders from the contract alone and reads no
-    source; the file kinds render from their source bytes.
+    A `conformance_workflow` entry renders from the contract and the tree's
+    platform marker and reads no source; the file kinds render from their
+    source bytes.
     """
     if entry["kind"] == "conformance_workflow":
         return render_conformance_workflow(
             contract["bindings"]["vcs"]["integration_branch"],
-            contract["schema_version"])
+            contract["schema_version"],
+            locked=conformance_workflow_locked(root))
     return render_projection(
         entry, read_projection_source(root, entry), contract["schema_version"])
 

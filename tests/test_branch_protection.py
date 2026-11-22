@@ -104,6 +104,7 @@ EXPECTED_WORKFLOW_PERMISSIONS = {"contents": "read"}
 CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run --purpose ci"
 CONFORMANCE_STEP = ["      - name: Run conformance",
                     f"        run: {CONFORMANCE_INVOCATION}"]
+CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
 BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")
 BUDGET_INVOCATION = 'PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"'
 EXPECTED_PROTECTION_PAYLOAD = {
@@ -335,7 +336,9 @@ def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
 
     Beyond the keys `green_without_work` finds, the job must keep its three steps, the
     exact command step, the runner's default shell (a `defaults:` block anywhere would
-    swap the interpreter that reads the command line) and its one job name.
+    swap the interpreter that reads the command line) and its one job name. The
+    never-rise check needs the merge base and the branch head, so the checkout keeps
+    full history and the pull request's head commit.
     """
     problems = []
     if job_names(path) != {"Conformance": "conformance"}:
@@ -345,6 +348,11 @@ def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
         problems.append(f"steps are {list(steps)}")
     elif [line for line in steps["Run conformance"] if line.strip()] != CONFORMANCE_STEP:
         problems.append(f"the command step is {steps['Run conformance']}")
+    else:
+        if "          fetch-depth: 0" not in steps["Checkout"]:
+            problems.append("the checkout does not fetch the full history")
+        if CONFORMANCE_CHECKOUT_REF not in steps["Checkout"]:
+            problems.append("the checkout does not judge the pull request's head")
     if any(re.match(r"^defaults:", line) for line in workflow_lines(path)):
         problems.append("a workflow-level defaults: block")
     job = job_blocks(path)["conformance"]
@@ -886,6 +894,8 @@ class ConformanceWorkflowShape(unittest.TestCase):
             "step shell": (run, [run, shell]),
             "workflow defaults": ("jobs:", ["defaults:", "  run:", "    shell: python {0}", "jobs:"]),
             "job defaults": (name, [name, "    defaults:", "      run:", shell]),
+            "shallow checkout": ("          fetch-depth: 0", []),
+            "merge-commit checkout": (CONFORMANCE_CHECKOUT_REF, []),
         }
         for label, (anchor, replacement) in mutations.items():
             with self.subTest(mutation=label):

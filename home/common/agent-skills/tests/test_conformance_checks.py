@@ -21,8 +21,9 @@ from agent_tools.delivery import context_map_lint, standards_lint
 from agent_tools.project_contract import resolve_project
 
 from .conformance_test_support import (
-    CLEAN_MAP, HERMETIC_ENV, REPO_ROOT, ReportAssertions, doctor, fixture,
-    load_module, make_root, platform_env, run, write_clean_map,
+    CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
+    commit_all, doctor, fixture, git, load_module, make_root, platform_env, run,
+    write_clean_map,
 )
 from .test_resolve_project import STANDARDS
 
@@ -301,7 +302,8 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
             root = make_root(tmp)
             self.write_workflow(
                 root,
-                resolve_project.render_conformance_workflow("main", 2)
+                resolve_project.render_conformance_workflow(
+                    "main", 2, locked=True)
                 + b"# hand edit\n")
             code, report = self.ci(root)
             self.assertEqual(code, 1)
@@ -321,7 +323,8 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
 
     def test_the_rendered_workflow_and_an_absent_one_both_pass(self):
         for label, data in (
-                ("rendered", resolve_project.render_conformance_workflow("main", 2)),
+                ("rendered", resolve_project.render_conformance_workflow(
+                    "main", 2, locked=True)),
                 ("absent", None)):
             with self.subTest(workflow=label), fixture() as tmp:
                 root = make_root(tmp)
@@ -333,8 +336,23 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
                 self.assertEqual([check["status"], check["facts"]], ["passed", {}])
                 self.assertEqual(report["outcome"]["status"], "passed")
 
+    def test_the_own_tree_form_is_stale_outside_the_platform_tree(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.write_workflow(
+                root, resolve_project.render_conformance_workflow(
+                    "main", 2, locked=False))
+            code, report = self.ci(root)
+            self.assertEqual(code, 1)
+            check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["facts"]],
+                ["failed", "conformance_workflow_stale",
+                 {"target": self.TARGET, "state": "stale"}])
+
     def test_a_workflow_entry_that_is_not_a_regular_file_is_stale(self):
-        rendered = resolve_project.render_conformance_workflow("main", 2)
+        rendered = resolve_project.render_conformance_workflow(
+            "main", 2, locked=True)
         for label in ("dangling symlink", "symlink to the rendered bytes"):
             with self.subTest(entry=label), fixture() as tmp:
                 root = make_root(tmp)
@@ -391,7 +409,8 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
                 "target": self.TARGET})
             contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
             self.write_workflow(
-                root, resolve_project.render_conformance_workflow("main", 2))
+                root, resolve_project.render_conformance_workflow(
+                    "main", 2, locked=True))
             report, by_id = doctor(self, root)
             for check_id in ("repository.projection.fresh",
                              "repository.paths.classified",
@@ -420,6 +439,108 @@ def make_run(root: Path, worktree: str, run_id: str, states: list, *,
     if lock:
         run.joinpath("state.lock").write_bytes(b"")
     return run
+
+
+class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
+    """The never-rise check, judged through one `ci` run on a committed root
+    whose integration ref the fixture moves (#1455)."""
+
+    CHECK_ID = "verification.violations.never_rise"
+
+    def ci(self, root: Path) -> tuple[int, dict, dict]:
+        code, out, err = run("run", "--purpose", "ci", "--repo-root", str(root))
+        self.assertIn(code, (0, 1), err)
+        report = json.loads(out)
+        return code, report, {c["id"]: c for c in report["checks"]}
+
+    def summary(self, check: dict) -> list:
+        return [check["status"], check["reason_code"], check["repair_id"],
+                check["facts"]]
+
+    def big_base(self, root: Path) -> str:
+        """A 1,600-line file committed and made the integration tip; its sha."""
+        write_file(root, "src/big.py", "x = 1\n" * 1600)
+        commit_all(root, "big")
+        git(root, "update-ref", INTEGRATION_REF, "HEAD")
+        return git(root, "rev-parse", "HEAD").strip()
+
+    def test_a_grown_over_budget_file_turns_ci_red_and_names_the_rule(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = self.big_base(root)
+            with (root / "src/big.py").open("a", encoding="utf-8") as handle:
+                handle.write("x = 1\n")
+            commit_all(root, "grow")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"], {
+                "status": "failed", "primary_check_id": self.CHECK_ID})
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B17", "base_count": 1,
+                  "branch_count": 1, "violations": ["B17 src/big.py:1601"],
+                  "rules": ["B17"]}])
+            self.assert_validates(report)
+
+    def test_a_tree_level_with_its_merge_base_passes_ci(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["passed", None, None,
+                 {"merge_base": git(root, "rev-parse", "HEAD").strip()}])
+
+    def test_a_missing_integration_ref_is_a_failed_check(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            git(root, "update-ref", "-d", INTEGRATION_REF)
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["failed", "history_unavailable", "violations.history.fetch",
+                 {"integration_branch": "main"}])
+            self.assert_validates(report)
+
+    def test_an_integration_branch_git_cannot_be_given_is_a_failed_check(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["bindings"]["vcs"]["integration_branch"] = "ma\x00in"
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID])[:3],
+                ["failed", "history_unavailable", "violations.history.fetch"])
+            self.assert_validates(report)
+
+    def test_an_uncommitted_growth_is_not_judged(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.big_base(root)
+            with (root / "src/big.py").open("a", encoding="utf-8") as handle:
+                handle.write("x = 1\n" * 10)
+            code, _, by_id = self.ci(root)
+            self.assertEqual(by_id[self.CHECK_ID]["status"], "passed")
+            self.assertEqual(code, 0)
+
+    def test_the_new_violations_are_bounded(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            for index in range(9):
+                write_file(root, f"src/n{index}.py", "x = 1\n" * 1501)
+            commit_all(root, "many")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            facts = by_id[self.CHECK_ID]["facts"]
+            self.assertEqual([facts["base_count"], facts["branch_count"],
+                              len(facts["violations"])], [0, 9, 8])
+            self.assert_validates(report)
 
 
 class LintChecksTest(ReportAssertions, unittest.TestCase):

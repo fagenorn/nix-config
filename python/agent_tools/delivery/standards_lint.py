@@ -59,12 +59,22 @@ characters, over 100`, and `no planning rule` when the section holds none.
    `P` id resolves only against the repository's `docs/standards` shards and any
    other id only against the platform directory (the bar and the stacks), so a
    deleted rule's citation fails. Without the recipe no enforcer is registered.
+   The suppression markers (`suppress-standard:<id> <reason>`, `agent_tools.delivery.rule_ids`)
+   of every tracked text file are read whether or not the recipe exists (a root with no
+   `.git` entry reads none, a binary file is skipped, a root `git` cannot list exits 2),
+   and each marker naming an id resolves as a citation does; one naming an id in no
+   applicable layer is a problem after every enforcer problem, in file then line order:
+   `<path>:<line>: suppresses <id>, which is in no applicable layer`, reasoned or bare.
+   A marker naming no id is no problem here. `lint(repo, platform)`, which the conformance
+   check runs, returns the first four checks and these suppression problems (the checks that
+   need no enforcer), so every caller fails an unknown id.
 
 With `--index` the problems still print and set exit status 1, and the rule index
 follows them on stdout, computed on the run and written to no file: for each rule
 (the bar, the stacks by filename, then the project shards by filename, each in
 heading order) `<id>. <title>` and one line `  <path>` per enforcer citing the id
-with a well-formed citation, sorted, each once; then `judged rules: <n>` (rules no
+with a well-formed citation, sorted, each once, then `  reasoned suppressions: <n>`
+(`0` when none), the reasoned markers naming the id in its layer; then `judged rules: <n>` (rules no
 enforcer cites) and `enforcers citing nothing: <m>` (existing registered enforcers
 holding neither a citation nor a decision-record id `ADR-<area>-NNN`).
 
@@ -282,10 +292,16 @@ def hint_problems(repo: Path) -> list[str]:
     return problems
 
 
-def lint(repo: Path, platform: Path) -> list[str]:
+def shape_problems(repo: Path, platform: Path) -> list[str]:
     readme = platform / "README.md"
     table = prefix_table(read(readme)) if readme.is_file() else {}
     return platform_problems(platform) + index_problems(repo) + shard_problems(repo, table) + hint_problems(repo)
+
+
+def lint(repo: Path, platform: Path) -> list[str]:
+    """The problems that need no registered enforcer: the layers' shapes, then each suppression
+    naming an id in no applicable layer. Raises `ValueError` for a root `git` cannot list."""
+    return shape_problems(repo, platform) + citation_lint.suppression_problems(repo, platform)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -307,11 +323,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{COMMAND}: no the-bar.md in {platform}", file=sys.stderr)
         return 2
     try:
+        shape = shape_problems(repo, platform)
         cited, index = citation_lint.check(repo, platform, args.index)
     except (ValueError, OSError) as error:
         print(f"{COMMAND}: {error}", file=sys.stderr)
         return 2
-    problems = lint(repo, platform) + cited
+    problems = shape + cited
     for line in problems + index:
         print(line)
     return 1 if problems else 0

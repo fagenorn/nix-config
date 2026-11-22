@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_core, engine_ledger, engine_shell
+from agent_tools.delivery import engine, engine_commands, engine_core, engine_ledger, engine_shell
 from agent_tools.delivery.engine_commands import command_text
 from agent_tools.delivery.engine_guard import Hook, judge, payload
 from agent_tools.delivery.engine_ledger import RUN_ID_RE
@@ -64,6 +65,7 @@ class EngineProject:
         self.release = self.tmp / "release"
         self.renewals = self.tmp / "renewals.log"
         self.answers = self.tmp / "answers.json"
+        self.hold = self.tmp / "hold.pid"
         self.root = self.world.project("example/engine", "example/engine", register=False,
                                        mutate=self.add_standins)
         self.bin = self.tmp / "bin"
@@ -113,9 +115,11 @@ class EngineProject:
             "standin-says-failed": entry("verdict", "failed", "0"),
             "standin-says-maybe": entry("verdict", "maybe", "0"),
             "standin-says-exhausted": entry("verdict", "exhausted", "0"),
+            "standin-says-out-of-bounds": entry("verdict", "out-of-bounds", "0"),
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
+            "standin-hold": entry("hold", str(self.hold), "0"),
         })
         land = ["gh", "pr", "merge", "7", "--repo", "example/engine", "--merge"]
         contract["bindings"]["commands"].update(
@@ -309,6 +313,31 @@ class DeliverTest(unittest.TestCase):
         state = json.loads(project.status(1512).stdout)
         self.assertEqual((state["stop"], state["done"]), (None, False))
 
+    def test_a_command_diagnostic_still_reaches_the_engine_stderr(self):
+        project = EngineProject(self)
+        project.answer({"stdout": "{\"verdict\":\"ok\"}", "stderr": "marker-diagnostic\n",
+                        "exit": 0})
+        done = project.deliver(project.procedures([
+            step("a", "standin-keep-alive", None,
+                 on={"ok": "done", "failed": "needs-owner", "refused": "needs-owner"})]))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("marker-diagnostic", done.stderr)
+
+    def test_a_printed_out_of_bounds_verdict_is_a_fault_with_no_outcome(self):
+        project = EngineProject(self)
+        faulted = project.deliver(project.procedures([
+            step("a", "standin-says-out-of-bounds", None,
+                 on={"ok": "done", "failed": "needs-owner", "refused": "needs-owner",
+                     "out-of-bounds": "needs-owner"})]))
+        self.assertEqual(faulted.returncode, 1)
+        self.assertEqual(faulted.stdout, "")
+        self.assertEqual(len(faulted.stderr.splitlines()), 1)
+        self.assertIn("out-of-bounds", faulted.stderr)
+        events = project.events(project.runs()[0])
+        self.assertEqual((events[-1]["event"], events[-1]["step"]), ("result_stored", "a"))
+        self.assertEqual([e for e in events if e["event"] in ("outcome_graded", "transition_taken")],
+                         [])
+
     def test_the_run_follows_its_own_procedure_copy(self):
         project = EngineProject(self)
         steps = [step("a", "standin-block", "b"), step("b", "standin-json", "done")]
@@ -333,7 +362,6 @@ class DeliverTest(unittest.TestCase):
         stdout, stderr = process.communicate(timeout=60)
         self.assertEqual(process.returncode, 0, stderr)
         self.assertEqual(json.loads(stdout)["end"], "done")
-
 
     @staticmethod
     def transitions(events: list[dict]) -> list[tuple]:
@@ -390,6 +418,120 @@ class DeliverTest(unittest.TestCase):
         self.assertEqual([(t.step, t.outcome, t.target) for t in walk.transitions],
                          [(step_, outcome, to) for step_, _, outcome, to in self.transitions(events)])
         self.assertEqual(walk.action, engine_core.Done())
+
+
+class BoundsTest(unittest.TestCase):
+    def sleeping(self, project: EngineProject, on: dict) -> Path:
+        """One command step that sleeps, since the release file is never created."""
+        return project.procedures(
+            [step("a", "standin-block", None, on=on)],
+            stops={"needs-owner": {"need": "owner-decision", "reenter": "a"},
+                   "step-failed": {"need": "retry", "reenter": "a"}})
+
+    def assert_gone(self, pid: int) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f"process {pid} outlived its step")
+
+    def test_a_command_past_its_wall_bound_is_ended_and_out_of_bounds(self):
+        project = EngineProject(self)
+        procedures = self.sleeping(project, {"ok": "done", "failed": "needs-owner",
+                                             "refused": "needs-owner",
+                                             "out-of-bounds": "step-failed"})
+        started = time.monotonic()
+        with project.inside(), mock.patch.object(engine_commands, "PROJECT_WALL_SECONDS", 1):
+            code, line = engine_shell.deliver(1520, procedures)
+        elapsed = time.monotonic() - started
+        self.assertEqual((code, line["end"], line["need"]), (3, "step-failed", "retry"))
+        self.assertLess(elapsed, 20)
+        run = project.runs()[0]
+        self.assertEqual(json.loads((run / "results/a.1.json").read_text()),
+                         {"bound": "wall-time"})
+        events = project.events(run)
+        stored = [e for e in events if e["event"] == "result_stored"]
+        self.assertGreaterEqual(stored[0]["wall_seconds"], 1)
+        self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                         ["out-of-bounds"])
+        pids = [e["pid"] for e in events if e["event"] == "process_started"]
+        self.assertEqual(len(pids), 1)
+        self.assert_gone(pids[0])
+
+    def test_a_command_past_its_wall_bound_that_does_not_map_it_is_graded_then_a_fault(self):
+        project = EngineProject(self)
+        procedures = self.sleeping(project, {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"})
+        with project.inside(), mock.patch.object(engine_commands, "PROJECT_WALL_SECONDS", 1):
+            with self.assertRaises(engine_shell.Fault) as raised:
+                engine_shell.deliver(1520, procedures)
+        self.assertIn("out-of-bounds", str(raised.exception))
+        run = project.runs()[0]
+        self.assertEqual(json.loads((run / "results/a.1.json").read_text()),
+                         {"bound": "wall-time"})
+        events = project.events(run)
+        self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                         ["out-of-bounds"])
+        self.assertEqual([e for e in events if e["event"] == "transition_taken"], [])
+
+    def test_a_closed_stderr_does_not_keep_a_killed_command_from_being_graded(self):
+        class Closed:
+            class buffer:
+                @staticmethod
+                def write(data: bytes) -> int:
+                    raise BrokenPipeError(32, "Broken pipe")
+
+                flush = write
+
+        project = EngineProject(self)
+        project.answer({"stdout": "", "stderr": "diagnostic\n", "exit": 0, "sleep": 30})
+        procedures = project.procedures(
+            [step("a", "standin-keep-alive", None,
+                  on={"ok": "done", "failed": "needs-owner", "refused": "needs-owner",
+                      "out-of-bounds": "step-failed"})],
+            stops={"needs-owner": {"need": "owner-decision", "reenter": "a"},
+                   "step-failed": {"need": "retry", "reenter": "a"}})
+        with (project.inside(), mock.patch.object(engine_commands, "PROJECT_WALL_SECONDS", 1),
+              mock.patch.object(sys, "stderr", Closed)):
+            code, line = engine_shell.deliver(1520, procedures)
+        self.assertEqual((code, line["end"]), (3, "step-failed"))
+        events = project.events(project.runs()[0])
+        self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                         ["out-of-bounds"])
+
+    def test_a_sigterm_to_the_engine_group_ends_a_running_command(self):
+        project = EngineProject(self)
+        procedures = self.sleeping(project, {"ok": "done", "failed": "needs-owner",
+                                             "refused": "needs-owner",
+                                             "out-of-bounds": "step-failed"})
+        argv, options = project.command("deliver", "1520", "--procedures", str(procedures))
+        engine = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  start_new_session=True, **options)
+        pids: list[int] = []
+
+        def cleanup() -> None:
+            for kill in (lambda: os.killpg(engine.pid, signal.SIGKILL),
+                         lambda: [os.kill(pid, signal.SIGKILL) for pid in pids]):
+                try:
+                    kill()
+                except ProcessLookupError:
+                    pass
+            engine.communicate()
+
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not pids:
+            runs = project.runs()
+            if runs:
+                pids.extend(e["pid"] for e in project.events(runs[0])
+                            if e["event"] == "process_started" and e["step"] == "a")
+            time.sleep(0.05)
+        self.assertTrue(pids, "the run never started its step process")
+        os.killpg(engine.pid, signal.SIGTERM)
+        engine.communicate(timeout=30)
+        self.assert_gone(pids[0])
 
 
 class FindingsTest(unittest.TestCase):
@@ -570,7 +712,39 @@ class GuardDeliverTest(unittest.TestCase):
         self.assertEqual([e for e in project.events(run) if e["event"] == "process_started"], [])
         return stored
 
-    def test_a_guard_past_its_timeout_or_unusable_is_refused_and_runs_nothing(self):
+    def test_settings_that_lose_the_guard_during_a_run_refuse_the_next_command(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-block", "b"),
+                                         step("b", "standin-record", "done")])
+        argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(argv, **options)
+        self.addCleanup(process.communicate)
+        self.addCleanup(process.kill)
+        self.addCleanup(project.release.write_text, "go", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            runs = project.runs()
+            if runs and any(e["event"] == "process_started" and e["step"] == "a"
+                            for e in project.events(runs[0])):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the run never started its step process")
+        run = runs[0]
+        project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
+        project.release.write_text("go", encoding="utf-8")
+        stdout, stderr = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 3, stdout + stderr)
+        self.assertEqual(json.loads(stdout)["end"], "needs-owner")
+        stored = json.loads((run / "results/b.1.json").read_text())
+        self.assertEqual(stored["verdict"], "refused")
+        self.assertIn("no usable guard", stored["reason"])
+        self.assertFalse(project.record.exists())
+        started = [e["step"] for e in project.events(run) if e["event"] == "process_started"]
+        self.assertEqual(started, ["a"])
+
+    def test_a_guard_past_its_timeout_or_missing_is_refused_and_runs_nothing(self):
         with self.subTest("timeout"):
             project = EngineProject(self)
             pidfile = project.tmp / "pids"
@@ -590,16 +764,20 @@ class GuardDeliverTest(unittest.TestCase):
                     time.sleep(0.05)
                 else:
                     self.fail(f"process {pid} outlived the guard timeout")
+        with self.subTest("missing"):
+            project = EngineProject(self)
+            project.use_guard(project.tmp / "missing/bin/claude-bash-lifecycle-guard")
+            self.refused_once(project, "missing")
+
+    def test_a_settings_shape_with_no_usable_guard_refuses_before_any_run(self):
         missing = "missing/bin/claude-bash-lifecycle-guard"
-        for name in ("missing", "arguments", "nul", "huge timeout", "other hook"):
+        for name in ("arguments", "nul", "huge timeout", "other hook"):
             with self.subTest(name):
                 project = EngineProject(self)
                 other = project.tmp / "other.log"
-                word = {"missing": "missing", "arguments": "arguments", "nul": "absolute path",
+                word = {"arguments": "arguments", "nul": "absolute path",
                         "huge timeout": "timeout", "other hook": "not the lifecycle guard"}[name]
-                if name == "missing":
-                    project.use_guard(project.tmp / missing)
-                elif name == "arguments":
+                if name == "arguments":
                     project.use_guard(project.tmp / missing, args=["--x"])
                 elif name == "nul":
                     project.use_guard("/g\u0000x/bin/claude-bash-lifecycle-guard")
@@ -611,7 +789,14 @@ class GuardDeliverTest(unittest.TestCase):
                 else:
                     project.use_guard(script(project.tmp / "other-hook", sys.executable,
                                              str(STANDIN_GUARD), "allow", str(other)))
-                self.refused_once(project, word)
+                done = project.deliver(project.procedures(
+                    [literal("a", ALLOW_ON, "standin-record")]))
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                self.assertIn(word, done.stderr)
+                self.assertEqual(project.runs(), [])
+                self.assertFalse(project.record.exists())
                 if name == "other hook":
                     self.assertEqual(payloads(other), [])
 
@@ -685,6 +870,12 @@ class RefusalTest(unittest.TestCase):
         self.assertIn(word, done.stderr)
         self.assertEqual(project.runs(), [])
         self.assertFalse(project.record.exists())
+
+    def test_a_host_without_the_guard_hook_starts_no_command_run(self):
+        project = EngineProject(self)
+        project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
+        done = project.deliver(project.procedures([step("a", "standin-record", "done")]))
+        self.assertRefused(project, done, "lifecycle guard")
 
     def test_an_unknown_command_id_refuses_the_procedure_before_any_process(self):
         project = EngineProject(self)
@@ -761,6 +952,7 @@ class LockTest(unittest.TestCase):
         run = runs[0]
         before = (run / "events.jsonl").read_bytes()
         runs_before = project.runs()
+        project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
         second = project.deliver(procedures)
         self.assertEqual(second.returncode, 4, second.stdout + second.stderr)
         self.assertEqual(len(second.stdout.splitlines()), 1)

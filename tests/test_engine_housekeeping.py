@@ -915,10 +915,11 @@ def stamp(moment: datetime) -> str:
 
 class DeliverHousekeepingTest(unittest.TestCase):
     def deliver_stderr(self, *args, **kw):
-        captured = io.StringIO()
+        raw = io.BytesIO()  # the shell forwards a command's stderr bytes through .buffer
+        captured = io.TextIOWrapper(raw, encoding="utf-8", write_through=True)
         with contextlib.redirect_stderr(captured):
             result = deliver(*args, **kw)
-        return result, captured.getvalue().splitlines()
+        return result, raw.getvalue().decode("utf-8").splitlines()
 
     def test_starting_the_engine_deletes_only_the_runs_whose_issue_closed_more_than_14_days_ago(self):
         project = EngineProject(self)
@@ -950,50 +951,43 @@ class DeliverHousekeepingTest(unittest.TestCase):
         stuck = canned_result(structured_output={"status": "stuck", "summary": "s", "items": []})
         cases = [("done", done, 0, "done", None, "drafted"),
                  ("stop", stuck, 3, "needs-owner", "owner-decision", "stuck")]
-        accounts = [("an override", "acct-1519"), ("a launcher choice", "work")]
         for name, canned, code, end, need, outcome in cases:
-            for how, account in accounts:
-                with self.subTest(name, account=how):
-                    project = EngineProject(self)
-                    if how == "an override":
-                        project.env["CLAUDE_ACCOUNT"] = account
-                    else:
-                        project.env.pop("CLAUDE_ACCOUNT", None)
-                        project.env["ENGINE_STUB_ACCOUNT"] = account
-                    copy_roles(project, "implementer")
-                    install_stub(project, canned)
-                    procedures = write_procedures(project, [
-                        step("a", "standin-json", "gate"), GATE,
-                        agent_step("draft", "implementer",
-                                   {"drafted": "done", "stuck": "needs-owner"})])
-                    got, result = deliver(project, 1519, procedures, at=T0,
-                                          tracker=FakeTracker({}))
-                    self.assertEqual(got, code)
-                    run = run_of(project, 1519)[0]
-                    stored = [e for e in engine_ledger.replay(run / "events.jsonl")
-                              if e["event"] == "result_stored" and e["step"] == "a"][0]
-                    lines = history(project)
-                    self.assertEqual(len(lines), 1)
-                    steps = lines[0].pop("steps")
-                    self.assertEqual(lines[0], {
-                        "format": 1, "run": run.name, "project": "example/engine",
-                        "issue": 1519, "end": end, "need": need, "ended": "2026-11-01T00:00:00Z"})
-                    for entry in steps:
-                        self.assertEqual(set(entry), {"step", "visit", "outcome", "wall_seconds",
-                                                      "waits", "tokens", "spend_usd", "account"})
-                    self.assertEqual([(s["step"], s["visit"], s["outcome"]) for s in steps],
-                                     [("a", 1, "ok"), ("gate", 1, "accept"), ("draft", 1, outcome)])
-                    first, gate, draft = steps
-                    self.assertEqual((first["waits"], first["account"], first["tokens"],
-                                      first["spend_usd"], first["wall_seconds"]),
-                                     ([], None, ZERO, 0, stored["wall_seconds"]))
-                    self.assertEqual((gate["wall_seconds"], gate["tokens"], gate["spend_usd"],
-                                      gate["account"], gate["waits"]), (None, None, None, None, []))
-                    self.assertEqual(
-                        (draft["account"], draft["tokens"], draft["spend_usd"],
-                         draft["wall_seconds"], draft["waits"]),
-                        (account, {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44},
-                         0.4321, 12.345, []))
+            with self.subTest(name):
+                project = EngineProject(self)
+                copy_roles(project, "implementer")
+                install_stub(project, canned)
+                procedures = write_procedures(project, [
+                    step("a", "standin-json", "gate"), GATE,
+                    agent_step("draft", "implementer",
+                               {"drafted": "done", "stuck": "needs-owner"})])
+                got, result = deliver(project, 1519, procedures, at=T0,
+                                      tracker=FakeTracker({}))
+                self.assertEqual(got, code)
+                run = run_of(project, 1519)[0]
+                stored = [e for e in engine_ledger.replay(run / "events.jsonl")
+                          if e["event"] == "result_stored" and e["step"] == "a"][0]
+                lines = history(project)
+                self.assertEqual(len(lines), 1)
+                steps = lines[0].pop("steps")
+                self.assertEqual(lines[0], {
+                    "format": 1, "run": run.name, "project": "example/engine",
+                    "issue": 1519, "end": end, "need": need, "ended": "2026-11-01T00:00:00Z"})
+                for entry in steps:
+                    self.assertEqual(set(entry), {"step", "visit", "outcome", "wall_seconds",
+                                                  "waits", "tokens", "spend_usd", "account"})
+                self.assertEqual([(s["step"], s["visit"], s["outcome"]) for s in steps],
+                                 [("a", 1, "ok"), ("gate", 1, "accept"), ("draft", 1, outcome)])
+                first, gate, draft = steps
+                self.assertEqual((first["waits"], first["account"], first["tokens"],
+                                  first["spend_usd"], first["wall_seconds"]),
+                                 ([], None, ZERO, 0, stored["wall_seconds"]))
+                self.assertEqual((gate["wall_seconds"], gate["tokens"], gate["spend_usd"],
+                                  gate["account"], gate["waits"]), (None, None, None, None, []))
+                self.assertEqual(
+                    (draft["account"], draft["tokens"], draft["spend_usd"],
+                     draft["wall_seconds"], draft["waits"]),
+                    ("stub", {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44},
+                     0.4321, 12.345, []))
 
     def test_a_delivered_run_records_the_identity_of_the_tracker_it_was_created_under(self):
         project = EngineProject(self)
@@ -1119,7 +1113,7 @@ class DeliverHousekeepingTest(unittest.TestCase):
         self.assertEqual(len(text.splitlines()), 1)
         for marker in (prompt, role, reply, env):
             self.assertNotIn(marker, text)
-        self.assertEqual(json.loads(text)["steps"][0]["account"], "acct-1519")
+        self.assertEqual(json.loads(text)["steps"][0]["account"], "stub")
 
     def test_any_history_failure_keeps_the_result_and_writes_one_stderr_line(self):
         for name, command, code in [("done", "standin-json", 0), ("stop", "standin-fail", 3)]:
