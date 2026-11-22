@@ -13,9 +13,10 @@ one exit-0 script per tool the contract names; a case that needs a different
 tool outcome builds its own bin with make_stub_bin and overrides PATH.
 
 HERMETIC_ENV's HOME also holds the platform installation the resolver ladder
-binds first — the committed manifest and host declaration, installed by the
-resolver family's own `install_home` (#147 D7). A case that needs another
-manifest or declaration runs under `platform_env` instead. HERMETIC_ENV's
+binds first — the committed manifest, host declaration and standards
+directory, installed by the resolver family's own `install_home` (#147 D7). A
+case that needs another manifest, declaration or none of the standards runs
+under `platform_env` instead. HERMETIC_ENV's
 PYTHONPATH is the recipe's, made absolute.
 """
 
@@ -58,7 +59,7 @@ def make_stub_bin(directory: Path, exits: dict | None = None) -> str:
 # copying it. Only the named helpers are imported, so no resolver TestCase
 # enters a conformance suite's namespace.
 from .test_resolve_project import (
-    COMMITTED, MANIFEST, install_home, mutated_manifest,
+    COMMITTED, MANIFEST, STANDARDS, install_home, mutated_manifest,
 )
 
 _HERMETIC_HOME = str(install_home(
@@ -106,14 +107,44 @@ def doctor(case, root, *extra: str, env: dict | None = None) -> tuple[dict, dict
     return report, {c["id"]: c for c in report["checks"]}
 
 
+CLEAN_MAP = """# Context Map
+
+## Areas
+
+| Area | Context file | Gist | governs |
+|---|---|---|---|
+| Fixture | [CONTEXT](./fixture-CONTEXT.md) | The fixture area | `.agents/project.json` |
+
+## Terms
+
+| Term | Area |
+|---|---|
+"""
+CLEAN_AREA = """---
+area: Fixture
+budget: 20 lines
+---
+
+# Fixture
+"""
+
+
+def write_clean_map(target: Path) -> None:
+    """A lint-clean context map at `target`, and its area file beside it."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(CLEAN_MAP, encoding="utf-8")
+    (target.parent / "fixture-CONTEXT.md").write_text(CLEAN_AREA, encoding="utf-8")
+
+
 def make_root(tmp: Path) -> Path:
     """A temporary project root a clean `doctor` run passes on.
 
     The committed contract, its instruction source and both projection targets
     are copied byte-for-byte, every directory a knowledge path names is
-    created (a file-shaped one, such as `docs/CONTEXT-MAP.md`, as an empty
-    file), and the root ignore file covers `.agents/runtime/`, so a fixture
-    refuses only for the mutation a case applies to it.
+    created (a file-shaped one as an empty file, except the selected context
+    map: a `CONTEXT-MAP.md` entry holds a lint-clean map with its area file
+    beside it), and the root ignore file covers `.agents/runtime/`, so a
+    fixture refuses only for the mutation a case applies to it.
     """
     root = tmp / "project"
     (root / ".agents" / "instructions").mkdir(parents=True)
@@ -131,7 +162,10 @@ def make_root(tmp: Path) -> Path:
                 continue
             if target.suffix:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.touch()
+                if target.name == "CONTEXT-MAP.md":
+                    write_clean_map(target)
+                else:
+                    target.touch()
             else:
                 target.mkdir(parents=True)
     (root / ".gitignore").write_text(".agents/runtime/\n", encoding="utf-8")
@@ -165,16 +199,17 @@ class Rebinding:
 
 
 def platform_env(tmp: Path, manifest: object = COMMITTED, *,
-                 declaration: object = COMMITTED) -> dict:
+                 declaration: object = COMMITTED,
+                 standards: object = COMMITTED) -> dict:
     """HERMETIC_ENV with `HOME` at a platform installation built under `tmp`.
 
-    `manifest` and `declaration` are `install_home`'s override
+    `manifest`, `declaration` and `standards` are `install_home`'s override
     hooks, unchanged: `COMMITTED` copies the repository's manifest (or host
     declaration), `None` installs none, any other value is written in its
     place.
     """
     home = install_home(tmp / "home", manifest,
-                        declaration=declaration)
+                        declaration=declaration, standards=standards)
     return {**HERMETIC_ENV, "HOME": str(home)}
 
 

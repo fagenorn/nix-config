@@ -17,10 +17,12 @@ import fnmatch
 import hashlib
 import json
 import os
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath
 import subprocess
 
-from agent_tools.delivery import host_admission
+from agent_tools.delivery import context_map_lint, host_admission, standards_lint
+from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
 from agent_tools.project_contract.conformance_registry import (
     CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER,
@@ -285,7 +287,8 @@ def declared_policy_paths(contract: dict) -> list[str]:
     """
     paths = contract["bindings"]["paths"]
     subjects = {entry for member in POLICY_PATH_MEMBERS for entry in paths[member]}
-    subjects.update(projection["source"] for projection in contract["projections"])
+    subjects.update(projection["source"] for projection in contract["projections"]
+                    if "source" in projection)
     return sorted(subjects)
 
 
@@ -624,6 +627,147 @@ def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
         return Outcome("passed")
     return Outcome("failed", "shell_indirection", "contract.commands.destructure",
                    {"commands": bound_facts(offending), "count": len(offending)})
+
+
+def check_conformance_workflow_fresh(context: "Context") -> "Outcome":
+    """Contract: failed when the committed conformance workflow differs from
+    the renderer's bytes for the contract's integration branch and schema
+    version, or when that branch cannot be rendered; passed when the file is
+    absent or exact.
+
+    Interim: it judges the file whether or not the contract declares a
+    `conformance_workflow` projection, until the contract declares one and the
+    projection check owns it. Only an absent entry is tolerated; an entry that
+    is not a regular file (a symlink included) is stale, and any other read
+    error reaches the engine boundary.
+    """
+    resolver = context.resolver
+    target = resolver.CONFORMANCE_WORKFLOW_TARGET
+    path = context.root / target
+    try:
+        entry_mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return Outcome("passed")
+    # Judged on the entry itself: a symlink, dangling or not, is not the
+    # rendered file even when what it points at matches the bytes.
+    if not stat.S_ISREG(entry_mode):
+        return Outcome("failed", "conformance_workflow_stale",
+                       "conformance.workflow.regenerate",
+                       {"target": bound_fact(target), "state": "stale"})
+    committed = path.read_bytes()
+    try:
+        expected = resolver.render_conformance_workflow(
+            context.contract["bindings"]["vcs"]["integration_branch"],
+            context.contract["schema_version"])
+    except ValueError:
+        return Outcome("failed", "conformance_workflow_stale",
+                       "conformance.workflow.regenerate",
+                       {"target": bound_fact(target), "state": "unrenderable"})
+    if committed == expected:
+        return Outcome("passed")
+    return Outcome("failed", "conformance_workflow_stale",
+                   "conformance.workflow.regenerate",
+                   {"target": bound_fact(target), "state": "stale"})
+
+
+CONTEXT_MAP_NAME = "CONTEXT-MAP.md"
+CONTEXT_MAP_LINT_COMMAND = "context-map-lint"
+PLATFORM_STANDARDS_ANCHOR = "the-bar.md"
+
+
+def select_context_map(entries: list[str]) -> list[str]:
+    """Contract: the authored entries whose basename is exactly
+    `CONTEXT-MAP.md`, in authored order.
+
+    The skills' selection rule: none is no map and no lint, several is an
+    invalid contract. Unlike a skill's reader this returns every match and
+    lets the evaluator report several as a finding instead of raising.
+    """
+    return [entry for entry in entries
+            if PurePosixPath(entry).name == CONTEXT_MAP_NAME]
+
+
+def lint_facts(problems: list[str]) -> dict:
+    """Contract: `{"paths": <labels>, "count": <problems>}` for a lint's
+    diagnostics, and nothing else of them.
+
+    A diagnostic is raw text that can carry an absolute path or an authored
+    line, so only its label, the text before the first `": "`, may become a
+    fact, and only when it reads as a repo-relative path.
+    """
+    labels = []
+    for problem in problems:
+        label, separator, _ = problem.partition(": ")
+        if (separator and label and not any(c.isspace() for c in label)
+                and not Path(label).is_absolute()
+                and ".." not in Path(label).parts):
+            labels.append(label)
+    return {"paths": bound_facts(labels), "count": len(problems)}
+
+
+def check_context_map_lint(context: "Context") -> "Outcome":
+    """Contract: the selected context map judged by the built-in lint, or a
+    finding when the contract's map cannot be judged.
+
+    Order: no map passes (an area `CONTEXT.md` is never a map), several maps
+    are ambiguous, a declared `context-map-lint` command is only reported
+    (the engine starts no repository-authored child, so its environment, cwd
+    and exit status never enter a report), a map resolving outside the root is
+    not read, an unreadable map is a finding. Authored contract, not
+    `context.bindings`, as for the other verification checks.
+    """
+    bindings = context.contract["bindings"]
+    matches = select_context_map(bindings["paths"]["context"])
+    if not matches:
+        return Outcome("passed")
+    if len(matches) > 1:
+        return Outcome("failed", "context_map_ambiguous", "docs.context_map.repair",
+                       {"paths": bound_facts(matches), "count": len(matches)})
+    entry = matches[0]
+    if CONTEXT_MAP_LINT_COMMAND in bindings["commands"]:
+        return Outcome("warning", "context_map_lint_delegated",
+                       "docs.context_map.run_repository_lint",
+                       {"command": CONTEXT_MAP_LINT_COMMAND})
+    root = context.root.resolve()
+    map_path = (context.root / entry).resolve()
+    if not map_path.is_relative_to(root):
+        return Outcome("failed", "context_map_outside_root",
+                       "docs.context_map.repair",
+                       {"paths": [bound_fact(entry)], "count": 1})
+    try:
+        problems = context_map_lint.check(context.root, map_path)
+    except (UnicodeDecodeError, OSError):
+        return Outcome("failed", "context_map_unreadable",
+                       "docs.context_map.repair",
+                       {"paths": [bound_fact(entry)], "count": 1})
+    if problems:
+        return Outcome("failed", "context_map_lint_failed",
+                       "docs.context_map.repair", lint_facts(problems))
+    return Outcome("passed")
+
+
+def check_standards_lint(context: "Context") -> "Outcome":
+    """Contract: the repository's standards tree judged by the built-in lint
+    against the installed platform standards.
+
+    The platform directory is the installation's, so its absence is its own
+    finding; an unreadable shard names the authored standards paths, never the
+    shard or the text that failed to decode.
+    """
+    platform = agent_platform.standards_dir()
+    if not (platform / PLATFORM_STANDARDS_ANCHOR).is_file():
+        return Outcome("failed", "platform_standards_missing",
+                       "platform.standards.install", {})
+    try:
+        problems = standards_lint.lint(context.root, platform)
+    except (UnicodeDecodeError, OSError):
+        authored = context.contract["bindings"]["paths"]["standards"]
+        return Outcome("failed", "standards_unreadable", "docs.standards.repair",
+                       {"paths": bound_facts(authored), "count": 1})
+    if problems:
+        return Outcome("failed", "standards_lint_failed", "docs.standards.repair",
+                       lint_facts(problems))
+    return Outcome("passed")
 
 
 # --------------------------------------------------------------------------
