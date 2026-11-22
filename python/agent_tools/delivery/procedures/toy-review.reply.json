@@ -1,1 +1,1 @@
-{"type": "object", "properties": {"verdict": {"enum": ["approve", "revise"]}, "notes": {"type": "string"}}, "required": ["verdict", "notes"]}
+{"type": "object", "properties": {"verdict": {"enum": ["approve", "revise"]}, "notes": {"type": "string"}}, "required": ["verdict", "notes"], "additionalProperties": false}

@@ -27,6 +27,10 @@ _Avoid_: project list
 One pure, named executor the platform manifest lists, which rewrites a checkout in place from one contract shape to the next.
 _Avoid_: upgrade script
 
+**Never-rise check**:
+The conformance check that runs each enforcer on the merge base and on the branch head and fails when a rule's violation count rises. The baseline is computed on every run and has no raise path (ADR-project-contract-017).
+_Avoid_: ratchet, baseline file
+
 **Platform manifest**:
 The versioned JSON file the platform ships, listing its deprecations and migrations. A project's contract schema version is checked against it.
 

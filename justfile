@@ -151,6 +151,7 @@ agent-workflow-tests *args:
     tests/test_engine_guard.py \
     tests/test_engine_deliver.py \
     tests/test_engine_session.py \
+    tests/test_engine_session_limits.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_caps.py \
     tests/test_plan_amend.py \
@@ -230,6 +231,7 @@ agent-workflow-tests *args:
     tests/test_standard_ids.py \
     tests/test_standards_lint.py \
     tests/test_citation_lint.py \
+    tests/test_never_rise.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \

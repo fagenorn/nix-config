@@ -21,11 +21,13 @@ import stat
 from pathlib import Path, PurePosixPath
 import subprocess
 
-from agent_tools.delivery import context_map_lint, host_admission, standards_lint
+from agent_tools.delivery import (
+    context_map_lint, host_admission, never_rise, size_lint, standards_lint,
+)
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
 from agent_tools.project_contract.conformance_registry import (
-    CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER,
+    CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER, MAX_FACT_LIST,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
     PROMOTED_DUPLICATE_DRIFTED, PROMOTED_DUPLICATE_FINDINGS,
     PROMOTED_DUPLICATE_PRESENT, PROMOTION_CANDIDATE_KIND,
@@ -768,6 +770,33 @@ def check_standards_lint(context: "Context") -> "Outcome":
         return Outcome("failed", "standards_lint_failed", "docs.standards.repair",
                        lint_facts(problems))
     return Outcome("passed")
+
+
+NEVER_RISE_ENFORCERS = (size_lint.ENFORCER,)
+
+
+def check_never_rise(context: "Context") -> "Outcome":
+    """Contract: no registered enforcer's violation count rises between the
+    merge base with the authored integration branch and the committed head.
+
+    It starts only read-only, bounded git children, which read committed
+    history and never the working tree; the authored contract supplies the
+    branch. No readable merge base is a failed check, never a pass.
+    """
+    branch = context.contract["bindings"]["vcs"]["integration_branch"]
+    verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
+                               CHILD_TIMEOUT_SECONDS)
+    if verdict is None:
+        return Outcome("failed", "history_unavailable", "violations.history.fetch",
+                       {"integration_branch": bound_fact(branch)})
+    if not verdict.rises:
+        return Outcome("passed", facts={"merge_base": verdict.merge_base})
+    first = verdict.rises[0]
+    return Outcome("failed", "violation_count_rose", "violations.never_rise.reduce", {
+        "merge_base": verdict.merge_base, "rule": first.rule,
+        "base_count": first.base_count, "branch_count": first.branch_count,
+        "violations": [bound_fact(v.text()) for v in first.new[:MAX_FACT_LIST]],
+        "rules": bound_facts([r.rule for r in verdict.rises])})
 
 
 # --------------------------------------------------------------------------
