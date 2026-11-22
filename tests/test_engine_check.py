@@ -278,6 +278,10 @@ def _exhausted_stop(toy: dict) -> None:
     toy["stops"]["exhausted"] = {"need": "retry", "reenter": "draft"}
 
 
+def _quota_wait_stop(toy: dict) -> None:
+    toy["stops"]["quota-wait"] = {"need": "retry", "reenter": "draft"}
+
+
 def _entry_id_with_newline(toy: dict) -> None:
     step(toy, "scope")["id"] = "scope\n"
 
@@ -433,6 +437,8 @@ CASES = [
     Case("step_id_with_a_trailing_newline", editing("toy", _entry_id_with_newline),
          [("toy", "scope\n", "invalid_field")]),
     Case("stop_named_exhausted", editing("toy", _exhausted_stop),
+         [("toy", None, "invalid_field")]),
+    Case("stop_named_quota_wait", editing("toy", _quota_wait_stop),
          [("toy", None, "invalid_field")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),

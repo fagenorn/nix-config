@@ -35,7 +35,8 @@ current directory belongs to, to `done` or a stop, and prints one line of compac
 JSON when it ends (`engine_shell` is the contract):
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
-- exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
+- exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`; the end may be the
+  engine's own stop `quota-wait` (need `retry`), when every account is out of usage;
 - exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"}, "run"}`,
   another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;

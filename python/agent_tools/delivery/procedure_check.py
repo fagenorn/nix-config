@@ -9,8 +9,8 @@ names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with exactly `
 id) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
 object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
 keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
-is never named `done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared verdict or reply enum value
-carries it.
+is never named `done`, `exhausted`, `quota-wait` or like a step. `exhausted` is reserved: no stop, declared verdict or reply
+enum value carries it. `quota-wait` is the engine's own stop, taken when every account is out of usage (`engine_shell`).
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`), `kind` (one of `KINDS`), `in` (distinct paths,
 `<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group member, forbidden on
@@ -90,6 +90,7 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
 CLAIM_LOST = "claim-lost"
+QUOTA_WAIT = "quota-wait"
 START = "(start)"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -296,8 +297,9 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
     for name, stop in stops.items():
         if not NAME_RE.fullmatch(name):
             found.add("invalid_field", f"stop name {name!r} must match {NAME_RE.pattern}.")
-        elif name in ("done", EXHAUSTED) or name in ids:
-            found.add("invalid_field", f"stop name {name!r} is `done`, `{EXHAUSTED}` or a step id.")
+        elif name in ("done", EXHAUSTED, QUOTA_WAIT) or name in ids:
+            found.add("invalid_field", f"stop name {name!r} is `done`, `{EXHAUSTED}`, "
+                                       f"`{QUOTA_WAIT}` or a step id.")
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue

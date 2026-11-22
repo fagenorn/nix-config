@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import sys
 import tempfile
 import threading
@@ -23,8 +24,8 @@ from unittest import mock
 
 from agent_tools.delivery import engine, engine_ledger, engine_session, engine_shell
 from agent_tools.delivery.engine_session import (
-    NOT_STARTED, Reading, Role, RoleError, diagnostic, launch, launch_argv, read_result,
-    read_role, render_prompt,
+    NOT_STARTED, Answer, Reading, Role, RoleError, diagnostic, launch, launch_argv,
+    read_answer, read_result, read_role, render_prompt,
 )
 from tests.test_engine_deliver import EngineProject, shape
 
@@ -34,6 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 STUB = REPO_ROOT / "tests/fixtures/engine-session/claude_stub.py"
 RESULT_NORMAL = REPO_ROOT / "tests/fixtures/engine-session/result-normal.json"
+RESULT_LIMIT = REPO_ROOT / "tests/fixtures/engine-session/result-limit.json"
 ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 DENIAL = {"tool_name": "Write", "tool_use_id": "toolu_01",
           "tool_input": {"file_path": "/etc/hosts"}}
@@ -86,6 +88,18 @@ class ReadResultTest(unittest.TestCase):
         huge = b"1" + b"0" * 400
         reading = read_result(b'{"duration_ms": ' + huge + b', "total_cost_usd": ' + huge + b"}")
         self.assertEqual((reading.wall_seconds, reading.spend_usd), (None, 0))
+
+    def test_a_limit_result_reads_as_a_usage_limit(self):
+        reading = read_result(RESULT_LIMIT.read_bytes())
+        self.assertEqual(reading.api_failure, "usage-limit")
+        self.assertIsNone(reading.reply)
+
+    def test_a_result_that_is_no_error_has_no_api_failure(self):
+        self.assertIsNone(read_result(json.dumps(RESULT).encode()).api_failure)
+        self.assertIsNone(read_result(raw(is_error=True)).api_failure)
+        self.assertIsNone(read_result(raw(is_error=True, api_error_status=True)).api_failure)
+        self.assertIsNone(read_result(raw(api_error="usage_limit_reached",
+                                          api_error_status=429)).api_failure)
 
     def test_invalid_measurements_read_as_zero(self):
         reading = read_result(raw(num_turns=True, total_cost_usd=-1, duration_ms=-5,
@@ -247,6 +261,14 @@ class LaunchArgvTest(unittest.TestCase):
             "--disallowedTools", GIT_WRITING,
             "--append-system-prompt-file", "/run/sessions/review.1.system.md"))
 
+    def test_a_resume_names_the_session_by_resume_and_never_session_id(self):
+        first = list(launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM))
+        again = list(launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM, resume=True))
+        self.assertEqual(after(again, "--resume"), SESSION)
+        self.assertNotIn("--session-id", again)
+        at = first.index("--session-id")
+        self.assertEqual(first[:at] + ["--resume", SESSION] + first[at + 2:], again)
+
     def test_a_role_with_disallowed_tools_passes_only_disallowed_tools(self):
         argv = launch_argv(IMPLEMENTER, SCHEMA, SESSION, SYSTEM)
         self.assertNotIn("--tools", argv)
@@ -288,6 +310,13 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(launched.exit_code, 0)
         self.assertEqual(len(pids), 1)
         self.assertGreater(pids[0], 0)
+
+    def test_a_given_env_is_the_launchers_whole_environment(self):
+        env = {"PATH": os.environ["PATH"], "X_ANSWER": "1"}
+        launched = launch(["env"], tempfile.gettempdir(), "", on_start=lambda pid: None, env=env)
+        lines = launched.stdout.decode().splitlines()
+        self.assertIn("X_ANSWER=1", lines)
+        self.assertFalse([line for line in lines if line.startswith("HOME=")])
 
     def test_the_launchers_stderr_is_captured_and_its_last_line_is_the_diagnostic(self):
         code = ("import sys; sys.stderr.write('first\\nclaude-account: no account \\'work\\'\\n'); "
@@ -401,6 +430,32 @@ class LaunchTest(unittest.TestCase):
                         pass
 
 
+class ReadAnswerTest(unittest.TestCase):
+    def read(self, text: str | None) -> Answer:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "answer.json"
+            if text is not None:
+                path.write_text(text, encoding="utf-8")
+            return read_answer(path)
+
+    def test_anything_but_the_two_exact_forms_is_no_answer(self):
+        nothing = Answer(None, False, None)
+        for text in (None, "", "not json", "[1]", '{"account":""}', '{"account":1}',
+                     '{"account":"a","x":1}', '{"account":"a","account":"b"}',
+                     '{"all_out":true,"resumes_at":"soon"}', '{"all_out":true}',
+                     '{"all_out":false,"resumes_at":null}', '{"all_out":1,"resumes_at":null}',
+                     '{"all_out":true,"resumes_at":null,"account":"a"}', "{}"):
+            with self.subTest(text=text):
+                self.assertEqual(self.read(text), nothing)
+
+    def test_the_two_valid_forms_give_their_values(self):
+        self.assertEqual(self.read('{"account":"p1"}'), Answer("p1", False, None))
+        self.assertEqual(self.read('{"all_out":true,"resumes_at":null}'),
+                         Answer(None, True, None))
+        self.assertEqual(self.read('{"all_out":true,"resumes_at":"2030-03-17T17:46:40Z"}'),
+                         Answer(None, True, "2030-03-17T17:46:40Z"))
+
+
 DRAFT_REPLY = {"type": "object",
                "properties": {"status": {"enum": ["drafted", "stuck"]},
                               "summary": {"type": "string"},
@@ -429,6 +484,13 @@ def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
                         f"{diagnostic_path} \"$@\"\n", encoding="utf-8")
     launcher.chmod(0o755)
     return log
+
+
+def install_answers(project: EngineProject, entries: list[dict]) -> Path:
+    """Put a launcher stand-in that answers each launch from `entries`; return its log."""
+    canned = project.tmp / "stub.answers.json"
+    canned.write_text(json.dumps(entries), encoding="utf-8")
+    return install_stub(project, canned)
 
 
 def copy_roles(project: EngineProject, *names: str) -> None:
@@ -561,9 +623,9 @@ class DeliverSessionTest(unittest.TestCase):
         run = self.run_dir()
         self.assertEqual(shape(self.project.events(run)), [
             ("step_entered", "draft", 1), ("session_starting", "draft", 1),
-            ("process_started", "draft", 1), ("result_stored", "draft", 1),
-            ("outcome_graded", "draft", 1), ("transition_taken", "draft", 1),
-            ("run_done", None, None)])
+            ("process_started", "draft", 1), ("session_answered", "draft", 1),
+            ("result_stored", "draft", 1), ("outcome_graded", "draft", 1),
+            ("transition_taken", "draft", 1), ("run_done", None, None)])
         (line,) = self.log(log)
         self.assertTrue(line["announced"])
         self.assertEqual((run / "sessions/draft.1.prompt.md").read_text(encoding="utf-8"),
@@ -576,12 +638,12 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         seen: list[tuple] = []
 
-        def checking(argv, cwd, prompt, *, on_start):
+        def checking(argv, cwd, prompt, *, on_start, **kwargs):
             (run,) = project.runs()
             events = engine_ledger.replay(run / "events.jsonl")
             seen.append((events[-1]["event"], events[-1].get("session"),
                          [e["event"] for e in events], after(list(argv), "--session-id")))
-            return real(argv, cwd, prompt, on_start=on_start)
+            return real(argv, cwd, prompt, on_start=on_start, **kwargs)
 
         with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
             code, line = engine_shell.deliver(1514, procedures)
@@ -794,3 +856,217 @@ class DeliverSessionTest(unittest.TestCase):
     def test_the_deliver_help_names_agent_steps(self):
         text = " ".join(engine.build_parser().format_help().split())
         self.assertIn("run a procedure of command, agent and decide steps to done or a stop", text)
+
+
+QUOTA_RESET = "2030-03-17T17:46:40Z"
+
+
+class DeliverLimitTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, *ROLE_NAMES)
+
+    def log(self, log: Path) -> list[dict]:
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def run_dir(self) -> Path:
+        (run,) = self.project.runs()
+        return run
+
+    def events(self, kind: str) -> list[dict]:
+        return [e for e in self.project.events(self.run_dir()) if e["event"] == kind]
+
+    def canned(self, name: str, data: bytes) -> str:
+        path = self.project.tmp / name
+        path.write_bytes(data)
+        return str(path)
+
+    def limit(self, account: str) -> dict:
+        return {"stdout": str(RESULT_LIMIT), "exit": 1, "account": account}
+
+    def normal(self, account: str | None) -> dict:
+        return {"stdout": str(RESULT_NORMAL), "exit": 0, "account": account}
+
+    def all_out(self, resumes_at: str | None = QUOTA_RESET) -> dict:
+        return {"stdout": self.canned("empty.json", b""), "exit": 75, "account": None,
+                "all_out": {"resumes_at": resumes_at}}
+
+    def limit_then_reply(self) -> tuple[Path, Path]:
+        log = install_answers(self.project, [self.limit("p1"), self.normal("p2")])
+        return log, one_step(self.project)
+
+    def test_a_limit_then_a_reply_resumes_the_same_session_in_one_visit_on_the_answering_account(self):
+        log, procedures = self.limit_then_reply()
+        done = self.project.deliver(procedures, issue=1521)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        run = self.run_dir()
+        records = self.log(log)
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(record["answer_file"] for record in records))
+        first, second = (record["argv"] for record in records)
+        session = after(first, "--session-id")
+        self.assertNotIn("--resume", first)
+        self.assertEqual(after(second, "--resume"), session)
+        self.assertNotIn("--session-id", second)
+        prompt = (run / "sessions/draft.1.prompt.md").read_text(encoding="utf-8")
+        self.assertEqual([record["stdin"] for record in records], [prompt, prompt])
+        events = self.project.events(run)
+        self.assertEqual(shape(events), [
+            ("step_entered", "draft", 1), ("session_starting", "draft", 1),
+            ("process_started", "draft", 1), ("session_answered", "draft", 1),
+            ("wait_started", None, None), ("session_resuming", "draft", 1),
+            ("process_started", "draft", 1), ("session_answered", "draft", 1),
+            ("wait_ended", None, None), ("result_stored", "draft", 1),
+            ("outcome_graded", "draft", 1), ("transition_taken", "draft", 1),
+            ("run_done", None, None)])
+        (started,) = [e for e in events if e["event"] == "wait_started"]
+        self.assertEqual((started["wait"], started["until"]), ("usage-limit", None))
+        answered = [e for e in events if e["event"] == "session_answered"]
+        self.assertEqual([e["account"] for e in answered], ["p1", "p2"])
+        self.assertEqual([e["attempt"] for e in answered], [1, 2])
+        (resuming,) = [e for e in events if e["event"] == "session_resuming"]
+        self.assertEqual(resuming["attempt"], 2)
+        for event in (*answered, resuming):
+            self.assertEqual(event["session"], session)
+        record = json.loads((run / "sessions/draft.1.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["session"], session)
+        (graded,) = [e for e in events if e["event"] == "outcome_graded"]
+        self.assertEqual(graded["outcome"], "drafted")
+
+    def test_an_all_out_answer_stops_the_run_at_quota_wait_with_the_resume_time(self):
+        install_answers(self.project, [self.all_out()])
+        done = self.project.deliver(one_step(self.project), issue=1521)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual((line["end"], line["need"]), ("quota-wait", "retry"))
+        self.assertIn(QUOTA_RESET, line["detail"])
+        events = self.project.events(self.run_dir())
+        kinds = [e["event"] for e in events]
+        self.assertNotIn("session_answered", kinds)
+        self.assertNotIn("result_stored", kinds)
+        waited, stopped = events[-2:]
+        self.assertEqual((waited["event"], waited["wait"], waited["until"]),
+                         ("wait_started", "usage-limit", QUOTA_RESET))
+        self.assertEqual((stopped["event"], stopped["step"], stopped["stop"], stopped["need"]),
+                         ("stop_reached", "draft", "quota-wait", "retry"))
+        status = json.loads(self.project.status(1521).stdout)
+        self.assertEqual(status["wait"]["until"], QUOTA_RESET)
+        self.assertEqual(status["stop"]["name"], "quota-wait")
+
+    def test_an_all_out_answer_needs_both_the_document_and_exit_75(self):
+        empty = self.canned("empty.json", b"")
+        with self.subTest("document, exit 1"):
+            install_answers(self.project, [{"stdout": empty, "exit": 1, "account": None,
+                                            "all_out": {"resumes_at": None}}])
+            done = self.project.deliver(one_step(self.project), issue=1521)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("no structured reply, exit 1", done.stderr)
+            self.assertEqual(self.events("stop_reached"), [])
+            self.assertEqual([e["account"] for e in self.events("session_answered")],
+                             ["unknown"])
+        with self.subTest("exit 75, account document"):
+            self.project = EngineProject(self)
+            self.project.env.pop("CLAUDE_ACCOUNT", None)
+            copy_roles(self.project, *ROLE_NAMES)
+            install_answers(self.project, [{"stdout": empty, "exit": 75, "account": "p1"}])
+            done = self.project.deliver(one_step(self.project), issue=1521)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("exit 75", done.stderr)
+            self.assertEqual(self.events("stop_reached"), [])
+
+    def test_a_limit_then_all_out_reopens_the_wait_with_the_resume_time(self):
+        log = install_answers(self.project, [self.limit("p1"), self.all_out()])
+        done = self.project.deliver(one_step(self.project), issue=1521)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        events = self.project.events(self.run_dir())
+        self.assertEqual(
+            [(e["event"], e.get("until", "-")) for e in events
+             if e["event"] in ("wait_started", "wait_ended", "stop_reached")],
+            [("wait_started", None), ("wait_ended", "-"), ("wait_started", QUOTA_RESET),
+             ("stop_reached", "-")])
+        records = self.log(log)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(after(records[1]["argv"], "--resume"),
+                         after(records[0]["argv"], "--session-id"))
+
+    def test_an_account_that_answers_a_limit_twice_stops_the_run_at_quota_wait(self):
+        log = install_answers(self.project, [self.limit("p1"), self.limit("p2"),
+                                             self.limit("p1"), self.normal("p3")])
+        done = self.project.deliver(one_step(self.project), issue=1521)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertEqual(len(self.log(log)), 3)
+        self.assertEqual(json.loads(done.stdout)["end"], "quota-wait")
+        self.assertEqual(len(self.events("wait_started")), 1)
+        self.assertEqual(self.events("wait_ended"), [])
+        status = json.loads(self.project.status(1521).stdout)
+        self.assertEqual(status["wait"]["wait"], "usage-limit")
+        self.assertIsNone(status["wait"]["until"])
+        self.assertEqual(status["stop"]["name"], "quota-wait")
+
+    def test_an_inherited_account_override_is_released_after_a_limit(self):
+        self.project.env["CLAUDE_ACCOUNT"] = "p1"
+        log, procedures = self.limit_then_reply()
+        done = self.project.deliver(procedures, issue=1521)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual([r["account_env"] for r in self.log(log)], ["p1", None])
+        (starting,) = self.events("session_starting")
+        self.assertEqual(starting["account"], "p1")
+        self.assertEqual([e["account"] for e in self.events("session_answered")], ["p1", "p2"])
+        (graded,) = self.events("outcome_graded")
+        self.assertEqual(graded["outcome"], "drafted")
+
+    def test_a_denied_shell_command_beside_a_limit_is_a_fault_not_a_relaunch(self):
+        denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
+                  "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
+        limited = self.canned("denied.json", canned_result(
+            is_error=True, api_error_status=429, api_error="usage_limit_reached",
+            structured_output=..., permission_denials=[denial]))
+        log = install_answers(self.project, [
+            {"stdout": limited, "exit": 1, "account": "p1"}, self.normal("p2")])
+        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
+                            prompt="review.md", reply="review.reply.json",
+                            outcome_from="verdict")]
+        procedures = write_procedures(self.project, steps, {
+            "review.md": "Review {{run.issue}}.\n",
+            "review.reply.json": json.dumps(REVIEW_REPLY)})
+        done = self.project.deliver(procedures, issue=1521)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("python3 -m unittest tests.test_x", done.stderr)
+        self.assertEqual(len(self.log(log)), 1)
+        self.assertEqual(self.events("wait_started"), [])
+        record = json.loads((self.run_dir() / "sessions/review.1.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(record["denials"], [denial])
+
+    def test_a_launch_with_no_answer_file_is_answered_by_unknown(self):
+        install_answers(self.project, [self.normal(None)])
+        done = self.project.deliver(one_step(self.project), issue=1521)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        (answered,) = self.events("session_answered")
+        self.assertEqual(answered["account"], "unknown")
+
+    def test_a_launcher_that_cannot_start_is_a_fault_with_its_diagnostic_and_no_answer(self):
+        install_stub(self.project, RESULT_NORMAL)
+        procedures = one_step(self.project)
+        with self.project.inside(), mock.patch.object(
+                engine_session, "LAUNCHER", ("/nonexistent/claude-account", "run")):
+            with self.assertRaises(engine_shell.Fault) as raised:
+                engine_shell.deliver(1521, procedures)
+        self.assertIn("exit 127", str(raised.exception))
+        self.assertIn("/nonexistent/claude-account", str(raised.exception))
+        kinds = [e["event"] for e in self.project.events(self.run_dir())]
+        self.assertNotIn("process_started", kinds)
+        self.assertNotIn("session_answered", kinds)
+
+    def test_handling_a_limit_opens_no_connection(self):
+        log, procedures = self.limit_then_reply()
+        with self.project.inside(), \
+                mock.patch.object(socket.socket, "connect", side_effect=OSError("no socket")) as connect, \
+                mock.patch.object(socket.socket, "connect_ex", side_effect=OSError("no socket")) as connect_ex, \
+                mock.patch.object(socket, "create_connection", side_effect=OSError("no socket")) as create:
+            code, line = engine_shell.deliver(1521, procedures)
+        self.assertEqual(code, 0, line)
+        self.assertEqual(line["end"], "done")
+        self.assertEqual((connect.call_count, connect_ex.call_count, create.call_count), (0, 0, 0))
+        self.assertEqual(len(self.log(log)), 2)

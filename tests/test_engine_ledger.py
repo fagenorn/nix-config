@@ -65,6 +65,10 @@ EXAMPLES = {
                          "session": "s-1", "role": "implementer", "account": "p1"},
     "process_started": {"event": "process_started", "at": AT, "step": "draft", "visit": 1,
                         "pid": 4242, "started": AT},
+    "session_resuming": {"event": "session_resuming", "at": AT, "step": "draft", "visit": 1,
+                         "session": "s-1", "attempt": 2},
+    "session_answered": {"event": "session_answered", "at": AT, "step": "draft", "visit": 1,
+                         "session": "s-1", "attempt": 1, "account": "p1"},
     "result_stored": {"event": "result_stored", "at": AT, "step": "scope", "visit": 1,
                       "result": "results/scope.1.json", "wall_seconds": 8.5, "turns": 3,
                       "tokens": dict(ZERO_TOKENS), "spend_usd": 0.25},
@@ -166,6 +170,8 @@ class EventShapeTest(unittest.TestCase):
                {**EXAMPLES["keep_alive_ran"], "attempt": 0},
                {**EXAMPLES["keep_alive_ran"], "attempt": True},
                {**EXAMPLES["keep_alive_ran"], "verdict": ""},
+               {**EXAMPLES["session_resuming"], "attempt": 0},
+               {**EXAMPLES["session_answered"], "attempt": 0},
                "not an object"]
         for variant in bad:
             with self.subTest(variant=variant), self.assertRaises(LedgerError):
