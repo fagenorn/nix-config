@@ -156,6 +156,19 @@ class SchemaThreeDraftPlanTest(AdoptTestCase):
         (violation,) = [v for v in doc["error"]["violations"] if v["pointer"] == "/platform"]
         self.assertTrue(violation["message"].startswith("cannot be derived"), violation)
 
+    def test_a_schema_three_draft_with_a_conformance_repair_plans_draft_naming_the_repair(self):
+        root = self.schema_three_repo()
+        install_platform_revision(self.home, None)  # the platform revision is unknown
+        code, doc, err = self.plan(root, "--contract-draft", self.draft_file())
+        self.assertEqual(code, 0, err or doc)
+        plan = doc["plan"]
+        self.assertEqual(plan["state"], "draft")
+        self.assertEqual(plan["project_id"], "fixture/target")
+        (gate,) = [gate for gate in doc["verification"]["ready_gates"]
+                   if gate["id"] == "conformance-plannable"]
+        self.assertEqual(gate, {"id": "conformance-plannable", "status": "failed",
+                                "repair_id": adopt_conformance.REVISION_UNKNOWN})
+
     def test_seed_origin_writes_the_authored_origin_url(self):
         root = bootstrap_repo(self.home, remotes=("https://github.com/fixture/target.git",))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)

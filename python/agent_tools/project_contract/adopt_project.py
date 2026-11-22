@@ -473,7 +473,15 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
          for path, (_, after) in reference_files.items()
          if path in adopt_conformance.CONFORMANCE_TARGETS})
     three = schema_three.declares(draft)
-    if draft is not None and three:
+    if draft is not None and three and conformance.repair_id is not None:
+        # A conformance repair empties the planned bytes (the lock then has no
+        # platform node), so no tree can state the contract's derived values
+        # and a strict resolve would refuse `/platform` in place of the cause.
+        # The plan is a draft whose blocker names the repair (ADR-018 D10);
+        # the strict resolve runs once the repair is made.
+        projections_drift = False
+        contract_resolves, repair_id, payload = True, None, None
+    elif draft is not None and three:
         # One strict resolve of the exact contract the plan writes, beside the
         # conformance bytes it writes with it: the derived values come from
         # the repository, so nothing short of that tree can state them.
@@ -524,9 +532,15 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         # The resolver accepted the id as a non-empty string. Taking it from
         # the draft bypasses `derive_identity`'s collision check, so the
         # registry is asked here.
-        contract_id = (derived_values.remote_slug(root) if three
-                       else draft["project"]["id"])
-        if adopt_planning.registry_collision(contract_id, root):
+        if not three:
+            contract_id = draft["project"]["id"]
+        else:
+            try:
+                contract_id = derived_values.remote_slug(root)
+            except derived_values.Underivable:
+                # Only a repaired conformance plan reaches here unresolved.
+                contract_id = None
+        if contract_id is not None and adopt_planning.registry_collision(contract_id, root):
             raise adopt_inspection.refuse(
                 "adopt_failure", "adopt.draft.id_taken", "/project/id",
                 "the project id is already registered for another checkout")
