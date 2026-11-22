@@ -53,6 +53,7 @@ from agent_tools.delivery import (
     engine_commands, engine_core, engine_ledger, engine_session, procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
+from agent_tools.delivery.engine_ledger import creation_lock_path
 from agent_tools.project_contract import resolve_project
 
 EXIT_DONE = 0
@@ -174,10 +175,6 @@ def _validate(directory: Path, table: CommandTable) -> dict:
             except engine_session.RoleError as error:
                 raise Refused(str(error)) from error
     return procedure
-
-
-def creation_lock_path(root: Path, issue: int) -> Path:
-    return Path(root) / f".{issue}.deliver.lock"
 
 
 def lock_holder(run_dir: Path) -> dict | None:

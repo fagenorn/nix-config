@@ -246,6 +246,10 @@ def read_run(run_dir: Path) -> dict:
     return document
 
 
+def creation_lock_path(root: Path, issue: int) -> Path:
+    return Path(root) / f".{issue}.deliver.lock"
+
+
 def _issue_runs(root: Path, issue: int) -> list[tuple[Path, dict]]:
     """Every run directory of `issue` under `root` with its `run.json`; it writes nothing."""
     root = Path(root)
@@ -256,7 +260,12 @@ def _issue_runs(root: Path, issue: int) -> list[tuple[Path, dict]]:
         match = RUN_ID_RE.match(entry.name)
         if match is None or match.group(1) != str(issue) or not entry.is_dir():
             continue
-        document = read_run(entry)
+        try:
+            document = read_run(entry)
+        except LedgerError:
+            if not entry.exists():
+                continue  # renamed away by a housekeeping sweep after the listing
+            raise
         if document["issue"] == issue:
             found.append((entry, document))
     return found
