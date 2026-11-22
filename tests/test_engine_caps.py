@@ -80,7 +80,6 @@ def chain(n: int) -> dict:
         )
     return {
         "format": header["format"],
-        "keep_alive": header["keep_alive"],
         "inputs": ["holder", "issue", "range", "repo"],
         "stops": {"halt": {"need": "retry", "reenter": "s1"}},
         "steps": steps,

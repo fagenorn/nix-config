@@ -1,53 +1,46 @@
 """`engine`: run the delivery engine's commands (#1508).
 
-`engine check [--procedures <dir>]` reads the procedure files of a directory
-(default: the package's `procedures` directory) and prints one line of compact
-sorted-key JSON to stdout, starting no process and opening no socket:
+`engine check [--procedures <dir>]` reads the procedure files of a directory (default: the
+package's `procedures` directory) and prints one line of compact sorted-key JSON, starting
+no process and opening no socket:
 
 - exit 0: `{"procedures": [<names>], "verdict": "ok"}`;
-- exit 1: `{"breaches": [{"cap", "size", "thing", "unit"}, ...], "refusals":
-  [{"defect", "detail", "procedure", "step"}, ...], "verdict": "refused"}`,
-  refusals ordered by procedure name, phase, then step position, and both
-  members always present;
-- exit 2, stdout empty and one stderr line: a usage error, `--procedures` not a
-  directory, a directory with no procedure file, or an invalid
-  `command_verdicts.json`.
+- exit 1: `{"breaches": [{"cap", "size", "thing", "unit"}, ...], "refusals": [{"defect",
+  "detail", "procedure", "step"}, ...], "verdict": "refused"}`, refusals ordered by
+  procedure name, phase, then step position, both members always present;
+- exit 2, stdout empty and one stderr line: a usage error, `--procedures` not a directory, a
+  directory with no procedure file, or an invalid `command_verdicts.json`.
 
-The procedure format and every refusal code are `procedure_check`'s contract.
-In a directory an onboarded project owns, the command ids checked are the
-platform's plus the project's, the ones `engine deliver` accepts; elsewhere
-they are the platform's.
-The check also lists in `breaches` each cap of `engine_caps` the core, the
-engine package, a procedure, the graders or a prompt file exceeds; nothing
-changes a cap.
+The procedure format and every refusal code are `procedure_check`'s contract. In a directory
+an onboarded project owns, the command ids checked are the platform's plus the project's,
+the ones `engine deliver` accepts; elsewhere they are the platform's. The check also lists
+in `breaches` each cap of `engine_caps` the core, the engine package, a procedure, the
+graders or a prompt file exceeds; nothing changes a cap.
 
-`engine status <issue> [--project <slug>]` reads the newest run of the issue
-under `~/.agents/state/engine/runs/` (the run directory `engine_ledger`
-describes) and prints one line of compact sorted-key JSON, the state one fold
-derives from the run's `events.jsonl`. It writes nothing and creates no
-directory:
+`engine status <issue> [--project <slug>]` reads the newest run of the issue under
+`~/.agents/state/engine/runs/` and prints one line of compact sorted-key JSON, the state one
+fold of the run's `events.jsonl` derives. It writes nothing and creates no directory:
 
 - exit 0: the folded state (`engine_ledger.RunState.as_json()`);
 - exit 1: `{"issue": <n>, "run": null}`, no run of that issue (and project);
-- exit 2, stdout empty and one stderr line: a usage error, an issue that is not
-  an integer of 1 or more, runs of several projects with no `--project`, an
-  unreadable `run.json`, or an event file the ledger refuses.
+- exit 2, stdout empty and one stderr line: a usage error, an issue that is not an integer
+  of 1 or more, runs of several projects with no `--project`, an unreadable `run.json`, or
+  an event file the ledger refuses.
 
-`engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a
-procedure of `command`, `agent` and `decide` steps; an agent step runs as one
-headless session through the account launcher, graded only by its structured
-reply, its files kept under the run's `sessions/`; default: the package's
-`procedures` directory) for the issue, in the project the current directory belongs to, to
-`done` or a stop, and prints one line of compact sorted-key JSON when it ends
-(`engine_shell` is the contract):
+`engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a procedure of
+`command`, `agent` and `decide` steps; an agent step runs as one headless session through the
+account launcher, graded only by its structured reply, its files kept under the run's
+`sessions/`; default: the package's `procedures` directory) for the issue, in the project the
+current directory belongs to, to `done` or a stop, and prints one line of compact sorted-key
+JSON when it ends (`engine_shell` is the contract):
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
-- exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"},
-  "run"}`, another deliver of the issue holds its run's lock; nothing is written;
+- exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"}, "run"}`,
+  another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
-- exit 2, stdout empty and one stderr line: a usage error, or a refusal before
-  any run exists, which creates no run directory.
+- exit 2, stdout empty and one stderr line: a usage error, or a refusal before any run
+  exists, which creates no run directory.
 """
 
 from __future__ import annotations

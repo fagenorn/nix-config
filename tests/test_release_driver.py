@@ -744,6 +744,29 @@ class MergePreviewTest(DriverCase):
         self.assertEqual(self.world.calls(), [])
         self.assertEqual(seen, [("acquire", CANONICAL["slug"], "dev", CANONICAL["commit"])])
 
+    def test_a_read_only_preview_takes_no_lock_when_a_release_starts_after_the_status_read(self):
+        driver = self.two_branch()
+        self.assertIsNone(driver.status()["release"])
+        rs.seed(driver, merge=support.MERGE)
+        self.world.reset()
+        seen = []
+
+        def recorder(*args):
+            seen.append(args)
+            return {"verdict": "already_held", "lock_sha": CANONICAL["commit"], "detail": None}
+
+        with mock.patch.object(release_lock, "call", side_effect=recorder):
+            document = driver.preview(None, read_only=True)
+        self.assertEqual(seen, [])
+        self.assertEqual(document["mode"], "resume")
+        self.assertIsNone(document["lock"])
+        self.assertEqual(document["confirmations"], [])
+        self.assertEqual(self.world.calls(), [])
+
+    def test_a_read_only_preview_of_a_new_release_still_needs_a_candidate(self):
+        driver = self.two_branch()
+        self.assertRefusal("candidate_required", lambda: driver.preview(None, read_only=True))
+
 
 class RailwayActivationWatchTest(DriverCase):
     """AC3: a railway-deploy unit is an inspect-only activation the driver waits on or parks."""

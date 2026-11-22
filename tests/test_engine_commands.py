@@ -7,10 +7,14 @@ for a project command (agent-helpers rule 5).
 
 from __future__ import annotations
 
+import _thread
 import os
 import re
+import signal
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,6 +24,8 @@ from agent_tools.delivery.engine_commands import (
     PLATFORM_MODULES, CommandTable, Invocation, UnknownCommand, argument, grade, run)
 from agent_tools.delivery.procedure_check import load_commands
 from agent_tools.system.siblings import sibling_argv
+
+TIER = "fast"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDIN = REPO_ROOT / "tests/fixtures/engine-deliver/standin.py"
@@ -169,6 +175,84 @@ class GradeTest(unittest.TestCase):
         self.assertEqual(len(pids), 1)
         with self.assertRaises(ProcessLookupError):
             os.kill(pids[0], 0)
+
+    def test_a_command_past_its_timeout_is_killed_with_its_group_and_keeps_its_output(self):
+        pidfile = os.path.join(self.tmp, "grandchild")
+        entry = project("hold", pidfile, "0", cwd=self.tmp)
+        pids: list[int] = []
+        started = time.monotonic()
+        ran = run(table(hold=entry), "hold", None, (), on_start=pids.append, timeout=2)
+        elapsed = time.monotonic() - started
+        self.assertEqual(ran.outcome, "timeout")
+        self.assertEqual(ran.outcome, engine_commands.TIMED_OUT)
+        self.assertEqual(ran.result, {})
+        self.assertNotEqual(ran.exit_code, 0)
+        self.assertLess(elapsed, 20, "a grandchild held the pipes open")
+        self.assertIn(b"marker-hold", ran.stdout)
+        self.assertIn(b"marker-hold-err", ran.stderr)
+        self.assertNotIn(b"marker-hold-err", ran.stdout)
+        self.assertEqual(len(pids), 1)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pids[0], 0)
+        grandchild = int(Path(pidfile).read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the grandchild outlived the timeout")
+
+    def test_an_interrupted_timed_run_kills_its_group_before_the_interrupt_propagates(self):
+        pidfile = os.path.join(self.tmp, "grandchild")
+        entry = project("hold", pidfile, "0", cwd=self.tmp)
+        pids: list[int] = []
+        interrupt = threading.Timer(1.5, _thread.interrupt_main)
+        interrupt.start()
+        self.addCleanup(interrupt.cancel)
+        with self.assertRaises(KeyboardInterrupt):
+            run(table(hold=entry), "hold", None, (), on_start=pids.append, timeout=60)
+        grandchild = int(Path(pidfile).read_text())
+        deadline = time.monotonic() + 5
+        for pid in (pids[0], grandchild):
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail(f"process {pid} outlived the interrupted run")
+
+    def test_a_descendant_that_left_the_group_cannot_hold_the_run_open(self):
+        pidfile = os.path.join(self.tmp, "grandchild")
+
+        def kill_escapee() -> None:
+            try:
+                os.kill(int(Path(pidfile).read_text()), signal.SIGKILL)
+            except (ProcessLookupError, FileNotFoundError, ValueError):
+                pass
+
+        self.addCleanup(kill_escapee)
+        entry = project("hold", pidfile, "1", cwd=self.tmp)
+        started = time.monotonic()
+        ran = run(table(hold=entry), "hold", None, (), on_start=lambda pid: None, timeout=2)
+        elapsed = time.monotonic() - started
+        self.assertEqual(ran.outcome, "timeout")
+        self.assertLess(elapsed, 20, "a descendant outside the group held the pipes open")
+        self.assertIn(b"marker-hold", ran.stdout)
+
+    def test_a_finished_command_carries_what_it_printed(self):
+        entry = project("verdict", "renewed", "0", cwd=self.tmp)
+        for options in ({"timeout": 60}, {}):
+            with self.subTest(options=options):
+                ran = run(table(says=entry), "says", None, (("run.issue", 5),),
+                          on_start=lambda pid: None, **options)
+                self.assertEqual(ran.stdout, b'{"argv":["5"],"verdict":"renewed"}\n')
+                self.assertEqual(ran.stderr, b"")
+                self.assertEqual((ran.outcome, ran.exit_code), ("renewed", 0))
 
     def test_arguments_are_text_integers_and_compact_json(self):
         self.assertEqual(argument("a b"), "a b")

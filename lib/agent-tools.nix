@@ -59,6 +59,7 @@ let
     "forge-claim" = "claims.forge_claim";
     "forge-issue" = "claims.forge_issue";
     "guard-policy" = "guard.guard_policy";
+    "host-readiness" = "project_contract.host_readiness";
     "issue-branch" = "delivery.issue_branch";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
@@ -72,6 +73,7 @@ let
     "resolve-project" = "project_contract.resolve_project";
     "skill-lint" = "skill_lint";
     "sprint" = "console.sprint";
+    "standards-lint" = "delivery.standards_lint";
     "verified-tree" = "verification.verified_tree";
     "verify-pending" = "verification.verify_pending";
     "verify-slot" = "delivery.verify_slot";

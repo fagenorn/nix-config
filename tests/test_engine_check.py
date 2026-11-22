@@ -212,7 +212,8 @@ def _two_exhausted_steps_hand_over(child: dict) -> None:
          "in": ["run.item"], "max_visits": 1,
          "on": {"ok": own, "failed": "done", "exhausted": other}}
         for own, other in (("a", "b"), ("b", "a"))]
-    child["stops"]["child-stop"]["reenter"] = "a"
+    for stop in child["stops"].values():
+        stop["reenter"] = "a"
 
 
 def _exhausted_and_ordinary_edges_loop(child: dict) -> None:
@@ -226,7 +227,51 @@ def _exhausted_and_ordinary_edges_loop(child: dict) -> None:
             item["max_visits"] = 1
         return item
     child["steps"] = [make("a", "a", "b", True), make("b", "b", "c", True), make("c", "a", None, False)]
-    child["stops"]["child-stop"]["reenter"] = "a"
+    for stop in child["stops"].values():
+        stop["reenter"] = "a"
+
+
+def _no_claim_lost_stop(toy: dict) -> None:
+    del toy["stops"]["claim-lost"]
+    step(toy, "children")["on"]["claim-lost"] = "needs-owner"
+
+
+def _recovery(child: dict) -> None:
+    child["steps"].append(
+        {"id": "recover", "stage": "building", "kind": "command", "command": "diff-scope",
+         "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop"}})
+    child["stops"]["claim-lost"]["reenter"] = "recover"
+
+
+def _recovery_without_a_mutating_step(child: dict) -> None:
+    _recovery(child)
+    del step(child, "claim")["mutates"]
+
+
+def _recovery_without_a_keep_alive(child: dict) -> None:
+    _recovery(child)
+    del child["keep_alive"]
+
+
+def _recovery_reading(path: str) -> Callable[[dict], None]:
+    """toy-child as a -> b (mutates) -> done, whose `claim-lost` re-enters `r`, a step reading `path`."""
+    def edit(child: dict) -> None:
+        def command(name: str, reads: str, on: dict, **more: object) -> dict:
+            return {"id": name, "stage": "building", "kind": "command", "command": "diff-scope",
+                    "in": [reads], "on": on, **more}
+        done = {"ok": "done", "failed": "child-stop"}
+        child["steps"] = [command("a", "run.item", {"ok": "b", "failed": "child-stop"}),
+                          command("b", "run.item", done, mutates=True), command("r", path, done)]
+        child["stops"]["child-stop"]["reenter"] = "a"
+        child["stops"]["claim-lost"]["reenter"] = "r"
+    return edit
+
+
+def _first_step_recovery_reading(path: str) -> Callable[[dict], None]:
+    def edit(child: dict) -> None:
+        _recovery(child)
+        step(child, "recover")["in"] = [path]
+    return edit
 
 
 def _exhausted_stop(toy: dict) -> None:
@@ -277,6 +322,20 @@ CASES = [
     Case("unknown_keep_alive",
          editing("toy", _set(lambda toy: toy["keep_alive"], "command", "nope")),
          [("toy", None, "unknown_command")]),
+    Case("keep_alive_without_a_claim_lost_stop", editing("toy", _no_claim_lost_stop),
+         [("toy", None, "missing_claim_lost")]),
+    Case("claim_lost_recovery_without_a_mutating_step",
+         editing("toy-child", _recovery_without_a_mutating_step),
+         [("toy-child", "recover", "unreachable_step")]),
+    Case("claim_lost_recovery_without_a_keep_alive",
+         editing("toy-child", _recovery_without_a_keep_alive),
+         [("toy-child", "recover", "unreachable_step")]),
+    Case("claim_lost_recovery_reads_the_result_of_the_step_it_guards",
+         editing("toy-child", _recovery_reading("b.anything")),
+         [("toy-child", "r", "unproduced_input")]),
+    Case("claim_lost_recovery_reads_the_result_of_the_first_step_it_guards",
+         editing("toy-child", _first_step_recovery_reading("claim.verdict")),
+         [("toy-child", "recover", "unproduced_input")]),
     Case("subcommand_on_a_plain_command",
          editing("toy", _set(lambda toy: step(toy, "scope"), "subcommand", "run")),
          [("toy", "scope", "unknown_command")]),
@@ -412,6 +471,27 @@ class ToyProcedureTest(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"}))
 
+    def test_a_procedure_with_no_keep_alive_passes_the_check(self):
+        def drop_keep_alive(directory: Path) -> None:
+            for name in ("toy", "toy-child"):
+                doc = load(directory, name)
+                del doc["keep_alive"]
+                save(directory, name, doc)
+        code, out, _ = run_check("--procedures", str(broken_copy(drop_keep_alive)))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_procedure_with_no_keep_alive_needs_no_claim_lost_stop(self):
+        def drop_keep_alive_and_claim_lost(directory: Path) -> None:
+            toy, child = load(directory, "toy"), load(directory, "toy-child")
+            del toy["keep_alive"], child["keep_alive"], child["stops"]["claim-lost"]
+            del step(toy, "children")["on"]["claim-lost"]
+            save(directory, "toy", toy)
+            save(directory, "toy-child", child)
+        code, out, _ = run_check("--procedures", str(broken_copy(drop_keep_alive_and_claim_lost)))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
     def test_the_toy_has_all_five_kinds_a_stop_and_a_bounded_loop(self):
         toy = load(PROCEDURES, "toy")
         self.assertEqual({item["kind"] for item in toy["steps"]},
@@ -461,6 +541,18 @@ class RefusalTableTest(unittest.TestCase):
 
 
 class GraphTest(unittest.TestCase):
+    def test_a_step_reached_only_through_claim_lost_is_reachable(self):
+        directory = broken_copy(editing("toy-child", _recovery))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_claim_lost_recovery_may_read_what_ran_before_the_guarded_step(self):
+        directory = broken_copy(editing("toy-child", _recovery_reading("a.anything")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
     def test_exhausted_may_be_mapped_off_a_cycle(self):
         directory = broken_copy(editing(
             "toy-child", _set(lambda child: step(child, "claim")["on"], "exhausted", "child-stop")))

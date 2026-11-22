@@ -2845,6 +2845,51 @@ class PlanTestCaseFormTest(unittest.TestCase):
         self.assertIn("follow its step 3 exactly", prompt(calls, "direct-impl"))
 
 
+class ProvingTestFirstTest(unittest.TestCase):
+    """#1384: the planner names each task's one proving test first, and the plan review checks it."""
+
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")
+
+    @staticmethod
+    def constant(name):
+        found = re.search(rf"const {name} = `([^`]*)`", PROGRAM.read_text(encoding="utf-8"))
+        if found is None:
+            raise AssertionError(f"{name} is not a shared constant")
+        return found.group(1)
+
+    def test_every_planner_prompt_asks_for_the_proving_test_first_and_no_other_prompt_does(self):
+        ask = self.constant("PROVING_TEST")
+        seen = set()
+        for call in all_calls():
+            label = call["label"]
+            if label in self.PLANNERS:
+                self.assertIn(ask, call["prompt"], label)
+                seen.add(label)
+            else:
+                self.assertNotIn(ask, call["prompt"], label)
+        self.assertEqual(seen, set(self.PLANNERS))
+        self.assertEqual(PROGRAM.read_text(encoding="utf-8").count(ask), 1)
+
+    def test_the_plan_review_and_the_planner_self_check_carry_the_proving_finding_in_both_rubrics(self):
+        finding = self.constant("PROVING_FINDING")
+        full_rubric = self.constant("PLAN_RUBRIC")
+        sized_rubric = self.constant("PLAN_RUBRIC_SIZED")
+        owns = self.constant("PLAN_CODEX_OWNS")
+        _, full = run()
+        _, sized = run(args=SIZED)
+        full_text = prompt(full, "plan-review")
+        sized_text = prompt(sized, "plan-review")
+        plan = prompt(full, "plan")
+        self.assertLess(full_text.index(full_rubric), full_text.index(finding))
+        self.assertLess(sized_text.index(sized_rubric), sized_text.index(finding))
+        self.assertLess(sized_text.index(finding), sized_text.index(owns))
+        self.assertLess(plan.index(full_rubric), plan.index(finding))
+        for call in all_calls():
+            if finding in call["prompt"]:
+                self.assertIn(call["label"], self.PLANNERS + ("plan-review",))
+        self.assertEqual(PROGRAM.read_text(encoding="utf-8").count(finding), 1)
+
+
 class TaskTest(unittest.TestCase):
     def test_blocked_task_stops_with_cont_marking_it_partial(self):
         result, _ = run(replies={"impl-1": {"status": "blocked", "notes": "no"}})
@@ -3630,10 +3675,10 @@ FULL = json.dumps(TWO_IDS, separators=(",", ":"))
 LINT_ONLY = json.dumps([TWO_IDS[0]], separators=(",", ":"))
 
 
-def slotted(entries):
-    """The entries as a verification prompt holds them: each argv behind verify-slot (#1383)."""
-    return json.dumps([dict(e, argv=["verify-slot", "run", "--wait-limit", "600", "--", *e["argv"]]) for e in entries],
-                      separators=(",", ":"))
+def slotted(entries, live=False):
+    """The entries as a verification prompt holds them: each argv behind verify-slot (#1383), with --live in the live lane (#1434)."""
+    lead = ["verify-slot", "run", "--wait-limit", "600", *(["--live"] if live else []), "--"]
+    return json.dumps([dict(e, argv=[*lead, *e["argv"]]) for e in entries], separators=(",", ":"))
 FIXED = "c" * 40
 LINT_RED = {"head": SHA, "clean": True, "results": [{"id": "lint", "status": "fail", "summary": "3 whitespace errors"},
                                                    {"id": "test", "status": "pass", "summary": "ok"}]}
@@ -4129,6 +4174,19 @@ class VerifySlotTest(unittest.TestCase):
         p = prompt(calls, "verify")
         self.assertIn(slotted([self.BUILD]), p)
         self.assertNotIn('"argv":["make","build"]', p)
+
+    def test_a_live_lane_verification_waits_ahead_of_ordinary_runs(self):
+        _, calls = run(args=ARGS, patch=LIVE_PATCH)
+        p = prompt(calls, "verify")
+        self.assertIn(slotted([self.BUILD], live=True), p)
+
+    def test_an_ordinary_lane_verification_takes_no_priority(self):
+        for args in (ARGS, dict(ARGS, lane="direct")):
+            with self.subTest(lane=args.get("lane")):
+                _, calls = run(args=args)
+                p = prompt(calls, "verify")
+                self.assertIn(slotted([self.BUILD]), p)
+                self.assertNotIn('"--live"', p)
 
     def test_the_rerun_and_the_next_verification_run_inside_a_verify_slot(self):
         _, calls = run(replies={"verify": VerifyRerunTest.OUTSIDE, "verify-rerun-1": VerifyRerunTest.OUTSIDE})
