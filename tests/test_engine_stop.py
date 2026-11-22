@@ -7,20 +7,34 @@ Every case that starts a process runs the stand-in project command or a launcher
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import fcntl
+import io
 import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.delivery import engine_commands, engine_session, engine_stop
+from agent_tools.delivery import (
+    engine, engine_commands, engine_ledger, engine_session, engine_shell, engine_stop,
+)
 from tests.test_engine_commands import project, table
-from tests.test_engine_session import LAUNCHER_STANDIN
+from tests.test_engine_deliver import ANY_SENTENCE, EngineProject, step
+from tests.test_engine_keep_alive import KEEP_ALIVE
+from tests.test_engine_session import (
+    LAUNCHER_STANDIN, RESULT_NORMAL, after, copy_roles, install_stub, one_step,
+)
 
 TIER = "integration"  # the polled cases start process groups
 
@@ -192,6 +206,266 @@ class StopPollTest(unittest.TestCase):
                                          stop=lambda: False)
         self.assertEqual(launched.exit_code, 0)
         self.assertEqual(launched.stdout, b"1000000\n")
+
+
+def reap_recorded(engine_project: EngineProject) -> None:
+    for run in engine_project.runs():
+        for event in engine_project.events(run):
+            if event["event"] == "process_started":
+                reap(event["pid"])
+
+
+def until(test: unittest.TestCase, predicate, seconds: float = 30) -> None:
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() > deadline:
+            test.fail("the condition did not come true in time")
+        time.sleep(0.05)
+
+
+def pid_in(path: Path) -> bool:
+    return path.exists() and bool(path.read_text().strip())
+
+
+class EngineStopTest(unittest.TestCase):
+    def start(self, engine_project: EngineProject, procedures: Path, issue: int):
+        argv, options = engine_project.command(
+            "deliver", str(issue), "--procedures", str(procedures),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(argv, **options)
+        self.addCleanup(process.communicate)
+        self.addCleanup(reap_recorded, engine_project)
+        self.addCleanup(process.kill)
+        self.addCleanup(engine_project.release.write_text, "go", encoding="utf-8")
+        return process
+
+    def stop(self, engine_project: EngineProject, issue: int):
+        argv, options = engine_project.command("stop", str(issue))
+        return subprocess.run(argv, capture_output=True, timeout=60, **options)
+
+    def started(self, engine_project: EngineProject, name: str) -> bool:
+        runs = engine_project.runs()
+        return len(runs) == 1 and any(
+            e["event"] == "process_started" and e["step"] == name
+            for e in engine_project.events(runs[0]))
+
+    def ended_with_stop(self, engine_project: EngineProject, process, run: Path):
+        began = time.monotonic()
+        self.assertEqual(process.wait(15), 3)
+        self.assertLess(time.monotonic() - began, 15)
+        out, _ = process.communicate()
+        (line,) = out.splitlines()
+        result = json.loads(line)
+        ANY_SENTENCE(self, result.pop("detail"))
+        self.assertEqual(result, {"end": "stopped-by-request", "need": "retry",
+                                  "run": run.name})
+        self.assertFalse((run / "stop-request").exists())
+
+    def test_engine_stop_ends_a_hanging_agent_step_with_the_stop_code(self):
+        project_ = EngineProject(self)
+        project_.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project_, "implementer")
+        log = install_stub(project_, RESULT_NORMAL, exit="hang")
+        procedures = one_step(project_)
+        running = self.start(project_, procedures, 1524)
+        until(self, lambda: self.started(project_, "draft") and log.exists()
+              and '"hang"' in log.read_text())
+        (run,) = project_.runs()
+        (record,) = [json.loads(line) for line in log.read_text().splitlines()]
+        self.addCleanup(reap, record["hang"]["child"])
+        holder = json.loads((run / "lock").read_text())
+        stopped = self.stop(project_, 1524)
+        self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+        (line,) = stopped.stdout.splitlines()
+        answer = json.loads(line)
+        ANY_SENTENCE(self, answer.pop("detail"))
+        self.assertEqual(answer, {"issue": 1524, "process": {"pid": running.pid,
+                                                              "started": holder["started"]},
+                                  "requested": True, "run": run.name})
+        self.ended_with_stop(project_, running, run)
+        events = project_.events(run)
+        last = events[-1]
+        self.assertEqual((last["event"], last["step"], last["stop"], last["need"]),
+                         ("stop_reached", "draft", "stopped-by-request", "retry"))
+        kinds = {e["event"] for e in events}
+        self.assertFalse(kinds & {"result_stored", "outcome_graded", "transition_taken"})
+        self.assertEqual(list((run / "results").iterdir()), [])
+        self.assertFalse((run / "sessions/draft.1.json").exists())
+        (starting,) = [e for e in events if e["event"] == "session_starting"]
+        self.assertEqual(starting["session"], after(record["argv"], "--session-id"))
+        (process,) = [e for e in events if e["event"] == "process_started"]
+        gone(self, process["pid"], group=True)
+        gone(self, record["hang"]["child"])
+        status = json.loads(project_.status(1524).stdout)
+        self.assertEqual(status["stop"], {"name": "stopped-by-request", "need": "retry"})
+        self.assertIs(status["done"], False)
+        again = project_.deliver(procedures, issue=1524)
+        self.assertEqual(again.returncode, 2, again.stdout + again.stderr)
+        self.assertIn(run.name, again.stderr)
+
+    def test_engine_stop_ends_a_hanging_command_step_and_its_group(self):
+        project_ = EngineProject(self)
+        procedures = project_.procedures([step("a", "standin-hold", "done")])
+        running = self.start(project_, procedures, 1512)
+        until(self, lambda: self.started(project_, "a") and pid_in(project_.hold))
+        (run,) = project_.runs()
+        self.addCleanup(reap, int(project_.hold.read_text()))
+        stopped = self.stop(project_, 1512)
+        self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+        self.ended_with_stop(project_, running, run)
+        events = project_.events(run)
+        self.assertEqual((events[-1]["event"], events[-1]["step"]), ("stop_reached", "a"))
+        self.assertNotIn("result_stored", {e["event"] for e in events})
+        (process,) = [e for e in events if e["event"] == "process_started"]
+        gone(self, process["pid"], group=True)
+        gone(self, int(project_.hold.read_text()))
+
+    def test_engine_stop_during_a_keep_alive_ends_the_run_before_the_step(self):
+        project_ = EngineProject(self)
+        renewer = project_.tmp / "keep-alive.pid"
+        project_.answer({"stdout": '{"verdict":"renewed"}', "sleep": 60, "exit": 0,
+                         "pidfile": str(renewer)})
+        procedures = project_.procedures(
+            [step("a", "standin-record", "done", mutates=True)], keep_alive=KEEP_ALIVE)
+        running = self.start(project_, procedures, 1512)
+        until(self, lambda: pid_in(renewer))
+        self.addCleanup(reap, int(renewer.read_text()))
+        (run,) = project_.runs()
+        stopped = self.stop(project_, 1512)
+        self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+        self.ended_with_stop(project_, running, run)
+        events = project_.events(run)
+        kinds = {e["event"] for e in events}
+        self.assertFalse(kinds & {"keep_alive_ran", "step_entered"})
+        self.assertEqual((events[-1]["event"], events[-1]["step"]), ("stop_reached", "a"))
+        self.assertFalse(project_.record.exists())
+        gone(self, int(renewer.read_text()), group=True)
+
+    def test_a_request_naming_an_engine_that_is_gone_does_not_stop_the_run(self):
+        project_ = EngineProject(self)
+        procedures = project_.procedures([step("a", "standin-block", "done")])
+        running = self.start(project_, procedures, 1512)
+        until(self, lambda: self.started(project_, "a"))
+        (run,) = project_.runs()
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        engine_stop.write_request(run, {"pid": dead.pid, "started": "2026-01-01T00:00:00Z"})
+        time.sleep(3)
+        self.assertIsNone(running.poll())
+        project_.release.write_text("go", encoding="utf-8")
+        self.assertEqual(running.wait(60), 0)
+        events = project_.events(run)
+        self.assertEqual(events[-1]["event"], "run_done")
+        self.assertNotIn("stop_reached", {e["event"] for e in events})
+
+    def test_a_request_left_in_a_done_runs_directory_does_not_stop_the_next_deliver(self):
+        project_ = EngineProject(self)
+        first = project_.deliver(project_.procedures([step("a", "standin-json", "done")]))
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (old,) = project_.runs()
+        holder = json.loads((old / "lock").read_text())
+        engine_stop.write_request(old, holder)
+        project_.answer({"stdout": "{}", "sleep": 2, "exit": 0})
+        second = project_.deliver(project_.procedures([step("a", "standin-keep-alive", "done")]))
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        runs = project_.runs()
+        self.assertEqual(len(runs), 2)
+        (new,) = [run for run in runs if run != old]
+        events = project_.events(new)
+        self.assertNotIn("stop_reached", {e["event"] for e in events})
+        self.assertEqual(events[-1]["event"], "run_done")
+        self.assertTrue((old / "stop-request").exists())
+
+    def test_the_request_is_cleared_only_after_the_stop_is_recorded(self):
+        project_ = EngineProject(self)
+        procedures = project_.procedures([step("a", "standin-hold", "done")])
+        seen: list[tuple] = []
+        real = engine_stop.clear
+
+        def spy(run_dir):
+            events = engine_ledger.replay(run_dir / "events.jsonl")
+            seen.append((events[-1]["event"], (run_dir / "stop-request").exists()))
+            real(run_dir)
+
+        def request():
+            until(self, lambda: bool(project_.runs()) and self.started(project_, "a"))
+            run = project_.runs()[0]
+            engine_stop.write_request(run, json.loads((run / "lock").read_text()))
+
+        thread = threading.Thread(target=request)
+        self.addCleanup(thread.join)
+        self.addCleanup(lambda: pid_in(project_.hold) and reap(int(project_.hold.read_text())))
+        self.addCleanup(reap_recorded, project_)
+        thread.start()
+        with project_.inside(), mock.patch.object(engine_stop, "clear", side_effect=spy):
+            code, line = engine_shell.deliver(1512, procedures)
+        self.assertEqual(code, engine_shell.EXIT_STOP)
+        self.assertEqual(line["end"], "stopped-by-request")
+        self.assertEqual(seen, [("stop_reached", True)])
+        self.assertFalse((project_.runs()[0] / "stop-request").exists())
+
+    def test_engine_stop_with_no_running_run_leaves_no_file_and_says_so(self):
+        with self.subTest("no run"):
+            project_ = EngineProject(self)
+            stopped = self.stop(project_, 1512)
+            self.assertEqual(stopped.returncode, 1, stopped.stdout + stopped.stderr)
+            (line,) = stopped.stdout.splitlines()
+            answer = json.loads(line)
+            ANY_SENTENCE(self, answer.pop("detail"))
+            self.assertEqual(answer, {"issue": 1512, "process": None, "requested": False,
+                                      "run": None})
+            self.assertFalse((project_.world.home / ".agents/state/engine/runs").exists())
+        with self.subTest("engine gone"):
+            project_ = EngineProject(self)
+            done = project_.deliver(project_.procedures([step("a", "standin-json", "done")]))
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            (run,) = project_.runs()
+            stopped = self.stop(project_, 1512)
+            self.assertEqual(stopped.returncode, 1, stopped.stdout + stopped.stderr)
+            answer = json.loads(stopped.stdout)
+            ANY_SENTENCE(self, answer.pop("detail"))
+            self.assertEqual(answer, {"issue": 1512, "process": None, "requested": False,
+                                      "run": run.name})
+            self.assertFalse((run / "stop-request").exists())
+
+    def test_engine_stop_writes_the_request_and_signals_no_one(self):
+        project_ = EngineProject(self)
+        procedures = project_.procedures([step("a", "standin-json", "done")])
+        run = engine_ledger.create_run(
+            project="example/engine", issue=1512, procedure="deliver", procedures_dir=procedures,
+            platform_revision="source", host="test", inputs={"issue": 1512},
+            now=datetime.now(timezone.utc), root=project_.world.home / ".agents/state/engine/runs")
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+        holder = {"pid": sleeper.pid, "started": "2026-11-22T00:00:00Z"}
+        descriptor = os.open(run / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        os.write(descriptor, json.dumps(holder).encode("utf-8"))
+        before = (run / "events.jsonl").read_bytes()
+        began = time.monotonic()
+        stopped = self.stop(project_, 1512)
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+        answer = json.loads(stopped.stdout)
+        self.assertEqual(answer["process"], holder)
+        self.assertIs(answer["requested"], True)
+        request = json.loads((run / "stop-request").read_text())
+        self.assertEqual((request["pid"], request["started"]), (holder["pid"], holder["started"]))
+        self.assertIsNone(sleeper.poll())
+        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+
+    def test_stop_takes_only_an_issue_and_a_project(self):
+        parser = engine.build_parser()
+        action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        self.assertEqual({a.dest for a in action.choices["stop"]._actions},
+                         {"help", "issue", "project"})
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["stop", "0"]), 2)
+        self.assertEqual(len(errors.getvalue().splitlines()), 1)
 
 
 if __name__ == "__main__":

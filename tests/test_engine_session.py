@@ -413,7 +413,7 @@ REVIEW_REPLY = {"type": "object",
 ROLE_NAMES = ("planner", "implementer", "reviewer", "reviewer-lite")
 
 
-def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
+def install_stub(project: EngineProject, canned: Path | bytes, exit: int | str = 0,
                  diagnostic: str | None = None) -> Path:
     """Put the stand-in launcher first on the project's PATH; return the log it appends to."""
     log = project.tmp / "claude.log"
@@ -576,12 +576,12 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         seen: list[tuple] = []
 
-        def checking(argv, cwd, prompt, *, on_start):
+        def checking(argv, cwd, prompt, *, on_start, stop=None):
             (run,) = project.runs()
             events = engine_ledger.replay(run / "events.jsonl")
             seen.append((events[-1]["event"], events[-1].get("session"),
                          [e["event"] for e in events], after(list(argv), "--session-id")))
-            return real(argv, cwd, prompt, on_start=on_start)
+            return real(argv, cwd, prompt, on_start=on_start, stop=stop)
 
         with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
             code, line = engine_shell.deliver(1514, procedures)

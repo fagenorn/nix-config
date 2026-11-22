@@ -6,6 +6,7 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
     procedure/          a byte copy of the entry procedure directory's `*.json`, `*.md`, `SHA256SUMS`
     events.jsonl        one compact JSON event per line, appended and fsynced
     lock  the deliver process's exclusive flock and its {"pid","started"}
+    stop-request   a pending stop request for the lock holder it names (engine_stop)
     results/<step>.<visit>.json
                         a step visit's stored result
     sessions/<step>.<visit>.{system.md,prompt.md,json}

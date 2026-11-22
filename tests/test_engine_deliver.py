@@ -49,6 +49,7 @@ class EngineProject:
         self.release = self.tmp / "release"
         self.renewals = self.tmp / "renewals.log"
         self.answers = self.tmp / "answers.json"
+        self.hold = self.tmp / "hold.pid"
         self.root = self.world.project("example/engine", "example/engine", register=False,
                                        mutate=self.add_standins)
         self.bin = self.tmp / "bin"
@@ -74,6 +75,7 @@ class EngineProject:
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
+            "standin-hold": entry("hold", str(self.hold), "0"),
         })
 
     def answer(self, *answers: dict) -> None:
