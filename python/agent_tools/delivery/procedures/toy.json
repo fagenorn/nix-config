@@ -2,7 +2,8 @@
   "format": 1,
   "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
   "inputs": ["holder", "issue", "range", "repo"],
-  "stops": {"needs-owner": {"need": "owner-decision", "reenter": "draft"}},
+  "stops": {"needs-owner": {"need": "owner-decision", "reenter": "draft"},
+            "claim-lost": {"need": "owner-decision", "reenter": "scope"}},
   "steps": [
     {"id": "scope", "stage": "setup", "kind": "command", "command": "diff-scope",
      "in": ["run.range"], "on": {"ok": "draft", "failed": "needs-owner"}},
@@ -24,6 +25,6 @@
      "on": {"accept": "children", "revise": "draft", "exhausted": "needs-owner"}},
     {"id": "children", "stage": "landing", "kind": "call", "procedure": "toy-child",
      "in": ["draft.items"], "each": "draft.items", "parallel": 2, "mutates": true,
-     "on": {"done": "done", "child-stop": "needs-owner"}}
+     "on": {"done": "done", "child-stop": "needs-owner", "claim-lost": "claim-lost"}}
   ]
 }

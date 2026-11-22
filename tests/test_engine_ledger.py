@@ -76,6 +76,8 @@ EXAMPLES = {
     "wait_ended": {"event": "wait_ended", "at": AT, "wait": "usage-limit"},
     "stop_reached": {"event": "stop_reached", "at": AT, "step": "scope",
                      "stop": "needs-owner", "need": "owner-decision"},
+    "keep_alive_ran": {"event": "keep_alive_ran", "at": AT, "step": "draft", "visit": 1,
+                       "attempt": 1, "verdict": "renewed"},
     "run_continued": {"event": "run_continued", "at": AT},
     "run_done": {"event": "run_done", "at": AT},
 }
@@ -161,6 +163,9 @@ class EventShapeTest(unittest.TestCase):
                {**EXAMPLES["step_entered"], "stage": "nowhere"},
                {**EXAMPLES["wait_started"], "wait": "coffee"},
                {**EXAMPLES["result_stored"], "result": "results/other.1.json"},
+               {**EXAMPLES["keep_alive_ran"], "attempt": 0},
+               {**EXAMPLES["keep_alive_ran"], "attempt": True},
+               {**EXAMPLES["keep_alive_ran"], "verdict": ""},
                "not an object"]
         for variant in bad:
             with self.subTest(variant=variant), self.assertRaises(LedgerError):
