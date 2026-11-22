@@ -733,9 +733,18 @@ def remove_scratch(path: Path) -> bool:
                 target.chmod(target.stat().st_mode | 0o700)
             except OSError:
                 pass
-        function(failed)
+        try:
+            if function is os.open or function is os.scandir:
+                shutil.rmtree(failed, onexc=make_writable)
+            elif function in (os.unlink, os.rmdir, os.lstat):
+                function(failed)
+        except OSError:
+            pass
 
-    shutil.rmtree(path, onexc=make_writable)
+    try:
+        shutil.rmtree(path, onexc=make_writable)
+    except OSError:
+        pass
     return not path.exists()
 
 

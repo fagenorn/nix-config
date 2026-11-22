@@ -884,6 +884,35 @@ class ScratchTest(unittest.TestCase):
         self.assertTrue(remove_scratch(directory))
         self.assertFalse(directory.exists())
 
+    def test_a_scratch_with_an_unopenable_directory_is_removed_whatever_its_mode(self):
+        for mode in (0o000, 0o200, 0o300):
+            with self.subTest(mode=oct(mode)):
+                directory = Path(tempfile.mkdtemp()).resolve()
+                (directory / "a/b").mkdir(parents=True)
+                (directory / "a/b/file").write_text("x", encoding="utf-8")
+                (directory / "a/b").chmod(mode)
+                (directory / "a").chmod(mode)
+                self.assertTrue(remove_scratch(directory))
+                self.assertFalse(directory.exists())
+
+    def test_a_removal_that_cannot_finish_reports_false_instead_of_raising(self):
+        directory = Path(tempfile.mkdtemp()).resolve()
+        (directory / "file").write_text("x", encoding="utf-8")
+        with mock.patch.object(os, "unlink", side_effect=PermissionError("held")):
+            self.assertFalse(remove_scratch(directory))
+        self.assertTrue(directory.exists())
+        remove_scratch(directory)
+
+    def test_a_stale_scratch_with_an_unopenable_directory_is_swept(self):
+        parent = Path(tempfile.mkdtemp()).resolve()
+        dead = parent / "host-readiness-dead"
+        (dead / "sub").mkdir(parents=True)
+        (dead / "sub/file").write_text("x", encoding="utf-8")
+        (dead / "owner").write_text(f"{reaped_pid()}\n", encoding="utf-8")
+        (dead / "sub").chmod(0o000)
+        self.assertEqual([dead], sweep_stale_scratch(parent))
+        self.assertFalse(dead.exists())
+
     def test_only_a_stale_scratch_of_this_user_is_swept(self):
         parent = Path(tempfile.mkdtemp()).resolve()
 
