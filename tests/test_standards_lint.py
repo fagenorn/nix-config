@@ -11,7 +11,8 @@ and the `lint` command's sources), fails on a citation of an id in no applicable
 layer, a malformed citation or a missing enforcer, resolves a project id only
 against the project's shards and any other id only against the platform
 directory, refuses bad arguments, has no command-table row and passes on this
-checkout.
+checkout. With `--index` it prints each rule with the enforcers citing it and the
+two counts, still fails on a problem, and writes nothing.
 """
 
 import os
@@ -296,6 +297,60 @@ class UsageTest(LintTestCase):
         self.assertEqual(result.returncode, 2)
 
 
+class IndexTest(LintTestCase):
+    def index_fixture(self, other: str, *, project_shards=None):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": "# " + cite("B1") + "\n# " + cite("B1") + "\n",
+                   "tests/test_b.py": other},
+            members=["tests/test_a.py", "tests/test_b.py"], project_shards=project_shards)
+        (platform / "stacks" / "python.md").unlink()
+        return root, platform, project
+
+    def test_the_index_lists_the_citing_enforcer_and_both_counts(self):
+        root, platform, project = self.index_fixture("x = 1\n")
+
+        result = self.run_lint(root, platform, project, "--index")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "B1. One", "  tests/test_a.py", "B2. Two", "judged rules: 1",
+            "enforcers citing nothing: 1"])
+
+    def test_a_decision_record_citation_counts_as_citing(self):
+        root, platform, project = self.index_fixture("# ADR-delivery-012\n")
+
+        result = self.run_lint(root, platform, project, "--index")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "enforcers citing nothing: 0")
+
+    def test_rules_are_listed_bar_then_stacks_then_project(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": "x = 1\n"}, members=["tests/test_a.py"],
+            project_shards={"b.md": "# B\n\n### P2. Two\n\nBody.\n",
+                            "a.md": "# A\n\n### P1. One\n\nBody.\n"})
+
+        result = self.run_lint(root, platform, project, "--index")
+
+        lines = result.stdout.splitlines()
+        rule_lines = [line for line in lines if not line.startswith("  ")][:-2]
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(rule_lines, ["B1. One", "B2. Two", "PY1. Py", "P1. One", "P2. Two"])
+        self.assertIn("judged rules: 5", lines)
+
+    def test_the_index_still_fails_on_an_unknown_citation(self):
+        root, platform, project = self.index_fixture("# " + cite("Z9") + "\n")
+
+        result = self.run_lint(root, platform, project, "--index")
+
+        lines = result.stdout.splitlines()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cites Z9", result.stderr)
+        self.assertTrue(lines[-2].startswith("judged rules: "))
+        self.assertTrue(lines[-1].startswith("enforcers citing nothing: "))
+        self.assertFalse(any(line.startswith("standards-lint: passed:") for line in lines))
+
+
 class PackagingTest(unittest.TestCase):
     def test_the_lint_has_no_command_table_row(self):
         table = (REPO_ROOT / "lib/agent-tools.nix").read_text("utf-8")
@@ -311,6 +366,22 @@ class CheckoutTest(LintTestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.splitlines()[-1].startswith("standards-lint: passed: "))
+
+    def test_the_index_is_printed_on_this_checkout_and_writes_nothing(self):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        status = ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--untracked-files=all"]
+        before = subprocess.run(status, capture_output=True, text=True, env=env, timeout=120).stdout
+
+        result = self.run_lint(
+            REPO_ROOT, REPO_ROOT / "home/common/agent-skills/standards",
+            REPO_ROOT / "docs/standards", "--index")
+
+        after = subprocess.run(status, capture_output=True, text=True, env=env, timeout=120).stdout
+        lines = result.stdout.splitlines()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(lines[-2], r"judged rules: [0-9]+")
+        self.assertRegex(lines[-1], r"enforcers citing nothing: [0-9]+")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

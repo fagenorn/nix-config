@@ -1,7 +1,7 @@
 """Fail on an enforcer's citation of a rule id that no applicable layer defines (#1442).
 
 Usage: `python -m agent_tools.delivery.standards_lint --root <repo> --platform-standards <dir>
---project-standards <dir>`
+--project-standards <dir> [--index]`
 
 The suite runs this module (it has no command-table row, after
 `agent_tools.delivery.suite_runner`: its enforcer discovery reads this repository's suite
@@ -30,6 +30,18 @@ Each problem is one line on stderr, `standards-lint: <problem>`, and the exit st
 With none, stdout is `standards-lint: passed: <n> enforcers, <k> citations` (`k` counts the
 citations found across the enforcers) and the exit status is 0.
 
+With `--index` the problems check still runs (problems on stderr, exit status 1 when there are any)
+and the rule index is printed on stdout either way, in place of the `passed:` line; it is never
+written to a file. The index is, for each rule in order (the bar, then the stacks by filename,
+then the project shards by filename, each in heading order):
+
+- `<id>. <title>`, then one line `  <path>` per enforcer citing that id with a well-formed
+  citation, sorted by path, each path once;
+- then `judged rules: <n>`, the rules no enforcer cites;
+- then `enforcers citing nothing: <m>`, the existing registered enforcers whose text holds
+  neither a citation (well-formed or not) nor a decision-record id (`ADR-<area>-NNN`); a missing
+  enforcer is a problem and is not counted.
+
 Exit status 2, with one `standards-lint: <reason>` line on stderr: an argument path that is not
 absolute or not an existing directory, a platform directory without `the-bar.md`, a justfile
 without the suite recipe, a lint member run without `-m`; argparse misuse also exits 2.
@@ -42,8 +54,9 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Sequence
 
+from agent_tools.delivery.context_map_lint import CITATION_RE
 from agent_tools.delivery.rule_ids import (
-    CITE, PROJECT_PREFIX, RULE_ID_HEADING, citations, prefix_of)
+    CITATION, CITE, PROJECT_PREFIX, RULE_ID_HEADING, citations, prefix_of)
 from agent_tools.delivery.suite_runner import suite_members
 from agent_tools.delivery.verification_command import members
 
@@ -117,11 +130,33 @@ def problems(root: Path, paths: list[str], platform: list[Rule], project: list[R
     return found
 
 
+def rule_index(root: Path, paths: list[str], rules: list[Rule]) -> list[str]:
+    """The index lines: each rule with the enforcers citing it, then the two counts."""
+    citing: dict[str, set[str]] = {}
+    nothing = 0
+    for path in paths:
+        if not (root / path).is_file():
+            continue
+        text = (root / path).read_text("utf-8")
+        for citation in citations(text):
+            if citation.well_formed:
+                citing.setdefault(citation.token, set()).add(path)
+        if not CITATION.search(text) and not CITATION_RE.search(text):
+            nothing += 1
+    lines: list[str] = []
+    for rule in rules:
+        lines.append(f"{rule.id}. {rule.title}")
+        lines += [f"  {path}" for path in sorted(citing.get(rule.id, ()))]
+    judged = sum(1 for rule in rules if rule.id not in citing)
+    return lines + [f"judged rules: {judged}", f"enforcers citing nothing: {nothing}"]
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="standards-lint")
     parser.add_argument("--root", required=True)
     parser.add_argument("--platform-standards", required=True)
     parser.add_argument("--project-standards", required=True)
+    parser.add_argument("--index", action="store_true")
     return parser
 
 
@@ -145,10 +180,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ValueError, OSError) as error:
         print(f"{PREFIX} {error}", file=sys.stderr)
         return 2
-    found = problems(root, paths, platform, project_rules(project_directory))
+    project = project_rules(project_directory)
+    found = problems(root, paths, platform, project)
+    for problem in found:
+        print(f"{PREFIX} {problem}", file=sys.stderr)
+    if args.index:
+        print("\n".join(rule_index(root, paths, platform + project)))
+        return 1 if found else 0
     if found:
-        for problem in found:
-            print(f"{PREFIX} {problem}", file=sys.stderr)
         return 1
     total = sum(len(_citations_of(root, path)) for path in paths)
     print(f"{PREFIX} passed: {len(paths)} enforcers, {total} citations")
