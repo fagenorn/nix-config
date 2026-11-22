@@ -234,7 +234,7 @@ def check(root: Path, map_path: Path) -> list[str]:
         for pattern in globs:
             try:
                 matched = next(root.glob(pattern), None)
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, NotImplementedError):
                 matched = None
                 errors.append(f"{rel_map}: area '{name}' has an unparseable glob `{pattern}`")
                 continue

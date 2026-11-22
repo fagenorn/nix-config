@@ -593,6 +593,20 @@ class LintChecksTest(ReportAssertions, unittest.TestCase):
                              ["failed", "standards_unreadable"])
             self.assert_validates(report)
 
+    def test_an_absolute_governs_glob_is_a_finding_not_a_refusal(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "docs/CONTEXT-MAP.md", CLEAN_MAP.replace(
+                "`.agents/project.json`", "`/etc/*`"))
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"]["primary_check_id"], self.MAP_ID)
+            self.assertEqual(
+                self.summary(by_id[self.MAP_ID]),
+                ["failed", "context_map_lint_failed", self.MAP_REPAIR,
+                 {"paths": ["docs/CONTEXT-MAP.md"], "count": 1}])
+            self.assert_validates(report)
+
     def test_a_map_resolving_outside_the_root_is_not_read(self):
         with fixture() as tmp:
             root = make_root(tmp)
