@@ -93,13 +93,14 @@ Contract:
   (asked 10 minutes ago) whose Dig deeper is still offered, so its estimate is the first
   thread's deeper spend (the spend before). On a page with the reading panel `deeper-answer`
   clicks the Questions fold and the first thread's line, then reads `DEEPER_READING` (the panel,
-  its two spend lines, the deeper answer, its spend line and Make it a goal, `DEEPER_SHOWN`), and
+  each row's answer and spend line, Make it a goal; `DEEPER_ROWS` holds the seeded phrase and
+  spend of each), and
   `deeper-offer` clicks the fold and the second thread's line and its Dig deeper (`DEEP_OPEN`,
-  never Start, which alone posts), waits for the estimate, then reads `OFFER_READING` (the panel,
-  the answer's spend line, the estimate with its earlier-deeper-answers wording and Make it a
-  goal, `DEEPER_SHOWN`); on a page without the panel each clicks the fold and its thread's
-  summary (`DEEPER_BASE_THREAD`), which is the before picture, its `deeper` None; `main` prints
-  `does not show` for a shot whose `deeper` is not `DEEPER_SHOWN` (`DEEPER_SAID`).
+  never Start, which alone posts), waits for the estimate, then reads `OFFER_READING` (the same, and the estimate's text, which
+  must carry the deeper row's tokens and dollars, `DEEPER_ESTIMATE`); on a page without the panel
+  each clicks the fold and its thread's summary (`DEEPER_BASE_THREAD`), which is the before
+  picture, its `deeper` None; `main` prints `does not show` for a shot for which `deeper_shows`
+  is false (`DEEPER_SAID`), a None reading passing only when `serves_reading_panel` is false.
   `activation-tooling` and `activation-host` are the desk with no sprint and an
   activation reading of merged changes this host is built from, none a console file: the first
   changes only agent tooling (a `python/` file and a skill), so its one line reads the
@@ -211,10 +212,10 @@ Contract:
   panel in the main column at the column's full width, the question once (counted from the question the shot was seeded with, an argument of
   the script), the answer holding bold,
   a list, inline code and a block of code, the call-out last in its row after the answer, three
-  choices visible); or when a `deeper-offer` or `deeper-answer` shot on a page with the panel does not read its
-  `DEEPER_SHOWN` entry (`OFFER_READING`: the panel, the answer's spend line, the estimate holding
-  the earlier-deeper-answers wording, Make it a goal; `DEEPER_READING`: the panel, two spend
-  lines, the deeper answer with its spend line and Make it a goal); or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
+  choices visible); or when a `deeper-offer` or `deeper-answer` shot on a page with the panel does not read as
+  `deeper_shows` says (each row's seeded answer phrase and exact spend line, Make it a goal and,
+  for the offer, the estimate holding the deeper row's figures), a None reading failing on a
+  page that has the panel; or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
   opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page
   without the fold that still lists the follow-up and its answer, the before picture), or when a `question-words` or `question-refused` shot's reading is not its `WORDS_CARD` or
   `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
@@ -392,6 +393,7 @@ PERMISSION_PROMPT = "/api/permission-prompt"
 PERMISSION_COMMAND = "git worktree add ../.worktrees/issue-12"
 PERMISSION_WORDS = "Create the delivery's worktree"
 READING_PANEL = "section#reading"
+READING_PANEL_ID = b'id="reading"'
 ACTIVATION_COMMIT = "1258" * 10
 ACTIVATION_PATHS = {
     "activation-tooling": ("python/agent_tools/system/util.py",
@@ -513,33 +515,65 @@ READ_SESSION = "7c2f9d4e-1a8b-4e63-b5d0-9f3a6c1e8b27"
 # The Dig deeper states (#1435): thread 1 holds a light answer and its deeper answer, thread 2 a
 # light answer whose Dig deeper is still offered, so its estimate is thread 1's deeper spend.
 DEEPER_STATES = ("deeper-offer", "deeper-answer")
-# The panel's reading of the deeper thread: whether the panel shows, how many spend lines show, and
-# whether the last row shows an answer, a spend line and Make it a goal.
+# The panel's reading of the deeper thread: whether the panel shows, each shown row's answer and
+# spend line text (whitespace collapsed), and whether the last row shows Make it a goal.
 DEEPER_READING = """(() => {
   const shown = (node) => Boolean(node && node.getClientRects().length > 0);
+  const text = (node) => (node && shown(node) ? node.textContent.replace(/\\s+/g, ' ').trim() : '');
   const panel = document.querySelector('#reading');
-  if (!shown(panel)) return [false, 0, false, false, false];
-  const spend = Array.from(panel.querySelectorAll('li.ask p.ask-spend')).filter(shown).length;
-  const rows = panel.querySelectorAll('ol.ask-list > li.ask');
+  if (!shown(panel)) return [false, [], false];
+  const rows = Array.from(panel.querySelectorAll('ol.ask-list > li.ask')).filter(shown);
   const last = rows.length ? rows[rows.length - 1] : null;
-  const has = (selector) => Boolean(last && shown(last.querySelector(selector)));
-  return [true, spend, has('.ask-answer'), has('p.ask-spend'), has('button.ask-goal')];
+  return [true,
+          rows.map((row) => [text(row.querySelector('.ask-answer')), text(row.querySelector('p.ask-spend'))]),
+          Boolean(last && shown(last.querySelector('button.ask-goal')))];
 })()"""
-# The panel's reading of the Dig deeper offer once its confirmation is open: whether the panel shows,
-# how many spend lines show, whether the estimate shows with an earlier deeper answer's spend (not
-# the no-estimate wording) and whether Make it a goal shows.
+# The panel's reading of the Dig deeper offer once its confirmation is open: the same three members
+# and, last, the text of the estimate the confirmation shows ('' when it shows none).
 OFFER_READING = """(() => {
   const shown = (node) => Boolean(node && node.getClientRects().length > 0);
+  const text = (node) => (node && shown(node) ? node.textContent.replace(/\\s+/g, ' ').trim() : '');
   const panel = document.querySelector('#reading');
-  if (!shown(panel)) return [false, 0, false, false];
-  const spend = Array.from(panel.querySelectorAll('li.ask p.ask-spend')).filter(shown).length;
-  const estimate = panel.querySelector('p.ask-deep-estimate');
-  return [true, spend,
-          Boolean(shown(estimate) && estimate.textContent.includes(
-            'Earlier deeper answers here spent about')),
-          shown(panel.querySelector('button.ask-goal'))];
+  if (!shown(panel)) return [false, [], false, ''];
+  const rows = Array.from(panel.querySelectorAll('ol.ask-list > li.ask')).filter(shown);
+  return [true,
+          rows.map((row) => [text(row.querySelector('.ask-answer')), text(row.querySelector('p.ask-spend'))]),
+          shown(panel.querySelector('button.ask-goal')), text(panel.querySelector('p.ask-deep-estimate'))];
 })()"""
-DEEPER_SHOWN = {"deeper-offer": (True, 1, True, True), "deeper-answer": (True, 2, True, True, True)}
+# What each picture must read, from the seed: per row a phrase its answer holds and its spend line
+# exactly (the figures follow from the seeded transcripts at the published per-million rates).
+DEEPER_LIGHT_SNIPPET = "do not say which parts of an issue take long"
+DEEPER_SNIPPET = "Review and planning take most of the time; the tasks take most of the tokens."
+DEEPER_OFFER_SNIPPET = "The test check fails most often: 9 of the last 40 pull requests"
+DEEPER_ESTIMATE = "Earlier deeper answers here spent about 2,184,000 tokens, $2.76 each."
+DEEPER_ROWS = {
+    "deeper-answer": ((DEEPER_LIGHT_SNIPPET, "Spent 544,000 tokens, about $0.38"),
+                      (DEEPER_SNIPPET, "Spent 2,184,000 tokens, about $2.76")),
+    "deeper-offer": ((DEEPER_OFFER_SNIPPET, "Spent 362,000 tokens, about $0.25"),)}
+# The least a finished reading holds, and the reading a page without the panel gives (None).
+DEEPER_SHOWN = {"deeper-answer": (True, DEEPER_ROWS["deeper-answer"], True),
+                "deeper-offer": (True, DEEPER_ROWS["deeper-offer"], True, DEEPER_ESTIMATE)}
+
+
+def _frozen(value):
+    """A reading from the page (nested lists) as nested tuples."""
+    return tuple(_frozen(item) for item in value) if isinstance(value, list) else value
+
+
+def deeper_shows(state: str, deeper) -> bool:
+    """Whether a deeper state's reading is its seeded rows (answer phrase and exact spend), Make it a goal and, for the offer, the deeper row's figures."""
+    want = DEEPER_ROWS[state]
+    if not isinstance(deeper, tuple) or len(deeper) != (4 if state == "deeper-offer" else 3):
+        return False
+    panel, rows, goal = deeper[:3]
+    if panel is not True or goal is not True or len(rows) != len(want):
+        return False
+    for (answer, spend), (snippet, spent) in zip(rows, want):
+        if snippet not in answer or spend != spent:
+            return False
+    return state != "deeper-offer" or DEEPER_ESTIMATE in deeper[3]
+
+
 DEEPER_SAID = {
     "deeper-offer": "the Dig deeper estimate with the answer's spend line and Make it a goal",
     "deeper-answer": "the deeper answer with its spend lines and Make it a goal"}
@@ -2059,6 +2093,17 @@ def style_applies(served: Path | None = None) -> bool:
     return True
 
 
+def serves_reading_panel(served: Path | None = None) -> bool:
+    """Whether the page served has the reading panel (a base run may serve one without it: the before picture)."""
+    if served is None:
+        import agent_tools.console
+        served = Path(next(iter(agent_tools.console.__path__)))
+    try:
+        return READING_PANEL_ID in (Path(served) / "page.html").read_bytes()
+    except OSError:
+        return False
+
+
 @dataclass(frozen=True)
 class Shot:
     state: str
@@ -2081,7 +2126,7 @@ class Shot:
     style: tuple[str, ...] = ()
     checked: tuple[str, ...] = ()
     broke: tuple[str, ...] = ()
-    deeper: tuple[bool | int, ...] | None = None
+    deeper: tuple | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -3483,16 +3528,16 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         deeper = None
         if state in DEEPER_STATES:
             if paneled:
-                thread = DEEPER_THREAD if state == "deeper-answer" else DEEPER_OFFER_THREAD
-                for selector in (ASK_FOLD, thread_line(thread)):
+                thread_id = DEEPER_THREAD if state == "deeper-answer" else DEEPER_OFFER_THREAD
+                for selector in (ASK_FOLD, thread_line(thread_id)):
                     page.click(selector)
                 if state == "deeper-answer":
-                    deeper = tuple(page.evaluate(DEEPER_READING))
+                    deeper = _frozen(page.evaluate(DEEPER_READING))
                 else:
                     if page.query_selector(DEEP_OPEN):
                         page.click(DEEP_OPEN)
                         page.wait_for_selector(DEEP_ESTIMATE)
-                    deeper = tuple(page.evaluate(OFFER_READING))
+                    deeper = _frozen(page.evaluate(OFFER_READING))
             elif page.query_selector(ASK_FOLD):
                 for selector in (ASK_FOLD, DEEPER_BASE_THREAD[state]):
                     page.click(selector)
@@ -3662,8 +3707,10 @@ def main(argv: list[str] | None = None) -> int:
                    else shot.reading not in shown)]
     for shot in unread:
         print(f"console-screenshots: {shot.path.name} does not show the answer in the main column")
-    undeep = [shot for shot in taken if shot.state in DEEPER_SHOWN
-              and shot.deeper not in (None, DEEPER_SHOWN[shot.state])]
+    paneled_page = serves_reading_panel()
+    undeep = [shot for shot in taken if shot.state in DEEPER_ROWS
+              and not (deeper_shows(shot.state, shot.deeper)
+                       or (shot.deeper is None and not paneled_page))]
     for shot in undeep:
         print(f"console-screenshots: {shot.path.name} does not show {DEEPER_SAID[shot.state]}")
     unlined = [shot for shot in taken if shot.state in ACTIVATION_SHOWN

@@ -135,10 +135,10 @@ def fake_browser(present):
                 return list(shots.READ_SHOWN)
             if expression == shots.DEEPER_READING:
                 self.reads += 1
-                return list(shots.DEEPER_SHOWN["deeper-answer"])
+                return json.loads(json.dumps(shots.DEEPER_SHOWN["deeper-answer"]))
             if expression == shots.OFFER_READING:
                 self.reads += 1
-                return list(shots.DEEPER_SHOWN["deeper-offer"])
+                return json.loads(json.dumps(shots.DEEPER_SHOWN["deeper-offer"]))
             if expression == shots.THREAD_READING:
                 self.reads += 1
                 return list(shots.OPEN_THREAD if shots.ASK_FOLD in present else shots.BASE_THREAD)
@@ -1839,9 +1839,10 @@ class ScreenshotFixtureTest(unittest.TestCase):
         offer_base = 'details[data-key="thread:owner/web:1435b1"] > summary'
         cases = (
             ("deeper-answer", "head", head,
-             [shots.ASK_FOLD, shots.thread_line("1435a1")], (True, 2, True, True, True)),
+             [shots.ASK_FOLD, shots.thread_line("1435a1")], shots.DEEPER_SHOWN["deeper-answer"]),
             ("deeper-offer", "head", head | {deep},
-             [shots.ASK_FOLD, shots.thread_line("1435b1"), deep], (True, 1, True, True)),
+             [shots.ASK_FOLD, shots.thread_line("1435b1"), deep],
+             shots.DEEPER_SHOWN["deeper-offer"]),
             ("deeper-answer", "base", {shots.ASK_FOLD}, [shots.ASK_FOLD, answer_base], None),
             ("deeper-offer", "base", {shots.ASK_FOLD}, [shots.ASK_FOLD, offer_base], None),
             ("deeper-answer", "no fold", set(), [], None),
@@ -1852,6 +1853,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
                 self.assertEqual(page.clicks, clicks)
                 self.assertEqual(shot.deeper, deeper)
+                self.assertIsNone(shot.thread)
         with tempfile.TemporaryDirectory() as tmp:
             browser, page = fake_browser(head)
             shot = shots._shoot(browser, "http://console.test/", "question-read", 480, Path(tmp))
@@ -1859,10 +1861,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
     def test_a_deeper_shot_without_its_spend_lines_estimate_or_goal_fails_the_command(
             self) -> None:
-        def run(shot):
+        def run(shot, panel=True):
             out = StringIO()
             with tempfile.TemporaryDirectory() as tmp, \
                     mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    mock.patch.object(shots, "serves_reading_panel", return_value=panel), \
                     redirect_stdout(out):
                 code = shots.main(["--out", tmp])
             return code, out.getvalue()
@@ -1870,34 +1873,65 @@ class ScreenshotFixtureTest(unittest.TestCase):
         answer_phrase = "does not show the deeper answer with its spend lines and Make it a goal"
         offer_phrase = ("does not show the Dig deeper estimate with the answer's spend line and "
                         "Make it a goal")
-        for deeper in ((False, 0, False, False, False), (True, 1, True, True, True),
-                       (True, 2, False, True, True), (True, 2, True, False, True),
-                       (True, 2, True, True, False)):
+        (light, light_spend), (deep, deep_spend) = shots.DEEPER_ROWS["deeper-answer"]
+        (offered, offered_spend), = shots.DEEPER_ROWS["deeper-offer"]
+        answer_ok = shots.DEEPER_SHOWN["deeper-answer"]
+        offer_ok = shots.DEEPER_SHOWN["deeper-offer"]
+        for deeper in ((False, (), False),
+                       (True, ((light, light_spend), (light, light_spend)), True),
+                       (True, ((light, light_spend), (deep, light_spend)), True),
+                       (True, ((light, deep_spend), (deep, deep_spend)), True),
+                       (True, ((light, light_spend),), True),
+                       (True, ((light, light_spend), (deep, deep_spend)), False),
+                       (True, (("", light_spend), (deep, deep_spend)), True)):
             with self.subTest(state="deeper-answer", deeper=deeper):
                 code, text = run(lambda path: shots.Shot("deeper-answer", 480, path, 480,
                                                          deeper=deeper))
                 self.assertEqual(code, 1)
                 self.assertIn(answer_phrase, text)
-        for deeper in ((False, 0, False, False), (True, 0, True, True), (True, 1, False, True),
-                       (True, 1, True, False)):
+        intro = "Dig deeper asks again on a stronger model for up to 20 minutes. "
+        row = ((offered, offered_spend),)
+        for deeper in ((False, (), False, ""), (True, row, False, shots.DEEPER_ESTIMATE),
+                       (True, row, True, intro),
+                       (True, row, True, intro + "Earlier deeper answers here spent about  tokens,  each."),
+                       (True, row, True, intro + "Earlier deeper answers here spent about "
+                        "544,000 tokens, $0.38 each."),
+                       (True, row, True, intro + "No earlier deeper answer here to estimate its "
+                        "spend from."),
+                       (True, ((offered, light_spend),), True, shots.DEEPER_ESTIMATE),
+                       (True, ((light, offered_spend),), True, shots.DEEPER_ESTIMATE),
+                       (True, row + row, True, shots.DEEPER_ESTIMATE)):
             with self.subTest(state="deeper-offer", deeper=deeper):
                 code, text = run(lambda path: shots.Shot("deeper-offer", 480, path, 480,
                                                          deeper=deeper))
                 self.assertEqual(code, 1)
                 self.assertIn(offer_phrase, text)
-        for state, shown in (("deeper-answer", (True, 2, True, True, True)),
-                             ("deeper-offer", (True, 1, True, True))):
-            for deeper in (shown, None):
-                with self.subTest(state=state, deeper=deeper):
-                    code, text = run(lambda path: shots.Shot(state, 480, path, 480,
-                                                             deeper=deeper))
-                    self.assertEqual(code, 0)
-                    self.assertNotIn(answer_phrase, text)
-                    self.assertNotIn(offer_phrase, text)
-        code, text = run(lambda path: shots.Shot("deeper-offer", 480, path, 480,
-                                                 deeper=(True, 2, True, True, True)))
+        for state, shown in (("deeper-answer", answer_ok), ("deeper-offer", offer_ok)):
+            with self.subTest(state=state, deeper=shown):
+                code, text = run(lambda path: shots.Shot(state, 480, path, 480, deeper=shown))
+                self.assertEqual(code, 0)
+                self.assertNotIn(answer_phrase, text)
+                self.assertNotIn(offer_phrase, text)
+            # A reading that is missing passes only a page without the panel (the before picture).
+            with self.subTest(state=state, deeper=None):
+                code, text = run(lambda path: shots.Shot(state, 480, path, 480), panel=False)
+                self.assertEqual(code, 0)
+                code, text = run(lambda path: shots.Shot(state, 480, path, 480), panel=True)
+                self.assertEqual(code, 1)
+                self.assertIn(answer_phrase if state == "deeper-answer" else offer_phrase, text)
+        code, text = run(lambda path: shots.Shot("deeper-offer", 480, path, 480, deeper=answer_ok))
         self.assertEqual(code, 1)
         self.assertIn(offer_phrase, text)
+
+    def test_serves_reading_panel_only_for_a_page_that_has_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            served = Path(tmp)
+            self.assertFalse(shots.serves_reading_panel(served))
+            (served / "page.html").write_text('<section id="reading"></section>')
+            self.assertTrue(shots.serves_reading_panel(served))
+            (served / "page.html").write_text("<main></main>")
+            self.assertFalse(shots.serves_reading_panel(served))
+        self.assertTrue(shots.serves_reading_panel())
 
     def test_the_question_read_shot_counts_the_question_it_was_given(self) -> None:
         browser, page = fake_browser({shots.READING_PANEL, shots.ASK_FOLD})
@@ -3779,7 +3813,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             for state in ("deeper-offer", "deeper-answer"):
                 self.assertEqual(
                     [s.width for s in taken
-                     if s.state == state and s.deeper == shots.DEEPER_SHOWN[state]],
+                     if s.state == state and shots.deeper_shows(state, s.deeper)],
                     list(shots.WIDTHS))
             self.assertEqual(
                 [s for s in taken if s.state not in shots.DEEPER_STATES and s.deeper is not None],
@@ -3816,33 +3850,36 @@ class ScreenshotReadingTest(unittest.TestCase):
             finally:
                 browser.close()
 
-    def test_the_deeper_readings_count_the_panels_spend_lines_and_read_its_rows(self) -> None:
-        row = ('<li class="ask"><div class="ask-answer"><p>a</p></div>'
-               '<p class="ask-spend">Spent 1 tokens, about $0.01</p>'
-               '<button class="ask-goal">Make it a goal</button></li>')
-        bare = ('<li class="ask"><div class="ask-answer"><p>a</p></div>'
-                '<p class="ask-spend">Spent 1 tokens, about $0.01</p></li>')
+    def test_the_deeper_readings_read_each_rows_answer_and_spend_and_the_estimate(self) -> None:
+        def row(answer, spend, goal=True):
+            return ('<li class="ask"><div class="ask-answer"><p>' + answer + '</p>\n<p>  b </p></div>'
+                    '<p class="ask-spend">' + spend + '</p>'
+                    + ('<button class="ask-goal">Make it a goal</button>' if goal else '')
+                    + '</li>')
 
         def panel(rows):
             return f'<section id="reading"><ol class="ask-list">{rows}</ol></section>'
 
         def offer(text):
-            confirm = (f'<div class="ask-deep-confirm"><p class="ask-deep-estimate">{text}</p></div>')
-            return panel(row + confirm)
+            confirm = f'<div class="ask-deep-confirm"><p class="ask-deep-estimate">{text}</p></div>'
+            return panel(row("a", "Spent 1 tokens, about $0.01") + confirm)
 
-        lead = "Dig deeper asks again on a stronger model for up to 20 minutes. "
-        markups = [
-            panel(row + row), panel(row + bare), "<p>none</p>",
-            offer(lead + "Earlier deeper answers here spent about 2,184,000 tokens, $9.10 each."),
-            offer(lead + "No earlier deeper answer here to estimate its spend from."),
-            "<p>none</p>"]
+        one = row("a", "Spent 1 tokens, about $0.01", goal=False)
+        two = row("c", "Spent 2 tokens, about $0.02")
+        hidden = panel(one + two).replace("<li", '<li style="display:none"', 1)
+        estimate = "Earlier deeper answers here spent about 2,184,000 tokens, $2.76 each."
         self.assertEqual(
-            self.read_pages(markups[:3], shots.DEEPER_READING),
-            [[True, 2, True, True, True], [True, 2, True, True, False],
-             [False, 0, False, False, False]])
+            self.read_pages([panel(one + two), hidden, "<p>none</p>"], shots.DEEPER_READING),
+            [[True, [["a b", "Spent 1 tokens, about $0.01"], ["c b", "Spent 2 tokens, about $0.02"]],
+              True],
+             [True, [["c b", "Spent 2 tokens, about $0.02"]], True],
+             [False, [], False]])
         self.assertEqual(
-            self.read_pages(markups[3:], shots.OFFER_READING),
-            [[True, 1, True, True], [True, 1, False, True], [False, 0, False, False]])
+            self.read_pages([offer(estimate), offer("No estimate."), "<p>none</p>"],
+                            shots.OFFER_READING),
+            [[True, [["a b", "Spent 1 tokens, about $0.01"]], True, estimate],
+             [True, [["a b", "Spent 1 tokens, about $0.01"]], True, "No estimate."],
+             [False, [], False, ""]])
 
     def test_the_jargon_count_counts_each_visible_review_phrase(self) -> None:
         samples = {
