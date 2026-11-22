@@ -1,0 +1,37 @@
+# Keeps one cleanup issue open for the never-rise violations already on main
+# (ADR-delivery-017). It reads the pushed commit and may write issues and
+# nothing else; tests/test_branch_protection.py pins this file's shape. One
+# concurrency group that cancels nothing and queues up to 100 waiting runs
+# (queue: max) runs pushes one after another, so two pushes never both find no
+# open cleanup issue. forge_api drops token variables, so the token is stored
+# for gh before the command runs.
+name: Cleanup Issue
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: cleanup-issue
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  cleanup-issue:
+    name: Cleanup Issue
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Store the workflow token for gh
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s\n' "$TOKEN" | gh auth login --with-token --insecure-storage
+      - name: File the next cleanup issue
+        run: PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file --repo-root "$GITHUB_WORKSPACE" --repo "$GITHUB_REPOSITORY"

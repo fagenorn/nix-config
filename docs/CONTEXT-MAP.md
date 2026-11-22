@@ -1,7 +1,6 @@
 # Context Map
 
 ## Areas
-
 | Area | Context file | Gist | governs |
 |---|---|---|---|
 | Delivery | [CONTEXT](./areas/delivery/CONTEXT.md) | Carrying an issue to merge: lanes, skills, programs, plans, test suite | `home/common/agent-skills/skills/**`, `home/common/claude-code/skills/**`, `home/common/agent-skills/default.nix`, `lib/impeccable.nix`, `python/agent_tools/delivery/**`, `python/agent_tools/agent_model_matrix.py`, `python/agent_tools/instruction_load.py`, `python/agent_tools/skill_lint.py` |
@@ -39,6 +38,7 @@
 | Capacity strip | Console |
 | Check | Verification |
 | Claim | Claims |
+| Cleanup issue | Delivery |
 | Code map | Delivery |
 | Command table | Hosts |
 | Compiled policy | Guard |
