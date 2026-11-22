@@ -392,11 +392,14 @@ def words(command: str) -> list[str] | None:
 
 _SPLIT = re.compile(r"[\s;|&()<>$`,\[\]{}]+")
 _SHELL_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
-# A release run at a command position: the text start or after an operator, and after the wrappers the client
-# strips before it matches rules (the guard refuses the detaching one). The client matches each subcommand of
-# a chain on its own, so the manager's release allow rule matches such a segment wherever it stands (#1592).
+# A release run at a command position: the text start or after an operator, past leading `NAME=value`
+# assignments, shell keywords and `!`, and after the wrappers the client strips before it matches rules (the
+# guard refuses the detaching one). The client matches each subcommand of a chain on its own, so the
+# manager's release allow rule matches such a segment wherever it stands (#1592). Whether the client also
+# strips assignments or splits keyword bodies is unconfirmed, so the permit decides them all.
 _RELEASE_RUN_TEXT = re.compile(
     r"(?:\A|[;&|\n(){`]|\$\()\s*"
+    r"(?:(?:(?:then|do|else|elif|if|while|until|!)|[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S)*)\s+)*"
     r"(?:(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)(?:\s+-?[\w=.,:-]+)*?\s+)*"
     r"release\s+transaction\s+run(?:\s|\Z)")
 

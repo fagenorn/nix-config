@@ -5400,6 +5400,14 @@ def structure_problem(compiled, words):
     return f"{shown_value(found)} is out of place"
 
 
+# The value-taking flags of `gh pr merge` beyond the ones the form table spells: the word after each is
+# its value, whatever it looks like (issue 1592).
+MERGE_VALUED_FLAGS = frozenset((
+    "-R", "--repo", "-t", "--subject", "-b", "--body", "-F", "--body-file",
+    "-A", "--author-email", "--match-head-commit",
+))
+
+
 def valued_flags(elements):
     """The literal flag words in `elements`, groups included, each followed immediately
     by a slot: the flags whose next word is a value, not an option (issue 1592)."""
@@ -5427,11 +5435,16 @@ def missing_flags(compiled, words):
         spelled = {element.word for element in form.elements
                    if isinstance(element, Literal)}
         required = [flag for flag in required if flag in spelled]
-    valued = set()
+    valued = set(MERGE_VALUED_FLAGS)
     for form in compiled.forms:
         valued |= valued_flags(form.elements)
-    options = {word for index, word in enumerate(words)
-               if not (index and words[index - 1] in valued)}
+    options, value = set(), False
+    for word in words:
+        if value:
+            value = False
+            continue
+        options.add(word)
+        value = word in valued
     return [flag for flag in required if flag not in options]
 
 

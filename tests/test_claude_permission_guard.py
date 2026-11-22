@@ -4200,6 +4200,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             # A flag spelled as another flag's value is not the flag.
             (f'gh pr merge 2342 --repo {NODO} --merg --subject "--merge" {head}',
              "lifecycle guard: unsafe merge: unknown flag --merg; missing --merge; accepted: "),
+            # Nor is it when the value-taking flag is one the form table does not spell.
+            (f'gh pr merge 2342 --repo {NODO} --body "--merge" {head}',
+             "lifecycle guard: unsafe merge: unknown flag --body; missing --merge; accepted: "),
+            (f'gh pr merge 2342 --repo {NODO} -t "--merge" {head}',
+             "lifecycle guard: unsafe merge: unknown flag -t; missing --merge; accepted: "),
         ):
             with self.subTest(command=command):
                 line = self.refusal_line(self.run_guard(command, cwd=nodo,

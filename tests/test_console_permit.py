@@ -397,7 +397,13 @@ class JudgeTest(unittest.TestCase):
         for command in ("git status && release transaction run --help",
                         f"git status && {plain}", f"git status; {plain}", f"git status | {plain}",
                         f"git status\n{plain}", f"(git status; {plain})", f"echo $({plain})",
-                        f"timeout 5 {plain}", f"git status && time {plain}"):
+                        f"timeout 5 {plain}", f"git status && time {plain}",
+                        "git status && LANG=C release transaction run --help",
+                        f'git status && LANG="a b" X=1 {plain}',
+                        "if true; then release transaction run --help; fi",
+                        "while true; do release transaction run --help; done",
+                        "git status && ! release transaction run --help",
+                        "git status; if false; then :; else release transaction run --help; fi"):
             with self.subTest(command):
                 self.assertTrue(mentions(command))
                 verdict = self.judge(command)
