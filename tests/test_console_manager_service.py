@@ -683,6 +683,59 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(body, b'{"profile":"work"}')
 
+    ALL_OUT = "/api/profile?all_out=1"
+
+    def every_account_out(self):
+        dirs = self.profiles(work=0, home=0)
+        self.seed_readings({"work": self.exhausted(FAR), "home": self.exhausted(FAR + 3600)})
+        return self.start(profile_dirs=list(dirs.values()), clock=lambda: NOW)
+
+    def test_the_all_out_question_answers_no_profile_and_the_earliest_reset(self):
+        svc = self.every_account_out()
+        status, headers, body = support.request(svc.address, "GET", self.ALL_OUT)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(
+            body, b'{"all_out":true,"profile":null,"resumes_at":"2030-03-17T17:46:40Z"}')
+
+    def test_the_plain_question_is_unchanged_when_every_profile_is_out(self):
+        svc = self.every_account_out()
+        body = self.ask(svc)[2].decode()
+        self.assertRegex(body, r'^\{"profile":(null|"[a-z]+")\}$')
+        self.assertNotIn("all_out", body)
+
+    def test_the_all_out_question_with_room_answers_the_choice(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(support.request(svc.address, "GET", self.ALL_OUT)[2],
+                         b'{"profile":"work"}')
+
+    def test_the_all_out_question_writes_the_choice_file_like_the_plain_one(self):
+        self.seed_readings({"work": self.weekly(0.6), "home": self.weekly(0.1)})
+        dirs = [support.profile_dir(self.store, "work")]
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.assertEqual(self.choice.read_text(), "work\n")
+        dirs.append(support.profile_dir(self.store, "home"))
+        self.assertEqual(support.request(svc.address, "GET", self.ALL_OUT)[2],
+                         b'{"profile":"home"}')
+        self.assertEqual(self.choice.read_text(), "home\n")
+
+    def test_the_all_out_question_with_no_known_reset_answers_null(self):
+        dirs = self.profiles(work=0)
+        self.seed_readings({"work": self.exhausted(None)})
+        svc = self.start(profile_dirs=list(dirs.values()), clock=lambda: NOW)
+        capacity_now = json.loads(svc.view_bytes)["capacity"]
+        self.assertTrue(capacity_now["all_out"])
+        self.assertIsNone(capacity_now["resumes_at"])
+        self.assertEqual(support.request(svc.address, "GET", self.ALL_OUT)[2],
+                         b'{"all_out":true,"profile":null,"resumes_at":null}')
+
+    def test_another_query_answers_as_the_plain_question(self):
+        svc = self.every_account_out()
+        plain = self.ask(svc)[2]
+        for query in ("?all_out=0", "?x=1"):
+            self.assertEqual(support.request(svc.address, "GET", self.PROFILE + query)[2], plain)
+
     def test_the_route_breaks_a_weekly_tie_on_five_hour_allowance(self):
         dirs = self.two_profiles({"work": self.both(0.5, 0.7), "home": self.both(0.5, 0.1)})
         svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
