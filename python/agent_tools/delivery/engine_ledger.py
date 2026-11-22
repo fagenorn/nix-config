@@ -2,7 +2,8 @@
 
 Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
 
-    run.json            the run's identity: exactly `RUN_MEMBERS`
+    run.json            the run's identity: exactly `RUN_MEMBERS`, plus `tracker` (the identity of the
+                        tracker its issue lives in) when the run was created with one
     procedure/          a byte copy of the entry procedure directory's `*.json`, `*.md`, `SHA256SUMS`
     events.jsonl        one compact JSON event per line, appended and fsynced
     lock  the deliver process's exclusive flock and its {"pid","started"}
@@ -58,6 +59,7 @@ RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 TOKEN_RE = re.compile(r"^[a-z0-9]{4}$")
 RUN_MEMBERS = ("host", "inputs", "issue", "platform_revision", "procedure", "project",
                "run", "sequence", "started")
+OPTIONAL_RUN_MEMBERS = ("tracker",)
 WAITS = ("usage-limit", "host-slot", "lock")
 TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
@@ -165,7 +167,7 @@ def _check_inputs(inputs: Mapping[str, str | int]) -> None:
 def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path,
                platform_revision: str, host: str, inputs: Mapping[str, str | int],
                now: datetime, token: str | None = None, root: Path | None = None,
-               before_publish: Callable[[Path], None] | None = None) -> Path:
+               tracker: str | None = None, before_publish: Callable[[Path], None] | None = None) -> Path:
     """Create the run directory and return its path; a `before_publish(staged)` raise leaves no run."""
     for label, value in (("project", project), ("platform_revision", platform_revision),
                          ("host", host)):
@@ -197,6 +199,8 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
                     "platform_revision": platform_revision, "procedure": procedure,
                     "project": project, "run": run_id, "sequence": sequence,
                     "started": started}
+        if tracker is not None:
+            document["tracker"] = tracker
         _write_file(temporary / "run.json", _compact(document).encode("utf-8"))
         copied = temporary / "procedure"
         os.mkdir(copied, 0o700)
@@ -235,8 +239,11 @@ def _strict_load(path: Path) -> object:
 
 def read_run(run_dir: Path) -> dict:
     document = _strict_load(Path(run_dir) / "run.json")
-    if not isinstance(document, dict) or set(document) != set(RUN_MEMBERS):
+    if (not isinstance(document, dict) or not set(RUN_MEMBERS) <= set(document)
+            or not set(document) <= set(RUN_MEMBERS + OPTIONAL_RUN_MEMBERS)):
         raise LedgerError("run.json does not have exactly the run members")
+    if "tracker" in document and not (isinstance(document["tracker"], str) and document["tracker"]):
+        raise LedgerError("run.json tracker is not a non-empty string")
     if not isinstance(document["project"], str):
         raise LedgerError("run.json project is not a string")
     if not _is_int(document["sequence"]) or document["sequence"] < 1:

@@ -21,6 +21,11 @@ Run directories expire `RUN_KEEP_DAYS` days after their issue closes. `sweep_run
 starts: it asks the tracker once per issue (an open issue never expires), skips an issue the tracker
 cannot read, and deletes nothing at all when the tracker call fails. A run whose lock another process
 holds, or whose issue has a delivery being created, is skipped and swept by a later start. A run is
+swept only under the tracker it was created under: `run.json` carries `tracker` (`tracker_identity`),
+and a run with another identity, or none, is kept, so re-pointing a project's tracker never lets another
+repository's issue of the same number expire a run. Before a finished run (done or stopped) is renamed,
+its history line is appended if the history holds none for it, and a run whose line cannot be appended is
+kept. The tracker budget (`SWEEP_SECONDS`) starts after the run directories are listed and read. A run is
 renamed to `.<run id>.expired` before it is removed, so a removal that fails is finished by the next
 sweep. `.sweep-cursor.json` remembers the last issue asked per project so that a sweep cut short by its
 time budget resumes after it.
@@ -111,12 +116,29 @@ def append_history(line: Mapping, path: Path | None = None) -> None:
             os.close(descriptor)
 
 
+def _load(line: bytes) -> object:
+    """The JSON value of `line`, or None when it is not readable (a deeply nested one included)."""
+    try:
+        return json.loads(line.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return None
+
+
 def _expired(line: bytes, cutoff: datetime) -> bool:
     try:
-        loaded = json.loads(line.decode("utf-8"))
-        return parse_rfc3339_utc(loaded["ended"]) < cutoff
+        return parse_rfc3339_utc(_load(line)["ended"]) < cutoff  # type: ignore[index]
     except (ValueError, KeyError, TypeError):
         return False
+
+
+def _recorded(run: str, path: Path) -> bool:
+    """Whether the history holds a line for `run`."""
+    try:
+        data = Path(path).read_bytes()
+    except FileNotFoundError:
+        return False
+    return any(isinstance(loaded, dict) and loaded.get("run") == run
+               for loaded in map(_load, data.split(b"\n")))
 
 
 def prune_history(now: datetime, path: Path | None = None) -> int:
@@ -185,6 +207,12 @@ def forge_tracker(slug: str) -> Tracker:
     return closed_at
 
 
+def tracker_identity(binding: Mapping) -> str:
+    """The identity a run records for the tracker its issue lives in: `github:<repo slug>`, or the kind."""
+    kind, slug = binding.get("kind"), binding.get("repo_slug")
+    return f"{kind}:{slug.casefold()}" if isinstance(slug, str) else str(kind)
+
+
 def default_tracker(binding: Mapping) -> Tracker:
     """The tracker of a project's tracker binding; a kind other than github fails on its first read."""
     kind = binding["kind"]
@@ -203,7 +231,7 @@ def cursor_path() -> Path:
 def _read_cursor(cursor: Path) -> dict:
     try:
         loaded = json.loads(Path(cursor).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
 
@@ -246,7 +274,7 @@ def _remove(path: Path) -> bool:
     return True
 
 
-def _candidates(root: Path, entries: list[Path], project: str,
+def _candidates(root: Path, entries: list[Path], project: str, tracker_id: str,
                 skip_run: str | None) -> dict[int, list[Path]]:
     """The runs of `project` the sweep may delete, by issue; every other run is kept."""
     found: dict[int, list[Path]] = {}
@@ -259,7 +287,8 @@ def _candidates(root: Path, entries: list[Path], project: str,
         except engine_ledger.LedgerError:
             continue
         issue = document["issue"]
-        if (document["project"] == project and isinstance(issue, int)
+        if (document["project"] == project and document.get("tracker") == tracker_id
+                and isinstance(issue, int)
                 and not isinstance(issue, bool) and issue >= 1 and issue == int(match.group(1))):
             found.setdefault(issue, []).append(entry)
     return found
@@ -272,8 +301,24 @@ def _rotated(issues: list[int], after: object) -> list[int]:
     return ordered
 
 
-def _delete(root: Path, issue: int, run: Path, on_locked: Callable[[Path], None] | None) -> bool:
-    """Rename `run` aside while holding its creation and run locks; False when a lock is not free."""
+def _record_end(run: Path, history: Path) -> None:
+    """Append the history line of a finished `run` the history lacks; the caller holds its locks."""
+    state = engine_ledger.fold(engine_ledger.read_run(run),
+                               engine_ledger.replay(run / "events.jsonl"), lambda pid, started: False)
+    if not (state.done or state.stop is not None) or _recorded(state.run, history):
+        return
+    ends = ("run_done",) if state.done else ("stop_reached",)
+    ended = [event["at"] for event in engine_ledger.replay(run / "events.jsonl")
+             if event["event"] in ends][-1]
+    append_history(history_line(state, parse_rfc3339_utc(ended)), history)
+
+
+def _delete(root: Path, issue: int, run: Path, history: Path,
+            on_locked: Callable[[Path], None] | None) -> bool:
+    """Rename `run` aside while holding its creation and run locks; False when it was kept.
+
+    A lock another process holds, or a run that vanished, keeps it silently; any other failure
+    keeps it and writes one stderr line naming the run."""
     descriptors = []
     try:
         try:
@@ -286,8 +331,17 @@ def _delete(root: Path, issue: int, run: Path, on_locked: Callable[[Path], None]
             fcntl.flock(held, fcntl.LOCK_SH | fcntl.LOCK_NB)
             if on_locked is not None:
                 on_locked(run)
+            try:
+                _record_end(run, history)
+            except Exception as error:
+                sys.stderr.write(f"engine: housekeeping kept {run}, its history line was not "
+                                 f"recorded: {_line(error)}\n")
+                return False
             os.rename(run, root / f".{run.name}.expired")
-        except OSError:
+        except (BlockingIOError, FileNotFoundError):
+            return False
+        except Exception as error:
+            sys.stderr.write(f"engine: housekeeping kept {run}: {_line(error)}\n")
             return False
     finally:
         for descriptor in reversed(descriptors):
@@ -295,20 +349,22 @@ def _delete(root: Path, issue: int, run: Path, on_locked: Callable[[Path], None]
     return True
 
 
-def sweep_runs(root: Path, *, project: str, tracker: Tracker, now: datetime, cursor: Path,
-               skip_run: str | None = None, monotonic: Callable[[], float] = time.monotonic,
+def sweep_runs(root: Path, *, project: str, tracker: Tracker, tracker_id: str, now: datetime,
+               cursor: Path, history: Path | None = None, skip_run: str | None = None,
+               monotonic: Callable[[], float] = time.monotonic,
                on_locked: Callable[[Path], None] | None = None) -> list[str]:
     """Delete the runs of `project` whose issue closed more than `RUN_KEEP_DAYS` days before `now`.
 
     Returns the deleted run ids, sorted. All tracker reads come before any deletion."""
-    start = monotonic()
     root = Path(root)
+    history = history_path() if history is None else Path(history)
     try:
         entries = list(root.iterdir())
     except OSError:
         return []
-    candidates = _candidates(root, entries, project, skip_run)
+    candidates = _candidates(root, entries, project, tracker_id, skip_run)
     order = _rotated(list(candidates), _read_cursor(cursor).get(project))
+    start = monotonic()  # the tracker budget: listing and reading the runs above is not charged to it
     expired: list[int] = []
     asked = None
     for issue in order:
@@ -334,13 +390,13 @@ def sweep_runs(root: Path, *, project: str, tracker: Tracker, now: datetime, cur
     deleted = []
     for issue in sorted(expired):
         for run in candidates[issue]:
-            if _delete(root, issue, run, on_locked) and _remove(root / f".{run.name}.expired"):
+            if _delete(root, issue, run, history, on_locked) and _remove(root / f".{run.name}.expired"):
                 deleted.append(run.name)
     return sorted(deleted)
 
 
 def housekeep(*, project: str, run: str, clock: Callable[[], datetime],
-              tracker: Callable[[], Tracker]) -> None:
+              tracker: Callable[[], Tracker], identity: str) -> None:
     """Prune the history and sweep expired runs; a failure is one stderr line, never an exception."""
     try:
         now = clock()
@@ -353,7 +409,7 @@ def housekeep(*, project: str, run: str, clock: Callable[[], datetime],
     except Exception as error:
         sys.stderr.write(f"engine: housekeeping skipped the history prune: {_line(error)}\n")
     try:
-        sweep_runs(engine_ledger.runs_root(), project=project, tracker=tracker(), now=now,
-                   cursor=cursor_path(), skip_run=run)
+        sweep_runs(engine_ledger.runs_root(), project=project, tracker=tracker(),
+                   tracker_id=identity, now=now, cursor=cursor_path(), skip_run=run)
     except Exception as error:
         sys.stderr.write(f"engine: housekeeping skipped the run sweep: {_line(error)}\n")

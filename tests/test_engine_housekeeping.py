@@ -230,6 +230,16 @@ class HistoryFileTest(unittest.TestCase):
         after = path.stat()
         self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
 
+    def test_a_deeply_nested_line_is_kept_and_the_independently_dated_lines_are_pruned(self):
+        path = self.tmp / "history.jsonl"
+        now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+        deep = b"[" * 100000 + b"\n"
+        young = compact(example_line("4-20260101T000000Z-aaaa", now - timedelta(days=10)))
+        path.write_bytes(deep + compact(example_line("1-20260101T000000Z-aaaa",
+                                                     now - timedelta(days=181))) + young)
+        self.assertEqual(prune_history(now, path), 1)
+        self.assertEqual(path.read_bytes(), deep + young)
+
     def test_a_prune_of_a_missing_file_creates_nothing(self):
         path = self.tmp / "absent/history.jsonl"
         self.assertEqual(prune_history(ENDED, path), 0)
@@ -239,15 +249,17 @@ class HistoryFileTest(unittest.TestCase):
 
 NOW = datetime(2026, 11, 21, 12, tzinfo=timezone.utc)
 PROJECT = "example/engine"
+TRACKER = "github:example/engine"
 
 
-def seed(root: Path, issue: int, project: str = PROJECT, token: str = "a1b2") -> Path:
+def seed(root: Path, issue: int, project: str = PROJECT, token: str = "a1b2",
+         tracker: str | None = TRACKER) -> Path:
     procedures = Path(tempfile.mkdtemp())
     (procedures / "deliver.json").write_text("{}")
     path = engine_ledger.create_run(
         project=project, issue=issue, procedure="deliver", procedures_dir=procedures,
         platform_revision="source", host="test", inputs={"issue": issue},
-        now=NOW - timedelta(days=30), token=token, root=root)
+        now=NOW - timedelta(days=30), token=token, root=root, tracker=tracker)
     shutil.rmtree(procedures)
     return path
 
@@ -286,6 +298,8 @@ class SweepTest(unittest.TestCase):
 
     def sweep(self, tracker, **kw):
         kw.setdefault("cursor", self.cursor)
+        kw.setdefault("tracker_id", TRACKER)
+        kw.setdefault("history", self.tmp / "history.jsonl")
         return sweep_runs(kw.pop("root", self.root), project=PROJECT, tracker=tracker, now=NOW, **kw)
 
     def hold(self, path: Path, mode: int = fcntl.LOCK_EX) -> None:
@@ -505,6 +519,112 @@ class SweepTest(unittest.TestCase):
         self.assertFalse(expired.exists())
         self.assertEqual(captured.getvalue(), "")
 
+    def test_a_run_of_another_tracker_or_of_none_is_kept_whatever_that_tracker_says(self):
+        other = seed(self.root, 101, tracker="github:other/repo")
+        legacy = seed(self.root, 102, tracker=None)
+        mine = seed(self.root, 103)
+        tracker = FakeTracker({101: ago(20), 102: ago(20), 103: ago(20)})
+        self.assertEqual(self.sweep(tracker), [mine.name])
+        self.assertEqual(tracker.asked, [103])
+        self.assertEqual(left(self.root), sorted([other.name, legacy.name]))
+
+    def finish(self, run: Path, event: dict) -> None:
+        engine_ledger.append_event(run, event)
+
+    def history_runs(self) -> list[dict]:
+        path = self.tmp / "history.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_a_finished_run_with_no_history_line_gets_it_before_its_directory_goes(self):
+        done, stopped, open_run = seed(self.root, 101), seed(self.root, 102), seed(self.root, 103)
+        self.finish(done, {"event": "run_done", "at": "2026-10-23T10:00:00Z"})
+        self.finish(stopped, {"event": "stop_reached", "at": "2026-10-23T11:00:00Z", "step": "a",
+                              "stop": "needs-owner", "need": "owner-decision"})
+        tracker = FakeTracker({101: ago(20), 102: ago(20), 103: ago(20)})
+        self.assertEqual(len(self.sweep(tracker)), 3)
+        lines = {line["run"]: line for line in self.history_runs()}
+        self.assertEqual(set(lines), {done.name, stopped.name})
+        self.assertEqual((lines[done.name]["end"], lines[done.name]["need"],
+                          lines[done.name]["ended"]), ("done", None, "2026-10-23T10:00:00Z"))
+        self.assertEqual((lines[stopped.name]["end"], lines[stopped.name]["need"]),
+                         ("needs-owner", "owner-decision"))
+        self.assertEqual(left(self.root), [])
+
+    def test_a_run_whose_history_line_exists_is_not_recorded_twice(self):
+        run = seed(self.root, 101)
+        self.finish(run, {"event": "run_done", "at": "2026-10-23T10:00:00Z"})
+        (self.tmp / "history.jsonl").write_bytes(
+            b"[" * 100000 + b"\n" + compact({"run": run.name, "ended": "2026-10-23T10:00:01Z"}))
+        before = (self.tmp / "history.jsonl").read_bytes()
+        self.assertEqual(self.sweep(FakeTracker({101: ago(20)})), [run.name])
+        self.assertEqual((self.tmp / "history.jsonl").read_bytes(), before)
+
+    def test_a_history_line_that_cannot_be_appended_keeps_the_run_and_writes_one_line(self):
+        run, plain = seed(self.root, 101), seed(self.root, 102)
+        self.finish(run, {"event": "run_done", "at": "2026-10-23T10:00:00Z"})
+        captured = io.StringIO()
+        with mock.patch("agent_tools.delivery.engine_housekeeping.append_history",
+                        side_effect=OSError("disk full")), contextlib.redirect_stderr(captured):
+            deleted = self.sweep(FakeTracker({101: ago(20), 102: ago(20)}))
+        self.assertEqual(deleted, [plain.name])
+        self.assertEqual(left(self.root), [run.name])
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn(run.name, lines[0])
+        self.assertTrue(lines[0].endswith("OSError: disk full"))
+
+    def test_listing_and_reading_every_run_does_not_spend_the_tracker_budget(self):
+        for issue in (101, 102):
+            seed(self.root, issue)
+        clock = [0.0]
+        original = engine_ledger.read_run
+
+        def slow(path):
+            clock[0] += 61.0
+            return original(path)
+
+        tracker = FakeTracker({101: ago(20)})
+        with mock.patch.object(engine_ledger, "read_run", slow):
+            deleted = self.sweep(tracker, monotonic=lambda: clock[0])
+        self.assertEqual(tracker.asked, [101, 102])
+        self.assertEqual([name.split("-")[0] for name in deleted], ["101"])
+
+    def test_a_lock_that_cannot_be_opened_is_reported_with_the_run_path_and_the_others_go(self):
+        refused, gone = seed(self.root, 101), seed(self.root, 102)
+        real = os.open
+
+        def opening(path, *args, **kw):
+            if Path(path) == refused / "lock":
+                raise PermissionError("denied")
+            return real(path, *args, **kw)
+
+        captured = io.StringIO()
+        with mock.patch("agent_tools.delivery.engine_housekeeping.os.open", opening), \
+                contextlib.redirect_stderr(captured):
+            deleted = self.sweep(FakeTracker({101: ago(20), 102: ago(20)}))
+        self.assertEqual(deleted, [gone.name])
+        self.assertEqual(left(self.root), [refused.name])
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn(str(refused), lines[0])
+        self.assertTrue(lines[0].endswith("PermissionError: denied"))
+
+    def test_a_rename_that_is_refused_is_reported_and_a_vanished_run_is_not(self):
+        run = seed(self.root, 101)
+        for error, reported in ((PermissionError("denied"), True), (FileNotFoundError("gone"), False)):
+            with self.subTest(error=type(error).__name__):
+                captured = io.StringIO()
+                with mock.patch("agent_tools.delivery.engine_housekeeping.os.rename",
+                                side_effect=error), contextlib.redirect_stderr(captured):
+                    self.assertEqual(self.sweep(FakeTracker({101: ago(20)})), [])
+                self.assertTrue(run.exists())
+                lines = captured.getvalue().splitlines()
+                self.assertEqual(len(lines), 1 if reported else 0)
+                if reported:
+                    self.assertIn(str(run), lines[0])
+
     def test_find_runs_skips_a_run_renamed_between_listing_and_reading(self):
         first, second = seed(self.root, 101), seed(self.root, 101, token="c3d4")
         original = engine_ledger.read_run
@@ -542,7 +662,7 @@ class HousekeepTest(unittest.TestCase):
             if prepare is not None:
                 prepare(home)
             self.assertIsNone(housekeep(project=PROJECT, run="999-20261101T000000Z-zzzz",
-                                        clock=clock, tracker=tracker))
+                                        clock=clock, tracker=tracker, identity=TRACKER))
         return home, run, captured.getvalue().splitlines()
 
     def test_each_swallowed_exception_writes_one_stderr_line(self):
@@ -766,6 +886,13 @@ class DeliverHousekeepingTest(unittest.TestCase):
                          draft["wall_seconds"], draft["waits"]),
                         (account, {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44},
                          0.4321, 12.345, []))
+
+    def test_a_delivered_run_records_the_identity_of_the_tracker_it_was_created_under(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        self.assertEqual(deliver(project, 205, procedures, at=T0, tracker=FakeTracker({}))[0], 0)
+        document = json.loads((run_of(project, 205)[0] / "run.json").read_text())
+        self.assertEqual(document["tracker"], "github:example/engine")
 
     def test_an_earlier_run_of_the_delivered_issue_expires_and_the_new_run_stays(self):
         project = EngineProject(self)
@@ -1039,7 +1166,8 @@ class DeliverHousekeepingTest(unittest.TestCase):
                 outcome["swept"] = sweep_runs(
                     engine_ledger.runs_root(), project="example/engine",
                     tracker=FakeTracker({702: T1 - timedelta(days=20)}), now=T1,
-                    cursor=project.tmp / "cursor.json", on_locked=pause)
+                    cursor=project.tmp / "cursor.json", on_locked=pause,
+                    tracker_id="github:example/engine")
             except BaseException as error:
                 outcome["sweep error"] = error
 

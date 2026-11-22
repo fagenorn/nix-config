@@ -235,6 +235,7 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
     snapshot, table = _resolve()
     project = snapshot["project"]["id"]
     clock = clock or (lambda: datetime.now(timezone.utc))
+    identity = engine_housekeeping.tracker_identity(snapshot["bindings"]["tracker"])
     tracker_factory = ((lambda: tracker) if tracker is not None else
                        (lambda: engine_housekeeping.default_tracker(
                            snapshot["bindings"]["tracker"])))
@@ -276,7 +277,7 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
                 procedures_dir=procedures_dir,
                 platform_revision=platform_revision(os.environ),
                 host=_host(), inputs=inputs, now=datetime.now(timezone.utc),
-                before_publish=stage)
+                tracker=identity, before_publish=stage)
         finally:
             os.close(creation)
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
@@ -287,7 +288,7 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
         raise
     try:
         engine_housekeeping.housekeep(project=project, run=run_dir.name, clock=clock,
-                                      tracker=tracker_factory)
+                                      tracker=tracker_factory, identity=identity)
         code, line = _walk(run_dir, table, inputs)
         if code in (EXIT_DONE, EXIT_STOP):
             _record_history(run_dir, clock)
