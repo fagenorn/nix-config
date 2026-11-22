@@ -151,8 +151,9 @@ class LauncherCase(unittest.TestCase):
         listener.listen(8)
         return "http://127.0.0.1:%d" % listener.getsockname()[1]
 
-    def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None):
-        """`claude-account run` from a fresh copy of the mod, as a finished process.
+    def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None,
+                     command="run"):
+        """`claude-account <command>` (default `run`) from a fresh copy of the mod, as a finished process.
 
         `without_curl_and_jq` points the copy's CURL and JQ at paths that do not exist."""
         copy = Path(tempfile.mkdtemp(dir=self.root)) / "accounts"
@@ -176,7 +177,7 @@ class LauncherCase(unittest.TestCase):
         child = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
         child.update(HOME=str(home), CLAUDE_ACCOUNTS_DIR=str(self.root / "accounts-state"),
                      CLAUDE_BIN=shutil.which("env"), **{**self.switch, **(env or {})})
-        return subprocess.run([shutil.which("bash"), str(script), "run"], cwd=work, env=child,
+        return subprocess.run([shutil.which("bash"), str(script), command], cwd=work, env=child,
                               capture_output=True, text=True, timeout=TIMEOUT, check=False)
 
     def launch(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None):
@@ -476,6 +477,27 @@ class ProfileChoiceTest(LauncherCase):
         environment = self.launch(self.closed(), {"CLAUDE_ACCOUNT": "b"}, console_url=url)
         self.assertEqual(self.chosen(environment), self.path("b"))
         self.assertEqual(self.console_requests, [])
+
+    def test_choose_prints_the_account_a_launch_uses(self):
+        self.profile("a", True, self.now)
+        self.profile("other", True, self.now - 100)
+        url = self.console(b'{"profile":"work"}')
+        self.profile("work", False, self.now - 200)
+        custom = str(self.root / "custom")
+        cases = (
+            ("console", {}, url, "work\n"),
+            ("override", {"CLAUDE_ACCOUNT": "other"}, url, "other\n"),
+            ("custom config dir", {"CLAUDE_CONFIG_DIR": custom}, url, "\n"),
+        )
+        for label, env, console_url, expected in cases:
+            with self.subTest(label):
+                completed = self.run_launcher(self.closed(), env, console_url=console_url, command="choose")
+                self.assertEqual((completed.returncode, completed.stdout, completed.stderr), (0, expected, ""))
+        with self.subTest("no named profile"):
+            shutil.rmtree(self.state / "profiles")
+            (self.state / "profiles" / "default").mkdir(parents=True)
+            completed = self.run_launcher(self.closed(), console_url=url, command="choose")
+            self.assertEqual((completed.returncode, completed.stdout, completed.stderr), (0, "default\n", ""))
 
     def test_a_caller_set_config_dir_wins_over_the_console(self):
         self.profile("a", True, self.now)

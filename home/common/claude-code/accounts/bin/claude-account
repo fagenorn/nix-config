@@ -54,6 +54,8 @@ usage: claude-account <command>
                        every account's 5-hour and weekly usage
   run [claude args]    start claude under the profile the console chooses (what
                        plain `claude` does)
+  choose               print the account `run` would start under (empty for a
+                       caller-set config directory)
   switch <name> <id>   from inside a session: restart it as session <id> under
                        an account (what /account <name> does)
   rm <name>            delete an account profile
@@ -550,6 +552,18 @@ cmd_run() {
   done
 }
 
+# Prints the account `run` would start under, one line, and starts nothing: empty when `run` would
+# leave a config directory the caller chose itself alone, else what launch_account prints.
+cmd_choose() {
+  if [ -z "${CLAUDE_ACCOUNT:-}" ]; then
+    case "${CLAUDE_CONFIG_DIR:-}" in
+      ""|"$PROFILES"/*) ;;
+      *) printf '\n'; return 0 ;;
+    esac
+  fi
+  launch_account
+}
+
 # <name> <session id>: from inside a session `run` started, ends that session's
 # claude and has `run` resume the conversation under the account. The claude to
 # end is the ancestor whose parent is the launcher, so nothing else is signalled.
@@ -593,6 +607,7 @@ case "$command" in
   status) cmd_status ;;
   active) active_account ;;
   run) cmd_run "$@" ;;
+  choose) cmd_choose ;;
   switch) cmd_switch "$@" ;;
   rm) cmd_rm "$@" ;;
   ""|help|-h|--help) usage ;;

@@ -79,6 +79,9 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 )
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
+CHOOSER: tuple[str, ...] = ("claude-account", "choose")
+CHOOSE_SECONDS = 15
+_ACCOUNT_RE = re.compile(r"^[a-z0-9_-]+$")
 NOT_STARTED = 127
 READ_ONLY_BASH: tuple[str, ...] = tuple(
     f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
@@ -299,13 +302,42 @@ def diagnostic(stderr: bytes) -> str:
     return " ".join(lines[-1].split())[:DIAGNOSTIC_CHARS] if lines else ""
 
 
+class AccountChoiceError(Exception):
+    """The launcher gave no usable answer to which account it would start under."""
+
+
+def choose_account(cwd: str) -> str | None:
+    """The account `CHOOSER` names in `cwd`, or None for its empty answer (a caller-set config)."""
+    try:
+        done = subprocess.run(CHOOSER, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=CHOOSE_SECONDS, check=False)
+    except OSError as error:
+        raise AccountChoiceError(f"the launcher did not start: {error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise AccountChoiceError(f"the launcher gave no answer in {CHOOSE_SECONDS} s") from error
+    if done.returncode != 0:
+        reason = diagnostic(done.stderr)
+        raise AccountChoiceError(f"exit {done.returncode}" + (f": {reason}" if reason else ""))
+    lines = done.stdout.decode("utf-8", errors="replace").split("\n")
+    if len(lines) != 2 or lines[1] != "":
+        raise AccountChoiceError(f"the launcher printed {done.stdout[:80]!r}, not one line")
+    if lines[0] == "":
+        return None
+    if not _ACCOUNT_RE.fullmatch(lines[0]):
+        raise AccountChoiceError(f"the launcher printed {lines[0][:80]!r}, not an account name")
+    return lines[0]
+
+
 def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
-           on_start: Callable[[int], None]) -> Launched:
-    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
+           on_start: Callable[[int], None], env: Mapping[str, str] | None = None) -> Launched:
+    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written.
+
+    The account is chosen first (`choose_account`) and pinned through `env`, so the launch cannot pick
+    another; None inherits the environment."""
     started = time.monotonic()
     try:
         previous = signal.signal(signal.SIGTERM, _terminate)
@@ -316,7 +348,7 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         try:
             process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       start_new_session=True)
+                                       start_new_session=True, env=env)
         except OSError as error:
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)

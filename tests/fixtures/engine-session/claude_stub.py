@@ -6,6 +6,11 @@ it appends one compact JSON line `{"announced", "argv", "cwd", "stdin"}` to
 bytes of the `<diagnostic>` file to stderr unless `<diagnostic>` is `-`, and
 exits `<exit>`.
 
+Exceptions, before anything is read or written: launcher args that are exactly `choose` print
+`$CLAUDE_ACCOUNT`, else `$ENGINE_STUB_ACCOUNT`, else `console` and exit 0, ignoring `<exit>` and
+writing no log; every other call first writes the `CLAUDE_ACCOUNT` it started with (empty when
+unset) to `<log>.account`.
+
 `announced` is true when some `$HOME/.agents/state/engine/runs/*/events.jsonl`
 holds a `session_starting` event whose `session` is the argv word after
 `--session-id`: the engine recorded the session before this process read it.
@@ -36,6 +41,11 @@ def announced(argv: list[str]) -> bool:
 
 def main(argv: list[str]) -> int:
     log, canned, code, diagnostic, words = argv[0], argv[1], int(argv[2]), argv[3], argv[4:]
+    if words == ["choose"]:
+        print(os.environ.get("CLAUDE_ACCOUNT") or os.environ.get("ENGINE_STUB_ACCOUNT", "console"))
+        return 0
+    with open(log + ".account", "w", encoding="utf-8") as handle:
+        handle.write(os.environ.get("CLAUDE_ACCOUNT", ""))
     record = {"announced": announced(words), "argv": words, "cwd": os.getcwd(),
               "stdin": sys.stdin.read()}
     with open(log, "a", encoding="utf-8") as handle:

@@ -414,13 +414,17 @@ def _visit_session(run_dir: Path, root: str, step: dict,
     prompt = engine_session.render_prompt(
         (staged / action.prompt).read_text(encoding="utf-8"), action.args)
     session = str(uuid.uuid4())
+    try:
+        account = engine_session.choose_account(root)
+    except engine_session.AccountChoiceError as error:
+        raise Fault(f"step {name} could not choose its account: {error}") from error
     system = engine_ledger.store_session_file(run_dir, f"{name}.{visit}.system.md",
                                               role.body.encode("utf-8"))
     engine_ledger.store_session_file(run_dir, f"{name}.{visit}.prompt.md", prompt.encode("utf-8"))
     engine_ledger.append_event(run_dir, {
         "event": "session_starting", "at": _now(), "step": name, "visit": visit,
         "session": session, "role": role.name,
-        "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
+        "account": account or "custom"})
 
     def started(pid: int) -> None:
         engine_ledger.append_event(run_dir, {"event": "process_started", "at": _now(),
@@ -428,7 +432,8 @@ def _visit_session(run_dir: Path, root: str, step: dict,
                                              "started": _now()})
 
     launched = engine_session.launch(
-        engine_session.launch_argv(role, schema, session, system), root, prompt, on_start=started)
+        engine_session.launch_argv(role, schema, session, system), root, prompt, on_start=started,
+        env=None if account is None else {**os.environ, "CLAUDE_ACCOUNT": account})
     reading = engine_session.read_result(launched.stdout)
     record = {"denials": reading.denials, "exit_code": launched.exit_code,
               "prose": reading.prose, "session": session, "subtype": reading.subtype}

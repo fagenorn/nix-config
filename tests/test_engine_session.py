@@ -576,12 +576,12 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         seen: list[tuple] = []
 
-        def checking(argv, cwd, prompt, *, on_start):
+        def checking(argv, cwd, prompt, *, on_start, env=None):
             (run,) = project.runs()
             events = engine_ledger.replay(run / "events.jsonl")
             seen.append((events[-1]["event"], events[-1].get("session"),
                          [e["event"] for e in events], after(list(argv), "--session-id")))
-            return real(argv, cwd, prompt, on_start=on_start)
+            return real(argv, cwd, prompt, on_start=on_start, env=env)
 
         with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
             code, line = engine_shell.deliver(1514, procedures)
@@ -708,6 +708,55 @@ class DeliverSessionTest(unittest.TestCase):
         done = self.project.deliver(one_step(self.project), issue=1514)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.starting()["account"], "work")
+
+    def test_the_account_the_launcher_chooses_is_recorded_and_pinned(self):
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        self.project.env["ENGINE_STUB_ACCOUNT"] = "work"
+        log = install_stub(self.project, RESULT_NORMAL)
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.starting()["account"], "work")
+        self.assertEqual(Path(f"{log}.account").read_text(encoding="utf-8"), "work")
+
+    def stand_in(self, choose_script: str) -> Path:
+        """A launcher whose `choose` runs `choose_script` and whose other calls run the stub."""
+        log = install_stub(self.project, RESULT_NORMAL)
+        stub_launcher = self.project.bin / "claude-account"
+        real = self.project.bin / "claude-account-stub"
+        stub_launcher.rename(real)
+        stub_launcher.write_text(f'#!/bin/sh\nif [ "$1" = choose ]; then\n{choose_script}\nfi\n'
+                                 f'exec {real} "$@"\n', encoding="utf-8")
+        stub_launcher.chmod(0o755)
+        return log
+
+    def test_a_launcher_that_cannot_choose_is_a_fault_before_any_session(self):
+        self.stand_in("echo 'claude-account: no profiles directory' >&2\nexit 3")
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        for word in ("draft", "could not choose its account", "exit 3", "no profiles directory"):
+            self.assertIn(word, done.stderr)
+        kinds = [e["event"] for e in self.project.events(self.run_dir())]
+        self.assertIn("step_entered", kinds)
+        self.assertNotIn("session_starting", kinds)
+
+    def test_an_empty_choice_records_custom_and_pins_nothing(self):
+        log = self.stand_in("echo\nexit 0")
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.starting()["account"], "custom")
+        self.assertEqual(Path(f"{log}.account").read_text(encoding="utf-8"), "")
+
+    def test_a_choice_that_is_not_one_name_is_a_fault(self):
+        for output in ("a b\n", "work\nother\n", "Work\n"):
+            with self.subTest(output=output):
+                self.project = EngineProject(self)
+                self.project.env.pop("CLAUDE_ACCOUNT", None)
+                copy_roles(self.project, *ROLE_NAMES)
+                self.stand_in(f"printf '%s' '{output}'\nexit 0")
+                done = self.project.deliver(one_step(self.project), issue=1514)
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertIn("could not choose its account", done.stderr)
 
     def test_an_unknown_account_is_one_fault_line_with_the_launchers_reason(self):
         self.project.env["CLAUDE_ACCOUNT"] = "work"
