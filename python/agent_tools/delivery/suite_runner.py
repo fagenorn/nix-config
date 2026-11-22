@@ -193,6 +193,22 @@ def schedule_order(members: Sequence[str], timings: Mapping[str, float]) -> list
     return unknown + known
 
 
+SUITE_RECIPE = "agent-workflow-tests *args:"
+
+
+def suite_members(justfile_text: str) -> list[str]:
+    """The suite's members: the recipe `SUITE_RECIPE` is their registration, one per line after the runner line."""
+    lines = justfile_text.splitlines()
+    if SUITE_RECIPE not in lines:
+        raise ValueError(f"justfile has no {SUITE_RECIPE!r} recipe")
+    body: list[str] = []
+    for line in lines[lines.index(SUITE_RECIPE) + 1:]:
+        if not line.startswith("  "):
+            break
+        body.append(line.strip().removesuffix(" \\"))
+    return body[1:]
+
+
 def member_command(member: str) -> list[str]:
     suffix = Path(member).suffix
     if suffix == ".py":

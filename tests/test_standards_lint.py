@@ -4,14 +4,30 @@ Measures the form itself: `citations` finds each citation with its line and
 whether its token is a well-formed rule id, a form glued to a word is no
 citation, `prefix_of` reads the id's capital letters, and the standards README
 states the form and gives the project shards the project prefix.
+
+The lint itself (`agent_tools.delivery.standards_lint`) is measured through its
+command line: it reads only the registered enforcers (the suite recipe's members
+and the `lint` command's sources), fails on a citation of an id in no applicable
+layer, a malformed citation or a missing enforcer, resolves a project id only
+against the project's shards and any other id only against the platform
+directory, refuses bad arguments, has no command-table row and passes on this
+checkout.
 """
 
+import os
+import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 from agent_tools.delivery.context_map_lint import CODE_RE, section, table_rows
 from agent_tools.delivery.rule_ids import (
     CITATION, PROJECT_PREFIX, RULE_ID_HEADING, Citation, citations, prefix_of)
+from agent_tools.delivery.standards_lint import enforcers
+from agent_tools.delivery.suite_runner import suite_members
+from agent_tools.delivery.verification_command import members
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "home/common/agent-skills/standards/README.md"
@@ -71,6 +87,230 @@ class ReadmeFormTest(unittest.TestCase):
         row = next(r for r in rows if "docs/standards/" in CODE_RE.findall(r[0]))
 
         self.assertEqual(CODE_RE.findall(row[1])[0], PROJECT_PREFIX)
+
+
+LINT_SOURCE_TEXT = '"""Fixture lint (ADR-delivery-012)."""\n'
+
+
+class LintTestCase(unittest.TestCase):
+    def fixture(self, *, files: dict[str, str], members: list[str],
+                project_shards: dict[str, str] | None = None) -> tuple[Path, Path, Path]:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        base = Path(scratch.name)
+        root, platform = base / "root", base / "platform"
+        project = root / "docs" / "standards"
+        (platform / "stacks").mkdir(parents=True)
+        project.mkdir(parents=True)
+        (platform / "the-bar.md").write_text(
+            "# The bar\n\n### B1. One\n\nBody.\n\n### B2. Two\n\nBody.\n", "utf-8")
+        (platform / "stacks" / "python.md").write_text("# Python\n\n### PY1. Py\n\nBody.\n", "utf-8")
+        for name, text in (project_shards or {}).items():
+            (project / name).write_text(text, "utf-8")
+        justfile = "agent-workflow-tests *args:\n  PYTHONPATH=x python3 -m agent_tools.delivery.suite_runner {{args}} \\\n"
+        justfile += " \\\n".join(f"    {m}" for m in members) + "\n"
+        (root / "justfile").write_text(justfile, "utf-8")
+        written = dict(files)
+        for member in members_of_lint(root):
+            written.setdefault(member, LINT_SOURCE_TEXT)
+        for relative, text in written.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, "utf-8")
+        return root, platform, project
+
+    def run_lint(self, root, platform, project, *extra):
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.standards_lint", "--root", str(root),
+             "--platform-standards", str(platform), "--project-standards", str(project), *extra],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")})
+
+
+def members_of_lint(root: Path) -> list[str]:
+    """The repository-relative lint sources, as `enforcers` derives them."""
+    return [
+        "python/" + m.argv[m.argv.index("-m") + 1].replace(".", "/") + ".py"
+        for m in members("lint", root)]
+
+
+class DiscoveryTest(LintTestCase):
+    def test_suite_members_are_the_recipe_lines_after_the_runner_line(self):
+        text = "x:\n  a\nagent-workflow-tests *args:\n  RUN \\\n    t/a.py \\\n    t/b.sh\nnext:\n  c\n"
+
+        self.assertEqual(suite_members(text), ["t/a.py", "t/b.sh"])
+
+    def test_a_justfile_without_the_suite_recipe_is_refused(self):
+        with self.assertRaises(ValueError):
+            suite_members("lint:\n  x\n")
+
+    def test_enforcers_are_the_suite_members_and_the_lint_sources(self):
+        root, _, _ = self.fixture(
+            files={"tests/test_a.py": "x = 1\n", "tests/test_b.py": "x = 1\n"},
+            members=["tests/test_b.py", "tests/test_a.py"])
+
+        self.assertEqual(enforcers(root), sorted([
+            "tests/test_a.py", "tests/test_b.py",
+            "python/agent_tools/delivery/agnostic_lint.py",
+            "python/agent_tools/delivery/context_map_lint.py",
+            "python/agent_tools/instruction_load.py"]))
+
+    def test_an_unregistered_file_is_never_read(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": "x = 1\n", "tests/test_c.py": cite("Z9") + "\n"},
+            members=["tests/test_a.py"])
+
+        result = self.run_lint(root, platform, project)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class CheckTest(LintTestCase):
+    def test_a_citation_of_an_id_in_no_layer_fails_naming_file_and_id(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": "x = 1\n# " + cite("Z9") + "\n"}, members=["tests/test_a.py"])
+
+        failed = self.run_lint(root, platform, project)
+        (root / "tests/test_a.py").write_text("x = 1\n", "utf-8")
+        passed = self.run_lint(root, platform, project)
+
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("standards-lint: tests/test_a.py:2: cites Z9, which is in no applicable layer",
+                      failed.stderr.splitlines())
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertTrue(passed.stdout.splitlines()[-1].startswith("standards-lint: passed: "))
+
+    def test_a_citation_in_a_lint_source_is_checked(self):
+        root, platform, project = self.fixture(
+            files={"python/agent_tools/delivery/agnostic_lint.py": cite("Z8") + "\n"},
+            members=["tests/test_a.py"])
+
+        result = self.run_lint(root, platform, project)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("python/agent_tools/delivery/agnostic_lint.py:1: cites Z8", result.stderr)
+
+    def test_a_malformed_citation_fails(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": cite("b7") + "\n"}, members=["tests/test_a.py"])
+
+        result = self.run_lint(root, platform, project)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("standards-lint: tests/test_a.py:1: malformed citation " + cite("b7"),
+                      result.stderr.splitlines())
+
+    def test_a_missing_registered_enforcer_fails(self):
+        root, platform, project = self.fixture(files={}, members=["tests/test_gone.py"])
+
+        result = self.run_lint(root, platform, project)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("standards-lint: tests/test_gone.py: registered enforcer is missing",
+                      result.stderr.splitlines())
+
+    def test_a_deleted_rule_fails_its_citation(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": cite("B2") + "\n"}, members=["tests/test_a.py"])
+
+        before = self.run_lint(root, platform, project)
+        (platform / "the-bar.md").write_text("# The bar\n\n### B1. One\n\nBody.\n", "utf-8")
+        after = self.run_lint(root, platform, project)
+
+        self.assertEqual(before.returncode, 0, before.stderr)
+        self.assertEqual(after.returncode, 1)
+        self.assertIn("cites B2", after.stderr)
+
+
+class LayerTest(LintTestCase):
+    def test_a_project_id_resolves_only_against_its_own_shards(self):
+        files = {"tests/test_a.py": cite("P1") + "\n"}
+        root_a, platform_a, project_a = self.fixture(
+            files=files, members=["tests/test_a.py"],
+            project_shards={"a.md": "# A\n\n### P1. A rule\n\nBody.\n"})
+        root_b, platform_b, project_b = self.fixture(
+            files=files, members=["tests/test_a.py"],
+            project_shards={"b.md": "# B\n\n### P2. B rule\n\nBody.\n"})
+
+        a = self.run_lint(root_a, platform_a, project_a)
+        b = self.run_lint(root_b, platform_b, project_b)
+
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertEqual(b.returncode, 1)
+        self.assertIn("standards-lint: tests/test_a.py:1: cites P1, which is in no applicable layer",
+                      b.stderr.splitlines())
+
+    def test_a_bar_id_resolves_only_against_the_platform_directory(self):
+        shadow = {"x.md": "# X\n\n### B9. Shadow\n\nBody.\n"}
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": cite("B9") + "\n"}, members=["tests/test_a.py"],
+            project_shards=shadow)
+        known_root, known_platform, known_project = self.fixture(
+            files={"tests/test_a.py": cite("B1") + "\n"}, members=["tests/test_a.py"],
+            project_shards=shadow)
+
+        shadowed = self.run_lint(root, platform, project)
+        known = self.run_lint(known_root, known_platform, known_project)
+
+        self.assertEqual(shadowed.returncode, 1)
+        self.assertIn("cites B9", shadowed.stderr)
+        self.assertEqual(known.returncode, 0, known.stderr)
+
+    def test_a_stack_id_resolves_against_the_stack_shards(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": cite("PY1") + "\n"}, members=["tests/test_a.py"])
+        other_root, other_platform, other_project = self.fixture(
+            files={"tests/test_a.py": cite("PY2") + "\n"}, members=["tests/test_a.py"])
+
+        known = self.run_lint(root, platform, project)
+        unknown = self.run_lint(other_root, other_platform, other_project)
+
+        self.assertEqual(known.returncode, 0, known.stderr)
+        self.assertEqual(unknown.returncode, 1)
+        self.assertIn("cites PY2", unknown.stderr)
+
+
+class UsageTest(LintTestCase):
+    def test_a_relative_path_is_a_usage_error(self):
+        root, platform, project = self.fixture(files={}, members=["tests/test_a.py"])
+
+        result = self.run_lint(".", platform, project)
+
+        self.assertEqual(result.returncode, 2)
+
+    def test_a_platform_directory_without_the_bar_is_a_usage_error(self):
+        root, platform, project = self.fixture(files={}, members=["tests/test_a.py"])
+        (platform / "the-bar.md").unlink()
+
+        result = self.run_lint(root, platform, project)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("the-bar.md", result.stderr)
+
+    def test_a_justfile_without_the_suite_recipe_is_a_usage_error(self):
+        root, platform, project = self.fixture(files={}, members=["tests/test_a.py"])
+        (root / "justfile").write_text("lint:\n  x\n", "utf-8")
+
+        result = self.run_lint(root, platform, project)
+
+        self.assertEqual(result.returncode, 2)
+
+
+class PackagingTest(unittest.TestCase):
+    def test_the_lint_has_no_command_table_row(self):
+        table = (REPO_ROOT / "lib/agent-tools.nix").read_text("utf-8")
+
+        self.assertIsNone(re.search(r'^\s*"standards-lint"\s*=', table, re.M))
+        self.assertNotIn("delivery.standards_lint", table)
+
+
+class CheckoutTest(LintTestCase):
+    def test_the_lint_passes_on_this_checkout(self):
+        result = self.run_lint(
+            REPO_ROOT, REPO_ROOT / "home/common/agent-skills/standards", REPO_ROOT / "docs/standards")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.splitlines()[-1].startswith("standards-lint: passed: "))
 
 
 if __name__ == "__main__":
