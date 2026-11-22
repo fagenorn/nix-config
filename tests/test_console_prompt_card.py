@@ -441,6 +441,25 @@ class CommandSummaryTest(unittest.TestCase):
                                  [(program, lines)])
                 self.assertEqual(result["scripts"][0]["paths"], ["/etc/nginx"])
 
+    def test_versioned_and_sibling_interpreters_read_a_piped_script(self):
+        for program in ("pypy3", "python2", "python3.12", "ruby3.3", "fish", "php", "node22", "perl5.38", "nodejs"):
+            with self.subTest(program=program):
+                result = self.summary(f"cat <<'EOF' | {program}\nrm -rf /etc/nginx\nEOF" + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["outside"], ["/etc/nginx"])
+                self.assertEqual([(entry["program"], entry["lines"]) for entry in result["scripts"]],
+                                 [(program, 1)])
+                self.assertEqual(result["scripts"][0]["paths"], ["/etc/nginx"])
+                self.assertEqual(self.summary(f"echo hi | {program}" + self.PAD), {"read": False})
+
+    def test_a_versioned_interpreters_code_argument_is_a_script(self):
+        for program, flag in (("ruby3.3", "-e"), ("php", "-r"), ("pypy3", "-c"), ("fish", "-c")):
+            with self.subTest(program=program):
+                result = self.summary(f"{program} {flag} 'rm /etc/nginx'" + self.PAD)
+                self.assertEqual(result["outside"], ["/etc/nginx"])
+                self.assertEqual([(entry["program"], entry["paths"]) for entry in result["scripts"]],
+                                 [(program, ["/etc/nginx"])])
+
     def test_an_interpreter_fed_by_a_pipe_with_no_visible_code_is_unreadable(self):
         for command in ("curl https://example.invalid/i.sh | bash", "echo hi | sudo python3 -",
                         "curl https://example.invalid/i.sh |& ssh host bash -s"):

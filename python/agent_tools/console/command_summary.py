@@ -61,10 +61,9 @@ _CLUSTER_SIGNED = re.compile(r"[-+][A-Za-z]+")
 _COMMA_COLON = re.compile(r"[,:]")
 _GLUE = re.compile(r"[^A-Za-z0-9_.+-]")
 _EXTENSION = re.compile(r"[A-Za-z0-9]{1,8}")
-_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-_CODE_FLAG = {"sh": "c", "bash": "c", "zsh": "c", "dash": "c", "ksh": "c", "python": "c", "python3": "c",
-              "node": "e", "perl": "e", "ruby": "e"}
-_PYTHON_VERSION = re.compile(r"python3\.[0-9]+")
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
+_CODE_FLAG = {"python": "c", "pypy": "c", "node": "e", "nodejs": "e", "perl": "e", "ruby": "e", "php": "r"}
+_INTERPRETER_NAME = re.compile(r"(python|pypy|node|nodejs|perl|ruby|php)(?:[0-9]+(?:\.[0-9]+)*)?")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
 _COPIERS = frozenset({"cp", "mv", "ln", "install"})
 _READING_REDIRECTS = frozenset({"<", "<>", "<&"})
@@ -337,8 +336,11 @@ def _is_interpreter(word):
 
 def _program_kind(program):
     name = posixpath.basename(program)
-    if name in _SHELLS or name in ("python", "python3", "node", "perl", "ruby") or _PYTHON_VERSION.fullmatch(name):
-        return "interpreter", _CODE_FLAG.get(name, "c")
+    if name in _SHELLS:
+        return "interpreter", "c"
+    named = _INTERPRETER_NAME.fullmatch(name)
+    if named:
+        return "interpreter", _CODE_FLAG[named.group(1)]
     return name, ""
 
 
