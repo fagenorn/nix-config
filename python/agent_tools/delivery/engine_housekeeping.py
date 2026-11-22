@@ -234,11 +234,18 @@ def tracker_identity(binding: Mapping) -> str:
     return f"{kind}:{slug.casefold()}" if host == "github.com" else f"{kind}:{host}/{slug.casefold()}"
 
 
-def default_tracker(binding: Mapping) -> Tracker:
-    """The tracker of a project's tracker binding; a kind other than github fails on its first read."""
+def default_tracker(binding: Mapping, root: str | Path | None = None) -> Tracker:
+    """The tracker of a project's tracker binding; a kind other than github fails on its first read.
+
+    A `cli` naming a path (it holds a `/`) is relative to the project `root`, as the contract resolves
+    it, so it is made absolute there: the CLI runs in whatever directory the engine started in.
+    """
     kind = binding["kind"]
     if kind == "github":
-        return forge_tracker(binding["repo_slug"], binding["cli"], forge_host())
+        cli = binding["cli"]
+        if root is not None and isinstance(cli, str) and "/" in cli:
+            cli = str(Path(root) / cli)
+        return forge_tracker(binding["repo_slug"], cli, forge_host())
 
     def unsupported(number: int) -> datetime | None:
         raise TrackerError(f"tracker kind {kind} is not supported")

@@ -248,7 +248,7 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
     identity = engine_housekeeping.tracker_identity(snapshot["bindings"]["tracker"])
     tracker_factory = ((lambda: tracker) if tracker is not None else
                        (lambda: engine_housekeeping.default_tracker(
-                           snapshot["bindings"]["tracker"])))
+                           snapshot["bindings"]["tracker"], snapshot["project"]["root"])))
     try:
         running = _running(engine_ledger.find_runs(engine_ledger.runs_root(), issue, project),
                            issue)

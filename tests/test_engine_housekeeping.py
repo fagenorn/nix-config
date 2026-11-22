@@ -845,6 +845,24 @@ class ForgeTrackerTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[0],
                          ["gh-wrapper", "api", "repos/example/engine/issues/101"])
 
+    def test_a_root_relative_cli_runs_from_the_project_root_whatever_the_cwd(self):
+        done = mock.Mock(returncode=0, stdout=json.dumps({**self.BASE, "state": "open"}), stderr="")
+        binding = {"kind": "github", "repo_slug": PROJECT, "cli": "bin/gh-wrapper"}
+        with mock.patch("agent_tools.system.forge_api.subprocess.run", return_value=done) as run:
+            default_tracker(binding, "/work/engine")(101)
+            default_tracker({**binding, "cli": "/opt/gh"}, "/work/engine")(101)
+            default_tracker({**binding, "cli": "gh"}, "/work/engine")(101)
+        self.assertEqual([call.args[0][0] for call in run.call_args_list],
+                         ["/work/engine/bin/gh-wrapper", "/opt/gh", "gh"])
+
+    def test_deliver_hands_the_tracker_the_resolved_project_root(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        with mock.patch.object(engine_housekeeping, "default_tracker",
+                               return_value=FakeTracker({})) as patched:
+            self.assertEqual(deliver(project, 810, procedures, at=T0)[0], 0)
+        self.assertEqual(Path(patched.call_args.args[1]).resolve(), project.root.resolve())
+
     def test_a_tracker_kind_other_than_github_is_a_tracker_error(self):
         with mock.patch("agent_tools.system.forge_api.api_get") as patched:
             with self.assertRaises(TrackerError):
