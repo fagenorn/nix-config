@@ -26,6 +26,9 @@ from unittest import mock
 from agent_tools.delivery import engine, engine_graders, procedure_check
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
+from tests.guard_policy_world import install_platform_manifest_in_environ
+
+setUpModule = install_platform_manifest_in_environ
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROCEDURES = REPO_ROOT / "python/agent_tools/delivery/procedures"

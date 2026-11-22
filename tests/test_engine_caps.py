@@ -29,6 +29,9 @@ from unittest import mock
 from agent_tools.delivery import engine, engine_caps, engine_graders
 from agent_tools.delivery.engine_caps import Breach
 from agent_tools.delivery.engine_graders import GRADERS, Grader
+from tests.guard_policy_world import install_platform_manifest_in_environ
+
+setUpModule = install_platform_manifest_in_environ
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DELIVERY = REPO_ROOT / "python/agent_tools/delivery"

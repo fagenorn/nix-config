@@ -95,7 +95,7 @@ class RunCreationTest(unittest.TestCase):
                 "host": "host-a", "inputs": INPUTS, "issue": 1511,
                 "platform_revision": "0" * 40, "procedure": "toy",
                 "project": "example/project", "run": "1511-20261121T160231Z-a1b2",
-                "started": "2026-11-21T16:02:31Z"})
+                "sequence": 1, "started": "2026-11-21T16:02:31Z"})
             sources = sorted(p.name for p in PROCEDURES.iterdir()
                              if p.is_file() and p.suffix in (".json", ".md"))
             sums = (path / "procedure/SHA256SUMS").read_text(encoding="utf-8")
@@ -630,6 +630,28 @@ class ReviewDefectsTest(unittest.TestCase):
             self.assertEqual(foreign.read_bytes(), b"another writer pending")
             self.assertEqual(json.loads((run / "results/scope.1.json").read_text()),
                              {"verdict": "ok"})
+
+    def test_runs_of_one_second_are_ordered_by_creation_not_by_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = new_run(tmp, token="zzzz")
+            second = new_run(tmp, token="aaaa")
+            self.assertEqual([engine_ledger.read_run(p)["sequence"] for p in (first, second)],
+                             [1, 2])
+            self.assertEqual(engine_ledger.find_runs(Path(tmp), 1511, None), [first, second])
+            self.assertEqual(engine_ledger.find_run(Path(tmp), 1511, None), second)
+
+    def test_a_refusal_before_publication_leaves_no_run_and_no_temporary_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staged: list[Path] = []
+
+            def refuse(path):
+                staged.append(path)
+                raise RuntimeError("refused")
+
+            with self.assertRaises(RuntimeError):
+                new_run(tmp, before_publish=refuse)
+            self.assertTrue(staged[0].name.endswith(".tmp"))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def test_creating_the_runs_hierarchy_fsyncs_each_parent_of_a_new_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
