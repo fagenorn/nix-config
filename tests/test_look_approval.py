@@ -508,6 +508,43 @@ class StatusMergeCarryTest(unittest.TestCase):
         self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
 
 
+    def files_served(self, base):
+        return {
+            f"compare/{base}...{A}": cmp([TESTF], commits=[(A, [FORK])]),
+            f"compare/{A}...{HEAD}": cmp(["docs/x.md"]),
+            f"compare/{base}...{HEAD}": cmp([TESTF], commits=[(A, [FORK]), (HEAD, [A, self.X])]),
+            f"contents/.github/look-files.json?ref={base}": CONSOLE,
+        }
+
+    def plain(self, cid):
+        return comment(cid, lm.approval_body(7, 12, A, "approved", f"m{cid}"))
+
+    def look_files_line(self, cid):
+        return comment(cid, lm.carry_body(7, 12, A, HEAD, None))
+
+    def test_status_of_a_look_files_carried_head_is_approved(self):
+        for lined, expected in ((True, (0, "approved", "approved", 5, A)), (False, (0, "needed", None, None, None))):
+            with self.subTest(lined=lined):
+                self.world = ForgeWorld(self)
+                self.seed([self.plain(5), *([self.look_files_line(6)] if lined else [])])
+                serve(self.world, SLUG, self.files_served(B))
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]), expected)
+
+    def test_tick_ticks_a_look_files_carried_merged_head(self):
+        pull = {"number": 12, "merged": True, "head": {"sha": HEAD}, "base": {"ref": "main"},
+                "merge_commit_sha": MC}
+        self.world.comment_store(SLUG, ISSUE, [self.plain(5), self.look_files_line(6)])
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": TickTest.TICK_BODY})
+        self.world.respond_json("gh", PULL_ARGV, pull)
+        self.world.respond_json("gh", TickTest.PATCH, {"number": 7})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{MC}"],
+                                {"sha": MC, "parents": [{"sha": BT}, {"sha": HEAD}]})
+        serve(self.world, SLUG, self.files_served(BT))
+        code, out = run("tick", *POST)
+        self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
+
+
 class CarryVerbTest(unittest.TestCase):
     """Issue 1566: `carry` checks a merges-only head and records one carry line for it."""
     BRANCH_ARGV = ["api", f"repos/{SLUG}/branches/main"]
@@ -554,7 +591,8 @@ class CarryVerbTest(unittest.TestCase):
         self.assertEqual((code, out["verdict"], out["from"], out["reason"], out["pictures"], out["comment_id"]),
                          (0, "carried", A, None, self.DIG, 100))
         self.assertEqual(list(out), ["command", "action", "repo", "issue", "pr", "head", "verdict", "from",
-                                     "reason", "pictures", "comment_id"])
+                                     "reason", "rule", "pictures", "comment_id"])
+        self.assertEqual(out["rule"], "pictures")
         stored = self.world.stored()
         self.assertEqual([c["id"] for c in stored], [5, 100])
         self.assertEqual(stored[1]["body"], self.LINE)
@@ -600,10 +638,6 @@ class CarryVerbTest(unittest.TestCase):
     def test_a_non_merge_commit_carries_nothing(self):
         self.seed([self.pics(5)], self.merges([(A, [FORK]), (HEAD, [A])]))
         self.assert_needed("not-merges")
-
-    def test_an_approval_without_pictures_carries_nothing(self):
-        self.seed([comment(5, lm.approval_body(7, 12, A, "approved", "m5"))])
-        self.assert_needed("no-pictures")
 
     def test_no_carried_approval_carries_nothing(self):
         cases = {
@@ -679,10 +713,154 @@ class CarryVerbTest(unittest.TestCase):
                 lines = [c["id"] for c in self.world.stored() if c["body"].startswith("<!-- agent:look-carry")]
                 self.assertEqual(lines, [99] if deleted else [100, 101])
 
+    TESTCONTENTS = f"contents/.github/look-files.json?ref={B}"
+
+    def files(self, a_files=(TESTF,), h_files=(TESTF,), tail=None, ah_files=("docs/x.md",)):
+        return {
+            f"compare/{B}...{A}": cmp(a_files, commits=[(A, [FORK])]),
+            f"compare/{A}...{HEAD}": cmp(ah_files),
+            f"compare/{B}...{HEAD}": cmp(h_files, commits=tail or [(A, [FORK]), (HEAD, [A, self.X])]),
+            self.TESTCONTENTS: CONSOLE,
+        }
+
+    def plain(self, cid):
+        return comment(cid, lm.approval_body(7, 12, A, "approved", f"m{cid}"))
+
+    def look_files_run(self, *extra):
+        return run("carry", *POST, "--from", A, *extra)
+
+    def assert_look_needed(self, reason, rule="look-files"):
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["comment_id"]),
+                         (0, "needed", reason, rule, None))
+        self.assertEqual(self.posted(), [])
+        return out
+
+    def test_an_approval_without_pictures_carries_by_the_unchanged_look_file_diff(self):
+        self.seed([self.plain(5)], self.files())
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["from"], out["reason"], out["rule"], out["pictures"],
+                          out["comment_id"]), (0, "carried", A, None, "look-files", None, 100))
+        self.assertEqual(list(out), ["command", "action", "repo", "issue", "pr", "head", "verdict", "from",
+                                     "reason", "rule", "pictures", "comment_id"])
+        self.assertEqual(self.world.stored()[-1]["body"], lm.carry_body(7, 12, A, HEAD, None))
+
+    def test_an_unchanged_change_to_a_look_file_carries(self):
+        self.seed([self.plain(5)], self.files((PAGE,), (PAGE,)))
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["rule"]), (0, "carried", "look-files"))
+
+    def test_a_changed_look_file_diff_carries_nothing(self):
+        self.seed([self.plain(5)], self.files((TESTF,), (TESTF, PAGE)))
+        self.assert_look_needed("look-files-differ")
+
+    def test_a_non_merge_commit_carries_nothing_under_the_look_file_rule(self):
+        self.seed([self.plain(5)], self.files(tail=[(A, [FORK]), (HEAD, [A])]))
+        self.assert_look_needed("not-merges")
+
+    def test_an_absent_look_file_set_carries_nothing(self):
+        compares = self.files()
+        del compares[self.TESTCONTENTS]
+        self.seed([self.plain(5)], compares)
+        self.world.not_found("gh", ["api", f"repos/{SLUG}/{self.TESTCONTENTS}"])
+        self.assert_look_needed("no-look-files")
+
+    def test_an_unreadable_look_file_set_is_an_error(self):
+        compares = self.files()
+        compares[self.TESTCONTENTS] = contents("{}")
+        self.seed([self.plain(5)], compares)
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+        self.assertEqual(self.posted(), [])
+
+    def test_a_pictured_approval_with_no_picture_given_carries_nothing(self):
+        self.seed([self.pics(5)])
+        self.assert_look_needed("pictures-missing", "pictures")
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("pulls/" in part or "compare/" in part for part in argv), argv)
+
+    def test_a_repeat_look_files_carry_posts_nothing_new(self):
+        self.seed([self.plain(5), comment(6, lm.carry_body(7, 12, A, HEAD, None))], self.files())
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "carried", 6))
+        self.assertEqual(self.posted(), [])
+
+    def test_the_look_file_carry_reads_each_path_once(self):
+        self.seed([self.plain(5)], self.files())
+        self.look_files_run()
+        reads_made = [a for a in self.world.argvs("gh")
+                      if a[0] == "api" and ("compare/" in a[1] or "contents/" in a[1])]
+        self.assertEqual(len(reads_made), 4)
+        self.assertEqual(len(reads_made), len({tuple(a) for a in reads_made}))
+
+    def test_a_look_files_line_does_not_carry_a_pictured_approval(self):
+        self.seed([self.pics(5), comment(6, lm.carry_body(7, 12, A, HEAD, None))])
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["rule"], out["comment_id"]), (0, "carried", "pictures", 100))
+        self.assertEqual(self.world.stored()[-1]["body"], self.LINE)
+
+    def test_a_merge_that_brought_a_look_file_in_carries_nothing(self):
+        self.seed([self.plain(5)], self.files(ah_files=("docs/x.md", PAGE)))
+        self.assert_look_needed("look-files-differ")
+
+    def test_a_look_file_one_merge_brought_in_and_a_later_merge_took_out_carries_nothing(self):
+        two = [(A, [FORK]), (self.T, [A, self.X]), (HEAD, [self.T, OTHER])]
+        compares = self.files(tail=two)
+        compares[f"compare/{A}...{self.T}"] = cmp([PAGE])
+        compares[f"compare/{self.T}...{HEAD}"] = cmp([PAGE])
+        self.seed([self.plain(5)], compares)
+        self.assert_look_needed("look-files-differ")
+        compares[f"compare/{A}...{self.T}"] = cmp(["docs/x.md"])
+        compares[f"compare/{self.T}...{HEAD}"] = cmp(["docs/y.md"])
+        self.seed([self.plain(5)], compares)
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["rule"]), (0, "carried", "look-files"))
+
+    def test_an_unreadable_listing_of_the_merges_is_an_error(self):
+        compares = self.files()
+        compares[f"compare/{A}...{HEAD}"] = {"status": "ahead", "files": "x", "total_commits": 0, "commits": []}
+        self.seed([self.plain(5)], compares)
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+        self.assertIn(f"compare/{A}...{HEAD}", out["detail"])
+        self.assertEqual(self.posted(), [])
+
+    def test_a_malformed_pictures_field_carries_nothing(self):
+        bad = comment(5, forge_markers.render(lm.KIND, {"issue": "7", "pr": "12", "head": A,
+                                                         "answer": "approved", "message": "m5",
+                                                         "pictures": "zz"}, "x"))
+        for name, extra in (("none given", []), ("pictures given", ["--before", str(self.before), "--after", str(self.after)])):
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed([bad], self.files())
+                code, out = self.look_files_run(*extra)
+                self.assertEqual((code, out["verdict"], out["reason"], out["rule"]),
+                                 (0, "needed", "pictures-unreadable", None))
+                self.assertEqual(self.posted(), [])
+                for argv in self.world.argvs("gh"):
+                    self.assertFalse(any("pulls/" in part or "compare/" in part for part in argv), argv)
+
+    def test_a_line_naming_both_rules_never_wins_the_write(self):
+        odd = comment(6, forge_markers.render(lm.CARRY_KIND, {"issue": "7", "pr": "12", "from": A, "to": HEAD,
+                                                              "pictures": self.DIG, "rule": "look-files"}, "x"))
+        for name, approval, compares, argv in (
+                ("look-files", self.plain(5), self.files(), ["carry", *POST, "--from", A]),
+                ("pictures", self.pics(5), None, self.carry_args())):
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed([approval, odd], compares)
+                code, out = run(*argv)
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "carried", 100))
+                self.assertFalse([a for a in self.world.argvs("gh") if a[:3] == ["api", "-X", "DELETE"]])
+                self.assertEqual([c["id"] for c in self.world.stored()], [5, 6, 100])
+                if name == "look-files":
+                    code, out = run(*STATUS)
+                    self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]),
+                                     (0, "approved", 5, A))
+
     def test_carry_usage_errors_come_before_any_gh_call(self):
         full = self.carry_args()
         cases = {
-            "no picture": ["carry", *POST, "--from", A],
             "unreadable after": ["carry", *POST, "--from", A, "--before", str(self.before),
                                  "--after", str(self.tmp / "none.png")],
             "missing file": ["carry", *POST, "--from", A, "--picture", str(self.tmp / "none.png")],
