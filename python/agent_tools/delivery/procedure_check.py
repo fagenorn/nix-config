@@ -4,12 +4,13 @@ A procedure directory holds procedure files `<name>.json` (every `*.json` not en
 reply schema files `*.reply.json`. A procedure's name is its file stem and matches `^[a-z][a-z0-9-]*$`. Every file is strict
 JSON: a duplicate key or a non-finite literal makes it unreadable.
 
-Header. A procedure is an object with exactly these members, all required: `format` (the integer 1, the only version number),
-`keep_alive` (an object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths:
-the one keep-alive command and where its arguments come from), `inputs` (distinct names matching `^[a-z][a-z0-9_]*$`), `stops`
-(stop name -> object with exactly `need`, one of `NEEDS`, and `reenter`, a step id) and `steps` (a non-empty list). A stop is
-never named `done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared verdict or reply enum value carries
-it.
+Header. A procedure is an object with these members: `format` (the integer 1, the only version number), `inputs` (distinct
+names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with exactly `need`, one of `NEEDS`, and `reenter`, a step
+id) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
+object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
+keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
+is never named `done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared verdict or reply enum value
+carries it.
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`), `kind` (one of `KINDS`), `in` (distinct paths,
 `<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group member, forbidden on
@@ -29,28 +30,29 @@ for a header, `keep_alive` or stop defect. Phase A (structure, per file): `unrea
 `invalid_field`, `unknown_stage`, `duplicate_step`. A file with a phase A refusal gets no other phase.
 
 Phase B (references, only on a file with no phase A refusal; the header, `keep_alive` and stops first, then the steps in
-order): `unknown_target` (an `on` target that is no step, stop or `done`, a stop `reenter` or a group member `step` that is no
-step), `unknown_command` and `undeclared_verdicts` (a `command` step or `keep_alive` against `command_verdicts.json`: an id
-that is no key, or a `subcommand` on a `verdicts`-form declaration, is the first; a `null` declaration, or a
-`subcommands`-form declaration that lacks the named subcommand, is the second), `unknown_role` (not in `ROLES`),
-`missing_prompt`, `missing_reply` (no such file in the procedure directory, a file that resolves outside it, or for
-`missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema is not a strict-JSON object with a
-`properties` object, a `required` list of strings that contains `outcome_from`, and an `enum` of distinct non-empty strings
-under `properties[outcome_from]`), `unknown_grader` (not in `GRADERS`) and `missing_procedure` (a `call` child file is absent;
-a child that exists but fails phase A gives the parent no refusal).
+order): `unknown_target` (an `on` target that is no step, stop or `done`, a stop `reenter` or a group member `step` that is
+no step), `missing_claim_lost` (a `keep_alive` and no stop `claim-lost`), `unknown_command` and `undeclared_verdicts` (a
+`command` step or `keep_alive` against `command_verdicts.json`: an id that is no key, or a `subcommand` on a `verdicts`-form
+declaration, is the first; a `null` declaration, or a `subcommands`-form declaration that lacks the named subcommand, is the
+second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply` (no such file in the procedure directory, a file
+that resolves outside it, or for `missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema is not
+a strict-JSON object with a `properties` object, a `required` list of strings that contains `outcome_from`, and an `enum` of
+distinct non-empty strings under `properties[outcome_from]`), `unknown_grader` (not in `GRADERS`) and `missing_procedure` (a
+`call` child file is absent; a child that exists but fails phase A gives the parent no refusal).
 
 `Resolved` records what each step's references resolved to: a `StepResolved` per step id (a member is `None` when its
 reference failed or does not apply; `child_stops` is set only when the child loaded with no phase A refusal) and `keep_alive`,
 the keep-alive command's outcomes or `None`.
 
-Phase C, graph (only on a file with no phase A refusal and no `unknown_target`; the steps in order, `unreachable_done` first):
-`unreachable_step` (a step the walk of `flow_graph` from the first step does not reach; a group member is reached when its
-group is), `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`),
-`unmapped_outcome` and `unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle of `step_graph` also
-produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the group) and `unbounded_cycle`
-(a cycle among steps with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through
-the `exhausted` entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent;
-refused at its first step). An outcome check whose reference failed phase B is skipped for that step.
+Phase C, graph (only on a file with no phase A refusal and no `unknown_target`; the steps in order, `unreachable_done`
+first): `unreachable_step` (a step the walk of `flow_graph` from the first step does not reach, `flow_graph` carrying the
+renewal failure of a `mutates` step as an edge to `claim-lost`; a group member is reached when its group is),
+`unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
+`unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle of `step_graph` also produces `exhausted`, any
+step may map it, and a group member's `pass` entries are checked at the group) and `unbounded_cycle` (a cycle among steps
+with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through the `exhausted`
+entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent; refused at its
+first step). An outcome check whose reference failed phase B is skipped for that step.
 
 Phase C, data flow (after the graph checks; in step order, the header's `keep_alive` first): `unproduced_input` (an `in` path
 `run.<n>` whose `n` is not a header input, or `<X>.<m>` where `X` is not produced on every route to the step: `X` is a
@@ -82,12 +84,13 @@ NEEDS = ("owner-decision", "owner-look", "retry", "nothing")
 ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
 DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_stage", "duplicate_step", "unknown_target", "unknown_command",
-           "undeclared_verdicts", "unknown_role", "missing_prompt", "missing_reply",
+           "undeclared_verdicts", "missing_claim_lost", "unknown_role", "missing_prompt", "missing_reply",
            "invalid_reply", "unknown_grader", "missing_procedure",
            "unreachable_step", "unreachable_done", "unmapped_outcome",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
+CLAIM_LOST = "claim-lost"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -95,7 +98,6 @@ PATH_RE = re.compile(r"^([a-z][a-z0-9-]*)\.([a-z][a-z0-9_]*)$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
-HEADER_MEMBERS = ("format", "keep_alive", "inputs", "stops", "steps")
 COMMON_REQUIRED = ("id", "stage", "kind")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
 KIND_MEMBERS = {
@@ -263,7 +265,7 @@ def _paths(value: object, only_run: bool, found: _Findings, step: str | None,
 
 
 def _header(doc: dict, found: _Findings) -> None:
-    _members(doc, HEADER_MEMBERS, (), found, None, "a procedure")
+    _members(doc, ("format", "inputs", "stops", "steps"), ("keep_alive",), found, None, "a procedure")
     if "format" in doc and not (_is_int(doc["format"]) and doc["format"] == FORMAT):
         found.add("invalid_field", f"format must be the integer {FORMAT}.")
     if "keep_alive" in doc:
@@ -576,7 +578,12 @@ def check_references(name: str, doc: dict, directory: Path,
     found = _Findings(name)
     ids = {item["id"] for item in doc["steps"]}
     stops = set(doc["stops"])
-    keep_alive = _command_outcomes(doc["keep_alive"], commands, found, None)
+    keep_alive = None
+    if "keep_alive" in doc:
+        keep_alive = _command_outcomes(doc["keep_alive"], commands, found, None)
+        if CLAIM_LOST not in stops:
+            found.add("missing_claim_lost",
+                      f"keep_alive {doc['keep_alive']['command']!r} needs a stop {CLAIM_LOST!r}.")
     for stop_name, stop in doc["stops"].items():
         if stop["reenter"] not in ids:
             found.add("unknown_target", f"stop {stop_name!r} re-enters {stop['reenter']!r}, which is no step.")
@@ -694,9 +701,14 @@ def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
 
 
 def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
-    """Steps and stops -> where control can go, `done` and dead `exhausted` left out."""
+    """Steps and stops -> where control can go, `done` and dead `exhausted` left out.
+
+    A `mutates` step of a procedure with a `keep_alive` and a `claim-lost` stop also goes to that stop.
+    """
     members = _members_of(procedure)
     cyclic = on_cycle(step_graph(procedure))
+    renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
+    changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
     graph: dict[str, tuple[str, ...]] = {}
     for item in procedure["steps"]:
         if item["id"] in members:
@@ -704,6 +716,8 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
         graph[item["id"]] = tuple(
             target for outcome, target in item["on"].items()
             if target != "done" and (outcome != EXHAUSTED or item["id"] in cyclic))
+        if renews and changing & {item["id"], *(m["step"] for m in item.get("members", ()))}:
+            graph[item["id"]] += (CLAIM_LOST,)
     for name, stop in procedure["stops"].items():
         graph[name] = (stop["reenter"],)
     return graph
@@ -764,7 +778,7 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                       f"{path!r} is not a member the result of {producer!r} carries; a decide step publishes only 'verdict'.",
                       label)
 
-    for path in procedure["keep_alive"]["in"]:
+    for path in procedure.get("keep_alive", {}).get("in", ()):
         check_path(path, None)
     for item in procedure["steps"]:
         reads = item.get("in", [])

@@ -74,8 +74,6 @@ class EngineProject:
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
         document = {"format": 1,
-                    "keep_alive": {"command": "forge-claim", "subcommand": "renew",
-                                   "in": ["run.issue"]},
                     "inputs": list(inputs),
                     "stops": stops or {"needs-owner": {"need": "owner-decision",
                                                        "reenter": steps[0]["id"]}},

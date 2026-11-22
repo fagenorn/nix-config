@@ -47,7 +47,7 @@ An acceptance criterion of kind human written exactly `- [ ] [human] before merg
 The one named result a step's grade produces; the only thing a transition reads.
 
 **Procedure**:
-One JSON file in the platform package that describes a delivery as a finite state machine: a header (its `format`, a keep-alive command, its stops) and a flat list of steps, with no expression and no code. Its prompts are sibling Markdown files.
+One JSON file in the platform package that describes a delivery as a finite state machine: a header (its `format`, an optional keep-alive command, its stops) and a flat list of steps, with no expression and no code. Its prompts are sibling Markdown files.
 
 **Step**:
 One entry of a procedure: an id, a stage, a kind (`command`, `agent`, `decide`, `group` or `call`), what it reads, a map from each outcome to the next step, a stop or `done`, a visit bound and whether it changes something.
