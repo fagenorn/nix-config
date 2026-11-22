@@ -105,7 +105,7 @@ fills the constants from `schema_three` and the four derived values from
 `derived_values` (`contract_view`), validates that view with the schema-2
 rules, and builds the snapshot from it, so the snapshot is schema 2 without the
 four retired members (`schema_three.RETIRED`). The derived values are the
-project id and the tracker repo slug (the `owner/repo` of the git remote
+attempt budget (below) and the project id and the tracker repo slug (the `owner/repo` of the git remote
 `origin`, read from the repository's git config), the merge's required checks
 (the contexts of `.github/branch-protection.json`) and the platform range (up
 to the next major from the `platform_version` of the platform manifest: the
@@ -114,7 +114,18 @@ of the revision `devenv.lock` pins as `agent-platform`, found in the Nix
 store). They are read from files, never through a child process or the network.
 A contract that authors one is refused `contract.<section>.derived_value`, and
 one the repository cannot state is refused `contract.<section>.not_derivable`
-at its pointer (ADR-project-contract-014). Schema 3
+at its pointer (ADR-project-contract-014).
+
+The attempt budget `bindings.workflow.orchestration.attempt_budget_minutes` is
+derived too, from one more file the resolver only reads, never writes:
+`<git common dir>/agent-platform/attempt-history.json`, through
+`attempt_history.read` (ADR-project-contract-016). The snapshot also carries
+`attempt_budget_basis` beside it: the history's delivered count, its 90th
+percentile and its `recorded_at`, or the fallback of 240 minutes with its
+reason (`no_history`, `unreadable`, `invalid`, `other_repository` or
+`too_few`). No state of that file refuses resolution, and an authored budget
+or basis is refused `contract.workflow.derived_value`. Schema 2 keeps its
+authored budget and reads no history. Schema 3
 also defines the platform command `commit-environment` (`platform_commands`),
 which the filled commit environment names. A schema-3 contract that authors a
 platform constant, a retired member, a platform command id or a command's `cwd`
@@ -165,7 +176,8 @@ import shutil
 import sys
 
 from agent_tools.release import release_adapter, release_profile
-from agent_tools.project_contract import agent_platform, derived_values, schema_three
+from agent_tools.project_contract import (
+    agent_platform, attempt_history, derived_values, schema_three)
 from agent_tools.system import semver
 
 
@@ -1342,9 +1354,15 @@ def platform_commands(source: object) -> dict:
 
 
 def derive_for(root: Path, source: object) -> derived_values.Derived:
-    """The values `root` states for a schema-3 `source`; nothing, and no file read, for any other schema."""
+    """The values `root` states for a schema-3 `source`, with its attempt budget and basis; nothing, and no file read, for any other schema."""
     if schema_three.declares(source):
-        return derived_values.derive(root)
+        derived = derived_values.derive(root)
+        budget = attempt_history.read(root, derived.values.get(derived_values.REPO_SLUG))
+        return derived_values.Derived(
+            {**derived.values,
+             schema_three.ATTEMPT_BUDGET: budget.minutes,
+             schema_three.ATTEMPT_BUDGET_BASIS: budget.basis},
+            derived.violations)
     return derived_values.Derived({}, [])
 
 
@@ -1737,6 +1755,9 @@ def build_snapshot(root: Path, source: dict, manifest: dict,
     # older supported schema (R2.5).
     view = contract_view(source, derived)
     bindings = normalize_bindings(view["bindings"], root, platform_commands(source))
+    if schema_three.ATTEMPT_BUDGET_BASIS in derived.values:
+        bindings["workflow"]["orchestration"]["attempt_budget_basis"] = copy.deepcopy(
+            derived.values[schema_three.ATTEMPT_BUDGET_BASIS])
     project = {"root": str(root), "id": view["project"]["id"]}
     if "name" in view["project"]:
         project["name"] = view["project"]["name"]
