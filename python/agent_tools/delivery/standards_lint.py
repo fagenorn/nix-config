@@ -31,20 +31,25 @@ Checks, in output order:
 3. The Layer 2 shards: the size cap, the heading cap, a numbered item written
    without its `### P<n>.` heading (`line <n>: no well-formed id: <line>`), and
    the rule-id problems of the shards together.
+4. The hint files, when `.agents/knowledge/hints` is a directory: each entry by
+   name that is not a regular file named in `hint_phases.HINT_FILES`, then a hint
+   file over the 60-line budget.
 
 Reason formats: `is <n> bytes, over 8192`; `line <n>: heading is <n> characters,
 over 100`; `index is <n> lines, over 40`; `row <k> names no shard`; `row names a
 missing shard <target>`; `row <k> repeats the shard <target>`; `<shard> governs
 prose, not path globs: <cell>`; `<shard> governs no path glob`; `<shard> governs
 `<glob>`, which is not a path glob` or `which matches every path`; `has no row in
-docs/standards/README.md`. A planning rule is a top-level `- ` item of the
+docs/standards/README.md`; `.agents/knowledge/hints/<name>: named for no delivery
+phase that reads hints` and `.agents/knowledge/hints/<name>: is <n> lines, over
+60`. A planning rule is a top-level `- ` item of the
 `## Rules` section of `acceptance-planning.md`, found by its place and never by
 the id it should carry: `line <n>: no well-formed id: <line>`, `more than one
 id`, `<id> should carry the prefix R`, `<id> repeats the id`, `rule title is <n>
 characters, over 100`, and `no planning rule` when the section holds none.
 
 Caps: a shard is at most 8192 bytes, a heading line at most 100 characters, the
-Layer 2 index at most 40 lines.
+Layer 2 index at most 40 lines, a hint file at most 60 lines.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ import re
 import sys
 from pathlib import Path
 
+from agent_tools.delivery import hint_phases
 from agent_tools.delivery.context_map_lint import CODE_RE, LINK_RE
 from agent_tools.delivery.rule_ids import (
     HEADING_LINE, REASON_NO_ID, REASON_TWO_IDS, SECOND_ID, layer_problems, numbered_items,
@@ -64,6 +70,7 @@ COMMAND = "standards-lint"
 INDEX_MAX_LINES = 40
 SHARD_MAX_BYTES = 8192
 HEADING_MAX_CHARS = 100
+HINT_MAX_LINES = 60
 LAYER2_DIR = "docs/standards"
 PLANNING_RULES = "acceptance-planning.md"
 GLOB_RE = re.compile(r"^[A-Za-z0-9._/*?\[\]{}!-]+$")
@@ -234,10 +241,26 @@ def shard_problems(repo: Path, table: dict[str, str]) -> list[str]:
     return problems + layer_problems(files)
 
 
+def hint_problems(repo: Path) -> list[str]:
+    directory = repo / hint_phases.HINT_DIR
+    if not directory.is_dir():
+        return []
+    problems: list[str] = []
+    for path in sorted(directory.iterdir(), key=lambda entry: entry.name):
+        label = f"{hint_phases.HINT_DIR}/{path.name}"
+        if not path.is_file() or path.name not in hint_phases.HINT_FILES:
+            problems.append(f"{label}: named for no delivery phase that reads hints")
+            continue
+        count = len(read(path).splitlines())
+        if count > HINT_MAX_LINES:
+            problems.append(f"{label}: is {count} lines, over {HINT_MAX_LINES}")
+    return problems
+
+
 def lint(repo: Path, platform: Path) -> list[str]:
     readme = platform / "README.md"
     table = prefix_table(read(readme)) if readme.is_file() else {}
-    return platform_problems(platform) + index_problems(repo) + shard_problems(repo, table)
+    return platform_problems(platform) + index_problems(repo) + shard_problems(repo, table) + hint_problems(repo)
 
 
 def main(argv: list[str] | None = None) -> int:

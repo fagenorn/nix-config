@@ -4,6 +4,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from agent_tools.delivery import hint_phases, procedure_check, standards_lint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -215,12 +218,76 @@ class StructureTest(unittest.TestCase):
         self.assertTrue(result.stderr.startswith("standards-lint: "))
 
 
+class HintTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.repo, self.platform = make_tree(Path(temp.name))
+        self.hints = self.repo / ".agents/knowledge/hints"
+
+    def assert_fails_with(self, line: str) -> None:
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout), (1, line + "\n"))
+
+    def assert_passes(self) -> None:
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_a_hint_named_for_no_reading_phase_fails(self):
+        for name in ("deploy.md", "verifying.md"):
+            with self.subTest(name=name):
+                temp = tempfile.TemporaryDirectory()
+                self.addCleanup(temp.cleanup)
+                self.repo, self.platform = make_tree(Path(temp.name))
+                write_files(self.repo, {f".agents/knowledge/hints/{name}": "Deploy carefully.\n"})
+                self.assert_fails_with(
+                    f".agents/knowledge/hints/{name}: named for no delivery phase that reads hints")
+
+    def test_a_directory_under_hints_fails(self):
+        (self.hints / "planning").mkdir(parents=True)
+        self.assert_fails_with(
+            ".agents/knowledge/hints/planning: named for no delivery phase that reads hints")
+
+    def test_a_hint_over_the_line_budget_fails(self):
+        write_files(self.repo, {".agents/knowledge/hints/planning.md": "step\n" * 61})
+        self.assert_fails_with(".agents/knowledge/hints/planning.md: is 61 lines, over 60")
+
+    def test_a_60_line_hint_passes(self):
+        write_files(self.repo, {".agents/knowledge/hints/planning.md": "step\n" * 60})
+        self.assert_passes()
+
+    def test_a_hint_for_each_reading_phase_passes(self):
+        write_files(self.repo, {
+            f".agents/knowledge/hints/{name}": "x\n"
+            for name in ("planning.md", "plan-review.md", "building.md", "final-review.md")})
+        self.assert_passes()
+
+    def test_the_hint_names_come_from_the_one_home(self):
+        write_files(self.repo, {".agents/knowledge/hints/x.md": "x\n"})
+        self.assertEqual(
+            standards_lint.hint_problems(self.repo),
+            [".agents/knowledge/hints/x.md: named for no delivery phase that reads hints"])
+        with mock.patch.object(hint_phases, "HINT_FILES", ("x.md",)):
+            self.assertEqual(standards_lint.hint_problems(self.repo), [])
+
+    def test_the_hint_stages_are_briefed_procedure_stages(self):
+        self.assertLessEqual(set(hint_phases.HINT_STAGES), set(procedure_check.STAGES))
+        self.assertEqual(
+            hint_phases.HINT_FILES, ("planning.md", "plan-review.md", "building.md", "final-review.md"))
+
+
 class LiveTreeTest(unittest.TestCase):
     def test_the_lint_passes_on_this_repository(self):
         result = run_lint(
             "--repo-root", str(REPO_ROOT),
             "--platform-standards", str(REPO_ROOT / "home/common/agent-skills/standards"))
         self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_the_standards_readme_sends_hints_to_the_knowledge_directory(self):
+        text = (REPO_ROOT / "home/common/agent-skills/standards/README.md").read_text(encoding="utf-8")
+        self.assertIn(".agents/knowledge/hints/", text)
+        self.assertNotIn(".claude/hints/", text)
+        self.assertNotIn("REVIEW-CONTRACT.md", text)
 
 
 if __name__ == "__main__":

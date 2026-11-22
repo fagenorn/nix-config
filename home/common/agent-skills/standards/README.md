@@ -40,7 +40,7 @@ A repo's `docs/standards/` is a directory of shards plus a **README index of at 
 - **Shape.** Each `governs` cell holds one or more code-span path globs relative to the repository root, never prose and never a glob made only of `*` and `/`. A shard in any layer is at most 8 KB (8192 bytes), and a heading, its hashes and id included, is at most 100 characters. `standards-lint` checks these shapes, the index and the ids; whether a rule restates a higher layer or is process filed as a standard stays with the reviewer.
 - **Deltas only.** Anything that restates Layer 0 or 1 gets deleted, not copied. If a rule is true for every project on this stack, it belongs upstream in `stacks/`.
 - **Case law is written rule-first**: each rule is one `### P<n>.` heading, then the rule in at most two sentences, plus one issue or ADR link. The narrative lives in the issue. Incident memoirs are what make a standards file grow linearly with project age.
-- **Process content is not a standard.** Deploy checklists go to `.claude/hints/`, review procedure to `REVIEW-CONTRACT.md`, lint commands nowhere — the environment already names them.
+- **Process content is not a standard.** It is a hint: process content for one delivery phase, never a rule with an id. Hints live at `.agents/knowledge/hints/`, one file per phase, named for the phase that reads it and within the platform line budget `standards-lint` sets. A review rule about the code is a Layer 2 standard with an id; review procedure is a hint. Lint commands go nowhere — the environment already names them.
 
 ## Planning rules
 
