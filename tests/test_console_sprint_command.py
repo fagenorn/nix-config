@@ -9,6 +9,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -1695,7 +1696,7 @@ class PromptCommandTest(unittest.TestCase):
         with mock.patch.object(sprint, "ask", side_effect=fake), \
                 mock.patch.dict(os.environ, environment), \
                 mock.patch.object(sys, "stdin", StringIO(stdin)), redirect_stdout(out):
-            for name in (manager.ID_ENV, manager.SECRET_ENV):
+            for name in (manager.ID_ENV, manager.SECRET_ENV, manager.ROOT_ENV):
                 if name not in environment:
                     os.environ.pop(name, None)
             args = sprint.build_parser().parse_args(["permit", "--prompt"])
@@ -1894,6 +1895,57 @@ class PromptCommandTest(unittest.TestCase):
                     [self.ASKED, self.state("allowed")])
                 self.assertEqual(out, prompt_card.hook_output("allow") + "\n")
         self.assertNotIn("terminal", prompt_card.SANDBOX_TEXT.lower())
+
+    def own_tree(self):
+        """A resolved temporary tree: the project root, the session's saved output, an outside secret, the env."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tree = Path(tmp.name).resolve()
+        root = tree / "proj"
+        root.mkdir()
+        (root / "README.md").write_text("hello\n")
+        results = tree / "profile" / "projects" / "-srv-proj" / "s-1" / "tool-results"
+        results.mkdir(parents=True)
+        (results / "b1.txt").write_text("saved\n")
+        secret = tree / "secret" / "id"
+        secret.parent.mkdir()
+        secret.write_text("key\n")
+        env = {**self.ENV, manager.ROOT_ENV: str(root), "HOME": str(tree / "home"),
+               "CLAUDE_ACCOUNTS_DIR": str(tree / "accounts"), "CLAUDE_CONFIG_DIR": str(tree / "profile")}
+        return root, results, secret, env
+
+    def test_an_own_read_is_allowed_without_a_card(self):
+        root, results, secret, env = self.own_tree()
+        allow = prompt_card.hook_output("allow") + "\n"
+        for command in (f"sed -n 1,5p {results}/b1.txt", "cat README.md"):
+            with self.subTest(command):
+                stdin = self.hook(cwd=str(root), tool_input={"command": command})
+                code, out, sent, _ = self.run_prompt(stdin, [self.ASKED, self.state("refused")], env=env)
+                self.assertEqual((code, out, sent), (0, allow, []))
+        denied = prompt_card.hook_output("deny", prompt_card.OWNER_REFUSED_TEXT) + "\n"
+        without_root = {k: v for k, v in env.items() if k != manager.ROOT_ENV}
+        for label, command, stdin_env, cwd in (
+                ("outside", f"cat {secret}", env, str(root)),
+                ("pipe", "cat README.md | head", env, str(root)),
+                ("no root", "cat README.md", without_root, str(root)),
+                ("no cwd", "cat README.md", env, None)):
+            with self.subTest(label):
+                change = {"tool_input": {"command": command}}
+                if cwd is not None:
+                    change["cwd"] = cwd
+                code, out, sent, _ = self.run_prompt(
+                    self.hook(**change), [self.ASKED, self.state("refused")], env=stdin_env)
+                self.assertEqual((code, out), (0, denied))
+                self.assertEqual(sent[0][1]["phase"], "ask")
+
+    def test_an_own_read_that_asks_to_leave_the_sandbox_is_still_refused(self):
+        root, results, _, env = self.own_tree()
+        refusal = prompt_card.hook_output("deny", prompt_card.SANDBOX_TEXT) + "\n"
+        for flag in (True, "yes", 0):
+            with self.subTest(flag):
+                stdin = self.hook(cwd=str(root), tool_input={
+                    "command": f"sed -n 1,5p {results}/b1.txt", "dangerouslyDisableSandbox": flag})
+                self.assertEqual(self.run_prompt(stdin, [], env=env)[:3], (0, refusal, []))
 
     def test_the_command_starts_in_a_fresh_interpreter(self):
         environment = {k: v for k, v in os.environ.items()

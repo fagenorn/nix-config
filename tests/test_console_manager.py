@@ -12,6 +12,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,7 +22,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from agent_tools.console import (
-    capacity, exclusion, manager, permission, permit, pin, revive_check, sessions)
+    capacity, exclusion, manager, permission, permit, pin, prompt_card, revive_check, sessions)
 from agent_tools.console import sprint as sprint_command
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
@@ -105,7 +106,8 @@ class CommandTest(Case):
         self.assertEqual(launch.prompt, PROMPT)
         self.assertEqual(launch.settings, self.settings)
         self.assertEqual(dict(launch.env),
-                         {"CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret"})
+                         {"CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret",
+                          "CONSOLE_SPRINT_ROOT": "/srv/p01"})
         self.assertNotIn("s3cret", repr(launch))
 
     def test_new_launch_carries_the_permission_it_is_given(self):
@@ -481,7 +483,8 @@ class RunTest(Case):
     def test_the_identity_is_written_to_a_private_settings_file(self):
         self.run_fake()
         self.assertEqual(json.loads(self.settings.read_text())["env"], {
-            "CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret"})
+            "CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret",
+            "CONSOLE_SPRINT_ROOT": str(self.root)})
         self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o600)
         manager.run_launch(self.launch(secret="n3w", root=str(self.root)), platform="linux",
                            run=self.fake(), environ=self.ENVIRON)
@@ -567,6 +570,39 @@ class RunTest(Case):
         self.assertEqual(json.loads(done.stdout), {"hookSpecificOutput": {
             "hookEventName": "PermissionRequest",
             "decision": {"behavior": "deny", "message": REFUSAL}}})
+
+    def test_the_settings_carry_the_root_the_prompt_hook_reads(self):
+        (self.root / "README.md").write_text("hello\n")
+        (self.tmp / "outside.txt").write_text("no\n")
+        self.run_fake()
+        settings = json.loads(self.settings.read_text())
+        self.assertEqual(settings["env"][manager.ROOT_ENV], str(self.root))
+        [hook] = settings["hooks"]["PermissionRequest"][0]["hooks"]
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        stand_in = bin_dir / "sprint"
+        stand_in.write_text(f'#!/bin/sh\nexec {sys.executable} -m agent_tools.console.sprint "$@"\n')
+        stand_in.chmod(0o755)
+        env = {k: v for k, v in settings["env"].items() if k not in (manager.ID_ENV, manager.SECRET_ENV)}
+        env.update({"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.tmp / "home"),
+                    "CLAUDE_CONFIG_DIR": str(self.tmp / "profile"),
+                    "PYTHONPATH": str(Path(sprint_command.__file__).resolve().parents[2])})
+
+        def run(command):
+            stdin = json.dumps({"session_id": "s-1", "cwd": str(self.root), "tool_name": "Bash",
+                                "tool_input": {"command": command}})
+            return subprocess.run(["/bin/sh", "-c", hook["command"]], input=stdin,
+                                  capture_output=True, text=True, env=env)
+
+        self.assertEqual(run("cat README.md").stdout, prompt_card.hook_output("allow") + "\n")
+        outside = json.loads(run(f"cat {self.tmp}/outside.txt").stdout)
+        self.assertEqual(outside["hookSpecificOutput"]["decision"]["behavior"], "deny")
+
+    def test_an_inherited_root_never_reaches_the_client(self):
+        run = self.fake()
+        manager.run_launch(self.launch(root=str(self.root)), platform="linux", run=run,
+                           environ={**self.ENVIRON, "CONSOLE_SPRINT_ROOT": "/elsewhere"})
+        self.assertNotIn("CONSOLE_SPRINT_ROOT", run.calls[0][1]["env"])
 
     def test_the_refusal_names_the_fixed_reason_and_the_two_ways_on(self):
         self.assertIn("nobody watches this session", REFUSAL.lower())

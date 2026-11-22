@@ -232,7 +232,8 @@ class ManagerServiceTest(Case):
         self.assertEqual(launch.settings,
                          self.store.parent / "sprint-secrets" / (sid + ".settings.json"))
         self.assertEqual(dict(launch.env), {"CONSOLE_SPRINT_ID": sid,
-                                            "CONSOLE_SPRINT_SECRET": self.secret(sid)})
+                                            "CONSOLE_SPRINT_SECRET": self.secret(sid),
+                                            "CONSOLE_SPRINT_ROOT": "/srv/p01"})
         _, _, kind, project, payload = support.log_rows(self.store)[-1]
         self.assertEqual((kind, project, json.loads(payload)), (
             "manager.started", "owner/p01",
