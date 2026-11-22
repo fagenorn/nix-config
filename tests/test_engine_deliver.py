@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -75,11 +76,21 @@ class EngineProject:
             "count-d": entry("record", str(self.tmp / "d.log")),
             "standin-gate": entry("gate", str(self.tmp / "gate.log"),
                                   str(self.tmp / "gate-open")),
+            "standin-effect": entry("effect", str(self.tmp / "effect.log"),
+                                    str(self.tmp / "kill-before"), str(self.tmp / "kill-after")),
+            "standin-effect-check": entry("effect-check", str(self.tmp / "effect.log"),
+                                          str(self.tmp / "checks.log")),
+            "standin-parity": entry("parity", str(self.tmp / "parity.log")),
         })
 
     def calls(self, name: str) -> int:
         log = self.tmp / f"{name}.log"
         return len(log.read_text().splitlines()) if log.exists() else 0
+
+    def argvs(self, name: str) -> list:
+        log = self.tmp / f"{name}.log"
+        return [json.loads(line)["argv"] for line in log.read_text().splitlines()] \
+            if log.exists() else []
 
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
@@ -424,6 +435,94 @@ class ContinueTest(unittest.TestCase):
         self.assertFalse(project.record.exists())
 
 
+def mutating(project: EngineProject) -> Path:
+    m = step("m", "standin-effect", "b")
+    m.update({"mutates": True, "check": {"command": "standin-effect-check"}})
+    return project.procedures([step("a", "count-a", "m"), m, step("b", "count-b", "done")])
+
+
+def looped(project: EngineProject) -> Path:
+    a = step("a", "count-a", "p", holds="live")
+    p = step("p", "standin-parity", None,
+             on={"ok": "m", "failed": "needs-owner", "exhausted": "b"})
+    p["max_visits"] = 2
+    m = step("m", "standin-effect", None,
+             on={"ok": "p", "failed": "needs-owner", "exhausted": "b"})
+    m.update({"in": ["p.n"], "max_visits": 2, "mutates": True,
+              "check": {"command": "standin-effect-check"}})
+    return project.procedures([a, p, m, step("b", "count-b", "done")])
+
+
+class MutatingContinueTest(unittest.TestCase):
+    def test_a_run_killed_after_a_mutating_command_took_effect_does_not_run_it_again(self):
+        project = EngineProject(self)
+        procedures = mutating(project)
+        (project.tmp / "kill-after").write_text("1512", encoding="utf-8")
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, -signal.SIGKILL, first.stdout + first.stderr)
+        self.assertEqual(project.calls("effect"), 1)
+        run = project.runs()[0]
+        self.assertFalse([e for e in project.events(run)
+                          if e["event"] == "result_stored" and e["step"] == "m"])
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        line = json.loads(second.stdout)
+        self.assertEqual((line["end"], line["run"]), ("done", run.name))
+        self.assertEqual(project.runs(), [run])
+        self.assertEqual(project.calls("effect"), 1)
+        self.assertEqual(project.calls("checks"), 1)
+        self.assertEqual([(e["step"], e["visit"]) for e in run_continued(project.events(run))],
+                         [("m", 1)])
+        self.assertEqual(json.loads((run / "results/m.2.json").read_text()),
+                         {"argv": ["1512"], "verdict": "ok"})
+        self.assertEqual((project.calls("a"), project.calls("b")), (1, 1))
+
+    def test_a_rewind_through_a_mutating_loop_checks_every_replayed_visit_and_repeats_no_effect(self):
+        project = EngineProject(self)
+        procedures = looped(project)
+        (project.tmp / "kill-after").write_text("1", encoding="utf-8")
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, -signal.SIGKILL, first.stdout + first.stderr)
+        self.assertEqual(project.argvs("effect"), [["0"], ["1"]])
+        run = project.runs()[0]
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        line = json.loads(second.stdout)
+        self.assertEqual((line["end"], line["run"]), ("done", run.name))
+        events = project.events(run)
+        self.assertEqual([(e["step"], e["visit"]) for e in run_continued(events)], [("a", 1)])
+        self.assertEqual(project.argvs("effect"), [["0"], ["1"]])
+        self.assertEqual(project.argvs("checks"), [["0"], ["1"]])
+        self.assertEqual([e["visit"] for e in events
+                          if e["event"] == "step_entered" and e["step"] == "m"], [1, 2, 3, 4])
+        self.assertEqual(json.loads((run / "results/m.3.json").read_text()),
+                         {"argv": ["0"], "verdict": "ok"})
+        self.assertEqual(json.loads((run / "results/m.4.json").read_text()),
+                         {"argv": ["1"], "verdict": "ok"})
+        self.assertEqual((project.calls("a"), project.calls("b")), (2, 1))
+
+    def test_a_mutating_command_whose_check_finds_no_effect_runs_after_the_check(self):
+        project = EngineProject(self)
+        procedures = mutating(project)
+        (project.tmp / "kill-before").write_text("go", encoding="utf-8")
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, -signal.SIGKILL, first.stdout + first.stderr)
+        self.assertEqual(project.calls("effect"), 0)
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        self.assertEqual((project.calls("effect"), project.calls("checks")), (1, 1))
+        self.assertEqual(json.loads((project.runs()[0] / "results/m.2.json").read_text()),
+                         {"argv": ["1512"]})
+
+    def test_a_first_visit_of_a_mutating_step_runs_no_check(self):
+        project = EngineProject(self)
+        done = project.deliver(mutating(project))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        self.assertEqual((project.calls("effect"), project.calls("checks")), (1, 0))
+
+
 class DeliverTest(unittest.TestCase):
     def test_a_three_command_procedure_runs_to_done_and_records_every_step_in_order(self):
         project = EngineProject(self)
@@ -645,7 +744,7 @@ class RefusalTest(unittest.TestCase):
             "an undeclared input": (
                 "repo", lambda p: p.procedures([step("a", "standin-record", "done")],
                                                inputs=("issue", "repo"))),
-            "a mutating step": ("mutates", with_mutation),
+            "a mutating step without a check": ("check", with_mutation),
             "an agent step": ("agent", shipped),
             "no deliver.json": ("deliver.json", empty),
         }

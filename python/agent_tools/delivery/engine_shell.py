@@ -10,9 +10,9 @@ Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
 held run lock answers `EXIT_RUNNING` first; the procedure must pass
 `procedure_check.check_directory` against the platform declarations plus every
-project command, hold only `command` and `decide` steps, no step with
-`mutates: true`, and no input but `issue`. A new run checks
-`<procedures_dir>/deliver.json`, and the same checks run again on the run's
+project command, hold only `command` and `decide` steps, and no input
+but `issue` (a mutating command step needs its `check`, which the checker requires). A new
+run checks `<procedures_dir>/deliver.json`, and the same checks run again on the run's
 staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
 
 An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done`
@@ -30,7 +30,11 @@ Two or more are refused, naming them. One is continued on its own procedure copy
 result is stored with its outcome but not graded is first graded from the stored
 outcome; unless the walk is already `Done`, `engine_core.reentry` (given the
 current repository head) names the step to re-enter and a `run_continued` event
-records it; the loop then runs as for a new run. A `run_continued` carries no
+records it; the loop then runs as for a new run. A mutating command step's `check`
+runs first on every visit that replays one a continue discarded (`RunCommand.recheck`):
+the outcome `absent` runs the command, any other outcome stands for it, its document
+stored as the visit's result. The keep-alive before a mutating step is not run yet
+(issue 1518). A `run_continued` carries no
 `head`; a `result_stored` of a step that holds `head` carries the repository head
 only when it is the same before and after the step's process. None are open: a
 new run is created.
@@ -63,6 +67,7 @@ LOCK_NAME = "lock"
 ENTRY = "deliver"
 SUPPLIED_INPUTS = ("issue",)
 RUNNABLE_KINDS = ("command", "decide")
+ABSENT = "absent"
 NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 
@@ -102,9 +107,6 @@ def _refuse_unrunnable(procedure: dict) -> None:
         if item["kind"] not in RUNNABLE_KINDS:
             raise Refused(f"step {item['id']} is a {item['kind']} step, "
                           "which the engine does not run yet")
-    for item in procedure["steps"]:
-        if item.get("mutates") is True:
-            raise Refused(f"step {item['id']} mutates, which the engine does not run yet")
     for name in procedure["inputs"]:
         if name not in SUPPLIED_INPUTS:
             raise Refused(f"input {name} is not supplied by the engine")
@@ -389,8 +391,16 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
                                              "started": _now()})
 
     before = read_head(table.root) if step["holds"] == "head" else None
-    ran = engine_commands.run(table, action.command, action.subcommand, action.args,
-                              on_start=started)
+    ran = None
+    if action.recheck:
+        check = step["check"]
+        ran = engine_commands.run(table, check["command"], check.get("subcommand"),
+                                  action.args, on_start=started)
+        if ran.outcome == ABSENT:
+            ran = None
+    if ran is None:
+        ran = engine_commands.run(table, action.command, action.subcommand, action.args,
+                                  on_start=started)
     after = read_head(table.root) if step["holds"] == "head" else None
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
