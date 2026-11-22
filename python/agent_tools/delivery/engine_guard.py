@@ -15,7 +15,8 @@ command the guard refuses in a Claude Code session is refused here too.
       refuses with the guard's stderr minus one line ending; any other exit, a
       timeout or a spawn failure refuses with a sentence. The guard's group and
       every descendant it has, whatever session each runs in, are killed and its
-      child reaped on a timeout, on any interrupt and on SIGTERM.
+      child reaped on a timeout, on any interrupt and on SIGTERM. Given `stop`, the
+      wait polls it and raises `engine_stop.Stopped` once it is true, the guard reaped.
   D6  `judge` never raises on the guard's account and never writes to the
       caller's stdout or stderr: both guard pipes are captured and stdout is
       never read.
@@ -29,11 +30,12 @@ import json
 import os
 import signal
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.delivery import engine_stop
 
 SETTINGS = Path(".claude") / "settings.json"
 MAX_TIMEOUT_SECONDS = 3600
@@ -194,7 +196,8 @@ def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
-def judge(guard: Hook | Unavailable, text: str, directory: str) -> Verdict:
+def judge(guard: Hook | Unavailable, text: str, directory: str,
+          stop: Callable[[], bool] | None = None) -> Verdict:
     if isinstance(guard, Unavailable):
         return Verdict(False, guard.reason)
     try:
@@ -209,13 +212,15 @@ def judge(guard: Hook | Unavailable, text: str, directory: str) -> Verdict:
         except (OSError, ValueError) as error:
             return Verdict(False, f"The lifecycle guard {guard.command} cannot be run: {error}.")
         try:
-            _, stderr = process.communicate(payload(text, directory), timeout=guard.timeout)
+            _, stderr = engine_stop.communicate(process, payload(text, directory), stop=stop,
+                                                timeout=guard.timeout)
         except subprocess.TimeoutExpired:
             _reap(process)
             return Verdict(False, f"The lifecycle guard {guard.command} did not answer within "
                                   f"{guard.timeout:g} seconds.")
-        except BaseException:
-            _reap(process)
+        except BaseException:  # a stop raises `engine_stop.Stopped` once the guard is reaped
+            if process.returncode is None:  # a guard already waited for has no group to reap
+                _reap(process)
             raise
     finally:
         if previous is not None:
