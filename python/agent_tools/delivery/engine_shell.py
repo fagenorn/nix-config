@@ -12,12 +12,15 @@ unconditional Bash hook with no hook switch on (`engine_guard.locate`), checked 
 `<procedures_dir>/deliver.json` must pass `procedure_check.check_directory` against the platform
 declarations plus every project command, hold only `command`, `agent` and `decide` steps, a
 `mutates: true` step only as a `command` step, and no input but `issue`, and every agent step's role
-file must read (`engine_session.read_role`). The same checks run again on the run's staged copy, which
-is the copy the loop reads (`<run>/procedure/deliver.json`).
+file must read (`engine_session.read_role`), and the host declaration must admit the engine route (else the
+refusal starts with its reason code), checked after the guard. The same checks run again on the run's
+staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
 
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
-run's `sessions/`, `session_starting` is on disk before the process is spawned,
+run's `sessions/`, the session holds one of the engine route's agent slots (`engine_slots`) from before
+`session_starting` to the end of its last launch, waiting with `wait_started` and `wait_ended` (`host-slot`)
+when none is free, `session_starting` is on disk before the process is spawned,
 and a session that ends normally is graded only by the `outcome_from` member of its
 structured reply, so neither the prose nor the exit code selects an outcome. A reading with no
 usable reply (none, or one that breaks the schema) is a miss when `engine_session.is_miss` accepts
@@ -96,7 +99,7 @@ from typing import Callable, Mapping
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
     engine_commands, engine_core, engine_guard, engine_ledger, engine_reply, engine_session,
-    engine_stop, procedure_check,
+    engine_slots, engine_stop, host_admission, procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.project_contract import resolve_project
@@ -189,6 +192,14 @@ def _resolve() -> tuple[dict, CommandTable]:
         return snapshot, CommandTable.from_snapshot(snapshot)
     except procedure_check.DeclarationError as error:
         raise Refused(str(error)) from error
+
+
+def _admitted() -> int:
+    try:
+        return engine_slots.declared_slots()
+    except host_admission.DeclarationError as error:
+        raise Refused(f"{error.reason_code}: the host declaration does not admit the "
+                      f"{host_admission.ENGINE_ROUTE} route, so no run starts") from error
 
 
 def check_declarations() -> dict[str, procedure_check.CommandDeclaration | None]:
@@ -293,6 +304,7 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
     if isinstance(guard, engine_guard.Unavailable):
         raise Refused(f"the host's settings load no lifecycle guard hook, so no run starts: "
                       f"{guard.reason}")
+    slots = _admitted()
     procedure = _validate(procedures_dir, table)
     inputs = {name: issue for name in procedure["inputs"]}
     holder = {"pid": os.getpid(), "started": _now()}
@@ -335,7 +347,7 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
         _release(held)
         raise
     try:
-        return _walk(run_dir, table, inputs, holder)
+        return _walk(run_dir, table, inputs, holder, slots)
     except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
             OSError, ValueError, KeyError) as error:
         raise Fault(str(error)) from error
@@ -360,8 +372,8 @@ def _release(held: list[int]) -> None:
         os.close(held.pop())
 
 
-def _walk(run_dir: Path, table: CommandTable, inputs: dict,
-          holder: Mapping[str, object]) -> tuple[int, dict]:
+def _walk(run_dir: Path, table: CommandTable, inputs: dict, holder: Mapping[str, object],
+          slots: int) -> tuple[int, dict]:
     procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
 
     def stop() -> bool:
@@ -389,7 +401,8 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict,
                          f"{action.name}, which needs {action.need}.", stop)
         if isinstance(action, engine_core.StartSession):
             try:
-                stopped = _visit_session(run_dir, table.root, steps[action.step], action, stop)
+                stopped = _visit_session(run_dir, table.root, steps[action.step], action, stop,
+                                         slots)
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
             if stopped is not None:
@@ -550,7 +563,7 @@ def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
 
 
 def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.StartSession,
-                   stop: Callable[[], bool]) -> tuple[int, dict] | None:
+                   stop: Callable[[], bool], slots: int) -> tuple[int, dict] | None:
     """Run the step's session to its result; the `quota-wait` stop when no account can answer."""
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
@@ -564,12 +577,22 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
     system = engine_ledger.store_session_file(run_dir, f"{name}.{visit}.system.md",
                                               role.body.encode("utf-8"))
     engine_ledger.store_session_file(run_dir, f"{name}.{visit}.prompt.md", prompt.encode("utf-8"))
-    engine_ledger.append_event(run_dir, {
-        "event": "session_starting", "at": _now(), "step": name, "visit": visit,
-        "session": session, "role": role.name,
-        "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
-    launched, reading, stopped, no_reply = _launch_until_answered(
-        run_dir, root, (name, visit, session), prompt, (role, schema, system), stop)
+
+    def waiting() -> None:
+        engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
+                                             "wait": engine_slots.WAIT, "until": None})
+
+    def waited() -> None:
+        engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(),
+                                             "wait": engine_slots.WAIT})
+
+    with engine_slots.hold(run_dir, slots, on_wait=waiting, on_waited=waited):
+        engine_ledger.append_event(run_dir, {
+            "event": "session_starting", "at": _now(), "step": name, "visit": visit,
+            "session": session, "role": role.name,
+            "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
+        launched, reading, stopped, no_reply = _launch_until_answered(
+            run_dir, root, (name, visit, session), prompt, (role, schema, system), stop)
     if stopped is not None:
         return stopped
     wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None

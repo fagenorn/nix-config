@@ -44,7 +44,8 @@ JSON when it ends (`engine_shell` is the contract):
   another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
 - exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
-  lifecycle guard hook, or a refusal before any run exists, which creates no run directory.
+  lifecycle guard hook, a host declaration that does not admit the engine route (printed with its
+  reason code first), or a refusal before any run exists, which creates no run directory.
 
 `engine stop <issue> [--project <slug>]` asks the run of the issue that is running on this host
 to stop: it writes the run's `stop-request` file naming the lock holder, signals no process,
