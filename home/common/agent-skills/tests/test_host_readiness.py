@@ -533,7 +533,7 @@ class ReadinessChecksTest(ReadinessCase):
 
     def test_a_production_verification_command_is_not_run(self):
         for argv in (["just", "switch"], ["sh", "-c", "just switch"],
-                     ["bash", "-c", "true && just switch"]):
+                     ["bash", "-c", "true && just switch"], ["just", "switch", "--dry-run"]):
             with self.subTest(argv=argv):
                 snapshot = fake_snapshot(self.root)
                 snapshot["bindings"]["commands"]["test"]["argv"] = argv
@@ -541,11 +541,6 @@ class ReadinessChecksTest(ReadinessCase):
                 self.assertEqual("fail verification test: would run production command deploy; "
                                  "not run", line(checks, "verification test"))
                 self.assertNotIn(tuple(argv), runner.argvs())
-        snapshot = fake_snapshot(self.root)
-        snapshot["bindings"]["commands"]["test"]["argv"] = ["just", "switch", "--dry-run"]
-        checks, runner = self.run_it(snapshot)
-        self.assertIn(("just", "switch", "--dry-run"), runner.argvs())
-        self.assertEqual("pass verification test", line(checks, "verification test"))
 
     def test_no_child_argv_hits_the_guards_production_rules(self):
         spec = importlib.util.spec_from_file_location("lifecycle_guard_source", GUARD_SOURCE)
@@ -566,7 +561,8 @@ class ReadinessChecksTest(ReadinessCase):
                 self.assertIsNotNone(refusal(argv, snap))
         dry = ["just", "switch", "--dry-run"]
         self.assertFalse(guard.production_hits(shlex.join(dry), rules)[0])
-        self.assertIsNone(refusal(dry, snap))
+        # The guard lifts a read-only extension; readiness does not (a false refusal is accepted).
+        self.assertEqual("would run production command deploy", refusal(dry, snap))
         runner = FakeRunner(self.common, self.railway_inspection())
         self.run_it(runner=runner)
         self.assertTrue(any(a[:2] == ("railway", "status") for a in runner.argvs()))
@@ -581,7 +577,8 @@ class RefusalTest(ReadinessCase):
         for argv in (["/usr/local/bin/just", "switch"],
                      ["devenv", "shell", "--", "just", "--justfile", "j", "switch"],
                      ["sh", "-c", "just switch"], ["sh", "-c", "cd x; just switch"],
-                     ["devenv", "shell", "--", "sh", "-c", "(just switch)"]):
+                     ["devenv", "shell", "--", "sh", "-c", "(just switch)"],
+                     ["just", "switch", "--dry-run"]):
             with self.subTest(argv=argv):
                 self.assertEqual(production, refusal(argv, snap))
         for argv in (["sh", "-c", "echo $(just switch)"], ["sh", "-c", "echo `x`"],
@@ -598,7 +595,7 @@ class RefusalTest(ReadinessCase):
                          refusal(["release", "transaction", "preview"], snap))
         for argv in (["release", "transaction", "preview", "--read-only"],
                      ["release", "transaction", "status"], ["just", "build"], ["just", "test"],
-                     ["just", "switch", "--dry-run"], ["sh", "-c", "test -f a && test ! -f b"],
+                     ["sh", "-c", "test -f a && test ! -f b"],
                      ["git", "commit", "-m", "host-readiness probe"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
@@ -647,8 +644,8 @@ class RefusalTest(ReadinessCase):
             with self.subTest(argv=argv):
                 self.assertEqual("would run production command deploy", refusal(argv, snap))
 
-    def test_a_read_only_verb_lifts_only_the_words_one_command_owns(self):
-        # A shell reads `sh -c deploy status` as `deploy` with `$0` set to `status`.
+    def test_a_read_only_verb_that_extends_a_production_verb_lifts_nothing(self):
+        # Readiness never lifts a hit: any production word refuses, a read-only extension too.
         snap = fake_snapshot(self.root, **{
             "bindings.commands": {
                 "deploy": {"argv": ["deploy"], "cwd": str(self.root), "env": []},
@@ -657,13 +654,12 @@ class RefusalTest(ReadinessCase):
         production = "would run production command deploy"
         for argv in (["sh", "-c", "deploy", "status"], ["bash", "-c", "deploy", "status"],
                      ["su", "-c", "deploy", "status"], ["env", "deploy", "status"],
-                     ["sh", "-c", "deploy status; deploy"]):
-            with self.subTest(argv=argv):
-                self.assertEqual(production, refusal(argv, snap))
-        for argv in (["deploy", "status"], ["sh", "-c", "deploy status"],
+                     ["sh", "-c", "deploy status; deploy"], ["deploy"], ["deploy", "status"],
+                     ["deploy", ";", "status"], ["deploy", "", "status"],
+                     ["deploy", "&&", "status"], ["sh", "-c", "deploy status"],
                      ["bash", "-c", "true && deploy status"]):
             with self.subTest(argv=argv):
-                self.assertIsNone(refusal(argv, snap))
+                self.assertEqual(production, refusal(argv, snap))
 
     def test_a_command_that_names_no_production_verb_is_not_refused(self):
         snap = self.deploy_snapshot()
@@ -675,11 +671,10 @@ class RefusalTest(ReadinessCase):
     def test_a_multi_word_production_verb_needs_its_words_in_order_after_the_program(self):
         snap = fake_snapshot(self.root)
         for argv in (["su", "-c", "just switch"], ["oksh", "-c", "just --justfile j switch"],
-                     ["sh", "+c", "just switch"]):
+                     ["sh", "+c", "just switch"], ["sh", "+c", "just switch --dry-run"]):
             with self.subTest(argv=argv):
                 self.assertEqual("would run production command deploy", refusal(argv, snap))
-        for argv in (["su", "-c", "just build"], ["sh", "+c", "just switch --dry-run"],
-                     ["switch", "just"]):
+        for argv in (["su", "-c", "just build"], ["switch", "just"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
 
