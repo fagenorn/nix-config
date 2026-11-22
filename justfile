@@ -122,6 +122,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_diff_scope.py \
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_resolve_platform.py \
+    home/common/agent-skills/tests/test_resolve_schema_three.py \
     home/common/agent-skills/tests/test_resolve_platform_status.py \
     home/common/agent-skills/tests/test_fleet_preflight.py \
     home/common/agent-skills/tests/test_host_readiness.py \
