@@ -66,36 +66,11 @@ from agent_tools.project_contract.adopt_inspection import (
 )
 from agent_tools.project_contract.adopt_links import LinkRewrites
 from agent_tools.project_contract.adopt_references import References
+from agent_tools.project_contract.derived_values import normalize_remote_url
 
 # --------------------------------------------------------------------------
 # Project identity (D35)
 # --------------------------------------------------------------------------
-
-
-def normalize_remote_url(url: str) -> str | None:
-    """`owner/repo` for the two documented remote spellings, else None.
-
-    A URL matching neither form is deliberately not normalized: guessing an
-    identity from an unrecognised spelling is exactly the inference the
-    contract forbids, and the caller turns None into an open question.
-    """
-    value = url.strip()
-    if not value:
-        return None
-    if value.endswith(".git"):
-        value = value[:-len(".git")]
-    if value.startswith("git@"):
-        _, separator, suffix = value.partition(":")
-        if not separator or not suffix:
-            return None
-        segments = [part for part in suffix.split("/") if part]
-        return "/".join(segments[-2:]) if len(segments) >= 2 else None
-    if "://" in value:
-        _, _, rest = value.partition("://")
-        segments = [part for part in rest.split("/") if part]
-        # host plus owner plus repo at the very least.
-        return "/".join(segments[-2:]) if len(segments) >= 3 else None
-    return None
 
 
 def remote_urls(root: Path) -> list[str]:
@@ -935,6 +910,24 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
 # --------------------------------------------------------------------------
 
 
+def current_schema(manifest: dict) -> int:
+    """The project schema adoption writes and routes by.
+
+    The highest supported schema that some well-formed migration reaches. A
+    schema becomes the adoption target only once a migration reaches it, so a
+    minor release can publish a schema the resolver reads before the migration
+    that writes it ships. When no migration reaches a supported schema, the
+    highest supported schema stands.
+    """
+    versions = manifest["project_schema_versions"]
+    reached = [entry["to_schema"] for entry in manifest["migrations"]
+               if isinstance(entry, dict)
+               and isinstance(entry.get("to_schema"), int)
+               and not isinstance(entry.get("to_schema"), bool)
+               and entry["to_schema"] in versions]
+    return max(reached) if reached else max(versions)
+
+
 def select_forward_step(manifest: dict, schema_version: object) -> dict | None:
     """The unique `migrations` record stepping forward from `schema_version`.
 
@@ -968,8 +961,8 @@ def route_outcome(manifest: dict, contract_source: dict | None,
         return "reconcile", None
     versions = manifest["project_schema_versions"]
     declared = contract_source.get("schema_version")
-    # 3. A supported schema that is not the highest supported one.
-    if declared in versions and declared != versions[-1]:
+    # 3. A supported schema that is not the current schema (`current_schema`).
+    if declared in versions and declared != current_schema(manifest):
         forward = select_forward_step(manifest, declared)
         if forward is None:
             raise refuse("adopt_failure",
@@ -983,13 +976,14 @@ def route_outcome(manifest: dict, contract_source: dict | None,
         if forward is not None:
             return "migration_required", forward["id"]
         return "repair_required", None
-    # 5. The current schema with adoption work outstanding.
+    # 5. The current schema (`current_schema`) with adoption work outstanding.
     if pending_work:
         return "reconcile", None
-    # 6. The current schema, valid, conformant, nothing left.
+    # 6. The current schema (`current_schema`), valid, conformant, nothing left.
     if contract_resolves:
         return "no_change", None
-    # 7. The current schema, invalid or drifted, with no legacy surface.
+    # 7. The current schema (`current_schema`), invalid or drifted, with no
+    # legacy surface.
     return "repair_required", None
 
 # --------------------------------------------------------------------------

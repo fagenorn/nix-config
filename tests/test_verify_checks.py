@@ -1678,11 +1678,6 @@ class BundleVerdictTest(unittest.TestCase):
                 self.assertEqual((code, report["approved"]), (75, []))
                 self.assertEqual([u["path"] for u in report["unreadable"]], ["x-bundle.json"])
 
-    def test_the_committed_cutover_bundle_verifies_unmeasured(self):
-        doc = json.loads((ROOT / ".agents/artifacts/evidence/cutover-579-bundle.json").read_text())
-        self.assertEqual(agent_gate_bundle.verify_bundle(doc), "unmeasured")
-        self.assertRegex(doc["identity"]["bound"]["commit"]["candidate"], r"^[0-9a-f]{40}$")
-
     def test_the_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/cutover-bundle"), "100755")
 
@@ -1691,7 +1686,7 @@ EVIDENCE = ".agents/artifacts/evidence"
 
 
 class CutoverBundleTest(unittest.TestCase):
-    def test_the_check_reads_the_bundles_at_origin_main(self):
+    def test_the_check_reads_the_bundles_retained_at_the_pinned_commit(self):
         world = CutoverWorld(self)
         candidate = world.publish_candidate()
         code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
@@ -1699,12 +1694,55 @@ class CutoverBundleTest(unittest.TestCase):
         files = {f"{EVIDENCE}/a-bundle.json": json.dumps(emitted("approved", candidate)),
                  f"{EVIDENCE}/b-bundle.json": "not json",
                  f"{EVIDENCE}/c-trials.json": "{}"}
-        world.commit(world.pusher, manifests()[0], files)
+        retained = world.commit(world.pusher, manifests()[0], files)
+        world.git(world.pusher, "rm", "-q", "-r", EVIDENCE)
+        world.git(world.pusher, "commit", "-q", "-m", "the evidence directory leaves the tree")
         world.git(world.pusher, "push", "-q", "origin", "main")
-        code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
+        with mock.patch.object(verify_checks, "RETAINED_EVIDENCE_COMMIT", retained):
+            code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
         self.assertEqual((code, report["verdict"]), (0, "green"))
         self.assertEqual(report["approved"], [f"{EVIDENCE}/a-bundle.json"])
         self.assertEqual([u["path"] for u in report["unreadable"]], [f"{EVIDENCE}/b-bundle.json"])
+
+    def test_the_default_retained_commit_holds_the_cutover_bundle_as_unmeasured(self):
+        shown = subprocess.run(
+            ["git", "-C", str(ROOT), "show",
+             f"{verify_checks.RETAINED_EVIDENCE_COMMIT}:{EVIDENCE}/cutover-579-bundle.json"],
+            check=True, capture_output=True)
+        doc = json.loads(shown.stdout)
+        self.assertEqual(agent_gate_bundle.verify_bundle(doc), "unmeasured")
+        self.assertRegex(doc["identity"]["bound"]["commit"]["candidate"], r"^[0-9a-f]{40}$")
+
+    def test_a_bundle_file_named_on_the_command_line_is_the_evidence(self):
+        world = CutoverWorld(self)
+        candidate = world.publish_candidate()
+        good = world.tmp / "attached-bundle.json"
+        good.write_text(json.dumps(emitted("approved", candidate)), encoding="utf-8")
+        stale = world.tmp / "stale-bundle.json"
+        stale.write_text(json.dumps(emitted("approved", "b" * 40)), encoding="utf-8")
+        broken = world.tmp / "broken-bundle.json"
+        broken.write_text("not json", encoding="utf-8")
+        missing = world.tmp / "missing-bundle.json"
+        code, report = verify_checks.cutover_bundle(
+            world.clone, CANDIDATE_BRANCH, [good, stale, broken, missing])
+        self.assertEqual((code, report["verdict"], report["approved"]), (0, "green", [str(good)]))
+        self.assertEqual([item["path"] for item in report["other"]], [str(stale)])
+        self.assertEqual([item["path"] for item in report["unreadable"]],
+                         sorted([str(broken), str(missing)]))
+        code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH, [stale])
+        self.assertEqual((code, report["approved"]), (75, []))
+
+    def test_the_command_line_takes_the_bundle_file(self):
+        world = CutoverWorld(self)
+        candidate = world.publish_candidate()
+        attached = world.tmp / "attached-bundle.json"
+        attached.write_text(json.dumps(emitted("approved", candidate)), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["cutover-bundle", "--repo-root", str(world.clone),
+                                       "--bundle", str(attached)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["approved"], [str(attached)])
 
     def test_an_absent_candidate_branch_is_not_yet(self):
         world = CutoverWorld(self)

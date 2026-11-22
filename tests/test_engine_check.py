@@ -143,7 +143,7 @@ def _outcome_not_required(schema: dict) -> None:
 def _add_orphan(toy: dict) -> None:
     toy["steps"].append({"id": "orphan", "stage": "building", "kind": "command",
                          "command": "diff-scope", "in": ["draft.summary"],
-                         "on": {"ok": "done", "failed": "done"}})
+                         "on": {"ok": "done", "failed": "done", "refused": "done"}})
 
 
 def _claim_reaches_done_only_through_exhausted(child: dict) -> None:
@@ -210,7 +210,7 @@ def _two_exhausted_steps_hand_over(child: dict) -> None:
     child["steps"] = [
         {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
          "in": ["run.item"], "max_visits": 1,
-         "on": {"ok": own, "failed": "done", "exhausted": other}}
+         "on": {"ok": own, "failed": "done", "refused": "done", "exhausted": other}}
         for own, other in (("a", "b"), ("b", "a"))]
     for stop in child["stops"].values():
         stop["reenter"] = "a"
@@ -218,7 +218,7 @@ def _two_exhausted_steps_hand_over(child: dict) -> None:
 
 def _exhausted_and_ordinary_edges_loop(child: dict) -> None:
     def make(own: str, ok: str, exhausted: str | None, bound: bool) -> dict:
-        on = {"ok": ok, "failed": "done"}
+        on = {"ok": ok, "failed": "done", "refused": "done"}
         if exhausted is not None:
             on["exhausted"] = exhausted
         item = {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
@@ -239,7 +239,8 @@ def _no_claim_lost_stop(toy: dict) -> None:
 def _recovery(child: dict) -> None:
     child["steps"].append(
         {"id": "recover", "stage": "building", "kind": "command", "command": "diff-scope",
-         "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop"}})
+         "in": ["run.item"],
+         "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}})
     child["stops"]["claim-lost"]["reenter"] = "recover"
 
 
@@ -259,8 +260,8 @@ def _recovery_reading(path: str) -> Callable[[dict], None]:
         def command(name: str, reads: str, on: dict, **more: object) -> dict:
             return {"id": name, "stage": "building", "kind": "command", "command": "diff-scope",
                     "in": [reads], "on": on, **more}
-        done = {"ok": "done", "failed": "child-stop"}
-        child["steps"] = [command("a", "run.item", {"ok": "b", "failed": "child-stop"}),
+        done = {"ok": "done", "failed": "child-stop", "refused": "child-stop"}
+        child["steps"] = [command("a", "run.item", {"ok": "b", "failed": "child-stop", "refused": "child-stop"}),
                           command("b", "run.item", done, mutates=True), command("r", path, done)]
         child["stops"]["child-stop"]["reenter"] = "a"
         child["stops"]["claim-lost"]["reenter"] = "r"
@@ -572,6 +573,44 @@ class ToyProcedureTest(unittest.TestCase):
                 code, out, _ = run_check("--procedures", str(directory))
                 self.assertEqual((code, out), (0, compact(
                     {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+
+class RefusedOutcomeTest(unittest.TestCase):
+    def test_a_command_step_that_does_not_map_refused_is_refused_and_one_that_maps_it_is_accepted(self):
+        missing = broken_copy(editing("toy", lambda doc: step(doc, "scope")["on"].pop("refused", None)))
+        restored = broken_copy(editing(
+            "toy", lambda doc: step(doc, "scope")["on"].update(refused="needs-owner")))
+        code, out, _ = run_check("--procedures", str(missing))
+        code2, out2, _ = run_check("--procedures", str(restored))
+        self.assertEqual(code, 1, out)
+        refusals = json.loads(out)["refusals"]
+        self.assertEqual(len(refusals), 1, out)
+        self.assertEqual((refusals[0]["defect"], refusals[0]["procedure"], refusals[0]["step"]),
+                         ("unmapped_outcome", "toy", "scope"))
+        self.assertIn("'refused'", refusals[0]["detail"])
+        self.assertEqual(code2, 0, out2)
+        self.assertNotIn("unknown_outcome", out2)
+
+    def test_a_group_member_that_passes_on_refused_is_refused(self):
+        def with_probe(passes: list[str]) -> Path:
+            def change(doc: dict) -> None:
+                probe = {key: value for key, value in step(doc, "scope").items() if key != "on"}
+                probe["id"] = "probe"
+                group = next(item for item in doc["steps"] if item["kind"] == "group")
+                doc["steps"].insert(doc["steps"].index(group), probe)
+                group["members"].append({"step": "probe", "pass": passes})
+            return broken_copy(editing("toy", change))
+
+        code, out, _ = run_check("--procedures", str(with_probe(["ok", "refused"])))
+        self.assertEqual(code, 1, out)
+        refusals = json.loads(out)["refusals"]
+        self.assertEqual(len(refusals), 1, out)
+        self.assertEqual((refusals[0]["defect"], refusals[0]["procedure"], refusals[0]["step"]),
+                         ("unknown_outcome", "toy", "review"))
+        self.assertIn("'refused'", refusals[0]["detail"])
+        self.assertIn("'probe'", refusals[0]["detail"])
+        code2, out2, _ = run_check("--procedures", str(with_probe(["ok"])))
+        self.assertEqual(code2, 0, out2)
 
 
 class RefusalTableTest(unittest.TestCase):
