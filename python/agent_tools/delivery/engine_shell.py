@@ -35,7 +35,8 @@ and takes `engine_core.call_outcome` of the ends. A fault in any child faults
 the parent with no call outcome. `engine status` reads the root run, never a
 child.
 
-Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
+Before each visit of a `mutates: true` command step, and before each visit of a group with a
+`mutates: true` member (once for the group, recorded at the group's step), in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
 only on the verdict `renewed` with exit 0; an `error` whose `transient` is the boolean
 `true` is called once more. Otherwise the run ends at `claim-lost` without entering the
@@ -413,12 +414,18 @@ def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
                          f"{action.name}, which needs {action.need}.")
         if isinstance(action, engine_core.RunCommand):
             if steps[action.step].get("mutates") is True and "keep_alive" in procedure:
-                lost = _renew(run_dir, table, procedure, inputs, action)
+                lost = _renew(run_dir, table, procedure, inputs, action.step, action.visit)
                 if lost is not None:
                     return lost
             _visit(run_dir, table, steps[action.step], action)
             ran += 1
         elif isinstance(action, engine_core.RunGroup):
+            if "keep_alive" in procedure and any(
+                    steps[member["step"]].get("mutates") is True
+                    for member in steps[action.step]["members"]):
+                lost = _renew(run_dir, table, procedure, inputs, action.step, action.visit)
+                if lost is not None:
+                    return lost
             _group(run_dir, table, steps, action)
             ran += len(action.members)
         elif isinstance(action, engine_core.RunCall):
@@ -435,8 +442,8 @@ def _stop(run_dir: Path, step: str, name: str, need: str, detail: str) -> tuple[
 
 
 def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
-           action: engine_core.RunCommand) -> tuple[int, dict] | None:
-    """None when the claim is renewed before `action`'s step, else the `claim-lost` stop."""
+           step: str, visit: int) -> tuple[int, dict] | None:
+    """None when the claim is renewed before visit `visit` of `step`, else the `claim-lost` stop."""
     keep_alive = procedure["keep_alive"]
     args = tuple((path, inputs[path.split(".", 1)[1]]) for path in keep_alive["in"])
     for attempt in (1, 2):
@@ -444,8 +451,8 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
                                   args, on_start=lambda pid: None, timeout=KEEP_ALIVE_SECONDS)
         verdict = "failed" if ran.outcome == "renewed" and ran.exit_code != 0 else ran.outcome
         engine_ledger.append_event(run_dir, {
-            "event": "keep_alive_ran", "at": _now(), "step": action.step,
-            "visit": action.visit, "attempt": attempt, "verdict": verdict})
+            "event": "keep_alive_ran", "at": _now(), "step": step,
+            "visit": visit, "attempt": attempt, "verdict": verdict})
         if verdict == "renewed":
             return None
         if verdict != "error" or ran.result.get("transient") is not True:
@@ -453,8 +460,8 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
     text = " ".join(ran.stdout.decode("utf-8", "replace").split()
                     + ran.stderr.decode("utf-8", "replace").split()) or "no output"
     need = procedure["stops"][procedure_check.CLAIM_LOST]["need"]
-    return _stop(run_dir, action.step, procedure_check.CLAIM_LOST, need,
-                 f"The claim was not renewed before step {action.step}, the keep-alive "
+    return _stop(run_dir, step, procedure_check.CLAIM_LOST, need,
+                 f"The claim was not renewed before step {step}, the keep-alive "
                  f"answered {verdict}: {text}.")
 
 
