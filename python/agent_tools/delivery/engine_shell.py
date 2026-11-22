@@ -1,25 +1,47 @@
-"""The engine's shell: `engine deliver` runs a procedure of command steps (#1512).
+"""The engine's shell: `engine deliver` runs a procedure of command, decide, group and call steps (#1512, #1517).
 
 `deliver(issue, procedures_dir)` is the imperative half over the pure core: it
 refuses what it cannot run before anything exists, creates the run directory,
 then loops (replay the run's events through `engine_core.replay`, act on the
-next action, record it) until the walk is `Done` or a `Stop`.
+next action, record it) until the walk is `Done` or a `Stop`. `_walk` is that
+loop for any run directory: it reads the run's procedure name and inputs from
+its `run.json`, so the root run and every child run share it.
 
 Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
 held run lock answers `EXIT_RUNNING` first; `<procedures_dir>/deliver.json` must
 pass `procedure_check.check_directory` against the platform declarations plus
-every project command, hold only `command` and `decide` steps, no step with
-`mutates: true`, and no input but `issue`. The same checks run again on the run's
-staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
+every project command, hold only `command`, `decide`, `group` and `call` steps,
+no step with `mutates: true`, no input the run does not supply, no `call` member
+of a group and no procedure that calls itself; every child procedure a `call`
+names is refused on the same terms, with the parent's inputs (plus `item` under
+`each`) as the inputs it may declare. The same checks run again on the run's
+staged copy, which is the copy the loop reads (`<run>/procedure/`).
+
+A `group` step runs its members beside each other, one thread each: each member
+records `step_entered`, `process_started`, its stored result and
+`outcome_graded`, and no `transition_taken`; the group's own grade is recorded
+once per visit from `Replay.graded`, before the shell acts on the next action,
+so a group of decide members, or one graded then exhausted in one replay, is
+recorded too. A `call` step runs its child procedure once per item of `each`
+(once with item `null` without `each`), each as a child run of its own: a run
+directory whose `run.json` names the parent, with the procedures copied from the
+parent's staged copy. At most `parallel` child walks run at once; children are
+admitted in list order, and admission stops at the first fault, while the
+children already admitted finish. The parent records a `call` event for each
+child before that child walks, stores `{"items": [{"end", "item", "run"}, ...]}`
+and takes `engine_core.call_outcome` of the ends. A fault in any child faults
+the parent with no call outcome. `engine status` reads the root run, never a
+child.
 
 An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done`
 or `stop_reached`.
 
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an
-exclusive `flock` held until `deliver` returns. A run whose lock is held makes
-the call exit `EXIT_RUNNING`; a run not done and not locked is refused
-(continuing a run is a later slice).
+exclusive `flock` held until its walk ends, for the root run and for each child
+run (released on every path). A run whose lock is held makes the call exit
+`EXIT_RUNNING`; a run not done and not locked is refused (continuing a run is a
+later slice).
 
 Exit codes: `engine.py` lists them; `Fault` and `Refused` print nothing on stdout.
 """
@@ -30,6 +52,9 @@ import fcntl
 import json
 import os
 import socket
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -47,7 +72,7 @@ EXIT_RUNNING = 4
 LOCK_NAME = "lock"
 ENTRY = "deliver"
 SUPPLIED_INPUTS = ("issue",)
-RUNNABLE_KINDS = ("command", "decide")
+RUNNABLE_KINDS = ("command", "decide", "group", "call")
 NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 
@@ -82,7 +107,8 @@ def _load(path: Path) -> dict:
     return document
 
 
-def _refuse_unrunnable(procedure: dict) -> None:
+def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ...] | set[str],
+                       name: str, calling: tuple[str, ...] = ()) -> None:
     for item in procedure["steps"]:
         if item["kind"] not in RUNNABLE_KINDS:
             raise Refused(f"step {item['id']} is a {item['kind']} step, "
@@ -90,20 +116,45 @@ def _refuse_unrunnable(procedure: dict) -> None:
     for item in procedure["steps"]:
         if item.get("mutates") is True:
             raise Refused(f"step {item['id']} mutates, which the engine does not run yet")
-    for name in procedure["inputs"]:
-        if name not in SUPPLIED_INPUTS:
-            raise Refused(f"input {name} is not supplied by the engine")
+    for input_name in procedure["inputs"]:
+        if input_name not in supplied:
+            raise Refused(f"input {input_name} is not supplied by the engine")
+    kinds = {item["id"]: item["kind"] for item in procedure["steps"]}
+    for item in procedure["steps"]:
+        if item["kind"] == "group":
+            for member in item["members"]:
+                if kinds.get(member["step"]) == "call":
+                    raise Refused(f"group {item['id']} has the call step {member['step']} as a "
+                                  "member, which the engine does not run")
+    for item in procedure["steps"]:
+        if item["kind"] != "call":
+            continue
+        child = item["procedure"]
+        if child in (*calling, name):
+            raise Refused(f"procedure {child} calls itself through step {item['id']}, "
+                          "which the engine does not run")
+        try:
+            document = _load(directory / f"{child}.json")
+        except (ValueError, OSError) as error:
+            raise Refused(str(error)) from error
+        _refuse_unrunnable(document, directory,
+                           set(procedure["inputs"]) | ({"item"} if "each" in item else set()),
+                           child, (*calling, name))
 
 
-def core_events(run_dir: Path, ledger: list[dict]) -> list[dict]:
-    """The core's events for a run's ledger events; every other ledger event is skipped."""
+def core_events(run_dir: Path, ledger: list[dict],
+                computed: frozenset[str] = frozenset()) -> list[dict]:
+    """The core's events for a run's ledger events; every other ledger event is skipped.
+
+    An `outcome_graded` of a step in `computed` (a group, graded by the core) is skipped.
+    """
     stored = {(e["step"], e["visit"]): e["result"]
               for e in ledger if e["event"] == "result_stored"}
     events: list[dict] = []
     for event in ledger:
         if event["event"] == "step_entered":
             events.append({"type": "entered", "step": event["step"]})
-        elif event["event"] == "outcome_graded":
+        elif event["event"] == "outcome_graded" and event["step"] not in computed:
             relative = stored[(event["step"], event["visit"])]
             events.append({"type": "outcome", "step": event["step"],
                            "outcome": event["outcome"], "result": _load(run_dir / relative)})
@@ -148,7 +199,7 @@ def _validate(directory: Path, table: CommandTable) -> dict:
         procedure = _load(directory / f"{ENTRY}.json")
     except (ValueError, OSError) as error:
         raise Refused(str(error)) from error
-    _refuse_unrunnable(procedure)
+    _refuse_unrunnable(procedure, directory, SUPPLIED_INPUTS, ENTRY)
     return procedure
 
 
@@ -254,7 +305,7 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
         _release(held)
         raise
     try:
-        return _walk(run_dir, table, inputs)
+        return _walk(run_dir, table)
     except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
             OSError, ValueError, KeyError) as error:
         raise Fault(str(error)) from error
@@ -279,19 +330,60 @@ def _release(held: list[int]) -> None:
         os.close(held.pop())
 
 
-def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
-    procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
+class _Admission:
+    """Hands out the indexes of a call's items in list order, none once a fault is noted."""
+
+    def __init__(self, count: int) -> None:
+        self._count = count
+        self._next = 0
+        self._stopped = False
+        self._lock = threading.Lock()
+
+    def take(self) -> int | None:
+        with self._lock:
+            if self._stopped or self._next >= self._count:
+                return None
+            index = self._next
+            self._next += 1
+            return index
+
+    def fail(self) -> None:
+        with self._lock:
+            self._stopped = True
+
+
+def _record_grades(run_dir: Path, ledger: list[dict],
+                   graded: tuple[engine_core.Graded, ...]) -> None:
+    """Record each group grade the ledger lacks: its `outcome_graded`, then its `transition_taken`."""
+    recorded = {(e["step"], e["visit"]) for e in ledger if e["event"] == "outcome_graded"}
+    for grade in graded:
+        if (grade.step, grade.visit) in recorded:
+            continue
+        engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(),
+                                             "step": grade.step, "visit": grade.visit,
+                                             "outcome": grade.outcome})
+        engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
+                                             "step": grade.step, "visit": grade.visit,
+                                             "outcome": grade.outcome, "to": grade.target})
+
+
+def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
+    run = engine_ledger.read_run(run_dir)
+    name, inputs = run["procedure"], run["inputs"]
+    procedure = _load(run_dir / "procedure" / f"{name}.json")
     steps = {item["id"]: item for item in procedure["steps"]}
+    computed = frozenset(item["id"] for item in procedure["steps"] if item["kind"] == "group")
     run_id = run_dir.name
     ran = 0
     while True:
         ledger = engine_ledger.replay(run_dir / "events.jsonl")
-        walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger))
+        walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger, computed))
+        _record_grades(run_dir, ledger, walk.graded)
         action = walk.action
         if isinstance(action, engine_core.Done):
             engine_ledger.append_event(run_dir, {"event": "run_done", "at": _now()})
             return EXIT_DONE, {
-                "detail": f"The {ENTRY} procedure reached done after {ran} command "
+                "detail": f"The {name} procedure reached done after {ran} command "
                           f"{'visit' if ran == 1 else 'visits'}.",
                 "end": "done", "need": None, "run": run_id}
         if isinstance(action, engine_core.Stop):
@@ -300,17 +392,24 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
                 "event": "stop_reached", "at": _now(), "step": step,
                 "stop": action.name, "need": action.need})
             return EXIT_STOP, {
-                "detail": f"The {ENTRY} procedure stopped at step {step} with "
+                "detail": f"The {name} procedure stopped at step {step} with "
                           f"{action.name}, which needs {action.need}.",
                 "end": action.name, "need": action.need, "run": run_id}
-        if not isinstance(action, engine_core.RunCommand):
+        if isinstance(action, engine_core.RunCommand):
+            _visit(run_dir, table, steps[action.step], action)
+            ran += 1
+        elif isinstance(action, engine_core.RunGroup):
+            _group(run_dir, table, steps, action)
+            ran += len(action.members)
+        elif isinstance(action, engine_core.RunCall):
+            _call(run_dir, table, run, steps[action.step], action)
+        else:
             raise Fault(f"step {action.step} needs a session, which the engine does not run yet")
-        _visit(run_dir, table, steps[action.step], action)
-        ran += 1
 
 
-def _visit(run_dir: Path, table: CommandTable, step: dict,
-           action: engine_core.RunCommand) -> None:
+def _run_command(run_dir: Path, table: CommandTable, step: dict,
+                 action: engine_core.RunCommand) -> engine_commands.Ran:
+    """Enter, run and store one command step visit; the caller records its outcome."""
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
                                          "visit": visit, "stage": step["stage"]})
@@ -325,10 +424,113 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
                                spend_usd=0)
+    return ran
+
+
+def _graded(run_dir: Path, name: str, visit: int, outcome: str) -> None:
+    engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
+                                         "visit": visit, "outcome": outcome})
+
+
+def _visit(run_dir: Path, table: CommandTable, step: dict,
+           action: engine_core.RunCommand) -> None:
+    name, visit = action.step, action.visit
+    ran = _run_command(run_dir, table, step, action)
     if ran.outcome == engine_core.EXHAUSTED or ran.outcome not in step["on"]:
         raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
-    engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
-                                         "visit": visit, "outcome": ran.outcome})
+    _graded(run_dir, name, visit, ran.outcome)
     engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
                                          "step": name, "visit": visit, "outcome": ran.outcome,
                                          "to": step["on"][ran.outcome]})
+
+
+def _member(run_dir: Path, table: CommandTable, step: dict,
+            action: engine_core.RunCommand | engine_core.StartSession) -> None:
+    if not isinstance(action, engine_core.RunCommand):
+        raise Fault(f"step {action.step} needs a session, which the engine does not run yet")
+    ran = _run_command(run_dir, table, step, action)
+    if ran.outcome == engine_core.EXHAUSTED:
+        raise Fault(f"step {action.step} reported the reserved outcome {ran.outcome}")
+    _graded(run_dir, action.step, action.visit, ran.outcome)
+
+
+def _group(run_dir: Path, table: CommandTable, steps: dict[str, dict],
+           action: engine_core.RunGroup) -> None:
+    """Run the members beside each other; the group's grade is recorded by `_record_grades`."""
+    engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(),
+                                         "step": action.step, "visit": action.visit,
+                                         "stage": steps[action.step]["stage"]})
+    with ThreadPoolExecutor(max_workers=len(action.members)) as pool:
+        futures = [pool.submit(_member, run_dir, table, steps[member.step], member)
+                   for member in action.members]
+    for future in futures:
+        future.result()
+
+
+def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
+           action: engine_core.RunCall, item: object, index: int, count: int) -> dict:
+    """Create the child run for one item, record its `call` event, walk it, and keep its end."""
+    held: list[int] = []
+    try:
+        child = _load(run_dir / "procedure" / f"{action.procedure}.json")
+        inputs = {name: item if name == "item" else run["inputs"][name]
+                  for name in child["inputs"]}
+        creation = _lock_creation(run["issue"])
+        try:
+            child_dir = engine_ledger.create_run(
+                project=run["project"], issue=run["issue"], procedure=action.procedure,
+                procedures_dir=run_dir / "procedure",
+                platform_revision=run["platform_revision"], host=run["host"], inputs=inputs,
+                now=datetime.now(timezone.utc), parent=run_dir.name,
+                before_publish=lambda staged: held.append(_take_run_lock(staged, _now())))
+        finally:
+            os.close(creation)
+        engine_ledger.append_event(run_dir, {
+            "event": "call", "at": _now(), "step": action.step, "visit": action.visit,
+            "child": child_dir.name, "index": index, "items": count})
+        _, line = _walk(child_dir, table)
+        return {"end": line["end"], "item": item, "run": child_dir.name}
+    finally:
+        _release(held)
+
+
+def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
+          action: engine_core.RunCall) -> None:
+    """Run the child procedure once per item, `parallel` at a time, and record the call's outcome."""
+    started = time.monotonic()
+    engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(),
+                                         "step": action.step, "visit": action.visit,
+                                         "stage": step["stage"]})
+    items = [None] if action.items is None else list(action.items)
+    admission = _Admission(len(items))
+    entries: dict[int, dict] = {}
+    errors: dict[int, Exception] = {}
+
+    def worker() -> None:
+        while (index := admission.take()) is not None:
+            try:
+                entries[index] = _child(run_dir, table, run, step, action, items[index],
+                                        index, len(items))
+            except Exception as error:
+                errors[index] = error
+                admission.fail()
+
+    threads = [threading.Thread(target=worker) for _ in range(min(action.parallel, len(items)))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[min(errors)]
+    ends = [entries[index] for index in range(len(items))]
+    engine_ledger.store_result(run_dir, step=action.step, visit=action.visit,
+                               result={"items": ends}, at=_now(),
+                               wall_seconds=time.monotonic() - started, turns=0,
+                               tokens=dict(NO_TOKENS), spend_usd=0)
+    outcome = engine_core.call_outcome([entry["end"] for entry in ends])
+    if outcome not in step["on"]:
+        raise Fault(f"step {action.step} has no mapping for the outcome {outcome}")
+    _graded(run_dir, action.step, action.visit, outcome)
+    engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
+                                         "step": action.step, "visit": action.visit,
+                                         "outcome": outcome, "to": step["on"][outcome]})

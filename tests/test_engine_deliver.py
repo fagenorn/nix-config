@@ -45,6 +45,7 @@ class EngineProject:
         self.tmp = Path(tempfile.mkdtemp(dir=self.world.tmp))
         self.record = self.tmp / "record.log"
         self.release = self.tmp / "release"
+        self.stamps = self.tmp / "stamps.log"
         self.root = self.world.project("example/engine", "example/engine", register=False,
                                        mutate=self.add_standins)
         self.bin = self.tmp / "bin"
@@ -69,18 +70,31 @@ class EngineProject:
             "standin-says-exhausted": entry("verdict", "exhausted", "0"),
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
+            "standin-stamp": entry("stamp", str(self.stamps), "1.0", "0"),
+            "standin-stamp-fail": entry("stamp", str(self.stamps), "1.0", "1"),
+            "standin-items": entry("json", "0", "approve", "approve", "approve"),
+            "standin-items-mixed": entry("json", "0", "approve", "nope", "approve"),
+            "standin-items-hold": entry("json", "0", "hold", "maybe", "approve"),
+            "standin-items-object": entry("emit", "0", '{"argv":["approve",{"id":2}]}'),
         })
 
-    def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None) -> Path:
+    def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None,
+                   children: dict[str, dict] | None = None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
-        document = {"format": 1,
-                    "keep_alive": {"command": "forge-claim", "subcommand": "renew",
-                                   "in": ["run.issue"]},
-                    "inputs": list(inputs),
-                    "stops": stops or {"needs-owner": {"need": "owner-decision",
-                                                       "reenter": steps[0]["id"]}},
-                    "steps": steps}
-        (directory / "deliver.json").write_text(json.dumps(document), encoding="utf-8")
+
+        def write(name: str, steps: list[dict], inputs, stops) -> None:
+            document = {"format": 1,
+                        "keep_alive": {"command": "forge-claim", "subcommand": "renew",
+                                       "in": ["run.issue"]},
+                        "inputs": list(inputs),
+                        "stops": stops or {"needs-owner": {"need": "owner-decision",
+                                                           "reenter": steps[0]["id"]}},
+                        "steps": steps}
+            (directory / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+
+        write("deliver", steps, inputs, stops)
+        for name, child in (children or {}).items():
+            write(name, child["steps"], child["inputs"], child["stops"])
         return directory
 
     def command(self, *words: str, cwd: Path | None = None, **kwargs):

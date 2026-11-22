@@ -34,10 +34,13 @@ directory:
   unreadable `run.json`, or an event file the ledger refuses.
 
 `engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a
-procedure of `command` and `decide` steps; default: the package's `procedures`
-directory) for the issue, in the project the current directory belongs to, to
-`done` or a stop, and prints one line of compact sorted-key JSON when it ends
-(`engine_shell` is the contract):
+procedure of `command`, `decide`, `group` and `call` steps; default: the package's
+`procedures` directory) for the issue, in the project the current directory belongs
+to, to `done` or a stop, and prints one line of compact sorted-key JSON when it ends
+(`engine_shell` is the contract). A `group` step runs its members beside each other;
+a `call` step runs a child procedure once per item as child runs of their own (a
+`run.json` with a `parent`), never more than `parallel` at once, and admits no
+further child once one faults; `engine status` reads the root run, never a child:
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
