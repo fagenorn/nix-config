@@ -1,30 +1,24 @@
 """Finding, running and grading one command step of an engine procedure (#1512).
 
-A `command` step names an id. The id is looked up in the platform table first
-(`PLATFORM_MODULES`), then in the project's commands from the resolved snapshot;
-an id in both resolves to the platform form, and an id in neither is an
-`UnknownCommand` that starts no process.
-
-Two argv forms exist. A platform id runs as its packaged sibling module
-(`siblings.sibling_argv`, agent-helpers rule 3), never by name on `PATH`, in the
-snapshot's project root, with its subcommand then its arguments. A project id
-runs its snapshot argv followed by its arguments, in the entry's own cwd, and
-takes no subcommand.
+A `command` step names an id, looked up in the platform table (`PLATFORM_MODULES`)
+first, then in the snapshot's project commands; an id in neither is an
+`UnknownCommand` that starts no process. A platform id runs as its packaged
+sibling module (`siblings.sibling_argv`, agent-helpers rule 3) in the snapshot's
+project root, with its subcommand then its arguments; a project id runs its
+snapshot argv then its arguments, in the entry's own cwd, with no subcommand.
 
 `PLATFORM_MODULES` mirrors the `lib/agent-tools.nix` rows of the commands that
 have a declaration in `command_verdicts.json`; tests/test_engine_commands.py
-pins the mirror to those rows, so a drift fails there and not at run time.
+pins the mirror.
 
-Grading: stdout is parsed strictly as one JSON document. The outcome is its
-`verdict` when that is a non-empty string, else `ok` for exit 0 and `failed` for
-any other exit. A document that is not an object is no result (`{}`).
+Grading: stdout is parsed strictly as one JSON document; the outcome is its
+`verdict` when that is a non-empty string, else `ok` for exit 0 and `failed`
+otherwise. A document that is not an object is no result (`{}`).
 
 A command that cannot start (an `OSError` from the spawn) is `failed` with exit
-127 and no pid: `on_start` is not called, because there is no process. When
-`on_start` raises, the process is killed and reaped before the error propagates,
-so no child outlives a run that could not record it.
-
-The module runs processes, so the pure engine core never imports it.
+127 and no pid, and `on_start` is not called. When `on_start` raises, the process
+is killed and reaped before the error propagates. The module runs processes, so
+the pure engine core never imports it.
 """
 
 from __future__ import annotations
@@ -106,15 +100,13 @@ class CommandTable:
 
 def grade(stdout: bytes, exit_code: int) -> tuple[str, dict]:
     """The outcome and the result object of a finished command."""
-    result: dict = {}
     try:
         document = json.loads(stdout.decode("utf-8"),
                               object_pairs_hook=reject_duplicate_keys,
                               parse_constant=reject_nonfinite_literal)
     except (ValueError, RecursionError):
         document = None
-    if isinstance(document, dict):
-        result = document
+    result = document if isinstance(document, dict) else {}
     verdict = result.get("verdict")
     if isinstance(verdict, str) and verdict:
         return verdict, result

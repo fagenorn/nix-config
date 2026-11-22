@@ -4,7 +4,7 @@ Each test drives `python -m agent_tools.verification.verified_tree` in a throwaw
 repository, the way the other command tests drive theirs (#263 D6). The
 repository is a copy of the eval fixture project whose contract gains a second,
 conditional verification id, resolved under a temporary HOME holding the
-committed platform manifest (the lane-triage harness), with
+committed platform manifest, with
 `refs/remotes/origin/main` at the base commit (issue 437 D12).
 """
 import json

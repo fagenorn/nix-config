@@ -1,47 +1,27 @@
 """The engine's shell: `engine deliver` runs a procedure of command steps (#1512).
 
-`deliver(issue, procedures_dir)` is the imperative half over the pure core. It
+`deliver(issue, procedures_dir)` is the imperative half over the pure core: it
 refuses what it cannot run before anything exists, creates the run directory,
-then loops: replay the run's events through `engine_core.replay`, act on the
-next action, record what happened, until the walk is `Done` or a `Stop`.
+then loops (replay the run's events through `engine_core.replay`, act on the
+next action, record it) until the walk is `Done` or a `Stop`.
 
-Before a run exists (every refusal raises `Refused`, creates no run directory
-and starts no process): the project contract must resolve from the current
-directory; a held run lock answers `EXIT_RUNNING` before the procedure is read;
-`<procedures_dir>/deliver.json` must exist; the directory must pass
-`procedure_check.check_directory` against the platform declarations plus every
-project command (outcomes `ok`/`failed`); then `deliver.json` must hold only
-`command` and `decide` steps, no step with `mutates: true`, and no input but
-`issue`. The same checks run again on the run's own staged copy, and the run is
-published only when they pass and its lock is held, so the procedure that is
-validated is the one that runs.
+Every refusal raises `Refused`, before a run directory exists and before any
+process starts: the project contract must resolve from the current directory; a
+held run lock answers `EXIT_RUNNING` first; `<procedures_dir>/deliver.json` must
+pass `procedure_check.check_directory` against the platform declarations plus
+every project command, hold only `command` and `decide` steps, no step with
+`mutates: true`, and no input but `issue`. The same checks run again on the run's
+staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
 
-The loop reads the run's own copy, `<run>/procedure/deliver.json`, never the
-source directory. One command visit appends exactly `step_entered`,
-`process_started` (absent when the command cannot start), `result_stored`,
-`outcome_graded` and `transition_taken`. An outcome the step's `on` does not map
-is a `Fault` with no `outcome_graded`. `decide` steps are walked by the core and
-record nothing. The run ends with `run_done`, or `stop_reached` naming the step
-of the last core transition.
+An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done`
+or `stop_reached`.
 
-Single writer: under the issue's creation lock (`creation_lock_path`) the shell
-finds the issue's newest run, creates the run and takes `<run>/lock`, an
-exclusive `flock` it holds until `deliver` returns, holding
-`{"pid", "started"}`. A newest run whose lock is held makes the call exit
-`EXIT_RUNNING` and write nothing; a newest run with a free lock that is not done
-is refused (continuing a run is a later slice); a done run lets a new run start.
+Single writer: under the issue's creation lock the shell takes `<run>/lock`, an
+exclusive `flock` held until `deliver` returns. A run whose lock is held makes
+the call exit `EXIT_RUNNING`; a run not done and not locked is refused
+(continuing a run is a later slice).
 
-Exit codes and the result line (one compact sorted-key JSON line on stdout for
-0, 3 and 4, nothing for 1 and 2):
-
-- `EXIT_DONE` 0: `{"detail", "end": "done", "need": null, "run"}`;
-- `EXIT_FAULT` 1: a fault during the run (`Fault`);
-- `EXIT_REFUSED` 2: refused before a run exists (`Refused`);
-- `EXIT_STOP` 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
-- `EXIT_RUNNING` 4: `{"detail", "end": null, "need": null, "process": {"pid",
-  "started"}, "run"}`, the process that holds the newest run's lock.
-
-`detail` is one sentence ending in a full stop.
+Exit codes: `engine.py` lists them; `Fault` and `Refused` print nothing on stdout.
 """
 
 from __future__ import annotations
@@ -177,10 +157,7 @@ def creation_lock_path(root: Path, issue: int) -> Path:
 
 
 def lock_holder(run_dir: Path) -> dict | None:
-    """The `{"pid", "started"}` of the process holding `run_dir/lock`, or None.
-
-    The file is opened read-only and never created; a lock nobody holds is None.
-    """
+    """The `{"pid", "started"}` of the process holding `run_dir/lock`, or None (never creates it)."""
     try:
         descriptor = os.open(Path(run_dir) / LOCK_NAME, os.O_RDONLY)
     except FileNotFoundError:
@@ -241,8 +218,7 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
     held: list[int] = []
 
     def stage(staged: Path) -> None:
-        # The copy that will run is the copy that is checked; the lock is held
-        # before the run is visible, so no published run is ever unlocked.
+        # The copy that runs is the copy checked; the lock is held before the run is visible.
         if _validate(staged / "procedure", table)["inputs"] != procedure["inputs"]:
             raise Refused(f"the {ENTRY} procedure changed while its run was created")
         held.append(_take_run_lock(staged, _now()))

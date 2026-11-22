@@ -5,8 +5,10 @@
 sorted-key JSON to stdout, starting no process and opening no socket:
 
 - exit 0: `{"procedures": [<names>], "verdict": "ok"}`;
-- exit 1: `{"refusals": [{"defect", "detail", "procedure", "step"}, ...],
-  "verdict": "refused"}`, ordered by procedure name, phase, then step position;
+- exit 1: `{"breaches": [{"cap", "size", "thing", "unit"}, ...], "refusals":
+  [{"defect", "detail", "procedure", "step"}, ...], "verdict": "refused"}`,
+  refusals ordered by procedure name, phase, then step position, and both
+  members always present;
 - exit 2, stdout empty and one stderr line: a usage error, `--procedures` not a
   directory, a directory with no procedure file, or an invalid
   `command_verdicts.json`.
@@ -15,6 +17,9 @@ The procedure format and every refusal code are `procedure_check`'s contract.
 In a directory an onboarded project owns, the command ids checked are the
 platform's plus the project's, the ones `engine deliver` accepts; elsewhere
 they are the platform's.
+The check also lists in `breaches` each cap of `engine_caps` the core, the
+engine package, a procedure, the graders or a prompt file exceeds; nothing
+changes a cap.
 
 `engine status <issue> [--project <slug>]` reads the newest run of the issue
 under `~/.agents/state/engine/runs/` (the run directory `engine_ledger`
@@ -37,24 +42,29 @@ directory) for the issue, in the project the current directory belongs to, to
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
 - exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"},
-  "run"}`, another deliver of the issue holds its newest run's lock; nothing is
-  written;
+  "run"}`, another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
 - exit 2, stdout empty and one stderr line: a usage error, or a refusal before
-  any run exists (no project contract, no `deliver.json`, a procedure that fails
-  the check or that the engine cannot run, or a newest run that is not done and
-  not running); no run directory is created.
+  any run exists, which creates no run directory.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import json
 import sys
 from pathlib import Path
 
-from agent_tools.delivery import engine_ledger, engine_shell, procedure_check
+from agent_tools.delivery import (
+    engine_caps,
+    engine_graders,
+    engine_ledger,
+    engine_shell,
+    procedure_check,
+)
 
+ENGINE_DIR = Path(importlib.resources.files("agent_tools.delivery"))
 PROCEDURES_DIR = Path(__file__).with_name("procedures")
 
 
@@ -145,10 +155,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         commands = engine_shell.check_declarations()
         result = procedure_check.check_directory(args.procedures, commands)
+        breaches = engine_caps.breaches(ENGINE_DIR, args.procedures, engine_graders.GRADERS)
     except (procedure_check.DeclarationError, engine_shell.Refused, ValueError) as error:
         return _usage(str(error))
-    if result.refusals:
-        sys.stdout.write(compact({"refusals": [r.as_json() for r in result.refusals],
+    if result.refusals or breaches:
+        sys.stdout.write(compact({"breaches": [b.as_json() for b in breaches],
+                                  "refusals": [r.as_json() for r in result.refusals],
                                   "verdict": "refused"}))
         return 1
     sys.stdout.write(compact({"procedures": list(result.procedures), "verdict": "ok"}))

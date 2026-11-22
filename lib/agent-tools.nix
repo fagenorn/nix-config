@@ -60,7 +60,6 @@ let
     "forge-issue" = "claims.forge_issue";
     "guard-policy" = "guard.guard_policy";
     "issue-branch" = "delivery.issue_branch";
-    "lane-triage" = "delivery.lane_triage";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
     "owner-actions" = "claims.owner_actions";
@@ -75,6 +74,7 @@ let
     "sprint" = "console.sprint";
     "verified-tree" = "verification.verified_tree";
     "verify-pending" = "verification.verify_pending";
+    "verify-slot" = "delivery.verify_slot";
   };
 
   # -I drops every PYTHON* variable, the working directory and the user site.

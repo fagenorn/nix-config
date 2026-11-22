@@ -1,6 +1,12 @@
 """The agent_tools layout rule: subpackages are the docs areas, imports follow one table."""
 
 import ast
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from collections.abc import Mapping
@@ -43,7 +49,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "delivery": frozenset({
         "agent_tools.console.inbox",  # look_approval
         "agent_tools.claims.forge_markers",  # look_marker, look_approval
-        "agent_tools.project_contract.resolve_project",  # lane_triage, issue_branch, engine_shell
+        "agent_tools.project_contract.resolve_project",  # issue_branch, engine_shell
     }),
     "guard": frozenset({
         "agent_tools.project_contract.adopt_inspection",  # guard_policy, contract_export
@@ -333,6 +339,55 @@ class LayoutRuleTest(unittest.TestCase):
             area_packages(AREAS_DIR),
             frozenset({"claims", "console", "delivery", "guard", "hosts", "project_contract",
                        "release", "system", "verification"}))
+
+
+class LightLaneRetirementTest(unittest.TestCase):
+    def test_the_repository_contract_declares_no_light_lane(self):
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".agents" / "share").mkdir(parents=True)
+        manifest = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
+        (home / ".agents" / "share" / "platform-manifest.json").write_bytes(manifest.read_bytes())
+        env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(REPO_ROOT / "python")}
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
+             "--repo-root", str(REPO_ROOT)],
+            env=env, text=True, stdin=subprocess.DEVNULL, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        snapshot = json.loads(done.stdout)
+        self.assertNotIn("light_lane", snapshot["bindings"]["workflow"])
+
+    def test_the_lane_triage_command_is_retired(self):
+        table = (REPO_ROOT / "lib/agent-tools.nix").read_text()
+        justfile = (REPO_ROOT / "justfile").read_text()
+        timings = json.loads((PACKAGE / "delivery/suite_timings.json").read_text())
+        self.assertIsNone(re.search(r'^\s*"lane-triage"\s*=', table, re.M))
+        self.assertEqual(sorted(PACKAGE.rglob("lane_triage.py")), [])
+        self.assertFalse((REPO_ROOT / "tests/test_lane_triage.py").exists())
+        self.assertNotIn("tests/test_lane_triage.py", justfile)
+        self.assertNotIn("tests/test_lane_triage.py", timings)
+
+    def test_the_launcher_floor_names_no_lane_triage(self):
+        # The launcher test runs only under the installed-skill gate; this suite reads its source.
+        tree = ast.parse((REPO_ROOT / "tests/test_agent_tools_launchers.py").read_text())
+        (floor,) = [node.value for node in tree.body
+                    if isinstance(node, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "LAUNCHER_FLOOR"
+                            for t in node.targets)]
+        self.assertNotIn("lane-triage", ast.literal_eval(floor))
+
+    def test_only_the_resolver_names_the_light_lane_binding(self):
+        named = []
+        for path in PACKAGE.rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if "light_lane" in text:
+                named.append(str(path.relative_to(REPO_ROOT)))
+        self.assertEqual(sorted(named), ["python/agent_tools/project_contract/resolve_project.py"])
 
 
 if __name__ == "__main__":
