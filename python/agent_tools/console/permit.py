@@ -396,10 +396,12 @@ _SHELL_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 # assignments, shell keywords and `!`, and after the wrappers the client strips before it matches rules (the
 # guard refuses the detaching one). The client matches each subcommand of a chain on its own, so the
 # manager's release allow rule matches such a segment wherever it stands (#1592). Whether the client also
-# strips assignments or splits keyword bodies is unconfirmed, so the permit decides them all.
+# strips assignments or splits keyword bodies is unconfirmed, so the permit decides them all. A value's
+# unquoted character excludes quotes and backslashes, so each value parses one way: with `\S` there it split
+# a quoted value many ways and a failed search backtracked exponentially on every Bash call.
 _RELEASE_RUN_TEXT = re.compile(
     r"(?:\A|[;&|\n(){`]|\$\()\s*"
-    r"(?:(?:(?:then|do|else|elif|if|while|until|!)|[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\\.|\S)*)\s+)*"
+    r"(?:(?:(?:then|do|else|elif|if|while|until|!)|[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\\.|[^\s\"'\\])*)\s+)*"
     r"(?:(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)(?:\s+-?[\w=.,:-]+)*?\s+)*"
     r"release\s+transaction\s+run(?:\s|\Z)")
 

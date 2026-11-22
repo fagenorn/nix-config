@@ -9,6 +9,7 @@ import importlib.util
 import io
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -412,6 +413,19 @@ class JudgeTest(unittest.TestCase):
                 self.assertEqual((DENY, permit.RELEASE, permit.RELEASE_SPELLING),
                                  (verdict.decision, verdict.verb, verdict.reason))
         self.assertEqual([], self.fake.calls)
+
+    def test_a_command_with_a_quoted_assignment_value_is_classified_in_bounded_time(self):
+        """A failed search must not backtrack over the many splits of a quoted value: ten JSON pairs took
+        40 s, past the hook's timeout, so the client ran the call without the permit's verdict (#1592)."""
+        pairs = ",".join(f'"k{i}":"v{i}"' for i in range(10))
+        for command in ("DATA='{" + pairs + "}' jq . x", "DATA={" + pairs + "} jq . x",
+                        "A=" + '""' * 40 + " jq . x"):
+            with self.subTest(command[:30]):
+                started = time.monotonic()
+                self.assertIsNone(permit.verb_of(command))
+                self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(permit.RELEASE, permit.verb_of(
+            "DATA='{" + pairs + "}' release transaction run x"))
 
     def test_every_other_release_spelling_gets_no_decision(self):
         for command in self.NO_DECISION:
