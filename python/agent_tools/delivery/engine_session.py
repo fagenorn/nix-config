@@ -14,17 +14,40 @@ argument words of the step's `in` values.
 its `structured_output` is the only source of the reply, the prose in `result`
 never is, and every measurement that is absent or invalid reads as zero.
 
-This module starts no process and imports no `engine_core`.
+`launch_argv` builds the one launch form: the account launcher's print mode
+(`claude-account run -p`) with the role handed over by flags (`--model`,
+`--effort`, `--tools` with `--allowedTools`, or `--disallowedTools`, and the
+role body as `--append-system-prompt-file`), the reply schema as
+`--json-schema`, the session id first fixed by the engine, and the permission
+mode `dontAsk`, so a tool the role does not allow is denied rather than asked
+about. The engine never passes `--agent`, `--bare`, `--setting-sources`,
+`--dangerously-skip-permissions` or `bypassPermissions`: `--bare` would skip the
+hooks that guard the session, and the others would hand the session its own
+settings or its permissions. The prompt is never in the argv: the tool options
+are variadic and would swallow a positional prompt, so `launch` writes it on
+stdin.
+
+`launch` starts the argv as its own process group (`start_new_session`) because
+the account launcher waits on its Claude child instead of replacing itself, so
+a session is a process tree and ending it means killing the group. Its stderr is
+captured so the launcher's own error is never a second line on the engine's
+stderr; `diagnostic` gives the last line of it for the engine's one fault line.
+
+This module imports no `engine_core`.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import signal
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery.engine_commands import argument
@@ -37,6 +60,9 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
     "bypassPermissions",
 )
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+LAUNCHER: tuple[str, ...] = ("claude-account", "run")
+NOT_STARTED = 127
+DIAGNOSTIC_CHARS = 300
 _USAGE_KEYS = {"input": "input_tokens", "cache_write": "cache_creation_input_tokens",
                "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
 
@@ -166,3 +192,59 @@ def read_result(stdout: bytes) -> Reading:
         turns=_count(document.get("num_turns")),
         tokens={key: _count(usage.get(_USAGE_KEYS[key])) for key in TOKEN_COUNTS},
         spend_usd=_amount(document.get("total_cost_usd")) or 0)
+
+
+def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) -> tuple[str, ...]:
+    """The launcher argv of one session; no word of it is a prompt."""
+    refuse_value(role.name, "model", role.model)
+    refuse_value(role.name, "effort", role.effort)
+    for field, names in (("tools", role.tools), ("disallowedTools", role.disallowed)):
+        for name in names or ():
+            refuse_value(role.name, field, name)
+    argv = [*LAUNCHER, "-p", "--output-format", "json",
+            "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
+            "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
+            "--model", role.model, "--effort", role.effort]
+    if role.tools is not None:
+        argv += ["--tools", ",".join(role.tools), "--allowedTools", ",".join(role.tools)]
+    if role.disallowed is not None:
+        argv += ["--disallowedTools", ",".join(role.disallowed)]
+    return (*argv, "--append-system-prompt-file", str(system_prompt))
+
+
+@dataclass(frozen=True)
+class Launched:
+    exit_code: int
+    stdout: bytes
+    stderr: bytes
+    wall_seconds: float
+
+
+def diagnostic(stderr: bytes) -> str:
+    """The last non-blank line of `stderr`, spaces collapsed, cut to 300 characters."""
+    lines = [line for line in stderr.decode("utf-8", errors="replace").splitlines()
+             if line.strip()]
+    return " ".join(lines[-1].split())[:DIAGNOSTIC_CHARS] if lines else ""
+
+
+def launch(argv: Sequence[str], cwd: str, prompt: str, *,
+           on_start: Callable[[int], None]) -> Launched:
+    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=True)
+    except OSError:
+        return Launched(NOT_STARTED, b"", b"", time.monotonic() - started)
+    try:
+        on_start(process.pid)
+        stdout, stderr = process.communicate(prompt.encode("utf-8"))
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise
+    return Launched(process.returncode, stdout, stderr, time.monotonic() - started)
