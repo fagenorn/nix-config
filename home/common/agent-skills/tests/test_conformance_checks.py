@@ -307,7 +307,8 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
             root = make_root(tmp)
             self.write_workflow(
                 root,
-                resolve_project.render_conformance_workflow("main", 2)
+                resolve_project.render_conformance_workflow(
+                    "main", 2, locked=True)
                 + b"# hand edit\n")
             code, report = self.ci(root)
             self.assertEqual(code, 1)
@@ -327,7 +328,8 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
 
     def test_the_rendered_workflow_and_an_absent_one_both_pass(self):
         for label, data in (
-                ("rendered", resolve_project.render_conformance_workflow("main", 2)),
+                ("rendered", resolve_project.render_conformance_workflow(
+                    "main", 2, locked=True)),
                 ("absent", None)):
             with self.subTest(workflow=label), fixture() as tmp:
                 root = make_root(tmp)
@@ -339,8 +341,23 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
                 self.assertEqual([check["status"], check["facts"]], ["passed", {}])
                 self.assertEqual(report["outcome"]["status"], "passed")
 
+    def test_the_own_tree_form_is_stale_outside_the_platform_tree(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.write_workflow(
+                root, resolve_project.render_conformance_workflow(
+                    "main", 2, locked=False))
+            code, report = self.ci(root)
+            self.assertEqual(code, 1)
+            check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["facts"]],
+                ["failed", "conformance_workflow_stale",
+                 {"target": self.TARGET, "state": "stale"}])
+
     def test_a_workflow_entry_that_is_not_a_regular_file_is_stale(self):
-        rendered = resolve_project.render_conformance_workflow("main", 2)
+        rendered = resolve_project.render_conformance_workflow(
+            "main", 2, locked=True)
         for label in ("dangling symlink", "symlink to the rendered bytes"):
             with self.subTest(entry=label), fixture() as tmp:
                 root = make_root(tmp)
@@ -397,7 +414,8 @@ class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
                 "target": self.TARGET})
             contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
             self.write_workflow(
-                root, resolve_project.render_conformance_workflow("main", 2))
+                root, resolve_project.render_conformance_workflow(
+                    "main", 2, locked=True))
             report, by_id = doctor(self, root)
             for check_id in ("repository.projection.fresh",
                              "repository.paths.classified",

@@ -49,7 +49,7 @@ import subprocess
 import tarfile
 import tempfile
 
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import adopt_conformance, agent_platform
 from agent_tools.project_contract.adopt_links import (
     Tree,
     broken_count,
@@ -70,6 +70,7 @@ from agent_tools.project_contract.adopt_inspection import (
     contained_path,
     contained_relative,
     gate_entry,
+    blob_at,
     git_or_fail,
     is_agent_path,
     is_secret_path,
@@ -994,11 +995,20 @@ def discard_retained(root: Path, digest: str) -> None:
     `adopt-<digest[:12]>` and the failure record, and nothing else. There is
     no `git worktree prune` on purpose (see the module docstring). With
     nothing retained it changes nothing. A step that fails is refused as
-    `adopt.discard.failed`.
+    `adopt.discard.failed`; a plan whose pending required-check record exists
+    is refused as `adopt.required_check.pending` before any step, unless its
+    branch no longer exists, which makes the record stale and removes it.
     """
     home = agent_platform.state_root() / "adopt" / "worktrees"
     worktree = home / digest
     branch = f"adopt-{digest[:12]}"
+    adopt_conformance.drop_stale_pending(root, digest)
+    if adopt_conformance.pending_path(digest).exists():
+        # The branch is the commit the pending required-check record names (P6):
+        # removing one without the other leaves a plan that can never be applied.
+        raise refuse("adopt_failure", adopt_conformance.REQUIRED_PENDING, "",
+                     "the required check of this plan is still to settle; apply "
+                     "the plan again to settle it before discarding anything")
     failed = refuse("adopt_failure", "adopt.discard.failed", "",
                     "the retained worktree of this plan could not be removed")
     code, listing = run_git(root, "worktree", "list", "--porcelain")
@@ -1295,6 +1305,48 @@ def prove_commit_content(worktree: Path, commit: str,
             "verification_failed", "adopt.commit.unplanned_content", "",
             "the adoption commit does not change exactly the paths the "
             "plan's operations declare")
+
+
+CONFORMANCE_UNPROVED = "adopt.commit.conformance_unproved"
+
+
+def prove_conformance_bytes(worktree: Path, commit: str,
+                            operations: list[dict], member: dict | None = None) -> None:
+    """Each conformance file the plan writes is committed with the planned bytes.
+
+    `prove_commit_content` compares path names only, so a hook or a verification
+    command that edits the lock, the input declaration or the protection file
+    after the gates passed leaves it satisfied. The forge write that follows is
+    irreversible without a rollback, so the committed blob of each planned
+    conformance target must hash to its operation's `after` first, and so must the
+    amended contract of a plan with a conformance `member`, which declares the
+    workflow's projection. `devenv.yaml` is the exception: an approved reference
+    formatter may rewrite its whitespace after planning, so its committed blob
+    must instead still declare the platform input as planned. The worktree is
+    retained as for the other proofs and no forge request is made.
+    """
+    proved = adopt_conformance.CONFORMANCE_TARGETS + (
+        (CONTRACT_FILENAME,) if member is not None else ())
+    for operation in operations:
+        if operation.get("op") != "write-file":
+            continue
+        for target in operation["targets"]:
+            if target not in proved:
+                continue
+            blob = blob_at(worktree, commit, target)
+            if blob is not None and target == adopt_conformance.INPUT_FILE and member is not None:
+                locked = member["revision"]
+                try:
+                    ok = adopt_conformance.declare_input(
+                        blob, locked["owner"], locked["repo"]) is None
+                except adopt_conformance.Undeclarable:
+                    ok = False
+            else:
+                ok = blob is not None and sha256_hash(blob) == operation["after"]
+            if not ok:
+                raise refuse(
+                    "verification_failed", CONFORMANCE_UNPROVED, "",
+                    f"the adoption commit does not carry the planned bytes of {target}")
 
 
 def prove_commit_links(worktree: Path, commit: str,
