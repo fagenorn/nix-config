@@ -399,6 +399,9 @@ class CommandSummaryTest(unittest.TestCase):
             (f"cat <<'EOF' | tee /tmp/log | bash\n{rm}\nEOF", ["cat", "tee", "bash"], "bash", 1),
             (f"cat <<'EOF' | bash -o errexit\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
             (f"cat <<'EOF' | bash -O extglob -\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash -eo pipefail\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash -euo pipefail\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | python3 -uW ignore\n{py}\nEOF", ["cat", "python3"], "python3", 1),
             (f"cat <<'EOF' | bash --rcfile x\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
             (f"cat <<'EOF' | bash /dev/stdin\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
             (f"cat <<'EOF' | python3 -W ignore\n{py}\nEOF", ["cat", "python3"], "python3", 1),
@@ -407,6 +410,11 @@ class CommandSummaryTest(unittest.TestCase):
             (f"ssh host <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"ssh -p 22 -o StrictHostKeyChecking=no host 'bash -s' <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
             (f"cat <<'EOF' | ssh host\n{rm}\nEOF", ["cat", "ssh"], "ssh", 1),
+            (f"ssh host -p 2222 <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
+            (f"ssh host -t <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
+            (f"cat <<'EOF' | ssh host -p 2222\n{rm}\nEOF", ["cat", "ssh"], "ssh", 1),
+            (f"ssh host -p 2222 bash <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
+            (f"ssh host -- bash <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
             (f"sudo ssh host bash <<'EOF'\n{rm}\nEOF", ["sudo"], "bash", 1),
         ]
         for command, runs, program, lines in rows:
@@ -430,6 +438,8 @@ class CommandSummaryTest(unittest.TestCase):
                               ("cat <<'EOF' | bash script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
                               ("cat <<'EOF' | bash -c 'true'\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
                               ("cat <<'EOF' | bash -o errexit script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+                              ("cat <<'EOF' | bash -eo pipefail script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+                              ("ssh host -p 2222 'ls /tmp' <<'EOF'\nrm -rf /etc/nginx\nEOF", ["ssh"]),
                               ("cat <<'EOF' | python3 -W ignore tool.py\nrm -rf /etc/nginx\nEOF", ["cat", "python3"]),
                               ("ssh host 'ls /tmp' <<'EOF'\nrm -rf /etc/nginx\nEOF", ["ssh"]),
                               ("cat <<'EOF'\nrm -rf /etc/nginx\nEOF\nbash\n", ["cat", "bash"])):

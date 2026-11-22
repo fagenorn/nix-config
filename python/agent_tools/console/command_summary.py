@@ -52,6 +52,7 @@ _WORD_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*=")
 _NAME_SPLIT = re.compile(r"[\s'\"`()\[\]{},;=<>|&]+")
 _COPY_TARGET = re.compile(r"[0-9]+-?|-")
 _CLUSTER = re.compile(r"-[A-Za-z]+")
+_CLUSTER_SIGNED = re.compile(r"[-+][A-Za-z]+")
 _COMMA_COLON = re.compile(r"[,:]")
 _GLUE = re.compile(r"[^A-Za-z0-9_.+-]")
 _EXTENSION = re.compile(r"[A-Za-z0-9]{1,8}")
@@ -428,22 +429,27 @@ class _Reader:
     def remote_of(arguments):
         """(name, the arguments after it) for what `ssh`'s standard input reaches: its remote login shell
         when it has no command, else the interpreter the remote command names (one word or the tokens of a
-        quoted one); (None, []) when the remote command is no interpreter."""
-        operands = []
+        quoted one); (None, []) when the remote command is no interpreter. Options are read again after the
+        host, as OpenSSH does."""
+        host = None
+        command = []
+        ended = False
         at = 0
         while at < len(arguments):
-            value = arguments[at].word.value
-            if value == "--":
-                operands.extend(arguments[at + 1:])
-                break
-            if value.startswith("-") and len(value) > 1 and not operands:
+            item = arguments[at]
+            value = item.word.value
+            if not ended and value == "--":
+                ended = True
+            elif not ended and value.startswith("-") and len(value) > 1:
                 letters = [char for char in value[1:] if char in _SSH_VALUES]
                 if letters and value[1:].index(letters[0]) == len(value) - 2:
                     at += 1
+            elif host is None:
+                host = item
             else:
-                operands.append(arguments[at])
+                command = arguments[at:]
+                break
             at += 1
-        command = operands[1:]
         if not command:
             return "ssh", []
         tokens = [token for item in command
@@ -479,6 +485,7 @@ class _Reader:
         base = posixpath.basename(name)
         family = "python" if base.startswith("python") else base
         takes = _SHELL_VALUES if base in _SHELLS else _VALUE_OPTIONS.get(family, frozenset())
+        letters = frozenset(option[1] for option in takes if len(option) == 2)
         operands = []
         skip = ended = False
         for item in rest:
@@ -487,7 +494,7 @@ class _Reader:
                 skip = False
             elif ended:
                 operands.append(value)
-            elif value in takes:
+            elif value in takes or (_CLUSTER_SIGNED.fullmatch(value) and value[-1] in letters):
                 skip = True
             elif value == "--":
                 ended = True
