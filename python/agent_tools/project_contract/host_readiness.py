@@ -48,9 +48,11 @@ is not run, and its check fails with `<reason>; not run`. A word of shell text
 is split into commands and read the same way; text that cannot be read is
 refused whole. The project root, and an existing absolute path with no operator
 character, is a plain path argument and never shell text. A newline ends a
-command like `;`. The script a shell takes after `-c` and the words `eval` joins are always shell
-text, quotes and backslashes read as the shell reads them, even one word long (`sh -c deploy`). A one-word production verb hits only as a command's program,
-read past its shell keywords (`{`, `!`, `then`) and `NAME=value` assignments, or behind a program that runs a later word (`timeout`, `env`,
+command like `;`. Every word a shell is given and the words `eval` joins are always shell
+text, quotes and backslashes read as the shell reads them, even one word long (`sh -c deploy`,
+`sh +c deploy`): no shell option is parsed, so no spelling of one hides the script. A one-word
+production verb hits only as a command's program, read past its shell keywords (`{`, `!`, `then`)
+and `NAME=value` assignments, or behind a program that runs a later word (`timeout`, `env`,
 `time`, `devenv`), never as another program's argument.
 
 The probe commit proves itself: after the commit the clone's HEAD must have the
@@ -149,11 +151,8 @@ PASS_THROUGH_PROGRAMS = frozenset({
     "xargs", "timeout", "nice", "ionice", "stdbuf", "watch", "chrt", "taskset", "flock",
     "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
     "devenv", "direnv", "command", "builtin", "exec", "env", "sudo", "time", "nohup", "setsid"})
-# Shells whose `-c` script is shell text whatever it holds (`sh -c deploy`).
+# Shells whose every later word is read as shell text whatever it holds (`sh -c deploy`).
 SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "yash", "busybox"})
-SCRIPT_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*$")
-# The long options of a shell that take the next word as their value.
-SHELL_LONG_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file", "--emulate"})
 BUDGET_EXIT = 3
 SCRATCH_PREFIX = "host-readiness-"
 READ_DEPTH = 4
@@ -256,48 +255,28 @@ def _is_shell_text(word: str, root: str) -> bool:
     return not (os.path.isabs(word) and not SHELL_CHARACTERS & set(word) and os.path.lexists(word))
 
 
-def _script_texts(argv: Sequence[str]) -> list[str]:
-    """The shell text `argv` runs without any operator character in it: the script a shell
-    takes after its `-c` (`sh -c deploy`) and the words `eval` joins into one command. They are
-    read at the command's program, or at any later word behind a program that runs one."""
+def _shell_words(argv: Sequence[str]) -> list[str]:
+    """The shell text `argv` runs without any operator character in it: every word a shell is
+    given (`sh -c deploy`, `sh +c deploy`: no option is parsed, so no spelling of one hides the
+    script) and the words `eval` joins into one command. They are read at the command's program,
+    or at any later word behind a program that runs one."""
     start = _program_start(argv)
     if start >= len(argv):
         return []
     reach = range(start, len(argv)) if _basename(argv[start]) in PASS_THROUGH_PROGRAMS else (start,)
-    texts: list[str] = []
     for i in reach:
         name = _basename(argv[i])
         if name == "eval":
-            if i + 1 < len(argv):
-                texts.append(" ".join(argv[i + 1:]))
-            break
-        if name not in SHELL_PROGRAMS:
-            continue
-        # A shell reads every option before its first operand, and with `-c` that operand is the
-        # script: `--`, a lone `-` and a lone `+` end the options, `-O extglob` and `--rcfile x`
-        # carry a value word.
-        j = i + 1
-        takes_script = False
-        while j < len(argv) and argv[j][:1] in ("-", "+"):
-            word = argv[j]
-            if word in ("--", "-", "+"):
-                j += 1
-                break
-            if word.startswith("--"):
-                j += 2 if word in SHELL_LONG_VALUE_OPTIONS else 1
-                continue
-            takes_script = takes_script or bool(SCRIPT_FLAG.match(word))
-            j += 1 + sum(word.count(letter) for letter in "oO")
-        if takes_script and j < len(argv):
-            texts.append(argv[j])
-        break
-    return texts
+            return [" ".join(argv[i + 1:])] if i + 1 < len(argv) else []
+        if name in SHELL_PROGRAMS:
+            return list(argv[i + 1:])
+    return []
 
 
 def _commands(argv: Sequence[str], depth: int, root: str) -> list[list[str]] | None:
     """`argv` and the commands of every shell-text word in it, or None when one is unreadable."""
     found = [list(argv)]
-    texts = [*_script_texts(argv), *(word for word in argv if _is_shell_text(word, root))]
+    texts = [*_shell_words(argv), *(word for word in argv if _is_shell_text(word, root))]
     for word in dict.fromkeys(texts):
         if depth >= READ_DEPTH:
             return None

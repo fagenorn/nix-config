@@ -672,7 +672,7 @@ class RefusalTest(ReadinessCase):
             with self.subTest(argv=argv):
                 self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
                 self.assertEqual(production, refusal(argv, snap))
-        for argv in (["sh", "-c", "true"], ["sh", "-c", "echo deploy"], ["sh", "deploy"],
+        for argv in (["sh", "-c", "true"], ["sh", "-c", "echo deploy"],
                      ["eval", "echo", "deploy"], ["echo", "sh", "-c", "deploy"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
@@ -700,10 +700,17 @@ class RefusalTest(ReadinessCase):
             with self.subTest(argv=argv):
                 self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
                 self.assertEqual(production, refusal(argv, snap))
+        # A `+`-prefixed -c spelling turns the option off in some shells and is no excuse: no
+        # option is parsed, every word a shell is given is read as shell text.
+        for argv in (["sh", "+c", "deploy"], ["zsh", "+c", "deploy"],
+                     ["bash", "-e", "+c", "deploy"], ["dash", "+ec", "deploy"],
+                     ["env", "sh", "+c", "deploy"], ["bash", "--rcfile", "deploy", "-c", "true"],
+                     ["bash", "-O", "deploy", "-c", "true"], ["sh", "deploy"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(production, refusal(argv, snap))
         for argv in (["bash", "-O", "extglob", "-c", "true"], ["bash", "-c", "--", "echo deploy"],
-                     ["bash", "-c", "-e", "echo", "deploy"], ["bash", "--rcfile", "deploy", "-c", "true"],
-                     ["bash", "-O", "deploy", "-c", "true"], ["sh", "-c", "-", "echo", "deploy"],
-                     ["zsh", "--emulate", "deploy", "-c", "true"]):
+                     ["sh", "-c", "-", "echo deploy"], ["sh", "+c", "echo deploy"],
+                     ["echo", "sh", "+c", "deploy"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
 
