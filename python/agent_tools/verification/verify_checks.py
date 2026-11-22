@@ -95,10 +95,13 @@ otherwise 75 (`not_yet`), and each row's `reason` is the first rule it fails (`b
 `candidate_missing`, `bridge_incompatible`, `candidate_incompatible`, `removed_use`). The wrapper
 `cutover-preflight` runs it with `~/.agents/bin` prepended to `PATH`.
 
-`cutover-bundle [--repo-root R] [--branch B]` (issue 579, C3) is met (0, `green`) when a `*-bundle.json`
-under `.agents/artifacts/evidence/` at `RETAINED_EVIDENCE_COMMIT` (the last commit of origin's main history that
-holds the directory) verifies, through `agent_gate_bundle.verify_bundle`,
-as `approved` and binds the commit at the tip of origin's candidate branch. The state is the verifier's
+`cutover-bundle [--repo-root R] [--branch B] [--bundle FILE ...]` (issue 579, C3) is met (0, `green`) when a
+bundle verifies, through `agent_gate_bundle.verify_bundle`,
+as `approved` and binds the commit at the tip of origin's candidate branch. The bundles are the files named by
+`--bundle` (repeatable; a path as given, relative to the working directory, for example an issue or pull request
+attachment downloaded to disk), and with no `--bundle` the `*-bundle.json` files under
+`.agents/artifacts/evidence/` at `RETAINED_EVIDENCE_COMMIT` (the last commit of origin's main history that
+holds the directory), which hold only unmeasured bundles. A file that is missing or not JSON is `unreadable`. The state is the verifier's
 return value, never the document's own `state` field; a bundle the verifier refuses is `unreadable` and
 never counts. It is 75 otherwise (`absent` when the branch does not exist) and 2 when git cannot be
 driven. It only reads: it fetches objects, and writes no ref. A gate-version-2 (claude-only) bundle is
@@ -1370,8 +1373,20 @@ def bundle_verdict(bundles: Mapping[str, object], candidate_sha: str) -> tuple[i
         "approved": approved, "other": other, "unreadable": unreadable}
 
 
-def cutover_bundle(repo_root: Path, branch: str = CANDIDATE_BRANCH) -> tuple[int, dict]:
-    """C3 over origin's candidate branch and the bundles retained at `RETAINED_EVIDENCE_COMMIT`.
+def _bundle_files(files: Sequence[Path]) -> tuple[dict[str, object], list[dict]]:
+    bundles: dict[str, object] = {}
+    unparsed: list[dict] = []
+    for file in files:
+        try:
+            bundles[str(file)] = json.loads(Path(file).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            unparsed.append({"path": str(file), "error": f"not readable JSON: {error}"})
+    return bundles, unparsed
+
+
+def cutover_bundle(repo_root: Path, branch: str = CANDIDATE_BRANCH,
+                   bundle_files: Sequence[Path] = ()) -> tuple[int, dict]:
+    """C3 over origin's candidate branch and `bundle_files`, else the bundles retained at `RETAINED_EVIDENCE_COMMIT`.
 
     Fetches objects and `FETCH_HEAD` only (`--refmap=` keeps it from updating a remote-tracking
     ref); the fetch of origin's main brings in the history that holds the retained commit.
@@ -1380,6 +1395,11 @@ def cutover_bundle(repo_root: Path, branch: str = CANDIDATE_BRANCH) -> tuple[int
     if sha is None:
         return 75, {"verdict": "absent", "candidate": None, "approved": [], "other": [],
                     "unreadable": []}
+    if bundle_files:
+        bundles, unparsed = _bundle_files(bundle_files)
+        code, report = bundle_verdict(bundles, sha)
+        report["unreadable"] = sorted(report["unreadable"] + unparsed, key=lambda item: item["path"])
+        return code, report
     _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "--refmap=", "origin", "refs/heads/main")
     listing = _git(repo_root, "ls-tree", "--name-only", f"{RETAINED_EVIDENCE_COMMIT}:{EVIDENCE_DIR}/")
     names = sorted(name for name in listing.stdout.splitlines()
@@ -2972,6 +2992,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         cutover.add_argument("--branch", default=CANDIDATE_BRANCH)
         if name == "cutover-manifest":
             cutover.add_argument("--main-ref", default=None)
+        if name == "cutover-bundle":
+            cutover.add_argument("--bundle", type=Path, action="append", default=[])
     runner = checks.add_parser(
         "self-hosted-runner",
         help="issue 680: a named self-hosted runner is registered, online and labelled")
@@ -3173,7 +3195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.check == "cutover-manifest":
                 code, report = cutover_manifest(args.repo_root, args.branch, args.main_ref)
             elif args.check == "cutover-bundle":
-                code, report = cutover_bundle(args.repo_root, args.branch)
+                code, report = cutover_bundle(args.repo_root, args.branch, args.bundle)
             else:
                 code, report = cutover_preflight(args.repo_root, args.branch, environ=os.environ)
         except GitError as error:

@@ -1713,6 +1713,37 @@ class CutoverBundleTest(unittest.TestCase):
         self.assertEqual(agent_gate_bundle.verify_bundle(doc), "unmeasured")
         self.assertRegex(doc["identity"]["bound"]["commit"]["candidate"], r"^[0-9a-f]{40}$")
 
+    def test_a_bundle_file_named_on_the_command_line_is_the_evidence(self):
+        world = CutoverWorld(self)
+        candidate = world.publish_candidate()
+        good = world.tmp / "attached-bundle.json"
+        good.write_text(json.dumps(emitted("approved", candidate)), encoding="utf-8")
+        stale = world.tmp / "stale-bundle.json"
+        stale.write_text(json.dumps(emitted("approved", "b" * 40)), encoding="utf-8")
+        broken = world.tmp / "broken-bundle.json"
+        broken.write_text("not json", encoding="utf-8")
+        missing = world.tmp / "missing-bundle.json"
+        code, report = verify_checks.cutover_bundle(
+            world.clone, CANDIDATE_BRANCH, [good, stale, broken, missing])
+        self.assertEqual((code, report["verdict"], report["approved"]), (0, "green", [str(good)]))
+        self.assertEqual([item["path"] for item in report["other"]], [str(stale)])
+        self.assertEqual([item["path"] for item in report["unreadable"]],
+                         sorted([str(broken), str(missing)]))
+        code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH, [stale])
+        self.assertEqual((code, report["approved"]), (75, []))
+
+    def test_the_command_line_takes_the_bundle_file(self):
+        world = CutoverWorld(self)
+        candidate = world.publish_candidate()
+        attached = world.tmp / "attached-bundle.json"
+        attached.write_text(json.dumps(emitted("approved", candidate)), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["cutover-bundle", "--repo-root", str(world.clone),
+                                       "--bundle", str(attached)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["approved"], [str(attached)])
+
     def test_an_absent_candidate_branch_is_not_yet(self):
         world = CutoverWorld(self)
         code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
