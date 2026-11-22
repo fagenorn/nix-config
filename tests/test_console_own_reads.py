@@ -21,6 +21,8 @@ from unittest import mock
 
 from agent_tools.console import own_reads, project_question_hook
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+
 TIER = "fast"  # source tree and standard library only
 
 
