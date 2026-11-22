@@ -48,8 +48,9 @@ line, reason)`, by a reasoned suppression of the base carried to the branch. A b
 suppression is carried by `line_changes`, the hunks of `git diff-tree -M -U0` from base to
 head: its path follows the git renames, and its line moves by the net lines the hunks above
 it add or remove, or, inside a hunk that replaces as many lines as it removes, to the same
-place in the replacement; inside any other hunk it is gone. So the one listed is the one
-the branch added, wherever it sits. It lists and never fails: a listed
+place in the replacement. One inside a hunk is also held for that hunk: a branch suppression
+inside the same hunk with its rule and reason, however its line moved, is the base's. So the
+one listed is the one the branch added, wherever it sits. It lists and never fails: a listed
 suppression raises no count. `Suppression.text()` is `<rule> <path>:<line> <reason>` on one
 line, path and reason escaped as below. `text(limit)` holds the line to `limit` characters
 by bounding each field alone: the rule to `RULE_FIELD`, the path to `PATH_FIELD` keeping its
@@ -317,15 +318,20 @@ def line_changes(root: Path, base: str, head: str,
         return None
     changes: dict[str, list[Hunk]] = {}
     path: str | None = None
+    in_hunks = False
     for raw in out.split(b"\n"):
+        # A hunk body line starts with ' ', '+', '-' or '\\', so only a header starts `diff --git `
+        # or `@@`; the `---` and `+++` file headers are read before a section's first hunk only,
+        # for an added line that reads `++ x` is printed `+++ x` inside a hunk.
         if raw.startswith(b"diff --git "):
-            path = None
-        elif raw.startswith(b"+++ "):
+            path, in_hunks = None, False
+        elif not in_hunks and raw.startswith(b"+++ "):
             name = _unquote(raw[4:].rstrip(b"\t"))
             path = os.fsdecode(name[2:]) if name.startswith(b"b/") else None
-        elif raw.startswith(b"@@") and path is not None:
+        elif raw.startswith(b"@@"):
+            in_hunks = True
             match = HUNK_HEADER.match(raw.decode("ascii", errors="replace"))
-            if match:
+            if match and path is not None:
                 old_start, old_count, new_start, new_count = (
                     int(g) if g is not None else 1 for g in match.groups())
                 changes.setdefault(path, []).append(
@@ -333,17 +339,29 @@ def line_changes(root: Path, base: str, head: str,
     return {name: tuple(hunks) for name, hunks in changes.items()}
 
 
-def carried(line: int, hunks: Sequence[Hunk]) -> int | None:
-    """The line a base line is at on the branch through `hunks`, or None when a hunk replaced it."""
+def carried(line: int, hunks: Sequence[Hunk]) -> tuple[int | None, int | None]:
+    """A base line as `(line it is at on the branch, index of the hunk that replaced it)`.
+
+    The first is None when a hunk replaced the line and removed a different number of lines than
+    it adds; the second is None when no hunk replaced it.
+    """
     offset = 0
-    for hunk in hunks:
+    for number, hunk in enumerate(hunks):
         if line <= (hunk.old_start if hunk.old_count == 0 else hunk.old_start - 1):
             break
         if hunk.old_count and line < hunk.old_start + hunk.old_count:
             same = hunk.old_count == hunk.new_count
-            return hunk.new_start + (line - hunk.old_start) if same else None
+            return (hunk.new_start + (line - hunk.old_start) if same else None), number
         offset += hunk.new_count - hunk.old_count
-    return line + offset
+    return line + offset, None
+
+
+def holding(line: int, hunks: Sequence[Hunk]) -> int | None:
+    """The index of the hunk whose added lines hold a branch line, else None."""
+    for number, hunk in enumerate(hunks):
+        if hunk.new_count and hunk.new_start <= line < hunk.new_start + hunk.new_count:
+            return number
+    return None
 
 
 def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
@@ -422,27 +440,41 @@ def added_suppressions(base: Snapshot, branch: Snapshot, renamed: Mapping[str, s
     """The reasoned suppressions the branch adds, those the base does not carry over; pure.
 
     A base suppression is carried to its path through `renamed` and its line through the
-    `changes` hunks of that path; a branch suppression equal to one carried over (rule, path,
-    line, reason) is the base's, and every other is added.
+    `changes` hunks of that path. A branch suppression equal to one carried over (rule, path,
+    line, reason) is the base's; of the rest, one inside a hunk that replaced a base
+    suppression of the same rule and reason is the base's too, as many as the hunk replaced.
+    Every other is added.
     """
     moved = {old: new for new, old in renamed.items()}
-    held: Counter[tuple] = Counter()
-    for suppression in base.suppressions:
-        if suppression.reasoned:
-            path = moved.get(suppression.path, suppression.path)
-            line = carried(suppression.line, changes.get(path, ()))
-            if line is not None:
-                held[(suppression.rule, path, line, suppression.reason)] += 1
-    added = []
-    for suppression in branch.suppressions:
+    at_line: dict[tuple, list[int]] = {}
+    in_hunk: dict[tuple, list[int]] = {}
+    for number, suppression in enumerate(base.suppressions):
         if not suppression.reasoned:
             continue
-        key = (suppression.rule, suppression.path, suppression.line, suppression.reason)
-        if held[key] > 0:
-            held[key] -= 1
-        else:
+        path = moved.get(suppression.path, suppression.path)
+        line, hunk = carried(suppression.line, changes.get(path, ()))
+        if line is not None:
+            at_line.setdefault((suppression.rule, path, line, suppression.reason), []).append(number)
+        if hunk is not None:
+            in_hunk.setdefault((suppression.rule, path, hunk, suppression.reason), []).append(number)
+    spent: set[int] = set()
+
+    def take(index: Mapping[tuple, Sequence[int]], key: tuple) -> bool:
+        for number in index.get(key, ()):
+            if number not in spent:
+                spent.add(number)
+                return True
+        return False
+
+    rest = [s for s in sorted(branch.suppressions, key=lambda s: (s.path, s.line))
+            if s.reasoned and not take(at_line, (s.rule, s.path, s.line, s.reason))]
+    added = []
+    for suppression in rest:
+        hunk = holding(suppression.line, changes.get(suppression.path, ()))
+        if hunk is None or not take(
+                in_hunk, (suppression.rule, suppression.path, hunk, suppression.reason)):
             added.append(suppression)
-    return tuple(sorted(added, key=lambda s: (s.path, s.line)))
+    return tuple(added)
 
 
 def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],

@@ -267,6 +267,45 @@ class NeverRiseSuppressionTest(unittest.TestCase):
             {"b.txt": lines(9) + "x" + marker}, {"b.txt": lines(9) + "y" + marker})
         self.assertEqual(verdict.suppressions, ())
 
+    def test_a_suppression_whose_line_was_edited_beside_an_added_line_is_not_listed(self):
+        marker = "  # " + suppress("FX1", "generated fixture") + "\n"
+        verdict = self.world(
+            {"a.sh": lines(39) + "x" + marker},
+            {"a.sh": lines(39) + "z" + marker + "added\n"})
+        self.assertEqual(verdict.suppressions, ())
+
+    def test_a_suppression_whose_line_was_edited_beside_a_deleted_line_is_not_listed(self):
+        marker = "  # " + suppress("FX1", "generated fixture") + "\n"
+        verdict = self.world(
+            {"a.sh": lines(39) + "x" + marker + "gone\n"},
+            {"a.sh": lines(39) + "z" + marker})
+        self.assertEqual(verdict.suppressions, ())
+
+    def test_a_suppression_that_moved_inside_a_replaced_block_is_not_listed(self):
+        marker = "  # " + suppress("FX1", "generated fixture") + "\n"
+        verdict = self.world(
+            {"a.sh": lines(39) + "x" + marker + "plain\n"},
+            {"a.sh": lines(39) + "plain2\n" + "x2" + marker})
+        self.assertEqual(verdict.suppressions, ())
+
+    def test_a_second_marker_added_beside_an_edited_one_is_listed_once(self):
+        marker = "  # " + suppress("FX1", "generated fixture") + "\n"
+        verdict = self.world(
+            {"a.sh": lines(39) + "x" + marker},
+            {"a.sh": lines(39) + "z" + marker + "w" + marker})
+        self.assertEqual(
+            verdict.suppressions, (Suppression("FX1", "a.sh", 41, "generated fixture"),))
+
+    def test_an_added_line_that_reads_as_a_file_header_hides_no_later_hunk(self):
+        marker = "y  # " + suppress("FX1", "generated fixture") + "\n"
+        body = "top\n" + lines(20, "m") + "\n" + marker
+        for header in ("++ note\n", "++ b/c.txt\n"):
+            with self.subTest(header=header):
+                new = header + "top\n" + lines(10, "m") + lines(5, "ins") + lines(20, "m")[
+                    len(lines(10, "m")):] + "\n" + marker
+                verdict = self.world({"b.txt": body, "c.txt": "c\n"}, {"b.txt": new})
+                self.assertEqual(verdict.suppressions, ())
+
     def test_a_suppression_kept_in_a_renamed_and_edited_file_is_not_listed(self):
         marker = "x  # " + suppress("FX1", "generated fixture") + "\n"
         body = lines(30) + marker + lines(30)
