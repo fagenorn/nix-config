@@ -11,7 +11,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
-    ACTIVATION, ADD_STEPS, ADDED, ADOPTION_ITEM, RELEASE_ITEM, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASK_DEEP_OFFER, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
+    ACTIVATION, ADD_STEPS, ADDED, ADOPTION_ITEM, PERMISSION_ITEM, RELEASE_ITEM, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASK_DEEP_OFFER, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
@@ -49,7 +49,7 @@ def _roles(kinds: frozenset, *names: str) -> dict:
 DESK_CONTROLS: dict = {
     **_roles(PRIMARY_OR_QUIET, "approve", "send", "try-again", "signin-start", ANS_ROLE),
     **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry", "look-retry", "adoption-merge",
-             "release-approve"),
+             "release-approve", "permission-allow"),
     **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "start-withdraw", "progress-withdraw",
              "acct-remove", "acct-remove-send", "share-off", "share-remove", "reading-delete-send"),
     **_roles(OPTION_ONLY, "opt"),
@@ -65,7 +65,7 @@ DESK_CONTROLS: dict = {
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
         "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate",
         "share-open", "share-close", "share-on", "share-edit", "share-project",
-        "share-add", "adoption-failed-dismiss", "release-decline"),
+        "share-add", "adoption-failed-dismiss", "release-decline", "permission-refuse"),
     **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "kept-words-text", "ask-text",
              "follow-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
@@ -202,6 +202,8 @@ def desk_scenarios() -> list:
          {"frame": frame([])}, snapshot],
         # a release card with Approve release and Decline (#1401)
         [START, {"frame": frame([RELEASE_ITEM])}, snapshot],
+        # a permission card with Allow once and Refuse (#1424)
+        [START, {"frame": frame([PERMISSION_ITEM])}, snapshot],
         # a stall and a progress card
         [START, {"frame": frame([STALL, PROGRESS])}, snapshot],
         [START, {"frame": frame([FAILED_START])}, snapshot],

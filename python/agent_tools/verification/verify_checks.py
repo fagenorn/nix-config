@@ -20,6 +20,14 @@ no pull request has merged; and it exits 2 on a forge error.
 
 `keepalive-end-turn-cap` is documented in `agent_tools.hosts.keepalive_pings`.
 
+`fleet-preflight` (`verify_checks.fleet_preflight_check`, issue 1451) runs this checkout's own
+`fleet_preflight.preflight` against this checkout's platform manifest, from the repository root, and
+needs nothing installed. It is met (0, `green`) when no project is refused and the rows are the
+host's registry entries one for one by `project_id`, so a dropped or duplicated row is not met
+(1, `red`, with `missing` and `extra`); it exits 2 (`unreadable`, with a `repair_id`) when the
+manifest or the registry will not read. An empty fleet is met with no row, which a block's
+`min_len` judges. It only reads.
+
 `platform-status` runs the installed `resolve-project platform-status` (from `~/.agents/bin`,
 prepended to `PATH`) and passes its output and exit through, so a block judges it with `expect`.
 
@@ -359,6 +367,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from typing import IO
 from datetime import datetime, timedelta, timezone
@@ -366,7 +375,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import agent_platform, fleet_preflight, resolve_project
 from agent_tools.project_contract.adopt_apply import run_leashed
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal
@@ -2885,6 +2894,34 @@ def _notice_spec(value: str) -> tuple[str, tuple[int, ...]]:
     return project, tuple(int(part) for part in parts)
 
 
+def fleet_preflight_verdict(report: dict, entries: list[dict]) -> tuple[int, dict]:
+    """Green when nothing is refused and the report's rows are the registry's entries one for one."""
+    reported = Counter(row["project_id"] for row in report["fleet"])
+    registered = Counter(entry["project_id"] for entry in entries)
+    missing = sorted((registered - reported).elements())
+    extra = sorted((reported - registered).elements())
+    green = not report["refused"] and not missing and not extra
+    return (0 if green else 1), {
+        "verdict": "green" if green else "red",
+        "platform_version": report["platform_version"],
+        "manifest_path": report["manifest_path"],
+        "fleet": report["fleet"],
+        "refused": report["refused"],
+        "registered": sorted(registered.elements()),
+        "missing": missing,
+        "extra": extra,
+    }
+
+
+def fleet_preflight_check(manifest: Path = Path(MANIFEST_PATH)) -> tuple[int, dict]:
+    """This checkout's fleet preflight against `manifest`, compared with the one registry snapshot it judged."""
+    try:
+        report, entries = fleet_preflight.judge(manifest)
+    except (resolve_project.ContractError, agent_platform.PlatformManifestError) as error:
+        return 2, {"verdict": "unreadable", "repair_id": error.repair_id}
+    return fleet_preflight_verdict(report, entries)
+
+
 def _merge_sha(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise argparse.ArgumentTypeError("must be a 40-character lowercase hex sha")
@@ -3032,7 +3069,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "suite-wall-time",
         help="issue 1314: a full agent workflow suite run at this commit passes in under --limit seconds")
     wall.add_argument("--limit", type=_suite_limit, required=True)
+    checks.add_parser(
+        "fleet-preflight",
+        help="issue 1451: the candidate's fleet preflight passes and covers every registered project")
     args = parser.parse_args(argv)
+    if args.check == "fleet-preflight":
+        code, report = fleet_preflight_check()
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "console-state":
         code, report = console_state(args.port)
         print(json.dumps(report, sort_keys=True))
