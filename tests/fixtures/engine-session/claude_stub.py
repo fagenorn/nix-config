@@ -31,8 +31,8 @@ Each log record also holds `answer_file` (true when `CLAUDE_ACCOUNT_ANSWER` is s
 When `<canned>` names a file ending in `.answers.json`, it holds a JSON list of entries
 `{"stdout": <absolute path>, "exit": <int>, "account": <str|null>, "all_out": <optional
 {"resumes_at": str|null}>}`: invocation `n` (the lines already in `<log>`) uses entry
-`min(n, len - 1)` and ignores `<exit>`. When `CLAUDE_ACCOUNT_ANSWER` is set, an `all_out`
-entry writes `{"all_out":true,"resumes_at":...}` there and prints nothing, and an entry with an
+`min(n, len - 1)` and ignores `<exit>`; an entry whose `exit` is `"hang"` behaves as `<exit>`
+`"hang"`. When `CLAUDE_ACCOUNT_ANSWER` is set, an `all_out` entry writes `{"all_out":true,"resumes_at":...}` there and prints nothing, and an entry with an
 account writes `{"account":<account>}`. In the legacy mode the same variable gets
 `{"account":"stub"}`.
 """
@@ -100,7 +100,8 @@ def main(argv: list[str]) -> int:
         with open(canned, encoding="utf-8") as handle:
             entries = json.load(handle)
         entry = entries[min(invocations(log), len(entries) - 1)]
-        canned, code = entry["stdout"], entry["exit"]
+        hang = entry["exit"] == "hang"
+        canned, code = entry["stdout"], 1 if hang else entry["exit"]
     record = {"announced": announced(words), "answer_file": answer_path is not None,
               "account_env": os.environ.get("CLAUDE_ACCOUNT"), "argv": words,
               "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"), "cwd": os.getcwd(),

@@ -35,7 +35,8 @@ from tests.test_engine_commands import project, table
 from tests.test_engine_deliver import ANY_SENTENCE, EngineProject, step
 from tests.test_engine_keep_alive import KEEP_ALIVE
 from tests.test_engine_session import (
-    LAUNCHER_STANDIN, RESULT_NORMAL, after, copy_roles, install_stub, one_step,
+    LAUNCHER_STANDIN, RESULT_API_ERROR, RESULT_MISSING, RESULT_NORMAL, after, copy_roles,
+    install_answers, install_stub, one_step,
 )
 
 TIER = "integration"  # the polled cases start process groups
@@ -334,6 +335,31 @@ class StopPollTest(unittest.TestCase):
         self.assertEqual(launched.exit_code, 0)
         self.assertEqual(launched.stdout, b"1000000\n")
 
+    def test_a_pause_with_no_stop_sleeps_once(self):
+        with mock.patch("time.sleep") as sleep:
+            engine_stop.pause(30, None)
+        self.assertEqual([c.args for c in sleep.call_args_list], [(30,)])
+
+    def test_a_pause_never_stopped_sleeps_its_whole_time_in_slices(self):
+        with mock.patch("time.sleep") as sleep:
+            engine_stop.pause(1.2, lambda: False)
+        slices = [c.args[0] for c in sleep.call_args_list]
+        self.assertEqual(len(slices), 3)
+        self.assertTrue(all(piece <= engine_stop.POLL_SECONDS for piece in slices))
+        self.assertAlmostEqual(sum(slices), 1.2)
+
+    def test_a_pause_raises_stopped_once_a_stop_is_requested(self):
+        calls = []
+
+        def stop() -> bool:
+            calls.append(None)
+            return len(calls) >= 3
+
+        with mock.patch("time.sleep") as sleep:
+            with self.assertRaises(engine_stop.Stopped):
+                engine_stop.pause(30, stop)
+        self.assertEqual([c.args for c in sleep.call_args_list], [(0.5,), (0.5,)])
+
 
 def reap_recorded(engine_project: EngineProject) -> None:
     for run in engine_project.runs():
@@ -429,6 +455,66 @@ class EngineStopTest(unittest.TestCase):
         again = project_.deliver(procedures, issue=1524)
         self.assertEqual(again.returncode, 2, again.stdout + again.stderr)
         self.assertIn(run.name, again.stderr)
+
+    def test_engine_stop_during_the_api_retry_pause_ends_the_run_within_seconds(self):
+        project_ = EngineProject(self)
+        project_.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project_, "implementer")
+        log = install_answers(project_, [
+            {"stdout": str(RESULT_API_ERROR), "exit": 1, "account": "p1"},
+            {"stdout": str(RESULT_NORMAL), "exit": 0, "account": "p1"}])
+        procedures = one_step(project_, on={"drafted": "done", "stuck": "needs-owner",
+                                            "no-reply": "needs-owner"})
+        running = self.start(project_, procedures, 1524)
+
+        def paused() -> bool:
+            runs = project_.runs()
+            return (len(runs) == 1 and log.exists() and len(log.read_text().splitlines()) == 1
+                    and any(e["event"] == "session_answered" and e["attempt"] == 1
+                            for e in project_.events(runs[0])))
+
+        until(self, paused)
+        (run,) = project_.runs()
+        stopped = self.stop(project_, 1524)
+        self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+        self.ended_with_stop(project_, running, run)
+        self.assertEqual(len(log.read_text().splitlines()), 1)
+        events = project_.events(run)
+        kinds = {e["event"] for e in events}
+        self.assertFalse(kinds & {"session_resuming", "result_stored", "outcome_graded"})
+        last = events[-1]
+        self.assertEqual((last["event"], last["step"], last["stop"]),
+                         ("stop_reached", "draft", "stopped-by-request"))
+        self.assertEqual(list((run / "results").iterdir()), [])
+
+    def test_engine_stop_ends_a_hanging_resumed_session(self):
+        project_ = EngineProject(self)
+        project_.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project_, "implementer")
+        log = install_answers(project_, [
+            {"stdout": str(RESULT_MISSING), "exit": 0, "account": "p1"},
+            {"stdout": str(RESULT_NORMAL), "exit": "hang", "account": "p1"}])
+        procedures = one_step(project_, on={"drafted": "done", "stuck": "needs-owner",
+                                            "no-reply": "needs-owner"})
+        running = self.start(project_, procedures, 1524)
+        until(self, lambda: log.exists() and len(log.read_text().splitlines()) == 2
+              and '"hang"' in log.read_text().splitlines()[1])
+        (run,) = project_.runs()
+        first, second = [json.loads(line) for line in log.read_text().splitlines()]
+        self.addCleanup(reap, second["hang"]["child"])
+        stopped = self.stop(project_, 1524)
+        self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+        self.ended_with_stop(project_, running, run)
+        events = project_.events(run)
+        (resuming,) = [e for e in events if e["event"] == "session_resuming"]
+        self.assertEqual(resuming["session"], after(first["argv"], "--session-id"))
+        self.assertEqual(resuming["session"], after(second["argv"], "--resume"))
+        kinds = {e["event"] for e in events}
+        self.assertFalse(kinds & {"result_stored", "outcome_graded"})
+        self.assertEqual(list((run / "results").iterdir()), [])
+        process = [e for e in events if e["event"] == "process_started"][-1]
+        gone(self, process["pid"], group=True)
+        gone(self, second["hang"]["child"])
 
     def test_engine_stop_ends_a_hanging_command_step_and_its_group(self):
         project_ = EngineProject(self)

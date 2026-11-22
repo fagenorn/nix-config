@@ -71,6 +71,7 @@ A stop request (`engine stop`, `engine_stop`) is the file `<run>/stop-request` n
 the shell polls it; a request for this holder ends that process's group, appends `stop_reached` named
 `stopped-by-request` (need `retry`) for the pending step, then removes the file, and the call exits
 `EXIT_STOP` with the run left open. The cut visit records no result, grade or transition.
+The API-error retry pause is polled too: a request in it ends the visit at once, with no resume.
 A request is published (`request_stop`) and removed (`_stopped`) under one lock, so none outlives the stop.
 
 Exit codes: `engine.py` lists them; `Fault` and `Refused` print nothing on stdout.
@@ -84,7 +85,6 @@ import os
 import socket
 import sys
 import tempfile
-import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -674,7 +674,7 @@ def _launch_until_answered(
                 no_reply = True
                 break
             retried, attempt = True, attempt + 1
-            time.sleep(API_RETRY_SECONDS)
+            engine_stop.pause(API_RETRY_SECONDS, stop)
             continue
         if reading.api_failure != engine_session.USAGE_LIMIT:
             if engine_session.is_miss(reading) and _problem(schema, reading) is not None:

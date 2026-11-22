@@ -9,7 +9,8 @@ never ends a later one. `write_request` publishes it atomically with mode 0600; 
 and raises `Stopped` once `stop()` is true, also when the process ended inside the first slice: a
 request made before the process ended is never graded past. It kills nothing: the caller's handler
 calls `end_group`. A retry passes no input, because CPython keeps the unsent offset of the first
-call. `requested` treats only a missing file as no request; any other read error propagates.
+call. `pause` is `time.sleep` that polls `stop` the same way, in slices of at most `POLL_SECONDS`.
+`requested` treats only a missing file as no request; any other read error propagates.
 
 `publication` is the exclusive flock on the run directory that orders a request's publication
 against the engine's recording of the stop and removal of the file (`engine_shell.request_stop`).
@@ -160,3 +161,19 @@ def communicate(process: subprocess.Popen, data: bytes | None, *,
             if stop():
                 raise Stopped
             return output
+
+
+def pause(seconds: float, stop: Callable[[], bool] | None) -> None:
+    """`time.sleep(seconds)`, raising `Stopped` as soon as `stop()` is true, before each slice and after the last."""
+    if stop is None:
+        time.sleep(seconds)
+        return
+    left = seconds
+    while True:
+        if stop():
+            raise Stopped
+        if left <= 0:
+            return
+        piece = min(POLL_SECONDS, left)
+        time.sleep(piece)
+        left -= piece
