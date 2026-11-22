@@ -6,8 +6,6 @@
 | [areas/](./areas/) | One directory per area: a budgeted glossary plus that area's decision records |
 | [standards/](./standards/) | The coding bar for this repo |
 | [guides/](./guides/) | Procedures (how to do one task, one file each) and the architecture description |
-| [archive/](./archive/) | Retained evidence and point-in-time records, kept at their paths |
-| [spikes/](./spikes/) | Point-in-time spike reports, kept at their paths |
 
 **Where new knowledge goes**
 

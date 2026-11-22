@@ -80,6 +80,31 @@ class LookGateEndToEndTest(unittest.TestCase):
             self.assertNotIn(label, labels)
         self.assertEqual(len(world.look_comments()), before, "a failed write still recorded an approval")
 
+    def test_the_carry_verification_counts_only_the_pull_requests_own_ordinary_commits(self):
+        """An Update branch that imports an ordinary commit of main is merges only; an ordinary commit of the branch is not."""
+        world = LookGateWorld(self)
+        approved = self.open_marked_pull_request(world)
+        path = world.worktree_of(MARKED)
+        scratch = world.tmp / "docs-fix"
+        world.git("clone", str(world.bare), str(scratch))
+        (scratch / "NOTES").write_text("docs\n", encoding="utf-8")
+        world.git("add", "NOTES", cwd=scratch)
+        world.git("commit", "-m", "docs", cwd=scratch)
+        world.git("push", str(world.bare), "HEAD:refs/heads/main", cwd=scratch)
+        world.fetch()
+        world.git("merge", "--no-edit", "origin/main", cwd=path)
+        brought = world.git("rev-parse", "HEAD", cwd=path)
+
+        def verify():
+            prompt = f"The owner approved head {approved} of PR #111; a merge made outside this delivery brought it to {brought}."
+            return world.actor({"type": "agent", "id": 1, "label": "look-carry-verify", "program": "deliver-standard",
+                                "issue": MARKED, "mode": "ship", "prompt": prompt, "schema": None, "agentType": "clerk"})
+
+        self.assertIs(verify()["merge_only"], True)
+        world.commit_line(MARKED, "own commit")
+        brought = world.git("rev-parse", "HEAD", cwd=path)
+        self.assertIs(verify()["merge_only"], False)
+
     def test_the_actor_merges_nothing_the_guard_refuses(self):
         world = LookGateWorld(self)
         head = self.open_marked_pull_request(world)
