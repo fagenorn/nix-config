@@ -301,7 +301,7 @@ class _Message:
     tokens: Tokens
 
 
-def _larger(first: dict, second: dict) -> dict:
+def larger_usage(first: dict, second: dict) -> dict:
     """The usage whose every count is the larger of the two (both already validated by `priced`)."""
     merged = {field: max(first.get(field) or 0, second.get(field) or 0)
               for field in _TOKEN_FIELDS}
@@ -493,7 +493,7 @@ class SpendReader:
             self._totals[key] = self._totals.get(key, Tokens()) + tokens
             return
         # A streamed message repeats its id with growing usage: keep each field's maximum.
-        usage = _larger(earlier.usage, message["usage"])
+        usage = larger_usage(earlier.usage, message["usage"])
         raised = priced(message.get("model"), usage)
         if raised is None:
             return

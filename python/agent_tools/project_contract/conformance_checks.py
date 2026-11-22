@@ -180,6 +180,10 @@ def check_contract_resolvable(context: Context) -> Outcome:
         stage = "valid"
         violations += resolver.validate_contract(source, manifest)
         resolver.raise_for_violations(dedup_violations(violations))
+        # Later checks read the filled view, where a schema-3 contract's
+        # constants are present at their schema-2 pointers; for schema 2 it is
+        # `source` itself.
+        context.contract = resolver.contract_view(source)
         context.stages["valid"] = Outcome("passed")
 
         stage = "schema_supported"
@@ -189,10 +193,11 @@ def check_contract_resolvable(context: Context) -> Outcome:
             "passed", facts=compatibility_facts(resolver, manifest, source))
 
         stage = "projection_fresh"
-        context.bindings = resolver.normalize_bindings(source["bindings"], root)
+        context.bindings = resolver.normalize_bindings(
+            context.contract["bindings"], root, resolver.platform_commands(source))
         context.capabilities = resolver.compute_capabilities(
-            context.bindings, root, source["capabilities"], source["release"],
-            source)
+            context.bindings, root, context.contract["capabilities"],
+            context.contract["release"], context.contract)
         resolver.validate_projections(root, source)
         context.stages["projection_fresh"] = Outcome("passed")
 

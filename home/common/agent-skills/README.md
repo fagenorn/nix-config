@@ -30,7 +30,7 @@ orchestrator context.
    `resolve-project write-projections` to generate its entries.
 2. Write the map skeleton: `docs/CONTEXT-MAP.md` with one area (or run a `grill-with-docs` session
    and let the first terms create it).
-3. Optionally seed `docs/standards/README.md` (empty index) and `.claude/hints/`.
+3. Optionally seed `docs/standards/README.md` (empty index) and `.agents/knowledge/hints/`.
 4. Everything else is machine-global via nix (`home/common/agent-skills/`): the skills, the
    standards layers 0–1, and the linter arrive with the home-manager generation.
 
@@ -76,9 +76,9 @@ The `.superpowers/` name is historical: it is a git-ignored home for run state t
 
 ## Code map
 
-The `design` skill leaves a code map for the planner: a navigation lead (ADR-delivery-004, #354). It is one Markdown file in the git directory of the worktree the design ran in (`git rev-parse --git-dir`), named after the spec file with `.code-map.md` in place of `.md`. That is outside the working tree, so it is never staged, committed, pushed or reviewed, no artifact-budget kind measures it, and in a linked worktree it goes when the worktree is removed. A rerun of `design` on the same spec overwrites it; the grill and the planner's ledger appends leave it alone, so it may be stale when it is read.
+The `design` skill leaves a code map for the planner: a navigation lead (ADR-delivery-004, #354). It is one Markdown file beside the spec draft in `<git-dir>/specs/` of the worktree the design ran in, named after the draft with `.code-map.md` in place of `.md`. That is outside the working tree, so it is never staged, committed, pushed or reviewed, no artifact-budget kind measures it, and in a linked worktree it goes when the worktree is removed. A rerun of `design` on the same spec overwrites it; the grill and the planner's ledger appends leave it alone, so it may be stale when it is read.
 
-Its first line is a title naming the spec file. Each entry names a module, seam or contract the spec's Decisions decide about, with a `Why:` line, a `Code:` line and a `Tests:` line; a path is repository-relative and stands outside parentheses, and its symbols or test names follow in parentheses. It holds no decision, requirement, rationale, line number or code excerpt, and only what the design agent had already read. When it cannot be written, the design still completes and its `notes` say so.
+Its first line is a title naming the draft file. Each entry names a module, seam or contract the spec's Decisions decide about, with a `Why:` line, a `Code:` line and a `Tests:` line; a path is repository-relative and stands outside parentheses, and its symbols or test names follow in parentheses. It holds no decision, requirement, rationale, line number or code excerpt, and only what the design agent had already read. When it cannot be written, the design still completes and its `notes` say so.
 
 The deliver-standard planner leaves a second code map (#743), `context.md` beside `plan.md` in the program's plan directory (`<worktree git dir>/deliver-standard`), so it is never committed either. Unlike the design map, it carries line ranges. Per area the plan touches, it lists the files and symbols, their tests and fixtures, the callers that matter and the facts the planner confirmed, each with a pointer. The program names it as read-first to the plan reviewer, the Codex plan review (as a lead, never evidence), the plan reviser and each task's implementer and fixer. They open the code to check a claim it makes or where it is silent, and a reviewer checks against HEAD any claim a finding relies on. The task reviews, the final review and its fix waves get no map, so they judge the code alone. The direct lane has no planner and no map, and `deliver-batch.js` gets the map through its `deliver-standard.js` children.
 

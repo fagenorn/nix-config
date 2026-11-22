@@ -5,7 +5,7 @@
 
 **Goal:** `tinytask list --include-done` replaces `tinytask list --all`, and the old name appears nowhere in the tool's code and docs (issue 3).
 
-**Architecture:** One argparse option in `tinytask/cli.py` is renamed, together with its single reader. The README example and the one existing test follow it. Spec: `.claude/specs/2026-10-07-issue-3-rename-flag-design.md`.
+**Architecture:** One argparse option in `tinytask/cli.py` is renamed, together with its single reader. The README example and the one existing test follow it. Spec: `../specs/2026-10-07-issue-3-rename-flag-design.md`.
 
 ## Global Constraints
 

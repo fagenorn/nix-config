@@ -1928,32 +1928,34 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
-`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062) and an optional
-`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9)
+`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062), an optional
+`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9) and an
+optional boolean `deep` (#1274, ADR-console-101)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
-`project_question.parse_keyed_request` does not accept is 400 `bad question`; `project_question.Refused` is
+`project_question.parse_ask` does not accept (a non-boolean `deep` included) is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
 exception is `console: project_question_failed <Type>: <message>` and 500 `question failed`;
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
-once it is answered. `ask_project_question(project_id, text, thread_id=None, request_key=None)` admits a question under the ingest
+once it is answered. `ask_project_question(project_id, text, thread_id=None, request_key=None, *, deep=False)` admits a question under the ingest
 lock, in this order: a credential-shaped text is `Refused` first (#1272, `project_question.CREDENTIAL`,
 before the lock and every check below, never repeating the text), no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
 question's own checks, with a `thread_id` only the follow-up checks of
-`project_question.follow_up` against the project's folded questions (an unknown thread, a thread
+`project_question.follow_up` (`deep_follow_up` for a `deep` one, which also refuses a thread whose last question is
+already deep or has other text, `DEEP_STALE`) against the project's folded questions (an unknown thread, a thread
 whose last question is not answered, a thread too long to carry), and no account the console would
 start a session under (`_session_choice`); a refusal appends nothing and counts nothing. An
 accepted question appends one `project_question.asked` row (`question_id`, `question`, `profile`,
 `session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
-`thread_id` and `request_key` it was given) and, for a keyed question, one `project_question.keyed` receipt row (`request_key`, `question_id`) in the same append, which retention never removes, so the key finds its question after the asked row is gone; it counts itself open in that same section. A follow-up's session gets
+`thread_id` and `request_key` it was given, and `deep` true for a deeper question) and, for a keyed question, one `project_question.keyed` receipt row (`request_key`, `question_id`) in the same append, which retention never removes, so the key finds its question after the asked row is gone; it counts itself open in that same section. A follow-up's session gets
 the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
 model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's reach (its read-only routes and its GitHub repository,
 `project_question.reach_of`; a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then gathers the project's own
 records (`question_records.project_records`, ADR-console-089, first reading spend when no poll has yet) after the reach and before the
-session, under the ingest lock and only while the project still holds the root the question was asked in; a gathering that raises (a root taken by another project included) is a `failed` answer with one stderr line `console:
+session, under the ingest lock and only while the project still holds the root the question was asked in (a deeper question then reads its project's transcript aggregates outside the lock, `transcript_digest.project_runs`, and after its answer is recorded its job reads spend once, so the session's own spend shows without waiting for the next poll); a gathering that raises (a root taken by another project included) is a `failed` answer with one stderr line `console:
 project_question_records_failed <question_id> <Type>: <message>` and starts no session; then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
 question and a question whose profile is being removed or already removed fails without starting a
@@ -2016,7 +2018,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -2567,12 +2569,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            project_id, question, thread_id, request_key = project_question.parse_keyed_request(body)
+            project_id, question, thread_id, request_key, deep = project_question.parse_ask(body)
         except ValueError:
             self._refuse(400, "bad question")
             return False
         try:
-            console.ask_project_question(project_id, question, thread_id, request_key)
+            console.ask_project_question(project_id, question, thread_id, request_key, deep=deep)
         except project_question.Refused as error:
             print(f"console: project_question_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -5658,7 +5660,8 @@ class ConsoleService:
             self._project_question_workers.append(worker)
 
     def ask_project_question(self, project_id: str, text: str,
-                             thread_id: str | None = None, request_key: str | None = None) -> str:
+                             thread_id: str | None = None, request_key: str | None = None,
+                             *, deep: bool = False) -> str:
         """Accept one question about a registered project and return its id (#1176, ADR-console-058).
 
         Admission, the asked row and the open count are one section under the ingest lock; the
@@ -5669,7 +5672,10 @@ class ConsoleService:
         that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089 D9); the
         check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
         `project_question.Refused` and append and count nothing. A credential-shaped text is
-        refused first, before every other check and before the request-key replay (#1272).
+        refused first, before every other check and before the request-key replay (#1272). A `deep`
+        question (#1274, ADR-console-101) with a `thread_id` is checked by `project_question.deep_follow_up`
+        in this same section, so a stale Dig deeper confirmation appends nothing; one without a thread is a
+        new thread.
         """
         if project_question.credential_shaped(text):
             raise project_question.Refused(project_question.CREDENTIAL)
@@ -5687,8 +5693,9 @@ class ConsoleService:
                      if item.request_key == request_key), None)
                 if known is not None:
                     return known
-            thread = () if thread_id is None else project_question.follow_up(
-                self._project_questions.get(project_id, ()), thread_id, text)
+            thread = () if thread_id is None else (
+                project_question.deep_follow_up if deep else project_question.follow_up)(
+                    self._project_questions.get(project_id, ()), thread_id, text)
             profile = self._session_choice(self._read_profiles())
             if profile is None:
                 raise project_question.Refused(project_question.NO_PROFILE)
@@ -5701,6 +5708,8 @@ class ConsoleService:
                 payload["thread_id"] = thread_id
             if request_key is not None:
                 payload["request_key"] = request_key
+            if deep:
+                payload["deep"] = True
             rows = [(PROJECT_QUESTION_ASKED, project_id, payload)]
             if request_key is not None:
                 rows.append((PROJECT_QUESTION_KEYED, project_id,
@@ -5712,7 +5721,7 @@ class ConsoleService:
         try:
             self._project_question_dispatch(
                 lambda: self._run_project_question(
-                    question_id, project_id, root, text, profile, session_id, thread))
+                    question_id, project_id, root, text, profile, session_id, thread, deep))
         except BaseException as error:
             self._record_project_answer(question_id, project_id, project_question.Outcome(
                 project_question.FAILED, reason=f"{type(error).__name__}: {error}"))
@@ -5740,7 +5749,8 @@ class ConsoleService:
 
     def _run_project_question(self, question_id: str, project_id: str, root: str, text: str,
                               profile: str, session_id: str,
-                              thread: "tuple[project_question.Turn, ...]" = ()) -> None:
+                              thread: "tuple[project_question.Turn, ...]" = (),
+                              deep: bool = False) -> None:
         """The job of one accepted question: stop check, routes, the session, then the one answer."""
         outcome = None
         try:
@@ -5759,7 +5769,7 @@ class ConsoleService:
                             detail=f"{type(error).__name__}: {error}"))
                 else:
                     try:
-                        records = self._question_records(project_id, root)
+                        records = self._question_records(project_id, root, deep)
                     except Exception as error:
                         print(f"console: project_question_records_failed {question_id} "
                               f"{type(error).__name__}: {error}", file=sys.stderr)
@@ -5774,12 +5784,16 @@ class ConsoleService:
                                     outcome = project_question.Outcome(
                                         project_question.FAILED,
                                         reason=project_question.PROFILE_GONE.format(profile=profile))
+                                elif not self._holds_checkout(project_id, root):
+                                    outcome = project_question.Outcome(
+                                        project_question.FAILED,
+                                        reason=project_question.CHECKOUT_MOVED)
                                 else:
                                     ask = project_question.new_ask(
                                         question_id, project_id, root, text, profile, reach.routes,
                                         Path(self._store).with_name(project_question.SETTINGS_DIR),
                                         session_id=session_id, thread=thread, repo=reach.repo,
-                                        unset=reach.unset, records=records)
+                                        unset=reach.unset, records=records, deep=deep)
                                     try:
                                         outcome = self._project_asker(ask, self._stop)
                                     except Exception as error:
@@ -5799,8 +5813,16 @@ class ConsoleService:
                 outcome = project_question.Outcome(
                     project_question.FAILED, reason=project_question.STOPPED_TEXT)
             self._record_project_answer(question_id, project_id, outcome)
+            if deep:
+                self._spend_step()  # the deeper session's own spend shows now, not at the next poll
 
-    def _question_records(self, project_id: str, root: str) -> str:
+    def _holds_checkout(self, project_id: str, root: str) -> bool:
+        """Whether, now and under the ingest lock, `project_id` is registered with `root` as its checkout."""
+        with self._ingest:
+            held = self._states.get(project_id)
+            return held is not None and held.root == root
+
+    def _question_records(self, project_id: str, root: str, deep: bool = False) -> str:
         """The encoded document of the console's own records of one project (ADR-console-089).
 
         The events and the folded state are read in one section under the ingest lock, so a delivery
@@ -5809,23 +5831,46 @@ class ConsoleService:
         project since the question was admitted would put the next owner's activations after the cutoff,
         so the gathering raises and the question is a failed answer. A question asked before the first
         spend poll reads the spend view first through the console's own poll (#1357, ADR-console-090),
-        and spend stays null only when that read failed.
+        and spend stays null only when that read failed. A `deep` question also reads its project's own
+        delivery transcripts, aggregated (`transcript_digest.project_runs`, #1274, ADR-console-101), from the
+        later of the spend window's first day and the day the project began to hold `root`, outside the lock,
+        mapped by a copy of the states taken in the section; a read that raises (every root unreadable
+        included) fails the question like any other gathering. After that read the ownership of every
+        checkout is compared once more under the lock with the copy: a registry that changed meanwhile (a
+        checkout taken by another project included) fails the question, so no later owner's records enter the
+        answer of an earlier one. `_run_project_question` checks once more, just before the session starts,
+        that the project still holds `root` (`project_question.CHECKOUT_MOVED`).
         """
         if self._spend_view is None:
             self._spend_step(only_without_view=True)
         with self._ingest:
             held_state = self._states.get(project_id)
             if held_state is None or held_state.root != root:
-                raise RuntimeError("the project no longer holds the checkout the question was asked in")
+                raise RuntimeError(project_question.CHECKOUT_MOVED)
             events = self.log.events()
             spend_view, sprint_states, inbox = self._spend_view, self._sprints, self._inbox
+            states = dict(self._states) if deep else None
             live_runs = {
                 key for key in self._deliveries
                 if (held := self._sessions.get(key[0])) is not None and held.state != sessions.ENDED
                 and held.repo is not None and project_for(held.repo, self._states) == project_id}
+        runs = None
+        if deep:
+            today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
+            window = (today - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
+            owned = question_records.owner_since(events, project_id, root)
+            runs = transcript_digest.project_runs(
+                self._projects_dirs(), project_id, lambda repo: project_for(repo, states),
+                max(window, owned) if owned else window,
+                question_records.run_issues(events, project_id))
+            with self._ingest:
+                if {pid: state.root for pid, state in self._states.items()} != {
+                        pid: state.root for pid, state in states.items()}:
+                    raise RuntimeError(
+                        "the projects' checkouts changed while the transcripts were read")
         return question_records.encode(question_records.project_records(
             project_id, root=root, events=events, spend=spend_view, live_runs=live_runs,
-            sprint_states=sprint_states, inbox=inbox,
+            sprint_states=sprint_states, inbox=inbox, transcripts=runs,
             written_at=self._now().isoformat(timespec="seconds")))
 
     def _record_project_answer(self, question_id: str, project_id: str,

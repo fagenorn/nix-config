@@ -111,6 +111,35 @@ def merges_world(after):
     }
 
 
+TWO_SETS = contents('{"version": 1, "sets": {"console": ["python/agent_tools/console/**"], '
+                    '"notes": ["docs/look/**"]}}')
+NOTE = "docs/look/y.md"
+
+
+def files_carry_comment(cid, a=A, h=H, association="OWNER", pr=1300):
+    return comment(cid, lm.carry_body(1200, pr, a, h, None), association)
+
+
+def odd_pics_approval(cid, head=A):
+    return comment(cid, fm.render(lm.KIND, {"issue": "1200", "pr": "1300", "head": head, "answer": "approved",
+                                            "message": f"m{cid}", "pictures": "zz"}, "x"))
+
+
+def both_fields_line(cid, a=A, h=H):
+    return comment(cid, fm.render(lm.CARRY_KIND, {"issue": "1200", "pr": "1300", "from": a, "to": h,
+                                                  "pictures": DIG, "rule": "look-files"}, "x"))
+
+
+def files_world(after, a_files, h_files, ah_files=(DOC,), sets=CONSOLE):
+    """The four reads the look-files carry rule makes."""
+    return {
+        lm.contents_path(B): sets,
+        lm.compare_path(B, A): cmp(a_files, commits=[(A, [FORK])]),
+        lm.compare_path(A, H): cmp(ah_files),
+        lm.compare_path(B, H): cmp(h_files, commits=[(A, [FORK])] + after),
+    }
+
+
 def three_reads():
     return (lm.compare_path(B, A), lm.compare_path(A, H), lm.compare_path(B, H))
 
@@ -771,6 +800,207 @@ class MergeCarryTest(unittest.TestCase):
         self.assertIs(lm.settle(c, H, B, read), True)
         self.assertEqual(seen, [*three_reads(), lm.contents_path(B), lm.compare_path(A, T),
                                 lm.compare_path(T, H)])
+
+    def test_a_look_files_line_carries_a_pictureless_approval_across_merges(self):
+        after = [(H, [A, X])]
+        facts = lm.IssueFacts(1200, BODY, (approval(10, A), files_carry_comment(11)))
+        for name, reads in {"no look file touched": files_world(after, [DOC], [DOC]),
+                            "the same look-file change": files_world(after, [PAGE], [PAGE])}.items():
+            with self.subTest(name=name):
+                self.assertEqual(lm.judge(1300, H, [facts], lm.Carry(B, reads)),
+                                 lm.Verdict(True, marked=(1200,)))
+
+    def test_carry_body_names_the_look_files_rule(self):
+        self.assertEqual(
+            lm.carry_body(1200, 1300, A, H, None),
+            f"<!-- agent:look-carry v1 issue=1200 pr=1300 from={A} to={H} rule=look-files -->\n"
+            f"Carried the owner's look approval of head {A[:7]} of pull request 1300 to head {H[:7]}: "
+            "only merges of the integration branch came in and the pull request's change to the look "
+            "files is unchanged.")
+        self.assertEqual(
+            lm.carry_body(1200, 1300, A, H, DIG),
+            f"<!-- agent:look-carry v1 issue=1200 pr=1300 from={A} to={H} pictures={DIG} -->\n"
+            f"Carried the owner's look approval of head {A[:7]} of pull request 1300 to head {H[:7]}: "
+            "only merges of the integration branch came in and the re-rendered pictures are unchanged.")
+        with self.assertRaises(ValueError):
+            lm.carry_sentence(1300, A, H, "other")
+
+    def test_the_candidate_names_a_look_files_line_for_a_pictureless_approval(self):
+        self.assertEqual(lm.carry_candidate([approval(10, A), files_carry_comment(11)], 1200, 1300, H),
+                         lm.Candidate(1200, A, "approved", 10, None, 11))
+        self.assertEqual(lm.carry_candidate([pics_approval(10), files_carry_comment(11)], 1200, 1300, H),
+                         lm.Candidate(1200, A, "approved", 10, DIG, None))
+        shapes = {
+            "a pictures line": [approval(10, A), carry_comment(11)],
+            "a fix answer": [approval(10, A, "fix", words="w"), files_carry_comment(11)],
+            "another to": [approval(10, A), files_carry_comment(11, h=T)],
+            "a collaborator": [approval(10, A), files_carry_comment(11, association="COLLABORATOR")],
+            "ended": [approval(10, A), files_carry_comment(11), comment(12, fm.end_body(11, "withdrawn"))],
+            "both fields": [approval(10, A), both_fields_line(11)],
+        }
+        for name, comments in shapes.items():
+            with self.subTest(name=name):
+                found = lm.carry_candidate(comments, 1200, 1300, H)
+                self.assertIsNone(found.line)
+        self.assertEqual(lm.carry_candidate([odd_pics_approval(10), files_carry_comment(11)], 1200, 1300, H),
+                         lm.Candidate(1200, A, "approved", 10))
+        rules = {
+            "plain": ([approval(10, A)], "look-files"),
+            "pictured": ([pics_approval(10)], "pictures"),
+            "malformed": ([odd_pics_approval(10)], None),
+            "fix": ([approval(10, A, "fix", words="w")], None),
+        }
+        for name, (comments, rule) in rules.items():
+            with self.subTest(rule=name):
+                self.assertEqual(lm.carry_rule(comments, lm.carry_candidate(comments, 1200, 1300, H)), rule)
+
+    def test_look_files_unchanged_names_its_four_reads(self):
+        self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, {})),
+                         lm.Kept(False, (lm.contents_path(B), lm.compare_path(B, A), lm.compare_path(A, H),
+                                         lm.compare_path(B, H))))
+
+    def test_look_files_unchanged_refuses_each_other_shape(self):
+        renamed = {"filename": PAGE, "previous_filename": "python/agent_tools/console/old.html",
+                   "status": "renamed", "patch": edit(PAGE)["patch"]}
+        bare = {"filename": PAGE, "status": "modified"}
+        one = [(H, [A, X])]
+        cases = {
+            "a one-parent commit": files_world([(H, [A])], [DOC], [DOC]),
+            "a look file whose change differs": files_world(one, [PAGE], [(PAGE, "other")]),
+            "a look file only at H": files_world(one, [DOC], [DOC, PAGE]),
+            "a look file only at A": files_world(one, [PAGE], []),
+            "a merge that brought a look file in": files_world(one, [DOC], [DOC], ah_files=[DOC, PAGE]),
+            "a second set's file only at H": files_world(one, [DOC], [DOC, NOTE], sets=TWO_SETS),
+            "a renamed look file": files_world(one, [renamed], [renamed]),
+            "a look-file listing with no patch": files_world(one, [bare], [bare]),
+        }
+        for name, reads in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, reads)), lm.Kept(False, ()))
+        self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, files_world(one, [DOC], [DOC, NOTE]))),
+                         lm.Kept(True, ()))
+        for path in files_world(one, [DOC], [DOC]):
+            with self.subTest(none=path):
+                reads = {**files_world(one, [DOC], [DOC]), path: None}
+                self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, reads)), lm.Kept(False, ()))
+        self.assertEqual(lm.look_files_unchanged(A, A, lm.Carry(B, files_world(one, [DOC], [DOC]))),
+                         lm.Kept(False, ()))
+        unreadable = {
+            "the set file": (lm.contents_path(B), {**files_world(one, [DOC], [DOC]),
+                                                   lm.contents_path(B): contents("{}")}),
+            "B...H": (lm.compare_path(B, H), None),
+            "A...H": (lm.compare_path(A, H), {**files_world(one, [DOC], [DOC]),
+                                              lm.compare_path(A, H): {"status": "ahead", "files": "x",
+                                                                      "total_commits": 0, "commits": []}}),
+        }
+        short = files_world(one, [DOC], [DOC])
+        short[lm.compare_path(B, H)]["total_commits"] += 1
+        unreadable["B...H"] = (lm.compare_path(B, H), short)
+        for name, (path, reads) in unreadable.items():
+            with self.subTest(unreadable=name):
+                with self.assertRaises(lm.Unreadable) as raised:
+                    lm.look_files_unchanged(A, H, lm.Carry(B, reads))
+                self.assertEqual(str(raised.exception), path)
+
+    def test_a_look_file_one_merge_brought_in_and_a_later_merge_took_out_carries_nothing(self):
+        two = [(T, [A, X]), (H, [T, F1])]
+        steps = {lm.compare_path(A, T): cmp([DOC]), lm.compare_path(T, H): cmp([DOC])}
+        reads = files_world(two, [DOC], [DOC])
+        self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, reads)),
+                         lm.Kept(False, (lm.compare_path(A, T), lm.compare_path(T, H))))
+        self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, {**reads, **steps})), lm.Kept(True, ()))
+        for name, listed in {"the first merge": {lm.compare_path(A, T): cmp([DOC, PAGE])},
+                             "the last merge": {lm.compare_path(T, H): cmp([PAGE])},
+                             "a look file renamed out": {lm.compare_path(A, T): cmp([
+                                 {"filename": DOC, "previous_filename": PAGE, "status": "renamed"}])}}.items():
+            with self.subTest(name=name):
+                self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, {**reads, **steps, **listed})),
+                                 lm.Kept(False, ()))
+        for path in steps:
+            with self.subTest(none=path):
+                self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, {**reads, **steps, path: None})),
+                                 lm.Kept(False, ()))
+            with self.subTest(unreadable=path):
+                with self.assertRaises(lm.Unreadable) as raised:
+                    lm.look_files_unchanged(A, H, lm.Carry(B, {**reads, **steps, path: {"status": "ahead"}}))
+                self.assertEqual(str(raised.exception), path)
+        seen = []
+
+        def read(path):
+            seen.append(path)
+            return {**reads, **steps}[path]
+
+        self.assertIs(lm.settle_look_files(A, H, B, read), True)
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertIs(lm.settle_look_files(A, H, B, lambda path: {**reads, **steps, lm.compare_path(T, H): cmp([PAGE])}[path]),
+                      False)
+
+    def test_a_renamed_look_file_compares_by_its_previous_name_and_blob(self):
+        one = [(H, [A, X])]
+        old = "python/agent_tools/console/old.html"
+
+        def renamed(sha="1" * 40, previous=old, patch=True):
+            entry = {"filename": PAGE, "previous_filename": previous, "status": "renamed", "sha": sha}
+            if patch:
+                entry["patch"] = edit(PAGE)["patch"]
+            return entry
+
+        def run(a_entry, h_entry):
+            return lm.look_files_unchanged(A, H, lm.Carry(B, files_world(one, [a_entry], [h_entry])))
+
+        self.assertEqual(run(renamed(), renamed()), lm.Kept(True, ()))
+        self.assertEqual(run(renamed(patch=False), renamed(patch=False)), lm.Kept(True, ()))
+        for name, other in {"another blob": renamed(sha="2" * 40), "another source": renamed(previous="python/agent_tools/console/z.html"),
+                            "not renamed": edit(PAGE)}.items():
+            with self.subTest(name=name):
+                self.assertEqual(run(renamed(), other), lm.Kept(False, ()))
+        no_sha = {k: v for k, v in renamed().items() if k != "sha"}
+        self.assertEqual(run(no_sha, no_sha), lm.Kept(False, ()))
+
+    def test_kept_asks_the_look_files_rule_for_a_pictureless_approval_with_a_line(self):
+        c = lm.Candidate(1200, A, "approved", 10, None, 11)
+        reads = files_world([(H, [A, X])], [DOC], [DOC])
+        self.assertEqual(lm.kept(c, H, lm.Carry(B, {})),
+                         lm.Kept(False, (lm.contents_path(B), lm.compare_path(B, A), lm.compare_path(A, H),
+                                         lm.compare_path(B, H))))
+        self.assertEqual(lm.kept(c, H, lm.Carry(B, reads)), lm.Kept(True, ()))
+        self.assertEqual(lm.kept(lm.Candidate(1200, A, "approved", 10, None, None), H, lm.Carry(B, reads)),
+                         lm.Kept(False, ()))
+        self.assertEqual(lm.kept(lm.Candidate(1200, A, "fix", 10, None, 11), H, lm.Carry(B, reads)),
+                         lm.Kept(False, ()))
+
+    def test_a_look_files_line_that_does_not_carry_falls_back_to_the_look_file_rule(self):
+        c = lm.Candidate(1200, A, "approved", 10, None, 11)
+        reads = files_world([(T, [A]), (H, [T])], [PAGE], [PAGE])
+        self.assertEqual(lm.kept(c, H, lm.Carry(B, reads)),
+                         lm.Kept(False, (lm.compare_path(A, T), lm.compare_path(T, H))))
+        full = {**reads, lm.compare_path(A, T): cmp([DOC]), lm.compare_path(T, H): cmp([DOC])}
+        self.assertEqual(lm.kept(c, H, lm.Carry(B, full)), lm.Kept(True, ()))
+        seen = []
+
+        def read(path):
+            seen.append(path)
+            return full[path]
+
+        self.assertIs(lm.settle(c, H, B, read), True)
+        self.assertEqual(len(seen), len(set(seen)))
+
+    def test_judge_admits_a_pictureless_head_only_with_its_look_files_line(self):
+        carry = lm.Carry(B, files_world([(H, [A, X])], [DOC], [DOC]))
+        refused = {
+            "no line": (approval(10, A),),
+            "a pictures line": (approval(10, A), carry_comment(11)),
+            "a pictured approval": (pics_approval(10), files_carry_comment(11)),
+            "a collaborator's line": (approval(10, A), files_carry_comment(11, association="COLLABORATOR")),
+            "an ended line": (approval(10, A), files_carry_comment(11), comment(12, fm.end_body(11, "withdrawn"))),
+            "a malformed pictures field": (odd_pics_approval(10), files_carry_comment(11)),
+            "both rules, plain": (approval(10, A), both_fields_line(11)),
+            "both rules, pictured": (pics_approval(10), both_fields_line(11)),
+        }
+        for name, comments in refused.items():
+            with self.subTest(name=name):
+                verdict = lm.judge(1300, H, [lm.IssueFacts(1200, BODY, comments)], carry)
+                self.assertEqual((verdict.admit, verdict.issue), (False, 1200))
 
 
 class SettleTest(unittest.TestCase):

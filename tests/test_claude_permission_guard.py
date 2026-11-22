@@ -6670,6 +6670,52 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual("", result.stderr)
 
+    def look_files_line(self, cid, a, h, association="OWNER"):
+        return {"id": cid, "body": look_marker.carry_body(1200, 1300, a, h, None),
+                "updated_at": "2026-11-16T10:00:00Z", "author_association": association}
+
+    def files_carry_world(self, after, b_h_files=(), a_h_files=()):
+        base, a, h = self.LOOK_BASE, self.LOOK_APPROVED, self.LOOK_HEAD
+        return {
+            f"{base}...{a}": self.look_compare([self.DOC], commits=[(a, [self.LOOK_FORK])]),
+            f"{a}...{h}": self.look_compare(a_h_files or [self.DOC]),
+            f"{base}...{h}": self.look_compare(
+                b_h_files or [self.DOC], commits=[(a, [self.LOOK_FORK])] + list(after)),
+        }
+
+    def test_a_look_files_carry_admits_a_pictureless_approval_across_main_merges(self):
+        a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
+        comments = [self.look_comment(10, head=a), self.look_files_line(11, a, h)]
+        result = self.run_guard(
+            self.LOOK_PINNED, self.look_repo(),
+            self.look_carry_env(comments, self.files_carry_world([(h, [a, x])])))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stderr)
+
+    def test_the_look_gate_refuses_each_shape_a_look_files_carry_does_not_cover(self):
+        repo = self.look_repo()
+        a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
+        plain, line = self.look_comment(10, head=a), self.look_files_line(11, a, h)
+        merged = self.files_carry_world([(h, [a, x])])
+        cases = {
+            "no line": ([plain], merged, None),
+            "B...H also listing a look file": (
+                [plain, line], self.files_carry_world([(h, [a, x])], b_h_files=[self.DOC, self.PAGE]), None),
+            "a merge that brought a look file in": (
+                [plain, line], self.files_carry_world([(h, [a, x])], a_h_files=[self.DOC, self.PAGE]), None),
+            "a one-parent commit": ([plain, line], self.files_carry_world([(h, [a])]), None),
+            "a collaborator's line": (
+                [plain, self.look_files_line(11, a, h, association="COLLABORATOR")], merged, None),
+            "a line that was ended": ([plain, line, self.look_end_comment(12, of=11)], merged, None),
+            "an absent set file": ([plain, line], merged, {}),
+        }
+        for name, (comments, compares, look_files) in cases.items():
+            with self.subTest(case=name):
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo,
+                    self.look_carry_env(comments, compares, look_files=look_files))
+                self.assert_look_refusal(result)
+
     def test_a_line_that_does_not_carry_still_admits_a_head_the_look_files_keep(self):
         a, h, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_T
         compares = self.merges_world([(t, [a]), (h, [t])])

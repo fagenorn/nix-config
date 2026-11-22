@@ -49,6 +49,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "delivery": frozenset({
         "agent_tools.console.inbox",  # look_approval
         "agent_tools.claims.forge_markers",  # look_marker, look_approval
+        "agent_tools.project_contract.agent_platform",  # standards_lint
         "agent_tools.project_contract.resolve_project",  # issue_branch, engine_shell
     }),
     "guard": frozenset({
@@ -389,7 +390,8 @@ class LightLaneRetirementTest(unittest.TestCase):
                 continue
             if "light_lane" in text:
                 named.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(sorted(named), ["python/agent_tools/project_contract/resolve_project.py"])
+        self.assertEqual(sorted(named), ["python/agent_tools/project_contract/resolve_project.py",
+                          "python/agent_tools/project_contract/schema_three.py"])
 
 
 if __name__ == "__main__":

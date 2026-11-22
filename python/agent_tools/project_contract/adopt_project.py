@@ -109,9 +109,12 @@ error object of code `adopt_failure` and nothing stored: `adopt.draft.contract_p
 checkout already carries a contract file), `adopt.draft.unreadable` (the file
 cannot be read as one JSON object), `adopt.draft.inside_checkout` (the file
 lies in the checkout), `adopt.draft.invalid` (the resolver's own
-`{pointer, message}` violations) and `adopt.draft.id_taken` (the drafted
-project id is registered for another checkout). A plan without the flag is
-unchanged, in its document and its `plan_id`.
+`{pointer, message}` violations, or a `/schema_version` the platform reads but
+adoption does not write: the draft declares a supported schema other than the
+one adoption writes, `adopt_planning.current_schema`) and
+`adopt.draft.id_taken` (the drafted project id is registered for another
+checkout). A plan without the flag is unchanged, in its document and its
+`plan_id`.
 
 `plan --commit-environment COMMAND` adds the command the adoption commit runs
 through to a contract that names none (#1333, ADR-project-contract-009).
@@ -356,6 +359,16 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
                 "the checkout already has a project contract, so a drafted "
                 "one cannot be planned")
     if draft is not None:
+        declared = draft.get("schema_version")
+        current = adopt_planning.current_schema(manifest)
+        if (isinstance(declared, int) and not isinstance(declared, bool)
+                and declared in manifest["project_schema_versions"]
+                and declared != current):
+            raise adopt_inspection.AdoptError(
+                "adopt_failure", "adopt.draft.invalid",
+                [{"pointer": "/schema_version",
+                  "message": f"adoption writes project schema {current}, "
+                             "which a draft declares"}])
         # The stored plan is canonical JSON, which sorts every key, so the
         # draft is put in that order before anything is derived from it:
         # `apply` re-derives from the stored draft and must write the bytes
@@ -460,7 +473,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     }
     amendment = adopt_planning.commit_environment_amendment(
         None if draft is not None else contract_source, environment,
-        manifest["project_schema_versions"][-1])
+        adopt_planning.current_schema(manifest))
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
         decisions["answered"], links.summary, path_references,
