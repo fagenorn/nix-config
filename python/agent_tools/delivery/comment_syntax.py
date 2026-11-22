@@ -26,6 +26,15 @@ does not tokenize or parse is read by a line fallback: a line whose left-strippe
 form starts with `#` is an own-line comment. A YAML quote opens a scalar only
 where a scalar starts, a shell `<<` inside arithmetic is a shift and not a
 heredoc, and the justfile is read as shell.
+
+JavaScript and TypeScript, C# and Nix are read by one character scanner with a
+stack of frames: a string or template literal is a frame, and a `${` or an
+interpolation hole pushes a code frame that its matching brace pops. A `/*`
+block comment is one block from its opening line to its closing line, `//` and
+`///` (and the Nix `#`) are line comments, and an unterminated block comment runs
+to the last line. In JavaScript a `/` opens a regular expression only after a
+token that cannot end an operand and never directly after `<` (a JSX closing
+tag), and JSX element text reads as code.
 """
 
 import ast
@@ -34,6 +43,7 @@ import io
 import re
 import tokenize
 import warnings
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import NamedTuple
 
@@ -53,13 +63,17 @@ class _Raw(NamedTuple):
     kind: str
 
 
-STACKS: tuple[str, ...] = ("python", "shell", "yaml", "just")
+STACKS: tuple[str, ...] = ("python", "shell", "yaml", "just", "javascript", "csharp", "nix")
 
 SUFFIX_STACKS = {
     ".py": "python", ".pyi": "python",
     ".sh": "shell", ".bash": "shell", ".zsh": "shell", ".ksh": "shell",
     ".yaml": "yaml", ".yml": "yaml",
     ".just": "just",
+    ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".jsx": "javascript",
+    ".ts": "javascript", ".mts": "javascript", ".cts": "javascript", ".tsx": "javascript",
+    ".cs": "csharp", ".csx": "csharp",
+    ".nix": "nix",
 }
 JUST_NAMES = frozenset({"justfile", "Justfile", ".justfile"})
 SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh", "ksh", "dash"})
@@ -470,4 +484,316 @@ def _yaml(text: str, lines: list[str]) -> tuple[list[_Raw], int | None]:
     return raws, first_code
 
 
-_LEXERS = {"python": _python, "shell": _shell, "just": _shell, "yaml": _yaml}
+@dataclass
+class _Frame:
+    """One lexing context: code at the top or in a hole, or a string being read."""
+
+    kind: str
+    quote: str = ""
+    multiline: bool = False
+    verbatim: bool = False
+    quotes: int = 0
+    braces: int = 0
+    close: int = 1
+    depth: int = 0
+
+
+_WORD = re.compile(r"[\w$]+")
+_NIX_ID = re.compile(r"[A-Za-z_][\w'-]*")
+_REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%<>~^")
+_REGEX_KEYWORDS = frozenset(
+    "return typeof case do else in of new delete void throw yield await instanceof".split())
+
+
+class _Scan:
+    """A character scanner over normalized text; subclasses add one language's tokens."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.n = len(text)
+        self.i = 0
+        self.row = 1
+        self.has_code = False
+        self.first_code: int | None = None
+        self.raws: list[_Raw] = []
+        self.stack = [_Frame("code")]
+        self.prev = ""
+        self.strings = {"str": self.plain}
+
+    def adv(self, k: int, code: bool = True) -> None:
+        for ch in self.text[self.i:self.i + k]:
+            if ch == "\n":
+                self.row += 1
+                self.has_code = False
+            elif code and ch not in BLANKS:
+                self.has_code = True
+                if self.first_code is None:
+                    self.first_code = self.row
+            self.i += 1
+
+    def scan(self) -> tuple[list[_Raw], int | None]:
+        if self.text.startswith("#!"):
+            self.adv(self.line_end() - self.i, False)
+        while self.i < self.n:
+            frame = self.stack[-1]
+            c = self.text[self.i]
+            if frame.kind in ("code", "hole"):
+                self.code(frame, c)
+            else:
+                self.strings[frame.kind](frame, c)
+        return self.raws, self.first_code
+
+    def line_end(self) -> int:
+        end = self.text.find("\n", self.i)
+        return self.n if end < 0 else end
+
+    def line_comment_here(self, c: str) -> bool:
+        return self.text.startswith("//", self.i)
+
+    def code(self, frame: _Frame, c: str) -> None:
+        if c in BLANKS or c == "\n":
+            self.adv(1, False)
+        elif self.text.startswith("/*", self.i):
+            self.block_comment()
+        elif self.line_comment_here(c):
+            self.line_comment()
+        elif c == "{":
+            frame.depth += 1
+            self.punct(c)
+        elif c == "}":
+            self.close_brace(frame, c)
+        else:
+            self.token(c)
+
+    def token(self, c: str) -> None:
+        self.punct(c)
+
+    def punct(self, c: str) -> None:
+        self.adv(1)
+        self.prev = c
+
+    def line_comment(self) -> None:
+        end = self.line_end()
+        self.raws.append(
+            _Raw(self.row, self.row, (self.text[self.i:end],), not self.has_code, "line"))
+        self.adv(end - self.i, False)
+
+    def block_comment(self) -> None:
+        close = self.text.find("*/", self.i + 2)
+        stop = self.n if close < 0 else close + 2
+        first, chunk = self.row, self.text[self.i:stop]
+        self.adv(stop - self.i, False)
+        self.raws.append(_Raw(first, self.row, tuple(chunk.split("\n")), False, "block"))
+
+    def close_brace(self, frame: _Frame, c: str) -> None:
+        closer = "}" * frame.close
+        if frame.kind == "hole" and frame.depth == 0 and self.text.startswith(closer, self.i):
+            self.adv(frame.close)
+            self.stack.pop()
+        else:
+            frame.depth = max(0, frame.depth - 1)
+            self.punct(c)
+
+    def push(self, frame: _Frame, width: int) -> None:
+        self.stack.append(frame)
+        self.adv(width)
+        if frame.kind == "hole":
+            self.prev = "{"
+
+    def pop(self) -> None:
+        self.stack.pop()
+        self.prev = "str"
+
+    def plain(self, frame: _Frame, c: str) -> None:
+        """A quoted string with backslash escapes; it ends at its quote or at the line end."""
+        if c == "\\":
+            self.adv(2)
+        elif c == frame.quote:
+            self.adv(1)
+            self.pop()
+        elif c == "\n" and not frame.multiline:
+            self.pop()
+        elif c == "$" and frame.multiline and self.text.startswith("${", self.i):
+            self.push(_Frame("hole"), 2)
+        else:
+            self.adv(1)
+
+
+class _JavaScript(_Scan):
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.strings["tpl"] = self.template
+
+    def token(self, c: str) -> None:
+        if c in "'\"":
+            self.push(_Frame("str", quote=c), 1)
+        elif c == "`":
+            self.push(_Frame("tpl"), 1)
+        elif c == "/" and self.regex_allowed():
+            self.regex()
+        elif match := _WORD.match(self.text, self.i):
+            self.adv(match.end() - self.i)
+            self.prev = match.group()
+        else:
+            self.punct(c)
+
+    def regex_allowed(self) -> bool:
+        if self.i > 0 and self.text[self.i - 1] == "<" and self.prev == "<":
+            return False
+        return self.prev == "" or self.prev in _REGEX_AFTER or self.prev in _REGEX_KEYWORDS
+
+    def regex(self) -> None:
+        text, j, in_class = self.text, self.i + 1, False
+        while j < self.n and text[j] != "\n":
+            ch = text[j]
+            if ch == "\\":
+                j += 1 if text[j + 1:j + 2] == "\n" else 2
+                continue
+            if ch == "[":
+                in_class = True
+            elif ch == "]":
+                in_class = False
+            elif ch == "/" and not in_class:
+                j += 1
+                break
+            j += 1
+        self.adv(min(j, self.n) - self.i)
+        self.prev = "str"
+
+    def template(self, frame: _Frame, c: str) -> None:
+        if c == "\\":
+            self.adv(2)
+        elif c == "`":
+            self.adv(1)
+            self.pop()
+        elif c == "$" and self.text.startswith("${", self.i):
+            self.push(_Frame("hole"), 2)
+        else:
+            self.adv(1)
+
+
+class _CSharp(_Scan):
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.strings["cs"] = self.literal
+
+    def token(self, c: str) -> None:
+        if c == "'":
+            self.push(_Frame("str", quote=c), 1)
+        elif c in "$@\"" and self.open_literal():
+            return
+        else:
+            self.punct(c)
+
+    def open_literal(self) -> bool:
+        text, j, dollars, verbatim = self.text, self.i, 0, False
+        while j < self.n and text[j] in "$@":
+            dollars += text[j] == "$"
+            verbatim = verbatim or text[j] == "@"
+            j += 1
+        if j >= self.n or text[j] != '"':
+            return False
+        quotes = self.run('"', j)
+        raw = quotes >= 3 and not verbatim
+        frame = _Frame(
+            "cs", verbatim=verbatim, quotes=quotes if raw else 0,
+            braces=(dollars if raw else min(dollars, 1)))
+        self.push(frame, j - self.i + (quotes if raw else 1))
+        return True
+
+    def run(self, ch: str, j: int) -> int:
+        end = j
+        while end < self.n and self.text[end] == ch:
+            end += 1
+        return end - j
+
+    def literal(self, frame: _Frame, c: str) -> None:
+        if c == "{" and frame.braces:
+            self.hole(frame)
+        elif frame.quotes:
+            self.raw_literal(frame, c)
+        elif c == '"' and frame.verbatim and self.text.startswith('""', self.i):
+            self.adv(2)
+        elif c == '"':
+            self.adv(1)
+            self.pop()
+        elif c == "\\" and not frame.verbatim:
+            self.adv(2)
+        elif c == "\n" and not frame.verbatim:
+            self.pop()
+        else:
+            self.adv(1)
+
+    def raw_literal(self, frame: _Frame, c: str) -> None:
+        if c != '"':
+            self.adv(1)
+            return
+        quotes = self.run('"', self.i)
+        self.adv(quotes)
+        if quotes >= frame.quotes:
+            self.pop()
+
+    def hole(self, frame: _Frame) -> None:
+        if frame.quotes:
+            braces = self.run("{", self.i)
+            if braces < frame.braces:
+                self.adv(braces)
+                return
+            self.adv(braces - frame.braces)
+        elif self.text.startswith("{{", self.i):
+            self.adv(2)
+            return
+        self.push(_Frame("hole", close=frame.braces), frame.braces)
+
+
+class _Nix(_Scan):
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.strings["ind"] = self.indented
+
+    def line_comment_here(self, c: str) -> bool:
+        return c == "#"
+
+    def token(self, c: str) -> None:
+        if c == '"':
+            self.push(_Frame("str", quote=c, multiline=True), 1)
+        elif self.text.startswith("''", self.i):
+            self.push(_Frame("ind"), 2)
+        elif match := _NIX_ID.match(self.text, self.i):
+            self.adv(match.end() - self.i)
+        else:
+            self.punct(c)
+
+    def indented(self, frame: _Frame, c: str) -> None:
+        text, i = self.text, self.i
+        if c == "'" and text.startswith("''", i):
+            after = text[i + 2:i + 3]
+            if after in ("'", "$"):
+                self.adv(3)
+            elif after == "\\":
+                self.adv(4)
+            else:
+                self.adv(2)
+                self.pop()
+        elif c == "$" and text.startswith("${", i):
+            self.push(_Frame("hole"), 2)
+        else:
+            self.adv(1)
+
+
+def _javascript(text: str, lines: list[str]) -> tuple[list[_Raw], int | None]:
+    return _JavaScript("\n".join(lines)).scan()
+
+
+def _csharp(text: str, lines: list[str]) -> tuple[list[_Raw], int | None]:
+    return _CSharp("\n".join(lines)).scan()
+
+
+def _nix(text: str, lines: list[str]) -> tuple[list[_Raw], int | None]:
+    return _Nix("\n".join(lines)).scan()
+
+
+_LEXERS = {
+    "python": _python, "shell": _shell, "just": _shell, "yaml": _yaml,
+    "javascript": _javascript, "csharp": _csharp, "nix": _nix,
+}

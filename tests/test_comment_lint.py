@@ -181,5 +181,130 @@ class CommentSyntaxTest(unittest.TestCase):
                     self.assertIsInstance(comment_syntax.blocks(path, text), tuple)
 
 
+    def test_each_c_family_and_nix_stack_reads_its_comments_and_skips_its_strings(self):
+        javascript = lines(
+            "#!/usr/bin/env node",
+            "// header",
+            """const a = "// no"; const b = '/* no */';""",
+            "const t = `x ${ \"/*\" } // no`; // yes",
+            "const r = /\\/\\/ no/g; /* one",
+            "two */ f();",
+        )
+        typescript = lines(
+            "/**", " * Header doc.", " */", "export type A = { b: string }; // yes")
+        csharp = lines(
+            "// header",
+            'var a = "// no"; var b = @"C:\\ ""/* no */""";',
+            'var c = """',
+            "    // raw no",
+            '    """; /// yes',
+            "char d = '/'; /* x */ int e;",
+        )
+        nix = lines(
+            "# header",
+            "{ pkgs, ... }:",
+            "let",
+            '  a = "# no ${ "/* no */" }";',
+            "  b = ''",
+            "    # no, inside an indented string",
+            "    ''${x} '''",
+            "  ''; # yes",
+            "  /* block */ c = 1;",
+            "in a",
+        )
+        cases = (
+            ("javascript", "tool.mjs", javascript, (
+                Block(2, 2, ("// header",), True),
+                Block(4, 4, ("// yes",), False),
+                Block(5, 6, ("/* one", "two */"), False),
+            )),
+            ("typescript", "mod.ts", typescript, (
+                Block(1, 3, ("/**", " * Header doc.", " */"), True),
+                Block(4, 4, ("// yes",), False),
+            )),
+            ("csharp", "Mod.cs", csharp, (
+                Block(1, 1, ("// header",), True),
+                Block(5, 5, ("/// yes",), False),
+                Block(6, 6, ("/* x */",), False),
+            )),
+            ("nix", "default.nix", nix, (
+                Block(1, 1, ("# header",), True),
+                Block(8, 8, ("# yes",), False),
+                Block(9, 9, ("/* block */",), False),
+            )),
+        )
+        for stack, path, text, expected in cases:
+            with self.subTest(stack=stack):
+                self.assertEqual(comment_syntax.blocks(path, text), expected)
+
+    def test_a_division_is_not_a_regex(self):
+        self.assertEqual(
+            comment_syntax.blocks("a.js", "const x = a / b; // yes\n"),
+            (Block(1, 1, ("// yes",), False),))
+
+    def test_a_jsx_closing_tag_is_not_a_regex(self):
+        self.assertEqual(
+            comment_syntax.blocks("a.jsx", "const el = <p>ok</p>; // TODO\n"),
+            (Block(1, 1, ("// TODO",), False),))
+
+    def test_a_csharp_interpolation_lexes_its_nested_string(self):
+        for text in (
+            'var s = $"{Get("/* TODO */")}"; // yes\n',
+            'var r = $$"""{{Get("// no")}} {x}"""; // yes\n',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    comment_syntax.blocks("a.cs", text), (Block(1, 1, ("// yes",), False),))
+
+    def test_a_nested_template_hides_its_comment_markers(self):
+        for text in (
+            'const s = `${ `${ "//" }` } /*`; // yes\n',
+            'const s = `${ "`" } /*`; // yes\n',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    comment_syntax.blocks("a.js", text), (Block(1, 1, ("// yes",), False),))
+
+    def test_a_nix_indented_string_keeps_its_escapes_and_holes(self):
+        for text in (
+            "x = ''\n  ''${\"# no\"}\n'';  # yes\n",
+            "x = ''\n  ${ \"''\" } # no\n'';  # yes\n",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    comment_syntax.blocks("a.nix", text), (Block(3, 3, ("# yes",), False),))
+
+    def test_an_unterminated_block_comment_runs_to_the_last_line(self):
+        self.assertEqual(
+            comment_syntax.blocks("a.js", "x();\n/* a\nb\n"),
+            (Block(2, 4, ("/* a", "b", ""), False),))
+
+    def test_adjacent_line_comments_of_both_forms_are_one_run(self):
+        self.assertEqual(
+            comment_syntax.blocks("a.cs", "int a;\n/// doc\n// more\n"),
+            (Block(2, 3, ("/// doc", "// more"), False),))
+
+    def test_the_new_suffixes_name_their_stacks(self):
+        table = (
+            ("a.js", "javascript"), ("a.cjs", "javascript"), ("a.jsx", "javascript"),
+            ("a.mts", "javascript"), ("a.cts", "javascript"), ("a.tsx", "javascript"),
+            ("a.csx", "csharp"), ("a.nix", "nix"),
+        )
+        for path, expected in table:
+            with self.subTest(path=path):
+                self.assertEqual(comment_syntax.stack_of(path, "\n"), expected)
+        self.assertEqual(
+            comment_syntax.STACKS,
+            ("python", "shell", "yaml", "just", "javascript", "csharp", "nix"))
+
+    def test_no_c_family_or_nix_lexer_raises_on_unbalanced_text(self):
+        texts = (
+            "/*", "'", '"', "`", "`${", "/", '@"', '"""', "''", "${", "}", "''$", "")
+        for path in ("a.mjs", "a.cs", "a.nix"):
+            for text in texts:
+                with self.subTest(path=path, text=text):
+                    self.assertIsInstance(comment_syntax.blocks(path, text), tuple)
+
+
 if __name__ == "__main__":
     unittest.main()
