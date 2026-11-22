@@ -121,6 +121,15 @@ class SuppressionTest(RealRuff):
 
         self.assertEqual((code, stdout), (1, "PY13 pkg/m.py:2\nPY13 pkg/m.py:3\n"))
 
+    def test_a_noqa_followed_only_by_unicode_whitespace_has_no_reason(self):
+        for padding in ("\u00a0", " \u00a0 ", "\u2003", "\u3000,\u00a0"):
+            with self.subTest(padding=padding):
+                source = f"import os  # noqa: F401{padding}\n".encode()
+                self.assertEqual(
+                    ruff_lint.suppressions("m.py", source), [Violation("PY13", "m.py", 1)])
+        self.assertEqual(
+            ruff_lint.suppressions("m.py", "import os  # noqa: F401 \u00a0kept\n".encode()), [])
+
     def test_a_file_wide_suppression_without_a_reason_prints(self):
         root = covered_world(self.tmp, "# ruff: noqa\nimport os\n")
 
@@ -358,6 +367,28 @@ class FailClosedTest(unittest.TestCase):
 
         self.assertEqual(reason, "scratch_inside_repository")
         self.assertEqual(list(inside.iterdir()), [])
+
+    def test_discovering_the_scratch_directory_writes_nothing_inside_the_repository(self):
+        require_ruff(self)
+        root = covered_world(self.tmp)
+        inside = root / "inside"
+        inside.mkdir()
+
+        with mock.patch.object(ruff_lint.tempfile, "tempdir", None), \
+                mock.patch.dict(os.environ, {"TMPDIR": str(inside)}):
+            reason = self.failure(snapshot_of(root))
+
+        self.assertEqual(reason, "scratch_inside_repository")
+        self.assertEqual(list(inside.iterdir()), [])
+
+    def test_a_failing_scratch_discovery_fails_closed(self):
+        require_ruff(self)
+        root = covered_world(self.tmp)
+
+        with mock.patch.object(ruff_lint.tempfile, "gettempdir", side_effect=OSError("no")):
+            reason = self.failure(snapshot_of(root))
+
+        self.assertEqual(reason, "scratch_unwritable")
 
     def test_an_unwritable_scratch_parent_fails_closed(self):
         require_ruff(self)

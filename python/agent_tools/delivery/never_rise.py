@@ -211,6 +211,8 @@ def _read_blobs(root: Path, oids: Sequence[str], timeout: float | None) -> list[
             return None
         contents.append(out[start:start + size])
         position = start + size + 1
+    if position != len(out):
+        return None
     return contents
 
 

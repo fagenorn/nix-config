@@ -547,7 +547,8 @@ class SnapshotFilesTest(unittest.TestCase):
                 "payload short": f"{oid} blob 9\none\n".encode(),
                 "no terminator": f"{oid} blob 4\none\nX".encode(),
                 "missing": f"{oid} missing\n".encode(),
-                "not a blob": f"{oid} tree 4\none\n\n".encode()}
+                "not a blob": f"{oid} tree 4\none\n\n".encode(),
+                "trailing bytes": f"{oid} blob 4\none\n\nextra".encode()}
             for name, answer in answers.items():
                 with self.subTest(name):
                     with mock.patch.object(never_rise, "_git", return_value=answer):

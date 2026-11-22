@@ -107,7 +107,7 @@ test:
 
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output). The suite gets the platform package's pinned tools.
 agent-workflow-tests *args:
-  AGENT_PLATFORM_TOOLS="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \

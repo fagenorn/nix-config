@@ -90,7 +90,8 @@ MARKER = "pyproject.toml"
 MEMO_SIZE = 4
 NOQA = re.compile(r"#\s*(?:(?:ruff|flake8)\s*:\s*)?noqa(?![A-Za-z0-9_])(?P<tail>.*)", re.I)
 CODED = re.compile(r"\s*:\s*(?P<codes>[A-Z]+[0-9]+(?:[\s,]+[A-Z]+[0-9]+)*)(?P<rest>.*)")
-REASON_PADDING = " \t,:;#-"
+TEMPORARY_VARIABLES = ("TMPDIR", "TEMP", "TMP")
+REASON_PADDING = re.compile(r"[\s,:;#-]*")
 _memo: dict[tuple[str, str, str], tuple[Violation, ...]] = {}
 
 
@@ -136,13 +137,21 @@ def suppressions(path: str, source: bytes) -> list[Violation]:
         if directive is None:
             continue
         coded = CODED.match(directive["tail"])
-        if coded is None or not coded["rest"].strip(REASON_PADDING):
+        if coded is None or REASON_PADDING.fullmatch(coded["rest"]):
             found.append(Violation(SUPPRESSION_RULE, path, row))
     return found
 
 
 def _fold(text: str) -> str:
     return unicodedata.normalize("NFC", text).casefold()
+
+
+def _inside(directory: str | Path | None, root: Path | None) -> bool:
+    """True when a directory is the repository root or below it."""
+    if not directory or root is None:
+        return False
+    path = Path(directory).resolve()
+    return path == root or root in path.parents
 
 
 def _check_paths(paths: list[str]) -> None:
@@ -209,12 +218,16 @@ def findings(snapshot: Snapshot) -> tuple[Violation, ...]:
         return _memo[key]
     _check_paths(paths)
     contents = never_rise.read_files(snapshot, paths)
-    parent = Path(tempfile.gettempdir()).resolve()
     root = snapshot.root.resolve() if snapshot.root is not None else None
-    if root is not None and (parent == root or root in parent.parents):
-        raise EnforcerFailed(COMMAND, "scratch_inside_repository")
+    if tempfile.tempdir is None:
+        for name in TEMPORARY_VARIABLES:
+            if _inside(os.environ.get(name), root):
+                raise EnforcerFailed(COMMAND, "scratch_inside_repository")
     found: list[Violation] = []
     try:
+        parent = Path(tempfile.gettempdir()).resolve()
+        if _inside(parent, root):
+            raise EnforcerFailed(COMMAND, "scratch_inside_repository")
         with tempfile.TemporaryDirectory(prefix="ruff-lint-", dir=parent) as tmp:
             scratch = Path(tmp).resolve()
             for path, data in contents.items():

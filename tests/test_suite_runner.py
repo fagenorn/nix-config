@@ -1160,7 +1160,8 @@ class RecipeWiringTest(unittest.TestCase):
             body.append(line)
         self.assertEqual(
             body[0],
-            '  AGENT_PLATFORM_TOOLS="$(nix build --no-link --print-out-paths \'{{justfile_directory()}}#agent-platform.tools\')/bin"'
+            '  tools="$(nix build --no-link --print-out-paths \'{{justfile_directory()}}#agent-platform.tools\')"'
+            ' && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin"'
             ' PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \\')
         self.assertTrue(all(line.endswith(" \\") for line in body[:-1]), body)
         self.assertFalse(body[-1].endswith("\\"), body[-1])
@@ -1169,6 +1170,36 @@ class RecipeWiringTest(unittest.TestCase):
         self.assertEqual(members[-1], EVAL_TREE_SCRIPT)
         self.assertIn("tests/test_suite_runner.py", members)
         suite_runner.validate_members(members, REPO_ROOT)
+
+    def recipe_command(self) -> str:
+        lines = (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines()
+        first = lines[lines.index("agent-workflow-tests *args:") + 1]
+        return (first.strip().removesuffix(" \\")
+                .replace("{{justfile_directory()}}", "/repo")
+                .replace("{{agent_tools_path}}", "/repo/python").replace("{{args}}", ""))
+
+    def run_recipe(self, nix_script: str) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            marker = Path(tmp) / "ran"
+            for name, body in (("nix", nix_script),
+                               ("python3", f'echo "$AGENT_PLATFORM_TOOLS" > "{marker}"\n')):
+                fake = bin_dir / name
+                fake.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+                fake.chmod(0o755)
+            done = subprocess.run(
+                ["/bin/sh", "-c", self.recipe_command()], env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                capture_output=True, text=True, timeout=60)
+            return done.returncode, marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+
+    def test_the_suite_never_starts_when_the_pinned_tools_do_not_build(self):
+        self.assertNotEqual(self.run_recipe("exit 1\n")[0], 0)
+        self.assertEqual(self.run_recipe("exit 1\n")[1], "")
+        self.assertEqual(self.run_recipe("exit 0\n")[1], "")
+
+    def test_the_suite_starts_with_the_built_tools_directory(self):
+        self.assertEqual(self.run_recipe("echo /pinned\n"), (0, "/pinned/bin"))
 
 
 TMPDIR_MEMBER = (
