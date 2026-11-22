@@ -531,6 +531,30 @@ class ReapingTest(unittest.TestCase):
                          {"codes": [0, 0, 127, 127], "ending": [False, False, True, True]})
 
 
+    def test_a_session_is_never_spawned_after_the_registry_closes(self):
+        real = subprocess.Popen
+        closers: list[threading.Thread] = []
+        closed_at_spawn: list[bool] = []
+
+        def popen(*args, **kwargs):
+            # A shutdown reaching the registry just as a worker is about to spawn its session.
+            closer = threading.Thread(target=engine_session._reap)
+            closers.append(closer)
+            closer.start()
+            closer.join(0.5)
+            closed_at_spawn.append(engine_session._closed)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(engine_session, "_closed", False), \
+                mock.patch.object(subprocess, "Popen", popen):
+            launched = launch(["sleep", "30"], tempfile.gettempdir(), "",
+                              on_start=lambda pid: None)
+            for closer in closers:
+                closer.join(30)
+        self.assertEqual(closed_at_spawn, [False])
+        self.assertEqual(launched.exit_code, -signal.SIGKILL)
+
+
 class DeliverSessionTest(unittest.TestCase):
     def setUp(self) -> None:
         self.project = EngineProject(self)

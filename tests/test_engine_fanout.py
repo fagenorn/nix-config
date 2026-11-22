@@ -15,10 +15,11 @@ import subprocess
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_ledger, engine_session, engine_shell
+from agent_tools.delivery import engine_commands, engine_ledger, engine_session, engine_shell
 from tests.test_engine_deliver import EngineProject, step
 from tests.test_engine_session import (
     DRAFT_REPLY, RESULT_NORMAL, canned_result, copy_roles, install_stub,
@@ -751,13 +752,17 @@ class GroupSessionTest(unittest.TestCase):
         self.assertEqual(taken["to"], "done")
 
     def test_an_agent_member_outside_its_pass_set_blocks_the_group(self):
-        project = session_project(self, hold=0)
+        project = session_project(self, hold=1.0)
         directory = with_session_files(project.procedures(REVIEWS(pass_b=("stuck",))))
 
         done = project.deliver(directory, issue=1517)
 
         self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
         self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        records = [json.loads(line) for line in
+                   (project.tmp / "sessions.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(records), 2)
+        self.assertLess(max(r["start"] for r in records), min(r["end"] for r in records))
         (run,) = project.runs()
         self.assertEqual([e["outcome"] for e in graded(project.events(run), "reviews")],
                          ["blocked"])
@@ -864,6 +869,119 @@ class SigtermTest(unittest.TestCase):
         self.assertEqual([e for e in events if e.get("step") == "after"
                           and e["event"] in ("step_entered", "process_started")], [])
         self.assertEqual(len(children_of(project)), 1)
+
+
+class ShutdownTest(unittest.TestCase):
+    """The engine ending while a group or a call is starting or walking (in process)."""
+
+    def test_a_sigterm_while_a_group_submits_its_members_ends_the_started_session(self):
+        project = session_project(self, hold=60)
+        directory = with_session_files(project.procedures(REVIEWS()))
+        real_submit = ThreadPoolExecutor.submit
+        pids: list[int] = []
+
+        def submit(pool, *args, **kwargs):
+            future = real_submit(pool, *args, **kwargs)
+            if not pids:
+                run = wait_for_run(project, children=False)
+                pids.extend(started(project, run, {"ra", "rb"}, 1))
+                self.assertIs(signal.getsignal(signal.SIGTERM), engine_session._terminate)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return future
+
+        began = time.monotonic()
+        try:
+            with project.inside(), mock.patch.object(engine_session, "_closed", False), \
+                    mock.patch.object(ThreadPoolExecutor, "submit", submit):
+                with self.assertRaises(SystemExit) as stopped:
+                    engine_shell.deliver(1517, directory)
+            self.assertEqual(stopped.exception.code, 143)
+            self.assertLess(time.monotonic() - began, 30)
+            for pid in pids:
+                self.assertFalse(alive(pid), pid)
+        finally:
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_a_member_that_cannot_be_started_is_a_fault_after_the_started_member_is_drained(self):
+        project = EngineProject(self)
+        real_submit = ThreadPoolExecutor.submit
+        calls: list[int] = []
+
+        def submit(pool, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+            return real_submit(pool, *args, **kwargs)
+
+        with project.inside(), mock.patch.object(ThreadPoolExecutor, "submit", submit):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, project.procedures(GROUP("standin-stamp")))
+        self.assertEqual(len(stamps(project)), 1)
+
+    def test_a_claim_renewed_as_the_engine_ends_dispatches_no_mutating_step(self):
+        project = EngineProject(self)
+        project.answer({"stdout": '{"verdict":"renewed"}', "exit": 0})
+        real_run = engine_commands.run
+
+        def run(*args, **kwargs):
+            ran = real_run(*args, **kwargs)
+            if kwargs.get("timeout") is not None:
+                engine_session._closed = True  # what `reaping` does on a SIGTERM
+            return ran
+
+        procedures = project.procedures(
+            [step("work", "standin-stamp", "done", mutates=True)],
+            keep_alive={"command": "standin-keep-alive", "in": ["run.issue"]})
+        with project.inside(), mock.patch.object(engine_session, "_closed", False), \
+                mock.patch.object(engine_commands, "run", run):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        self.assertEqual(project.renewal_calls(), [{"argv": ["1517"]}])
+        self.assertFalse(project.stamps.exists())
+        (root,) = roots(project)
+        self.assertEqual([e for e in project.events(root)
+                          if e["event"] in ("step_entered", "process_started")], [])
+
+    def test_a_call_admits_no_item_once_the_engine_is_ending(self):
+        project = EngineProject(self)
+        real_walk = engine_shell._walk
+
+        def walk(run_dir, table):
+            outcome = real_walk(run_dir, table)
+            if "parent" in json.loads((run_dir / "run.json").read_text(encoding="utf-8")):
+                engine_session._closed = True  # another thread's `reaping` closed the registry
+            return outcome
+
+        procedures = project.procedures(FAN("standin-items", 1), children=fan_children())
+        with project.inside(), mock.patch.object(engine_session, "_closed", False), \
+                mock.patch.object(engine_shell, "_walk", walk):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        (root,) = roots(project)
+        self.assertEqual(len([e for e in project.events(root) if e["event"] == "call"]), 1)
+        self.assertEqual(len(children_of(project)), 1)
+
+    def test_a_call_event_that_failed_only_at_its_fsync_keeps_the_child_it_names(self):
+        project = EngineProject(self)
+        real_append = engine_ledger.append_event
+
+        def append(run_dir, event):
+            real_append(run_dir, event)
+            if event["event"] == "call" and event["index"] == 0:
+                raise OSError("fsync failed after the event was written")
+
+        procedures = project.procedures(FAN("standin-items", 1), children=fan_children())
+        with project.inside(), mock.patch.object(engine_ledger, "append_event", append):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        (root,) = roots(project)
+        named = {e["child"] for e in project.events(root) if e["event"] == "call"}
+        self.assertEqual(len(named), 1)
+        self.assertEqual({kid.name for kid in children_of(project)}, named)
 
 
 class HandlerTest(unittest.TestCase):

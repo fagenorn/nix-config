@@ -454,6 +454,8 @@ CASES = [
          [("toy", "children", "each_not_a_list")]),
     Case("each_over_a_decide_verdict", editing("toy", _each_over("tally.verdict")),
          [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_command_string", editing("toy", _each_over("scope.range")),
+         [("toy", "children", "each_not_a_list")]),
     Case("each_over_a_missing_member", editing("toy", _each_over("draft.missing")),
          [("toy", "children", "unknown_member")]),
     Case("group_pass_unmapped",
@@ -596,6 +598,22 @@ class DataFlowTest(unittest.TestCase):
     def test_a_member_reads_what_precedes_its_group(self):
         directory = broken_copy(editing(
             "toy", _set(lambda toy: step(toy, "review-a"), "in", ["draft.summary", "run.issue"])))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+
+    def test_an_each_over_the_list_a_platform_command_publishes_is_accepted(self):
+        directory = broken_copy(editing("toy", _each_over("scope.files")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_an_each_over_a_reply_member_typed_as_an_array_only_list_is_accepted(self):
+        def array_only(schema: dict) -> None:
+            schema["properties"]["items"]["type"] = ["array"]
+
+        directory = broken_copy(_editing_draft_reply(array_only))
         code, out, _ = run_check("--procedures", str(directory))
         self.assertEqual((code, out), (0, compact(
             {"procedures": ["toy", "toy-child"], "verdict": "ok"})))

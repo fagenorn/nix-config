@@ -63,9 +63,10 @@ schema resolved and `m` is not in its `properties` or its `required` list, since
 consumed; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
 declares no schema and is not member-checked), `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
 its `in` paths; skipped when the prompt is missing) and `each_not_a_list` (a `call` step's `each` path that resolved with
-no refusal above and reads a value that is not a list: a run input, a decide step's `verdict`, or an agent reply member
-whose property schema has no `"type": "array"`; a path that did not resolve keeps its own refusal alone, and a producer
-of any other kind, or an agent whose reply did not resolve, declares no schema and is not list-checked)."""
+no refusal above and reads a value that is not a list: a run input, a decide step's `verdict`, an agent reply member
+whose property schema has no `"type": "array"` (or `["array"]`), or a member of a platform command's output that
+`PLATFORM_LISTS` does not name; a path that did not resolve keeps its own refusal alone, and a producer of any other
+kind, a project command, or an agent whose reply did not resolve, declares no schema and is not list-checked)."""
 
 from __future__ import annotations
 
@@ -100,6 +101,12 @@ INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 PATH_RE = re.compile(r"^([a-z][a-z0-9-]*)\.([a-z][a-z0-9_]*)$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
+
+# The members of each platform command's JSON output that are lists; every other member is not one.
+PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
+    "diff-scope": frozenset({"files"}),
+    "forge-claim": frozenset(),
+}
 
 COMMON_REQUIRED = ("id", "stage", "kind")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
@@ -514,7 +521,7 @@ def _reply_schema(path: Path, outcome_from: str) -> _Reply | str:
     if EXHAUSTED in enum:
         return f"properties.{outcome_from} enum names {EXHAUSTED!r}, which is reserved."
     lists = frozenset(name for name, schema in properties.items()
-                      if isinstance(schema, dict) and schema.get("type") == "array")
+                      if isinstance(schema, dict) and schema.get("type") in ("array", ["array"]))
     return _Reply(frozenset(properties), frozenset(required), tuple(enum), lists)
 
 
@@ -800,6 +807,8 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
         kind = by_id[producer]["kind"] if producer in by_id else None
         if kind == "decide":
             return False
+        if kind == "command" and by_id[producer]["command"] in PLATFORM_LISTS:
+            return member in PLATFORM_LISTS[by_id[producer]["command"]]
         known = resolved.steps.get(producer)
         if kind == "agent" and known is not None and known.reply_lists is not None:
             return member in known.reply_lists

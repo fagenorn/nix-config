@@ -370,7 +370,7 @@ def _release(held: list[int]) -> None:
 
 
 class _Admission:
-    """Hands out the indexes of a call's items in list order, none once a fault is noted."""
+    """Hands out the indexes of a call's items in list order, none once a fault is noted or the engine ends."""
 
     def __init__(self, count: int) -> None:
         self._count = count
@@ -380,7 +380,7 @@ class _Admission:
 
     def take(self) -> int | None:
         with self._lock:
-            if self._stopped or self._next >= self._count:
+            if self._stopped or self._next >= self._count or engine_session.ending():
                 return None
             index = self._next
             self._next += 1
@@ -433,9 +433,7 @@ def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
             return _stop(run_dir, step, action.name, action.need,
                          f"The {name} procedure stopped at step {step} with "
                          f"{action.name}, which needs {action.need}.")
-        if engine_session.ending():
-            raise Fault(f"run {run_dir.name} stops before step {action.step}: "
-                        "the engine is ending")
+        _refuse_when_ending(run_dir, action.step)
         if isinstance(action, engine_core.StartSession):
             _visit_session(run_dir, table.root, steps[action.step], action)
             ran += 1
@@ -462,6 +460,12 @@ def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
                         "which the engine does not run yet")
 
 
+def _refuse_when_ending(run_dir: Path, step: str) -> None:
+    """A fault when the engine is ending: nothing is entered or dispatched after that."""
+    if engine_session.ending():
+        raise Fault(f"run {run_dir.name} stops before step {step}: the engine is ending")
+
+
 def _stop(run_dir: Path, step: str, name: str, need: str, detail: str) -> tuple[int, dict]:
     engine_ledger.append_event(run_dir, {"event": "stop_reached", "at": _now(), "step": step,
                                          "stop": name, "need": need})
@@ -481,6 +485,7 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
             "event": "keep_alive_ran", "at": _now(), "step": step,
             "visit": visit, "attempt": attempt, "verdict": verdict})
         if verdict == "renewed":
+            _refuse_when_ending(run_dir, step)  # the engine may have begun ending during the renewal
             return None
         if verdict != "error" or ran.result.get("transient") is not True:
             break
@@ -548,12 +553,34 @@ def _group(run_dir: Path, table: CommandTable, steps: dict[str, dict],
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(),
                                          "step": action.step, "visit": action.visit,
                                          "stage": steps[action.step]["stage"]})
-    with engine_session.reaping():
-        with ThreadPoolExecutor(max_workers=len(action.members)) as pool:
-            futures = [pool.submit(_member, run_dir, table, steps[member.step], member)
-                       for member in action.members]
+    pool = ThreadPoolExecutor(max_workers=len(action.members))
+    futures = []
+    try:
+        with engine_session.reaping():
+            try:
+                try:
+                    for member in action.members:
+                        futures.append(pool.submit(_member, run_dir, table,
+                                                   steps[member.step], member))
+                except RuntimeError as error:
+                    raise Fault(f"step {action.step} could not start a member: {error}") from error
+                pool.shutdown(wait=True)
+            except Exception:
+                pool.shutdown(wait=True)  # drain the started members, still under `reaping`
+                raise
+    finally:
+        pool.shutdown(wait=True)  # after a stop `reaping` has killed the sessions: this returns
     for future in futures:
         future.result()
+
+
+def _names_child(run_dir: Path, child: str) -> bool:
+    """Whether the run's readable events name `child`; true too when they cannot be read."""
+    try:
+        return any(event["event"] == "call" and event["child"] == child
+                   for event in engine_ledger.replay(run_dir / "events.jsonl"))
+    except engine_ledger.LedgerError:
+        return True
 
 
 def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
@@ -580,7 +607,9 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
                 "child": child_dir.name, "index": index, "items": count})
         except BaseException:
             # Published but never named by the parent and never walked: leave no unnamed child.
-            shutil.rmtree(child_dir, ignore_errors=True)
+            # A write that failed only at its fsync did name it: that child stays.
+            if not _names_child(run_dir, child_dir.name):
+                shutil.rmtree(child_dir, ignore_errors=True)
             raise
         _, line = _walk(child_dir, table)
         return {"end": line["end"], "item": item, "run": child_dir.name}
@@ -611,27 +640,36 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
 
     threads = [threading.Thread(target=worker) for _ in range(min(action.parallel, len(items)))]
     running: list[threading.Thread] = []
-    with engine_session.reaping():
-        try:
+
+    def drain() -> None:
+        for thread in running:
+            thread.join()
+
+    try:
+        with engine_session.reaping():
             try:
-                for thread in threads:
-                    thread.start()
-                    running.append(thread)
-            except RuntimeError as error:
-                raise Fault(f"step {action.step} could not start a child worker: "
-                            f"{error}") from error
-        except BaseException:
-            admission.fail()
-            raise
-        finally:
-            try:
-                for thread in running:
-                    thread.join()
-            except BaseException:
+                try:
+                    for thread in threads:
+                        thread.start()
+                        running.append(thread)
+                except RuntimeError as error:
+                    raise Fault(f"step {action.step} could not start a child worker: "
+                                f"{error}") from error
+                drain()
+            except Exception:
                 admission.fail()
+                drain()  # the started workers finish, still under `reaping`
                 raise
+    except BaseException:
+        admission.fail()
+        raise
+    finally:
+        drain()  # after a stop `reaping` has killed the sessions: this returns
     if errors:
         raise errors[min(errors)]
+    if len(entries) != len(items):
+        raise Fault(f"step {action.step} stops before its items are all run: "
+                    "the engine is ending")
     ends = [entries[index] for index in range(len(items))]
     engine_ledger.store_result(run_dir, step=action.step, visit=action.visit,
                                result={"items": ends}, at=_now(),

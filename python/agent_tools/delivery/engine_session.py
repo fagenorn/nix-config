@@ -320,6 +320,19 @@ def ending() -> bool:
         return _closed
 
 
+def _reap() -> None:
+    """Close the registry and kill every registered session's process group."""
+    global _closed
+    with _registry:
+        _closed = True
+        live = list(_live)
+    for pid in live:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 @contextlib.contextmanager
 def reaping():
     """Turn SIGTERM into `SystemExit` while the main thread waits, and reap every live session.
@@ -329,7 +342,6 @@ def reaping():
     closes nothing, and off the main thread the manager does nothing. The handler it replaced
     is restored on every exit path.
     """
-    global _closed
     try:
         previous = signal.signal(signal.SIGTERM, _terminate)
         installed = True
@@ -341,14 +353,7 @@ def reaping():
         raise
     except BaseException:
         if threading.current_thread() is threading.main_thread():
-            with _registry:
-                _closed = True
-                live = list(_live)
-            for pid in live:
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            _reap()
         raise
     finally:
         if installed:
@@ -359,28 +364,26 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
            on_start: Callable[[int], None]) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
     started = time.monotonic()
-    with _registry:
-        if _closed:
-            return Launched(NOT_STARTED, b"", b"the engine is ending\n",
-                            time.monotonic() - started)
     try:
         previous = signal.signal(signal.SIGTERM, _terminate)
     except ValueError:  # not the main thread: no handler can be installed
         previous = None
     process = None
     try:
-        try:
-            process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       start_new_session=True)
-        except OSError as error:
-            return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
-                            time.monotonic() - started)
+        # The registry stays locked from the check to the registration, so a close of the registry
+        # either comes first (nothing starts) or finds this session registered and kills it.
         with _registry:
             if _closed:
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                _live.add(process.pid)
+                return Launched(NOT_STARTED, b"", b"the engine is ending\n",
+                                time.monotonic() - started)
+            try:
+                process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           start_new_session=True)
+            except OSError as error:
+                return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
+                                time.monotonic() - started)
+            _live.add(process.pid)
         on_start(process.pid)
         stdout, stderr = process.communicate(prompt.encode("utf-8"))
     except BaseException:
