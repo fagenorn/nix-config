@@ -42,7 +42,9 @@ the same way. The parent records a `call` event for each child before that child
 walks (a child whose event cannot be recorded is removed unwalked), stores `{"items": [{"end", "item", "run"}, ...]}`
 and takes `engine_core.call_outcome` of the ends. A fault in any child faults
 the parent with no call outcome. `engine status` reads the root run, never a
-child.
+child. A group's and a call's wait runs under `engine_session.reaping`, so a SIGTERM ends
+every live session, admits no further child, starts no further step in any walk and exits
+143 once the running steps end.
 
 Before each visit of a `mutates: true` command step, and before each visit of a group with a
 `mutates: true` member (once for the group, recorded at the group's step), in a procedure naming a `keep_alive`,
@@ -431,6 +433,9 @@ def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
             return _stop(run_dir, step, action.name, action.need,
                          f"The {name} procedure stopped at step {step} with "
                          f"{action.name}, which needs {action.need}.")
+        if engine_session.ending():
+            raise Fault(f"run {run_dir.name} stops before step {action.step}: "
+                        "the engine is ending")
         if isinstance(action, engine_core.StartSession):
             _visit_session(run_dir, table.root, steps[action.step], action)
             ran += 1
@@ -526,12 +531,15 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
 
 def _member(run_dir: Path, table: CommandTable, step: dict,
             action: engine_core.RunCommand | engine_core.StartSession) -> None:
-    if not isinstance(action, engine_core.RunCommand):
-        raise Fault(f"step {action.step} needs a session, which the engine does not run yet")
-    ran = _run_command(run_dir, table, step, action)
-    if ran.outcome == engine_core.EXHAUSTED:
-        raise Fault(f"step {action.step} reported the reserved outcome {ran.outcome}")
-    _graded(run_dir, action.step, action.visit, ran.outcome)
+    if isinstance(action, engine_core.StartSession):
+        outcome = _run_session(run_dir, table.root, step, action)
+        if not isinstance(outcome, str) or outcome == engine_core.EXHAUSTED:
+            raise Fault(f"step {action.step} has no mapping for the outcome {outcome}")
+    else:
+        outcome = _run_command(run_dir, table, step, action).outcome
+        if outcome == engine_core.EXHAUSTED:
+            raise Fault(f"step {action.step} reported the reserved outcome {outcome}")
+    _graded(run_dir, action.step, action.visit, outcome)
 
 
 def _group(run_dir: Path, table: CommandTable, steps: dict[str, dict],
@@ -540,9 +548,10 @@ def _group(run_dir: Path, table: CommandTable, steps: dict[str, dict],
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(),
                                          "step": action.step, "visit": action.visit,
                                          "stage": steps[action.step]["stage"]})
-    with ThreadPoolExecutor(max_workers=len(action.members)) as pool:
-        futures = [pool.submit(_member, run_dir, table, steps[member.step], member)
-                   for member in action.members]
+    with engine_session.reaping():
+        with ThreadPoolExecutor(max_workers=len(action.members)) as pool:
+            futures = [pool.submit(_member, run_dir, table, steps[member.step], member)
+                       for member in action.members]
     for future in futures:
         future.result()
 
@@ -602,16 +611,25 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
 
     threads = [threading.Thread(target=worker) for _ in range(min(action.parallel, len(items)))]
     running: list[threading.Thread] = []
-    try:
-        for thread in threads:
-            thread.start()
-            running.append(thread)
-    except RuntimeError as error:
-        admission.fail()
-        raise Fault(f"step {action.step} could not start a child worker: {error}") from error
-    finally:
-        for thread in running:
-            thread.join()
+    with engine_session.reaping():
+        try:
+            try:
+                for thread in threads:
+                    thread.start()
+                    running.append(thread)
+            except RuntimeError as error:
+                raise Fault(f"step {action.step} could not start a child worker: "
+                            f"{error}") from error
+        except BaseException:
+            admission.fail()
+            raise
+        finally:
+            try:
+                for thread in running:
+                    thread.join()
+            except BaseException:
+                admission.fail()
+                raise
     if errors:
         raise errors[min(errors)]
     ends = [entries[index] for index in range(len(items))]
@@ -628,8 +646,9 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
                                          "outcome": outcome, "to": step["on"][outcome]})
 
 
-def _visit_session(run_dir: Path, root: str, step: dict,
-                   action: engine_core.StartSession) -> None:
+def _run_session(run_dir: Path, root: str, step: dict,
+                 action: engine_core.StartSession) -> object:
+    """Run one agent step's session and store its reply; the reply's `outcome_from` member."""
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
                                          "visit": visit, "stage": step["stage"]})
@@ -679,7 +698,13 @@ def _visit_session(run_dir: Path, root: str, step: dict,
     problem = engine_session.reply_problem(schema, reply)
     if problem is not None:
         raise Fault(f"step {name} gave a reply that breaks its schema: {problem}")
-    outcome = reply.get(step["outcome_from"])
+    return reply.get(step["outcome_from"])
+
+
+def _visit_session(run_dir: Path, root: str, step: dict,
+                   action: engine_core.StartSession) -> None:
+    name, visit = action.step, action.visit
+    outcome = _run_session(run_dir, root, step, action)
     if (not isinstance(outcome, str) or outcome == engine_core.EXHAUSTED
             or outcome not in step["on"]):
         raise Fault(f"step {name} has no mapping for the outcome {outcome}")

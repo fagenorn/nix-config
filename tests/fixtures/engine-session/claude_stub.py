@@ -9,12 +9,18 @@ exits `<exit>`.
 `announced` is true when some `$HOME/.agents/state/engine/runs/*/events.jsonl`
 holds a `session_starting` event whose `session` is the argv word after
 `--session-id`: the engine recorded the session before this process read it.
+
+`CLAUDE_STUB_HOLD` (seconds, default 0) is slept after the log line is appended and before
+stdout is written. With `CLAUDE_STUB_STAMPS` naming a file, the stub appends one line
+`{"end", "pid", "start"}` (`time.time()` before and after the hold, `os.getpid()`) to it in a
+single write before printing. Without them it behaves as before.
 """
 
 import glob
 import json
 import os
 import sys
+import time
 
 
 def announced(argv: list[str]) -> bool:
@@ -40,6 +46,14 @@ def main(argv: list[str]) -> int:
               "stdin": sys.stdin.read()}
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    began = time.time()
+    time.sleep(float(os.environ.get("CLAUDE_STUB_HOLD", "0")))
+    stamps = os.environ.get("CLAUDE_STUB_STAMPS")
+    if stamps:
+        line = json.dumps({"end": time.time(), "pid": os.getpid(), "start": began},
+                          sort_keys=True, separators=(",", ":")) + "\n"
+        with open(stamps, "a", encoding="utf-8") as handle:
+            handle.write(line)
     with open(canned, "rb") as handle:
         sys.stdout.buffer.write(handle.read())
     sys.stdout.buffer.flush()

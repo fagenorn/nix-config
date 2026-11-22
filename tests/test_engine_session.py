@@ -12,8 +12,10 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -477,6 +479,56 @@ def frontmatter(text: str, field: str) -> str | None:
 
 def names(value: str) -> str:
     return ",".join(part.strip() for part in value.split(","))
+
+
+class ReapingTest(unittest.TestCase):
+    def test_only_a_stop_in_the_main_thread_closes_the_session_registry(self):
+        script = textwrap.dedent("""
+            import json, sys, threading
+            from agent_tools.delivery import engine_session as session
+
+            codes, ending = [], []
+
+            def run():
+                ending.append(session.ending())
+                codes.append(session.launch([sys.executable, "-c", "pass"], ".", "",
+                                            on_start=lambda pid: None).exit_code)
+
+            try:
+                with session.reaping():
+                    raise ValueError("an ordinary exception")
+            except ValueError:
+                pass
+            run()
+
+            def worker():
+                try:
+                    with session.reaping():
+                        raise KeyboardInterrupt
+                except KeyboardInterrupt:
+                    pass
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            thread.join()
+            run()
+            try:
+                with session.reaping():
+                    raise KeyboardInterrupt
+            except KeyboardInterrupt:
+                pass
+            run()
+            run()
+            print(json.dumps({"codes": codes, "ending": ending}))
+        """)
+
+        ran = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                             env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")},
+                             timeout=60)
+
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(json.loads(ran.stdout),
+                         {"codes": [0, 0, 127, 127], "ending": [False, False, True, True]})
 
 
 class DeliverSessionTest(unittest.TestCase):

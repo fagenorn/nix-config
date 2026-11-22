@@ -46,8 +46,12 @@ fault, never a transition.
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
-other exception both do. A launcher that cannot start gives exit 127 and the
-`OSError` text as its stderr. Its stderr is
+other exception both do. A session started off the main thread (a group member's, a
+child walk's) cannot install that handler, so it is registered from its spawn until it is
+reaped, and `reaping` (held by the main thread while it waits for such sessions) turns a
+SIGTERM or any other stop in the main thread into a kill of every registered group and closes
+the registry: after that `launch` starts no session and `ending()` is true. A launcher that
+cannot start gives exit 127 and the `OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line.
 
@@ -56,12 +60,14 @@ This module imports no `engine_core`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import re
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -303,10 +309,60 @@ def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+_registry = threading.Lock()
+_live: set[int] = set()
+_closed = False
+
+
+def ending() -> bool:
+    """True once `reaping` has closed the registry: no session starts after that."""
+    with _registry:
+        return _closed
+
+
+@contextlib.contextmanager
+def reaping():
+    """Turn SIGTERM into `SystemExit` while the main thread waits, and reap every live session.
+
+    A stop that is not an `Exception` leaving the block in the main thread closes the registry
+    and kills every registered session's process group before it propagates; an `Exception`
+    closes nothing, and off the main thread the manager does nothing. The handler it replaced
+    is restored on every exit path.
+    """
+    global _closed
+    try:
+        previous = signal.signal(signal.SIGTERM, _terminate)
+        installed = True
+    except ValueError:  # not the main thread: no handler can be installed
+        previous, installed = None, False
+    try:
+        yield
+    except Exception:
+        raise
+    except BaseException:
+        if threading.current_thread() is threading.main_thread():
+            with _registry:
+                _closed = True
+                live = list(_live)
+            for pid in live:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        raise
+    finally:
+        if installed:
+            signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+
+
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
            on_start: Callable[[int], None]) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
     started = time.monotonic()
+    with _registry:
+        if _closed:
+            return Launched(NOT_STARTED, b"", b"the engine is ending\n",
+                            time.monotonic() - started)
     try:
         previous = signal.signal(signal.SIGTERM, _terminate)
     except ValueError:  # not the main thread: no handler can be installed
@@ -320,6 +376,11 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         except OSError as error:
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)
+        with _registry:
+            if _closed:
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                _live.add(process.pid)
         on_start(process.pid)
         stdout, stderr = process.communicate(prompt.encode("utf-8"))
     except BaseException:
@@ -331,6 +392,9 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
             process.communicate()
         raise
     finally:
+        if process is not None:
+            with _registry:
+                _live.discard(process.pid)
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
     return Launched(process.returncode, stdout, stderr, time.monotonic() - started)
