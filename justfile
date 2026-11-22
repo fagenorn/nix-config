@@ -133,6 +133,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_host_readiness.py \
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
+    home/common/agent-skills/tests/test_conformance_suppressions.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_adopt_project.py \
     home/common/agent-skills/tests/test_adopt_migrate.py \
@@ -236,6 +237,7 @@ agent-workflow-tests *args:
     tests/test_standards_lint.py \
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
+    tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \
