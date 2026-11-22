@@ -136,6 +136,29 @@ member. The flag with `--contract-draft` is refused
 `adopt.environment.drafted`, and a COMMAND that cannot be read as a command
 `adopt.environment.unreadable`, each exit 2 with nothing stored.
 
+A repository whose base commit has a `devenv.lock` gets three more writes
+(#1454), each computed by `adopt_conformance` from the base commit's bytes and
+never from the working tree: the lock gains the platform's `agent-platform` node
+at the revision the running platform was built from, `devenv.yaml` declares the
+same input, and the contract gains the `conformance_workflow` projection entry,
+which regenerates `.github/workflows/conformance.yaml`; a tracked
+`.github/branch-protection.json` also gains the `Conformance` check. The plan
+publishes the lock entry, the workflow and the required check on the integration
+branch as `plan.conformance` (a member only a plan that makes the writes has),
+which is the thirteenth input of `plan_id` and which the evidence record
+repeats. The ready gate `conformance-plannable` keeps the plan `draft` with the
+`adopt.conformance.*` repair id of the first cause when the repository cannot
+take them: no installed revision, an unnamed tracker, an `origin` that is not
+the tracker's slug, a projection of another kind holding the workflow's id or
+target, a lock or `devenv.yaml` that cannot be edited, a kept lock entry that is
+not the installed revision, a protection file that cannot take the check, or a
+contract the resolver refuses with the workflow's entry in it. A repository
+without a `devenv.lock`, and the platform's own tree, are planned exactly as
+before, in plan id, operations and evidence record. Conformance work still to do
+counts as pending work, so such a repository is never routed `no_change`, and
+a path reference an answer edits in `devenv.yaml` shares the declaration's one
+write.
+
 A schema-1 contract is routed as `migration_required` with the
 `bindings-deploy.retire` step (issue 579 P11); `resolve_project` states the
 schema that refuses it.
@@ -213,9 +236,9 @@ import subprocess
 import sys
 import tempfile
 
-from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
-                                          adopt_migrate, adopt_planning, adopt_references,
-                                          adopt_verify, agent_platform)
+from agent_tools.project_contract import (adopt_apply, adopt_conformance, adopt_inspection,
+                                          adopt_links, adopt_migrate, adopt_planning,
+                                          adopt_references, adopt_verify, agent_platform)
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.system.siblings import sibling_argv
 
@@ -408,9 +431,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         adopt_planning.generated_targets(contract_source))
     if draft is not None:
         written = adopt_inspection.authored_bytes(
-            adopt_planning.amended_contract(
-                draft, adopt_planning.derived_interval(
-                    manifest["platform_version"]), found))
+            adopt_planning.final_contract(
+                draft, manifest, found, None, conformance=False))
         projections_drift = resolve_draft(root, inventory.base_revision,
                                           written)
         contract_resolves, repair_id, payload = True, None, None
@@ -474,18 +496,47 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     amendment = adopt_planning.commit_environment_amendment(
         None if draft is not None else contract_source, environment,
         adopt_planning.current_schema(manifest))
+    conformance = adopt_conformance.plan_conformance(
+        root, inventory.base_revision, contract_source,
+        {path: after.encode("utf-8")
+         for path, (_, after) in reference_files.items()
+         if path in adopt_conformance.CONFORMANCE_TARGETS})
+    if conformance.member is not None and conformance.projection:
+        # The bytes `build_operations` writes, resolved before the plan can be
+        # `ready`: a contract the resolver refuses with the workflow's entry in
+        # it is a repair of this plan, not a failure of `apply`.
+        try:
+            resolve_draft(root, inventory.base_revision,
+                          adopt_inspection.authored_bytes(adopt_planning.final_contract(
+                              contract_source, manifest, found, amendment,
+                              conformance=True)))
+        except adopt_inspection.AdoptError:
+            conformance = conformance._replace(
+                repair_id=adopt_conformance.CONTRACT_REFUSED, member=None,
+                contents={}, before={}, projection=False)
+    # One in-place write per file: a file an answered path reference also edits
+    # takes the declaration into that write (P15).
+    for target in sorted(set(reference_files) & set(conformance.contents)):
+        reference_files[target] = (reference_files[target][0],
+                                   conformance.contents[target].decode("utf-8"))
+    conformance = conformance._replace(
+        contents={path: data for path, data in conformance.contents.items()
+                  if path not in reference_files},
+        before={path: data for path, data in conformance.before.items()
+                if path not in reference_files})
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
         decisions["answered"], links.summary, path_references,
         reference_policies, reference_formatting, draft,
-        amendment[1] if amendment else None)
+        amendment[1] if amendment else None, conformance.member)
 
     ready_gates = adopt_planning.evaluate_ready_gates(
         root, found, contract_source, contract_resolves, unfixable, untracked,
-        decisions, links.summary)
+        decisions, links.summary, conformance.repair_id)
     head, tail, contents = adopt_planning.build_operations(
         root, found, manifest, contract_source, plan_id, links,
-        reference_files, drafted=draft is not None, environment=amendment)
+        reference_files, drafted=draft is not None, environment=amendment,
+        conformance=conformance)
 
     agent_surface = any(
         entry["lifecycle_class"] != "runtime-residue"
@@ -499,7 +550,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     substantive = [op for op in head + tail
                    if op["op"] != "regenerate-projection"]
     pending_work = bool(substantive) or projections_drift or any(
-        entry["action"] == "needs-decision" for entry in evidence)
+        entry["action"] == "needs-decision" for entry in evidence
+    ) or conformance.outstanding
 
     # A draft is not the checkout's own contract: the checkout has none, so
     # the outcome is routed on the legacy surface alone.
@@ -515,7 +567,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         bookkeeping, written = adopt_planning.bookkeeping_operations(
             found, plan_id, outcome, inventory.base_revision, platform_block,
             decisions, ready_gates, links.summary, path_references,
-            reference_policies, reference_formatting)
+            reference_policies, reference_formatting, conformance)
         contents.update(written)
         changes = head + bookkeeping + tail
         adopt_planning.check_markdown_writes(changes, set(links.files))
@@ -580,9 +632,13 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         document["plan"]["contract_draft"] = draft
     if amendment is not None:
         document["plan"]["commit_environment"] = amendment[1]
+    if conformance.member is not None:
+        document["plan"]["conformance"] = conformance.member
 
-    return Composition(document, contents, adopt_inspection.dirty_targets(
-        found))
+    overlap = adopt_inspection.dirty_targets(found)
+    if conformance.planned:
+        overlap = sorted(set(overlap).union(adopt_conformance.CONFORMANCE_TARGETS))
+    return Composition(document, contents, overlap)
 
 
 def command_plan(args: argparse.Namespace) -> int:
@@ -698,6 +754,14 @@ def emit_human(document: dict) -> int:
         f"extended {count('extend')}, rewritten {count('rewrite')}, "
         f"retained {count('retain')}, open {count(None)}",
     ]
+    member = plan.get("conformance")
+    if member is not None:
+        check = member["required_check"]
+        lines.insert(lines.index(f"changes:  {len(document['changes'])} operations") + 1, (
+            f"platform lock: {member['lock']['input']} at "
+            f"{member['revision']['rev']} ({member['lock']['path']})"))
+        lines.insert(lines.index(f"changes:  {len(document['changes'])} operations") + 2, (
+            f"required check: {check['context']} on {check['branch']} of {check['repo']}"))
     for row in document["reference_policies"]:
         lines.append(
             f"policy {row['subject']}: {row['files']} files, "

@@ -23,6 +23,11 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
 from agent_tools.project_contract import adopt_links, adopt_references, agent_platform
+from agent_tools.project_contract.adopt_conformance import (
+    ConformancePlan,
+    NOT_PLANNED,
+    PROJECTION_ENTRY,
+)
 from agent_tools.system import semver
 from agent_tools.project_contract.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
@@ -67,6 +72,8 @@ from agent_tools.project_contract.adopt_inspection import (
 from agent_tools.project_contract.adopt_links import LinkRewrites
 from agent_tools.project_contract.adopt_references import References
 from agent_tools.project_contract.derived_values import normalize_remote_url
+
+CONFORMANCE_GATE = "conformance-plannable"
 
 # --------------------------------------------------------------------------
 # Project identity (D35)
@@ -547,18 +554,25 @@ def commit_environment_amendment(contract_source: dict | None,
 
 
 def amended_contract(source: dict, interval: dict, found: Candidates,
-                     environment: tuple[str, list[str]] | None = None
-                     ) -> dict:
+                     environment: tuple[str, list[str]] | None = None,
+                     conformance: bool = False) -> dict:
     """The contract this adoption would write: `platform` plus moved bindings.
 
     Nothing else is touched. The amendment is confined to the one member the
     platform requires, the path bindings whose authored values name a tree
-    this plan relocates and, when `environment` is given, the commit
+    this plan relocates, when `environment` is given, the commit
     environment binding with the command it names (an authored command of that
-    id is kept as it is), so a contract cannot acquire policy it did not
-    author.
+    id is kept as it is) and, when `conformance` is true, the conformance
+    workflow's projection entry (unless a `conformance_workflow` entry
+    exists), so a contract cannot acquire policy it did not author.
     """
     amended = json.loads(json.dumps(source))
+    if conformance:
+        projections = amended.setdefault("projections", [])
+        if isinstance(projections, list) and not any(
+                isinstance(entry, dict) and entry.get("kind") == "conformance_workflow"
+                for entry in projections):
+            projections.append(dict(PROJECTION_ENTRY))
     if "platform" not in amended:
         amended["platform"] = interval
     if environment is not None:
@@ -589,6 +603,18 @@ def amended_contract(source: dict, interval: dict, found: Candidates,
                                if isinstance(value, str) else value
                                for value in rejections]
     return amended
+
+
+def final_contract(contract_source: dict | None, manifest: dict, found: Candidates,
+                   environment: tuple[str, list[str]] | None, *,
+                   conformance: bool) -> dict | None:
+    """The contract the plan writes, or None when it has none to amend: the one
+    place `amended_contract` is called with the manifest's interval."""
+    if contract_source is None:
+        return None
+    return amended_contract(
+        contract_source, derived_interval(manifest["platform_version"]), found,
+        environment, conformance=conformance)
 
 
 def evidence_record_members(found: Candidates) -> list[tuple[str, str]]:
@@ -697,7 +723,8 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                      plan_id: str, links: LinkRewrites,
                      reference_files: dict[str, tuple[str, str]],
                      drafted: bool = False,
-                     environment: tuple[str, list[str]] | None = None
+                     environment: tuple[str, list[str]] | None = None,
+                     conformance: ConformancePlan = NOT_PLANNED
                      ) -> tuple[list[dict], list[dict], dict[str, bytes]]:
     """The typed operations either side of the adoption's own bookkeeping.
 
@@ -723,13 +750,16 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     adoption write", which is the duplication the bar forbids. `environment` is
     the `(command id, argv)` of a commit environment the contract amendment
     adds (`commit_environment_amendment`); a drafted contract takes none.
+    `conformance` is the plan's conformance work: its projection entry is part
+    of the contract written, and one `write-file` per remaining `contents`
+    target follows the `.gitignore` amendment, sorted by target.
     """
     operations: list[dict] = []
     contents: dict[str, bytes] = {}
 
-    interval = derived_interval(manifest["platform_version"])
-    amended = (amended_contract(contract_source, interval, found, environment)
-               if contract_source is not None else None)
+    amended = final_contract(
+        contract_source, manifest, found, environment,
+        conformance=conformance.member is not None and conformance.projection)
     # Compared as values, never as bytes: `contract_source` is the file this
     # parsed, so a contract the amendment leaves unchanged is no work however
     # it happens to be formatted, and only a real change is re-serialized.
@@ -778,6 +808,13 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                 "write-file", [GITIGNORE], [GITIGNORE],
                 sha256_hash(ignore_bytes), sha256_hash(amended_ignore)))
             contents[GITIGNORE] = amended_ignore
+
+    for target in sorted(conformance.contents):
+        operations.append(operation(
+            "write-file", [target], [target],
+            sha256_hash(conformance.before[target]),
+            sha256_hash(conformance.contents[target])))
+        contents[target] = conformance.contents[target]
 
     tail: list[dict] = []
 
@@ -851,8 +888,9 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                            link_rewrites: dict,
                            path_references: list[dict],
                            reference_policies: list[dict],
-                           reference_formatting: list[dict]) -> tuple[
-                               list[dict], dict[str, bytes]]:
+                           reference_formatting: list[dict],
+                           conformance: ConformancePlan = NOT_PLANNED
+                           ) -> tuple[list[dict], dict[str, bytes]]:
     """The path-migration map and the adoption evidence record, preceded by
     the deletion of every evidence record an earlier adoption committed.
 
@@ -865,6 +903,11 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
     candidate is a `delete-file`, which therefore needs the D16
     acknowledgement. Earlier migration maps stay, because they are the archive
     of paths that did move.
+
+    The record's `checks` omit the `conformance-plannable` row unless the
+    repository is planned for conformance, and the record carries the
+    `conformance` member only when the plan has one, so a repository without
+    the writes keeps its record's bytes.
 
     Returned with the same `{target: bytes}` map `build_operations` returns,
     for the same reason: `apply` writes the very bytes this hashed.
@@ -879,7 +922,7 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
         "moves": [{"old_path": old, "new_path": new}
                   for old, new in sorted(found.moves)],
     })
-    record_bytes = document_bytes({
+    record = {
         "schema_version": 1,
         "plan_id": plan_id,
         "outcome": outcome,
@@ -891,13 +934,17 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
         "sources": [{"path": entry["path"], "before": entry["fingerprint"],
                      "after": entry["target"]} for entry in found.entries],
         "checks": [{"id": gate["id"], "status": gate["status"]}
-                   for gate in ready_gates],
+                   for gate in ready_gates
+                   if conformance.planned or gate["id"] != CONFORMANCE_GATE],
         "link_rewrites": link_rewrites,
         "path_references": path_references,
         "reference_policies": reference_policies,
         "reference_formatting": reference_formatting,
         "path_migration_map": records["migration_map"],
-    })
+    }
+    if conformance.member is not None:
+        record["conformance"] = conformance.member
+    record_bytes = document_bytes(record)
     return [
         operation("delete-file", [path], [], object_hash(object_id), None)
         for path, object_id in superseded
@@ -1002,8 +1049,12 @@ def evaluate_ready_gates(root: Path, found: Candidates,
                          unfixable_pointers: list[str],
                          untracked: list[str],
                          decisions: dict,
-                         link_rewrites: dict) -> list[dict]:
-    """One entry per gate, in declaration order. All must pass for `ready`."""
+                         link_rewrites: dict,
+                         conformance_repair: str | None = None) -> list[dict]:
+    """One entry per gate, in declaration order. All must pass for `ready`.
+
+    `conformance_repair` is the repair id of the cause that keeps the plan from
+    taking the conformance writes, None when it can take them or has none."""
     gates: list[dict] = []
 
     if contract_source is None:
@@ -1069,6 +1120,10 @@ def evaluate_ready_gates(root: Path, found: Candidates,
     gates.append(gate_entry(
         READY_GATES[7], "failed" if unrewritable else "passed",
         "adopt.link.unrewritable" if unrewritable else None))
+
+    gates.append(gate_entry(
+        READY_GATES[8], "failed" if conformance_repair else "passed",
+        conformance_repair))
     return gates
 
 
@@ -1090,6 +1145,9 @@ GATE_MESSAGES = {
     "no-unrewritable-link":
         "a relative Markdown link into or out of a moved path cannot be "
         "rewritten to resolve to the same target",
+    CONFORMANCE_GATE:
+        "the repository has a devenv lock but cannot take the platform lock "
+        "entry, the conformance workflow and the required check",
 }
 
 
@@ -1111,16 +1169,19 @@ def compute_plan_id(project_id: str | None, base_revision: str,
                     reference_policies: list[dict],
                     reference_formatting: list[dict],
                     contract_draft: dict | None = None,
-                    commit_environment: list[str] | None = None) -> str:
+                    commit_environment: list[str] | None = None,
+                    conformance: dict | None = None) -> str:
     """D15's content address over exactly ten inputs, eleven with a drafted
-    contract (#1067), twelve with a commit environment (#1333): the project
-    id, the
+    contract (#1067), twelve with a commit environment (#1333), thirteen with
+    a conformance member (#1454): the project id, the
     base revision, the platform block, the evidence, the answered decisions,
     the schema version, the `link_rewrites` summary (#345), the
     `path_references` rows (#350), the `reference_policies` rows (#372) and
     the `reference_formatting` rows (#376), then the drafted contract exactly
     as given, which only a plan made with one has, then the commit
-    environment's argv, which only a plan that adds one has.
+    environment's argv, which only a plan that adds one has, then the
+    conformance member, which only a plan that locks the platform has, so the
+    revision the running platform would lock is part of what the plan names.
 
     The manifest's `migrations` array is deliberately *not* one of them (D36):
     it can only route toward `migration_required` or `repair_required`, and
@@ -1145,6 +1206,8 @@ def compute_plan_id(project_id: str | None, base_revision: str,
         source["contract_draft"] = contract_draft
     if commit_environment is not None:
         source["commit_environment"] = commit_environment
+    if conformance is not None:
+        source["conformance"] = conformance
     return "sha256:" + hashlib.sha256(canonical_json(source)).hexdigest()
 
 

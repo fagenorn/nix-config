@@ -1266,6 +1266,8 @@ def documented_plan_id(doc: object) -> str:
         source["contract_draft"] = doc["plan"]["contract_draft"]
     if "commit_environment" in doc["plan"]:
         source["commit_environment"] = doc["plan"]["commit_environment"]
+    if "conformance" in doc["plan"]:
+        source["conformance"] = doc["plan"]["conformance"]
     payload = json.dumps(source, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
@@ -1996,8 +1998,11 @@ class TypedOperationTest(AdoptTestCase):
             "sources": [{"path": entry["path"], "before": entry["fingerprint"],
                          "after": entry["target"]}
                         for entry in doc["evidence"]],
+            # A repository without a devenv lock is not planned for conformance,
+            # so its record keeps the checks it always had.
             "checks": [{"id": gate["id"], "status": gate["status"]}
-                       for gate in doc["verification"]["ready_gates"]],
+                       for gate in doc["verification"]["ready_gates"]
+                       if gate["id"] != "conformance-plannable"],
             "link_rewrites": doc["link_rewrites"],
             "path_references": doc["path_references"],
             "reference_policies": doc["reference_policies"],
@@ -2551,9 +2556,10 @@ class LinkRewritePlanTest(AdoptTestCase):
                         "target"},
             doc["plan"]["blockers"])
 
-    def test_the_link_gate_is_the_last_ready_gate(self):
-        self.assertEqual(adopt_inspection.READY_GATES[-2:],
-                         ("no-secret-path-in-moves", "no-unrewritable-link"))
+    def test_the_conformance_gate_is_the_last_ready_gate(self):
+        self.assertEqual(adopt_inspection.READY_GATES[-3:],
+                         ("no-secret-path-in-moves", "no-unrewritable-link",
+                          "conformance-plannable"))
 
     def test_a_markdown_file_any_other_operation_names_is_a_derivation_bug(self):
         op = adopt_planning.operation
@@ -3949,6 +3955,346 @@ class ProtectionFileTest(unittest.TestCase):
                     self.require(document)
                 self.assertEqual(caught.exception.repair_id,
                                  adopt_conformance.PROTECTION_FILE_UNREQUIRED)
+
+
+# --------------------------------------------------------------------------
+# The adoption plan's conformance writes
+# --------------------------------------------------------------------------
+
+CONFORMANCE_WORKFLOW = ".github/workflows/conformance.yaml"
+CONFORMANCE_MEMBER = {
+    "revision": FIXTURE_REVISION,
+    "lock": {"path": "devenv.lock", "input": "agent-platform", "node": "agent-platform"},
+    "workflow": CONFORMANCE_WORKFLOW,
+    "required_check": {"repo": "fixture/target", "branch": "main", "context": "Conformance"},
+}
+CONFORMANCE_GATE = "conformance-plannable"
+PLATFORM_MANIFEST_TREE_PATH = "home/common/agent-skills/platform-manifest.json"
+
+
+def install_platform_revision(home: Path, record: dict | None = FIXTURE_REVISION) -> None:
+    """The installed revision record under `home`, or none for None."""
+    target = home / ".agents" / "share" / "platform-revision.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    if record is not None:
+        target.write_text(json.dumps({"schema_version": 1, **record}), encoding="utf-8")
+
+
+def edit_contract(root: Path, mutate) -> None:
+    """Rewrite the committed contract through `mutate`; the caller commits."""
+    path = root / ".agents" / "project.json"
+    contract = json.loads(path.read_text("utf-8"))
+    mutate(contract)
+    path.write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+
+
+def write_devenv(root: Path, *, slug: str = "fixture/target", lock: str = DEVENV_LOCK,
+                 yaml: str = DEVENV_YAML) -> None:
+    """The two devenv files, the contract's tracker slug, in one commit."""
+    write(root, "devenv.lock", lock)
+    write(root, "devenv.yaml", yaml)
+
+    def name_slug(contract: dict) -> None:
+        old = contract["bindings"]["tracker"]["repo_slug"]
+        contract["bindings"]["tracker"]["repo_slug"] = slug
+        if isinstance(contract.get("release"), dict):
+            # The release profile names the repository the tracker names.
+            contract["release"] = json.loads(json.dumps(contract["release"]).replace(old, slug))
+
+    if (root / ".agents" / "project.json").exists():
+        edit_contract(root, name_slug)
+    commit(root, "add devenv")
+
+
+def locked_lock_text() -> str:
+    document = json.loads(DEVENV_LOCK)
+    document["nodes"]["agent-platform"] = locked_platform_node(FIXTURE_REVISION)
+    document["nodes"]["root"]["inputs"]["agent-platform"] = "agent-platform"
+    return json.dumps(document, indent=2, sort_keys=True)
+
+
+def conformance_failure(doc: object, repair_id: str) -> dict:
+    return {"id": CONFORMANCE_GATE, "status": "failed", "repair_id": repair_id}
+
+
+class ConformanceAdoptionPlanTest(AdoptTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        install_platform_revision(self.home)
+
+    def devenv_repo(self, **devenv: object) -> Path:
+        root = nix_config_shape_repo(self.home)
+        write_devenv(root, **devenv)
+        return root
+
+    def fresh_home(self) -> None:
+        """A plan id binds to one checkout, so a case with several has a home each."""
+        self.home = make_home()
+        install_platform_revision(self.home)
+
+    def gates(self, doc: object) -> list[dict]:
+        return [gate for gate in doc["verification"]["ready_gates"] if gate["id"] == CONFORMANCE_GATE]
+
+    def targets(self, doc: object, kind: str = "write-file") -> list[str]:
+        return [target for op in doc["changes"] if op["op"] == kind for target in op["targets"]]
+
+    def test_the_plan_lists_the_lock_entry_the_workflow_and_the_required_check_and_names_the_revision(self):
+        root = self.devenv_repo()
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+        self.assertEqual(doc["plan"]["conformance"], CONFORMANCE_MEMBER)
+        written = self.targets(doc)
+        self.assertIn("devenv.lock", written)
+        self.assertIn("devenv.yaml", written)
+        (yaml_op,) = [op for op in doc["changes"] if op["targets"] == ["devenv.yaml"]]
+        self.assertEqual(yaml_op["after"], sha256_hash(DEVENV_YAML_DECLARED.encode()))
+        (workflow,) = [op for op in doc["changes"]
+                       if op["op"] == "regenerate-projection" and op["targets"] == [CONFORMANCE_WORKFLOW]]
+        self.assertEqual(workflow["sources"], [".agents/project.json"])
+        code, human, err = run("plan", "--repo-root", str(root), "--format", "human", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("platform lock: agent-platform at " + "0f" * 20 + " (devenv.lock)", human)
+        self.assertIn("required check: Conformance on main of fixture/target", human)
+
+    def test_a_repository_without_a_devenv_lock_plans_none_of_the_three_writes(self):
+        doc = self.ready_plan(nix_config_shape_repo(self.home))
+        self.assertNotIn("conformance", doc["plan"])
+        self.assertEqual(sorted(doc["plan"]), PLAN_MEMBERS)
+        touched = [target for op in doc["changes"] for target in op["targets"]]
+        for path in ("devenv.lock", "devenv.yaml", ".github/branch-protection.json", CONFORMANCE_WORKFLOW):
+            self.assertNotIn(path, touched)
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+        self.assertEqual([gate["status"] for gate in self.gates(doc)], ["passed"])
+
+    def test_the_platforms_own_tree_plans_none_of_the_three_writes(self):
+        root = self.devenv_repo()
+        write(root, PLATFORM_MANIFEST_TREE_PATH, "{}\n")
+        commit(root, "the platform's own tree")
+        doc = self.ready_plan(root)
+        self.assertNotIn("conformance", doc["plan"])
+        touched = [target for op in doc["changes"] for target in op["targets"]]
+        for path in ("devenv.lock", "devenv.yaml", CONFORMANCE_WORKFLOW):
+            self.assertNotIn(path, touched)
+        self.assertEqual(self.gates(doc), [{"id": CONFORMANCE_GATE, "status": "passed", "repair_id": None}])
+
+    def test_inputs_come_from_the_base_commit(self):
+        with self.subTest("an untracked manifest"):
+            self.fresh_home()
+            root = self.devenv_repo()
+            write(root, PLATFORM_MANIFEST_TREE_PATH, "{}\n")
+            doc = self.ready_plan(root)
+            self.assertEqual(doc["plan"]["conformance"], CONFORMANCE_MEMBER)
+        with self.subTest("a staged deletion of the lock"):
+            self.fresh_home()
+            root = self.devenv_repo()
+            git(root, "rm", "--cached", "--quiet", "devenv.lock")
+            doc = self.ready_plan(root)
+            self.assertEqual(doc["plan"]["conformance"], CONFORMANCE_MEMBER)
+            with mock.patch.object(adopt_project.subprocess, "run", _resolver_in_process), \
+                    mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+                composed = adopt_project.compose_plan(root, json.loads(MANIFEST.read_text("utf-8")), [])
+            self.assertIn("devenv.lock", composed.overlap)
+        with self.subTest("a lock that is a symlink"):
+            self.fresh_home()
+            root = self.devenv_repo()
+            (root / "devenv.lock").unlink()
+            write(root, "real.lock", DEVENV_LOCK)
+            (root / "devenv.lock").symlink_to("real.lock")
+            commit(root, "link the lock")
+            doc = self.ready_plan(root)
+            self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.lock_unreadable")])
+
+    def test_a_kept_pin_must_be_the_installed_revision(self):
+        root = self.devenv_repo(lock=locked_lock_text(), yaml=DEVENV_YAML_DECLARED)
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+        self.assertEqual(doc["plan"]["conformance"]["revision"], FIXTURE_REVISION)
+        written = self.targets(doc)
+        self.assertNotIn("devenv.lock", written)
+        self.assertNotIn("devenv.yaml", written)
+        self.fresh_home()
+        stale = json.loads(locked_lock_text())
+        stale["nodes"]["agent-platform"] = locked_platform_node({**FIXTURE_REVISION, "rev": "1e" * 20})
+        root = self.devenv_repo(lock=json.dumps(stale, indent=2, sort_keys=True), yaml=DEVENV_YAML_DECLARED)
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.pin_incompatible")])
+
+    def test_the_evidence_record_repeats_the_conformance_member(self):
+        root = self.devenv_repo()
+        with mock.patch.object(adopt_project.subprocess, "run", _resolver_in_process), \
+                mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            composed = adopt_project.compose_plan(root, json.loads(MANIFEST.read_text("utf-8")), [])
+        record = json.loads(composed.contents[composed.document["handoff"]["evidence_record"]])
+        self.assertEqual(record["conformance"], CONFORMANCE_MEMBER)
+        self.assertIn({"id": CONFORMANCE_GATE, "status": "passed"}, record["checks"])
+
+    def test_the_running_revision_enters_the_plan_id(self):
+        root = self.devenv_repo()
+        first = self.ready_plan(root)
+        other = make_home()
+        install_platform_revision(other, {**FIXTURE_REVISION, "rev": "1e" * 20})
+        code, second, err = self.plan(root, home=other)
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual(first["plan"]["plan_id"], second["plan"]["plan_id"])
+        self.assertEqual(first["plan"]["plan_id"], documented_plan_id(first))
+        self.assertEqual(second["plan"]["plan_id"], documented_plan_id(second))
+
+    def test_a_repository_that_cannot_take_the_writes_stays_draft(self):
+        def protection(text: str):
+            def change(root: Path) -> None:
+                write(root, ".github/branch-protection.json", text)
+                commit(root, "protect")
+            return change
+
+        def remove_yaml(root: Path) -> None:
+            git(root, "rm", "--quiet", "devenv.yaml")
+            commit(root, "drop the yaml")
+
+        def no_tracker(root: Path) -> None:
+            edit_contract(root, lambda contract: contract["bindings"]["tracker"].update(kind="none"))
+            commit(root, "no tracker")
+
+        cases = {
+            "revision_unknown": ({}, None, lambda root: None),
+            "revision_unknown (null rev)": ({}, {**FIXTURE_REVISION, "rev": None}, lambda root: None),
+            "tracker_unnamed": ({}, FIXTURE_REVISION, no_tracker),
+            "origin_mismatch": ({"slug": "fixture/other"}, FIXTURE_REVISION, lambda root: None),
+            "lock_unreadable": ({"lock": "not json"}, FIXTURE_REVISION, lambda root: None),
+            "input_undeclarable (no file)": ({}, FIXTURE_REVISION, remove_yaml),
+            "input_undeclarable (flow)": ({"yaml": "{}\n"}, FIXTURE_REVISION, lambda root: None),
+            "protection_file_unrequired (null)": (
+                {}, FIXTURE_REVISION, protection('{"required_status_checks": null}\n')),
+            "protection_file_unrequired (contexts)": (
+                {}, FIXTURE_REVISION, protection('{"required_status_checks": {"contexts": ["Nix Eval"]}}\n')),
+        }
+        for name, (devenv, record, change) in cases.items():
+            with self.subTest(name):
+                # A plan id binds to one checkout, so each case has its own home.
+                self.home = make_home()
+                install_platform_revision(self.home, record)
+                root = self.devenv_repo(**devenv)
+                change(root)
+                doc = self.ready_plan(root)
+                repair = "adopt.conformance." + name.split(" ")[0]
+                self.assertEqual(doc["plan"]["state"], "draft")
+                self.assertEqual(self.gates(doc), [conformance_failure(doc, repair)])
+                self.assertIn({"id": CONFORMANCE_GATE,
+                               "message": adopt_planning.GATE_MESSAGES[CONFORMANCE_GATE]},
+                              doc["plan"]["blockers"])
+                self.assertNotIn("conformance", doc["plan"])
+
+    def test_a_colliding_projection_stays_draft(self):
+        def collide_by_id(contract: dict) -> None:
+            contract["projections"].append({
+                "id": "conformance.workflow", "agent": "claude", "kind": "managed_import",
+                "target": "OTHER.md", "source": ".agents/instructions/bootstrap.md"})
+
+        root = self.devenv_repo()
+        edit_contract(root, collide_by_id)
+        commit(root, "collide by id")
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.projection_collides")])
+        self.assertNotIn("conformance", doc["plan"])
+
+        draft = drafted_contract()
+        draft["bindings"]["tracker"]["repo_slug"] = "fixture/target"
+        draft["projections"] = [{
+            "id": "other.entry", "agent": "codex", "kind": "generated_file",
+            "target": CONFORMANCE_WORKFLOW, "source": "README.md"}]
+        self.fresh_home()
+        scratch = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        path = scratch / "draft.json"
+        path.write_text(json.dumps(draft), encoding="utf-8")
+        root = bootstrap_repo(self.home, remotes=("https://github.com/fixture/target.git",))
+        write_devenv(root)
+        code, doc, err = self.plan(root, "--contract-draft", str(path))
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.projection_collides")])
+
+    def test_a_branch_the_workflow_cannot_carry_is_refused_before_ready(self):
+        def unsafe(contract: dict) -> None:
+            contract["bindings"]["vcs"]["integration_branch"] = "release candidate"
+
+        plain = nix_config_shape_repo(self.home)
+        edit_contract(plain, unsafe)
+        commit(plain, "an unusual branch")
+        doc = self.ready_plan(plain)
+        self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+        self.fresh_home()
+        root = self.devenv_repo()
+        edit_contract(root, unsafe)
+        commit(root, "an unusual branch")
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.contract_refused")])
+        self.assertNotIn("conformance", doc["plan"])
+
+    def test_the_protection_file_gains_conformance(self):
+        root = self.devenv_repo()
+        original = {"required_status_checks": {"strict": True, "checks": [{"context": "Nix Eval", "app_id": 15368}]}}
+        write(root, ".github/branch-protection.json", json.dumps(original, indent=2) + "\n")
+        commit(root, "protect")
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+        expected = {"required_status_checks": {"strict": True, "checks": [
+            {"context": "Nix Eval", "app_id": 15368}, {"context": "Conformance"}]}}
+        (op,) = [op for op in doc["changes"] if op["targets"] == [".github/branch-protection.json"]]
+        self.assertEqual(op["op"], "write-file")
+        self.assertEqual(op["after"], sha256_hash((json.dumps(expected, indent=2) + "\n").encode()))
+
+    def test_a_path_reference_edit_and_the_declaration_share_one_write(self):
+        root = self.devenv_repo(yaml=DEVENV_YAML + "# notes: .claude/specs/x.md\n")
+        doc = self.ready_plan(root)
+        rows = [row for row in doc["path_references"] if row["path"] == "devenv.yaml"]
+        self.assertEqual(len(rows), 1, doc["path_references"])
+        answer = [value for value in rows[0]["answers"] if value != "retain"][0]
+        code, doc, err = self.plan(root, "--answer", "path-reference", rows[0]["subject"], answer)
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+        (op,) = [op for op in doc["changes"] if "devenv.yaml" in op["sources"] + op["targets"]]
+        self.assertEqual(op["op"], "write-file")
+        rewritten = DEVENV_YAML_DECLARED + "# notes: .agents/artifacts/specs/x.md\n"
+        self.assertEqual(op["after"], sha256_hash(rewritten.encode()))
+
+    def test_outstanding_conformance_work_is_never_routed_to_no_change(self):
+        with self.subTest("a lock the plan cannot edit"):
+            root = adopted_repo(self.home)
+            write_devenv(root, lock="not json")
+            doc = self.ready_plan(root)
+            self.assertEqual(doc["plan"]["outcome"], "reconcile")
+            self.assertEqual(doc["plan"]["state"], "draft")
+            self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.lock_unreadable")])
+        self.fresh_home()
+        root = adopted_repo(self.home)
+        write_devenv(root, lock=locked_lock_text(), yaml=DEVENV_YAML_DECLARED)
+        edit_contract(root, lambda contract: contract["projections"].append(
+            dict(adopt_conformance.PROJECTION_ENTRY)))
+        proc = run_module("agent_tools.project_contract.resolve_project",
+                          ("write-projections", "--repo-root", str(root)),
+                          env={**os.environ, "HOME": str(self.home)})
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        commit(root, "the settled tree")
+        with self.subTest("the record names no conformance work"):
+            doc = self.ready_plan(root)
+            self.assertEqual(doc["plan"]["outcome"], "reconcile")
+            self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+            self.assertEqual(doc["plan"]["conformance"], CONFORMANCE_MEMBER)
+            written = self.targets(doc)
+            for path in ("devenv.lock", "devenv.yaml", ".github/branch-protection.json"):
+                self.assertNotIn(path, written)
+        with self.subTest("the record carries the member"):
+            record = next((root / ".agents/artifacts/evidence").glob("*.json"))
+            document = json.loads(record.read_text("utf-8"))
+            document["conformance"] = CONFORMANCE_MEMBER
+            record.write_text(json.dumps(document) + "\n", encoding="utf-8")
+            commit(root, "record the conformance work")
+            doc = self.ready_plan(root)
+            self.assertEqual(doc["plan"]["outcome"], "no_change")
 
 
 if __name__ == "__main__":

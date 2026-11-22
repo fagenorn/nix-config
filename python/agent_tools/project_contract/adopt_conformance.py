@@ -32,6 +32,29 @@ is the apply step.
 
 A refusal is `Undeclarable` carrying one of the `adopt.conformance.*` repair ids
 below; the plan's ready gate reports it.
+
+The plan side is `plan_conformance`. It reads every input from the plan's base
+commit through `base_entry` (a blob of mode `100644` or `100755`, read by
+`git cat-file` after `git ls-tree` named it), never from the working tree, so an
+untracked manifest, a staged deletion or an uncommitted edit cannot change what
+it returns, and it starts no process other than `git` through
+`adopt_inspection.run_git`. A repository whose base commit has no `devenv.lock`,
+or holds the platform's own tree marker in any mode, is `NOT_PLANNED`: none of
+the three writes, the workflow projection or the required check is planned for
+it. Otherwise it is planned, and the first failing cause, in the order of the
+`adopt.conformance.*` ids' use below, is the plan's `repair_id`: no installed
+revision, an unnamed tracker (not `github`, a slug that is not `owner/repo`, or no
+integration branch), an `origin` that is not the tracker's slug, a projection of
+another kind that holds the workflow's id or target, a lock or `devenv.yaml` that
+cannot take its edit, a kept lock entry that is not the installed revision, a
+branch protection file that cannot take the check. With no cause the plan carries
+a `member`, the one record of what the adoption locks and requires, which the plan
+document publishes as `plan.conformance` and the evidence record repeats; the new
+bytes of each of the three files that change are `contents`, their base bytes
+`before`, and `projection` says whether the contract gains the workflow's entry.
+`outstanding` is whether the repository still has conformance work: the plan
+writes something, or the one committed evidence record does not carry the
+member the plan would write.
 """
 
 from __future__ import annotations
@@ -39,9 +62,12 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections.abc import Mapping
+from pathlib import Path
 from typing import NamedTuple
 
 from agent_tools.canonical import reject_duplicate_keys
+from agent_tools.project_contract import adopt_inspection, agent_platform, derived_values
 from agent_tools.project_contract.agent_platform import valid_revision
 
 CONTEXT = "Conformance"
@@ -52,6 +78,9 @@ WORKFLOW_TARGET = ".github/workflows/conformance.yaml"
 INPUT = "agent-platform"
 PROJECTION_ENTRY = {"id": "conformance.workflow", "kind": "conformance_workflow",
                     "target": WORKFLOW_TARGET}
+CONFORMANCE_TARGETS = (PROTECTION_FILE, LOCK_FILE, INPUT_FILE, WORKFLOW_TARGET)
+REGULAR_MODES = ("100644", "100755")
+_SLUG = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 REVISION_UNKNOWN = "adopt.conformance.revision_unknown"
 TRACKER_UNNAMED = "adopt.conformance.tracker_unnamed"
@@ -290,3 +319,181 @@ def require_in_protection_file(data: bytes) -> bytes | None:
     if data.endswith(b"\n"):
         text += "\n"
     return text.encode("utf-8")
+
+
+# --------------------------------------------------------------------------
+# The plan side
+# --------------------------------------------------------------------------
+
+
+class ConformancePlan(NamedTuple):
+    """What the adoption plan does about conformance (see the module docstring)."""
+
+    planned: bool
+    outstanding: bool
+    repair_id: str | None
+    member: dict | None
+    contents: dict[str, bytes]
+    before: dict[str, bytes]
+    projection: bool
+
+
+NOT_PLANNED = ConformancePlan(False, False, None, None, {}, {}, False)
+
+
+def base_entry(root: Path, revision: str, path: str) -> tuple[str, bytes | None] | None:
+    """The `(mode, bytes)` of `path` in the commit `revision`, or None when absent.
+
+    The bytes are those of a blob of mode `100644` or `100755` and None for any
+    other mode, a symlink, a submodule or a tree included. A git failure is the
+    refusal `adopt.git.failed`.
+    """
+    code, out = adopt_inspection.run_git(
+        root, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", revision, "--", path,
+        local_only=True)
+    if code != 0:
+        raise _git_failed()
+    for record in out.split(b"\0"):
+        head, separator, name = record.partition(b"\t")
+        if not separator or name.decode("utf-8", "surrogateescape") != path:
+            continue
+        fields = head.decode("ascii", "replace").split(" ")
+        if len(fields) != 3:
+            raise _git_failed()
+        mode, kind, object_id = fields
+        if mode not in REGULAR_MODES or kind != "blob":
+            return mode, None
+        code, data = adopt_inspection.run_git(root, "cat-file", "blob", object_id, local_only=True)
+        if code != 0:
+            raise _git_failed()
+        return mode, data
+    return None
+
+
+def _git_failed() -> Exception:
+    return adopt_inspection.refuse("adopt_failure", "adopt.git.failed", "",
+                                   "a git inspection command did not succeed")
+
+
+def _tracker(contract_source: dict | None) -> tuple[str, str] | None:
+    """The tracker's `repo_slug` and the integration branch, or None when unnamed."""
+    bindings = contract_source.get("bindings") if isinstance(contract_source, dict) else None
+    if not isinstance(bindings, dict):
+        return None
+    tracker, vcs = bindings.get("tracker"), bindings.get("vcs")
+    if not isinstance(tracker, dict) or not isinstance(vcs, dict):
+        return None
+    slug, branch = tracker.get("repo_slug"), vcs.get("integration_branch")
+    if (tracker.get("kind") != "github" or not isinstance(slug, str)
+            or _SLUG.fullmatch(slug) is None or not isinstance(branch, str) or not branch):
+        return None
+    return slug, branch
+
+
+def _projection_state(contract_source: dict) -> tuple[bool, bool]:
+    """`(collides, declared)`: the workflow's id or target is another kind's, and
+    a `conformance_workflow` entry exists."""
+    projections = contract_source.get("projections")
+    if projections is None:
+        return False, False
+    if not isinstance(projections, list):
+        return True, False
+    collides = declared = False
+    for entry in projections:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") == "conformance_workflow":
+            declared = True
+        elif entry.get("id") == PROJECTION_ENTRY["id"] or entry.get("target") == WORKFLOW_TARGET:
+            collides = True
+    return collides, declared
+
+
+def _settled(root: Path, base_revision: str, candidate: dict) -> bool:
+    """Whether the one committed evidence record carries exactly `candidate`."""
+    records = adopt_inspection.evidence_records_at(root, base_revision)
+    if len(records) != 1:
+        return False
+    data = adopt_inspection.blob_at(root, base_revision, records[0])
+    try:
+        record = json.loads(data.decode("utf-8")) if data is not None else None
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return False
+    return isinstance(record, dict) and record.get("conformance") == candidate
+
+
+def plan_conformance(root: Path, base_revision: str, contract_source: dict | None,
+                     reference_after: Mapping[str, bytes]) -> ConformancePlan:
+    """The conformance work of adopting `root` at `base_revision`.
+
+    `reference_after[path]` replaces the base bytes of that target as its input,
+    because an answered path reference edits the same file and the two edits
+    must be one write.
+    """
+    lock = base_entry(root, base_revision, LOCK_FILE)
+    if lock is None or base_entry(root, base_revision, derived_values.TREE_MANIFEST) is not None:
+        return NOT_PLANNED
+
+    def inputs(path: str, entry: tuple[str, bytes | None]) -> bytes:
+        return reference_after.get(path, entry[1])
+
+    candidate: dict | None = None
+    lock_after: bytes | None = None
+    repair: str | None = None
+    contents: dict[str, bytes] = {}
+    before: dict[str, bytes] = {}
+    projection = False
+    try:
+        revision = agent_platform.platform_revision()
+        if revision is None:
+            raise Undeclarable(REVISION_UNKNOWN)
+        named = _tracker(contract_source)
+        if named is None:
+            raise Undeclarable(TRACKER_UNNAMED)
+        slug, branch = named
+        try:
+            origin = derived_values.remote_slug(root)
+        except derived_values.Underivable:
+            origin = None
+        if origin != slug:
+            raise Undeclarable(ORIGIN_MISMATCH)
+        collides, declared = _projection_state(contract_source)
+        if collides:
+            raise Undeclarable(PROJECTION_COLLIDES)
+        if lock[1] is None:
+            raise Undeclarable(LOCK_UNREADABLE)
+        entry = lock_with_platform(inputs(LOCK_FILE, lock), revision)
+        candidate = {
+            "revision": entry.locked,
+            "lock": {"path": LOCK_FILE, "input": INPUT, "node": entry.node},
+            "workflow": WORKFLOW_TARGET,
+            "required_check": {"repo": slug, "branch": branch, "context": CONTEXT},
+        }
+        if entry.kept and (entry.locked["rev"] != revision["rev"]
+                           or entry.locked["narHash"] != revision["narHash"]):
+            raise Undeclarable(PIN_INCOMPATIBLE)
+        declaration = base_entry(root, base_revision, INPUT_FILE)
+        if declaration is None or declaration[1] is None:
+            raise Undeclarable(INPUT_UNDECLARABLE)
+        declared_after = declare_input(
+            inputs(INPUT_FILE, declaration), entry.locked["owner"], entry.locked["repo"])
+        protection = base_entry(root, base_revision, PROTECTION_FILE)
+        protection_after = None
+        if protection is not None:
+            if protection[1] is None:
+                raise Undeclarable(PROTECTION_FILE_UNREQUIRED)
+            protection_after = require_in_protection_file(inputs(PROTECTION_FILE, protection))
+        for path, source, after in ((PROTECTION_FILE, protection, protection_after),
+                                    (LOCK_FILE, lock, entry.after),
+                                    (INPUT_FILE, declaration, declared_after)):
+            if after is not None:
+                contents[path] = after
+                before[path] = source[1]
+        projection = not declared
+    except Undeclarable as refused:
+        repair = refused.repair_id
+        contents, before, projection = {}, {}, False
+    settled = (candidate is not None and not contents and not projection
+               and _settled(root, base_revision, candidate))
+    return ConformancePlan(True, not settled, repair,
+                           candidate if repair is None else None, contents, before, projection)

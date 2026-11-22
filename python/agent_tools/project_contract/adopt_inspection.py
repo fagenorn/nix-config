@@ -154,6 +154,7 @@ READY_GATES = (
     "move-sources-tracked",
     "no-secret-path-in-moves",
     "no-unrewritable-link",
+    "conformance-plannable",
 )
 
 # The gates `apply` runs inside its isolated worktree before it commits. They
