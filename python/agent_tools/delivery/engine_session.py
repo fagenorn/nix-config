@@ -50,7 +50,9 @@ other exception both do. A session started off the main thread (a group member's
 child walk's) cannot install that handler, so it is registered from its spawn until it is
 reaped, and `reaping` (held by the main thread while it waits for such sessions) turns a
 SIGTERM or any other stop in the main thread into a kill of every registered group and closes
-the registry: after that `launch` starts no session and `ending()` is true. A launcher that
+the registry: after that `launch` starts no session and `ending()` is true. `ending()` is true
+as soon as the interpreter has taken a SIGTERM (`reaping` installs a wakeup descriptor), before the
+main thread has run the handler. A launcher that
 cannot start gives exit 127 and the `OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line.
@@ -312,12 +314,37 @@ def _terminate(signum: int, frame: object) -> None:
 _registry = threading.Lock()
 _live: set[int] = set()
 _closed = False
+_wakeup_read: int | None = None
+
+
+def _sigterm_taken() -> bool:
+    """True once the interpreter has taken a SIGTERM, though no Python handler has run yet.
+
+    The interpreter writes the number of every signal it takes to the wakeup descriptor `reaping`
+    installs, from whichever thread took it; the main thread runs `_terminate` only when it is next
+    scheduled, which under load can come after a walk has started its next step. The caller holds
+    `_registry`.
+    """
+    if _wakeup_read is None:
+        return False
+    try:
+        return signal.SIGTERM in os.read(_wakeup_read, 64)
+    except BlockingIOError:
+        return False
+
+
+def _is_closed() -> bool:
+    """Whether the registry is closed, closing it on a SIGTERM already taken; the caller holds `_registry`."""
+    global _closed
+    if not _closed and _sigterm_taken():
+        _closed = True
+    return _closed
 
 
 def ending() -> bool:
-    """True once `reaping` has closed the registry: no session starts after that."""
+    """True once the registry is closed, by `reaping` or by a SIGTERM taken: no session starts after that."""
     with _registry:
-        return _closed
+        return _is_closed()
 
 
 def _reap() -> None:
@@ -342,11 +369,18 @@ def reaping():
     closes nothing, and off the main thread the manager does nothing. The handler it replaced
     is restored on every exit path.
     """
+    global _wakeup_read
     try:
         previous = signal.signal(signal.SIGTERM, _terminate)
         installed = True
     except ValueError:  # not the main thread: no handler can be installed
         previous, installed = None, False
+    if installed:
+        read_end, write_end = os.pipe()
+        os.set_blocking(read_end, False)
+        os.set_blocking(write_end, False)
+        previous_wakeup = signal.set_wakeup_fd(write_end, warn_on_full_buffer=False)
+        _wakeup_read = read_end
     try:
         yield
     except Exception:
@@ -358,6 +392,10 @@ def reaping():
     finally:
         if installed:
             signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+            signal.set_wakeup_fd(previous_wakeup)
+            _wakeup_read = None
+            os.close(read_end)
+            os.close(write_end)
 
 
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
@@ -373,7 +411,7 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         # The registry stays locked from the check to the registration, so a close of the registry
         # either comes first (nothing starts) or finds this session registered and kills it.
         with _registry:
-            if _closed:
+            if _is_closed():
                 return Launched(NOT_STARTED, b"", b"the engine is ending\n",
                                 time.monotonic() - started)
             try:

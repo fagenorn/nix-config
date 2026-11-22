@@ -838,6 +838,7 @@ class SigtermTest(unittest.TestCase):
             kid = wait_for_run(project, children=True)
             started(project, kid, {"work"}, 1)
             os.kill(engine.pid, signal.SIGTERM)
+            time.sleep(0.5)  # the engine takes the signal while the call still blocks, even under load
             project.release.write_text("", encoding="utf-8")
             engine.communicate(timeout=60)
         finally:

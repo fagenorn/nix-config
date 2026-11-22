@@ -531,6 +531,29 @@ class ReapingTest(unittest.TestCase):
                          {"codes": [0, 0, 127, 127], "ending": [False, False, True, True]})
 
 
+    def test_a_sigterm_the_interpreter_has_taken_ends_the_engine_before_the_main_thread_runs_it(self):
+        script = textwrap.dedent("""
+            import json, os, signal
+            from agent_tools.delivery import engine_session as session
+
+            seen = []
+            with session.reaping():
+                wake = signal.set_wakeup_fd(-1)  # the descriptor the C handler writes to
+                signal.set_wakeup_fd(wake)
+                os.write(wake, bytes([signal.SIGINT]))
+                seen.append(session.ending())
+                os.write(wake, bytes([signal.SIGTERM]))
+                seen.append(session.ending())
+            print(json.dumps({"seen": seen, "after": session.ending()}))
+        """)
+
+        ran = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                             env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")},
+                             timeout=60)
+
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(json.loads(ran.stdout), {"seen": [False, True], "after": True})
+
     def test_a_session_is_never_spawned_after_the_registry_closes(self):
         real = subprocess.Popen
         closers: list[threading.Thread] = []
