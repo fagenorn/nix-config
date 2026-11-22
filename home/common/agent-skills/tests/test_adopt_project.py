@@ -61,8 +61,9 @@ TOP_LEVEL_MEMBERS = ["changes", "decisions", "evidence", "handoff",
                      "link_rewrites", "path_references", "plan",
                      "reference_formatting", "reference_policies",
                      "schema_version", "verification"]
-PLAN_MEMBERS = ["base_revision", "blockers", "input_digest", "outcome",
-                "plan_id", "platform", "project_id", "state"]
+PLAN_MEMBERS = ["available_migration", "base_revision", "blockers",
+                "input_digest", "outcome", "plan_id", "platform",
+                "project_id", "state"]
 HANDOFF_MEMBERS = ["evidence_record", "migration_map", "next_command",
                    "plan_path", "repo_root", "state"]
 
@@ -921,7 +922,78 @@ def manifest_with(versions: list[int], migrations: list[dict],
     }
 
 
+def offering_manifest() -> dict:
+    """Schema 3 is readable and a 2->3 step exists, as the platform will ship it.
+
+    The committed version keeps the pinned contract's interval satisfied, so a
+    repository adopted against it resolves.
+    """
+    return manifest_with(
+        [2, 3],
+        [{"id": "bindings-deploy.retire", "from_schema": 1, "to_schema": 2},
+         {"id": "platform-constants.retire", "from_schema": 2,
+          "to_schema": 3}],
+        platform_version=json.loads(MANIFEST.read_text())["platform_version"])
+
+
 class OutcomeRoutingTest(AdoptTestCase):
+    def offered_home_and_root(self, **kwargs) -> tuple[Path, Path]:
+        home = make_home(offering_manifest())
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        root = adopted_repo(home, **kwargs)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return home, root
+
+    def test_a_schema_two_plan_keeps_its_outcome_and_names_the_offered_step(self):
+        home, root = self.offered_home_and_root()
+        code, doc, err = self.plan(root, home=home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["outcome"], "no_change")
+        self.assertEqual(doc["plan"]["available_migration"],
+                         "platform-constants.retire")
+        self.assertIn("verify --register", doc["handoff"]["next_command"])
+
+    def test_a_schema_one_plan_names_no_offered_step(self):
+        home, root = self.offered_home_and_root(schema=1)
+        code, doc, err = self.plan(root, home=home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["outcome"], "migration_required")
+        self.assertIsNone(doc["plan"]["available_migration"])
+        self.assertIn("bindings-deploy.retire", doc["handoff"]["next_command"])
+
+    def test_the_human_view_names_the_offered_step(self):
+        home, root = self.offered_home_and_root()
+        code, out, err = run("plan", "--repo-root", str(root),
+                             "--format", "human", home=home)
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        index = lines.index("available: migrate platform-constants.retire")
+        self.assertTrue(lines[index + 1].startswith("next: "), lines)
+
+    def test_a_drifted_schema_two_checkout_reconciles_and_names_the_offered_step(self):
+        home, root = self.offered_home_and_root()
+        write(root, "AGENTS.md", "hand-edited\n")
+        commit(root, "drift a projection")
+        code, doc, err = self.plan(root, home=home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["outcome"], "reconcile")
+        self.assertEqual(doc["plan"]["available_migration"],
+                         "platform-constants.retire")
+
+    def test_an_invalid_schema_two_contract_needs_repair_and_names_the_offered_step(self):
+        home, root = self.offered_home_and_root()
+        contract = json.loads(
+            (root / ".agents" / "project.json").read_text("utf-8"))
+        del contract["project"]["name"]
+        write(root, ".agents/project.json",
+              json.dumps(contract, indent=2) + "\n")
+        commit(root, "break the contract")
+        code, doc, err = self.plan(root, home=home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["outcome"], "repair_required")
+        self.assertEqual(doc["plan"]["available_migration"],
+                         "platform-constants.retire")
+
     def test_rule_1_no_contract_and_no_agent_surface_is_bootstrap(self):
         doc = self.ready_plan(bootstrap_repo(self.home))
         self.assertEqual(doc["plan"]["outcome"], "bootstrap")
@@ -1012,13 +1084,23 @@ class AdoptionSchemaTest(unittest.TestCase):
     def committed(self) -> dict:
         return json.loads(MANIFEST.read_text())
 
-    def test_the_adoption_schema_is_the_highest_schema_a_migration_reaches(self):
+    def test_the_adoption_schema_is_the_highest_schema_a_required_migration_reaches(self):
+        def step(name, source, target):
+            return {"id": name, "from_schema": source, "to_schema": target}
+
         rows = (
-            ([2, 3], [{"id": "a", "from_schema": 1, "to_schema": 2}], 2),
-            ([2, 3], [{"id": "a", "from_schema": 1, "to_schema": 2},
-                      {"id": "b", "from_schema": 2, "to_schema": 3}], 3),
+            ([2, 3], [step("a", 1, 2)], 2),
+            # 2->3 starts from a schema the platform still reads: offered.
+            ([2, 3], [step("a", 1, 2), step("b", 2, 3)], 2),
             ([2], [], 2),
             ([1, 2], [], 2),
+            # No required migration, so the old rule applies.
+            ([1, 2], [step("a", 1, 2)], 2),
+            ([1, 2, 3], [step("a", 1, 2)], 2),
+            ([2, 3, 4], [step("a", 1, 2), step("b", 2, 3),
+                         step("c", 3, 4)], 2),
+            # 2->3 is required because schema 2 is unsupported.
+            ([3, 4], [step("a", 1, 2), step("b", 2, 3), step("c", 3, 4)], 3),
         )
         for versions, migrations, expected in rows:
             with self.subTest(versions=versions, migrations=migrations):
@@ -1032,12 +1114,38 @@ class AdoptionSchemaTest(unittest.TestCase):
                 self.committed(), {"schema_version": 2}, True, True, False),
             ("no_change", None))
 
-    def test_a_schema_three_contract_waits_for_a_migration_to_schema_three(self):
-        with self.assertRaises(adopt_planning.AdoptError) as caught:
+    def test_the_offered_step_is_named_only_for_the_schema_adoption_writes(self):
+        manifest = offering_manifest()
+        for source, expected in (
+                ({"schema_version": 2}, "platform-constants.retire"),
+                ({"schema_version": 1}, None),
+                ({"schema_version": 3}, None),
+                ({"schema_version": True}, None),
+                ({"schema_version": 2.0}, None),
+                (None, None)):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    adopt_planning.offered_migration(manifest, source),
+                    expected)
+        unsupported_target = manifest_with(
+            [2], [{"id": "x", "from_schema": 2, "to_schema": 3}])
+        self.assertIsNone(adopt_planning.offered_migration(
+            unsupported_target, {"schema_version": 2}))
+
+    def test_a_schema_two_contract_routes_no_change_while_schema_three_is_offered(self):
+        self.assertEqual(
             adopt_planning.route_outcome(
-                self.committed(), {"schema_version": 3}, True, True, False)
-        self.assertEqual(caught.exception.repair_id,
-                         "adopt.manifest.forward_step_missing")
+                offering_manifest(), {"schema_version": 2}, True, True, False),
+            ("no_change", None))
+
+    def test_a_schema_three_contract_is_refused_while_adoption_writes_schema_two(self):
+        for manifest in (self.committed(), offering_manifest()):
+            with self.subTest(version=manifest["platform_version"]):
+                with self.assertRaises(adopt_planning.AdoptError) as caught:
+                    adopt_planning.route_outcome(
+                        manifest, {"schema_version": 3}, True, True, False)
+                self.assertEqual(caught.exception.repair_id,
+                                 "adopt.manifest.forward_step_missing")
 
 
 class ForwardStepRefusalTest(AdoptTestCase):
@@ -1431,6 +1539,15 @@ class ContractDraftTest(AdoptTestCase):
             "approval_class": adopt_inspection.approval_class_for(
                 "write-file")})
         self.assertEqual(doc["decisions"]["open"], [])
+
+    def test_a_draft_plan_names_no_offered_step(self):
+        install_home(self.home, offering_manifest())
+        root = bootstrap_repo(self.home)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        path = self.draft_file()
+        code, doc, err = self.plan(root, "--contract-draft", path)
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(doc["plan"]["available_migration"])
 
     def test_every_resolver_check_runs_on_the_draft(self):
         def outside(draft):

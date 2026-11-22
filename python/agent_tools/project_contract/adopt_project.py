@@ -138,7 +138,11 @@ member. The flag with `--contract-draft` is refused
 
 A schema-1 contract is routed as `migration_required` with the
 `bindings-deploy.retire` step (issue 579 P11); `resolve_project` states the
-schema that refuses it.
+schema that refuses it. A contract of the schema adoption writes
+(`adopt_planning.current_schema`) whose forward step reaches a supported schema
+keeps its outcome, and the plan names that step in `available_migration` (null
+otherwise, and for a draft). The member is not an input of `plan_id`, and
+`--format human` prints it.
 
 `apply` takes a stored `ready` plan by that id, refuses on any drift, and
 carries the whole transformation out in an isolated worktree in the same user
@@ -540,6 +544,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     if state not in adopt_inspection.PLAN_STATES:
         raise ValueError(f"unknown plan state: {state!r}")
 
+    available = adopt_planning.offered_migration(
+        manifest, None if draft is not None else contract_source)
     plan_path = adopt_planning.store_plan_path(plan_id)
     document = {
         "schema_version": adopt_inspection.ADOPT_SCHEMA_VERSION,
@@ -552,6 +558,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
             "input_digest": plan_id,
             "plan_id": plan_id,
             "blockers": blockers,
+            "available_migration": available,
         },
         "evidence": evidence,
         "decisions": decisions,
@@ -732,6 +739,8 @@ def emit_human(document: dict) -> int:
             lines.append(f"open {entry['id']}: {entry['recommendation']}")
     for blocker in plan["blockers"]:
         lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
+    if plan["available_migration"] is not None:
+        lines.append(f"available: migrate {plan['available_migration']}")
     lines.append(f"next: {document['handoff']['next_command'] or '(none)'}")
     lines.append(f"stored at {document['handoff']['plan_path']}")
     sys.stdout.write("\n".join(lines) + "\n")

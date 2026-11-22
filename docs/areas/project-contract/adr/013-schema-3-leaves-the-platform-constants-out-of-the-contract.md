@@ -1,6 +1,6 @@
 # ADR-project-contract-013 — Project schema 3 leaves the platform constants out of the contract
 
-- **Status:** accepted
+- **Status:** accepted; D6 amended by #1469
 - **Decided in:** #1453 (per #1430)
 
 ## Context
@@ -19,14 +19,14 @@ Every registered project's schema-2 contract spells out the same values: the bra
 
 **D5. Verification commands are required.** The verification list is a constant, so a contract must author `lint` and `test`. One that does not, including one with no `bindings.commands`, is refused `contract.commands.member_missing` at `/bindings/commands/<id>`, never at the constant `/bindings/workflow/verification/<n>`. A `bindings.commands` that is not an object keeps its schema-2 shape error.
 
-**D6. Adoption target.** Adoption targets the highest supported schema that some migration reaches, so it keeps writing schema 2 until a migration to 3 exists. A schema-3 contract or draft is refused until then.
+**D6. Adoption target.** Adoption targets the highest supported schema that a required migration reaches, one whose source schema the platform no longer reads. A migration from a schema the platform still reads is offered: it does not move the target while a required migration exists. A plan on its source schema keeps its outcome and names the step. With no required migration the target is the highest supported schema some migration reaches, else the highest supported schema. Under platform 2.x adoption keeps writing schema 2 and offers the migration to 3. A schema-3 contract or draft is refused until the target moves (amended by #1469).
 
 **D7. Optional homes are always filled.** `paths.architecture` and `paths.operations` are filled even when the file or directory is absent. The authored `knowledge.architecture` capability still gates readiness.
 
 ## Consequences
 
 - No repository is on schema 3 until the migration slice.
-- Adoption refuses a schema-3 contract until a migration reaches 3.
+- Adoption writes schema 2 and offers the migration to 3. It refuses a schema-3 contract or draft until a required migration reaches 3.
 - The four values of #1458 are derived from the repository (ADR-project-contract-014); the attempt budget of #1466 stays as decided here until that issue.
 - Rejected: a manifest member for the constants, for the reason ADR-010 rejected one for the commands: the values are code the resolver and its tests must agree on, and a manifest is data a host can leave stale.
 - Rejected: refusing an authored platform id in schema 2, because the registered projects' schema-2 contracts author these ids today and would stop resolving.
