@@ -18,6 +18,7 @@ from agent_tools.console.transcript_digest import (
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
+TIER = "fast"  # source tree and standard library only
 SINCE = "2026-11-01"
 P01, P00 = "/srv/p01", "/srv/p00"
 PROJECTS = {P01: "owner/p01", P00: "owner/p00"}
