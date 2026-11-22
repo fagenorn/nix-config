@@ -11,7 +11,7 @@ on that file, held by the engine process on a descriptor the session never inher
 when the engine dies. `hold` tries the files in order; with every slot taken it calls `on_wait` once, polls
 every `POLL_SECONDS`, and calls `on_waited` once when it gets one. The caller records that wait as the
 `wait_started` and `wait_ended` events of the `host-slot` wait. The bound is per root run: there is no count
-across runs (ADR-delivery-017).
+across runs (ADR-delivery-018).
 """
 
 from __future__ import annotations

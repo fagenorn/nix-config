@@ -1,4 +1,4 @@
-# ADR-delivery-017 — An engine run holds its agent slots in its root run's directory
+# ADR-delivery-018 — An engine run holds its agent slots in its root run's directory
 
 - **Status:** accepted
 - **Decided in:** issue 1522
