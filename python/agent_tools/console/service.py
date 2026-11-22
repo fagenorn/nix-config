@@ -8292,8 +8292,7 @@ class ConsoleService:
                 raise nudge.NudgeFailed("the sprint's secret is missing")
             try:
                 manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
-                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret,
-                                        manager.ROOT_ENV: root},
+                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret, manager.ROOT_ENV: root},
                                        chosen, allow)
             except manager.LaunchFailed as error:
                 raise nudge.NudgeFailed(str(error)) from error

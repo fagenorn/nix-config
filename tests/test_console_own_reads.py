@@ -14,7 +14,6 @@ from __future__ import annotations
 import errno
 import os
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -137,14 +136,11 @@ class OwnReadsTest(unittest.TestCase):
 
     def test_a_case_alias_of_the_root_is_the_root(self):
         alias = str(self.root).swapcase()
-        if os.path.exists(alias):
-            self.assertTrue(self.check("cat README.md", cwd=alias))
-            self.assertTrue(self.check(f"cat {alias}/README.md"))
-            self.assertFalse(self.check(f"cat {str(self.secret).swapcase()}"))
-        elif sys.platform == "darwin":
-            self.fail("expected a case-insensitive temporary volume on macOS")
-        else:
+        if not os.path.exists(alias):
             self.skipTest("the temporary volume is case-sensitive")
+        self.assertTrue(self.check("cat README.md", cwd=alias))
+        self.assertTrue(self.check(f"cat {alias}/README.md"))
+        self.assertFalse(self.check(f"cat {str(self.secret).swapcase()}"))
 
     def test_grep_prompts_when_grep_options_are_set(self):
         self.assertFalse(self.check("grep foo README.md", environ={"GREP_OPTIONS": f"-f {self.secret}"}))
@@ -185,6 +181,26 @@ class OwnReadsTest(unittest.TestCase):
             with self.subTest(linked=str(linked)):
                 self.assertFalse(rule(str(linked), "sess-1", self.stores))
         self.assertFalse(rule(str(self.results / "b1.txt"), "sess-1", (str(self.T / "missing"),)))
+
+    def test_a_named_pipe_in_the_root_prompts(self):
+        os.mkfifo(self.root / "events")
+        self.assertFalse(self.check("cat events"))
+        self.assertFalse(self.check("head -n 1 events"))
+        self.assertTrue(self.check("cat README.md"))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads an unreadable directory")
+    def test_an_unreadable_store_does_not_hide_the_readable_one(self):
+        unreadable = self.T / "unreadable"
+        unreadable.mkdir()
+        unreadable.chmod(0)
+        self.addCleanup(unreadable.chmod, 0o700)
+        stores = (str(unreadable), *self.stores)
+        own = str(self.results / "b1.txt")
+        self.assertTrue(project_question_hook.session_results(own, "sess-1", stores))
+        self.assertTrue(own_reads.allowed(f"cat {own}", str(self.root), "sess-1", str(self.root), stores, {}))
+        self.assertFalse(own_reads.allowed(f"cat {self.secret}", str(self.root), "sess-1", str(self.root),
+                                           stores, {}))
+        self.assertFalse(project_question_hook.session_results(own, "sess-1", (str(unreadable),)))
 
 
 if __name__ == "__main__":

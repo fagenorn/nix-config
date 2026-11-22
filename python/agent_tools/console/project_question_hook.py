@@ -296,8 +296,9 @@ def session_results(path: str, session: str, stores: Sequence[str]) -> bool:
 
     `stores` are real paths, as `transcript_dirs` returns them. Only genuine directories count: the slug
     is listed without following links, and the session and `tool-results` components must each be a
-    directory by `os.lstat`, so a link at any of the three admits nothing. A missing store or component
-    is skipped; any other `OSError` propagates.
+    directory by `os.lstat`, so a link at any of the three admits nothing. A store or component that is
+    missing or unreadable is skipped, so one unreadable store never hides a readable one: each store is
+    verified on its own, and a skipped one grants nothing.
     """
     if not SESSION_NAME.fullmatch(session):
         return False
@@ -305,14 +306,14 @@ def session_results(path: str, session: str, stores: Sequence[str]) -> bool:
         try:
             with os.scandir(store) as scan:
                 slugs = [entry.path for entry in scan if entry.is_dir(follow_symlinks=False)]
-        except (FileNotFoundError, NotADirectoryError):
+        except OSError:
             continue
         for slug in slugs:
             held = os.path.join(slug, session)
             results = os.path.join(held, RESULTS_DIR)
             try:
                 genuine = all(stat.S_ISDIR(os.lstat(part).st_mode) for part in (held, results))
-            except (FileNotFoundError, NotADirectoryError):
+            except OSError:
                 continue
             if genuine and _inside(path, results):
                 return True

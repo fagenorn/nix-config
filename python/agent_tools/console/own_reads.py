@@ -37,7 +37,8 @@ component, a link target's included, on the device of `/proc` or `/dev` refuses:
 utility. The resolved path must lie inside the real path of `root` (`project_question_hook._inside`,
 spelling then identity, so a case alias of the root is the root) or inside the session's own saved output
 (`project_question_hook.session_results`, genuine directories only). An operand that resolves to a
-regular file with more than one link refuses: a hard link could name a file outside the root. `cwd` must
+regular file with more than one link refuses: a hard link could name a file outside the root. An operand
+that exists and is neither a regular file nor a directory (a named pipe, socket or device) refuses. `cwd` must
 be an absolute string, `session` a string matching `SESSION_NAME`, and `root` counts only when it is an
 absolute string (else only the session's own output passes).
 
@@ -188,13 +189,16 @@ def resolve(cwd: str, operand: str) -> str | None:
 
 
 def _may_read(path: str, root: str | None, session: str, stores: Sequence[str]) -> bool:
-    """Whether the resolved `path` is a single-link file or directory inside the root or the session's output."""
+    """Whether the resolved `path` is a single-link file or directory inside the root or the session's output.
+
+    A named pipe, socket or device refuses: a read could block on a writer or consume another process's stream."""
     try:
         status = os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
         pass
     else:
-        if stat.S_ISREG(status.st_mode) and status.st_nlink > 1:
+        if not (stat.S_ISREG(status.st_mode) or stat.S_ISDIR(status.st_mode)) or (
+                stat.S_ISREG(status.st_mode) and status.st_nlink > 1):
             return False
     if root is not None and project_question_hook._inside(path, root):
         return True
