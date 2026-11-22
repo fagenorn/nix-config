@@ -66,11 +66,13 @@ PYTEST_NAMES = frozenset({"skip", "skipif", "importorskip"})
 DECORATOR_NAMES = frozenset({"skip", "skipIf", "skipUnless"})
 INERT_CONDITIONS = {"skipIf": "False", "skipif": "False", "skipUnless": "True"}
 CS_SKIP_KEYS = frozenset({"Skip"})
+CS_FACT_KEYS = frozenset({"Skip", "Explicit"})
 CS_IGNORE_KEYS = frozenset({"Ignore", "IgnoreReason", "Explicit"})
 CS_ARGUMENT_KEYS = {
-    "Fact": CS_SKIP_KEYS, "Theory": CS_SKIP_KEYS, "SkippableFact": CS_SKIP_KEYS,
-    "SkippableTheory": CS_SKIP_KEYS, "InlineData": CS_SKIP_KEYS,
-    "TestCase": CS_IGNORE_KEYS, "TestCaseSource": CS_IGNORE_KEYS}
+    "Fact": CS_FACT_KEYS, "Theory": CS_FACT_KEYS, "SkippableFact": CS_FACT_KEYS,
+    "SkippableTheory": CS_FACT_KEYS, "InlineData": CS_SKIP_KEYS,
+    "TestCase": CS_IGNORE_KEYS, "TestCaseSource": CS_IGNORE_KEYS,
+    "TestFixture": CS_IGNORE_KEYS, "TestFixtureSource": CS_IGNORE_KEYS}
 CS_OFF_VALUES = frozenset({"false", "null"})
 CS_DISABLING_ATTRIBUTES = frozenset({"Ignore", "Explicit"})
 CS_ASSERT_NAMES = frozenset({"Skip", "SkipWhen", "SkipUnless", "Ignore"})
@@ -149,7 +151,7 @@ def argument_skips(tokens: tuple[Token, ...], pairs: dict[int, int], open_: int,
             i = pairs[i] + 1
             continue
         if tokens[i].text in keys and i + 2 < close and tokens[i + 1].text == "=" and (
-                keys is CS_SKIP_KEYS or tokens[i + 2].text not in CS_OFF_VALUES):
+                tokens[i].text == "Skip" or tokens[i + 2].text not in CS_OFF_VALUES):
             found.append(i)
         i += 1
     return found

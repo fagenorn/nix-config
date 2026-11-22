@@ -368,6 +368,21 @@ class SkipRecognitionTest(unittest.TestCase):
         self.assertEqual(found({"src/T.cs": source(cases)[0]}),
                          [("src/T.cs", n) for n in source(cases)[1]])
 
+    def test_an_ignore_named_argument_of_a_test_fixture_disables_every_test_in_it(self):
+        fixture = [ok('[TestFixture(Ignore = "maintenance")]'), ok("public class A {"),
+                   ok("[Test]"), bad("public void B() { Run(1); }"),
+                   ok("[Test]"), bad("public void C() { Run(2); }"), ok("}"),
+                   ok("[TestFixture(Explicit = false)]"), ok("public class D {"),
+                   ok("[Test]"), ok("public void E() { Run(3); }"), ok("}")]
+        explicit = [ok("public class F {"), ok("[Fact(Explicit = true)]"),
+                    bad("public void G() { Run(4); }"), ok("[Theory(Explicit = false)]"),
+                    ok("public void H(int n) { Run(5); }"), ok("}")]
+
+        self.assertEqual(found({"src/A.cs": source(fixture)[0]}),
+                         [("src/A.cs", n) for n in source(fixture)[1]])
+        self.assertEqual(found({"src/F.cs": source(explicit)[0]}),
+                         [("src/F.cs", n) for n in source(explicit)[1]])
+
     def test_a_csharp_file_with_an_unmatched_bracket_is_read_without_error(self):
         for text in ("[Fact]\npublic void A() {\n", '[Fact(Skip = "x"]\npublic void A() { }\n',
                      "[Fact]\npublic void A(\n"):
