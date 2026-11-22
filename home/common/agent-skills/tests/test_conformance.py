@@ -286,6 +286,29 @@ class ValidateReportTest(unittest.TestCase):
         self.assertIn("usage:", err)
 
 
+class CiExitTest(ReportAssertions, unittest.TestCase):
+    """A red `ci` run exits 1 after printing its report; no other purpose
+    turns a failed outcome into a non-zero exit."""
+
+    def test_a_failed_ci_report_exits_one_and_still_prints_it(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            code, out, err = run("run", "--purpose", "ci", "--repo-root",
+                                 str(root), "--require", "knowledge.hints")
+            self.assertEqual(code, 1, err)
+            report = json.loads(out)
+            self.assertEqual(report["outcome"]["status"], "failed")
+            self.assert_validates(report)
+            for purpose in ("adoption", "fleet", "doctor"):
+                with self.subTest(purpose=purpose):
+                    code, out, err = run("run", "--purpose", purpose,
+                                         "--repo-root", str(root),
+                                         "--require", "knowledge.hints")
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(json.loads(out)["outcome"]["status"],
+                                     "failed")
+
+
 class RunReportShapeTest(ReportAssertions, unittest.TestCase):
     """AC1: both purposes emit a schema-valid report, differing in shape."""
 
@@ -660,8 +683,8 @@ class ReadOnlyTest(unittest.TestCase):
     empty directory, and the mtimes — of directories and of the root itself,
     not only of files — a rewrite with identical bytes and a create-then-delete
     cycle that leaves the path set unchanged. Only the engine subprocess is
-    hermetic; the fixture's own git calls use the caller's environment, and
-    `commit.gpgsign=false` here is bookkeeping in a throwaway temp repository.
+    hermetic; `make_root` already committed the root, and this suite's own git
+    calls only read its status.
     """
 
     def git(self, root: Path, *args: str) -> str:
@@ -680,15 +703,42 @@ class ReadOnlyTest(unittest.TestCase):
     def test_a_doctor_run_leaves_the_subject_root_untouched(self):
         with fixture() as tmp:
             root = make_root(tmp)
-            self.git(root, "init", "-q")
-            self.git(root, "add", "-A")
-            self.git(root, "commit", "-q", "-m", "fixture")
             status = self.git(root, "status", "--porcelain")
             paths, root_mtime = self.snapshot(root), root.stat().st_mtime_ns
             doctor(self, root)
             self.assertEqual(self.git(root, "status", "--porcelain"), status)
             self.assertEqual(self.snapshot(root), paths)
             self.assertEqual(root.stat().st_mtime_ns, root_mtime)
+
+
+    def test_a_doctor_run_with_a_declared_map_lint_leaves_every_tree_untouched(self):
+        for cwd in (".", ".."):
+            with self.subTest(cwd=cwd), fixture() as tmp:
+                root = make_root(tmp)
+                bin_dir = tmp / "bin"
+                bin_dir.mkdir()
+                script = bin_dir / "map-lint"
+                script.write_text(
+                    f"#!/bin/sh\n: > {root}/inside-marker\n: > {tmp}/outside-marker\n",
+                    encoding="utf-8")
+                script.chmod(0o755)
+                contract = root / ".agents/project.json"
+                authored = json.loads(contract.read_text(encoding="utf-8"))
+                authored["bindings"]["commands"]["context-map-lint"] = {
+                    "argv": ["map-lint"], "cwd": cwd, "env": []}
+                contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+                env = {**HERMETIC_ENV, "PATH": f"{bin_dir}:{HERMETIC_ENV['PATH']}"}
+                status = self.git(root, "status", "--porcelain")
+                paths, root_mtime = self.snapshot(root), root.stat().st_mtime_ns
+                for extra in ((), ("--offline",)):
+                    code, _, err = run("run", "--purpose", "doctor", "--repo-root",
+                                       str(root), *extra, env=env)
+                    self.assertIn(code, (0, 2), err)
+                    self.assertEqual(self.git(root, "status", "--porcelain"), status)
+                    self.assertEqual(self.snapshot(root), paths)
+                    self.assertEqual(root.stat().st_mtime_ns, root_mtime)
+                    self.assertFalse((root / "inside-marker").exists())
+                    self.assertFalse((tmp / "outside-marker").exists())
 
 
 class PolicyPathSymlinkTest(ReportAssertions, unittest.TestCase):

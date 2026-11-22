@@ -35,6 +35,11 @@ CACHE_PROXY_URL=
 # A plain constant: the console's port has no Nix binding to substitute.
 CONSOLE_URL=http://127.0.0.1:27184
 
+# The file `run` writes its answer to (CLAUDE_ACCOUNT_ANSWER, ADR-system-006); empty outside `run`. Not
+# named ANSWER_FILE, which a caller may export, and never exported itself: no client inherits it.
+ANSWER_PATH=
+export -n ANSWER_PATH
+
 # What a profile shares with ~/.claude. Everything else (the login, caches,
 # per-process state) is the profile's own.
 SHARED=(settings.json CLAUDE.md keybindings.json skills agents commands
@@ -59,6 +64,8 @@ usage: claude-account <command>
   rm <name>            delete an account profile
 
 One-off override for a single launch: CLAUDE_ACCOUNT=<name> claude
+For `run` only: CLAUDE_ACCOUNT_ANSWER=<file> makes the launch write which account
+it started under, or that every account is out (and exit 75), to that file
 USAGE
 }
 
@@ -449,13 +456,40 @@ signed_in() {
   "$JQ" -e '.oauthAccount | type == "object"' "$(profile_dir "$1")/.claude.json" >/dev/null 2>&1
 }
 
+# <time>: whether it is a real UTC instant `YYYY-MM-DDTHH:MM:SSZ` (calendar day, leap years, hour below 24,
+# minute and second below 60, year from 1), the forms the engine accepts. Builtins only.
+valid_utc_time() {
+  local re='^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$' year month day days
+  [[ $1 =~ $re ]] || return 1
+  year=$((10#${BASH_REMATCH[1]})) month=$((10#${BASH_REMATCH[2]})) day=$((10#${BASH_REMATCH[3]}))
+  [ "$year" -ge 1 ] && [ "$month" -ge 1 ] && [ "$month" -le 12 ] || return 1
+  [ $((10#${BASH_REMATCH[4]})) -lt 24 ] && [ $((10#${BASH_REMATCH[5]})) -lt 60 ] &&
+    [ $((10#${BASH_REMATCH[6]})) -lt 60 ] || return 1
+  case "$month" in
+    4|6|9|11) days=30 ;;
+    2) if [ $((year % 4)) -eq 0 ] && { [ $((year % 100)) -ne 0 ] || [ $((year % 400)) -eq 0 ]; }; then days=29; else days=28; fi ;;
+    *) days=31 ;;
+  esac
+  [ "$day" -ge 1 ] && [ "$day" -le "$days" ]
+}
+
 # The profile the console answers on GET /api/profile, when the body is exactly
-# {"profile":"<name>"}; nothing for any other answer or none. The caller bounds it.
+# {"profile":"<name>"}; nothing for any other answer or none. A launch that names an answer file
+# (ANSWER_PATH, ADR-system-006) asks GET /api/profile?all_out=1 instead, and for the console's
+# exact all-out body prints `!all-out <null|"<time>">`, which no profile name can be. Builtins
+# only: no curl or jq starts here. The caller bounds it.
 console_profile() {
   [ -n "$CONSOLE_URL" ] || return 0
-  local hostport="${CONSOLE_URL#http://}" body re='^\{"profile":"([a-z0-9_-]+)"\}$'
-  loopback_body "${hostport%:*}" "${hostport##*:}" /api/profile body || return 0
-  if [[ $body =~ $re ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; fi
+  local hostport="${CONSOLE_URL#http://}" body path=/api/profile re='^\{"profile":"([a-z0-9_-]+)"\}$'
+  local all_out='^\{"all_out":true,"profile":null,"resumes_at":(null|"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")\}$'
+  if [ -n "$ANSWER_PATH" ]; then path='/api/profile?all_out=1'; fi
+  loopback_body "${hostport%:*}" "${hostport##*:}" "$path" body || return 0
+  if [[ $body =~ $re ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [ -n "$ANSWER_PATH" ] && [[ $body =~ $all_out ]]; then
+    local at="${BASH_REMATCH[1]}"
+    if [ "$at" = null ] || valid_utc_time "${at//\"/}"; then printf '!all-out %s\n' "$at"; fi
+  fi
   return 0
 }
 
@@ -476,7 +510,8 @@ console_excluded() {
 # used signed-in named profile, the first named profile by name, each used only when it is an
 # account and, for the last two, not excluded by the owner (the console is asked); when every
 # named profile is excluded, default. Never reads the bindings. Prints only the name: stdout and
-# stderr belong to claude.
+# stderr belong to claude. With an answer file the console may answer that every profile is out;
+# that comes back as the line `!all-out <token>` (this runs in a subshell, so as data).
 launch_account() {
   local names name answer="" waited=0 choice="" best="" excluded="" first=""
   if [ -n "${CLAUDE_ACCOUNT:-}" ]; then printf '%s\n' "$CLAUDE_ACCOUNT"; return 0; fi
@@ -487,6 +522,7 @@ launch_account() {
   if [ "$waited" -gt 128 ]; then kill "$!" 2>/dev/null || true; fi
   wait "$!" 2>/dev/null || true
   if is_account "$answer"; then printf '%s\n' "$answer"; return 0; fi
+  case "$answer" in '!all-out '*) printf '%s\n' "$answer"; return 0 ;; esac
   if [ -f "$ROOT/chosen-profile" ]; then
     IFS= read -r choice 2>/dev/null < "$ROOT/chosen-profile" || true
     choice="${choice#"${choice%%[![:space:]]*}"}"
@@ -511,8 +547,28 @@ launch_account() {
   printf 'default\n'
 }
 
+# With the switch set (the engine's sessions, issue 1525) claude starts only when the settings
+# file it will read is ~/.claude/settings.json itself, so the lifecycle guard checked is loaded.
+require_host_settings() {
+  [ -n "${CLAUDE_ACCOUNT_HOST_SETTINGS:-}" ] || return 0
+  local dir="${CLAUDE_CONFIG_DIR:-$BASE}"
+  [ "$dir/settings.json" -ef "$BASE/settings.json" ] ||
+    die "this session would not load the lifecycle guard: $dir/settings.json is not $BASE/settings.json"
+}
+
+# <json>: the engine's answer (ADR-system-006), written whole so a reader never sees half of it.
+write_answer() {
+  # mktemp creates the file exclusively, so a link planted at a guessable name is never followed.
+  local tmp
+  tmp="$(mktemp "$ANSWER_PATH.XXXXXX")" && printf '%s\n' "$1" >"$tmp" && chmod 0644 "$tmp" &&
+    mv -f "$tmp" "$ANSWER_PATH" || { rm -f "${tmp:-}"; die "cannot write the answer file $ANSWER_PATH"; }
+}
+
 cmd_run() {
   local name status request session
+  # The answer path is this launch's own: no client, and no launch inside one, inherits it.
+  ANSWER_PATH="${CLAUDE_ACCOUNT_ANSWER:-}"
+  unset CLAUDE_ACCOUNT_ANSWER
   # A launch from inside a session inherits this, so the mod is added once.
   case ":${CLAUDE_CODE_PLUGIN_DIRS:-}:" in
     *":$MOD_DIR:"*) ;;
@@ -522,10 +578,16 @@ cmd_run() {
   if [ -z "${CLAUDE_ACCOUNT:-}" ]; then
     case "${CLAUDE_CONFIG_DIR:-}" in
       ""|"$PROFILES"/*) ;;
-      *) route_cache_proxy; exec "$(claude_bin)" "$@" ;;
+      *) require_host_settings; route_cache_proxy; exec "$(claude_bin)" "$@" ;;
     esac
   fi
   name="$(launch_account)"
+  # Only the console's answer, never an override, can say every account is out.
+  if [ -z "${CLAUDE_ACCOUNT:-}" ] && [ -n "$ANSWER_PATH" ]; then
+    case "$name" in
+      '!all-out '*) write_answer "{\"all_out\":true,\"resumes_at\":${name#'!all-out '}}"; exit 75 ;;
+    esac
+  fi
   # claude is waited on, not exec'd, so `switch` can end it and have it resumed
   # here under another account. Without a switch request this exits as claude did.
   export CLAUDE_ACCOUNT_LAUNCHER=$$
@@ -537,7 +599,9 @@ cmd_run() {
       sync_profile "$name"
       export CLAUDE_CONFIG_DIR="$(profile_dir "$name")"
     fi
+    require_host_settings
     route_cache_proxy
+    if [ -n "$ANSWER_PATH" ]; then write_answer "{\"account\":\"$name\"}"; fi
     status=0
     "$(claude_bin)" "$@" || status=$?
     request="$ROOT/switch/$$"

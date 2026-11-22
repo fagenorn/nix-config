@@ -17,11 +17,19 @@ A command that cannot start (an `OSError` from the spawn) is `failed` with exit 
 propagates. Every run is the leader of its own process group, and any exception while it waits (a
 SIGTERM to the engine, raised as `SystemExit`, and a failing `on_start` included) kills that group
 and closes its pipes without waiting for EOF. A timed run (`timeout` given) also has captured
-stderr, kills the group at the timeout and bounds the drain by `DRAIN_SECONDS`. A run given `stop`
-raises `Stopped` when it is true before the process starts, polls it while the process runs
-(`engine_stop.communicate`) and raises `Stopped` once it is true, also when the process has
-already ended. `Ran.stdout`/`stderr` are what it printed
-(stderr is empty untimed). The module runs processes, so the pure engine core never imports it.
+stderr, kills the group at the timeout and bounds the drain by `DRAIN_SECONDS`; the timeout counts
+from the spawn, `on_start` included. The deadline is armed (a `Watchdog` thread) before `on_start`
+runs, so a stalled `on_start` cannot keep the group past its bound; the SIGTERM handler is
+installed before the spawn, timed or not, and defers a signal until the group is owned, so a
+SIGTERM in the spawn interval still ends the group, and the previous handler returns with the run.
+`Ran.timed_out` says the timeout fired. A run given `stop` raises `Stopped` when it is true before
+the process starts, polls it while the process runs (`engine_stop.communicate`) and raises
+`Stopped` once it is true, also when the process has already ended. `Ran.stdout`/`stderr` are what
+it printed (stderr is empty untimed).
+
+The platform command table holds each platform id's wall bound (`PLATFORM_WALL_SECONDS`) and the one
+bound of every project command (`PROJECT_WALL_SECONDS`); the engine times every step run by it and
+captures its stderr. The module runs processes, so the pure engine core never imports it.
 
 Every command passes the lifecycle guard first, in the guard's accepted spelling (`command_text`),
 and runs marked as an agent session so the pre-push hook judges a push it makes (issue 1515). A
@@ -36,6 +44,7 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -50,6 +59,11 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "diff-scope": "delivery.diff_scope",
     "forge-claim": "claims.forge_claim",
 })
+PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
+    "diff-scope": 300,
+    "forge-claim": 1200,
+})
+PROJECT_WALL_SECONDS = 3600
 PROJECT_DECLARATION = CommandDeclaration((), {})
 NOT_STARTED = 127
 TIMED_OUT = "timeout"
@@ -136,6 +150,14 @@ class CommandTable:
             raise UnknownCommand(f"{command}: a project command takes no subcommand")
         raise UnknownCommand(f"{command}: not a platform or project command")
 
+    def wall_seconds(self, command: str) -> float:
+        """The wall bound of a command step: its platform row, else the project bound."""
+        if command in self.platform:
+            return PLATFORM_WALL_SECONDS[command]
+        if command in self.project:
+            return PROJECT_WALL_SECONDS
+        raise UnknownCommand(f"{command}: not a platform or project command")
+
 
 def grade(stdout: bytes, exit_code: int) -> tuple[str, dict]:
     """The outcome and the result object of a finished command."""
@@ -160,6 +182,36 @@ class Ran:
     wall_seconds: float
     stdout: bytes = b""
     stderr: bytes = b""
+    timed_out: bool = False
+
+
+def _terminate(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
+class Watchdog:
+    """Runs `end` once at a deadline from its own thread, so a stall in the caller cannot outlast it."""
+
+    def __init__(self, seconds: float, end: Callable[[], None]) -> None:
+        self.fired = False
+        self._end = end
+        self._timer = threading.Timer(max(0.0, seconds), self._fire)
+        self._timer.daemon = True
+
+    def _fire(self) -> None:
+        self.fired = True
+        self._end()
+
+    def start(self) -> Watchdog:
+        self._timer.start()
+        return self
+
+    def stop(self) -> bool:
+        """Disarm the deadline, waiting for an ending already begun; whether the deadline passed."""
+        self._timer.cancel()
+        if self._timer.is_alive():
+            self._timer.join()
+        return self.fired
 
 
 def _refused(reason: str, started: float) -> Ran:
@@ -183,7 +235,14 @@ def run(table: CommandTable, command: str, subcommand: str | None,
         return _refused(verdict.reason or "The lifecycle guard refused.", started)
     if stop is not None and stop():
         raise engine_stop.Stopped
-    with engine_stop.sigterm_exits():
+    started = time.monotonic()  # the wall bound counts from the spawn, not from the guard
+    deferred: list[int] = []
+    previous = None
+    try:  # before the spawn: the group exists from the spawn on
+        previous = signal.signal(signal.SIGTERM, lambda signum, frame: deferred.append(signum))
+    except ValueError:  # not the main thread: no handler can be installed
+        pass
+    try:
         try:
             process = subprocess.Popen(
                 shlex.split(text), cwd=invocation.cwd, stdin=subprocess.DEVNULL,
@@ -191,29 +250,60 @@ def run(table: CommandTable, command: str, subcommand: str | None,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
                 start_new_session=True)
         except OSError:
+            if deferred:  # no group to end, but the engine was told to stop
+                raise SystemExit(128 + deferred[0])
             return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
+        return _wait(process, on_start, started, timeout, deferred, stop)
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _kill(process: subprocess.Popen) -> None:
+    """End the command's own process group."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):  # gone, or a leader left unreaped as a zombie (macOS)
+        pass
+
+
+def _wait(process: subprocess.Popen, on_start: Callable[[int], None], started: float,
+          timeout: float | None, deferred: list[int], stop: Callable[[], bool] | None) -> Ran:
+    guard = None
+    try:
+        try:  # the deferred signals end here: from now on the group is owned
+            signal.signal(signal.SIGTERM, _terminate)
+        except ValueError:
+            pass
+        if deferred:
+            raise SystemExit(128 + deferred[0])
+        if timeout is not None:
+            guard = Watchdog(started + timeout - time.monotonic(),
+                             lambda: _kill(process)).start()
+        on_start(process.pid)
+    except BaseException:
+        if guard is not None:
+            guard.stop()
+        engine_stop.end_group(process)
+        raise
+    overran = guard is not None and guard.stop()
+    try:
+        remaining = None if timeout is None else started + timeout - time.monotonic()
+        if overran or (remaining is not None and remaining <= 0):
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        stdout, stderr = engine_stop.communicate(process, None, stop=stop, timeout=remaining)
+    except subprocess.TimeoutExpired:
+        _kill(process)
         try:
-            on_start(process.pid)
-        except BaseException:
-            engine_stop.end_group(process)
-            raise
-        try:
-            stdout, stderr = engine_stop.communicate(process, None, stop=stop, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                stdout, stderr = process.communicate(timeout=DRAIN_SECONDS)
-            except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
-                stdout, stderr = late.output or b"", late.stderr or b""
-                process.stdout.close(), process.stderr.close(), process.wait()
-            return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout,
-                       stderr)
-        except BaseException:  # an interrupt, a SIGTERM or a stop must not leave the group alive
-            engine_stop.end_group(process)
-            raise
+            stdout, stderr = process.communicate(timeout=DRAIN_SECONDS)
+        except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
+            stdout, stderr = late.output or b"", late.stderr or b""
+            process.stdout.close(), process.stderr.close(), process.wait()
+        return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr,
+                   timed_out=True)
+    except BaseException:  # an interrupt, a SIGTERM or a stop must not leave the group alive
+        engine_stop.end_group(process)
+        raise
     outcome, result = grade(stdout, process.returncode)
     return Ran(outcome, result, process.returncode, time.monotonic() - started,
                stdout, stderr or b"")

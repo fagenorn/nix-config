@@ -1,6 +1,6 @@
 """Resolve this repository's authored project contract into a ResolvedProject.
 
-`.agents/project.json` is the only input. `resolve` loads it, validates its
+`.agents/project.json` is the only input of a schema-2 contract. `resolve` loads it, validates its
 whole shape in one pass, normalizes every authored repository-relative path
 against the discovered project root, computes each capability's readiness
 from the filesystem and `PATH`, and prints the snapshot as compact sorted JSON
@@ -41,15 +41,19 @@ it must be a non-empty string naming a commands entry (`contract.vcs.not_string`
 `contract.vcs.unknown_command_id`), is returned as authored, and is never inserted
 when absent.
 
-`check-projections` judges each declared target against its source and
-refuses on drift; `resolve` runs the same check before it builds anything, so
+`check-projections` judges each declared target against its source (or, for
+`conformance_workflow`, the render) and refuses on drift; `resolve` runs the same check before it builds anything, so
 a hand-edited target is a structural refusal rather than a stale snapshot
 (D10).
 
 `platform-status` is the administrative operation: it reports the installed
 platform's version facts, and — when asked — one project's declared interval
 and compatibility verdict, or one verdict row per registered fleet member. It
-is never normal workflow context (R3.1).
+is never normal workflow context (R3.1). A schema-3 contract's project id and
+interval, in the `project` block and in every fleet row, are the derived ones
+(`contract_view`; ADR-project-contract-014), and a value that cannot be derived
+refuses a named project like `resolve` and reports a fleet row as
+`project_schema_unsupported`.
 
 `platform-status` republishes `platform.deprecations` verbatim and adds
 `deprecated_uses` to the `project` block and to each `fleet` row: the ascending
@@ -97,9 +101,31 @@ Schema 2 is unchanged: a supported `review.plan` or `review.code` still needs
 its authored `bindings.workflow.review` id.
 
 Project schema 3 authors only what the platform cannot decide. The resolver
-fills the constants from `schema_three` (`contract_view`), validates that view
-with the schema-2 rules, and builds the snapshot from it, so the snapshot is
-schema 2 without the four retired members (`schema_three.RETIRED`). Schema 3
+fills the constants from `schema_three` and the four derived values from
+`derived_values` (`contract_view`), validates that view with the schema-2
+rules, and builds the snapshot from it, so the snapshot is schema 2 without the
+four retired members (`schema_three.RETIRED`). The derived values are the
+attempt budget (below) and the project id and the tracker repo slug (the `owner/repo` of the git remote
+`origin`, read from the repository's git config), the merge's required checks
+(the contexts of `.github/branch-protection.json`) and the platform range (up
+to the next major from the `platform_version` of the platform manifest: the
+tree's own when it holds one, as the platform's own repository does, else that
+of the revision `devenv.lock` pins as `agent-platform`, found in the Nix
+store). They are read from files, never through a child process or the network.
+A contract that authors one is refused `contract.<section>.derived_value`, and
+one the repository cannot state is refused `contract.<section>.not_derivable`
+at its pointer (ADR-project-contract-014).
+
+The attempt budget `bindings.workflow.orchestration.attempt_budget_minutes` is
+derived too, from one more file the resolver only reads, never writes:
+`<git common dir>/agent-platform/attempt-history.json`, through
+`attempt_history.read` (ADR-project-contract-016). The snapshot also carries
+`attempt_budget_basis` beside it: the history's delivered count, its 90th
+percentile and its `recorded_at`, or the fallback of 240 minutes with its
+reason (`no_history`, `unreadable`, `invalid`, `other_repository` or
+`too_few`). No state of that file refuses resolution, and an authored budget
+or basis is refused `contract.workflow.derived_value`. Schema 2 keeps its
+authored budget and reads no history. Schema 3
 also defines the platform command `commit-environment` (`platform_commands`),
 which the filled commit environment names. A schema-3 contract that authors a
 platform constant, a retired member, a platform command id or a command's `cwd`
@@ -116,6 +142,16 @@ line inside an otherwise authored file for the other (D11). Rendering is a
 pure function of the source bytes, the projection id and the schema version,
 so two machines regenerate byte-identical targets; a target already in sync is
 left untouched, mtime included.
+
+A third kind, `conformance_workflow`, projects no instruction source: the
+entry carries only `id`, `kind` and `target` (an `agent` or a `source` is
+`contract.projections.member_unexpected`), its target is always
+`.github/workflows/conformance.yaml`, at most one is declared, and the file is
+rendered from the schema version and `bindings.vcs.integration_branch` alone.
+A branch outside `[A-Za-z0-9][A-Za-z0-9._/-]*` is refused while such an entry
+is declared, so the branch can always be written as a quoted YAML string.
+`check-projections` and `write-projections` judge and rewrite it as they do a
+generated file: absent is `missing`, any other bytes than the render `stale`.
 
 Every subcommand loads and validates the installed platform manifest before it
 looks at the repository, so a missing or malformed platform installation always
@@ -140,7 +176,8 @@ import shutil
 import sys
 
 from agent_tools.release import release_adapter, release_profile
-from agent_tools.project_contract import agent_platform, schema_three
+from agent_tools.project_contract import (
+    agent_platform, attempt_history, derived_values, schema_three)
 from agent_tools.system import semver
 
 
@@ -180,7 +217,7 @@ REASON_CODES = (
     "release_profile_inadmissible",
     "release_adapter_unavailable",
 )
-PROJECTION_KINDS = ("generated_file", "managed_import")
+PROJECTION_KINDS = ("generated_file", "managed_import", "conformance_workflow")
 PROJECTION_STATUSES = ("in_sync", "missing", "stale")
 AGENT_IDS = ("claude", "codex")
 CONTRACT_FILENAME = ".agents/project.json"
@@ -282,6 +319,20 @@ VERIFICATION_CONDITION_MEMBERS = ("when_changed", "skip_reason")
 VERIFICATION_CONDITION_OPTIONAL_MEMBERS = ("pre_commit",)
 LIGHT_LANE_MODES = ("shadow", "active")
 PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
+# The members each kind carries. `conformance_workflow` renders from the
+# contract alone, so it has no `agent` and no `source`.
+PROJECTION_KIND_MEMBERS = {
+    "generated_file": PROJECTION_MEMBERS,
+    "managed_import": PROJECTION_MEMBERS,
+    "conformance_workflow": ("id", "kind", "target"),
+}
+# The only target a `conformance_workflow` entry may name: the kind has no
+# source, so the source-collision check cannot protect an authored file; the
+# fixed target does.
+CONFORMANCE_WORKFLOW_TARGET = ".github/workflows/conformance.yaml"
+# A branch the rendered workflow may carry as a double-quoted YAML string: no
+# quote, backslash, space or control character can reach it.
+WORKFLOW_BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 # D6: what each capability demands of the bindings when it is declared
 # `supported`. A row is the binding member's path under `/bindings` and the
@@ -329,6 +380,52 @@ GENERATED_HEADER_TEMPLATE = (
     "Do not edit; edit the source and run `resolve-project write-projections`. -->"
 )
 MANAGED_IMPORT_TEMPLATE = "@{source}"
+# The third rendered form, a wire format: only {version} and {branch} vary; one final newline.
+CONFORMANCE_WORKFLOW_TEMPLATE = """\
+# Generated by resolve-project (project schema {version}). Do not edit: the
+# Conformance check fails while this file differs from what resolve-project renders.
+name: Conformance
+
+on:
+  pull_request:
+    branches:
+      - "{branch}"
+  push:
+    branches:
+      - "{branch}"
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: Conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v4
+      - name: Run conformance
+        run: nix shell .#agent-platform --command conformance run --purpose ci
+"""
+
+
+def render_conformance_workflow(integration_branch: str, schema_version: int) -> bytes:
+    """Contract: the exact bytes of the committed conformance workflow.
+
+    A pure function of its two arguments. The branch is written as a
+    double-quoted YAML string, so `null`, `true` or `123` stays a string; a
+    branch outside `WORKFLOW_BRANCH_PATTERN` is a `ValueError`.
+    """
+    if WORKFLOW_BRANCH_PATTERN.fullmatch(integration_branch) is None:
+        raise ValueError(f"integration branch is not workflow-safe: {integration_branch!r}")
+    return CONFORMANCE_WORKFLOW_TEMPLATE.format(
+        version=schema_version, branch=integration_branch).encode("utf-8")
 
 
 class ContractError(Exception):
@@ -1116,12 +1213,17 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
     seen: set[str] = set()
     targets: dict[str, int] = {}
     sources: set[str] = set()
+    workflow_declared = False
     for index, entry in enumerate(projections):
         pointer = f"/projections/{index}"
         if not check_object(entry, pointer, "projections", violations):
             continue
-        check_exact_members(
-            entry, pointer, PROJECTION_MEMBERS, "projections", violations)
+        kind = entry.get("kind")
+        # A kind that is not a string (a list, an object) is unhashable and
+        # selects the file kinds' members; `invalid_kind` below refuses it.
+        members = (PROJECTION_KIND_MEMBERS.get(kind, PROJECTION_MEMBERS)
+                   if isinstance(kind, str) else PROJECTION_MEMBERS)
+        check_exact_members(entry, pointer, members, "projections", violations)
         if "id" in entry and check_string(
                 entry["id"], f"{pointer}/id", "projections", violations):
             if entry["id"] in seen:
@@ -1129,7 +1231,8 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
                     f"{pointer}/id", "projection id is declared more than once",
                     "contract.projections.duplicate_id"))
             seen.add(entry["id"])
-        if "agent" in entry and entry["agent"] not in AGENT_IDS:
+        if ("agent" in entry and "agent" in members
+                and entry["agent"] not in AGENT_IDS):
             violations.append(violation(
                 f"{pointer}/agent", "must name a known agent",
                 "contract.projections.invalid_agent"))
@@ -1137,6 +1240,20 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
             violations.append(violation(
                 f"{pointer}/kind", "must name a known projection kind",
                 "contract.projections.invalid_kind"))
+        if kind == "conformance_workflow":
+            if workflow_declared:
+                violations.append(violation(
+                    f"{pointer}/kind",
+                    "at most one conformance_workflow entry may be declared",
+                    "contract.projections.duplicate_conformance_workflow"))
+            workflow_declared = True
+            if ("target" in entry
+                    and entry["target"] != CONFORMANCE_WORKFLOW_TARGET):
+                violations.append(violation(
+                    f"{pointer}/target",
+                    f"a conformance_workflow entry must name "
+                    f"'{CONFORMANCE_WORKFLOW_TARGET}'",
+                    "contract.projections.workflow_target"))
         for name in ("target", "source"):
             if name in entry and check_safe_path(
                     entry[name], f"{pointer}/{name}", "projections", violations):
@@ -1161,6 +1278,19 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
                 "must not name a projection source: writing the target would "
                 "overwrite the authored source it is rendered from",
                 "contract.projections.target_is_source"))
+    if workflow_declared:
+        # Only a string reached through objects is judged here: a null or
+        # non-object `bindings` or `vcs`, or a non-string branch, is the
+        # finding of the validators that own those members.
+        reached, branch = find_binding(
+            source.get("bindings"), ("vcs", "integration_branch"))
+        if (reached and isinstance(branch, str)
+                and WORKFLOW_BRANCH_PATTERN.fullmatch(branch) is None):
+            violations.append(violation(
+                "/bindings/vcs/integration_branch",
+                "must be a workflow-safe branch name (letters, digits, '.', "
+                "'_', '-' and '/') while a conformance_workflow entry is declared",
+                "contract.projections.workflow_branch_unsafe"))
 
 
 def projection_paths(source: object) -> list[str]:
@@ -1223,16 +1353,30 @@ def platform_commands(source: object) -> dict:
     return agent_platform.PLATFORM_COMMANDS
 
 
-def contract_view(source: dict) -> dict:
-    """The contract the shape rules and the snapshot read: schema 3 with its constants filled, else `source`."""
+def derive_for(root: Path, source: object) -> derived_values.Derived:
+    """The values `root` states for a schema-3 `source`, with its attempt budget and basis; nothing, and no file read, for any other schema."""
     if schema_three.declares(source):
-        return schema_three.fill(source)
+        derived = derived_values.derive(root)
+        budget = attempt_history.read(root, derived.values.get(derived_values.REPO_SLUG))
+        return derived_values.Derived(
+            {**derived.values,
+             schema_three.ATTEMPT_BUDGET: budget.minutes,
+             schema_three.ATTEMPT_BUDGET_BASIS: budget.basis},
+            derived.violations)
+    return derived_values.Derived({}, [])
+
+
+def contract_view(source: dict, derived: derived_values.Derived) -> dict:
+    """The contract the shape rules and the snapshot read: schema 3 with its constants and derived values filled, else `source`."""
+    if schema_three.declares(source):
+        return schema_three.fill(source, derived.values)
     return source
 
 
 def load_contract_view(root: Path) -> dict:
     """The contract at `root` as its readers outside the resolver see it: `contract_view` of `load_contract`."""
-    return contract_view(load_contract(root))
+    source = load_contract(root)
+    return contract_view(source, derive_for(root, source))
 
 
 def effective_commands(authored: dict | None,
@@ -1351,7 +1495,8 @@ def validate_production(source: dict, violations: list[dict]) -> None:
                 "contract.production.unknown_release_profile"))
 
 
-def validate_contract(source: dict, manifest: dict) -> list[dict]:
+def validate_contract(source: dict, manifest: dict,
+                      derived: derived_values.Derived) -> list[dict]:
     """Every shape violation of the authored source, collected in one pass.
 
     Each returned violation carries `pointer`, `message` and the internal
@@ -1361,49 +1506,65 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
     `manifest` is the installed platform manifest: it carries the set of
     project schema versions this platform supports (D8), which is the only
     authority for "supported" — the resolver holds no schema literal.
+
+    `derived` is what `derive_for` read for this source. A value it could not
+    derive is its own violation, so the shape violation that only restates it
+    (the same pointer, one beneath it, or the `project` container whose only
+    member is the failed id) is dropped; every other shape violation stays.
     """
     violations: list[dict] = []
     validate_schema_version(
         source, violations, manifest["project_schema_versions"])
     # Schema 3 is judged through its filled view: the shape rules are schema 2's,
     # over the member lists schema 3 keeps. What the contract authors that the
-    # platform decides is refused from the authored source first.
+    # platform decides or the repository states is refused from the authored
+    # source first.
     three = schema_three.declares(source)
     if three:
         violations.extend(schema_three.refusals(source))
-    source = contract_view(source)
+        violations.extend(derived.violations)
+    source = contract_view(source, derived)
+    shape: list[dict] = []
     for name in TOP_LEVEL_MEMBERS:
         # `schema_version` reports its own absence above, with the repair id
         # that names the version rather than the generic missing-member one.
         if name != "schema_version" and name not in source:
-            violations.append(violation(
+            shape.append(violation(
                 f"/{name}", "required member is absent",
                 "contract.top_level.member_missing"))
     for name in sorted(source):
         if name not in TOP_LEVEL_MEMBERS and name not in TOP_LEVEL_OPTIONAL_MEMBERS:
-            violations.append(violation(
+            shape.append(violation(
                 f"/{name}", "member is not part of this schema",
                 "contract.top_level.member_unexpected"))
     if "project" in source:
-        validate_project(source, violations, **({"members": ("id",)} if three else {}))
+        validate_project(source, shape, **({"members": ("id",)} if three else {}))
     if "bindings" in source:
         validate_bindings(
-            source, violations,
+            source, shape,
             schema=schema_three.SCHEMA_VERSION if three else 2)
     if "capabilities" in source:
-        validate_capabilities(source, violations)
+        validate_capabilities(source, shape)
     if "projections" in source:
-        validate_projection_entries(source, violations)
+        validate_projection_entries(source, shape)
     if "platform" in source:
-        validate_platform(source, violations)
+        validate_platform(source, shape)
     if "release" in source:
         # D2: the grammar's violations join the one ordered list; what the
         # admissibility rules refuse is a capability state, never a violation.
-        violations.extend(
+        shape.extend(
             release_profile.grammar_violations(source["release"], source))
     if "production" in source:
-        validate_production(source, violations)
-    violations.extend(validate_capability_bindings(source))
+        validate_production(source, shape)
+    shape.extend(validate_capability_bindings(source))
+    failed = [entry["pointer"] for entry in derived.violations]
+    violations.extend(
+        entry for entry in shape
+        if not any(entry["pointer"] == pointer
+                   or entry["pointer"].startswith(pointer + "/")
+                   or (entry["pointer"] in schema_three.DERIVED_CONTAINERS
+                       and pointer.startswith(entry["pointer"] + "/"))
+                   for pointer in failed))
     return violations
 
 
@@ -1583,7 +1744,8 @@ def production_rules(source: dict) -> dict:
     return rules
 
 
-def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
+def build_snapshot(root: Path, source: dict, manifest: dict,
+                   derived: derived_values.Derived) -> dict:
     # Readiness reads the normalized bindings, so each command's `cwd` is
     # already the absolute base a relative argv[0] resolves against (D22).
     #
@@ -1591,8 +1753,11 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # `resolved_schema_version`, the schema this platform resolves *to*. It is
     # not the contract's declared `schema_version`, which may legally be an
     # older supported schema (R2.5).
-    view = contract_view(source)
+    view = contract_view(source, derived)
     bindings = normalize_bindings(view["bindings"], root, platform_commands(source))
+    if schema_three.ATTEMPT_BUDGET_BASIS in derived.values:
+        bindings["workflow"]["orchestration"]["attempt_budget_basis"] = copy.deepcopy(
+            derived.values[schema_three.ATTEMPT_BUDGET_BASIS])
     project = {"root": str(root), "id": view["project"]["id"]}
     if "name" in view["project"]:
         project["name"] = view["project"]["name"]
@@ -1727,20 +1892,40 @@ def managed_line_occurrences(target_bytes: bytes, entry: dict) -> int:
     return target_bytes.decode("utf-8", errors="replace").splitlines().count(line)
 
 
-def projection_status(root: Path, entry: dict, schema_version: int) -> str:
+def rendered_target(root: Path, entry: dict, contract: dict) -> bytes:
+    """The bytes a target holding the whole rendered file must equal.
+
+    A `conformance_workflow` entry renders from the contract alone and reads no
+    source; the file kinds render from their source bytes.
+    """
+    if entry["kind"] == "conformance_workflow":
+        return render_conformance_workflow(
+            contract["bindings"]["vcs"]["integration_branch"],
+            contract["schema_version"])
+    return render_projection(
+        entry, read_projection_source(root, entry), contract["schema_version"])
+
+
+def projection_status(root: Path, entry: dict, contract: dict) -> str:
     """Contract: exactly one of "in_sync", "missing", "stale".
 
-    The source is read for either kind, so a missing source refuses as
+    The source is read for a file kind, so a missing source refuses as
     `invalid_contract` before any target is ever judged.
     """
+    kind = entry["kind"]
+    if kind == "conformance_workflow":
+        existing = read_projection_target(root, entry)
+        if existing is None:
+            return "missing"
+        return "in_sync" if existing == rendered_target(
+            root, entry, contract) else "stale"
     source_bytes = read_projection_source(root, entry)
     existing = read_projection_target(root, entry)
     if existing is None:
         return "missing"
-    kind = entry["kind"]
     if kind == "generated_file":
         return "in_sync" if existing == render_projection(
-            entry, source_bytes, schema_version) else "stale"
+            entry, source_bytes, contract["schema_version"]) else "stale"
     if kind == "managed_import":
         return "in_sync" if managed_line_occurrences(existing, entry) == 1 \
             else "stale"
@@ -1761,7 +1946,7 @@ def validate_projections(root: Path, contract: dict) -> None:
         # Each of the three statuses is named: a value outside the closed set
         # is a bug in this module, and reclassifying it as drift would hide
         # that behind a plausible refusal.
-        status = projection_status(root, entry, contract["schema_version"])
+        status = projection_status(root, entry, contract)
         if status == "in_sync":
             continue
         if status == "missing":
@@ -1787,7 +1972,23 @@ def validate_projections(root: Path, contract: dict) -> None:
     )
 
 
-def apply_projection(root: Path, entry: dict, schema_version: int,
+def target_directory_is_contained(root: Path, target: Path) -> bool:
+    """Whether the directory a write would replace `target` in lies inside `root`.
+
+    `os.replace` swaps the target's own entry, so a symlinked target is
+    harmless, but a symlinked parent directory sends the replacement into
+    whatever it points at. Resolved without requiring existence, because a
+    missing directory is created by the write.
+    """
+    try:
+        anchor = root.resolve()
+        parent = target.parent.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return parent == anchor or anchor in parent.parents
+
+
+def apply_projection(root: Path, entry: dict, contract: dict,
                     violations: list[dict]) -> str | None:
     """Bring one target into sync and name the action taken.
 
@@ -1795,10 +1996,17 @@ def apply_projection(root: Path, entry: dict, schema_version: int,
     import already present more than once is reported, never repaired, because
     only the author knows which of the duplicates was meant (D17).
     """
-    rendered = render_projection(
-        entry, read_projection_source(root, entry), schema_version)
+    rendered = rendered_target(root, entry, contract)
     target = root / entry["target"]
-    status = projection_status(root, entry, schema_version)
+    if not target_directory_is_contained(root, target):
+        violations.append({
+            "pointer": f"/projections/{entry['id']}",
+            "message": ("the projection target's directory resolves outside "
+                        "the repository; replace the symlink with a real "
+                        "directory and rerun"),
+        })
+        return None
+    status = projection_status(root, entry, contract)
     if status == "in_sync":
         return "unchanged"
     if status == "missing":
@@ -1807,7 +2015,7 @@ def apply_projection(root: Path, entry: dict, schema_version: int,
     if status != "stale":
         raise ValueError(f"unknown projection status: {status!r}")
     kind = entry["kind"]
-    if kind == "generated_file":
+    if kind in ("generated_file", "conformance_workflow"):
         agent_platform.write_atomically(target, rendered)
         return "written"
     if kind != "managed_import":
@@ -1955,15 +2163,17 @@ def compose_snapshot(repo_root: str | None, required: list[str] | None) -> dict:
     manifest, _ = require_platform_manifest()
     root = discover_root(repo_root)
     source = load_contract(root)
-    raise_for_violations(validate_contract(source, manifest))
+    derived = derive_for(root, source)
+    raise_for_violations(validate_contract(source, manifest, derived))
     # The range check is the inner half of the manifest gate, and it runs only
     # once interval *shape* validation has succeeded: a malformed interval is
     # `invalid_contract`, an out-of-range one `unsupported_schema` (R2.3).
-    raise_for_platform_range(source["platform"], manifest["platform_version"])
+    raise_for_platform_range(
+        contract_view(source, derived)["platform"], manifest["platform_version"])
     # Drift is a structural refusal, not a capability state, and it refuses
     # before a single snapshot member exists (D10).
     validate_projections(root, source)
-    snapshot = build_snapshot(root, source, manifest)
+    snapshot = build_snapshot(root, source, manifest, derived)
     raise_for_unavailable(required, snapshot["capabilities"])
     json.dumps(snapshot, allow_nan=False)
     return snapshot
@@ -1987,12 +2197,11 @@ def command_write_projections(args: argparse.Namespace) -> int:
     manifest, _ = require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
-    raise_for_violations(validate_contract(source, manifest))
+    raise_for_violations(validate_contract(source, manifest, derive_for(root, source)))
     applied: list[dict] = []
     violations: list[dict] = []
     for entry in source["projections"]:
-        action = apply_projection(
-            root, entry, source["schema_version"], violations)
+        action = apply_projection(root, entry, source, violations)
         if action is not None:
             applied.append({"id": entry["id"], "action": action})
     raise_for_projection_violations(violations)
@@ -2011,7 +2220,7 @@ def command_check_projections(args: argparse.Namespace) -> int:
     manifest, _ = require_platform_manifest()
     root = discover_root(args.repo_root)
     source = load_contract(root)
-    raise_for_violations(validate_contract(source, manifest))
+    raise_for_violations(validate_contract(source, manifest, derive_for(root, source)))
     validate_projections(root, source)
     return emit_json({"projections": [
         {"id": entry["id"], "action": "unchanged"}
@@ -2168,8 +2377,10 @@ def evaluate_named_project(root: Path, source: dict,
     does not publish and an out-of-range interval are the two reported
     verdicts.
     """
+    derived = derive_for(root, source)
+    view = contract_view(source, derived)
     try:
-        raise_for_violations(validate_contract(source, manifest))
+        raise_for_violations(validate_contract(source, manifest, derived))
     except ContractError as error:
         if error.code != "unsupported_schema":
             raise
@@ -2177,9 +2388,9 @@ def evaluate_named_project(root: Path, source: dict,
     else:
         reason_code = agent_platform.interval_verdict(
             manifest["platform_version"],
-            source["platform"]["min_inclusive"],
-            source["platform"]["max_exclusive"])
-    facts = declared_facts(source)
+            view["platform"]["min_inclusive"],
+            view["platform"]["max_exclusive"])
+    facts = declared_facts(view)
     project = {
         "project_id": facts["project_id"],
         "root": str(root),
@@ -2192,7 +2403,10 @@ def evaluate_named_project(root: Path, source: dict,
 
 
 def fleet_verdict(root: Path, manifest: dict) -> tuple[object, str | None]:
-    """One registered project's contract, and its failing reason code or None.
+    """One registered project's contract view, and its failing reason code or None.
+
+    The view is `contract_view` of the loaded contract: a schema-3 contract's
+    identity and interval are the derived ones (ADR-project-contract-014).
 
     Nothing here refuses. The registry named this project, not the operator, so
     a root that is gone, an unreadable or unparseable contract and a structural
@@ -2203,16 +2417,18 @@ def fleet_verdict(root: Path, manifest: dict) -> tuple[object, str | None]:
         source = load_contract(root)
     except ContractError:
         return None, "project_schema_unsupported"
+    derived = derive_for(root, source)
+    view = contract_view(source, derived)
     try:
-        violations = validate_contract(source, manifest)
+        violations = validate_contract(source, manifest, derived)
     except ContractError as error:
-        return source, error.reason_code or "project_schema_unsupported"
+        return view, error.reason_code or "project_schema_unsupported"
     if violations:
-        return source, "project_schema_unsupported"
-    return source, agent_platform.interval_verdict(
+        return view, "project_schema_unsupported"
+    return view, agent_platform.interval_verdict(
         manifest["platform_version"],
-        source["platform"]["min_inclusive"],
-        source["platform"]["max_exclusive"])
+        view["platform"]["min_inclusive"],
+        view["platform"]["max_exclusive"])
 
 
 def fleet_row(entry: dict, manifest: dict) -> dict:

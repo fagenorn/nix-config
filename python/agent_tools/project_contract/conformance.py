@@ -15,6 +15,10 @@ A schema refusal prints the resolver's refusal shape — one JSON object
 carrying an `error` member — on stdout and exits 2. An argparse usage error
 also exits 2 but prints no JSON, which is how a caller tells the two apart.
 
+`run` exits 2 for a non-passing `workflow_entry`, 1 for a non-passing `ci`
+(after printing the report, so a red CI job still carries its findings), and 0
+for every other purpose, however its outcome reads.
+
 Nothing here reads a clock: no report member and no source line carries a
 timestamp, and `FORBIDDEN_MEMBER_NAMES` is validated at every object depth so
 none can be added later without the validator refusing it.
@@ -632,9 +636,10 @@ def build_report(purpose: str, context: Context, checks: list[dict]) -> dict:
 
 
 def command_run(args: argparse.Namespace) -> int:
-    """Contract: prints one schema-valid report and returns 0, or 2 for a
-    non-passing workflow_entry. It catches nothing: an unexpected exception
-    reaches main's single boundary and becomes the D15 refusal (D29)."""
+    """Contract: prints one schema-valid report and returns 0, 2 for a
+    non-passing workflow_entry, or 1 for a non-passing ci. It catches nothing:
+    an unexpected exception reaches main's single boundary and becomes the D15
+    refusal (D29)."""
     context = Context(
         root=(Path(args.repo_root).resolve() if args.repo_root
               else Path.cwd().resolve()),
@@ -648,6 +653,8 @@ def command_run(args: argparse.Namespace) -> int:
     emit_json(report)
     if args.purpose == "workflow_entry" and report["outcome"]["status"] != "passed":
         return 2
+    if args.purpose == "ci" and report["outcome"]["status"] != "passed":
+        return 1
     return 0
 
 
