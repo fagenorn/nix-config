@@ -11,6 +11,7 @@ import _thread
 import os
 import re
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -27,6 +28,8 @@ from agent_tools.delivery.procedure_check import load_commands
 from agent_tools.system.siblings import sibling_argv
 
 TIER = "fast"
+
+HEARTBEAT = "import sys, time\nwhile True:\n    open(sys.argv[1], 'a').write('x')\n    time.sleep(0.05)\n"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDIN = REPO_ROOT / "tests/fixtures/engine-deliver/standin.py"
@@ -282,6 +285,56 @@ class GradeTest(unittest.TestCase):
                   timeout=1)
         self.assertTrue(ran.timed_out)
         self.assertEqual(ran.outcome, engine_commands.TIMED_OUT)
+
+    def test_a_stalled_start_callback_cannot_keep_the_group_past_its_bound(self):
+        beat = Path(self.tmp) / "beat"
+        entry = {"argv": [sys.executable, "-c", HEARTBEAT, str(beat)], "cwd": self.tmp, "env": []}
+        sizes: list[tuple[int, int]] = []
+
+        def stalled(pid: int) -> None:
+            time.sleep(2.5)
+            before = beat.stat().st_size
+            time.sleep(0.5)
+            sizes.append((before, beat.stat().st_size))
+
+        ran = run(table(beat=entry), "beat", None, (), on_start=stalled, timeout=1)
+        self.assertTrue(ran.timed_out)
+        self.assertEqual(sizes[0][0], sizes[0][1], "the group still ran while on_start stalled")
+
+    def test_a_sigterm_between_the_spawn_and_the_engine_handler_still_ends_the_group(self):
+        entry = {"argv": [sys.executable, "-c", "import time; time.sleep(60)"], "cwd": self.tmp,
+                 "env": []}
+        real = subprocess.Popen
+        pids: list[int] = []
+
+        def spawn_then_term(*args, **kwargs):
+            child = real(*args, **kwargs)
+            pids.append(child.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+
+        def kill_group() -> None:
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        self.addCleanup(kill_group)
+        outer = signal.signal(signal.SIGTERM, lambda signum, frame: None)
+        self.addCleanup(signal.signal, signal.SIGTERM, outer)
+        with mock.patch.object(engine_commands.subprocess, "Popen", spawn_then_term):
+            with self.assertRaises(SystemExit) as raised:
+                run(table(sleepy=entry), "sleepy", None, (), on_start=lambda pid: None, timeout=3)
+        self.assertEqual(raised.exception.code, 128 + signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pids[0], 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail("the command group outlived the engine's SIGTERM")
 
     def test_arguments_are_text_integers_and_compact_json(self):
         self.assertEqual(argument("a b"), "a b")

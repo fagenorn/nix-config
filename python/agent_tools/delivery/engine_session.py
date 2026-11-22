@@ -49,7 +49,8 @@ the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
 other exception both do. Its `timeout` is the wall bound, counted from the spawn
-(so the time `on_start` takes is inside it): a session past it gets SIGTERM to
+(so the time `on_start` takes is inside it, and the deadline is armed, as a `Watchdog` thread, before
+`on_start` runs, so a stalled `on_start` cannot keep the group past it): a session past it gets SIGTERM to
 its whole group, then `GRACE_SECONDS` for the group (not only the launcher) to
 be gone, and SIGKILL to the group if any member is still alive; the call returns
 with `timed_out` set within `timeout + GRACE_SECONDS + DRAIN_SECONDS`. A launcher that
@@ -79,7 +80,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery.engine_commands import argument
+from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
 from agent_tools.delivery.procedure_check import PLACEHOLDER_RE, ROLES
 from agent_tools.skill_lint import parse_frontmatter
@@ -357,6 +358,28 @@ def _kill_group(pid: int, signum: int) -> None:
         pass
 
 
+def _signal_overrun(process: subprocess.Popen) -> None:
+    """Signal a session past its wall bound: TERM to its group, the grace, then KILL to the group."""
+    pid = process.pid
+    _kill_group(pid, signal.SIGTERM)
+    grace_end = time.monotonic() + GRACE_SECONDS
+    while process.poll() is None and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    while _group_alive(pid) and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    _kill_group(pid, signal.SIGKILL)  # a member that outlived the launcher and the grace
+
+
+def _collect(process: subprocess.Popen) -> tuple[bytes, bytes]:
+    """What an ended session printed, the drain bounded by `DRAIN_SECONDS`."""
+    try:
+        return process.communicate(timeout=DRAIN_SECONDS)
+    except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
+        stdout, stderr = late.output or b"", late.stderr or b""
+        process.stdout.close(), process.stderr.close(), process.wait()
+        return stdout, stderr
+
+
 def _end_overrun(process: subprocess.Popen) -> tuple[bytes, bytes]:
     """End a session past its wall bound: TERM to its group, the grace, then KILL to the group."""
     pid = process.pid
@@ -366,12 +389,7 @@ def _end_overrun(process: subprocess.Popen) -> tuple[bytes, bytes]:
         stdout, stderr = process.communicate(timeout=max(0.0, grace_end - time.monotonic()))
     except subprocess.TimeoutExpired:  # the launcher ignores TERM, or a member holds a pipe
         _kill_group(pid, signal.SIGKILL)
-        try:
-            return process.communicate(timeout=DRAIN_SECONDS)
-        except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
-            stdout, stderr = late.output or b"", late.stderr or b""
-            process.stdout.close(), process.stderr.close(), process.wait()
-            return stdout, stderr
+        return _collect(process)
     while _group_alive(pid) and time.monotonic() < grace_end:
         time.sleep(0.05)
     _kill_group(pid, signal.SIGKILL)  # a member that outlived the launcher and the grace
@@ -400,8 +418,16 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         except OSError as error:
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)
-        on_start(process.pid)
-        if timeout is None:
+        guard = None if timeout is None else Watchdog(
+            started + timeout - time.monotonic(), lambda: _signal_overrun(process)).start()
+        try:
+            on_start(process.pid)
+        finally:  # the deadline is armed before `on_start` runs and is waited out here
+            overran = guard is not None and guard.stop()
+        if overran:
+            timed_out = True
+            stdout, stderr = _collect(process)
+        elif timeout is None:
             stdout, stderr = process.communicate(prompt.encode("utf-8"))
         else:
             remaining = started + timeout - time.monotonic()

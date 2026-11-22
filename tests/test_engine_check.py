@@ -302,6 +302,11 @@ def _exhausted_route_to_children(toy: dict) -> None:
     step(toy, "draft")["on"]["exhausted"] = "children"
 
 
+def _bound_retries_and_exhausted_route_to_children(toy: dict) -> None:
+    _exhausted_route_to_children(toy)
+    step(toy, "draft")["on"]["out-of-bounds"] = "draft"
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -408,8 +413,7 @@ CASES = [
          [("toy", "draft", "unbounded_cycle")]),
     Case("exhausted_reenters_its_loop",
          editing("toy", _set(lambda toy: step(toy, "draft")["on"], "exhausted", "review")),
-         [("toy", "draft", "unbounded_cycle"), ("toy", "review-a", "unproduced_input"),
-          ("toy", "review-b", "unproduced_input"), ("toy", "children", "unproduced_input")]),
+         [("toy", "draft", "unbounded_cycle")]),
     Case("outcome_the_step_cannot_produce",
          editing("toy", _set(lambda toy: step(toy, "draft")["on"], "maybe", "review")),
          [("toy", "draft", "unknown_outcome")]),
@@ -463,7 +467,8 @@ CASES = [
     Case("bound_route_reaches_a_reply_reader", editing("toy", _bound_route_to_review),
          [("toy", "review-a", "unproduced_input"), ("toy", "review-b", "unproduced_input"),
           ("toy", "children", "unproduced_input")]),
-    Case("exhausted_route_reaches_a_reply_reader", editing("toy", _exhausted_route_to_children),
+    Case("exhausted_route_after_a_retried_bound_reaches_a_reply_reader",
+         editing("toy", _bound_retries_and_exhausted_route_to_children),
          [("toy", "children", "unproduced_input")]),
     Case("step_overrides_a_bound",
          editing("toy", _set(lambda toy: step(toy, "draft"), "max_turns", 5)),
@@ -507,6 +512,10 @@ class ToyProcedureTest(unittest.TestCase):
         def map_bound(toy: dict) -> None:
             step(toy, "scope")["on"]["out-of-bounds"] = "needs-owner"
         code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", map_bound))))
+        self.assertEqual((code, out), (0, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_an_exhausted_retry_loop_may_feed_a_reader_of_its_reply(self):
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", _exhausted_route_to_children))))
         self.assertEqual((code, out), (0, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"})))
 
     def test_a_decide_step_cannot_map_out_of_bounds(self):

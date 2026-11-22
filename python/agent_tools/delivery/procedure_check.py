@@ -62,7 +62,7 @@ through its group; a step never reads its own result; a step the walk does not r
 reach, skip this route check and keep the `run.<n>` and member checks), `unknown_member` (`X` is an agent step whose reply
 schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
 consumed; a step ended by a bound (`out-of-bounds`) produces none of its members, so a read of `<X>.<m>` is refused on a
-route where `X` ended by the bound, unless the route reenters `X` and passes a normal outcome before the reader; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
+route where `X` ended by the bound, unless the route reenters `X` and passes a normal outcome before the reader (the `exhausted` entry of a step on a cycle follows an earlier visit and keeps that visit's reply, unless the bound route leads back to the step); `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
 declares no schema and is not member-checked) and `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
 its `in` paths; skipped when the prompt is missing)."""
 
@@ -741,16 +741,21 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
 def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     """`flow_graph` with a `(result)` node after each step whose `on` maps `out-of-bounds`.
 
-    The step's node keeps its `out-of-bounds` and `exhausted` edges (unless a target is `done`, or `exhausted` is dead)
-    and goes to `<id>(result)`, which stands for the step having ended by a normal outcome and carries the step's other
-    outcome edges. A route through the step's own node alone is one on which the step ended by a bound, or was
-    exhausted on entry without running, and stored no member of this visit.
+    The step's node keeps its `out-of-bounds` edge (unless its target is `done`) and goes to `<id>(result)`, which
+    stands for the step having ended by a normal outcome and carries the step's other outcome edges. A route through
+    the step's own node alone is one on which the step ended by a bound and stored no member of this visit.
+
+    The `exhausted` edge of a step on a cycle is taken on an entry after a visit ended, and a visit's result is
+    kept until the next one replaces it, so it hangs on `<id>(result)`: the previous visit ended by a normal outcome.
+    It hangs on the step's own node too only when its `out-of-bounds` target leads back to the step through steps,
+    the one way the previous visit can have ended by a bound.
     """
     members = _members_of(procedure)
     cyclic = on_cycle(step_graph(procedure))
     renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
     changing = _changing_steps(procedure)
     graph = flow_graph(procedure)
+    steps_only = step_graph(procedure)
 
     def renewing(targets: tuple[str, ...]) -> tuple[str, ...]:
         return targets + (CLAIM_LOST,) if renews and changing.intersection(targets) else targets
@@ -758,14 +763,17 @@ def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     for item in procedure["steps"]:
         if item["id"] in members or item["kind"] not in ("agent", "command") or OUT_OF_BOUNDS not in item["on"]:
             continue
-        result_node = f"{item['id']}(result)"
-        graph[item["id"]] = renewing(tuple(
-            target for outcome, target in item["on"].items()
-            if outcome in (OUT_OF_BOUNDS, EXHAUSTED) and target != "done"
-            and (outcome != EXHAUSTED or item["id"] in cyclic)) + (result_node,))
+        name = item["id"]
+        result_node = f"{name}(result)"
+        bound_target = item["on"][OUT_OF_BOUNDS]
+        bound_returns = bound_target == name or name in _reach(steps_only, bound_target)
+        bound = (bound_target,) if bound_target != "done" else ()
+        exhausted = tuple(target for outcome, target in item["on"].items()
+                          if outcome == EXHAUSTED and target != "done" and name in cyclic)
+        graph[name] = renewing(bound + (exhausted if bound_returns else ()) + (result_node,))
         graph[result_node] = renewing(tuple(
             target for outcome, target in item["on"].items()
-            if outcome not in (OUT_OF_BOUNDS, EXHAUSTED) and target != "done"))
+            if outcome not in (OUT_OF_BOUNDS, EXHAUSTED) and target != "done") + exhausted)
     return graph
 
 

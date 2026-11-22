@@ -410,8 +410,23 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
 
     ran = engine_commands.run(table, action.command, action.subcommand, action.args,
                               on_start=started, timeout=table.wall_seconds(action.command))
-    sys.stderr.buffer.write(ran.stderr)
-    sys.stderr.buffer.flush()
+    try:
+        _grade_command(run_dir, step, name, visit, ran)
+    finally:  # forwarding a diagnostic never decides whether the step is graded
+        _forward(ran.stderr)
+
+
+def _forward(diagnostic: bytes) -> None:
+    """Pass a command's stderr on to the engine's; a closed stream loses it, nothing more."""
+    try:
+        sys.stderr.buffer.write(diagnostic)
+        sys.stderr.buffer.flush()
+    except OSError:
+        pass
+
+
+def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
+                   ran: engine_commands.Ran) -> None:
     if ran.timed_out:
         engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": "wall-time"},
                                    at=_now(), wall_seconds=ran.wall_seconds, turns=0,

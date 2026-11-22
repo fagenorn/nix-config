@@ -393,6 +393,35 @@ class WalkTest(unittest.TestCase):
         self.assertNotEqual(reply_errors(schema, {"status": "drafted", "summary": 1, "items": []}), [])
         self.assertEqual(reply_errors(schema, {"status": "drafted", "summary": "s", "items": ["a"]}), [])
 
+    def test_the_shipped_toy_with_a_group_has_step_outcomes(self) -> None:
+        self.assertEqual(
+            step_outcomes(SHIPPED_TOY.parent, "toy"),
+            {
+                "scope": ("ok", "failed"),
+                "draft": ("drafted", "stuck", "out-of-bounds"),
+                "review-a": ("approve", "revise"),
+                "review-b": ("approve", "revise"),
+            },
+        )
+
+    def test_an_edge_reachable_only_through_a_bound_is_credited_to_that_walk(self) -> None:
+        doc = toy()
+        step(doc, "draft")["on"]["out-of-bounds"] = "recover"
+        doc["steps"].append(
+            {"id": "recover", "stage": "building", "kind": "command", "command": "diff-scope",
+             "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}}
+        )
+        outcomes = {**step_outcomes(FIXTURE, "toy-core"), "recover": ("ok", "failed")}
+        coverage = walk_edges(doc, INPUTS, outcomes, reply_schemas(FIXTURE, "toy-core"))
+        self.assertEqual(coverage.unwalked, ())
+        self.assertEqual(
+            [describe(walk) for walk in coverage.walks if walk.edge.step == "recover"],
+            [
+                "recover:ok -> done | scope=ok draft=out-of-bounds recover=ok => done",
+                "recover:failed -> needs-owner | scope=ok draft=out-of-bounds recover=failed => needs-owner",
+            ],
+        )
+
     def test_an_edge_no_walk_takes_is_reported(self) -> None:
         doc = toy()
         step(doc, "scope")["on"]["error"] = "needs-owner"

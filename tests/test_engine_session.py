@@ -441,6 +441,23 @@ class LaunchTest(unittest.TestCase):
                           timeout=1)
         self.assertIs(launched.timed_out, True)
 
+    def test_a_stalled_start_callback_cannot_keep_the_group_past_its_wall_bound(self):
+        code = "import sys, time\nwhile True:\n    open(sys.argv[1], 'a').write('x')\n    time.sleep(0.05)\n"
+        with tempfile.TemporaryDirectory() as directory:
+            beat = Path(directory) / "beat"
+            sizes: list[tuple[int, int]] = []
+
+            def stalled(pid: int) -> None:
+                time.sleep(2.5)
+                before = beat.stat().st_size
+                time.sleep(0.5)
+                sizes.append((before, beat.stat().st_size))
+
+            launched = launch([sys.executable, "-c", code, str(beat)], directory, "p",
+                              on_start=stalled, timeout=1)
+        self.assertIs(launched.timed_out, True)
+        self.assertEqual(sizes[0][0], sizes[0][1], "the group still ran while on_start stalled")
+
     def test_an_untimed_launch_is_not_timed_out(self):
         launched = launch([sys.executable, "-c", "import sys; print(sys.stdin.read())"],
                           tempfile.gettempdir(), "word", on_start=lambda pid: None)

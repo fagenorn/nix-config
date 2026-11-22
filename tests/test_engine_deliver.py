@@ -361,6 +361,30 @@ class BoundsTest(unittest.TestCase):
                          ["out-of-bounds"])
         self.assertEqual([e for e in events if e["event"] == "transition_taken"], [])
 
+    def test_a_closed_stderr_does_not_keep_a_killed_command_from_being_graded(self):
+        class Closed:
+            class buffer:
+                @staticmethod
+                def write(data: bytes) -> int:
+                    raise BrokenPipeError(32, "Broken pipe")
+
+                flush = write
+
+        project = EngineProject(self)
+        project.answer({"stdout": "", "stderr": "diagnostic\n", "exit": 0, "sleep": 30})
+        procedures = project.procedures(
+            [step("a", "standin-keep-alive", None,
+                  on={"ok": "done", "failed": "needs-owner", "out-of-bounds": "step-failed"})],
+            stops={"needs-owner": {"need": "owner-decision", "reenter": "a"},
+                   "step-failed": {"need": "retry", "reenter": "a"}})
+        with (project.inside(), mock.patch.object(engine_commands, "PROJECT_WALL_SECONDS", 1),
+              mock.patch.object(sys, "stderr", Closed)):
+            code, line = engine_shell.deliver(1520, procedures)
+        self.assertEqual((code, line["end"]), (3, "step-failed"))
+        events = project.events(project.runs()[0])
+        self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                         ["out-of-bounds"])
+
     def test_a_sigterm_to_the_engine_group_ends_a_running_command(self):
         project = EngineProject(self)
         procedures = self.sleeping(project, {"ok": "done", "failed": "needs-owner",

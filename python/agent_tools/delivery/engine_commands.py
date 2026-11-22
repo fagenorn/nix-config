@@ -16,7 +16,10 @@ A command that cannot start (an `OSError` from the spawn) is `failed` with exit 
 `on_start` is not called. When `on_start` raises, the process is killed and reaped before the error
 propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group at
 the timeout and bounds the drain by `DRAIN_SECONDS`; the timeout counts from the spawn, `on_start`
-included, and a SIGTERM to the engine ends the group too. `Ran.timed_out` says the timeout fired.
+included, and a SIGTERM to the engine ends the group too. The deadline is armed (a `Watchdog`
+thread) before `on_start` runs, so a stalled `on_start` cannot keep the group past its bound; the
+SIGTERM handler is installed before the spawn and defers a signal until the group is owned, so a
+SIGTERM in the spawn interval still ends the group. `Ran.timed_out` says the timeout fired.
 `Ran.stdout`/`stderr` are what it printed (stderr is empty untimed).
 
 The platform command table holds each platform id's wall bound (`PLATFORM_WALL_SECONDS`) and the one
@@ -30,6 +33,7 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -148,27 +152,55 @@ def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+class Watchdog:
+    """Runs `end` once at a deadline from its own thread, so a stall in the caller cannot outlast it."""
+
+    def __init__(self, seconds: float, end: Callable[[], None]) -> None:
+        self.fired = False
+        self._end = end
+        self._timer = threading.Timer(max(0.0, seconds), self._fire)
+        self._timer.daemon = True
+
+    def _fire(self) -> None:
+        self.fired = True
+        self._end()
+
+    def start(self) -> Watchdog:
+        self._timer.start()
+        return self
+
+    def stop(self) -> bool:
+        """Disarm the deadline, waiting for an ending already begun; whether the deadline passed."""
+        self._timer.cancel()
+        if self._timer.is_alive():
+            self._timer.join()
+        return self.fired
+
+
 def run(table: CommandTable, command: str, subcommand: str | None,
         args: Sequence[tuple[str, object]], *, on_start: Callable[[int], None],
         timeout: float | None = None) -> Ran:
     """Run one command step to its end; `on_start(pid)` is called once, before waiting."""
     invocation = table.invocation(command, subcommand, args)
     started = time.monotonic()
-    try:
-        process = subprocess.Popen(
-            invocation.argv, cwd=invocation.cwd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
-            start_new_session=timeout is not None)
-    except OSError:
-        return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
+    deferred: list[int] = []
     previous = None
-    if timeout is not None:
+    if timeout is not None:  # before the spawn: the group exists from the spawn on
         try:
-            previous = signal.signal(signal.SIGTERM, _terminate)
+            previous = signal.signal(signal.SIGTERM, lambda signum, frame: deferred.append(signum))
         except ValueError:  # not the main thread: no handler can be installed
             pass
     try:
-        return _wait(process, on_start, started, timeout)
+        try:
+            process = subprocess.Popen(
+                invocation.argv, cwd=invocation.cwd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
+                start_new_session=timeout is not None)
+        except OSError:
+            if deferred:  # no group to end, but the engine was told to stop
+                raise SystemExit(128 + deferred[0])
+            return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
+        return _wait(process, on_start, started, timeout, deferred)
     finally:
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
@@ -181,24 +213,37 @@ def _kill(process: subprocess.Popen, timeout: float | None) -> None:
             os.killpg(process.pid, signal.SIGKILL)
         else:
             process.kill()
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):  # gone, or a leader left unreaped as a zombie (macOS)
         pass
 
 
 def _wait(process: subprocess.Popen, on_start: Callable[[int], None], started: float,
-          timeout: float | None) -> Ran:
+          timeout: float | None, deferred: list[int]) -> Ran:
+    guard = None
     try:
+        if timeout is not None:
+            try:  # the deferred signals end here: from now on the group is owned
+                signal.signal(signal.SIGTERM, _terminate)
+            except ValueError:
+                pass
+            if deferred:
+                raise SystemExit(128 + deferred[0])
+            guard = Watchdog(started + timeout - time.monotonic(),
+                             lambda: _kill(process, timeout)).start()
         on_start(process.pid)
     except BaseException:
+        if guard is not None:
+            guard.stop()
         _kill(process, timeout)
         process.communicate()
         raise
+    overran = guard is not None and guard.stop()
     try:
         if timeout is None:
             stdout, stderr = process.communicate()
         else:
             remaining = started + timeout - time.monotonic()
-            if remaining <= 0:
+            if overran or remaining <= 0:
                 raise subprocess.TimeoutExpired(process.args, timeout)
             stdout, stderr = process.communicate(timeout=remaining)
     except subprocess.TimeoutExpired:
