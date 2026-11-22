@@ -647,6 +647,24 @@ class RefusalTest(ReadinessCase):
             with self.subTest(argv=argv):
                 self.assertEqual("would run production command deploy", refusal(argv, snap))
 
+    def test_a_read_only_verb_lifts_only_the_words_one_command_owns(self):
+        # A shell reads `sh -c deploy status` as `deploy` with `$0` set to `status`.
+        snap = fake_snapshot(self.root, **{
+            "bindings.commands": {
+                "deploy": {"argv": ["deploy"], "cwd": str(self.root), "env": []},
+                "status": {"argv": ["deploy", "status"], "cwd": str(self.root), "env": []}},
+            "production.read_only": {"commands": ["status"], "mcp_tools": []}})
+        production = "would run production command deploy"
+        for argv in (["sh", "-c", "deploy", "status"], ["bash", "-c", "deploy", "status"],
+                     ["su", "-c", "deploy", "status"], ["env", "deploy", "status"],
+                     ["sh", "-c", "deploy status; deploy"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(production, refusal(argv, snap))
+        for argv in (["deploy", "status"], ["sh", "-c", "deploy status"],
+                     ["bash", "-c", "true && deploy status"]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(refusal(argv, snap))
+
     def test_a_command_that_names_no_production_verb_is_not_refused(self):
         snap = self.deploy_snapshot()
         for argv in (["sh", "-c", "true"], ["git", "status"], ["sh", "-c", "true && test -f a"],

@@ -270,12 +270,18 @@ def _occurs_in_order(words: Sequence[str], needed: Sequence[str]) -> bool:
     return position == len(needed)
 
 
-def _lifted(run: Sequence[str], verb: Sequence[str], read_only: Sequence[Sequence[str]]) -> bool:
-    """True when a read-only verb that properly extends `verb` begins `run` (the guard's rule)."""
+def _lifted(run: Sequence[str], owners: Sequence[int], starts: bool, verb: Sequence[str],
+            read_only: Sequence[Sequence[str]]) -> bool:
+    """True when a read-only verb that properly extends `verb` begins `run` (the guard's rule)
+    and its words are the command's own: the run starts the command (`starts`), or every word of
+    the read-only verb comes from one word of the argv. `owners` gives each token's source word.
+    A shell reads `sh -c deploy status` as `deploy` with `$0` set to `status`, so a run of
+    separate words that merely spells the read-only verb is not lifted."""
     return any(
         len(each) > len(verb) and list(each[:len(verb)]) == list(verb)
         and len(run) >= len(each) and _basename(run[0]) == each[0]
         and list(run[1:len(each)]) == list(each[1:])
+        and (starts or len(set(owners[:len(each)])) == 1)
         for each in read_only)
 
 
@@ -283,19 +289,20 @@ TOKEN_SPLIT = re.compile(r"[\s" + re.escape("".join(sorted(SHELL_CHARACTERS))) +
 QUOTE_CHARACTERS = re.compile(r"[\\'\"]")
 
 
-def _tokens(words: Sequence[str]) -> list[str]:
-    """Every word split on whitespace and on each shell character. A word that holds a quote or
-    a backslash is also given with them removed, so `'deploy'` and `\\deploy` name `deploy`.
-    No program is recognised as a shell and no option is parsed: a false hit is acceptable."""
+def _tokens(words: Sequence[str]) -> list[tuple[str, int]]:
+    """Every word split on whitespace and on each shell character, each with the index of the
+    word it came from. A word that holds a quote or a backslash is also given with them
+    removed, so `'deploy'` and `\\deploy` name `deploy`. No program is recognised as a shell
+    and no option is parsed: a false hit is acceptable."""
     tokens = []
-    for word in words:
+    for index, word in enumerate(words):
         for token in TOKEN_SPLIT.split(word.replace("\\\n", "")):
             if not token:
                 continue
-            tokens.append(token)
+            tokens.append((token, index))
             bare = QUOTE_CHARACTERS.sub("", token)
             if bare and bare != token:
-                tokens.append(bare)
+                tokens.append((bare, index))
     return tokens
 
 
@@ -311,10 +318,13 @@ def _production_reason(snapshot: Mapping, commands: Sequence[list[str]]) -> str 
             continue
         verb = _verb(bound[name]["argv"])
         for each in commands:
-            tokens = _tokens(each)
+            pairs = _tokens(each)
+            tokens = [token for token, _ in pairs]
+            owners = [owner for _, owner in pairs]
             for i, token in enumerate(tokens):
                 if (_basename(token) == verb[0] and _occurs_in_order(tokens[i + 1:], verb[1:])
-                        and not _lifted([_basename(token), *tokens[i + 1:]], verb, read_only)):
+                        and not _lifted([_basename(token), *tokens[i + 1:]], owners[i:], i == 0,
+                                        verb, read_only)):
                     return f"would run production command {name}"
     return None
 
