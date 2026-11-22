@@ -692,7 +692,7 @@ def validate_registry(source: object) -> list[dict]:
     return violations
 
 
-def _read_regular_file(path: Path) -> bytes:
+def read_regular_file(path: Path) -> bytes:
     """The bytes of the regular file at `path`; any other kind raises `OSError`.
 
     Opened nonblocking and judged by its descriptor, so a FIFO with no writer
@@ -727,7 +727,7 @@ def read_registry() -> list[dict]:
     if not path.is_absolute():
         raise unreadable
     try:
-        raw = _read_regular_file(path)
+        raw = read_regular_file(path)
     except FileNotFoundError:
         if any(p.is_symlink() and not p.exists() for p in (path, *path.parents)):
             raise unreadable from None

@@ -2,4 +2,5 @@
 # Verify check for issue 1271: the fixed project questions, asked on this host's console, are each
 # answered from the console's own records. verify-pending runs it from the repository root at the
 # commit the block names. Exit 0 met, 1 not met, 75 not yet.
+# It also checks issue 1274's deeper question with --deep, and records the lead's comparison with --deep --compare.
 PYTHONPATH=python exec python3 -m agent_tools.console.question_check "$@"

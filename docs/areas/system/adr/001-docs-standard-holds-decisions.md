@@ -13,7 +13,8 @@ Adopt the docs standard: `docs/README.md` routes knowledge, `docs/CONTEXT-MAP.md
 
 ## Consequences
 
-- `tests/test_docs_tree.py` runs the context-map linter and checks the section map in the suite, so the tree and the record of where each README section went cannot drift unseen.
+- `tests/test_docs_tree.py` runs the context-map linter in the suite. The section map that recorded where each README section went is kept at [readme-section-map](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/docs/archive/readme-section-map.md); issue 1444 removed it from the tree with its check.
+- Since issue 1418 a measurement is a comment or attachment on the pull request or issue it proves, so issue 1444 removed `docs/archive/` and `docs/spikes/`.
 - `paths.context` is not yet declared, so the skills do not select the map until #797 wires it.
 - How-to already in the kept sections of the Nix-module READMEs stays there instead of moving to `guides/`, because it describes the module that README documents.
 - The map's areas are also the subpackages #695 will create.

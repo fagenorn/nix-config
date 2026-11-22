@@ -1008,6 +1008,38 @@ class OutcomeRoutingTest(AdoptTestCase):
         self.assertIn("contract.", doc["handoff"]["next_command"])
 
 
+class AdoptionSchemaTest(unittest.TestCase):
+    def committed(self) -> dict:
+        return json.loads(MANIFEST.read_text())
+
+    def test_the_adoption_schema_is_the_highest_schema_a_migration_reaches(self):
+        rows = (
+            ([2, 3], [{"id": "a", "from_schema": 1, "to_schema": 2}], 2),
+            ([2, 3], [{"id": "a", "from_schema": 1, "to_schema": 2},
+                      {"id": "b", "from_schema": 2, "to_schema": 3}], 3),
+            ([2], [], 2),
+            ([1, 2], [], 2),
+        )
+        for versions, migrations, expected in rows:
+            with self.subTest(versions=versions, migrations=migrations):
+                manifest = manifest_with(versions, migrations)
+                self.assertEqual(adopt_planning.current_schema(manifest),
+                                 expected)
+
+    def test_a_resolvable_schema_two_contract_routes_no_change_under_the_committed_manifest(self):
+        self.assertEqual(
+            adopt_planning.route_outcome(
+                self.committed(), {"schema_version": 2}, True, True, False),
+            ("no_change", None))
+
+    def test_a_schema_three_contract_waits_for_a_migration_to_schema_three(self):
+        with self.assertRaises(adopt_planning.AdoptError) as caught:
+            adopt_planning.route_outcome(
+                self.committed(), {"schema_version": 3}, True, True, False)
+        self.assertEqual(caught.exception.repair_id,
+                         "adopt.manifest.forward_step_missing")
+
+
 class ForwardStepRefusalTest(AdoptTestCase):
     def test_absent_forward_step_is_adopt_failure(self):
         home = make_home(manifest_with([1, 2], []))
@@ -1438,6 +1470,19 @@ class ContractDraftTest(AdoptTestCase):
                             "/bindings/paths/artifacts/specs")
                         for v in violations), violations)
                 self.assertEqual(self.stored_plans(), before)
+
+    def test_a_draft_of_a_schema_adoption_does_not_target_is_refused(self):
+        root = bootstrap_repo(self.home)
+        draft = drafted_contract()
+        draft["schema_version"] = 3
+        before = self.stored_plans()
+        code, doc, err = self.plan(root, "--contract-draft",
+                                   self.draft_file(draft))
+        self.assertEqual(code, 2, err)
+        self.assertEqual(doc["error"]["repair_id"], "adopt.draft.invalid")
+        self.assertEqual([v["pointer"] for v in doc["error"]["violations"]],
+                         ["/schema_version"])
+        self.assertEqual(self.stored_plans(), before)
 
     def test_a_checkout_with_a_contract_refuses_a_draft(self):
         root = adopted_repo(self.home)

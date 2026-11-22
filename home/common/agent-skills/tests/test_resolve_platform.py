@@ -695,8 +695,8 @@ class CommittedManifestTest(ResolverTestCase):
         manifest = committed_manifest()
         self.assertEqual(sorted(manifest), sorted(MANIFEST_MEMBERS))
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["platform_version"], "2.0.0")
-        self.assertEqual(manifest["project_schema_versions"], [2])
+        self.assertEqual(manifest["platform_version"], "2.1.0")
+        self.assertEqual(manifest["project_schema_versions"], [2, 3])
         self.assertEqual(manifest["resolved_schema_version"], 2)
         self.assertEqual(manifest["migrations"], [
             {"id": "bindings-deploy.retire", "from_schema": 1, "to_schema": 2}])
@@ -828,8 +828,8 @@ class PlatformRangeTest(ResolverTestCase):
 
     def test_a_schema_absent_from_the_manifest_set_is_unsupported(self):
         contract = source_contract()
-        # Platform 2.0.0 supports schema 2 alone; 3 is an unsupported integer.
-        contract["schema_version"] = 3
+        # Platform 2.1.0 reads schemas 2 and 3; 4 is an unsupported integer.
+        contract["schema_version"] = 4
         code, payload, _ = self.resolve(self.make_root(contract))
         self.assert_unsupported(code, payload, "project_schema_unsupported",
                                 "/schema_version")
@@ -911,8 +911,8 @@ class ReasonCodePositionTest(ResolverTestCase):
         closed = ("platform_too_old", "platform_too_new",
                   "project_schema_unsupported")
         contract = source_contract()
-        # Platform 2.0.0 supports schema 2 alone; 3 is an unsupported integer.
-        contract["schema_version"] = 3
+        # Platform 2.1.0 reads schemas 2 and 3; 4 is an unsupported integer.
+        contract["schema_version"] = 4
         errors = [self.refusal("resolve", "--repo-root",
                                str(self.make_root(contract)))]
         for version in ("0.9.0", "3.0.0"):
