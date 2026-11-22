@@ -378,7 +378,7 @@ END = re.compile(r"^suite-runner: end (\S+) (passed|failed) exit=(\S+) \d+\.\ds$
 ROW = re.compile(r"^suite-runner: +(?P<wall>\d+\.\d)s wall +(?P<cpu>\d+\.\d)s cpu "
                  r"(?P<state>passed|failed) (?P<member>\S+)$")
 SUMMARY = re.compile(r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) "
-                     r"jobs=(\d+) wall=\d+\.\ds cpu=(\d+\.\d)s$")
+                     r"jobs=(\d+) wall=(?P<wall>\d+\.\d)s cpu=(?P<cpu>\d+\.\d)s$")
 
 
 def without_command_git_config(environ: Mapping[str, str]) -> dict[str, str]:
@@ -667,6 +667,79 @@ class ReportTest(RunnerCase):
         ])
 
 
+class ReportFileTest(RunnerCase):
+    def test_timing_report_lists_every_member_slowest_first_with_the_summary_figures(self):
+        results = [
+            MemberResult(index=0, member="a.py", returncode=0, seconds=2.0, cpu_seconds=1.5),
+            MemberResult(index=1, member="b.py", returncode=0, seconds=5.0, cpu_seconds=2.0),
+            MemberResult(index=2, member="c.py", returncode=1, seconds=2.0, cpu_seconds=0.04),
+            MemberResult(index=3, member="d.py", returncode=-9, seconds=0.04, cpu_seconds=0.04),
+            MemberResult(index=4, member="e.py", returncode=0, seconds=5.0, cpu_seconds=4.9),
+            MemberResult(index=5, member="f.py", returncode=0, seconds=3.21, cpu_seconds=0.04),
+            MemberResult(index=6, member="g.sh", returncode=None, seconds=3.24, cpu_seconds=0.0),
+        ]
+        report = suite_runner.timing_report(
+            list(reversed(results)), jobs=3, wall_seconds=12.34)
+        self.assertEqual(report, {
+            "version": 1, "members": 7, "passed": 4, "failed": 3, "jobs": 3,
+            "wall_seconds": 12.3, "member_seconds": 20.5, "cpu_seconds": 8.5,
+            "timings": [
+                {"member": "b.py", "seconds": 5.0, "cpu_seconds": 2.0, "passed": True},
+                {"member": "e.py", "seconds": 5.0, "cpu_seconds": 4.9, "passed": True},
+                {"member": "f.py", "seconds": 3.2, "cpu_seconds": 0.0, "passed": True},
+                {"member": "g.sh", "seconds": 3.2, "cpu_seconds": 0.0, "passed": False},
+                {"member": "a.py", "seconds": 2.0, "cpu_seconds": 1.5, "passed": True},
+                {"member": "c.py", "seconds": 2.0, "cpu_seconds": 0.0, "passed": False},
+                {"member": "d.py", "seconds": 0.0, "cpu_seconds": 0.0, "passed": False},
+            ]})
+        self.assertEqual(list(report), [
+            "version", "members", "passed", "failed", "jobs", "wall_seconds",
+            "member_seconds", "cpu_seconds", "timings"])
+
+    def test_a_completed_run_writes_the_timing_report_the_environment_names(self):
+        members = self.barrier_members("test_m0.py", "test_fail_m1.py")
+        result = self.run_suite("--jobs", "2", *members, cap=2, total=2,
+                                env={"SUITE_RUNNER_REPORT": "out/report.json"})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads((self.work / "out/report.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            {key: report[key] for key in ("version", "members", "passed", "failed", "jobs")},
+            {"version": 1, "members": 2, "passed": 1, "failed": 1, "jobs": 2})
+        self.assertEqual({t["member"]: t["passed"] for t in report["timings"]},
+                         {"test_m0.py": True, "test_fail_m1.py": False})
+        seconds = [t["seconds"] for t in report["timings"]]
+        self.assertEqual(seconds, sorted(seconds, reverse=True))
+        summary = SUMMARY.match(result.stdout.splitlines()[-1])
+        self.assertIsNotNone(summary, result.stdout)
+        self.assertEqual(report["wall_seconds"], float(summary.group("wall")))
+        self.assertEqual(report["cpu_seconds"], float(summary.group("cpu")))
+        self.assertEqual([path.name for path in (self.work / "out").iterdir()],
+                         ["report.json"])
+
+    def test_no_report_without_the_variable(self):
+        members = self.barrier_members("test_m0.py", "test_m1.py")
+        for extra in ({}, {"SUITE_RUNNER_REPORT": ""}):
+            with self.subTest(extra=extra):
+                inherited = {key: value for key, value in os.environ.items()
+                             if key != "SUITE_RUNNER_REPORT"}
+                with mock.patch.dict(os.environ, inherited, clear=True):
+                    result = self.run_suite("--jobs", "2", *members, cap=2, total=2,
+                                            env=extra)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                summary = SUMMARY.match(result.stdout.splitlines()[-1])
+                self.assertIsNotNone(summary, result.stdout)
+                self.assertEqual(summary.group(1, 2, 3), ("2", "2", "0"))
+                self.assertEqual(sorted(path.name for path in self.work.iterdir()),
+                                 sorted(members))
+
+    def test_members_do_not_inherit_the_report_variable(self):
+        parent = {"SUITE_RUNNER_REPORT": "x.json", "KEEP": "1"}
+        environment = suite_runner.member_environment(parent, "/tmp/c")
+        self.assertNotIn("SUITE_RUNNER_REPORT", environment)
+        self.assertEqual(environment["KEEP"], "1")
+        self.assertIn("SUITE_RUNNER_REPORT", parent)
+
+
 class CpuTimeTest(RunnerCase):
     """A busy member's CPU is close to its wall time and a sleeping member's far
     below it, in both modes (issue 497 D4). No bound rests on host load: the
@@ -697,7 +770,7 @@ class CpuTimeTest(RunnerCase):
         self.assertLessEqual(sleep_cpu, sleep_wall / 4, report)
         summary = SUMMARY.match(report[-1])
         self.assertIsNotNone(summary, report[-1])
-        total = float(summary.group(5))
+        total = float(summary.group("cpu"))
         self.assertGreaterEqual(total, 1.0, report[-1])
         self.assertLessEqual(abs(total - busy_cpu - sleep_cpu), 0.15, report)
 
