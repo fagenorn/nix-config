@@ -253,6 +253,27 @@ def _recovery_without_a_keep_alive(child: dict) -> None:
     del child["keep_alive"]
 
 
+def _recovery_reading(path: str) -> Callable[[dict], None]:
+    """toy-child as a -> b (mutates) -> done, whose `claim-lost` re-enters `r`, a step reading `path`."""
+    def edit(child: dict) -> None:
+        def command(name: str, reads: str, on: dict, **more: object) -> dict:
+            return {"id": name, "stage": "building", "kind": "command", "command": "diff-scope",
+                    "in": [reads], "on": on, **more}
+        done = {"ok": "done", "failed": "child-stop"}
+        child["steps"] = [command("a", "run.item", {"ok": "b", "failed": "child-stop"}),
+                          command("b", "run.item", done, mutates=True), command("r", path, done)]
+        child["stops"]["child-stop"]["reenter"] = "a"
+        child["stops"]["claim-lost"]["reenter"] = "r"
+    return edit
+
+
+def _first_step_recovery_reading(path: str) -> Callable[[dict], None]:
+    def edit(child: dict) -> None:
+        _recovery(child)
+        step(child, "recover")["in"] = [path]
+    return edit
+
+
 def _exhausted_stop(toy: dict) -> None:
     toy["stops"]["exhausted"] = {"need": "retry", "reenter": "draft"}
 
@@ -309,6 +330,12 @@ CASES = [
     Case("claim_lost_recovery_without_a_keep_alive",
          editing("toy-child", _recovery_without_a_keep_alive),
          [("toy-child", "recover", "unreachable_step")]),
+    Case("claim_lost_recovery_reads_the_result_of_the_step_it_guards",
+         editing("toy-child", _recovery_reading("b.anything")),
+         [("toy-child", "r", "unproduced_input")]),
+    Case("claim_lost_recovery_reads_the_result_of_the_first_step_it_guards",
+         editing("toy-child", _first_step_recovery_reading("claim.verdict")),
+         [("toy-child", "recover", "unproduced_input")]),
     Case("subcommand_on_a_plain_command",
          editing("toy", _set(lambda toy: step(toy, "scope"), "subcommand", "run")),
          [("toy", "scope", "unknown_command")]),
@@ -516,6 +543,12 @@ class RefusalTableTest(unittest.TestCase):
 class GraphTest(unittest.TestCase):
     def test_a_step_reached_only_through_claim_lost_is_reachable(self):
         directory = broken_copy(editing("toy-child", _recovery))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_claim_lost_recovery_may_read_what_ran_before_the_guarded_step(self):
+        directory = broken_copy(editing("toy-child", _recovery_reading("a.anything")))
         code, out, _ = run_check("--procedures", str(directory))
         self.assertEqual((code, out), (0, compact(
             {"procedures": ["toy", "toy-child"], "verdict": "ok"})))

@@ -14,8 +14,8 @@ result (`{}`).
 
 A command that cannot start (an `OSError` from the spawn) is `failed` with exit 127 and no pid, and
 `on_start` is not called. When `on_start` raises, the process is killed and reaped before the error
-propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group
-at the timeout and bounds the drain by `DRAIN_SECONDS`. `Ran.stdout`/`stderr` are what it printed
+propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group at
+the timeout and bounds the drain by `DRAIN_SECONDS`. `Ran.stdout`/`stderr` are what it printed
 (stderr is empty untimed). The module runs processes, so the pure engine core never imports it.
 """
 
@@ -157,6 +157,11 @@ def run(table: CommandTable, command: str, subcommand: str | None,
             stdout, stderr = late.output or b"", late.stderr or b""
             process.stdout.close(), process.stderr.close(), process.wait()
         return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr)
+    except BaseException:  # an interrupt must not leave a timed run's group alive
+        if timeout is not None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        raise
     outcome, result = grade(stdout, process.returncode)
     return Ran(outcome, result, process.returncode, time.monotonic() - started,
                stdout, stderr or b"")

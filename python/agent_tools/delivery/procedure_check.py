@@ -46,7 +46,7 @@ the keep-alive command's outcomes or `None`.
 
 Phase C, graph (only on a file with no phase A refusal and no `unknown_target`; the steps in order, `unreachable_done`
 first): `unreachable_step` (a step the walk of `flow_graph` from the first step does not reach, `flow_graph` carrying the
-renewal failure of a `mutates` step as an edge to `claim-lost`; a group member is reached when its group is),
+renewal failure as an edge to `claim-lost` into a `mutates` step; a group member is reached when its group is),
 `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
 `unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle of `step_graph` also produces `exhausted`, any
 step may map it, and a group member's `pass` entries are checked at the group) and `unbounded_cycle` (a cycle among steps
@@ -62,8 +62,7 @@ reach, skip this route check and keep the `run.<n>` and member checks), `unknown
 schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
 consumed; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
 declares no schema and is not member-checked) and `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
-its `in` paths; skipped when the prompt is missing).
-"""
+its `in` paths; skipped when the prompt is missing)."""
 
 from __future__ import annotations
 
@@ -91,6 +90,7 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
 CLAIM_LOST = "claim-lost"
+START = "(start)"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -701,25 +701,28 @@ def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
 
 
 def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
-    """Steps and stops -> where control can go, `done` and dead `exhausted` left out.
+    """Steps and stops -> where control can go (`START` to the first step), `done` and dead `exhausted` left out.
 
-    A `mutates` step of a procedure with a `keep_alive` and a `claim-lost` stop also goes to that stop.
+    A node entering a `mutates` step of a procedure with a `keep_alive` and a `claim-lost` stop also goes to that stop.
     """
     members = _members_of(procedure)
     cyclic = on_cycle(step_graph(procedure))
     renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
     changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
-    graph: dict[str, tuple[str, ...]] = {}
+    changing |= {item["id"] for item in procedure["steps"]
+                 if changing.intersection(m["step"] for m in item.get("members", ()))}
+    graph: dict[str, tuple[str, ...]] = {START: (procedure["steps"][0]["id"],)}
     for item in procedure["steps"]:
         if item["id"] in members:
             continue
         graph[item["id"]] = tuple(
             target for outcome, target in item["on"].items()
             if target != "done" and (outcome != EXHAUSTED or item["id"] in cyclic))
-        if renews and changing & {item["id"], *(m["step"] for m in item.get("members", ()))}:
-            graph[item["id"]] += (CLAIM_LOST,)
     for name, stop in procedure["stops"].items():
         graph[name] = (stop["reenter"],)
+    for node, targets in graph.items():
+        if renews and changing.intersection(targets):
+            graph[node] = targets + (CLAIM_LOST,)
     return graph
 
 
@@ -749,7 +752,7 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
     by_id = {item["id"]: item for item in procedure["steps"]}
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
                 if item["kind"] == "group" for member in item["members"]}
-    dom = dominators(graph, procedure["steps"][0]["id"])
+    dom = dominators(graph, START)
     inputs = set(procedure["inputs"])
 
     def check_path(path: str, step: dict | None) -> None:
@@ -796,8 +799,7 @@ def _check_reachability(procedure: dict, found: _Findings) -> None:
     members = _members_of(procedure)
     graph = flow_graph(procedure)
     cyclic = on_cycle(step_graph(procedure))
-    entry = procedure["steps"][0]["id"]
-    reached = {entry} | _reach(graph, entry)
+    reached = {START} | _reach(graph, START)
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
                 if item["kind"] == "group" for member in item["members"]}
     reaches_done = any(

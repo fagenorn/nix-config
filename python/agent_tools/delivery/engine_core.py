@@ -24,6 +24,7 @@ Actions (`Action`)
     Done          the run finished.
     Both step actions carry `args`: one `(path, value)` pair per entry of the step's `in`, in `in`
     order, resolved when the walk reaches the step.
+    An `entered` event for the pending step does not change the action.
 
 Visits
     Every entry of a step counts a visit. Entry `max_visits + 1` (`max_visits` defaults to 1) takes

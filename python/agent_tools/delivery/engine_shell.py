@@ -19,13 +19,11 @@ only on the verdict `renewed` with exit 0; an `error` whose `transient` is the b
 `true` is called once more. Otherwise the run ends at `claim-lost` without entering the
 step, its detail carrying the verdict and what the call printed on stdout and stderr.
 
-An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done`
-or `stop_reached`.
+An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done` or `stop_reached`.
 
-Single writer: under the issue's creation lock the shell takes `<run>/lock`, an
-exclusive `flock` held until `deliver` returns. A run whose lock is held makes
-the call exit `EXIT_RUNNING`; a run not done and not locked is refused
-(continuing a run is a later slice).
+Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
+until `deliver` returns. A run whose lock is held makes the call exit `EXIT_RUNNING`; a run not done and
+not locked is refused (continuing a run is a later slice).
 
 Exit codes: `engine.py` lists them; `Fault` and `Refused` print nothing on stdout.
 """

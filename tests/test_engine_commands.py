@@ -7,11 +7,13 @@ for a project command (agent-helpers rule 5).
 
 from __future__ import annotations
 
+import _thread
 import os
 import re
 import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -200,6 +202,27 @@ class GradeTest(unittest.TestCase):
             time.sleep(0.05)
         else:
             self.fail("the grandchild outlived the timeout")
+
+    def test_an_interrupted_timed_run_kills_its_group_before_the_interrupt_propagates(self):
+        pidfile = os.path.join(self.tmp, "grandchild")
+        entry = project("hold", pidfile, "0", cwd=self.tmp)
+        pids: list[int] = []
+        interrupt = threading.Timer(1.5, _thread.interrupt_main)
+        interrupt.start()
+        self.addCleanup(interrupt.cancel)
+        with self.assertRaises(KeyboardInterrupt):
+            run(table(hold=entry), "hold", None, (), on_start=pids.append, timeout=60)
+        grandchild = int(Path(pidfile).read_text())
+        deadline = time.monotonic() + 5
+        for pid in (pids[0], grandchild):
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail(f"process {pid} outlived the interrupted run")
 
     def test_a_descendant_that_left_the_group_cannot_hold_the_run_open(self):
         pidfile = os.path.join(self.tmp, "grandchild")
