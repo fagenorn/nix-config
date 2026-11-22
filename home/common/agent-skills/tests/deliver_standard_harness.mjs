@@ -72,6 +72,9 @@ const DEFAULTS = [
   [/^look-post$/, { verdict: 'posted', comment_id: 101 }],
   [/^look-read$/, { verdict: 'approved', kept_from: null }],
   [/^look-stale$/, { complete: true, stale: [] }],
+  // #1566: a landing resync's carry check: the verification of the new head (merges only, a passing verification and two pictures) and the carry command's answer.
+  [/^look-carry-verify$/, prompt => ({ head: (/brought it to ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, clean: true, merge_only: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }], pictures: [{ kind: 'before', path: '/r/pics/before.png' }, { kind: 'after', path: '/r/pics/after.png' }] })],
+  [/^look-carry$/, { verdict: 'needed', from: SHA, reason: 'pictures-differ', comment_id: null }],
   [/^look-status$/, { verdict: 'needed', kept_from: null }],
   // #1246: the verification of an approved head; the fast-forward reached the head the prompt names.
   [/^look-verify$/, prompt => ({ head: (/merge --ff-only ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, clean: true, merge_only: true, ahead: false, results: [{ id: 'build', status: 'pass', summary: 'ok' }] })],

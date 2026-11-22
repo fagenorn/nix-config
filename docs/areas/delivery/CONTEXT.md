@@ -21,7 +21,7 @@ _Avoid_: context file, index
 The work of carrying one issue from claim to merge on its own branch and worktree. A delivery ends when the integration branch holds the change and its evidence criteria are met or handed to a Verify block.
 
 **Engine**:
-The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run.
+The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run. A run is recorded as a directory under `~/.agents/state/engine/runs/` whose append-only `events.jsonl` is the single source of truth, and `engine status <issue>` prints the state one fold derives from it (issue 1511).
 
 **Grader**:
 A pure function in the engine that turns stored results into an outcome for a `decide` step.
@@ -35,10 +35,10 @@ The route of an issue with a standing live-fault declaration (ADR-console-099), 
 _Avoid_: hotfix lane
 
 **Look approval**:
-The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved`, `fix` (approved with one worded fix) or `changes`, and the console message it came from (issue 1138). It covers its head and every later head of that pull request that keeps it (issue 1211): the approved head is an ancestor, and no later commit of the pull request changed a look file other than by a clean merge of the integration branch, except one commit under a `fix` answer. The latest answer for a head decides. A delivery that lands under it ticks the look marker's box (`look-approval tick`, issue 1186). The console records an approval the owner gives on a look card; a delivery reads it (ADR-console-074).
+The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved`, `fix` (approved with one worded fix) or `changes`, and the console message it came from (issue 1138). It covers its head and every later head of that pull request that keeps it (issue 1211): the approved head is an ancestor, and no later commit of the pull request changed a look file other than by a clean merge of the integration branch, except one commit under a `fix` answer. The latest answer for a head decides. A delivery that lands under it ticks the look marker's box (`look-approval tick`, issue 1186). The console records an approval the owner gives on a look card; a delivery reads it (ADR-console-074). An `approved` approval that records the digest of its pictures also carries across a head that only merges the integration branch in, when a look carry names it (issue 1566). A look carry is an `agent:look-carry` line naming the approved head and a later head of the same pull request, written by `look-approval carry` when only merges of the integration branch came in and the re-rendered picture ids equal the approved ones; it is never an approval, and such an approval is kept across later heads by a look carry alone, never by the look file rule.
 
 **Look file set**:
-The path globs, declared per area in `.github/look-files.json` on the integration branch, whose change a look approval covers (issue 1211); a pull request is judged by the set at its base commit, never its own. An area with none keeps one approval per head.
+The path globs, declared per area in `.github/look-files.json` on the integration branch, whose change a look approval covers (issue 1211); a pull request is judged by the set at its base commit, never its own. An area with none keeps one approval per head, except where a look carry carries it across merges of the integration branch (issue 1566).
 
 **Look marker**:
 An acceptance criterion of kind human written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`; it makes the issue need the owner's look at its pull request head before merge (issue 1138). Read only by `agent_tools.delivery.look_marker`. `look-lint` refuses a body with a criterion line that is a near miss of it (issue 1141). An ordinary `[human]` criterion or a hold in prose is not one.
