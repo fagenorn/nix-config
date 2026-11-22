@@ -34,7 +34,6 @@ import binascii
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -62,7 +61,7 @@ INPUT_PATHS = (PROTECTION_SOURCE, LOCK_SOURCE, TREE_MANIFEST)
 NIX_BASE32 = "0123456789abcdfghijklmnpqrsvwxyz"
 
 
-COMMENT_MARKER = re.compile(r"[ \t][#;]")
+ESCAPES = {"n": "\n", "t": "\t", "b": "\b", "\\": "\\", '"': '"'}
 
 
 def read_text(path: Path) -> str:
@@ -150,11 +149,40 @@ def _header(line: str) -> tuple[str, str | None]:
 
 
 def _value(raw: str) -> str:
-    text = raw.strip()
-    if text.startswith('"'):
-        return text[1:].split('"', 1)[0]
-    marker = COMMENT_MARKER.search(text)
-    return (text[:marker.start()] if marker else text).rstrip()
+    """The value text of a config line as git reads it.
+
+    An unquoted `#` or `;` starts a comment wherever it stands, a double quote
+    toggles quoting anywhere in the value, a backslash escapes only `n`, `t`,
+    `b`, `\\` and `"`, and whitespace around the value is dropped. A bad escape,
+    a backslash that ends the line (a continuation) and an unterminated quote are
+    a config git refuses, so they raise `Underivable`.
+    """
+    unreadable = Underivable(GIT_CONFIG_UNREADABLE)
+    text = raw.lstrip()
+    out: list[str] = []
+    kept = 0
+    quoted = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        index += 1
+        if char == "\\":
+            if index >= len(text) or text[index] not in ESCAPES:
+                raise unreadable
+            out.append(ESCAPES[text[index]])
+            index += 1
+            kept = len(out)
+        elif char == '"':
+            quoted = not quoted
+        elif not quoted and char in "#;":
+            break
+        else:
+            out.append(char)
+            if quoted or not char.isspace():
+                kept = len(out)
+    if quoted:
+        raise unreadable
+    return "".join(out[:kept])
 
 
 def origin_url(config_text: str) -> str | None:

@@ -167,6 +167,33 @@ class RemoteTest(DerivationCase):
                         f'[remote "origin"]\n\turl = git@github.com:o/r.git{gap}{marker} note\n'),
                         "o/r")
 
+    def test_a_comment_marker_ends_the_url_wherever_it_stands(self):
+        # Each url reads as `https://github.com/o/r` or `git@github.com:o/r.git` in `git config -f`.
+        for url in ("https://github.com/o/r#c", "git@github.com:o/r.git;x",
+                    "git@github.com:o/r.git#c", '"https://github.com/o/r"#c',
+                    'https://github.com/o/"r"#c'):
+            with self.subTest(url=url):
+                self.assertEqual(self.slug(f'[remote "origin"]\n\turl = {url}\n'), "o/r")
+
+    def test_value_text_follows_gits_quoting_and_escapes(self):
+        cases = (
+            ('"a#b" c ;x', "a#b c"),
+            ('a\\"b', 'a"b'),
+            ('a\\\\b # c', "a\\b"),
+            ('"a  " ', "a  "),
+            ("  a   b  ", "a   b"),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(derived_values._value(raw), expected)
+
+    def test_a_url_git_refuses_is_refused(self):
+        for raw in ('"unterminated', "a\\qb", "a\\"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(Underivable) as raised:
+                    self.slug(f'[remote "origin"]\n\turl = {raw}\n')
+                self.assertIn("git config", raised.exception.message)
+
     def test_a_config_that_is_a_fifo_is_refused_without_blocking(self):
         root = self.root()
         self.fifo(root / ".git" / "config")
