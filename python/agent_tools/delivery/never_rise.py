@@ -28,6 +28,24 @@ violation of the same file on the base, matched through git renames
 violation of that rule, or one with a smaller `line`. A move git does not pair
 is a new file.
 
+Suppressions (#1459). A suppression marker (`agent_tools.delivery.rule_ids`) is read
+from every text file at a revision into `Snapshot.suppressions`, in path then line
+order. `counted(enforcer, snapshot)` is the count both sides of the comparison use,
+returned as `(findings left, marker violations)`: a finding is dropped when a reasoned
+marker naming the enforcer's rule sits on its `(path, line)`, and each marker that is
+bare (no reason) and names the rule, or names no rule and sits on one of the rule's
+findings, is one violation of the rule at the marker's own line. A marker naming
+another rule, or none and off a finding, counts nothing. The count of a rule is the sum
+of both lists, so deleting a reason, or adding a bare marker, rises. A per-file rule
+compares the findings left as before and the marker violations as a count, so a bare
+marker on a held finding rises though the finding itself held.
+
+`Verdict.suppressions` lists each reasoned suppression the branch adds, by
+`added_suppressions`: those of the branch not matched, as a multiset of `(rule, path,
+reason)` with the path followed through git renames, by a reasoned suppression of the
+base. It lists and never fails: a listed suppression raises no count. `Suppression.text()`
+is `<rule> <path>:<line> <reason>` on one line, path and reason escaped as below.
+
 Output line, one per violation: `Violation.text()` is the rule id, one space,
 the repository-relative path escaped, a colon and the 1-based line. The escape
 doubles a backslash, writes a newline, carriage return and tab as `\\n`, `\\r`
@@ -56,6 +74,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+
+from agent_tools.delivery import rule_ids
 
 REMOTE = "origin"
 SELECTION_VARIABLES = (
@@ -91,9 +111,24 @@ class Violation(NamedTuple):
         return f"{self.rule} {escape_path(self.path)}:{self.line}"
 
 
+class Suppression(NamedTuple):
+    rule: str | None
+    path: str
+    line: int
+    reason: str
+
+    @property
+    def reasoned(self) -> bool:
+        return rule_ids.is_reasoned(self.rule, self.reason)
+
+    def text(self) -> str:
+        return f"{self.rule} {escape_path(self.path)}:{self.line} {escape_path(self.reason)}"
+
+
 class Snapshot(NamedTuple):
     revision: str
     line_counts: Mapping[str, int]
+    suppressions: tuple[Suppression, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -114,6 +149,7 @@ class Verdict(NamedTuple):
     merge_base: str
     head: str
     rises: tuple[Rise, ...]
+    suppressions: tuple[Suppression, ...] = ()
 
 
 def _git(root: Path, args: Sequence[str], timeout: float | None,
@@ -185,6 +221,7 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
     if out is None:
         return None
     counts: dict[str, int] = {}
+    found: list[Suppression] = []
     position = 0
     for path in paths:
         end = out.find(b"\n", position)
@@ -197,7 +234,12 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
         position = stop + 1
         if content and b"\0" not in content[:BINARY_PROBE_BYTES]:
             counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
-    return Snapshot(revision, counts)
+            if rule_ids.SUPPRESS.encode() in content:
+                found.extend(
+                    Suppression(m.rule, path, m.line, m.reason)
+                    for m in rule_ids.markers(content.decode("utf-8", errors="replace")))
+    found.sort(key=lambda s: (s.path, s.line))
+    return Snapshot(revision, counts, tuple(found))
 
 
 def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str, str] | None:
@@ -219,31 +261,70 @@ def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     return found
 
 
+def counted(enforcer: Enforcer, snapshot: Snapshot) -> tuple[list[Violation], list[Violation]]:
+    """The findings left after reasoned suppressions, and the violations of bare markers."""
+    found = _found(enforcer, snapshot)
+    suppressed = {(s.path, s.line) for s in snapshot.suppressions
+                  if s.reasoned and s.rule == enforcer.rule}
+    on_finding = {(v.path, v.line) for v in found}
+    kept = [v for v in found if (v.path, v.line) not in suppressed]
+    marked = [Violation(enforcer.rule, s.path, s.line) for s in snapshot.suppressions
+              if not s.reasoned and (s.rule == enforcer.rule
+                                     or (s.rule is None and (s.path, s.line) in on_finding))]
+    return kept, marked
+
+
+def _added(after: Sequence[Violation], before: Sequence[Violation]) -> list[Violation]:
+    """The multiset difference of `(path, line)` keys, `after` minus `before`, in `after` order."""
+    remaining = Counter((v.path, v.line) for v in before)
+    new = []
+    for violation in after:
+        key = (violation.path, violation.line)
+        if remaining[key] > 0:
+            remaining[key] -= 1
+        else:
+            new.append(violation)
+    return new
+
+
 def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
             enforcers: Sequence[Enforcer]) -> tuple[Rise, ...]:
     """The rules whose branch violations rose over the base; pure."""
     rises = []
     for enforcer in enforcers:
-        before = _found(enforcer, base)
-        after = _found(enforcer, branch)
+        kept_before, marked_before = counted(enforcer, base)
+        kept_after, marked_after = counted(enforcer, branch)
+        before = len(kept_before) + len(marked_before)
+        after = len(kept_after) + len(marked_after)
+        new: list[Violation] = []
         if enforcer.per_file:
-            base_lines = {v.path: v.line for v in before}
-            new = [v for v in after
+            base_lines = {v.path: v.line for v in kept_before}
+            new = [v for v in kept_after
                    if base_lines.get(renamed.get(v.path, v.path), 0) < v.line]
-        elif len(after) > len(before):
-            remaining = Counter((v.path, v.line) for v in before)
-            new = []
-            for violation in after:
-                key = (violation.path, violation.line)
-                if remaining[key] > 0:
-                    remaining[key] -= 1
-                else:
-                    new.append(violation)
-        else:
-            new = []
+            if len(marked_after) > len(marked_before):
+                new += _added(marked_after, marked_before)
+        elif after > before:
+            new = _added(kept_after + marked_after, kept_before + marked_before)
         if new:
-            rises.append(Rise(enforcer.rule, len(before), len(after), tuple(new)))
+            rises.append(Rise(enforcer.rule, before, after, tuple(new)))
     return tuple(rises)
+
+
+def added_suppressions(base: Snapshot, branch: Snapshot,
+                       renamed: Mapping[str, str]) -> tuple[Suppression, ...]:
+    """The reasoned suppressions the branch adds, those the base does not hold; pure."""
+    held = Counter((s.rule, s.path, s.reason) for s in base.suppressions if s.reasoned)
+    added = []
+    for suppression in branch.suppressions:
+        if not suppression.reasoned:
+            continue
+        key = (suppression.rule, renamed.get(suppression.path, suppression.path),
+               suppression.reason)
+        if held[key] > 0:
+            held[key] -= 1
+        else:
+            added.append(suppression)
+    return tuple(added)
 
 
 def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
@@ -258,4 +339,6 @@ def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
     renamed = renames(root, base, head, timeout)
     if base_snapshot is None or branch_snapshot is None or renamed is None:
         return None
-    return Verdict(base, head, compare(base_snapshot, branch_snapshot, renamed, enforcers))
+    return Verdict(
+        base, head, compare(base_snapshot, branch_snapshot, renamed, enforcers),
+        added_suppressions(base_snapshot, branch_snapshot, renamed))
