@@ -3016,7 +3016,7 @@ class ConformanceAdoptionApplyTest(ApplyTestCase):
                     self.assertEqual(posts(log), [])
 
     def test_a_check_required_from_another_app_is_refused_and_one_from_actions_or_any_is_not(self):
-        for app_id, accepted in ((999, False), (15368, True), (None, True)):
+        for app_id, accepted in ((999, False), (15368, True), (-1, True), (None, True)):
             with self.subTest(app_id=app_id):
                 self.home = make_home()
                 root = locked_apply_repo(self.home)

@@ -161,6 +161,7 @@ REQUIRED_PENDING_MISMATCH = "adopt.required_check.pending_mismatch"
 REQUIRED_PENDING = "adopt.required_check.pending"
 REQUIRED_APP_MISMATCH = "adopt.required_check.app_mismatch"
 ACTIONS_APP_ID = 15368
+ANY_APP_ID = -1
 REQUIRED_POINTER = "/plan/conformance/required_check"
 PENDING_MEMBERS = ("plan_id", "branch", "commit", "repo", "integration_branch", "result")
 
@@ -637,11 +638,14 @@ def _answer_contexts(answer: object, branch: str) -> list[str]:
 
 
 def _bound_elsewhere(answer: dict) -> bool:
-    """Whether a listed `Conformance` check is bound to an app other than Actions."""
+    """Whether a listed `Conformance` check is bound to an app other than Actions.
+
+    An absent `app_id` and `-1` (any source) are satisfiable by the Actions job.
+    """
     checks = answer.get("checks")
     return isinstance(checks, list) and any(
         isinstance(item, dict) and item.get("context") == CONTEXT
-        and item.get("app_id") not in (None, ACTIONS_APP_ID) for item in checks)
+        and item.get("app_id") not in (None, ANY_APP_ID, ACTIONS_APP_ID) for item in checks)
 
 
 def required_check_state(repo: str, branch: str) -> str:
