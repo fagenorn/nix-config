@@ -918,19 +918,26 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
 def current_schema(manifest: dict) -> int:
     """The project schema adoption writes and routes by.
 
-    The highest supported schema that some well-formed migration reaches. A
-    schema becomes the adoption target only once a migration reaches it, so a
-    minor release can publish a schema the resolver reads before the migration
-    that writes it ships. When no migration reaches a supported schema, the
-    highest supported schema stands.
+    The highest supported schema that a *required* well-formed migration
+    reaches: one whose source schema the platform no longer reads. A migration
+    whose source schema the platform still reads is *offered* and does not move
+    the target while a required migration exists, so a minor release can publish
+    a schema and its migration while adoption keeps writing the schema before
+    it. With no required migration, the highest supported schema some
+    well-formed migration reaches stands, else the highest supported schema.
     """
     versions = manifest["project_schema_versions"]
-    reached = [entry["to_schema"] for entry in manifest["migrations"]
-               if isinstance(entry, dict)
-               and isinstance(entry.get("to_schema"), int)
-               and not isinstance(entry.get("to_schema"), bool)
-               and entry["to_schema"] in versions]
-    return max(reached) if reached else max(versions)
+    reaching = [entry for entry in manifest["migrations"]
+                if isinstance(entry, dict)
+                and isinstance(entry.get("to_schema"), int)
+                and not isinstance(entry.get("to_schema"), bool)
+                and entry["to_schema"] in versions]
+    required = [entry["to_schema"] for entry in reaching
+                if entry.get("from_schema") not in versions]
+    if required:
+        return max(required)
+    return max((entry["to_schema"] for entry in reaching),
+               default=max(versions))
 
 
 def select_forward_step(manifest: dict, schema_version: object) -> dict | None:
@@ -948,6 +955,26 @@ def select_forward_step(manifest: dict, schema_version: object) -> dict | None:
                      "more than one migration steps forward from the "
                      "project's declared schema")
     return matches[0] if matches else None
+
+
+def offered_migration(manifest: dict, contract_source: dict | None) -> str | None:
+    """The id of the forward step a contract on the adoption schema is offered.
+
+    None unless the contract declares exactly `current_schema` and a migration
+    steps forward from it to a schema the platform reads. The offer does not
+    change the routing outcome.
+    """
+    if contract_source is None:
+        return None
+    declared = contract_source.get("schema_version")
+    if (not isinstance(declared, int) or isinstance(declared, bool)
+            or declared != current_schema(manifest)):
+        return None
+    step = select_forward_step(manifest, declared)
+    if step is None or step.get("to_schema") not in manifest[
+            "project_schema_versions"]:
+        return None
+    return step["id"]
 
 
 def route_outcome(manifest: dict, contract_source: dict | None,
