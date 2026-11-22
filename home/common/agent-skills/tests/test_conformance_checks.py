@@ -11,16 +11,32 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 
+from agent_tools.delivery import context_map_lint, standards_lint
+from agent_tools.project_contract import resolve_project
+
 from .conformance_test_support import (
-    REPO_ROOT, ReportAssertions, doctor, fixture, load_module, make_root, run,
+    CLEAN_MAP, HERMETIC_ENV, REPO_ROOT, ReportAssertions, doctor, fixture,
+    load_module, make_root, platform_env, run, write_clean_map,
 )
+from .test_resolve_project import STANDARDS
 
 
 RELEASE_FIXTURES = REPO_ROOT / "tests/fixtures/release"
+
+
+def conformance_lint_facts(problems: list) -> dict:
+    """The facts a lint's diagnostics become, computed here from the diagnostic
+    format (`<label>: <text>`) rather than by the code under test."""
+    labels = {p.split(": ", 1)[0] for p in problems if ": " in p}
+    labels = {l for l in labels if l and not any(c.isspace() for c in l)
+              and not l.startswith("/") and ".." not in Path(l).parts}
+    return {"paths": sorted(labels)[:8], "count": len(problems)}
 
 
 def release_fixture(name: str) -> dict:
@@ -262,6 +278,128 @@ class ShellIndirectionTest(ReportAssertions, unittest.TestCase):
                 self.assertEqual(self.CHECK_ID in ids, expected)
 
 
+class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
+    """The interim freshness check: the committed conformance workflow is
+    judged against the renderer's bytes until a contract declares it."""
+
+    CHECK_ID = "verification.conformance_workflow.fresh"
+    REPAIR_ID = "conformance.workflow.regenerate"
+    TARGET = ".github/workflows/conformance.yaml"
+
+    def ci(self, root: Path) -> tuple[int, dict]:
+        code, out, err = run("run", "--purpose", "ci", "--repo-root", str(root))
+        self.assertIn(code, (0, 1), err)
+        return code, json.loads(out)
+
+    def write_workflow(self, root: Path, data: bytes) -> None:
+        target = root / self.TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    def test_a_hand_edited_conformance_workflow_turns_ci_red_and_names_it(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.write_workflow(
+                root,
+                resolve_project.render_conformance_workflow("main", 2)
+                + b"# hand edit\n")
+            code, report = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"], {
+                "status": "failed", "primary_check_id": self.CHECK_ID})
+            check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"],
+                 check["facts"]],
+                ["failed", "conformance_workflow_stale", self.REPAIR_ID,
+                 {"target": self.TARGET, "state": "stale"}])
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.REPAIR_ID]
+            self.assertEqual(
+                [repair["module"], repair["safety_class"], repair["operation"]],
+                ["resolve-project", "worktree", None])
+            self.assert_validates(report)
+
+    def test_the_rendered_workflow_and_an_absent_one_both_pass(self):
+        for label, data in (
+                ("rendered", resolve_project.render_conformance_workflow("main", 2)),
+                ("absent", None)):
+            with self.subTest(workflow=label), fixture() as tmp:
+                root = make_root(tmp)
+                if data is not None:
+                    self.write_workflow(root, data)
+                code, report = self.ci(root)
+                self.assertEqual(code, 0)
+                check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+                self.assertEqual([check["status"], check["facts"]], ["passed", {}])
+                self.assertEqual(report["outcome"]["status"], "passed")
+
+    def test_a_workflow_entry_that_is_not_a_regular_file_is_stale(self):
+        rendered = resolve_project.render_conformance_workflow("main", 2)
+        for label in ("dangling symlink", "symlink to the rendered bytes"):
+            with self.subTest(entry=label), fixture() as tmp:
+                root = make_root(tmp)
+                target = root / self.TARGET
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if label == "dangling symlink":
+                    target.symlink_to(tmp / "missing.yaml")
+                else:
+                    (tmp / "elsewhere.yaml").write_bytes(rendered)
+                    target.symlink_to(tmp / "elsewhere.yaml")
+                code, report = self.ci(root)
+                self.assertEqual(code, 1)
+                check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["facts"]],
+                    ["failed", "conformance_workflow_stale",
+                     {"target": self.TARGET, "state": "stale"}])
+                self.assert_validates(report)
+
+    def test_an_unrenderable_branch_is_a_finding(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["bindings"]["vcs"]["integration_branch"] = "main: x"
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            self.write_workflow(root, b"anything\n")
+            code, report = self.ci(root)
+            self.assertEqual(code, 1)
+            check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["facts"]],
+                ["failed", {"target": self.TARGET, "state": "unrenderable"}])
+
+    def test_ci_and_doctor_select_it_and_adoption_and_fleet_do_not(self):
+        selected = {}
+        for purpose in ("ci", "doctor", "adoption", "fleet"):
+            with fixture() as tmp:
+                code, out, err = run("run", "--purpose", purpose, "--repo-root",
+                                     str(make_root(tmp)))
+                self.assertEqual(code, 0, err)
+                selected[purpose] = self.CHECK_ID in [
+                    c["id"] for c in json.loads(out)["checks"]]
+        self.assertEqual(selected, {"ci": True, "doctor": True,
+                                    "adoption": False, "fleet": False})
+
+    def test_a_declared_workflow_projection_passes_doctor(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["projections"].append({
+                "id": "conformance.workflow", "kind": "conformance_workflow",
+                "target": self.TARGET})
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            self.write_workflow(
+                root, resolve_project.render_conformance_workflow("main", 2))
+            report, by_id = doctor(self, root)
+            for check_id in ("repository.projection.fresh",
+                             "repository.paths.classified",
+                             "host.policy_path.no_follow_readable",
+                             self.CHECK_ID):
+                self.assertEqual(by_id[check_id]["status"], "passed", check_id)
+
+
 def make_run(root: Path, worktree: str, run_id: str, states: list, *,
              lock: bool = True, results: bool = True,
              ledger: str | None = None) -> Path:
@@ -282,6 +420,402 @@ def make_run(root: Path, worktree: str, run_id: str, states: list, *,
     if lock:
         run.joinpath("state.lock").write_bytes(b"")
     return run
+
+
+class LintChecksTest(ReportAssertions, unittest.TestCase):
+    """The context-map lint and the standards lint, each run in process by the
+    engine and judged through one `ci` run (#1452 D4, D5, D7). A diagnostic is
+    raw text, so only its repo-relative label ever becomes a fact."""
+
+    MAP_ID = "verification.context_map.lint"
+    STANDARDS_ID = "verification.standards.lint"
+    MAP_REPAIR = "docs.context_map.repair"
+
+    def ci(self, root: Path, env: dict | None = None) -> tuple[int, dict, dict]:
+        code, out, err = run("run", "--purpose", "ci", "--repo-root", str(root),
+                             env=env)
+        self.assertIn(code, (0, 1), err)
+        report = json.loads(out)
+        return code, report, {c["id"]: c for c in report["checks"]}
+
+    def summary(self, check: dict) -> list:
+        return [check["status"], check["reason_code"], check["repair_id"],
+                check["facts"]]
+
+    def edit_contract(self, root: Path, mutate) -> None:
+        contract = root / ".agents/project.json"
+        authored = json.loads(contract.read_text(encoding="utf-8"))
+        mutate(authored)
+        contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+
+    def set_context(self, root: Path, entries: list) -> None:
+        self.edit_contract(
+            root, lambda a: a["bindings"]["paths"].__setitem__("context", entries))
+        for entry in entries:
+            if Path(entry).name == "CONTEXT-MAP.md":
+                write_clean_map(root / entry)
+            else:
+                write_file(root, entry, "")
+
+    def test_a_broken_context_map_turns_ci_red_and_names_the_check(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "docs/CONTEXT-MAP.md", "")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"], {
+                "status": "failed", "primary_check_id": self.MAP_ID})
+            self.assertEqual(
+                self.summary(by_id[self.MAP_ID]),
+                ["failed", "context_map_lint_failed", self.MAP_REPAIR,
+                 {"paths": ["docs/CONTEXT-MAP.md"], "count": 1}])
+            self.assert_validates(report)
+
+    def test_a_broken_standards_tree_turns_ci_red_and_names_the_check(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "docs/standards/orphan.md", "# Orphan\n")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"], {
+                "status": "failed", "primary_check_id": self.STANDARDS_ID})
+            check = by_id[self.STANDARDS_ID]
+            self.assertEqual(check["status"], "failed")
+            self.assertEqual([check["reason_code"], check["repair_id"]],
+                             ["standards_lint_failed", "docs.standards.repair"])
+            self.assertEqual(
+                check["facts"],
+                conformance_lint_facts(standards_lint.lint(root, STANDARDS)))
+            self.assertIn("docs/standards/README.md", check["facts"]["paths"])
+            self.assert_validates(report)
+
+    def test_a_clean_tree_passes_both_lints_and_ci_exits_zero(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.assertEqual(
+                context_map_lint.check(root, root / "docs/CONTEXT-MAP.md"), [])
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 0)
+            self.assertEqual(report["outcome"]["status"], "passed")
+            for check_id in (self.MAP_ID, self.STANDARDS_ID):
+                self.assertEqual([by_id[check_id]["status"],
+                                  by_id[check_id]["facts"]], ["passed", {}])
+
+    def test_an_area_context_file_beside_the_map_is_not_linted_as_a_map(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.set_context(root, ["docs/CONTEXT-MAP.md",
+                                    "docs/areas/backlog/CONTEXT.md",
+                                    "docs/areas/system/CONTEXT.md"])
+            # With `docs/areas` present the lint also checks the layout, so the
+            # map names both areas and each area file carries its front matter;
+            # neither area file holds an `## Areas` table, so linting one as a
+            # map would report `no '## Areas' table found`.
+            rows = "".join(
+                f"| {name} | [CONTEXT](./areas/{name.lower()}/CONTEXT.md) | "
+                f"The {name} area | `.agents/project.json` |\n"
+                for name in ("Backlog", "System"))
+            write_file(root, "docs/CONTEXT-MAP.md", CLEAN_MAP.split("| Fixture")[0]
+                       + rows + "\n## Terms\n\n| Term | Area |\n|---|---|\n")
+            (root / "docs/fixture-CONTEXT.md").unlink()
+            for name in ("Backlog", "System"):
+                write_file(root, f"docs/areas/{name.lower()}/CONTEXT.md",
+                           f"---\narea: {name}\nbudget: 20 lines\n---\n\n# {name}\n")
+            self.assertEqual(
+                context_map_lint.check(root, root / "docs/CONTEXT-MAP.md"), [])
+            code, _, by_id = self.ci(root)
+            self.assertEqual(code, 0)
+            self.assertEqual([by_id[self.MAP_ID]["status"],
+                              by_id[self.MAP_ID]["facts"]], ["passed", {}])
+
+    def test_no_map_entry_means_no_lint(self):
+        for label in ("area file only", "no entries"):
+            with self.subTest(context=label), fixture() as tmp:
+                root = make_root(tmp)
+                if label == "area file only":
+                    self.set_context(root, ["docs/areas/backlog/CONTEXT.md"])
+                else:
+                    self.set_context(root, [])
+                    self.edit_contract(
+                        root, lambda a: a["capabilities"]["knowledge.context"]
+                        .__setitem__("support", "unsupported"))
+                code, _, by_id = self.ci(root)
+                self.assertEqual(code, 0)
+                self.assertEqual([by_id[self.MAP_ID]["status"],
+                                  by_id[self.MAP_ID]["facts"]], ["passed", {}])
+
+    def test_two_maps_are_an_ambiguous_contract(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.set_context(root, ["docs/CONTEXT-MAP.md",
+                                    "docs/other/CONTEXT-MAP.md"])
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"], {
+                "status": "failed", "primary_check_id": self.MAP_ID})
+            self.assertEqual(
+                self.summary(by_id[self.MAP_ID]),
+                ["failed", "context_map_ambiguous", self.MAP_REPAIR,
+                 {"paths": ["docs/CONTEXT-MAP.md", "docs/other/CONTEXT-MAP.md"],
+                  "count": 2}])
+
+    def write_marker_lint(self, tmp: Path, root: Path) -> dict:
+        """A `map-lint` on PATH that would leave a marker inside and outside."""
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        script = bin_dir / "map-lint"
+        script.write_text(
+            f"#!/bin/sh\n: > {root}/inside-marker\n: > {tmp}/outside-marker\n",
+            encoding="utf-8")
+        script.chmod(0o755)
+        self.edit_contract(root, lambda a: a["bindings"]["commands"].__setitem__(
+            "context-map-lint", {"argv": ["map-lint"], "cwd": ".", "env": []}))
+        return {**HERMETIC_ENV,
+                "PATH": os.pathsep.join([str(bin_dir), HERMETIC_ENV["PATH"]])}
+
+    def test_a_declared_repository_lint_is_delegated_and_never_run(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "docs/CONTEXT-MAP.md", "")
+            env = self.write_marker_lint(tmp, root)
+            code, report, by_id = self.ci(root, env)
+            self.assertEqual(code, 0)
+            self.assertEqual(report["outcome"]["status"], "passed")
+            self.assertEqual(
+                self.summary(by_id[self.MAP_ID]),
+                ["warning", "context_map_lint_delegated",
+                 "docs.context_map.run_repository_lint",
+                 {"command": "context-map-lint"}])
+            self.assertFalse((root / "inside-marker").exists())
+            self.assertFalse((tmp / "outside-marker").exists())
+
+    def test_an_unreadable_map_or_shard_is_a_finding_not_a_refusal(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            (root / "docs/CONTEXT-MAP.md").write_bytes(b"\xff\xfe\n")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"]["primary_check_id"], self.MAP_ID)
+            self.assertEqual(
+                self.summary(by_id[self.MAP_ID]),
+                ["failed", "context_map_unreadable", self.MAP_REPAIR,
+                 {"paths": ["docs/CONTEXT-MAP.md"], "count": 1}])
+            self.assert_validates(report)
+        with fixture() as tmp:
+            root = make_root(tmp)
+            (root / "docs/standards").mkdir(parents=True, exist_ok=True)
+            (root / "docs/standards/bad.md").write_bytes(b"\xff\n")
+            with self.assertRaises(UnicodeDecodeError):
+                standards_lint.lint(root, STANDARDS)
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"]["primary_check_id"],
+                             self.STANDARDS_ID)
+            check = by_id[self.STANDARDS_ID]
+            self.assertEqual([check["status"], check["reason_code"]],
+                             ["failed", "standards_unreadable"])
+            self.assert_validates(report)
+
+    def test_an_absolute_governs_glob_is_a_finding_not_a_refusal(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "docs/CONTEXT-MAP.md", CLEAN_MAP.replace(
+                "`.agents/project.json`", "`/etc/*`"))
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"]["primary_check_id"], self.MAP_ID)
+            self.assertEqual(
+                self.summary(by_id[self.MAP_ID]),
+                ["failed", "context_map_lint_failed", self.MAP_REPAIR,
+                 {"paths": ["docs/CONTEXT-MAP.md"], "count": 1}])
+            self.assert_validates(report)
+
+    def test_a_map_resolving_outside_the_root_is_not_read(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            outside = tmp / "outside" / "CONTEXT-MAP.md"
+            write_clean_map(outside)
+            (root / "docs/CONTEXT-MAP.md").unlink()
+            (root / "docs/CONTEXT-MAP.md").symlink_to(outside)
+            code, _, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.MAP_ID]),
+                ["failed", "context_map_outside_root", self.MAP_REPAIR,
+                 {"paths": ["docs/CONTEXT-MAP.md"], "count": 1}])
+
+    def test_an_area_file_outside_the_root_is_a_finding_and_is_never_read(self):
+        for label, link in (("relative", "../../outside/CONTEXT.md"),
+                            ("absolute", None)):
+            with self.subTest(link=label), fixture() as tmp:
+                root = make_root(tmp)
+                outside = tmp / "outside" / "CONTEXT.md"
+                write_file(tmp, "outside/CONTEXT.md", "no front matter\n")
+                write_file(root, "docs/CONTEXT-MAP.md", CLEAN_MAP.replace(
+                    "./fixture-CONTEXT.md", link or str(outside)))
+                opened = []
+                original = Path.read_text
+
+                def recording(path, *args, **kwargs):
+                    opened.append(Path(path).resolve())
+                    return original(path, *args, **kwargs)
+
+                with unittest.mock.patch.object(Path, "read_text", recording):
+                    problems = context_map_lint.check(
+                        root, root / "docs/CONTEXT-MAP.md")
+                self.assertNotIn(outside.resolve(), opened)
+                self.assertTrue(
+                    any("outside the repository" in problem
+                        for problem in problems), problems)
+                code, _, by_id = self.ci(root)
+                self.assertEqual(code, 1)
+                self.assertEqual(
+                    self.summary(by_id[self.MAP_ID]),
+                    ["failed", "context_map_lint_failed", self.MAP_REPAIR,
+                     {"paths": ["docs/CONTEXT-MAP.md"], "count": len(problems)}])
+
+    def test_a_docs_areas_symlinked_outside_the_root_is_a_finding_and_is_never_read(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(tmp, "host/secret/adr/001-a.md", "# ADR-secret-001 — A\n")
+            write_file(tmp, "host/other/private.md", "private\n")
+            areas = root / "docs/areas"
+            if areas.is_symlink() or areas.is_file():
+                areas.unlink()
+            elif areas.is_dir():
+                shutil.rmtree(areas)
+            areas.symlink_to(tmp / "host")
+            opened = []
+            original = Path.read_text
+
+            def recording(path, *args, **kwargs):
+                opened.append(Path(path).resolve())
+                return original(path, *args, **kwargs)
+
+            with unittest.mock.patch.object(Path, "read_text", recording):
+                problems = context_map_lint.check(
+                    root, root / "docs/CONTEXT-MAP.md")
+            host = (tmp / "host").resolve()
+            self.assertEqual(
+                [path for path in opened if host in path.parents], [])
+            self.assertTrue(
+                any("resolves outside the repository" in problem
+                    for problem in problems), problems)
+            self.assertFalse(
+                any(str(tmp) in problem for problem in problems), problems)
+
+    def test_a_link_under_docs_to_the_outside_is_a_finding_and_is_never_read(self):
+        def link_area(root, tmp):
+            write_file(tmp, "host/slug/adr/001-a.md", "# ADR-slug-001 — A\n")
+            (root / "docs/areas/slug").symlink_to(tmp / "host/slug")
+
+        def link_record(root, tmp):
+            write_file(tmp, "host/secret.md", "# ADR-real-001 — A\n")
+            (root / "docs/areas/real/adr").mkdir(parents=True)
+            (root / "docs/areas/real/adr/001-a.md").symlink_to(
+                tmp / "host/secret.md")
+
+        def link_adr_dir(root, tmp):
+            write_file(tmp, "host/adr/001-a.md", "# ADR-real-001 — A\n")
+            (root / "docs/areas/real").mkdir(parents=True)
+            (root / "docs/areas/real/adr").symlink_to(tmp / "host/adr")
+
+        def link_doc(root, tmp):
+            write_file(tmp, "host/leak.md", "ADR-nope-001\n")
+            (root / "docs/leak.md").symlink_to(tmp / "host/leak.md")
+
+        def link_readme(root, tmp):
+            write_file(tmp, "host/readme.md", "leaks/\n")
+            (root / "docs/README.md").symlink_to(tmp / "host/readme.md")
+
+        for case in (link_area, link_record, link_adr_dir, link_doc,
+                     link_readme):
+            with self.subTest(case=case.__name__), fixture() as tmp:
+                root = make_root(tmp)
+                (root / "docs/areas").mkdir(parents=True, exist_ok=True)
+                readme = root / "docs/README.md"
+                if case is link_readme and readme.exists():
+                    readme.unlink()
+                case(root, tmp)
+                opened = []
+                original = Path.read_text
+
+                def recording(path, *args, **kwargs):
+                    opened.append(Path(path).resolve())
+                    return original(path, *args, **kwargs)
+
+                with unittest.mock.patch.object(Path, "read_text", recording):
+                    problems = context_map_lint.check(
+                        root, root / "docs/CONTEXT-MAP.md")
+                host = (tmp / "host").resolve()
+                self.assertEqual(
+                    [path for path in opened if host in path.parents], [])
+                leaks = [problem for problem in problems
+                         if "resolves outside the repository" in problem]
+                self.assertEqual(len(leaks), 1, problems)
+                self.assertFalse(
+                    any(str(tmp) in problem or "host" in problem
+                        for problem in leaks), leaks)
+
+    def test_lint_facts_carry_no_absolute_path_or_authored_text(self):
+        with self.subTest(case="long path"), fixture() as tmp:
+            root = make_root(tmp)
+            long_entry = "docs/" + "a" * 230 + "/CONTEXT-MAP.md"
+            self.set_context(root, [long_entry])
+            write_file(root, long_entry, "")
+            _, report, by_id = self.ci(root)
+            for value in by_id[self.MAP_ID]["facts"].values():
+                for text in (value if isinstance(value, list) else [value]):
+                    if isinstance(text, str):
+                        self.assertLessEqual(len(text), 200)
+            self.assert_validates(report)
+        with self.subTest(case="absolute diagnostic"), fixture() as tmp:
+            root = make_root(tmp)
+            write_file(tmp, "outside/CONTEXT.md", "no front matter\n")
+            write_file(root, "docs/CONTEXT-MAP.md", CLEAN_MAP.replace(
+                "./fixture-CONTEXT.md", "../../outside/CONTEXT.md")
+                       + "\n[broken](./missing.md)\n")
+            problems = context_map_lint.check(root, root / "docs/CONTEXT-MAP.md")
+            self.assertTrue(any(str(tmp) in problem for problem in problems),
+                            problems)
+            _, _, by_id = self.ci(root)
+            facts = by_id[self.MAP_ID]["facts"]
+            self.assertNotIn(str(tmp), json.dumps(facts))
+            self.assertIn("docs/CONTEXT-MAP.md", facts["paths"])
+        with self.subTest(case="authored line"), fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "docs/standards/rules.md",
+                       "# Rules\n\n1. AUTHORED-LINE-MARKER\n")
+            problems = standards_lint.lint(root, STANDARDS)
+            self.assertTrue(
+                any("AUTHORED-LINE-MARKER" in problem for problem in problems),
+                problems)
+            _, _, by_id = self.ci(root)
+            self.assertEqual(by_id[self.STANDARDS_ID]["status"], "failed")
+            self.assertNotIn("AUTHORED-LINE-MARKER",
+                             json.dumps(by_id[self.STANDARDS_ID]["facts"]))
+
+    def test_a_missing_platform_standards_directory_is_its_own_finding(self):
+        with fixture() as tmp:
+            env = platform_env(tmp, standards=None)
+            _, by_id = doctor(self, make_root(tmp), env=env)
+            self.assertEqual(
+                self.summary(by_id[self.STANDARDS_ID]),
+                ["failed", "platform_standards_missing",
+                 "platform.standards.install", {}])
+
+    def test_ci_and_doctor_select_both_and_adoption_and_fleet_do_not(self):
+        selected = {}
+        for purpose in ("ci", "doctor", "adoption", "fleet"):
+            with fixture() as tmp:
+                code, out, err = run("run", "--purpose", purpose, "--repo-root",
+                                     str(make_root(tmp)))
+                self.assertEqual(code, 0, err)
+                ids = [c["id"] for c in json.loads(out)["checks"]]
+                selected[purpose] = (self.MAP_ID in ids, self.STANDARDS_ID in ids)
+        self.assertEqual(selected, {
+            "ci": (True, True), "doctor": (True, True),
+            "adoption": (False, False), "fleet": (False, False)})
 
 
 class NestedLedgerResidueTest(ReportAssertions, unittest.TestCase):
