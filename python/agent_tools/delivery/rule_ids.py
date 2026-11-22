@@ -19,7 +19,7 @@ RULE_ID = re.compile(r"[A-Z]+[1-9][0-9]*")
 RULE_ID_HEADING = re.compile(
     r"^(?P<hashes>#{1,6}) (?P<prefix>[A-Z]+)(?P<number>[1-9][0-9]*)\. (?P<title>\S.*)$")
 CITE = "standard:"
-CITATION = re.compile(r"(?<![A-Za-z0-9_-])standard:(?P<token>[A-Za-z0-9_]+)")
+CITATION = re.compile(r"(?<![A-Za-z0-9_-])standard:(?P<token>[A-Za-z0-9_.-]*[A-Za-z0-9_-])")
 PROJECT_PREFIX = "P"
 
 

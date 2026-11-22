@@ -54,7 +54,7 @@ class CitationFormTest(unittest.TestCase):
                 self.assertEqual(citations(text), [])
 
     def test_a_token_that_is_no_rule_id_is_malformed(self):
-        for token in ("b7", "B07", "B7a", "B", "7", "_B7", "B7_x"):
+        for token in ("b7", "B07", "B7a", "B", "7", "_B7", "B7_x", "-B7", ".B7", "B7-x", "B7.x"):
             with self.subTest(token=token):
                 self.assertEqual(citations(cite(token)), [Citation(1, token, False)])
 
@@ -223,15 +223,17 @@ class CheckTest(LintTestCase):
         self.assertIn("cites B2", after.stderr)
 
 
-    def test_a_citation_led_by_an_underscore_is_malformed_in_an_enforcer(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": "# " + cite("_B7") + "\n"}, members=["tests/test_a.py"])
+    def test_a_citation_led_or_continued_by_a_separator_is_malformed_in_an_enforcer(self):
+        for token in ("_B7", "-B7", ".B7", "B7-x", "B7_x"):
+            with self.subTest(token=token):
+                root, platform, project = self.fixture(
+                    files={"tests/test_a.py": "# " + cite(token) + "\n"}, members=["tests/test_a.py"])
 
-        result = self.run_lint(root, platform, project)
+                result = self.run_lint(root, platform, project)
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("standards-lint: tests/test_a.py:1: malformed citation " + cite("_B7"),
-                      result.stderr.splitlines())
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("standards-lint: tests/test_a.py:1: malformed citation " + cite(token),
+                              result.stderr.splitlines())
 
     def test_a_commented_out_or_fenced_rule_heading_is_no_rule(self):
         hidden = {
