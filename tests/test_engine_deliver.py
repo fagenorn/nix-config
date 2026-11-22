@@ -321,6 +321,31 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual([project.calls("gate"), project.calls("c"), project.calls("b")],
                          [1, 0, 2])
 
+    def test_a_stop_the_owner_never_saw_is_reported_not_walked_past(self):
+        for last in ("result_stored", "transition_taken"):
+            with self.subTest(killed_after=last):
+                project = EngineProject(self)
+                procedures = project.procedures([
+                    step("a", "standin-gate", "c"), step("b", "count-b", "done"),
+                    step("c", "count-c", "done")],
+                    stops={"needs-owner": {"need": "owner-decision", "reenter": "b"}})
+                run = self.first_stop(project, procedures)
+                lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
+                cut = next(i for i, line in enumerate(lines)
+                           if json.loads(line)["event"] == last) + 1
+                (run / "events.jsonl").write_text("".join(lines[:cut]), encoding="utf-8")
+                second = project.deliver(procedures)
+                self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+                self.assertEqual(json.loads(second.stdout)["end"], "needs-owner")
+                after = [e["event"] for e in project.events(run)[cut:]]
+                owed = ["outcome_graded", "transition_taken"] if last == "result_stored" else []
+                self.assertEqual(after, [*owed, "stop_reached"])
+                self.assertEqual(run_continued(project.events(run)), [])
+                self.assertEqual(project.calls("b"), 0)
+                third = project.deliver(procedures)
+                self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
+                self.assertEqual([e["step"] for e in run_continued(project.events(run))], ["b"])
+
     def test_a_head_that_moves_while_its_step_runs_leaves_the_result_stale(self):
         project = EngineProject(self)
         procedures = project.procedures(

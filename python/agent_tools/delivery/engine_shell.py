@@ -318,8 +318,11 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
             _grade(run_dir, steps[name], visit, stored[0]["outcome"])
             ledger = engine_ledger.replay(run_dir / "events.jsonl")
     events = core_events(run_dir, ledger)
-    if isinstance(engine_core.replay(procedure, inputs, events).action, engine_core.Done):
+    action = engine_core.replay(procedure, inputs, events).action
+    if isinstance(action, engine_core.Done):
         return
+    if isinstance(action, engine_core.Stop) and ledger[-1]["event"] != "stop_reached":
+        return  # the owner never saw this stop: the walk reports it before anything is re-entered
     point = engine_core.reentry(procedure, inputs, events, read_head(table.root))
     event = {"event": "run_continued", "at": _now(), "step": point.step}
     if point.visit is not None:
