@@ -51,6 +51,8 @@ def stub_just(directory: Path) -> Path:
         "#!/bin/sh\n"
         "printf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$STUB_LOG\"\n"
         "[ \"$1\" = \"${STUB_FAIL:-}\" ] && exit 3\n"
+        "[ \"$1\" = \"${STUB_EXEC_FOR:-}\" ] && exec \"$STUB_PYTHON\" -m unittest -v"
+        " -k \"$STUB_EXEC_K\" \"$STUB_EXEC_FILE\"\n"
         "exit 0\n", "utf-8")
     path.chmod(0o755)
     return path
@@ -188,8 +190,8 @@ class ActivatedSkillsComparisonTest(JustCase):
         if differing:
             entry = skills / "deliver-direct" / "SKILL.md"
             text = entry.read_text(encoding="utf-8")
-            self.assertIn("`bindings.workflow.verification`", text)
-            entry.write_text(text.replace("`bindings.workflow.verification`", "the verification"),
+            self.assertIn("bindings.workflow.verification", text)
+            entry.write_text(text.replace("bindings.workflow.verification", "the verification"),
                              encoding="utf-8")
         return home
 
@@ -205,13 +207,22 @@ class ActivatedSkillsComparisonTest(JustCase):
             cwd=REPO_ROOT, env=self.env_for(home, **extra), capture_output=True, text=True,
             timeout=600)
 
-    def test_the_test_suite_member_sees_no_comparison_failure_on_a_differing_home(self):
-        suite = [m for m in members("test", REPO_ROOT) if m.id == "agent-workflow-tests"][0]
+    def test_the_test_command_passes_on_a_differing_home_with_the_switch_unset(self):
         home = self.fixture_home(differing=True)
-        # Without the member's environment the comparison fails: the fixture really differs.
+        # Control: run bare, the comparison fails, so the fixture really differs.
         self.assertNotEqual(self.run_comparison(home).returncode, 0)
-        result = self.run_comparison(home, **dict(suite.env))
+        # The production `test` command starts the stubbed suite member with the differing
+        # home and no switch of its own; only the command's own environment can skip it.
+        tmp = self.tmp()
+        stub_just(tmp / "bin")
+        env = self.env_for(
+            home, PATH=f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            STUB_LOG=str(tmp / "log"), STUB_EXEC_FOR="agent-workflow-tests",
+            STUB_PYTHON=sys.executable, STUB_EXEC_K=COMPARISON, STUB_EXEC_FILE=CONTRACTS)
+        result = run_entry(["test"], REPO_ROOT, env)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1],
+                         "test: passed: nix-build, agent-workflow-tests")
         self.assertIn("skipped", result.stderr)
 
     def test_the_kept_entry_point_fails_on_the_same_differing_home(self):
