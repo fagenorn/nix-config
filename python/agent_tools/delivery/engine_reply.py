@@ -8,6 +8,7 @@ use this module, so what the checker admits is exactly what the shell validates.
 The subset. The root is an object node. A node is one of:
 
 - `{"type": "string"}`, `{"type": "integer"}` or `{"type": "boolean"}` (exactly the key `type`);
+  an integer node takes any integral number, so `2.0` conforms and `true` does not;
 - `{"enum": [...]}`, optionally with `"type": "string"`: a non-empty list of distinct strings;
 - `{"type": "array", "items": <node>}` (exactly those keys);
 - `{"type": "object", "properties": {<name>: <node>}, "additionalProperties": false}` with an
@@ -25,7 +26,8 @@ from typing import Mapping
 
 _SCALARS = {
     "string": lambda v: isinstance(v, str),
-    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "integer": lambda v: (isinstance(v, int) and not isinstance(v, bool))
+    or (isinstance(v, float) and v.is_integer()),
     "boolean": lambda v: isinstance(v, bool),
 }
 _OBJECT_KEYS = {"type", "properties", "required", "additionalProperties"}

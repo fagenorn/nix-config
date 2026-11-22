@@ -61,7 +61,8 @@ first step). An outcome check whose reference failed phase B is skipped for that
 Phase C, data flow (after the graph checks; in step order, the header's `keep_alive` first): `unproduced_input` (an `in` path
 `run.<n>` whose `n` is not a header input, or `<X>.<m>` where `X` is not produced on every route to the step: `X` is a
 non-member step, or a member of a group, among the `dominators` of the step without itself; a group member is dominated
-through its group; a step never reads its own result; a step the walk does not reach, and a member of a group it does not
+through its group; an `<X>.<m>` path is also unproduced when `X` is a non-member agent step whose `no-reply` edge
+reaches the step without running `X` again, since a missed answer stores `{}`; a step never reads its own result; a step the walk does not reach, and a member of a group it does not
 reach, skip this route check and keep the `run.<n>` and member checks), `unknown_member` (`X` is an agent step whose reply
 schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
 consumed; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
@@ -797,6 +798,28 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                       f"{path!r} is not a member the result of {producer!r} carries; a decide step publishes only 'verdict'.",
                       label)
 
+    def check_no_reply(producer: dict) -> None:
+        """Flag each reader of `producer` that a `no-reply` edge reaches without the producer running again.
+
+        A reader the producer does not dominate is already flagged by `check_path`.
+        """
+        target = producer["on"][NO_REPLY]
+        if target == "done" or target == producer["id"]:
+            return
+        blocked = {node: tuple(t for t in targets if t != producer["id"])
+                   for node, targets in graph.items() if node != producer["id"]}
+        reached = {target} | _reach(blocked, target)
+        for item in procedure["steps"]:
+            owner = group_of.get(item["id"], item["id"])
+            if (item["id"] == producer["id"] or owner not in reached
+                    or producer["id"] not in dom.get(owner, frozenset()) - {owner}):
+                continue  # a producer that does not dominate the reader is already unproduced
+            for path in item.get("in", ()):
+                if path.split(".", 1)[0] == producer["id"]:
+                    found.add("unproduced_input",
+                              f"{path!r} is read after {producer['id']!r} replied nothing, "
+                              "when its result is empty.", item["id"])
+
     for path in procedure.get("keep_alive", {}).get("in", ()):
         check_path(path, None)
     for item in procedure["steps"]:
@@ -809,6 +832,9 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                 if name not in reads:
                     found.add("unknown_placeholder",
                               f"the prompt names {{{{{name}}}}}, which is not an in path.", item["id"])
+    for item in procedure["steps"]:
+        if item["kind"] == "agent" and item["id"] not in group_of and NO_REPLY in item.get("on", {}):
+            check_no_reply(item)
 
 
 def _check_reachability(procedure: dict, found: _Findings) -> None:

@@ -273,6 +273,19 @@ class LocateTest(unittest.TestCase):
                 self.assertIn("if filter", found.reason)
         self.assertEqual(self.locate(self.settings(self.entry())), Hook(GUARD, 30))
 
+    def test_an_asynchronous_guard_hook_is_unavailable(self):
+        for name, value in (("async", True), ("async", "true"), ("async", 1),
+                            ("asyncRewake", True), ("asyncRewake", "yes")):
+            with self.subTest(name=name, value=value):
+                found = self.locate(self.settings(self.entry("Bash", self.hook(**{name: value}))))
+                self.assertIsInstance(found, Unavailable)
+                self.assertIn("asynchronous", found.reason)
+        for name in ("async", "asyncRewake"):
+            with self.subTest(name=name, value=False):
+                self.assertEqual(
+                    self.locate(self.settings(self.entry("Bash", self.hook(**{name: False})))),
+                    Hook(GUARD, 30))
+
     def test_every_other_shape_is_unavailable_with_a_reason(self):
         def with_hook(**changes) -> str:
             return self.settings(self.entry("Bash", self.hook(**changes)))

@@ -301,6 +301,10 @@ def _exhausted_reply_value(schema: dict) -> None:
     schema["properties"]["status"]["enum"].append("exhausted")
 
 
+def _no_reply_reaches_the_reviewers(toy: dict) -> None:
+    step(toy, "draft")["on"]["no-reply"] = "review"
+
+
 def _summary_with_min_length(schema: dict) -> None:
     schema["properties"]["summary"] = {"type": "string", "minLength": 1}
 
@@ -461,6 +465,10 @@ CASES = [
          [("toy", "draft", "invalid_reply")]),
     Case("pass_set_naming_no_reply", editing("toy", _pass_set_with_no_reply),
          [("toy", "review", "unknown_outcome")]),
+    Case("no_reply_edge_to_steps_reading_the_empty_result",
+         editing("toy", _no_reply_reaches_the_reviewers),
+         [("toy", "review-a", "unproduced_input"), ("toy", "review-b", "unproduced_input"),
+          ("toy", "children", "unproduced_input")]),
     Case("reply_schema_outside_the_subset",
          _editing_draft_reply(_summary_with_min_length),
          [("toy", "draft", "unsupported_reply")]),
@@ -710,12 +718,23 @@ class ReplyValidatorTest(unittest.TestCase):
         integer = _object(n={"type": "integer"})
         self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": True}))
         self.assertIsNone(engine_reply.reply_problem(integer, {"n": 2}))
+        self.assertIsNone(engine_reply.reply_problem(integer, {"n": 2.0}))
+        self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": 2.5}))
+        self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": float("inf")}))
+        self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": False}))
         self.assertIsNotNone(engine_reply.reply_problem({"type": "number"}, 1))
         self.assertIsNotNone(engine_reply.reply_problem({"type": "string"}, "x"))
         self.assertIsNone(engine_reply.reply_problem(_object(s={"type": "string"}), {"s": "x"}))
 
 
 class GraphTest(unittest.TestCase):
+    def test_a_no_reply_edge_that_runs_the_producer_again_leaves_its_readers_unflagged(self):
+        directory = broken_copy(editing("toy", _set(
+            lambda toy: step(toy, "draft")["on"], "no-reply", "needs-owner")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
     def test_a_step_reached_only_through_claim_lost_is_reachable(self):
         directory = broken_copy(editing("toy-child", _recovery))
         code, out, _ = run_check("--procedures", str(directory))

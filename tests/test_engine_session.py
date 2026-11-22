@@ -77,6 +77,18 @@ class ReadResultTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertIsNone(read_result(raw(structured_output=value)).reply)
 
+    def test_an_integral_number_written_as_a_float_reads_as_an_integer(self):
+        reading = read_result(b'{"type":"result","structured_output":{"n":2.0,"m":2.5,"k":1e2}}')
+        self.assertEqual(reading.reply, {"n": 2, "m": 2.5, "k": 100})
+        self.assertIs(type(reading.reply["n"]), int)
+        self.assertIs(type(read_result(b'{"structured_output":{"n":true}}').reply["n"]), bool)
+
+    def test_is_error_is_read_only_when_it_is_the_boolean_true(self):
+        self.assertTrue(read_result(raw(is_error=True)).is_error)
+        for value in (False, "true", 1, None):
+            with self.subTest(value=value):
+                self.assertFalse(read_result(raw(is_error=value)).is_error)
+
     def test_unreadable_stdout_reads_as_nothing(self):
         nothing = Reading(None, None, [], None, None, 0, dict(ZERO_TOKENS), 0)
         for stdout in (b"", b"not json", b"[1]", b'{"a":1,"a":2}',
@@ -983,6 +995,91 @@ class DeliverSessionTest(unittest.TestCase):
                 self.assertIn("draft", done.stderr)
                 self.assertEqual(len(self.log(log)), 1)
                 self.assertNotIn("session_resuming", self.kinds(project))
+
+    def test_a_success_flagged_as_an_error_with_no_reply_is_a_fault_not_a_miss(self):
+        log = install_stub(self.project, canned_result(structured_output=..., is_error=True),
+                           exit=1, diagnostic="client failed\n")
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        self.assertIn("draft", done.stderr)
+        self.assertEqual(len(self.log(log)), 1)
+        kinds = self.kinds()
+        for kind in ("session_resuming", "result_stored", "outcome_graded"):
+            self.assertNotIn(kind, kinds)
+
+    def test_a_success_flagged_as_an_error_is_a_fault_on_the_resume_too(self):
+        log = install_stub(self.project, RESULT_MISSING,
+                           resumed=canned_result(structured_output=..., is_error=True), exit=0)
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(len(self.log(log)), 2)
+        self.assertNotIn("outcome_graded", self.kinds())
+
+    def test_an_integral_float_answer_for_an_integer_member_is_a_usable_reply(self):
+        schema = {**DRAFT_REPLY, "properties": {**DRAFT_REPLY["properties"],
+                                                "n": {"type": "integer"}},
+                  "required": [*DRAFT_REPLY["required"], "n"]}
+        procedures = write_procedures(
+            self.project, [agent_step("draft", "implementer",
+                                      {"drafted": "done", "stuck": "needs-owner"})],
+            {"draft.md": "Draft issue {{run.issue}}.\n", "draft.reply.json": json.dumps(schema)})
+        log = install_stub(self.project, RESULT_MISSING, resumed=canned_result(
+            structured_output={"status": "drafted", "summary": "s", "items": [], "n": 2.0}))
+        done = self.project.deliver(procedures, issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.log(log)), 2)
+        stored = json.loads((self.run_dir() / "results/draft.1.json").read_text())
+        self.assertEqual(stored, {"status": "drafted", "summary": "s", "items": [], "n": 2})
+        self.assertIs(type(stored["n"]), int)
+        self.assertEqual([e["outcome"] for e in self.project.events(self.run_dir())
+                          if e["event"] == "outcome_graded"], ["drafted"])
+
+    def test_settings_that_lose_the_guard_during_a_run_stop_the_resume(self):
+        project = self.project
+        install_stub(project, RESULT_MISSING, resumed=RESULT_NORMAL)
+        procedures = one_step(project)
+        real = engine_session.launch
+        launches: list[list[str]] = []
+
+        def losing(argv, cwd, prompt, *, on_start):
+            launches.append(list(argv))
+            launched = real(argv, cwd, prompt, on_start=on_start)
+            project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
+            return launched
+
+        with project.inside(), mock.patch.object(engine_session, "launch", side_effect=losing):
+            with self.assertRaises(engine_shell.Fault) as caught:
+                engine_shell.deliver(1514, procedures)
+        self.assertEqual(len(launches), 1)
+        self.assertIn("lifecycle guard", str(caught.exception))
+        self.assertIn("draft", str(caught.exception))
+        self.assertEqual(self.kinds().count("process_started"), 1)
+        self.assertNotIn("outcome_graded", self.kinds())
+
+    def test_settings_that_lose_the_guard_during_a_run_stop_the_next_agent_step(self):
+        project = self.project
+        install_stub(project, RESULT_NORMAL)
+        procedures = write_procedures(project, [
+            agent_step("draft", "implementer", {"drafted": "second", "stuck": "needs-owner"}),
+            agent_step("second", "implementer", {"drafted": "done", "stuck": "needs-owner"})])
+        real = engine_session.launch
+        launches: list[list[str]] = []
+
+        def losing(argv, cwd, prompt, *, on_start):
+            launches.append(list(argv))
+            launched = real(argv, cwd, prompt, on_start=on_start)
+            project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
+            return launched
+
+        with project.inside(), mock.patch.object(engine_session, "launch", side_effect=losing):
+            with self.assertRaises(engine_shell.Fault) as caught:
+                engine_shell.deliver(1514, procedures)
+        self.assertEqual(len(launches), 1)
+        self.assertIn("second", str(caught.exception))
+        self.assertNotIn("process_started", [
+            e["event"] for e in self.project.events(self.run_dir()) if e["step"] == "second"])
 
     def test_an_object_that_is_not_a_result_is_a_fault_with_no_resume(self):
         log = install_stub(self.project, canned_result(type="assistant", structured_output=...))

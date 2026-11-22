@@ -7,8 +7,9 @@ command the guard refuses in a Claude Code session is refused here too.
       `~/.claude/settings.json` whose command ends with
       `/bin/claude-bash-lifecycle-guard`. Any other settings shape is
       `Unavailable`, and `locate` never raises. A settings document with a hook
-      switch on loads no user hook, and a Bash hook with an `if` filter may be
-      skipped, so both are `Unavailable` too.
+      switch on loads no user hook, a Bash hook with an `if` filter may be
+      skipped, and an asynchronous Bash hook (`async` or `asyncRewake` set) may refuse
+      after the tool has run, so all three are `Unavailable` too.
   D5  `judge` runs that hook as a subprocess with the Bash PreToolUse payload on
       stdin and `directory` as its working directory. Only exit 0 allows; exit 2
       refuses with the guard's stderr minus one line ending; any other exit, a
@@ -38,6 +39,7 @@ SETTINGS = Path(".claude") / "settings.json"
 MAX_TIMEOUT_SECONDS = 3600
 GUARD_SUFFIX = "/bin/claude-bash-lifecycle-guard"
 HOOK_SWITCHES = ("allowManagedHooksOnly", "disableAllHooks")
+ASYNC_KEYS = ("async", "asyncRewake")
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,9 @@ def _defect(document: object) -> tuple[Hook | None, str]:
         return None, f"the Bash hook {command} is not the lifecycle guard"
     if "args" in hook and hook["args"] != []:
         return None, "its Bash hook has arguments"
+    for name in ASYNC_KEYS:
+        if name in hook and hook[name] is not False:
+            return None, f"its Bash hook is asynchronous ({name})"
     problem = _timeout_defect(hook.get("timeout"))
     if problem:
         return None, f"its Bash hook {problem}"

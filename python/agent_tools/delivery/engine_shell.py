@@ -22,11 +22,12 @@ run's `sessions/`, `session_starting` is on disk before the process is spawned,
 and only the `outcome_from` member of the session's structured reply grades the
 step, so neither the prose nor the exit code selects an outcome. A reading with no
 usable reply (none, or one that breaks the schema) is a miss when stdout is a
-result whose subtype is one of `engine_session.MISS_SUBTYPES`: the same session is
+result that `engine_session.is_miss` accepts (a subtype in `MISS_SUBTYPES`, and no `is_error` on a `success`): the same session is
 then resumed once (`session_resuming`, `--resume <session>`) and asked again, and
 a second miss grades `no-reply` with `{}` as the stored result. Any other reading
 with no usable reply is a `Fault`, and so is a reading denied a shell command,
-whose reply may rest on a check it never ran. The stored result's measurements
+whose reply may rest on a check it never ran. Before each launch, the resume included, the shell reads the
+host's settings again and a lifecycle guard hook that is gone is a `Fault`. The stored result's measurements
 are the sums of the launches.
 
 Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
@@ -441,6 +442,10 @@ def _visit_session(run_dir: Path, root: str, step: dict,
     def launch(resume: bool, text: str) -> tuple[engine_session.Launched,
                                                  engine_session.Reading, str | None]:
         suffix = ".resume" if resume else ""
+        guard = _guard()
+        if isinstance(guard, engine_guard.Unavailable):
+            raise Fault(f"step {name} was not launched: the host's settings no longer load the "
+                        f"lifecycle guard hook: {guard.reason}")
         launched = engine_session.launch(
             engine_session.launch_argv(role, schema, session, system, resume=resume),
             root, text, on_start=started)
@@ -461,8 +466,7 @@ def _visit_session(run_dir: Path, root: str, step: dict,
             raise Fault(f"step {name} was denied the shell command {str(command)[:200]!r}, so "
                         f"its reply is not graded: list it in the role's tools as "
                         f"Bash(<prefix>:*)")
-        if problem is not None and not (reading.is_result
-                                        and reading.subtype in engine_session.MISS_SUBTYPES):
+        if problem is not None and not engine_session.is_miss(reading):
             reason = engine_session.diagnostic(launched.stderr)
             raise Fault(f"step {name} gave no structured reply, exit {launched.exit_code}"
                         + (f": {reason}" if reason else ""))

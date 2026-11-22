@@ -33,9 +33,10 @@ becomes `--resume <id>`, and `--fork-session` is never passed, so the id is kept
 The prompt of that second launch is `REASK_PROMPT`. A miss is a reading with no
 reply that conforms to the schema (`engine_reply.reply_problem`) whose stdout is
 a JSON object of `type` `result` with a `subtype` in `MISS_SUBTYPES`: `success`
-(the model answered in prose or its answer broke the schema) or the client's own
-`error_max_structured_output_retries`. Any other reading without a usable reply
-is not a miss and is never resumed.
+(the model answered in prose or its answer broke the schema) with `is_error` not set, or the
+client's own `error_max_structured_output_retries`, flagged or not (`is_miss`). Any other
+reading without a usable reply, a `success` flagging `is_error` included, is not a miss and is
+never resumed.
 
 The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
 permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
@@ -90,7 +91,8 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
 HOST_SETTINGS_SWITCH = "CLAUDE_ACCOUNT_HOST_SETTINGS"
 NOT_STARTED = 127
-MISS_SUBTYPES: tuple[str, ...] = ("success", "error_max_structured_output_retries")
+STRUCTURED_OUTPUT_EXHAUSTED = "error_max_structured_output_retries"
+MISS_SUBTYPES: tuple[str, ...] = ("success", STRUCTURED_OUTPUT_EXHAUSTED)
 REASK_PROMPT = (
     "Your last answer was not a valid structured answer. Reply again with only the structured "
     "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
@@ -192,6 +194,13 @@ class Reading:
     tokens: dict[str, int]
     spend_usd: float
     is_result: bool = False
+    is_error: bool = False
+
+
+def _number(text: str) -> int | float:
+    """A JSON number written with a fraction or exponent: an int when it is integral, so `2.0` reads as 2."""
+    value = float(text)
+    return int(value) if value.is_integer() else value
 
 
 def _count(value: object) -> int:
@@ -211,7 +220,7 @@ def read_result(stdout: bytes) -> Reading:
     """The reply, prose, denials and measurements of a session's stdout."""
     try:
         document = json.loads(stdout.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
-                              parse_constant=reject_nonfinite_literal)
+                              parse_constant=reject_nonfinite_literal, parse_float=_number)
     except (UnicodeDecodeError, ValueError, RecursionError):
         document = None
     if not isinstance(document, dict):
@@ -231,7 +240,21 @@ def read_result(stdout: bytes) -> Reading:
         turns=_count(document.get("num_turns")),
         tokens={key: _count(usage.get(_USAGE_KEYS[key])) for key in TOKEN_COUNTS},
         spend_usd=_amount(document.get("total_cost_usd")) or 0,
-        is_result=document.get("type") == "result")
+        is_result=document.get("type") == "result",
+        is_error=document.get("is_error") is True)
+
+
+def is_miss(reading: Reading) -> bool:
+    """True when a reading with no usable reply is one the session is asked again about.
+
+    A result whose subtype is in `MISS_SUBTYPES`; but a `success` that flags `is_error` is a client
+    error, not an answer that missed, and is no miss. Only the client's own structured-output
+    exhaustion is a miss whatever it flags.
+    """
+    if not reading.is_result or reading.subtype not in MISS_SUBTYPES:
+        return False
+    return not reading.is_error or reading.subtype == STRUCTURED_OUTPUT_EXHAUSTED
+
 
 
 def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, *,
