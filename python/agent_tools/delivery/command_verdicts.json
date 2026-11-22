@@ -46,6 +46,7 @@
   "release": null,
   "release-card": null,
   "resolve-project": null,
+  "ruff-lint": null,
   "size-lint": null,
   "skill-lint": null,
   "sprint": null,

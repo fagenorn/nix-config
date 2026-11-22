@@ -1,5 +1,4 @@
 # Context Map
-
 ## Areas
 | Area | Context file | Gist | governs |
 |---|---|---|---|
@@ -135,6 +134,7 @@
 | Step | Delivery |
 | Stop | Delivery |
 | Suite member | Delivery |
+| Suppression | Delivery |
 | Transaction | Release |
 | Verification pass | Verification |
 | Verified tree | Verification |

@@ -104,8 +104,8 @@ class CommandTest(Case):
         self.assertEqual(launch.session_name, NAME)
         self.assertEqual(launch.prompt, PROMPT)
         self.assertEqual(launch.settings, self.settings)
-        self.assertEqual(dict(launch.env),
-                         {"CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret"})
+        self.assertEqual(dict(launch.env), {"CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret",
+                                            "CONSOLE_SPRINT_ROOT": "/srv/p01"})
         self.assertNotIn("s3cret", repr(launch))
 
     def test_new_launch_carries_the_permission_it_is_given(self):
@@ -481,7 +481,7 @@ class RunTest(Case):
     def test_the_identity_is_written_to_a_private_settings_file(self):
         self.run_fake()
         self.assertEqual(json.loads(self.settings.read_text())["env"], {
-            "CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret"})
+            "CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret", "CONSOLE_SPRINT_ROOT": str(self.root)})
         self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o600)
         manager.run_launch(self.launch(secret="n3w", root=str(self.root)), platform="linux",
                            run=self.fake(), environ=self.ENVIRON)

@@ -249,6 +249,7 @@ class RulesTest(unittest.TestCase):
                          list(conformance_checks.NEVER_RISE_ENFORCERS))
 
 
+COUNTS_OF_ONE_FILE = "B17 1\n" + "".join(f"PY{n} 0\n" for n in range(6, 14))
 BOT = {"user": {"login": "github-actions[bot]"}, "author_association": "NONE"}
 MARK = "<!-- agent:cleanup v1 rule=B17 -->"
 LISTING = "repos/octo/widgets/issues?state=open&per_page=100"
@@ -437,7 +438,7 @@ class CommandTest(unittest.TestCase):
     def test_counts_prints_each_rule_and_its_count(self):
         code, out, _, _, _ = self.call(["counts", "--repo-root", str(self.world())])
 
-        self.assertEqual((code, out), (0, "B17 1\n"))
+        self.assertEqual((code, out), (0, COUNTS_OF_ONE_FILE))
 
     def test_violations_still_names_a_listed_file_when_the_total_falls(self):
         root = self.world(commit_b=True)
@@ -449,7 +450,7 @@ class CommandTest(unittest.TestCase):
         write(root, "b.py", numbered(10))
         commit_all(root)
 
-        self.assertEqual(self.call(["counts", "--repo-root", str(root)])[:2], (0, "B17 1\n"))
+        self.assertEqual(self.call(["counts", "--repo-root", str(root)])[:2], (0, COUNTS_OF_ONE_FILE))
         listed = ["violations", "--repo-root", str(root), "--rule", "B17"]
         self.assertEqual(self.call(listed)[:2], (0, "B17 a.py:1501\n"))
         write(root, "a.py", numbered(1500))

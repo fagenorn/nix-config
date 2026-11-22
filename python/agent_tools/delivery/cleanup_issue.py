@@ -106,7 +106,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
-from agent_tools.delivery import never_rise, size_lint
+from agent_tools.delivery import never_rise, ruff_lint, size_lint
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.system import forge_api
 
@@ -126,7 +126,33 @@ class CleanupRule:
     guidance: str
 
 
-RULES: tuple[CleanupRule, ...] = (CleanupRule(size_lint.ENFORCER, 1, B17_GUIDANCE),)
+RUFF_BATCH = 10
+RUFF_GUIDANCE = {
+    "PY6": "Import each name explicitly, one module per statement, above every statement but "
+           "the docstring and the `__future__` imports, and only the names the module reads.",
+    "PY7": "Compare with `None`, `True` and `False` by `is`, test a type with `isinstance`, "
+           "write `not in` and `is not`, catch a named exception, bind a function with `def`, "
+           "put one statement on a line and never name anything `l`, `O` or `I`.",
+    "PY8": "Make each listed file read and parse: fix the syntax error, or the string "
+           "annotation that does not parse.",
+    "PY9": "Make each `%` or `str.format` template's placeholders match its arguments, and "
+           "write an f-string with no placeholder as a plain string.",
+    "PY10": "Make each listed statement do what it reads as: no `assert` or `if` on a tuple, "
+            "`==` rather than `is` against a literal, no repeated dict key, `raise "
+            "NotImplementedError`, and `break`, `continue`, `return` and `yield` only inside "
+            "the construct each needs.",
+    "PY11": "Bind every name before it is read, and delete or use each variable or import that "
+            "is rebound before a read or assigned and never read.",
+    "PY12": "Delete the commented-out code; version control keeps it.",
+    "PY13": "Make each suppression name the code of every check it silences and then give, in "
+            "the same comment, the reason the line is right as written.",
+}
+
+RULES: tuple[CleanupRule, ...] = (
+    CleanupRule(size_lint.ENFORCER, 1, B17_GUIDANCE),
+    *(CleanupRule(enforcer, RUFF_BATCH, RUFF_GUIDANCE[enforcer.rule])
+      for enforcer in ruff_lint.ENFORCERS),
+)
 
 
 class Refusal(Exception):

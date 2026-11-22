@@ -13,7 +13,7 @@ The never-rise check (ADR-project-contract-017) stops a branch from adding viola
 
 **D2. Selection.** The rule with the smallest count above zero is selected; equal counts take the earlier rule in `RULES`.
 
-**D3. Listing.** Violations are grouped by file; files are ordered by (violations in the file, largest line in the file, path) ascending; whole files are taken while the total stays at most `batch`; the first file is always taken whole, even when it alone exceeds `batch`. A file is never split across two issues. B17's batch is 1, so each B17 issue is one file, the smallest first.
+**D3. Listing.** Violations are grouped by file; files are ordered by (violations in the file, largest line in the file, path) ascending; whole files are taken while the total stays at most `batch`; the first file is always taken whole, even when it alone exceeds `batch`. A file is never split across two issues. B17's batch is 1, so each B17 issue is one file, the smallest first. The Ruff rules PY6 to PY13 share a batch of 10 violations.
 
 **D4. Recognition.** An open issue is a cleanup issue when its author is trusted and any line of its body, trailing carriage return and spaces stripped, is exactly `<!-- agent:cleanup v1 rule=<id> -->`. Trusted is the login the workflow token files as, `github-actions[bot]`, or an `author_association` of `OWNER` or `MEMBER` (the convention of `look_marker.TRUSTED`). Title and labels are ignored.
 

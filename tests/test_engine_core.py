@@ -165,7 +165,8 @@ class ActionTest(unittest.TestCase):
             with self.subTest(outcome=outcome):
                 doc = toy()
                 step(doc, "draft")["on"][outcome] = "needs-owner"
-                self.assertEqual(refusals(doc, (outcome,)), ())
+                widening = () if outcome == "no-reply" else (outcome,)
+                self.assertEqual(refusals(doc, widening), ())
                 result = replay(doc, INPUTS, pair("scope", "ok") + pair("draft", outcome))
                 self.assertEqual(result.action, STOP)
                 self.assertEqual(result.transitions[-1], Transition("draft", outcome, "needs-owner"))
@@ -352,15 +353,17 @@ class WalkTest(unittest.TestCase):
         self.assertEqual(
             [describe(walk) for walk in coverage.walks],
             [
-                "scope:ok -> draft | scope=ok draft=drafted review=approve => done",
+                "scope:ok -> draft | scope=ok draft=no-reply => step-failed",
                 "scope:failed -> needs-owner | scope=failed => needs-owner",
                 "scope:refused -> needs-owner | scope=refused => needs-owner",
                 "draft:drafted -> review | scope=ok draft=drafted review=approve => done",
                 "draft:stuck -> draft | scope=ok draft=stuck draft=stuck => needs-owner",
+                "draft:no-reply -> step-failed | scope=ok draft=no-reply => step-failed",
                 "draft:exhausted -> needs-owner | scope=ok draft=stuck draft=stuck => needs-owner",
                 "draft:out-of-bounds -> step-failed | scope=ok draft=out-of-bounds => step-failed",
                 "review:approve -> tally | scope=ok draft=drafted review=approve => done",
                 "review:revise -> tally | scope=ok draft=drafted review=revise => needs-owner",
+                "review:no-reply -> step-failed | scope=ok draft=drafted review=no-reply => step-failed",
                 "review:out-of-bounds -> step-failed | scope=ok draft=drafted review=out-of-bounds => step-failed",
                 "tally:accept -> done | scope=ok draft=drafted review=approve => done",
                 "tally:revise -> needs-owner | scope=ok draft=drafted review=revise => needs-owner",
@@ -378,6 +381,9 @@ class WalkTest(unittest.TestCase):
             for event in walk.events:
                 if event["type"] == "outcome" and event["step"] in schemas:
                     result = event["result"]
+                    if event["outcome"] == "no-reply":
+                        self.assertEqual(result, {})
+                        continue
                     if event["outcome"] == "out-of-bounds":
                         self.assertEqual(result, {"bound": "wall-time"})
                         continue
@@ -399,9 +405,9 @@ class WalkTest(unittest.TestCase):
             step_outcomes(SHIPPED_TOY.parent, "toy"),
             {
                 "scope": ("ok", "failed", "refused"),
-                "draft": ("drafted", "stuck", "out-of-bounds"),
-                "review-a": ("approve", "revise"),
-                "review-b": ("approve", "revise"),
+                "draft": ("drafted", "stuck", "no-reply", "out-of-bounds"),
+                "review-a": ("approve", "revise", "no-reply"),
+                "review-b": ("approve", "revise", "no-reply"),
             },
         )
 

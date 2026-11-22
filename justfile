@@ -105,9 +105,9 @@ lint:
 test:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command test
 
-# Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output).
+# Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output). The suite gets the platform package's pinned tools.
 agent-workflow-tests *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
@@ -115,6 +115,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
     home/common/agent-skills/tests/test_eval_cases.py \
+    home/common/agent-skills/tests/test_eval_sandboxes.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
     home/common/agent-skills/tests/test_skill_lint.py \
@@ -123,6 +124,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_resolve_platform.py \
     home/common/agent-skills/tests/test_resolve_schema_three.py \
+    home/common/agent-skills/tests/test_resolve_conformance_workflow.py \
     home/common/agent-skills/tests/test_schema_three_derivation.py \
     home/common/agent-skills/tests/test_attempt_history.py \
     home/common/agent-skills/tests/test_attempt_budget.py \
@@ -131,11 +133,15 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_host_readiness.py \
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
+    home/common/agent-skills/tests/test_conformance_suppressions.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
+    home/common/agent-skills/tests/test_conformance_ruff.py \
     home/common/agent-skills/tests/test_adopt_project.py \
     home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
+    home/common/agent-skills/tests/test_adopt_conformance.py \
+    home/common/agent-skills/tests/test_adopt_conformance_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
     home/common/agent-skills/tests/test_adopt_links.py \
     home/common/agent-skills/tests/test_adopt_references.py \
@@ -151,6 +157,7 @@ agent-workflow-tests *args:
     tests/test_engine_guard.py \
     tests/test_engine_deliver.py \
     tests/test_engine_session.py \
+    tests/test_engine_session_limits.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_caps.py \
     tests/test_plan_amend.py \
@@ -232,6 +239,8 @@ agent-workflow-tests *args:
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
     tests/test_cleanup_issue.py \
+    tests/test_ruff_lint.py \
+    tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \
@@ -276,6 +285,7 @@ agent-workflow-tests *args:
     tests/test_console_register_check.py \
     tests/test_console_approve.py \
     tests/test_console_approve_service.py \
+    tests/test_console_approve_waits.py \
     tests/test_console_commit_failure.py \
     tests/test_console_accounts_sandbox.py \
     tests/test_console_manager_check.py \
@@ -326,6 +336,9 @@ agent-workflow-tests *args:
     tests/test_console_permission.py \
     tests/test_console_manager_service.py \
     tests/test_console_permit.py \
+    tests/test_console_own_reads.py \
+    tests/test_console_own_reads_wiring.py \
+    tests/test_console_permit_wire.py \
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \
     tests/test_console_idle_service.py \
