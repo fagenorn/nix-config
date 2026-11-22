@@ -23,17 +23,50 @@ contents lexed as ordinary tokens between them. A JavaScript regex literal is
 one token unless the previous token makes `/` a division, or ends right before
 it with `<` (a JSX closing tag). A quote left open ends at its line. C# drops a
 preprocessor line (`#region`, `#if`) through its end.
+
+`test_functions` is the one reader of test declarations: each test's line, body
+tokens, declaration span and the header ranges (token-index ranges) of the
+suites whose markers apply to it. The test name, decorators, attributes,
+parameters and a JavaScript title are never in a body. Python: a `test*` def at
+module level or directly in a class body, read from `ast` with every column
+converted from UTF-8 bytes to characters before it meets a token; a file `ast`
+refuses has none. JavaScript: a call whose callee chain has a test root and only
+test modifiers (a suite root or `test.describe` and only suite modifiers makes a
+suite), whose last function argument is the callback; no callback is a test
+with no body. C#: a method whose run of attribute sections names a test
+attribute; `class`, `record` and `struct` declarations are suites, headed from
+their first attribute section.
 """
 
+import ast
 import bisect
 import io
 import re
 import tokenize
+import warnings
+from collections.abc import Sequence
 from typing import NamedTuple
 
 from agent_tools.delivery.never_rise import Snapshot
 
 FAMILIES = ("python", "csharp", "javascript")
+
+JS_TEST_ROOTS = ("it", "test", "specify", "xit", "xtest", "xspecify", "fit")
+JS_SUITE_ROOTS = ("describe", "context", "suite", "xdescribe", "fdescribe", "xcontext", "xsuite")
+CS_TEST_ATTRIBUTES = (
+    "Fact", "Theory", "Test", "TestCase", "TestCaseSource", "TestMethod", "DataTestMethod",
+    "SkippableFact", "SkippableTheory")
+JS_TEST_MEMBERS = frozenset({
+    "only", "skip", "todo", "concurrent", "sequential", "fails", "failing", "fixme", "skipIf",
+    "runIf", "each"})
+JS_SUITE_MEMBERS = frozenset({
+    "only", "skip", "todo", "concurrent", "sequential", "shuffle", "skipIf", "runIf", "each"})
+JS_ARGUMENT_MEMBERS = frozenset({"skipIf", "runIf", "each"})
+CS_MODIFIERS = frozenset({
+    "public", "internal", "private", "protected", "static", "sealed", "abstract", "partial",
+    "unsafe", "readonly", "ref", "file", "new", "async", "virtual", "override", "extern"})
+CS_SUITE_KEYWORDS = ("class", "record", "struct")
+BRACKETS = {"(": ")", "[": "]", "{": "}"}
 
 
 class Token(NamedTuple):
@@ -370,3 +403,360 @@ def read_test_files(snapshot: Snapshot) -> list[TestFile]:
         if tokens is not None:
             files.append(TestFile(path, family, text, tuple(tokens)))
     return files
+
+
+class TestFunction(NamedTuple):
+    __test__ = False
+
+    line: int
+    body: tuple[str, ...] | None
+    span: tuple[int, int]
+    scopes: tuple[tuple[int, int], ...]
+
+
+def bracket_pairs(tokens: Sequence[Token]) -> dict[int, int]:
+    """Each bracket operator's index to its partner's, both ways."""
+    closers = {close: open_ for open_, close in BRACKETS.items()}
+    pairs: dict[int, int] = {}
+    stack: list[int] = []
+    for i, token in enumerate(tokens):
+        if token.kind != "op":
+            continue
+        if token.text in BRACKETS:
+            stack.append(i)
+        elif token.text in closers:
+            for depth in range(len(stack) - 1, -1, -1):
+                if tokens[stack[depth]].text == closers[token.text]:
+                    pairs[stack[depth]] = i
+                    pairs[i] = stack[depth]
+                    del stack[depth:]
+                    break
+    return pairs
+
+
+def texts_between(tokens: Sequence[Token], start: int, end: int) -> tuple[str, ...]:
+    return tuple(token.text for token in tokens[start:end])
+
+
+class PythonSource:
+    """The `ast` of a Python test file, placed in its token list by character column."""
+
+    def __init__(self, test_file: "TestFile", tree: ast.Module):
+        self.tokens = test_file.tokens
+        self.keys = [(token.line, token.column) for token in test_file.tokens]
+        self.lines = test_file.text.split("\n")
+        self.tree = tree
+
+    def index(self, line: int, offset: int) -> int:
+        """The first token at or after an `ast` position (its column is in UTF-8 bytes)."""
+        text = self.lines[line - 1] if 0 < line <= len(self.lines) else ""
+        column = len(text.encode("utf-8")[:offset].decode("utf-8", errors="ignore"))
+        return bisect.bisect_left(self.keys, (line, column))
+
+    def start(self, node: ast.AST) -> int:
+        return self.index(node.lineno, node.col_offset)
+
+    def end(self, node: ast.AST) -> int:
+        return self.index(node.end_lineno, node.end_col_offset)
+
+    def start_with_decorators(self, node: ast.AST) -> int:
+        """The index of a statement's first token, its first decorator's `@` included."""
+        decorators = getattr(node, "decorator_list", [])
+        if not decorators:
+            return self.start(node)
+        at = self.start(decorators[0])
+        return at - 1 if at and self.tokens[at - 1].text == "@" else at
+
+    def first_on_line_of(self, node: ast.AST) -> int:
+        decorators = getattr(node, "decorator_list", [])
+        line = decorators[0].lineno if decorators else node.lineno
+        return bisect.bisect_left(self.keys, (line, 0))
+
+    def pytestmarks(self, body: list[ast.stmt]) -> list[tuple[int, int]]:
+        marks = []
+        for node in body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+            elif isinstance(node, ast.AnnAssign):
+                target = node.target
+            else:
+                continue
+            if isinstance(target, ast.Name) and target.id == "pytestmark":
+                marks.append((self.start(node), self.end(node)))
+        return marks
+
+    def collect(self, nodes: list[ast.stmt], classes: list[tuple[int, int]],
+                module_marks: list[tuple[int, int]], found: list[TestFunction]) -> None:
+        for node in nodes:
+            if isinstance(node, ast.ClassDef) and node.body:
+                header = (self.first_on_line_of(node), self.start(node.body[0]))
+                scopes = classes + [header] + self.pytestmarks(node.body)
+                self.collect(node.body, scopes, module_marks, found)
+            elif (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and node.name.startswith("test")):
+                first = self.start_with_decorators(node.body[0])
+                end = self.end(node)
+                found.append(TestFunction(
+                    node.lineno, texts_between(self.tokens, first, end),
+                    (self.first_on_line_of(node), end), tuple(classes + module_marks)))
+
+
+def python_tests(test_file: "TestFile") -> list[TestFunction]:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(test_file.text)
+    except (SyntaxError, ValueError, RecursionError):
+        return []
+    source = PythonSource(test_file, tree)
+    found: list[TestFunction] = []
+    source.collect(tree.body, [], source.pytestmarks(tree.body), found)
+    return found
+
+
+def javascript_chain(tokens: Sequence[Token], pairs: dict[int, int], i: int,
+                     ) -> tuple[str, list[str], int] | None:
+    """The root, members and call `(` index of the callee chain starting at token `i`."""
+    if tokens[i].kind != "name" or (i and tokens[i - 1].text == "."):
+        return None
+    members: list[str] = []
+    j = i + 1
+    while j + 1 < len(tokens) and tokens[j].text == "." and tokens[j + 1].kind == "name":
+        members.append(tokens[j + 1].text)
+        j += 2
+        if members[-1] in JS_ARGUMENT_MEMBERS and j < len(tokens) and tokens[j].text == "(":
+            close = pairs.get(j)
+            if close is not None and close + 1 < len(tokens) and (
+                    tokens[close + 1].text in ("(", ".")):
+                j = close + 1
+    if j < len(tokens) and tokens[j].text == "(" and j in pairs:
+        return tokens[i].text, members, j
+    return None
+
+
+def javascript_kind(root: str, members: list[str]) -> str | None:
+    if root in JS_TEST_ROOTS and all(m in JS_TEST_MEMBERS for m in members):
+        return "test"
+    if root in JS_SUITE_ROOTS and all(m in JS_SUITE_MEMBERS for m in members):
+        return "suite"
+    if root == "test" and members[:1] == ["describe"] and all(
+            m in JS_SUITE_MEMBERS for m in members[1:]):
+        return "suite"
+    return None
+
+
+def javascript_function(tokens: Sequence[Token], pairs: dict[int, int], a: int, b: int,
+                        ) -> tuple[int, int, int] | None:
+    """`(header end, body start, body end)` when tokens `a..b` are a function expression."""
+    i = a
+    if tokens[i].text == "async" and i + 1 < b and tokens[i + 1].text != "=>":
+        i += 1
+    if tokens[i].text == "function":
+        i += 1
+        if i < b and tokens[i].text == "*":
+            i += 1
+        if i < b and tokens[i].kind == "name":
+            i += 1
+        if i >= b or i not in pairs:
+            return None
+        j = pairs[i] + 1
+        while j < b and tokens[j].text != "{":
+            j += 1
+        if j < b and pairs.get(j) == b - 1:
+            return j + 1, j + 1, b - 1
+        return None
+    if tokens[i].text == "(" and i in pairs:
+        j = pairs[i] + 1
+        if j < b and tokens[j].text == ":":
+            while j < b and tokens[j].text != "=>":
+                j = pairs[j] + 1 if j in pairs else j + 1
+    elif tokens[i].kind == "name":
+        j = i + 1
+    else:
+        return None
+    if j >= b or tokens[j].text != "=>":
+        return None
+    if j + 1 < b and tokens[j + 1].text == "{" and pairs.get(j + 1) == b - 1:
+        return j + 2, j + 2, b - 1
+    return j + 1, j + 1, b
+
+
+def javascript_callback(tokens: Sequence[Token], pairs: dict[int, int], open_: int,
+                        close: int) -> tuple[int, int, int] | None:
+    """The last top-level argument of the call that is a function, as `javascript_function`."""
+    found, start, i = None, open_ + 1, open_ + 1
+    while i <= close:
+        if i < close and i in pairs:
+            i = pairs[i] + 1
+            continue
+        if i == close or tokens[i].text == ",":
+            if start < i:
+                found = javascript_function(tokens, pairs, start, i) or found
+            start = i + 1
+        i += 1
+    return found
+
+
+def javascript_tests(test_file: "TestFile") -> list[TestFunction]:
+    tokens = test_file.tokens
+    pairs = bracket_pairs(tokens)
+    tests: list[tuple[int, tuple[str, ...] | None, tuple[int, int]]] = []
+    suites: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    for i in range(len(tokens)):
+        chain = javascript_chain(tokens, pairs, i)
+        kind = javascript_kind(chain[0], chain[1]) if chain else None
+        if chain is None or kind is None:
+            continue
+        close = pairs[chain[2]]
+        callback = javascript_callback(tokens, pairs, chain[2], close)
+        if kind == "suite" and callback:
+            suites.append(((i, callback[0]), (callback[1], callback[2])))
+        elif kind == "test":
+            body = texts_between(tokens, callback[1], callback[2]) if callback else None
+            tests.append((tokens[i].line, body, (i, close + 1)))
+    return [TestFunction(line, body, span, tuple(
+        header for header, inside in sorted(suites)
+        if inside[0] <= span[0] and span[1] <= inside[1]))
+        for line, body, span in tests]
+
+
+def attribute_sections(tokens: Sequence[Token]) -> list[tuple[int, int]]:
+    """The half-open token range of each C# attribute section, `[` through its `]`."""
+    pairs = bracket_pairs(tokens)
+    sections: list[tuple[int, int]] = []
+    for i, token in enumerate(tokens):
+        if token.text != "[" or token.kind != "op" or i not in pairs:
+            continue
+        if sections and i < sections[-1][1]:
+            continue
+        previous = tokens[i - 1].text if i else ";"
+        if previous in (";", "{", "}") or (sections and sections[-1][1] == i):
+            sections.append((i, pairs[i] + 1))
+    return sections
+
+
+def attribute_names(tokens: Sequence[Token], section: tuple[int, int]) -> list[str]:
+    """The names a section applies, by last segment without a trailing `Attribute`."""
+    names: list[str] = []
+    expecting, depth, i, end = True, 0, section[0] + 1, section[1] - 1
+    while i < end:
+        token = tokens[i]
+        if token.kind == "op":
+            depth += token.text in BRACKETS
+            depth -= token.text in BRACKETS.values()
+            expecting = expecting or (token.text == "," and depth == 0)
+        elif expecting and depth == 0 and token.kind == "name":
+            if i + 1 < end and tokens[i + 1].text == ":":
+                i += 2
+                continue
+            name = token.text
+            while i + 2 < end and tokens[i + 1].text == "." and tokens[i + 2].kind == "name":
+                name = tokens[i + 2].text
+                i += 2
+            names.append(name[:-9] if name.endswith("Attribute") and len(name) > 9 else name)
+            expecting = False
+        i += 1
+    return names
+
+
+def csharp_method(tokens: Sequence[Token], pairs: dict[int, int], start: int,
+                  ) -> tuple[int, tuple[int, int], int] | None:
+    """`(name index, body range, end)` of the method declared from token `start`."""
+    i, count = start, len(tokens)
+    while i < count:
+        token = tokens[i]
+        if token.kind == "op" and token.text == "(":
+            before = tokens[i - 1]
+            if before.text == ">" or (before.kind == "name" and before.text not in CS_MODIFIERS):
+                break
+        if token.kind == "op" and token.text in ("{", "}", ";", "=", "=>"):
+            return None
+        opens = token.kind == "op" and token.text in ("(", "[") and i in pairs
+        i = pairs[i] + 1 if opens else i + 1
+    else:
+        return None
+    name = i - 1
+    if tokens[name].text == ">":
+        depth = 0
+        while name > start:
+            depth += tokens[name].text == ">"
+            depth -= tokens[name].text == "<"
+            name -= 1
+            if depth == 0:
+                break
+    j = pairs.get(i, count) + 1
+    while j < count and tokens[j].text not in ("{", "=>", ";"):
+        j = pairs[j] + 1 if tokens[j].text in ("(", "[") and j in pairs else j + 1
+    if j >= count or tokens[j].text == ";":
+        return None
+    if tokens[j].text == "{":
+        return name, (j + 1, pairs[j]), pairs[j] + 1
+    k = j + 1
+    while k < count and tokens[k].text != ";":
+        opens = tokens[k].kind == "op" and tokens[k].text in BRACKETS and k in pairs
+        k = pairs[k] + 1 if opens else k + 1
+    return (name, (j + 1, k), k + 1) if k < count else None
+
+
+def csharp_suites(tokens: Sequence[Token], pairs: dict[int, int],
+                  sections: list[tuple[int, int]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """`(header range, body range)` of each `class`, `record` or `struct` declaration."""
+    section_ending = {end: start for start, end in sections}
+    suites = []
+    for k, token in enumerate(tokens):
+        if token.kind != "name" or token.text not in CS_SUITE_KEYWORDS:
+            continue
+        if token.text != "record" and k and tokens[k - 1].text == "record":
+            continue
+        j = k + 1
+        if token.text == "record" and j < len(tokens) and tokens[j].text in ("class", "struct"):
+            j += 1
+        if j >= len(tokens) or tokens[j].kind != "name" or tokens[j].text == "where":
+            continue
+        first = k
+        while first and tokens[first - 1].text in CS_MODIFIERS:
+            first -= 1
+        while first in section_ending:
+            first = section_ending[first]
+        if first and tokens[first - 1].text not in (";", "{", "}"):
+            continue
+        while j < len(tokens) and tokens[j].text not in ("{", ";"):
+            j = pairs[j] + 1 if tokens[j].text in ("(", "[") and j in pairs else j + 1
+        if j < len(tokens) and tokens[j].text == "{" and j in pairs:
+            suites.append(((first, j + 1), (j + 1, pairs[j])))
+    return suites
+
+
+def csharp_tests(test_file: "TestFile") -> list[TestFunction]:
+    tokens = test_file.tokens
+    pairs = bracket_pairs(tokens)
+    sections = attribute_sections(tokens)
+    suites = csharp_suites(tokens, pairs, sections)
+    runs: list[list[tuple[int, int]]] = []
+    for section in sections:
+        if runs and runs[-1][-1][1] == section[0]:
+            runs[-1].append(section)
+        else:
+            runs.append([section])
+    found = []
+    for run in runs:
+        if not any(name in CS_TEST_ATTRIBUTES for s in run for name in attribute_names(tokens, s)):
+            continue
+        method = csharp_method(tokens, pairs, run[-1][1])
+        if method is None:
+            continue
+        name, body, end = method
+        span = (run[0][0], end)
+        found.append(TestFunction(
+            tokens[name].line, texts_between(tokens, *body), span, tuple(
+                header for header, inside in sorted(suites)
+                if inside[0] <= span[0] and span[1] <= inside[1])))
+    return found
+
+
+def test_functions(test_file: TestFile) -> list[TestFunction]:
+    """Every test the file declares by its family's rules, ordered by where it starts."""
+    readers = {"python": python_tests, "csharp": csharp_tests, "javascript": javascript_tests}
+    if test_file.family not in readers:
+        raise ValueError(f"unknown family {test_file.family!r}; expected one of {FAMILIES}")
+    return sorted(readers[test_file.family](test_file), key=lambda f: f.span[0])

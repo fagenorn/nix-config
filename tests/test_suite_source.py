@@ -6,8 +6,9 @@ split around its holes, whose contents are lexed as ordinary tokens), regex
 literals, JSX closing tags, operators, C# string forms and preprocessor lines
 are read as the stack's language defines them, and Python's refusal is no
 token list; a path is a test file by its stack's rules; every stack shard
-prefix of the standards has a registry row; and a snapshot yields its decoded,
-lexed test files in path order.
+prefix of the standards has a registry row; a snapshot yields its decoded,
+lexed test files in path order; and each family's test declarations yield their
+line, body tokens, span and enclosing suite headers.
 """
 
 import unittest
@@ -16,7 +17,8 @@ from pathlib import Path
 from agent_tools.delivery import rule_ids
 from agent_tools.delivery.never_rise import Snapshot
 from agent_tools.delivery.suite_source import (
-    STACKS, Token, family_of, lex, read_test_files)
+    STACKS, TestFile, Token, attribute_sections, family_of, lex, read_test_files,
+    test_functions)
 
 TIER = "fast"
 
@@ -148,6 +150,137 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual([f.path for f in files], ["tests/test_a.py", "tests/test_b.py"])
         self.assertEqual(files[0].family, "python")
         self.assertEqual(files[0].text, "y\n")
+
+
+def test_file(family: str, source: str) -> TestFile:
+    return TestFile("t", family, source, tuple(lex(family, source)))
+
+
+def declared(family: str, source: str) -> list[tuple[int, tuple[str, ...] | None]]:
+    return [(f.line, f.body) for f in test_functions(test_file(family, source))]
+
+
+def range_texts(file: TestFile, bounds: tuple[int, int]) -> list[str]:
+    return [file.tokens[i].text for i in range(*bounds)]
+
+
+RUN = ("run", "(", ")", ";")
+CS_RUN = ("Run", "(", ")", ";")
+
+
+class TestFunctionsTest(unittest.TestCase):
+    def test_each_familys_test_functions_yield_their_body_tokens_and_line(self):
+        python = ("class T(unittest.TestCase):\n    def test_a(self):\n"
+                  "        x = 1  # note\n        self.assertEqual(x, 1)\n")
+        javascript = "it('a', () => {\n  expect(1).toBe(1); // c\n});\n"
+        csharp = "[Fact]\npublic void A() { Assert.True(true); }\n"
+
+        self.assertEqual(declared("python", python), [(2, (
+            "x", "=", "1", "<newline>", "self", ".", "assertEqual", "(", "x", ",", "1", ")"))])
+        self.assertEqual(declared("javascript", javascript), [(1, (
+            "expect", "(", "1", ")", ".", "toBe", "(", "1", ")", ";"))])
+        self.assertEqual(declared("csharp", csharp), [(2, (
+            "Assert", ".", "True", "(", "true", ")", ";"))])
+
+    def test_python_tests_are_test_named_defs_at_module_or_class_level(self):
+        source = ("def helper():\n    pass\nasync def test_b():\n    pass\n"
+                  "def test_outer():\n    def test_inner():\n        pass\n"
+                  "class A:\n    class B:\n        def test_c(self):\n            pass\n")
+
+        self.assertEqual([line for line, _ in declared("python", source)], [3, 5, 10])
+
+    def test_python_indentation_is_part_of_the_body_and_its_width_is_not(self):
+        inside = declared("python", "def test_a():\n    if a:\n        x()\n        y()\n")
+        after = declared("python", "def test_a():\n    if a:\n        x()\n    y()\n")
+        method = declared(
+            "python", "class A:\n    def test_a(self):\n        if a:\n"
+            "            x()\n            y()\n")
+
+        self.assertNotEqual(inside[0][1], after[0][1])
+        self.assertEqual(inside[0][1], method[0][1])
+
+    def test_a_python_body_with_non_ascii_text_ends_at_its_last_token(self):
+        plain = "def test_a(self):\n    self.assertEqual(s, \"\u00e9\")\n"
+        noted = "def test_a(self):\n    self.assertEqual(s, \"\u00e9\")  # note\n"
+        expected = ("self", ".", "assertEqual", "(", "s", ",", '"\u00e9"', ")")
+
+        self.assertEqual(declared("python", plain), [(1, expected)])
+        self.assertEqual(declared("python", noted), [(1, expected)])
+
+    def test_javascript_declarations_with_and_without_a_callback(self):
+        source = "\n".join([
+            "test.concurrent('a', async () => { run(); })",
+            'it.only("b", function () { run(); })',
+            "specify('c', done => { run(); })",
+            "it('d', () => expect(1).toBe(1))",
+            "describe('s', () => {",
+            "  test('e', async (): Promise<void> => { run(); })",
+            "})",
+            "fit('f', () => { run(); })",
+            "xit('g', () => { run(); })",
+            "test.skipIf(x)('h', () => { run(); })",
+            "it('i')",
+            "it.todo('j')",
+            "test.describe('s', () => {})",
+            "test.beforeEach(() => {})",
+            "test.step('k', () => {})"])
+
+        self.assertEqual(declared("javascript", source), [
+            (1, RUN), (2, RUN), (3, RUN),
+            (4, ("expect", "(", "1", ")", ".", "toBe", "(", "1", ")")),
+            (6, RUN), (8, RUN), (9, RUN), (10, RUN), (11, None), (12, None)])
+
+    def test_csharp_attributes_and_expression_bodies(self):
+        source = "\n".join([
+            "public class T {", "#region Skipped", "[Fact]", "public void A() { Run(); }",
+            "#endregion", "[Theory]", "[InlineData(1)]",
+            "public async Task B(int x) => await Run(x);", '[Test, Category("x")]',
+            "public void C() { Run(); }", "[TestMethod]", "public void D() { Run(); }",
+            "[Xunit.Fact]", "public void E() { Run(); }", "[InlineData(1)]",
+            "public void F() { Run(); }", "public void H() { Run(); }", "[Fact]",
+            "public void G<T>() where T : new() { Run(); }", "}"])
+
+        self.assertEqual(declared("csharp", source), [
+            (4, CS_RUN), (8, ("await", "Run", "(", "x", ")")), (10, CS_RUN), (12, CS_RUN),
+            (14, CS_RUN), (19, CS_RUN)])
+
+    def test_a_python_file_ast_cannot_parse_has_no_test_functions(self):
+        self.assertEqual(declared("python", "def test_a(self):\n    return = 1\n"), [])
+
+    def test_spans_and_scopes_cover_each_declaration_and_its_suite_headers(self):
+        python = test_file("python", "\n".join([
+            "pytestmark = 2", '@unittest.skip("x")', "class A(unittest.TestCase):",
+            "    pytestmark = 1", "    @dec", "    def test_a(self):", "        pass", ""]))
+        javascript = test_file("javascript", "describe.skip('s', () => {\n"
+                               "  it('a', () => { run(); })\n})")
+        csharp = test_file("csharp", '[TestFixture, Ignore("x")]\npublic class C {\n[Test]\n'
+                           "public void A() { Run(); }\n}")
+
+        [py], [js], [cs] = (test_functions(f) for f in (python, javascript, csharp))
+
+        self.assertIn("dec", range_texts(python, py.span))
+        self.assertIn("pass", range_texts(python, py.span))
+        self.assertNotIn("pytestmark", range_texts(python, py.span))
+        self.assertEqual([range_texts(python, r) for r in py.scopes], [[
+            "@", "unittest", ".", "skip", "(", '"x"', ")", "<newline>", "class", "A", "(",
+            "unittest", ".", "TestCase", ")", ":", "<newline>", "<indent>"],
+            ["pytestmark", "=", "1"], ["pytestmark", "=", "2"]])
+        self.assertEqual(range_texts(javascript, js.span), [
+            "it", "(", "'a'", ",", "(", ")", "=>", "{", "run", "(", ")", ";", "}", ")"])
+        self.assertEqual([range_texts(javascript, r) for r in js.scopes], [[
+            "describe", ".", "skip", "(", "'s'", ",", "(", ")", "=>", "{"]])
+        self.assertEqual(range_texts(csharp, cs.span), [
+            "[", "Test", "]", "public", "void", "A", "(", ")", "{", "Run", "(", ")", ";", "}"])
+        self.assertEqual([range_texts(csharp, r) for r in cs.scopes], [[
+            "[", "TestFixture", ",", "Ignore", "(", '"x"', ")", "]", "public", "class", "C",
+            "{"]])
+
+    def test_attribute_sections_open_only_at_declaration_positions(self):
+        tokens = lex("csharp", "var a = b[0]; [Fact] void A() {}")
+
+        [(start, end)] = attribute_sections(tokens)
+
+        self.assertEqual([t.text for t in tokens[start:end]], ["[", "Fact", "]"])
 
 
 if __name__ == "__main__":
