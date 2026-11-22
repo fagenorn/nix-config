@@ -151,10 +151,12 @@ class LauncherCase(unittest.TestCase):
         listener.listen(8)
         return "http://127.0.0.1:%d" % listener.getsockname()[1]
 
-    def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None):
+    def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None,
+                     client=None):
         """`claude-account run` from a fresh copy of the mod, as a finished process.
 
-        `without_curl_and_jq` points the copy's CURL and JQ at paths that do not exist."""
+        `without_curl_and_jq` points the copy's CURL and JQ at paths that do not exist; `client` is the
+        program started as claude (default: `env`, which prints its environment)."""
         copy = Path(tempfile.mkdtemp(dir=self.root)) / "accounts"
         shutil.copytree(ACCOUNTS, copy)
         script = copy / "bin" / "claude-account"
@@ -175,13 +177,14 @@ class LauncherCase(unittest.TestCase):
         # An allowlist: the stand-in claude prints its environment, and a failing assertion shows it.
         child = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
         child.update(HOME=str(home), CLAUDE_ACCOUNTS_DIR=str(self.root / "accounts-state"),
-                     CLAUDE_BIN=shutil.which("env"), **{**self.switch, **(env or {})})
+                     CLAUDE_BIN=client or shutil.which("env"), **{**self.switch, **(env or {})})
         return subprocess.run([shutil.which("bash"), str(script), "run"], cwd=work, env=child,
                               capture_output=True, text=True, timeout=TIMEOUT, check=False)
 
-    def launch(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None):
+    def launch(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None,
+               client=None):
         """The environment the stand-in claude printed; the launch must succeed silently."""
-        completed = self.run_launcher(proxy_url, env, substitute, without_curl_and_jq, console_url)
+        completed = self.run_launcher(proxy_url, env, substitute, without_curl_and_jq, console_url, client)
         self.assertEqual((completed.returncode, completed.stderr), (0, ""))
         return dict(line.split("=", 1) for line in completed.stdout.splitlines() if "=" in line)
 
@@ -547,6 +550,96 @@ class ProfileChoiceTest(LauncherCase):
             with self.subTest(body=body):
                 url = self.console(b'{"profile":null}', body)
                 self.assertEqual(self.chosen(self.launch(self.closed(), console_url=url)), self.path("b"))
+
+
+    def answer_env(self, **more):
+        self.answer = self.root / "answer.json"
+        return {"CLAUDE_ACCOUNT_ANSWER": str(self.answer), **more}
+
+    def test_an_all_out_console_answer_starts_no_client_and_answers_the_resume_time(self):
+        self.profile("a", True, self.now)
+        self.profile("b", True, self.now - 100)
+        url = self.console(b'{"all_out":true,"profile":null,"resumes_at":"2030-03-17T17:46:40Z"}')
+        answer = self.root / "answer.json"
+        ran = self.root / "client-ran"
+        client = self.root / "client"
+        client.write_text("#!/bin/sh\ntouch %s\n" % ran)
+        client.chmod(0o755)
+        done = self.run_launcher(self.closed(), env={"CLAUDE_ACCOUNT_ANSWER": str(answer)}, console_url=url,
+                                 client=str(client))
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (75, "", ""))
+        self.assertFalse(ran.exists())
+        self.assertEqual(answer.read_text(), '{"all_out":true,"resumes_at":"2030-03-17T17:46:40Z"}\n')
+        self.assertEqual(self.console_requests, ["/api/profile?all_out=1"])
+
+    def test_an_all_out_answer_with_no_known_reset_answers_null(self):
+        self.profile("a", True, self.now)
+        url = self.console(b'{"all_out":true,"profile":null,"resumes_at":null}')
+        done = self.run_launcher(self.closed(), env=self.answer_env(), console_url=url)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (75, "", ""))
+        self.assertEqual(self.answer.read_text(), '{"all_out":true,"resumes_at":null}\n')
+
+    def test_the_answer_file_names_the_account_the_client_starts_under(self):
+        self.profile("a", True, self.now - 100)
+        self.profile("b", True, self.now)
+        url = self.console(b'{"profile":"a"}')
+        environment = self.launch(self.closed(), self.answer_env(), console_url=url)
+        self.assertEqual(self.chosen(environment), self.path("a"))
+        self.assertEqual(self.answer.read_text(), '{"account":"a"}\n')
+
+    def test_an_account_override_is_the_answered_account(self):
+        self.profile("a", True, self.now)
+        self.profile("b", True, self.now)
+        url = self.console(b'{"profile":"a"}')
+        self.launch(self.closed(), self.answer_env(CLAUDE_ACCOUNT="b"), console_url=url)
+        self.assertEqual(self.answer.read_text(), '{"account":"b"}\n')
+        self.assertEqual(self.console_requests, [])
+
+    def test_an_override_shaped_like_the_all_out_marker_is_an_invalid_account(self):
+        self.profile("a", True, self.now)
+        self.profile("b", True, self.now)
+        url = self.console(b'{"profile":"a"}')
+        done = self.run_launcher(self.closed(), self.answer_env(CLAUDE_ACCOUNT="!all-out null"), console_url=url)
+        self.assertEqual((done.returncode, done.stdout, done.stderr),
+                         (1, "", "claude-account: '!all-out null' is not an account name (use a-z, 0-9, - and _)\n"))
+        self.assertFalse(self.answer.exists())
+        self.assertEqual(self.console_requests, [])
+
+    def test_the_client_never_inherits_the_answer_path(self):
+        self.profile("a", True, self.now)
+        with self.subTest("loop"):
+            url = self.console(b'{"profile":"a"}')
+            environment = self.launch(self.closed(), self.answer_env(), console_url=url)
+            self.assertNotIn("CLAUDE_ACCOUNT_ANSWER", environment)
+        with self.subTest("caller-chosen config"):
+            self.answer = self.root / "answer.json"
+            self.answer.unlink(missing_ok=True)
+            elsewhere = str(self.root / "elsewhere")
+            environment = self.launch(self.closed(), self.answer_env(CLAUDE_CONFIG_DIR=elsewhere))
+            self.assertNotIn("CLAUDE_ACCOUNT_ANSWER", environment)
+            self.assertEqual(self.chosen(environment), elsewhere)
+            self.assertFalse(self.answer.exists())
+
+    def test_without_the_answer_variable_the_all_out_body_is_never_asked_for(self):
+        self.profile("a", True, self.now)
+        self.profile("b", True, self.now - 100)
+        url = self.console(b'{"all_out":true,"profile":null,"resumes_at":"2030-03-17T17:46:40Z"}',
+                           b'{"excluded":[]}')
+        environment = self.launch(self.closed(), console_url=url)
+        self.assertEqual(self.chosen(environment), self.path("a"))
+        self.assertEqual(self.console_requests, ["/api/profile", "/api/excluded"])
+        self.assertFalse((self.root / "answer.json").exists())
+
+    def test_a_malformed_all_out_body_falls_back(self):
+        self.profile("a", True, self.now)
+        self.profile("b", True, self.now - 100)
+        bodies = (b'{"all_out":true,"profile":null,"resumes_at":"soon"}', b'{"all_out":true}')
+        for body in bodies:
+            with self.subTest(body=body):
+                url = self.console(body, b'{"excluded":[]}')
+                environment = self.launch(self.closed(), self.answer_env(), console_url=url)
+                self.assertEqual(self.chosen(environment), self.path("a"))
+                self.assertEqual(self.answer.read_text(), '{"account":"a"}\n')
 
 
 if __name__ == "__main__":
