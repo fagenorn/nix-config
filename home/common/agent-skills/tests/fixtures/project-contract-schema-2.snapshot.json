@@ -1,0 +1,200 @@
+{
+  "bindings": {
+    "commands": {
+      "agent-workflow-tests": {
+        "argv": [
+          "just",
+          "agent-workflow-tests"
+        ],
+        "cwd": "<root>",
+        "env": []
+      },
+      "codex-diff-review": {
+        "argv": [
+          "codex-companion",
+          "task",
+          "--fresh",
+          "--reviewer",
+          "diff-review"
+        ],
+        "cwd": "<root>",
+        "env": []
+      },
+      "codex-plan-review": {
+        "argv": [
+          "codex-companion",
+          "task",
+          "--fresh",
+          "--reviewer",
+          "plan-review"
+        ],
+        "cwd": "<root>",
+        "env": []
+      },
+      "nix-activate": {
+        "argv": [
+          "just",
+          "switch"
+        ],
+        "cwd": "<root>",
+        "env": []
+      },
+      "nix-build": {
+        "argv": [
+          "just",
+          "build"
+        ],
+        "cwd": "<root>",
+        "env": []
+      }
+    },
+    "paths": {
+      "architecture": [
+        "<root>/CLAUDE.md"
+      ],
+      "artifacts": {
+        "plans": "<root>/.agents/artifacts/plans",
+        "specs": "<root>/.agents/artifacts/specs"
+      },
+      "context": [],
+      "hints": [],
+      "operations": [],
+      "rejections": [
+        "<root>/.agents/knowledge/rejections"
+      ],
+      "standards": [
+        "<root>/home/common/agent-skills/standards",
+        "<root>/docs/standards"
+      ]
+    },
+    "tracker": {
+      "cli": "gh",
+      "credential_env": {
+        "unset_before_invocation": []
+      },
+      "kind": "github",
+      "repo_slug": "fagenorn/nix-config"
+    },
+    "vcs": {
+      "branch_pattern": "issue-<num>-<slug>",
+      "commit": {
+        "co_authored_by": true,
+        "signed": true
+      },
+      "default_branch": "main",
+      "integration_branch": "main",
+      "kind": "git",
+      "merge": {
+        "delete_branch": true,
+        "strategy": "merge"
+      },
+      "worktree": {
+        "prefix": "worktree-",
+        "root": ".worktrees"
+      }
+    },
+    "workflow": {
+      "light_lane": {
+        "budget_minutes": 90,
+        "mode": "shadow",
+        "risk_paths": [
+          "home/common/claude-code/lifecycle_guard.py",
+          "python/agent_tools/transaction_*.py",
+          "python/agent_tools/resolve_project.py",
+          "python/agent_tools/lane_triage.py",
+          ".agents/project.json"
+        ]
+      },
+      "orchestration": {
+        "attempt_budget_minutes": 240,
+        "max_parallel": 2
+      },
+      "review": {
+        "code": "codex-diff-review",
+        "plan": "codex-plan-review"
+      },
+      "verification": [
+        "nix-build"
+      ]
+    }
+  },
+  "capabilities": {
+    "knowledge.architecture": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "available"
+    },
+    "knowledge.context": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "unsupported"
+    },
+    "knowledge.hints": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "unsupported"
+    },
+    "knowledge.standards": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "available"
+    },
+    "release": {
+      "reason_code": "release_adapter_unavailable",
+      "repair_id": "capability.release.release_adapter_unavailable",
+      "state": "blocked"
+    },
+    "review.code": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "available"
+    },
+    "review.plan": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "available"
+    },
+    "tracker": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "available"
+    },
+    "verification": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "available"
+    },
+    "worktrees": {
+      "reason_code": null,
+      "repair_id": null,
+      "state": "available"
+    }
+  },
+  "production": {
+    "status": "not_declared"
+  },
+  "project": {
+    "id": "fagenorn/nix-config",
+    "name": "nix-config",
+    "root": "<root>"
+  },
+  "release": {
+    "targets": [
+      {
+        "adapter": "github-forge",
+        "operations": [
+          "release",
+          "tag"
+        ],
+        "profile": "github-release",
+        "target": {
+          "branch": "main",
+          "handle": "repository",
+          "kind": "github_repository",
+          "repository": "fagenorn/nix-config"
+        }
+      }
+    ]
+  },
+  "schema_version": 2
+}

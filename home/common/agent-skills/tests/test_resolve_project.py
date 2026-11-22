@@ -226,6 +226,8 @@ def assert_read_only(case: unittest.TestCase, root: Path,
 
 # P11: a pinned schema-2 contract, so a later change to this repository's own contract cannot move the suites.
 SCHEMA_TWO_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "project-contract-schema-2.json"
+# The snapshot the base resolver printed for that fixture, with the temp root spelled `<root>`.
+SCHEMA_TWO_SNAPSHOT = Path(__file__).resolve().parent / "fixtures" / "project-contract-schema-2.snapshot.json"
 
 
 def source_contract() -> dict:
@@ -423,6 +425,32 @@ class ResolverTestCase(unittest.TestCase):
         for violation in error["violations"]:
             self.assertEqual(sorted(violation), ["message", "pointer"])
         return error
+
+
+class SchemaTwoSnapshotPinTest(ResolverTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+
+    def test_the_pinned_schema_two_fixture_resolves_to_the_stored_snapshot(self):
+        root = self.make_root(source_contract())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        stub = make_stub_bin(("codex-companion", "gh", "git", "just"))
+        self.addCleanup(shutil.rmtree, stub, ignore_errors=True)
+        code, out, err = run_with_path(str(stub), "resolve", "--repo-root", str(root),
+                                       home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out.replace(str(root), "<root>")),
+                         json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8")))
+
+    def test_the_stored_snapshot_has_the_schema_two_shape(self):
+        stored = json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8"))
+        self.assertEqual(stored["schema_version"], 2)
+        self.assertEqual(sorted(stored["project"]), ["id", "name", "root"])
+        self.assertIn("artifacts", stored["bindings"]["paths"])
+        self.assertEqual(sorted(stored["bindings"]["vcs"]["commit"]),
+                         ["co_authored_by", "signed"])
+        self.assertNotIn("commit-environment", stored["bindings"]["commands"])
 
 
 class SchemaTwoContractTest(ResolverTestCase):
