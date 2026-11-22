@@ -1928,7 +1928,7 @@ tracker, movement, retention, digest and spend threads and the folder-trust star
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
 `question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062), an optional
 `request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9) and an
-optional boolean `deep` (#1274, ADR-console-100)
+optional boolean `deep` (#1274, ADR-console-101)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
 `project_question.parse_ask` does not accept (a non-boolean `deep` included) is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
@@ -5671,7 +5671,7 @@ class ConsoleService:
         check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
         `project_question.Refused` and append and count nothing. A credential-shaped text is
         refused first, before every other check and before the request-key replay (#1272). A `deep`
-        question (#1274, ADR-console-100) with a `thread_id` is checked by `project_question.deep_follow_up`
+        question (#1274, ADR-console-101) with a `thread_id` is checked by `project_question.deep_follow_up`
         in this same section, so a stale Dig deeper confirmation appends nothing; one without a thread is a
         new thread.
         """
@@ -5830,7 +5830,7 @@ class ConsoleService:
         so the gathering raises and the question is a failed answer. A question asked before the first
         spend poll reads the spend view first through the console's own poll (#1357, ADR-console-090),
         and spend stays null only when that read failed. A `deep` question also reads its project's own
-        delivery transcripts, aggregated (`transcript_digest.project_runs`, #1274, ADR-console-100), from the
+        delivery transcripts, aggregated (`transcript_digest.project_runs`, #1274, ADR-console-101), from the
         later of the spend window's first day and the day the project began to hold `root`, outside the lock,
         mapped by a copy of the states taken in the section; a read that raises (every root unreadable
         included) fails the question like any other gathering. After that read the ownership of every
