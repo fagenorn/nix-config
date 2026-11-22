@@ -62,6 +62,7 @@ JS_TEST_MEMBERS = frozenset({
 JS_SUITE_MEMBERS = frozenset({
     "only", "skip", "todo", "concurrent", "sequential", "shuffle", "skipIf", "runIf", "each"})
 JS_ARGUMENT_MEMBERS = frozenset({"skipIf", "runIf", "each"})
+JS_ANNOTATION_MEMBERS = frozenset({"skip", "fixme"})
 CS_MODIFIERS = frozenset({
     "public", "internal", "private", "protected", "static", "sealed", "abstract", "partial",
     "unsafe", "readonly", "ref", "file", "new", "async", "virtual", "override", "extern"})
@@ -489,7 +490,7 @@ class PythonSource:
                 module_marks: list[tuple[int, int]], found: list[TestFunction]) -> None:
         for node in nodes:
             if isinstance(node, ast.ClassDef) and node.body:
-                header = (self.first_on_line_of(node), self.start(node.body[0]))
+                header = (self.first_on_line_of(node), self.start_with_decorators(node.body[0]))
                 scopes = classes + [header] + self.pytestmarks(node.body)
                 self.collect(node.body, scopes, module_marks, found)
             elif (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -597,10 +598,25 @@ def javascript_callback(tokens: Sequence[Token], pairs: dict[int, int], open_: i
     return found
 
 
+def javascript_annotation(tokens: Sequence[Token], pairs: dict[int, int], members: list[str],
+                          open_: int, callback: tuple[int, int, int] | None) -> bool:
+    """Whether a `skip` or `fixme` call states a condition, not a title and a callback."""
+    if not members or members[-1] not in JS_ANNOTATION_MEMBERS:
+        return False
+    close, i = pairs[open_], open_ + 1
+    while i < close and tokens[i].text != ",":
+        i = pairs[i] + 1 if i in pairs else i + 1
+    first = (open_ + 1, i)
+    if first[1] - first[0] == 1 and tokens[first[0]].kind == "string":
+        return False
+    return callback is None or first[0] <= callback[1] < first[1]
+
+
 def javascript_tests(test_file: "TestFile") -> list[TestFunction]:
     tokens = test_file.tokens
     pairs = bracket_pairs(tokens)
     tests: list[tuple[int, tuple[str, ...] | None, tuple[int, int]]] = []
+    bodies: list[tuple[int, int]] = []
     suites: list[tuple[tuple[int, int], tuple[int, int]]] = []
     for i in range(len(tokens)):
         chain = javascript_chain(tokens, pairs, i)
@@ -611,9 +627,13 @@ def javascript_tests(test_file: "TestFile") -> list[TestFunction]:
         callback = javascript_callback(tokens, pairs, chain[2], close)
         if kind == "suite" and callback:
             suites.append(((i, callback[0]), (callback[1], callback[2])))
-        elif kind == "test":
+        elif kind == "test" and not javascript_annotation(
+                tokens, pairs, chain[1], chain[2], callback):
             body = texts_between(tokens, callback[1], callback[2]) if callback else None
             tests.append((tokens[i].line, body, (i, close + 1)))
+            if callback:
+                bodies.append((callback[1], callback[2]))
+    tests = [t for t in tests if not any(a <= t[2][0] and t[2][1] <= b for a, b in bodies)]
     return [TestFunction(line, body, span, tuple(
         header for header, inside in sorted(suites)
         if inside[0] <= span[0] and span[1] <= inside[1]))

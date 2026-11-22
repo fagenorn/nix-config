@@ -275,6 +275,38 @@ class TestFunctionsTest(unittest.TestCase):
             "[", "TestFixture", ",", "Ignore", "(", '"x"', ")", "]", "public", "class", "C",
             "{"]])
 
+    def test_a_python_class_header_stops_before_its_first_members_decorators(self):
+        source = test_file("python", "\n".join([
+            "class A(unittest.TestCase):", '    @unittest.skip("x")', "    def test_a(self):",
+            "        pass", "    def test_b(self):", "        pass", ""]))
+
+        found = test_functions(source)
+
+        self.assertEqual([[range_texts(source, r) for r in f.scopes] for f in found], [[[
+            "class", "A", "(", "unittest", ".", "TestCase", ")", ":", "<newline>",
+            "<indent>"]]] * 2)
+
+    def test_playwright_annotation_calls_are_not_test_declarations(self):
+        described = "\n".join([
+            "test.describe('a', () => {",
+            "  test.skip(({ browserName }) => browserName === 'webkit', 'r');",
+            "  test('x', async () => { run(1); });", "});",
+            "test.describe('b', () => {",
+            "  test.skip(({ browserName }) => browserName === 'webkit', 'r');",
+            "  test('y', async () => { run(2); });", "});"])
+        flagged = "\n".join([
+            "test.skip(isCI, 'r');", "test.fixme(true);", "test.skip();",
+            "test('z', () => { run(); });"])
+        inside = "test('a', async () => { test.skip(cond, 'r'); run(); });"
+        pending = "test.skip('t');\ntest.fixme('u', () => { run(); });"
+
+        self.assertEqual(declared("javascript", described), [
+            (3, ("run", "(", "1", ")", ";")), (7, ("run", "(", "2", ")", ";"))])
+        self.assertEqual(declared("javascript", flagged), [(4, RUN)])
+        self.assertEqual(declared("javascript", inside), [(1, (
+            "test", ".", "skip", "(", "cond", ",", "'r'", ")", ";", "run", "(", ")", ";"))])
+        self.assertEqual(declared("javascript", pending), [(1, None), (2, RUN)])
+
     def test_attribute_sections_open_only_at_declaration_positions(self):
         tokens = lex("csharp", "var a = b[0]; [Fact] void A() {}")
 
