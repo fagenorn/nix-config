@@ -4,7 +4,9 @@
 # concurrency group that cancels nothing and queues up to 100 waiting runs
 # (queue: max) runs pushes one after another, so two pushes never both find no
 # open cleanup issue. forge_api drops token variables, so the token is stored
-# for gh before the command runs.
+# for gh before the command runs. --branch makes a run for a commit that is no
+# longer the branch tip file nothing, so a delayed run never refiles work a
+# newer merge completed.
 name: Cleanup Issue
 
 on:
@@ -34,4 +36,4 @@ jobs:
           TOKEN: ${{ github.token }}
         run: printf '%s\n' "$TOKEN" | gh auth login --with-token --insecure-storage
       - name: File the next cleanup issue
-        run: PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file --repo-root "$GITHUB_WORKSPACE" --repo "$GITHUB_REPOSITORY"
+        run: PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file --repo-root "$GITHUB_WORKSPACE" --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME"

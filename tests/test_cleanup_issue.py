@@ -48,9 +48,18 @@ def snapshot_of(*paths: str) -> Snapshot:
 
 
 class StubTracker:
-    def __init__(self, open_issues: list[Issue] | None = None):
+    def __init__(self, open_issues: list[Issue] | None = None, writer: bool = True,
+                 current: bool = True):
         self.open = list(open_issues or [])
+        self.writer = writer
+        self.is_current = current
         self.created: list[tuple[str, str]] = []
+
+    def trusted_writer(self) -> bool:
+        return self.writer
+
+    def current(self, revision: str) -> bool:
+        return self.is_current
 
     def open_issues(self) -> list[Issue]:
         return list(self.open)
@@ -125,6 +134,32 @@ class CleanupRunTest(unittest.TestCase):
         outcome = run(tracker, snapshot_of("a.one", "b.one", "a.two", "b.two"), (R1, R2))
 
         self.assertEqual(outcome.rule, "FX1")
+
+    def test_a_filer_that_would_not_be_trusted_files_nothing(self):
+        tracker = StubTracker(writer=False)
+
+        with self.assertRaises(cleanup_issue.Refusal):
+            run(tracker, snapshot_of("a.one"), (R1,))
+        self.assertEqual(tracker.created, [])
+        self.assertEqual(run(tracker, snapshot_of("x.py"), (R1,)), Outcome("clean", None, None))
+
+    def test_a_run_for_a_commit_that_is_no_longer_the_tip_files_nothing(self):
+        tracker = StubTracker(current=False)
+
+        self.assertEqual(run(tracker, snapshot_of("a.one"), (R1,)), Outcome("stale", None, None))
+        self.assertEqual(tracker.created, [])
+
+    def test_a_path_that_is_not_utf8_is_filed_as_printable_escapes(self):
+        name = os.fsdecode(b"big\xff\x80.py")
+        tracker = StubTracker()
+
+        outcome = run(tracker, Snapshot(REVISION, {name: 1501, "a\\b.py": 1502}))
+
+        self.assertEqual(outcome, Outcome("filed", 101, "B17"))
+        title, body = tracker.created[0]
+        self.assertIn("B17 big\\xff\\x80.py:1501", body.splitlines())
+        self.assertEqual(body.encode("utf-8").decode("utf-8"), body)
+        self.assertEqual(title.encode("utf-8").decode("utf-8"), title)
 
     def test_an_enforcer_emitting_another_rule_is_refused(self):
         tracker = StubTracker()
@@ -242,9 +277,15 @@ class CommandTest(unittest.TestCase):
             write(root, "b.py", numbered(b))
         return root
 
-    def call(self, argv, pages=None, created=41):
+    def call(self, argv, pages=None, created=41, reads=None):
         out, err = io.StringIO(), io.StringIO()
+        answers = {"user": None, **(reads or {})}
+
+        def api_get(path, allow=()):
+            return answers[path]
+
         with mock.patch.object(cleanup_issue.forge_api, "api_pages") as api_pages, \
+                mock.patch.object(cleanup_issue.forge_api, "api_get", side_effect=api_get), \
                 mock.patch.object(cleanup_issue.forge_api, "create_issue",
                                   return_value=created) as create_issue, \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -255,8 +296,9 @@ class CommandTest(unittest.TestCase):
             code = cleanup_issue.main(argv)
         return code, out.getvalue(), err.getvalue(), api_pages, create_issue
 
-    def file(self, root, pages=None):
-        return self.call(["file", "--repo-root", str(root), "--repo", "octo/widgets"], pages)
+    def file(self, root, pages=None, reads=None, *extra):
+        return self.call(["file", "--repo-root", str(root), "--repo", "octo/widgets", *extra],
+                         pages, reads=reads)
 
     def test_file_on_a_committed_tree_files_one_issue_through_the_forge(self):
         root = self.world()
@@ -323,7 +365,9 @@ class CommandTest(unittest.TestCase):
                  [[{"number": True, "body": "", **BOT}]],
                  [[], "oops"],
                  [[1]],
-                 [[{"number": 3, "body": 7, **BOT}]]]
+                 [[{"number": 3, "body": 7, **BOT}]],
+                 [[{"number": 3, **BOT}]],
+                 [[{"number": 3, "body": "ordinary", **BOT}, {"number": 4, **BOT}]]]
         root = self.world()
         for pages in cases:
             with self.subTest(pages=pages):
@@ -332,6 +376,63 @@ class CommandTest(unittest.TestCase):
                 self.assertEqual((code, out), (2, ""))
                 self.assertTrue(err.startswith("cleanup-issue: "), err)
                 create_issue.assert_not_called()
+
+    def test_a_filer_that_would_not_be_trusted_exits_2_and_files_nothing(self):
+        repository = {"owner": {"login": "octo", "type": "User"}}
+        root = self.world()
+        for login in ("mallory", "collaborator"):
+            with self.subTest(login):
+                reads = {"user": {"login": login}, "repos/octo/widgets": repository}
+
+                code, out, err, _, create_issue = self.file(root, None, reads)
+
+                self.assertEqual((code, out), (2, ""))
+                self.assertTrue(err.startswith("cleanup-issue: "), err)
+                create_issue.assert_not_called()
+        reads = {"user": {"login": "Octo"}, "repos/octo/widgets": repository}
+        code, out, _, _, create_issue = self.file(root, None, reads)
+        self.assertEqual((code, json.loads(out)["action"]), (0, "filed"))
+        create_issue.assert_called_once()
+
+    def test_a_filer_is_trusted_as_the_bot_the_owner_or_an_active_member(self):
+        user_repo = {"owner": {"login": "octo", "type": "User"}}
+        org_repo = {"owner": {"login": "acme", "type": "Organization"}}
+        membership = "user/memberships/orgs/acme"
+        cases = [({}, True),
+                 ({"user": {"login": "github-actions[bot]"}, "repos/o/w": user_repo}, True),
+                 ({"user": {"login": "octo"}, "repos/o/w": user_repo}, True),
+                 ({"user": {"login": "other"}, "repos/o/w": user_repo}, False),
+                 ({"user": {"login": "amy"}, "repos/o/w": org_repo,
+                   membership: {"state": "active"}}, True),
+                 ({"user": {"login": "amy"}, "repos/o/w": org_repo,
+                   membership: {"state": "pending"}}, False),
+                 ({"user": {"login": "amy"}, "repos/o/w": org_repo, membership: None}, False)]
+        for reads, want in cases:
+            with self.subTest(reads=reads):
+                answers = {"user": None, **reads}
+                with mock.patch.object(cleanup_issue.forge_api, "api_get",
+                                       side_effect=lambda path, allow=(): answers[path]):
+                    self.assertIs(cleanup_issue.GitHubTracker("o/w").trusted_writer(), want)
+        with mock.patch.object(cleanup_issue.forge_api, "api_get", return_value={"login": "x"}):
+            with self.assertRaises(ForgeError):
+                cleanup_issue.GitHubTracker("o/w").trusted_writer()
+
+    def test_a_branch_whose_tip_moved_files_nothing(self):
+        root = self.world()
+        sha = git(root, "rev-parse", "HEAD").strip()
+        ref = "repos/octo/widgets/git/ref/heads/main"
+        moved = {ref: {"object": {"sha": "b" * 40}}}
+        same = {ref: {"object": {"sha": sha}}}
+
+        code, out, _, _, create_issue = self.file(root, None, moved, "--branch", "main")
+        self.assertEqual((code, out), (0, '{"action": "stale", "issue": null, "rule": null}\n'))
+        create_issue.assert_not_called()
+        code, out, _, _, create_issue = self.file(root, None, same, "--branch", "main")
+        self.assertEqual((code, json.loads(out)["action"]), (0, "filed"))
+        create_issue.assert_called_once()
+        code, out, _, _, create_issue = self.file(root, None, {ref: {"object": {}}}, "--branch", "main")
+        self.assertEqual((code, out), (2, ""))
+        create_issue.assert_not_called()
 
     def test_counts_prints_each_rule_and_its_count(self):
         code, out, _, _, _ = self.call(["counts", "--repo-root", str(self.world())])
@@ -396,6 +497,7 @@ STUB_GH = """#!/bin/sh
 echo "$*" >> "$GH_LOG"
 case " $* " in
   *" POST "*) echo '{"number": 41}' ;;
+  *" api user "*) echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1 ;;
   *) cat "$GH_PAGES" ;;
 esac
 """

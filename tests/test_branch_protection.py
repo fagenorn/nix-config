@@ -1034,20 +1034,40 @@ class CleanupIssueWorkflowTest(unittest.TestCase):
             ["Checkout", "Store the workflow token for gh", "File the next cleanup issue"],
             list(steps),
         )
+        # Each step is exactly its lines: an added `shell:`, `if:`, `working-directory:`
+        # or `continue-on-error:` would change what the command does or whether it runs.
         token_step = steps["Store the workflow token for gh"]
-        self.assertIn(
-            "        run: printf '%s\\n' \"$TOKEN\" | gh auth login --with-token --insecure-storage",
-            token_step,
+        self.assertEqual(
+            [
+                "      - name: Store the workflow token for gh",
+                "        env:",
+                "          TOKEN: ${{ github.token }}",
+                "        run: printf '%s\\n' \"$TOKEN\" | gh auth login --with-token --insecure-storage",
+            ],
+            [line for line in token_step if line.strip()],
         )
-        self.assertEqual(["TOKEN: ${{ github.token }}"], step_env(token_step))
         file_step = steps["File the next cleanup issue"]
-        self.assertIn(
-            "        run: PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file"
-            " --repo-root \"$GITHUB_WORKSPACE\" --repo \"$GITHUB_REPOSITORY\"",
-            file_step,
+        self.assertEqual(
+            [
+                "      - name: File the next cleanup issue",
+                "        run: PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file"
+                " --repo-root \"$GITHUB_WORKSPACE\" --repo \"$GITHUB_REPOSITORY\""
+                " --branch \"$GITHUB_REF_NAME\"",
+            ],
+            [line for line in file_step if line.strip()],
         )
         # No `env:` on the filing step: no token reaches the command.
         self.assertIsNone(step_env(file_step))
+        # No default shell, working directory or job-level condition changes the commands.
+        text = CLEANUP_WORKFLOW.read_text(encoding="utf-8")
+        for key in ("defaults:", "shell:", "working-directory:", "continue-on-error:"):
+            self.assertNotIn(key, text)
+        self.assertEqual(
+            ["    name: Cleanup Issue", "    runs-on: ubuntu-24.04", "    timeout-minutes: 10",
+             "    steps:"],
+            [line for line in job_blocks(CLEANUP_WORKFLOW)["cleanup-issue"]
+             if line.startswith("    ") and not line.startswith("     ")],
+        )
         self.assertEqual([], green_without_work(job_blocks(CLEANUP_WORKFLOW)["cleanup-issue"], None))
 
     def test_the_job_is_not_a_required_context(self):

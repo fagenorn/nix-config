@@ -43,26 +43,38 @@ Run. `run` lists the open issues first. Any open cleanup issue answers
 `Outcome("open", <lowest issue number>, None)` and files nothing. Otherwise, with
 no rule above zero it answers `Outcome("clean", None, None)` and files nothing;
 else it files exactly one issue for the selected rule and answers
-`Outcome("filed", <issue number>, <rule id>)`.
+`Outcome("filed", <issue number>, <rule id>)`. Before it creates an issue, `run`
+asks the tracker two questions: `trusted_writer` (an issue by an account that
+`trusted` would drop is invisible to the next run, so a filer that would not be
+trusted files nothing and `run` raises `Refusal`) and `current` (the revision is
+still the tip of the integration branch; a delayed run for an older commit
+answers `Outcome("stale", None, None)` and files nothing, so completed work is
+never filed again).
 
 Tracker. `GitHubTracker(slug)` lists the open issues of `<owner>/<name>` through
 `agent_tools.system.forge_api.api_pages` and files through
 `forge_api.create_issue`, with no label. It reads every page before it decides
 anything, keeps an item that is no pull request and has a trusted author, and
 raises `ForgeError("payload_invalid", ...)` for a page that is not a list of
-objects, a kept item whose number is not an integer or whose body is neither text
-nor null (a null body reads as empty). An author is trusted (`trusted`) when the
+objects, a kept item whose number is not an integer, whose body is absent or is
+neither text nor null (a null body reads as empty; an absent one is an incomplete
+listing, and an issue whose body is unknown could be a cleanup issue). An author is trusted (`trusted`) when the
 login is `FILER`, the account the workflow token files as, or the author
 association is one of `TRUSTED` (`OWNER`, `MEMBER`); a marker in an issue by
-anyone else is invisible to `file` and `open`. The command reads no environment
+anyone else is invisible to `file` and `open`. The writer is trusted
+(`trusted_writer`) when `GET user` answers 403 (the workflow token, which files
+as `FILER`), or answers `FILER`, the owner of a user-owned repository, or an
+active member of the owning organization. The command reads no environment
 token: `forge_api` drops `GITHUB_TOKEN` and `GH_TOKEN`, so `gh` answers from its
 stored credential alone.
 
 Command. `cleanup-issue <subcommand>`, also `python3 -m
 agent_tools.delivery.cleanup_issue`:
 
-- `file --repo-root <absolute dir> --repo <owner/name> [--revision HEAD]` runs
-  `run` on the snapshot at the revision and prints one JSON line
+- `file --repo-root <absolute dir> --repo <owner/name> [--revision HEAD]
+  [--branch <name>]` runs `run` on the snapshot at the revision (with `--branch`,
+  `current` is true only while the revision is that branch's tip on the forge;
+  without it, always) and prints one JSON line
   `{"action": ..., "issue": ..., "rule": ...}`; it exits 0. It never asks,
   labels, comments or closes anything.
 - `counts --repo-root <absolute dir> [--revision HEAD]` prints `<rule> <count>`
@@ -79,8 +91,8 @@ Every failure exits 2 with one line `cleanup-issue: <reason>` on stderr and
 nothing on stdout: a relative root, a root that is not a directory, a root below
 its repository's top level, a revision that does not resolve or a snapshot that
 cannot be read, a `--rule` that is not in `RULES`, a `--repo` that is not
-`<owner>/<name>`, and any `ForgeError`; after a failed or malformed listing no
-issue is created. A usage error keeps argparse's exit 2.
+`<owner>/<name>`, a filer that is not trusted, and any `ForgeError`; after a
+failed or malformed listing no issue is created. A usage error keeps argparse's exit 2.
 """
 
 import argparse
@@ -92,6 +104,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, Protocol
+from urllib.parse import quote
 
 from agent_tools.delivery import never_rise, size_lint
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
@@ -116,6 +129,10 @@ class CleanupRule:
 RULES: tuple[CleanupRule, ...] = (CleanupRule(size_lint.ENFORCER, 1, B17_GUIDANCE),)
 
 
+class Refusal(Exception):
+    pass
+
+
 class Issue(NamedTuple):
     number: int
     body: str
@@ -123,6 +140,10 @@ class Issue(NamedTuple):
 
 class Tracker(Protocol):
     def open_issues(self) -> list[Issue]: ...
+
+    def trusted_writer(self) -> bool: ...
+
+    def current(self, revision: str) -> bool: ...
 
     def create(self, title: str, body: str) -> int: ...
 
@@ -213,6 +234,10 @@ def run(tracker: Tracker, snapshot: Snapshot, rules: Sequence[CleanupRule] = RUL
     rule = select(found, rules)
     if rule is None:
         return Outcome("clean", None, None)
+    if not tracker.trusted_writer():
+        raise Refusal("the filer is not a trusted author: its issue would be invisible to the next run")
+    if not tracker.current(snapshot.revision):
+        return Outcome("stale", None, None)
     issue = draft(rule, found[rule.enforcer.rule], snapshot.revision)
     return Outcome("filed", tracker.create(issue.title, issue.body), issue.rule)
 
@@ -224,8 +249,37 @@ def trusted(item: Mapping) -> bool:
 
 
 class GitHubTracker:
-    def __init__(self, slug: str) -> None:
+    def __init__(self, slug: str, branch: str | None = None) -> None:
         self.slug = slug
+        self.branch = branch
+
+    def trusted_writer(self) -> bool:
+        user = forge_api.api_get("user", allow=(403,))
+        if user is None:
+            return True
+        login = user.get("login") if isinstance(user, dict) else None
+        repository = forge_api.api_get(f"repos/{self.slug}")
+        owner = repository.get("owner") if isinstance(repository, dict) else None
+        owner_login = owner.get("login") if isinstance(owner, dict) else None
+        if not (isinstance(login, str) and login and isinstance(owner_login, str) and owner_login):
+            raise forge_api.ForgeError("payload_invalid", "no authenticated login or repository owner")
+        if login == FILER:
+            return True
+        if owner.get("type") != "Organization":
+            return login.lower() == owner_login.lower()
+        membership = forge_api.api_get(
+            f"user/memberships/orgs/{quote(owner_login, safe='')}", allow=(403, 404))
+        return isinstance(membership, dict) and membership.get("state") == "active"
+
+    def current(self, revision: str) -> bool:
+        if self.branch is None:
+            return True
+        ref = forge_api.api_get(f"repos/{self.slug}/git/ref/heads/{quote(self.branch, safe='/')}")
+        target = ref.get("object") if isinstance(ref, dict) else None
+        sha = target.get("sha") if isinstance(target, dict) else None
+        if not isinstance(sha, str):
+            raise forge_api.ForgeError("payload_invalid", f"branch {self.branch} has no commit")
+        return sha == revision
 
     def open_issues(self) -> list[Issue]:
         pages = forge_api.api_pages(f"repos/{self.slug}/issues?state=open&per_page=100")
@@ -240,6 +294,8 @@ class GitHubTracker:
                 number, body = item.get("number"), item.get("body")
                 if isinstance(number, bool) or not isinstance(number, int):
                     raise forge_api.ForgeError("payload_invalid", "an issue has no number")
+                if "body" not in item:
+                    raise forge_api.ForgeError("payload_invalid", f"issue {number} has no body field")
                 if body is not None and not isinstance(body, str):
                     raise forge_api.ForgeError("payload_invalid", f"issue {number} has no text body")
                 issues.append(Issue(number, body or ""))
@@ -247,10 +303,6 @@ class GitHubTracker:
 
     def create(self, title: str, body: str) -> int:
         return forge_api.create_issue(self.slug, title, body)
-
-
-class Refusal(Exception):
-    pass
 
 
 def snapshot_at(args: argparse.Namespace) -> Snapshot:
@@ -271,7 +323,7 @@ def snapshot_at(args: argparse.Namespace) -> Snapshot:
 def tracker_for(args: argparse.Namespace) -> GitHubTracker:
     if not SLUG.fullmatch(args.repo):
         raise Refusal(f"--repo is not <owner>/<name>: {args.repo}")
-    return GitHubTracker(args.repo)
+    return GitHubTracker(args.repo, getattr(args, "branch", None))
 
 
 def parser() -> argparse.ArgumentParser:
@@ -283,6 +335,8 @@ def parser() -> argparse.ArgumentParser:
         if wants_root:
             sub.add_argument("--repo-root", required=True)
             sub.add_argument("--revision", default="HEAD")
+        if name == "file":
+            sub.add_argument("--branch")
         if wants_repo:
             sub.add_argument("--repo", required=True)
         if name == "violations":

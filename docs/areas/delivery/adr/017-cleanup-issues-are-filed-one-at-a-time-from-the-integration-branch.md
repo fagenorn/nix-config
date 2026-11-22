@@ -27,6 +27,8 @@ The never-rise check (ADR-project-contract-017) stops a branch from adding viola
 
 **D9. Criterion.** The filed issue's acceptance criterion bounds both promises: the rule's total falls by the listed count and no listed file still has a violation of the rule, measured by `cleanup-issue violations --rule <id>`, because a total alone falls when some other file is fixed.
 
+**D10. Writer and tip.** Before it files, the command checks that the account it files as would be trusted by D4 (the workflow token, which answers 403 to `GET user`, files as `github-actions[bot]`; otherwise the owner or an active organization member), and refuses with exit 2 when not, because an issue by anyone else is invisible to the next run, which would file a second one. With `--branch`, it also files nothing when the revision is no longer that branch's tip on the forge: a delayed run for an older commit would otherwise file work a newer merge completed. A listing item without a `body` field is a `ForgeError`, because its body could hold the marker.
+
 ## Consequences
 
 - Each B17 cleanup issue is one file, the smallest first; a file is never split across issues.

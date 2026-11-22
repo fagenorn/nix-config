@@ -31,9 +31,11 @@ is a new file.
 Output line, one per violation: `Violation.text()` is the rule id, one space,
 the repository-relative path escaped, a colon and the 1-based line. The escape
 doubles a backslash, writes a newline, carriage return and tab as `\\n`, `\\r`
-and `\\t`, any other C0 character and DEL as `\\xNN`, and the Unicode line
-separators U+0085, U+2028 and U+2029 as `\\uNNNN`, so a path never splits one
-violation across two physical lines.
+and `\\t`, any other C0 character and DEL as `\\xNN`, a byte of the name that
+is no UTF-8 (read back as a surrogate U+DC80 to U+DCFF) as the `\\xNN` of that
+byte, and the Unicode line separators U+0085, U+2028 and U+2029 as `\\uNNNN`, so
+a path never splits one violation across two physical lines and is always valid
+UTF-8.
 
 Every git child is read-only, never fetches and is bounded by the caller's
 `timeout`: it drops the variables that select a repository other than the one
@@ -75,6 +77,8 @@ def escape_path(path: str) -> str:
             pieces.append(escape)
         elif character < " " or character == "\x7f":
             pieces.append(f"\\x{ord(character):02x}")
+        elif "\udc80" <= character <= "\udcff":
+            pieces.append(f"\\x{ord(character) - 0xDC00:02x}")
         elif character in UNICODE_LINE_SEPARATORS:
             pieces.append(f"\\u{ord(character):04x}")
         else:
