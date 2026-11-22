@@ -202,6 +202,19 @@ class EntryConversionGuardTest(CleanApplyTestCase):
         self.assertEqual(code, 2, document)
         self.assertEqual(document["error"]["repair_id"], "adopt.entry.undecodable")
 
+    def test_a_non_utf8_source_does_not_refuse_a_plan_that_converts_nothing(self):
+        root = self.owned(apply_repo(self.home))
+        source = b"# caf\xe9\n"
+        (root / BOOTSTRAP).write_bytes(source)
+        entry = next(row for row in self.contract(root)["projections"]
+                     if row["id"] == "codex.entry")
+        (root / "AGENTS.md").write_bytes(resolve_project.render_projection(
+            entry, source, self.contract(root)["schema_version"]))
+        commit(root, "a source that is not UTF-8")
+        code, document = self.plan(root)
+        self.assertEqual(code, 0, document)
+        self.assertNotIn("convert-to-source", self.actions(document).values())
+
     def test_a_symlinked_entry_file_is_not_converted(self):
         root = self.owned(entry_apply_repo(self.home))
         (root / "AGENTS.md").unlink()

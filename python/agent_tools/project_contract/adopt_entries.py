@@ -87,10 +87,7 @@ def plan_entry_conversion(root, found: Candidates, inventory: Inventory,
     indexed = dict(inventory.tracked)
     source_bytes = blob_at(root, revision, BOOTSTRAP_SOURCE) \
         if BOOTSTRAP_SOURCE in records else None
-    source = None if source_bytes is None else decoded(
-        source_bytes, "the bootstrap source is not UTF-8 text, so adopted "
-        "text cannot be joined to it")
-    seen = [] if not source else [ended(source)]
+    seen: list[str] | None = None
     paths, blocks = [], []
     before: dict[str, bytes] = {}
     for name in ENTRY_FILES:
@@ -98,11 +95,19 @@ def plan_entry_conversion(root, found: Candidates, inventory: Inventory,
         if mode not in REGULAR_MODES:
             continue
         data = blob_at(root, revision, name)
+        if name == "AGENTS.md" and (data or b"").startswith(
+                GENERATED_PREFIX.encode("utf-8")):
+            continue  # the projection of a source that may not be UTF-8 text
         text = decoded(data or b"", "a hand-written entry file is not UTF-8 "
                        "text, so its text cannot move into the bootstrap source")
         authored = authored_entry_text(name, text)
         if not authored:
             continue
+        if seen is None:
+            source = None if source_bytes is None else decoded(
+                source_bytes, "the bootstrap source is not UTF-8 text, so "
+                "adopted text cannot be joined to it")
+            seen = [] if not source else [ended(source)]
         if indexed.get(name) != oid:
             raise refuse("dirty_worktree", "adopt.worktree.dirty", "/evidence",
                          "an entry file is staged differently from the base "
