@@ -2,39 +2,33 @@
 
 Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
 
-    run.json            the run's identity: exactly `RUN_MEMBERS`, plus `parent` (the
-                        id of the run that called it) in a child run
-    procedure/          a byte copy of the entry procedure directory's `*.json`
-                        and `*.md` files plus `SHA256SUMS`
+    run.json            the run's identity: exactly `RUN_MEMBERS`, plus `parent` (the id of the run that called
+                        it) in a child run
+    procedure/          a byte copy of the entry procedure directory's `*.json`, `*.md`, `SHA256SUMS`
     events.jsonl        one compact JSON event per line, appended and fsynced
-    lock  the deliver process's exclusive flock and its {"pid","started"}
-    results/<step>.<visit>.json
-                        a step visit's stored result
+    lock                the deliver process's exclusive flock and its {"pid","started"}
+    results/<step>.<visit>.json   a step visit's stored result
 
-The run id is `<issue>-<UTC start as %Y%m%dT%H%M%SZ>-<four [a-z0-9]>`. It orders
-only to the second, so `run.json` also carries `sequence`: an integer one above
-the greatest `sequence` among the issue's earlier runs, the order `find_runs`
-returns. The caller serialises the creation of an issue's runs. `sequence`
-counts every run of the issue, child runs included, but `find_runs` and
-`find_run` return root runs only (a run whose `run.json` has no `parent`).
+The run id is `<issue>-<UTC start as %Y%m%dT%H%M%SZ>-<four [a-z0-9]>`. It orders only to the second, so
+`run.json` also carries `sequence`: one above the greatest `sequence` among the issue's earlier runs, the
+order `find_runs` returns. The caller serialises the creation of an issue's runs. `sequence` counts every run
+of the issue, child runs included, but `find_runs` and `find_run` return root runs only (a run whose
+`run.json` has no `parent`). A run is assembled in `<root>/.<run id>.tmp` and renamed into place, so a run
+directory is either complete or absent.
 
-Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS`
-lists, per type, exactly the other members it carries; a `call` event records
-that a step started the child run `child` for item `index` of `items`. A run is assembled in
-`<root>/.<run id>.tmp` and renamed into place, so a run directory is either
-complete or absent.
+Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, exactly the
+other members it carries; a `call` event records that a step started the child run `child` for item `index`
+of `items`.
 
-Order rule: a result file is written to a writer-owned temporary file (fsynced),
-then linked into place, which refuses a result that exists, before its
-`result_stored` event is appended; `append_event` refuses that event while the
-file is absent. A crash between the two leaves a result with no event, never
-an event naming no result. An append first cuts a write that was cut short back
-to the last newline, so a torn tail never joins the next event; the cut and
-the write run under an exclusive `flock` on `events.jsonl`, so two writers
-never race on the cut.
+Order rule: a result file is written to a writer-owned temporary file (fsynced), then linked into place,
+which refuses a result that exists, before its `result_stored` event is appended; `append_event` refuses
+that event while the file is absent. A crash between the two leaves a result with no event, never an
+event naming no result. An append first cuts a write that was cut short back to the last newline, so a
+torn tail never joins the next event; the cut and the write run under an exclusive `flock` on
+`events.jsonl`.
 
-The ledger holds no environment value and no credential: `run.json` carries
-only the names and values its caller passes as `inputs`.
+The ledger holds no environment value and no credential: `run.json` carries only the names and values its
+caller passes as `inputs`.
 """
 
 from __future__ import annotations
@@ -82,6 +76,7 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
     "wait_ended": frozenset(("wait",)),
     "stop_reached": frozenset(("step", "stop", "need")),
     "call": frozenset(("step", "visit", "child", "index", "items")),
+    "keep_alive_ran": frozenset(("step", "visit", "attempt", "verdict")),
     "run_continued": frozenset(),
     "run_done": frozenset(),
 }
@@ -174,13 +169,9 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
                now: datetime, token: str | None = None, root: Path | None = None,
                before_publish: Callable[[Path], None] | None = None,
                parent: str | None = None) -> Path:
-    """Create the run directory and return its path.
+    """Create the run directory and return its path; a `before_publish(staged)` raise leaves no run.
 
-    With `parent` (a run id) the run is a child: its `run.json` also names the parent.
-
-    `before_publish(staged)` is called with the assembled, still unpublished run
-    directory; what it raises leaves no run behind.
-    """
+    With `parent` (a run id) the run is a child: its `run.json` also names the parent."""
     for label, value in (("project", project), ("platform_revision", platform_revision),
                          ("host", host)):
         if not _is_name(value):
@@ -286,12 +277,10 @@ def _issue_runs(root: Path, issue: int) -> list[tuple[Path, dict]]:
 
 
 def find_runs(root: Path, issue: int, project: str | None) -> list[Path]:
-    """Every root run directory of `issue` under `root`, oldest first; it writes nothing.
+    """Every root run directory of `issue` under `root`, oldest first (`sequence`, then name); it writes nothing.
 
-    A child run (its `run.json` has a `parent`) is not returned. The order is
-    `run.json`'s `sequence`, then the run's name. With no `project`, runs of more
-    than one project are a `LedgerError`.
-    """
+    A child run (its `run.json` has a `parent`) is not returned. With no `project`, runs of several projects
+    are a `LedgerError`."""
     found = [(entry, document) for entry, document in _issue_runs(root, issue)
              if PARENT_MEMBER not in document
              and (project is None or document["project"] == project)]
@@ -304,9 +293,7 @@ def find_runs(root: Path, issue: int, project: str | None) -> list[Path]:
 
 
 def find_run(root: Path, issue: int, project: str | None) -> Path | None:
-    """The newest run directory of `issue` under `root`, or None; it writes nothing.
-
-    """
+    """The newest run directory of `issue` under `root`, or None; it writes nothing."""
     runs = find_runs(root, issue, project)
     return runs[-1] if runs else None
 
@@ -331,7 +318,7 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
     elif key == "step":
         if not isinstance(value, str) or not NAME_RE.fullmatch(value):
             raise LedgerError("step is not a step id")
-    elif key in ("visit", "pid"):
+    elif key in ("visit", "attempt", "pid"):
         if not _is_int(value) or value < 1:  # type: ignore[operator]
             raise LedgerError(f"{key} must be an integer of at least 1")
     elif key == "child":
@@ -469,9 +456,8 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
 def replay(events_path: Path) -> list[dict]:
     """The validated events of an event file, in order.
 
-    Every segment ended by a newline is a line; a last segment with no newline
-    is a write cut short and is dropped whatever it holds. A kept line that is
-    not strict JSON or not a valid event is a `LedgerError` naming its line.
+    A last segment with no newline is a write cut short and is dropped whatever it holds. A
+    kept line that is not strict JSON or not a valid event is a `LedgerError` naming its line.
     """
     events_path = Path(events_path)
     try:
@@ -517,9 +503,8 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
          alive: Callable[[int, str], bool]) -> RunState:
     """Derive a run's state from its events in one pass; no file, clock or process.
 
-    `process` is the last recorded process whose step visit has no stored
-    result, and `alive` is the probe's answer for it, whatever the stop or done
-    state: reading those first is the caller's concern.
+    `process` is the last recorded process whose step visit has no stored result, and `alive` is
+    the probe's answer for it, whatever the stop or done state: reading those first is the caller's.
     """
     stage = step = last_event = None
     wait = stop = None

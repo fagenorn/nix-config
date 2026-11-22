@@ -2,7 +2,8 @@
   "format": 1,
   "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
   "inputs": ["holder", "issue", "range", "repo"],
-  "stops": {"needs-owner": {"need": "owner-decision", "reenter": "draft"}},
+  "stops": {"needs-owner": {"need": "owner-decision", "reenter": "draft"},
+            "claim-lost": {"need": "owner-decision", "reenter": "draft"}},
   "steps": [
     {"id": "draft", "stage": "building", "kind": "agent", "role": "implementer",
      "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
@@ -16,8 +17,8 @@
      "subcommand": "status", "in": ["run.repo", "run.issue", "run.holder"], "max_visits": 2},
     {"id": "fan", "stage": "landing", "kind": "call", "procedure": "toy-fan-child",
      "in": ["draft.items"], "each": "draft.items", "parallel": 2,
-     "on": {"done": "once", "child-stop": "needs-owner"}},
+     "on": {"done": "once", "child-stop": "needs-owner", "claim-lost": "needs-owner"}},
     {"id": "once", "stage": "landing", "kind": "call", "procedure": "toy-fan-child",
-     "on": {"done": "done", "child-stop": "needs-owner"}}
+     "on": {"done": "done", "child-stop": "needs-owner", "claim-lost": "needs-owner"}}
   ]
 }

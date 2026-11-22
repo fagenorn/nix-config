@@ -26,6 +26,8 @@ from agent_tools.delivery.engine_ledger import RUN_ID_RE
 from agent_tools.delivery.engine_shell import creation_lock_path, lock_holder, platform_revision
 from tests.guard_policy_world import GuardPolicyWorld
 
+TIER = "integration"
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDIN = REPO_ROOT / "tests/fixtures/engine-deliver/standin.py"
 SHIPPED = REPO_ROOT / "python/agent_tools/delivery/procedures"
@@ -46,6 +48,8 @@ class EngineProject:
         self.record = self.tmp / "record.log"
         self.release = self.tmp / "release"
         self.stamps = self.tmp / "stamps.log"
+        self.renewals = self.tmp / "renewals.log"
+        self.answers = self.tmp / "answers.json"
         self.root = self.world.project("example/engine", "example/engine", register=False,
                                        mutate=self.add_standins)
         self.bin = self.tmp / "bin"
@@ -76,20 +80,32 @@ class EngineProject:
             "standin-items-mixed": entry("json", "0", "approve", "nope", "approve"),
             "standin-items-hold": entry("json", "0", "hold", "maybe", "approve"),
             "standin-items-object": entry("emit", "0", '{"argv":["approve",{"id":2}]}'),
+            "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
         })
 
+    def answer(self, *answers: dict) -> None:
+        self.answers.write_text(json.dumps(list(answers)), encoding="utf-8")
+
+    def renewal_calls(self) -> list[dict]:
+        if not self.renewals.exists():
+            return []
+        return [json.loads(line) for line in self.renewals.read_text(encoding="utf-8").splitlines()]
+
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None,
+                   keep_alive: dict | None = None,
                    children: dict[str, dict] | None = None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
 
         def write(name: str, steps: list[dict], inputs, stops) -> None:
+            default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
+            if keep_alive:
+                default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
             document = {"format": 1,
-                        "keep_alive": {"command": "forge-claim", "subcommand": "renew",
-                                       "in": ["run.issue"]},
                         "inputs": list(inputs),
-                        "stops": stops or {"needs-owner": {"need": "owner-decision",
-                                                           "reenter": steps[0]["id"]}},
+                        "stops": stops or default,
                         "steps": steps}
+            if keep_alive:
+                document["keep_alive"] = keep_alive
             (directory / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
 
         write("deliver", steps, inputs, stops)
@@ -133,11 +149,16 @@ class EngineProject:
 
 
 def step(id: str, command: str, ok: str | None, *, failed: str = "needs-owner",
-         subcommand: str | None = None, on: dict | None = None) -> dict:
+         subcommand: str | None = None, on: dict | None = None, mutates: bool = False,
+         max_visits: int | None = None) -> dict:
     document = {"id": id, "stage": "setup", "kind": "command", "command": command,
                 "in": ["run.issue"], "on": on or {"ok": ok, "failed": failed}}
     if subcommand:
         document["subcommand"] = subcommand
+    if mutates:
+        document["mutates"] = True
+    if max_visits is not None:
+        document["max_visits"] = max_visits
     return document
 
 
@@ -354,10 +375,18 @@ class RefusalTest(unittest.TestCase):
             (directory / "toy.json").rename(directory / "deliver.json")
             return directory
 
-        def with_mutation(project: EngineProject) -> Path:
-            first = step("a", "standin-record", "done")
-            first["mutates"] = True
-            return project.procedures([first])
+        keep_alive = {"command": "standin-keep-alive", "in": ["run.issue"]}
+
+        def no_claim_lost(project: EngineProject) -> Path:
+            return project.procedures(
+                [step("a", "standin-record", "done")], keep_alive=keep_alive,
+                stops={"needs-owner": {"need": "owner-decision", "reenter": "a"}})
+
+        def mutating_decide(project: EngineProject) -> Path:
+            return project.procedures([{
+                "id": "d", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+                "mutates": True, "on": {"accept": "done", "revise": "needs-owner"}}],
+                keep_alive=keep_alive)
 
         def empty(project: EngineProject) -> Path:
             return Path(tempfile.mkdtemp(dir=project.tmp))
@@ -366,7 +395,8 @@ class RefusalTest(unittest.TestCase):
             "an undeclared input": (
                 "repo", lambda p: p.procedures([step("a", "standin-record", "done")],
                                                inputs=("issue", "repo"))),
-            "a mutating step": ("mutates", with_mutation),
+            "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
+            "a mutating decide step": ("marked mutates", mutating_decide),
             "an agent step": ("agent", shipped),
             "no deliver.json": ("deliver.json", empty),
         }

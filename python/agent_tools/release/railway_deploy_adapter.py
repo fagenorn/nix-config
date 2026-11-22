@@ -93,6 +93,7 @@ import json
 import re
 import subprocess
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -623,6 +624,24 @@ def _next_step(reading: _Reading, reason: str) -> None:
         reading.references.append(step)
 
 
+def linkage_problem(payload: object, config: Mapping[str, Any]) -> str | None:
+    """Why the `railway status --json` payload is not the configured project and environment, or
+    None when it is: the payload's `name` must equal `config["project"]`, and
+    `config["environment"]` must be among `environments.edges[].node.name` (edges or nodes of
+    another shape are skipped). `inspect` and `host-readiness` both apply this one rule."""
+    edges = (payload.get("environments", {}).get("edges")
+             if isinstance(payload, dict) and isinstance(payload.get("environments"), dict)
+             else None)
+    names = ([edge["node"].get("name") for edge in edges
+              if isinstance(edge, dict) and isinstance(edge.get("node"), dict)]
+             if isinstance(edges, list) else [])
+    if (not isinstance(payload, dict) or payload.get("name") != config["project"]
+            or config["environment"] not in names):
+        return (f"the linked project is not {config['project']} with "
+                f"environment {config['environment']}")
+    return None
+
+
 def _read(parameters: dict[str, Any], deadline: float) -> _Reading:
     """Plan steps 1 to 4: the released commit, the linkage, each service and the skip evidence."""
     reading = _Reading(parameters)
@@ -638,17 +657,9 @@ def _read(parameters: dict[str, Any], deadline: float) -> _Reading:
         reading.failure = {"outcome": "unknown", "reason": status, "detail": detail}
         _next_step(reading, status)
         return reading
-    edges = (payload.get("environments", {}).get("edges")
-             if isinstance(payload, dict) and isinstance(payload.get("environments"), dict)
-             else None)
-    names = ([edge["node"].get("name") for edge in edges
-              if isinstance(edge, dict) and isinstance(edge.get("node"), dict)]
-             if isinstance(edges, list) else [])
-    if (not isinstance(payload, dict) or payload.get("name") != config["project"]
-            or config["environment"] not in names):
-        reading.failure = {"outcome": "unknown", "reason": "project_mismatch",
-                           "detail": f"the linked project is not {config['project']} with "
-                                     f"environment {config['environment']}"}
+    problem = linkage_problem(payload, config)
+    if problem is not None:
+        reading.failure = {"outcome": "unknown", "reason": "project_mismatch", "detail": problem}
         return reading
     for name in config["services"]:
         service = _Service(name)

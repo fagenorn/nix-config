@@ -19,7 +19,8 @@
 | A procedure (how-to) | `guides/`, one file per task, named for what it does |
 | The architecture description (flake layout, module layering, helpers, the agent helper package) | [`guides/architecture.md`](./guides/architecture.md) |
 | The behaviour of a Nix module with no Python home | That module's README (`home/common/claude-code/README.md`, `home/common/agent-skills/README.md`, `home/linux/claude-local/README.md`) |
-| A measurement or other retained evidence | `archive/` |
+| A measurement, spike or other evidence | A comment or attachment on the pull request or issue it proves, never `docs/` |
 | A Layer-2 coding rule | `standards/` |
 | The package overview (layout, running, testing) | `python/README.md` |
-| Specs and plans | `.agents/artifacts/`, never `docs/` |
+| A spec | The body of its parent issue, never the tree |
+| A plan and its task files | The worktree's git directory, never the tree |

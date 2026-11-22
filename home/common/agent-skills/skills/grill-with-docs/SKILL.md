@@ -20,7 +20,7 @@ A question a bounded read-only lookup in the code or docs can answer is explored
 <!-- agent-dispatch: id=grill-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
 
-Only questions downstream of a lookup wait for it. The decisions are the user's; the facts are yours. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high; record that escalation and the selected role in the phase's existing fixed-schema report.
+Only questions downstream of a lookup wait for it. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high; record that escalation and the selected role in the phase's existing fixed-schema report.
 
 ## Domain docs
 
@@ -28,7 +28,7 @@ Read existing documentation while exploring, long documents by section (`doc-gro
 
 During the session:
 
-- **Challenge against the glossary**: a term used against its glossary definition is called out at once ("Your glossary defines 'cancellation' as X, but you seem to mean Y — which is it?").
+- **Challenge against the glossary**: a term used against its glossary definition is called out at once.
 - **Sharpen fuzzy language**: propose a precise canonical term for a vague or overloaded one.
 - **Probe with concrete scenarios** that force precision at the boundaries between concepts.
 - **Cross-reference the code**: surface any contradiction between what the user states and what the code does.
@@ -49,7 +49,7 @@ Offer an ADR only when it passes the gate in [ADR-FORMAT.md](./ADR-FORMAT.md); w
 
 ## Final spec measurement
 
-Measurement follows the final-writer rule (D5). When the grilling ends (frontier empty, or the user stops it), finish every glossary, ADR, spec and ledger edit; the last spec or ledger edit is the final mutation. Even if the grill changed nothing, measure afresh rather than repeat an earlier claim: run `artifact-budget check --kind design-spec --root <spec-root> --format json`; the checker owns the thresholds.
+Measurement follows the final-writer rule (D5). When the grilling ends (frontier empty, or the user stops it), finish every glossary, ADR, spec and ledger edit; the last spec or ledger edit is the final mutation. Even if the grill changed nothing, measure afresh: run `artifact-budget check --kind design-spec --root <spec-root> --format json`; the checker owns the thresholds. A changed spec is written back as its issue's body after a `within_budget` check, as `design` does.
 
 - Exit 0 with `within_budget`: measured.
 - Exit 2 from either check: `failed`.
@@ -65,6 +65,6 @@ Return one producer report `{state, artifact, notes}` (D11, D14), to the calling
 - `decompose_required`: the same with `budget_status: over_budget` and the checker's `violations`.
 - `failed`: a null artifact, or only `kind` and `path` once the root is known.
 
-`notes` stays within the shared policy's `phase_reports.notes_max_characters` and may point to the committed spec and docs, but never inlines artifact contents, ledger rows, doc or member lists, policy or logs.
+`notes` stays within the shared policy's `phase_reports.notes_max_characters` and may point to the committed docs, the spec draft and its issue, but never inlines artifact contents, ledger rows, doc or member lists, policy or logs.
 
 After the last check, write the report to a candidate from `mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"`, run `artifact-budget validate-report --boundary producer --input <report-candidate>`, and remove the candidate in a cleanup that runs on every outcome (a `trap` on `EXIT HUP INT TERM`, or `finally`). Return only the validated stdout; validation exit 2 is `failed`, with no fallback text. Do not invoke the next skill or start implementing.

@@ -2,7 +2,8 @@
   "format": 1,
   "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
   "inputs": ["holder", "issue", "repo"],
-  "stops": {"child-stop": {"need": "retry", "reenter": "claim"}},
+  "stops": {"child-stop": {"need": "retry", "reenter": "claim"},
+            "claim-lost": {"need": "retry", "reenter": "claim"}},
   "steps": [
     {"id": "claim", "stage": "building", "kind": "command", "command": "forge-claim", "subcommand": "status",
      "in": ["run.repo", "run.issue", "run.holder"], "mutates": true,
