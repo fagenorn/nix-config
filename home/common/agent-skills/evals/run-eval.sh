@@ -247,8 +247,8 @@ prepare_tree_env() {
 # .claude/skills/<name> links each skill directory of both roots, .claude/agents/<file>
 # links each agent file, and .claude/CLAUDE.md links AGENTS.md (project memory beside the
 # fixture's own root CLAUDE.md, which stays as it is). The three injected paths, and only
-# those, go in .git/info/exclude: the fixture's tracked .claude/ content and the specs,
-# plans and maps an eval writes there must stay visible to git.
+# those, go in .git/info/exclude: the fixture's tracked .claude/ content must stay
+# visible to git.
 inject_tree() {
   local repo=$1 root dir name agent
   [ ! -e "$repo/.claude/skills" ] && [ ! -e "$repo/.claude/agents" ] && [ ! -e "$repo/.claude/CLAUDE.md" ] ||
@@ -316,17 +316,17 @@ run_trial() {
   # never part of the fixture's history.
   [ -n "${EVAL_TREE:-}" ] && inject_tree "$REPO"
 
-  local RESOLVED_PROJECT SPEC_DIR PLAN_DIR
+  local RESOLVED_PROJECT GIT_DIR_ABS SPEC_DIR PLAN_DIR
   if ! RESOLVED_PROJECT=$(resolve-project resolve --repo-root "$REPO"); then
     printf '%s\n' "$RESOLVED_PROJECT" >&2
     die "resolver refused the initialized fixture"
   fi
   jq -e 'has("schema_version") and has("project") and has("bindings") and has("capabilities")' \
     <<<"$RESOLVED_PROJECT" >/dev/null || die "resolver returned an invalid snapshot"
-  SPEC_DIR=$(jq -er '.bindings.paths.artifacts.specs' <<<"$RESOLVED_PROJECT") ||
-    die "resolver snapshot has no specs artifact path"
-  PLAN_DIR=$(jq -er '.bindings.paths.artifacts.plans' <<<"$RESOLVED_PROJECT") ||
-    die "resolver snapshot has no plans artifact path"
+  GIT_DIR_ABS=$(git -C "$REPO" rev-parse --absolute-git-dir) ||
+    die "could not read the sandbox repo's git directory"
+  SPEC_DIR="$GIT_DIR_ABS/specs"
+  PLAN_DIR="$GIT_DIR_ABS/plans"
 
   # --- optional setup hook ----------------------------------------------------
 
@@ -346,23 +346,18 @@ run_trial() {
       echo "setup: pre-created dirty worktree at $PRE_WT"
       ;;
     shippable-worktree|planned-worktree)
-      local spec_rel plan_rel
+      local pre_git
       PRE_WT="$WORK/worktree-issue-3-rename-flag"
       git -C "$REPO" worktree add -q -b worktree-issue-3-rename-flag "$PRE_WT" origin/main ||
         die "setup: could not create worktree worktree-issue-3-rename-flag"
-      spec_rel=${SPEC_DIR#"$REPO"/}
-      plan_rel=${PLAN_DIR#"$REPO"/}
-      mkdir -p "$PRE_WT/$spec_rel" || die "setup: could not create $spec_rel"
-      cp "$SETUPS/issue-3/2026-10-07-issue-3-rename-flag-design.md" "$PRE_WT/$spec_rel/" ||
+      pre_git=$(git -C "$PRE_WT" rev-parse --absolute-git-dir) ||
+        die "setup: could not read the worktree's git directory"
+      mkdir -p "$pre_git/specs" "$pre_git/plans" || die "setup: could not create the specs and plans directories"
+      cp "$SETUPS/issue-3/2026-10-07-issue-3-rename-flag-design.md" "$pre_git/specs/" ||
         die "setup: could not copy the spec"
-      git -C "$PRE_WT" add -A && git -C "$PRE_WT" commit -qm "docs(spec): issue 3 rename-flag design" ||
-        die "setup: could not commit the spec"
-      mkdir -p "$PRE_WT/$plan_rel" || die "setup: could not create $plan_rel"
       cp -R "$SETUPS/issue-3/2026-10-07-issue-3-rename-flag.md" \
-        "$SETUPS/issue-3/2026-10-07-issue-3-rename-flag.tasks" "$PRE_WT/$plan_rel/" ||
+        "$SETUPS/issue-3/2026-10-07-issue-3-rename-flag.tasks" "$pre_git/plans/" ||
         die "setup: could not copy the plan"
-      git -C "$PRE_WT" add -A && git -C "$PRE_WT" commit -qm "docs(plan): issue 3 rename-flag plan" ||
-        die "setup: could not commit the plan"
       if [ "$SETUP_KIND" = shippable-worktree ]; then
         git -C "$PRE_WT" apply "$SETUPS/issue-3/implementation.patch" ||
           die "setup: could not apply the implementation patch"
