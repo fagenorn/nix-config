@@ -66,6 +66,7 @@ export const meta = {
 // check passed and every required name passing. The look path syncs and pushes on a behind answer (twice at most, then sync-contention), spends the one red-check fix on a failed one (fix-ci, fix-ci-review, look-push, so a second
 // red poll stops at checks), and verifies a moved head again (look-reverify) and waits on the forge once more before the stop; a re-ask only waits. An approve of the unmoved approved head reuses the pull request and pushes nothing.
 // A read with neither verdict stops at stage look after verify (in ship and ready mode alike), and ready mode reports look: {verdict, covers}.
+// #1566: a landing resync that brings a marked delivery's head past the owner's approved head asks look-approval status first; when that says needed it verifies the new head (look-carry-verify: only clean merges of the integration branch past the owner's head, the declared verification, the pictures) and asks look-approval carry (look-carry) to record a carry line for it. A usable carried lands the new head under the owner's approval; anything else shows the owner the new head with its pictures (awaiting-look) or stops at look-carry, never merging. The program never posts an approval.
 // A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place as the plan numbered it (cont.look_acs), never by the plan's wording), so no owner check is posted for it (#1356). A landing that leaves a criterion out first makes a read-only look-stale call: when a hold posted earlier still checks that criterion on a split child, or on the issue with nothing else left to hold, it stops at hold with look_checks, and a reply it cannot read stops at hold too; a check on the issue with another criterion still open is removed in place by the hold. A replay after the PR merged stops at look when the setup's look read failed, and always reads the merged head: the approval is always read again with look-approval status for the merged PR and head, never taken from a cont (which may hold another PR's), and anything but approved holds the look criterion and ticks nothing; the landing commit is resolved first (a PR merged indirectly has none on the pull) and both status and tick name it with --merge-commit. The look-stale read must say complete, and a hold of this issue with recorded results is never rewritten (its block version would change); a split child's returned fence naming an answered criterion stops the landing.
 //
 // FOLDS (#801): consecutive clerk steps with no program decision between them share one call. Folded: the lock release into the hold call,
@@ -938,9 +939,13 @@ const LOOK_REASON = `issue ${ISSUE} needs the owner's look before merge`
 const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, message?} to land on the approval recorded for that head (the owner records it where they answered; this program never posts one, so an approve with none recorded stops), or look {answer: fix, head: <head>, words: <the owner's words>, message?} to approve that head with one fix, or look {answer: changes, words: <the owner's words>} to ask for a change.`
 // #1139: the head the owner's approval was recorded for (an approved cont carries it); a marked delivery stops at awaiting-look until it holds one.
 // The pull request and head the awaiting-look stop left for the owner, carried in cont.look; a resume keeps it only when well formed.
-const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved } : {}) } : null)
+const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved, ...(typeof l.owner === 'string' && SHA_RE.test(l.owner) ? { owner: l.owner } : {}) } : {}) } : null)
 let lookAt = lookOf(CONT && CONT.look)
 let approvedHead = lookAt && lookAt.approved ? lookAt.approved : null
+// #1566: the head the owner's recorded approval names; a kept or carried head never moves it (approvedHead does), and it rides in cont.look.owner, so a later resync, in this run or after a stop, carries from the owner's head, not from a kept one.
+let ownerHead = approvedHead && lookAt.owner ? lookAt.owner : approvedHead
+// The look entry of cont for an approved head: owner is there only when the approved head is not the owner's own.
+const approvedLook = (pr, head) => ({ pr, head, approved: head, ...(ownerHead && ownerHead !== head ? { owner: ownerHead } : {}) })
 let LOOK_STOP = MARKED && approvedHead === null
 // #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established. Carried in cont on its
 // own, not with the verified head: the edit stays on the branch when a resume finds the head moved, so the flag stays too.
@@ -2847,7 +2852,8 @@ if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === '
   // The fix answer's approval was recorded for the head it was given for: the delivery lands the fixed head when look-approval status keeps it.
   if (MARKED && LOOK_ANSWER.answer === 'fix') {
     approvedHead = LOOK_ANSWER.head
-    lookAt = { pr: lookAt.pr, head: approvedHead, approved: approvedHead }
+    ownerHead = approvedHead
+    lookAt = approvedLook(lookAt.pr, approvedHead)
     LOOK_STOP = false
   }
 }
@@ -3137,9 +3143,57 @@ ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK
     if (!read || typeof read.verdict !== 'string' || read.verdict === 'error') return stop('look-approve', { details: `the approval of ${A} could not be checked: the verified head was ${V0} and ${answered}`, result: read })
     if (read.verdict !== 'approved') return stop('look-approve', { details: `${NOT_RECORDED}: the verified head was ${V0} and ${answered}`, result: read })
     approvedHead = A
-    lookAt = { pr: P, head: approvedHead, approved: approvedHead }
+    ownerHead = A
+    lookAt = approvedLook(P, approvedHead)
   }
   LOOK_STOP = MARKED && approvedHead === null
+}
+// #1566: a landing resync that moved a marked head past the owner's approved head. LOOK_CARRY_VERIFY adds merge_only to the verification reply; the carry command's JSON line is LOOK_CARRY_SCHEMA.
+const LOOK_CARRY_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only'] }
+const LOOK_CARRY_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, from: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] }, comment_id: { type: ['integer', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
+// The reasons look-approval carry gives for a needed answer; any other reason is an unreadable reply.
+const CARRY_REASONS = ['no-approval', 'source-differs', 'no-pictures', 'pictures-differ', 'not-merges']
+// A picture path the carry command is given: absolute and on one line; shq quotes it, so a space or a shell character is fine.
+const USABLE_PICTURE = /^\/[^\0\r\n]+$/
+// A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry line). The verification of H always runs, so every later stop shows H's verified record and pictures.
+const carryLook = async H => {
+  const S = ownerHead
+  const lv = await call(`${CTX}
+The owner approved head ${S} of PR #${PR}; the landing brought it to ${H}. Run only git commands and the declared verification, in this order:
+1. git -C ${W} fetch origin. When git -C ${W} rev-parse HEAD is not ${H}, run nothing more and return head (git -C ${W} rev-parse HEAD), clean, results [] and merge_only false.
+2. merge_only is true only when git -C ${W} merge-base --is-ancestor ${S} ${H} succeeds, git -C ${W} rev-list --no-merges ${S}..${H} ^origin/${INT} prints nothing, and every merge in git -C ${W} rev-list --merges ${S}..${H} ^origin/${INT} is a clean two-parent merge, meaning git -C ${W} merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C ${W} rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged); else false.
+3. Whatever merge_only is: ${verifyBody}`, { label: 'look-carry-verify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_VERIFY })
+  if (!complete(lv, LOOK_CARRY_VERIFY) || !SHA_RE.test(lv.head) || !sameSha(lv.head, H)) return stop('look-carry', { pr: PR, head: H, details: `the verification of ${H} returned no usable reply for it`, result: lv })
+  if (verifyProblems(lv).length) return stop('look-carry', { pr: PR, head: H, problems: verifyProblems(lv) })
+  verify = { head: fuller(H, lv.head), clean: true, results: lv.results, ...(picturesOf(lv).length ? { pictures: picturesOf(lv) } : {}) }
+  if (lv.merge_only !== true) {
+    lookWhy = `the approval of ${S} does not carry to ${H}: it adds commits that are not clean merges of ${INT}`
+    return lookWaitStop(PR, H)
+  }
+  const pics = picturesOf(lv)
+  if (!pics.length || pics.some(x => !USABLE_PICTURE.test(x.path))) {
+    lookWhy = `the approval of ${S} does not carry to ${H}: the verification wrote no pictures it can compare`
+    return lookWaitStop(PR, H)
+  }
+  const reply = await call(`${CTX}
+Record whether the owner's look approval of issue #${ISSUE} of ${SLUG} carries from ${S} to the head ${H} of PR #${PR}. Run alone and exactly: look-approval carry --repo ${SLUG} --issue ${ISSUE} --pr ${PR} --from ${S} --head ${H}${pics.map(x => ` --${x.kind} ${shq(x.path)}`).join('')}
+It prints one JSON line. Return its verdict, from, reason, comment_id and any detail. Run nothing else.
+${RULES}`, { label: 'look-carry', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_SCHEMA })
+  // approved: the owner approved exactly H between the status read and this call, so H lands under that approval and is the owner's head from now on.
+  if (isEntry(reply) && reply.verdict === 'approved') {
+    log(`look-carry: the owner approved ${H} itself; nothing to carry`)
+    ownerHead = H
+    return null
+  }
+  if (isEntry(reply) && reply.verdict === 'carried' && typeof reply.from === 'string' && SHA_RE.test(reply.from) && sameSha(reply.from, S) && Number.isInteger(reply.comment_id) && reply.comment_id > 0) {
+    log(`look-carry: the approval of ${S} carried to ${H} (comment ${reply.comment_id})`)
+    return null
+  }
+  if (isEntry(reply) && reply.verdict === 'needed' && CARRY_REASONS.includes(reply.reason)) {
+    lookWhy = `the approval of ${S} does not carry to ${H}: ${reply.reason}`
+    return lookWaitStop(PR, H)
+  }
+  return stop('look-carry', { pr: PR, head: H, result: reply })
 }
 const landBody = async () => {
   // The pr call may take the lock (--wait) after opening the PR: mark the verified head as possibly held before it, so a lost reply still reaches the release.
@@ -3581,9 +3635,14 @@ Read whether the owner's look approval of issue #${ISSUE} of ${SLUG} still cover
 It prints one JSON line. Return its verdict, kept_from and any detail. Run nothing else.
 ${RULES}`, { label: 'look-status', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_STATUS_SCHEMA })
         if (!complete(ls, LOOK_STATUS_SCHEMA) || (ls.verdict !== 'approved' && ls.verdict !== 'needed')) return stop('look-status', { pr: PR, head, result: ls })
-        if (ls.verdict === 'needed') return lookStop(PR, head)
+        if (ls.verdict === 'needed') {
+          const row = await carryLook(head)
+          if (row) return row
+        }
+        // The owner's head: a kept approval's own (kept_from), the head itself when the owner approved it exactly; a carry leaves it where it was.
+        if (ls.verdict === 'approved') ownerHead = typeof ls.kept_from === 'string' && SHA_RE.test(ls.kept_from) ? ls.kept_from : head
         approvedHead = head
-        lookAt = { pr: PR, head, approved: head }
+        lookAt = approvedLook(PR, head)
       }
       // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
       mg = await recall(() => call(`${CTX}
