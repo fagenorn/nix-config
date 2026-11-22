@@ -505,6 +505,24 @@ class ParserCommandTest(ReleaseCommandCase):
         self.assertFalse((self.root / ".git/agent-release").exists())
 
 
+class ReadOnlyParserTest(unittest.TestCase):
+    def parse(self, *args):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+            release.build_parser().parse_args(list(args))
+        return caught.exception.code, stderr.getvalue()
+
+    def test_read_only_belongs_to_preview_and_excludes_dispose(self):
+        parsed = release.build_parser().parse_args(["transaction", "preview", "--read-only"])
+        self.assertIs(parsed.read_only, True)
+        code, err = self.parse("transaction", "preview", "--read-only", "--dispose",
+                               "no_recovery_path")
+        self.assertEqual(code, 2)
+        self.assertIn("not allowed with argument", err)
+        code, _ = self.parse("transaction", "run", "--read-only")
+        self.assertEqual(code, 2)
+
+
 class LegacyCommandTest(TransactionCommandTest):
     """Cutover refuses while a legacy release is in flight (#128 AC6)."""
 

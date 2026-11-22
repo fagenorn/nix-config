@@ -538,8 +538,11 @@ class Driver:
         raise Refusal("profile_inadmissible",
                       "no proof unit targets a GitHub repository to verify the candidate against")
 
-    def preview(self, candidate: Mapping[str, str] | None) -> dict[str, Any]:
+    def preview(self, candidate: Mapping[str, str] | None, *,
+                read_only: bool = False) -> dict[str, Any]:
         plan = self._plan(candidate)
+        if read_only:
+            return {**plan.document, "confirmations": [], "lock": None}
         if self.sync is None:
             return plan.document
         if plan.refusal is not None or self._merged(plan.transaction):
