@@ -6,6 +6,7 @@ import unittest
 from agent_tools.console import contract_draft, register
 from agent_tools.console.view import derive_view
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .test_console_page import ASKING, START, cards, full, has_class, nodes, registered, render
 
 TIER = "integration"  # the page cases run the page under node
