@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 import copy
 import json
+import shutil
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -26,7 +28,7 @@ from agent_tools.delivery.engine_core import (
     replay,
 )
 from agent_tools.delivery.engine_graders import Grader
-from tests.engine_walks import describe, edges, step_outcomes, walk_edges
+from tests.engine_walks import describe, edges, reply_errors, reply_schemas, step_outcomes, walk_edges
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "tests/fixtures/engine-core"
@@ -47,6 +49,19 @@ def pair(step_id: str, outcome: str, result: object = None) -> list:
     if result is not None:
         outcome_event["result"] = result
     return [{"type": "entered", "step": step_id}, outcome_event]
+
+
+def refusals(doc: dict, draft_outcomes: tuple[str, ...] = ()) -> tuple:
+    """The checker's refusals of `doc` beside the fixture's prompts, its draft reply enum widened by `draft_outcomes`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        for source in FIXTURE.iterdir():
+            shutil.copy(source, directory / source.name)
+        reply = json.loads((directory / "draft.reply.json").read_text(encoding="utf-8"))
+        reply["properties"]["status"]["enum"] += list(draft_outcomes)
+        (directory / "draft.reply.json").write_text(json.dumps(reply), encoding="utf-8")
+        (directory / "toy-core.json").write_text(json.dumps(doc), encoding="utf-8")
+        return procedure_check.check_directory(directory, procedure_check.load_commands()).refusals
 
 
 STOP = Stop(name="needs-owner", need="owner-decision", reenter="draft")
@@ -103,6 +118,24 @@ class ActionTest(unittest.TestCase):
             ),
         )
 
+    def test_a_decide_step_publishes_its_verdict(self) -> None:
+        doc = toy()
+        step(doc, "tally")["on"]["accept"] = "publish"
+        doc["steps"].append(
+            {"id": "publish", "stage": "final review", "kind": "command", "command": "diff-scope",
+             "in": ["tally.verdict"], "on": {"ok": "done", "failed": "needs-owner"}}
+        )
+        self.assertEqual(refusals(doc), ())
+        events = (
+            pair("scope", "ok")
+            + pair("draft", "drafted", {"summary": "s"})
+            + pair("review", "approve", {"verdict": "approve"})
+        )
+        self.assertEqual(
+            next_action(doc, INPUTS, events),
+            RunCommand(step="publish", visit=1, command="diff-scope", subcommand=None, args=(("tally.verdict", "accept"),)),
+        )
+
     def test_an_outcome_is_followed_to_a_stop(self) -> None:
         result = replay(toy(), INPUTS, pair("scope", "failed"))
         self.assertEqual(result.action, STOP)
@@ -123,6 +156,7 @@ class ActionTest(unittest.TestCase):
             with self.subTest(outcome=outcome):
                 doc = toy()
                 step(doc, "draft")["on"][outcome] = "needs-owner"
+                self.assertEqual(refusals(doc, (outcome,)), ())
                 result = replay(doc, INPUTS, pair("scope", "ok") + pair("draft", outcome))
                 self.assertEqual(result.action, STOP)
                 self.assertEqual(result.transitions[-1], Transition("draft", outcome, "needs-owner"))
@@ -242,6 +276,12 @@ class EventErrorTest(unittest.TestCase):
                 INPUTS,
                 pair("scope", "ok") + pair("draft", "drafted", {"status": "drafted"}),
             ),
+            (
+                "missing member resolved before a later approval",
+                toy(),
+                INPUTS,
+                pair("scope", "ok") + pair("draft", "drafted", {"status": "drafted"}) + pair("review", "approve", {"verdict": "approve"}),
+            ),
             ("missing run input", toy(), {}, []),
             (
                 "group step",
@@ -280,7 +320,7 @@ def impure(source: str, allowed: set[str]) -> list[str]:
 
 
 def toy_coverage():
-    return walk_edges(toy(), INPUTS, step_outcomes(FIXTURE, "toy-core"))
+    return walk_edges(toy(), INPUTS, step_outcomes(FIXTURE, "toy-core"), reply_schemas(FIXTURE, "toy-core"))
 
 
 class WalkTest(unittest.TestCase):
@@ -307,10 +347,34 @@ class WalkTest(unittest.TestCase):
             ],
         )
 
+    def test_the_walks_report_schema_valid_replies(self) -> None:
+        expected = {
+            "draft": {"status": "drafted", "summary": "draft.summary", "items": []},
+            "review": {"verdict": "approve", "notes": "x"},
+        }
+        schemas = reply_schemas(FIXTURE, "toy-core")
+        seen: set[str] = set()
+        for walk in toy_coverage().walks:
+            for event in walk.events:
+                if event["type"] == "outcome" and event["step"] in schemas:
+                    result = event["result"]
+                    self.assertEqual(reply_errors(schemas[event["step"]], result), [])
+                    self.assertEqual(sorted(result), sorted(expected[event["step"]]))
+                    self.assertEqual(result[next(iter(expected[event["step"]]))], event["outcome"])
+                    seen.add(event["step"])
+        self.assertEqual(seen, set(expected))
+
+    def test_a_reply_the_schema_rejects_is_refused(self) -> None:
+        schema = reply_schemas(FIXTURE, "toy-core")["draft"]
+        self.assertNotEqual(reply_errors(schema, {"status": "drafted", "summary": "s"}), [])
+        self.assertNotEqual(reply_errors(schema, {"status": "other", "summary": "s", "items": []}), [])
+        self.assertNotEqual(reply_errors(schema, {"status": "drafted", "summary": 1, "items": []}), [])
+        self.assertEqual(reply_errors(schema, {"status": "drafted", "summary": "s", "items": ["a"]}), [])
+
     def test_an_edge_no_walk_takes_is_reported(self) -> None:
         doc = toy()
         step(doc, "scope")["on"]["error"] = "needs-owner"
-        coverage = walk_edges(doc, INPUTS, step_outcomes(FIXTURE, "toy-core"))
+        coverage = walk_edges(doc, INPUTS, step_outcomes(FIXTURE, "toy-core"), reply_schemas(FIXTURE, "toy-core"))
         self.assertEqual(coverage.unwalked, (("scope", "error"),))
 
 

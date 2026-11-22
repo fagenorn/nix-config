@@ -19,6 +19,8 @@ Inputs
                      the pending step finished; `result` (default `{}`) is the
                      step's reply members or command result. An `<X>.<m>` path
                      reads member `m` of the latest `outcome` result of step X.
+               A `decide` step publishes `{"verdict": <outcome>}` as its result
+               each time it grades, so `<decide step>.verdict` is readable.
                Shell outcomes such as `no-reply`, `out-of-bounds` and `refused`
                are ordinary outcomes: they are followed through the step's `on`.
 
@@ -28,7 +30,7 @@ Actions (`Action`)
     Stop          the run stopped at a named stop with its `need` and `reenter`.
     Done          the run finished.
     Both step actions carry `args`: one `(path, value)` pair per entry of the
-    step's `in`, in `in` order. An `entered` event for the pending step does not
+    step's `in`, in `in` order, resolved when the walk reaches the step. An `entered` event for the pending step does not
     change the action.
 
 Visits
@@ -44,7 +46,7 @@ or a second `entered` for the same visit; an `outcome` naming a step but the
 pending one, or before its `entered`; any event once the run ended in a stop or
 `done`; an `outcome` reporting `exhausted`; any outcome (reported, graded or
 `exhausted`) the step's `on` does not map; a `result` that is not a dict; an
-`in` path with no value; entry `max_visits + 2` of a step (a loop through
+`in` path with no value when the walk reaches the step; entry `max_visits + 2` of a step (a loop through
 `exhausted`); entering a `group` or `call` step.
 
 Later slices: `group` and `call` steps, waits and continuing a stopped run.
@@ -136,7 +138,7 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
         transitions.append(Transition(step["id"], outcome, target))
         return target
 
-    def settle(where: str) -> tuple[str, dict | None]:
+    def settle(where: str) -> tuple[str, dict | None, tuple[tuple[str, object], ...]]:
         while where in steps:
             step = steps[where]
             visits[where] = visits.get(where, 0) + 1
@@ -147,14 +149,16 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
                 where = follow(step, EXHAUSTED)
             elif step["kind"] == "decide":
                 grader = engine_graders.GRADERS[step["grader"]]
-                where = follow(step, grader.grade({path: value(path) for path in step.get("in", [])}))
+                graded = grader.grade({path: value(path) for path in step.get("in", [])})
+                results[where] = {"verdict": graded}
+                where = follow(step, graded)
             elif step["kind"] in ("command", "agent"):
-                return where, step
+                return where, step, tuple((path, value(path)) for path in step.get("in", []))
             else:
                 raise CoreError(f"step {where!r} is a {step['kind']!r} step, which the core does not run yet")
-        return where, None
+        return where, None, ()
 
-    position, pending = settle(position)
+    position, pending, args = settle(position)
     for event in events:
         if not isinstance(event, Mapping) or event.get("type") not in EVENT_TYPES:
             kind = event.get("type") if isinstance(event, Mapping) else event
@@ -177,11 +181,10 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
         if not isinstance(result, dict):
             raise CoreError(f"result of {pending['id']!r} is not an object")
         results[pending["id"]] = result
-        position, pending = settle(follow(pending, outcome))
+        position, pending, args = settle(follow(pending, outcome))
         entered = False
 
     if pending is not None:
-        args = tuple((path, value(path)) for path in pending.get("in", []))
         if pending["kind"] == "command":
             return Replay(
                 RunCommand(pending["id"], visits[pending["id"]], pending["command"], pending.get("subcommand"), args),
