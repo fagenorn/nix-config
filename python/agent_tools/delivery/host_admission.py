@@ -140,17 +140,20 @@ def validate_declaration(value: object) -> dict:
 def load_declaration() -> dict:
     """Read, parse and validate the installed declaration; return a deep copy.
 
-    Symlinks are followed (the installed file is a store link). An absent file
-    is `declaration_missing`; anything unreadable, unparseable or refused by
-    `validate_declaration` is `declaration_invalid`.
+    Symlinks are followed (the installed file is a store link). Only an absent
+    entry is `declaration_missing`; an entry that is not a readable file (a
+    directory, a dangling symlink), and anything unparseable or refused by
+    `validate_declaration`, is `declaration_invalid`.
     """
     path = declaration_path()
+    if path is None or not os.path.lexists(path):
+        raise DeclarationError("declaration_missing")
     try:
-        present = path is not None and path.is_file()
+        usable = path.is_file()
     except OSError as error:
         raise _invalid(f"unreadable: {error}") from None
-    if not present:
-        raise DeclarationError("declaration_missing")
+    if not usable:
+        raise _invalid("not a file")
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:

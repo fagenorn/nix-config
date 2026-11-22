@@ -14,7 +14,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery.verify_slot import NO_SLOT_EXIT, NO_SLOT_LINE, WAITING_LINE
+from agent_tools.delivery.verify_slot import NO_SLOT_EXIT, NO_SLOT_LINE, SLOT_DIR_ENV, WAITING_LINE
 from .process_liveness import process_alive
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +53,7 @@ class VerifySlotTest(unittest.TestCase):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.home = scratch.name
+        self.slots = Path(self.home) / "slots"
         self.marks = Path(self.home) / "marks"
         self.marks.mkdir()
         self.procs = []
@@ -78,14 +79,17 @@ class VerifySlotTest(unittest.TestCase):
         declaration.update(extra)
         target.write_text(json.dumps(declaration))
 
-    def start(self, name, *opts, code=None, argv=None):
+    def env(self, home=None):
+        return {**os.environ, "HOME": home or self.home, "PYTHONPATH": str(REPO_ROOT / "python"),
+                SLOT_DIR_ENV: str(self.slots)}
+
+    def start(self, name, *opts, code=None, argv=None, home=None):
         tail = [str(code)] if code is not None else []
         command = argv if argv is not None else [
             sys.executable, "-c", CHILD, str(self.marks), name, *tail]
         proc = subprocess.Popen(
             [sys.executable, "-m", "agent_tools.delivery.verify_slot", "run", *opts, "--", *command],
-            env={**os.environ, "HOME": self.home, "PYTHONPATH": str(REPO_ROOT / "python")},
-            cwd=self.home, stderr=subprocess.PIPE, text=True)
+            env=self.env(home), cwd=self.home, stderr=subprocess.PIPE, text=True)
         self.procs.append(proc)
         return proc
 
@@ -191,14 +195,96 @@ class VerifySlotTest(unittest.TestCase):
         missing_code, _ = self.finish(self.start("x", argv=["/nonexistent/program"]))
         empty = subprocess.run(
             [sys.executable, "-m", "agent_tools.delivery.verify_slot", "run", "--"],
-            env={**os.environ, "HOME": self.home, "PYTHONPATH": str(REPO_ROOT / "python")},
-            cwd=self.home, capture_output=True, text=True, check=False)
+            env=self.env(), cwd=self.home, capture_output=True, text=True, check=False)
         self.release("b")
         code, err = self.finish(self.start("b", "--wait-limit", "1"))
         self.assertEqual(missing_code, 127)
         self.assertEqual(empty.returncode, 2)
         self.assertEqual(code, 0)
         self.assertIsNone(WAITED_PATTERN.search(err))
+
+    def test_runs_of_different_accounts_on_one_host_share_the_slots(self):
+        """VS-01: the slots are the host's, so two accounts with different homes cannot both hold one."""
+        other = Path(self.home) / "other-account"
+        other.mkdir()
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b", "--wait-limit", "1", home=str(other))
+        code, err = self.finish(second)
+        self.assertEqual(code, NO_SLOT_EXIT)
+        self.assertIn(NO_SLOT_LINE.format(limit=1), err.splitlines())
+        self.assertFalse(self.mark("b", "start").exists())
+        self.release("a")
+        self.assertEqual(self.finish(first)[0], 0)
+
+    def test_the_default_slot_directory_does_not_depend_on_home(self):
+        homes = [Path(self.home) / "one", Path(self.home) / "two"]
+        env = {key: value for key, value in self.env().items() if key != SLOT_DIR_ENV}
+        found = []
+        for home in homes:
+            home.mkdir()
+            done = subprocess.run(
+                [sys.executable, "-c",
+                 "from agent_tools.delivery import verify_slot; print(verify_slot.slot_dir())"],
+                env={**env, "HOME": str(home)}, capture_output=True, text=True, check=True)
+            found.append(Path(done.stdout.strip()))
+        self.assertEqual(found[0], found[1])
+        self.assertTrue(found[0].is_absolute())
+        for home in homes:
+            self.assertNotIn(home, found[0].parents)
+
+    def test_a_lowered_count_still_counts_the_holders_of_the_higher_slots(self):
+        """VS-02: with count 2 -> 1 and slot-1 still held, a new run waits though slot-0 is free."""
+        self.declare(verify_slots=2)
+        first = self.start("a")
+        second = self.start("b")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.release("a")
+        self.assertEqual(self.finish(first)[0], 0)
+        declaration = Path(self.home) / ".agents/share/host-declaration.json"
+        declaration.write_text(json.dumps({**json.loads(declaration.read_text()), "verify_slots": 1}))
+        self.release("c")
+        third = self.start("c", "--wait-limit", "1")
+        code, err = self.finish(third)
+        self.assertFalse(self.mark("c", "start").exists())
+        self.assertEqual(code, NO_SLOT_EXIT)
+        self.assertIn(NO_SLOT_LINE.format(limit=1), err.splitlines())
+        self.release("b")
+        self.assertEqual(self.finish(second)[0], 0)
+
+    def test_a_waiter_that_wakes_after_its_limit_does_not_take_a_slot_freed_after_it(self):
+        """VS-04: the deadline is checked before another try, so a late wake-up times out."""
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.release("b")
+        second = self.start("b", "--wait-limit", "1")
+        self.assertEqual(second.stderr.readline().rstrip("\n"), WAITING_LINE.format(count=1))
+        os.kill(second.pid, signal.SIGSTOP)
+        time.sleep(1.3)
+        self.release("a")
+        self.assertEqual(self.finish(first)[0], 0)
+        os.kill(second.pid, signal.SIGCONT)
+        code, err = self.finish(second)
+        self.assertFalse(self.mark("b", "start").exists())
+        self.assertEqual(code, NO_SLOT_EXIT)
+        self.assertIn(NO_SLOT_LINE.format(limit=1), err.splitlines())
+
+    def test_a_declaration_that_is_not_a_file_is_a_setup_error_not_a_missing_one(self):
+        target = Path(self.home) / ".agents/share/host-declaration.json"
+        target.parent.mkdir(parents=True)
+        for label, make in (("directory", lambda: target.mkdir()),
+                            ("dangling symlink", lambda: target.symlink_to(Path(self.home) / "nowhere"))):
+            with self.subTest(label):
+                make()
+                code, err = self.finish(self.start("x"))
+                self.assertEqual(code, 2)
+                self.assertFalse(self.mark("x", "start").exists())
+                self.assertTrue(err.strip())
+                if target.is_dir():
+                    target.rmdir()
+                else:
+                    target.unlink()
 
 
 if __name__ == "__main__":

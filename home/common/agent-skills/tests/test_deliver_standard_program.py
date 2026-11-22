@@ -4157,6 +4157,28 @@ class VerifySlotTest(unittest.TestCase):
                       "retried as below.", rerun)
         self.assertNotIn("exactly as declared, and never a second time, whatever the outcome.", rerun)
 
+    NO_SLOT = {"id": "build", "status": "fail", "no_slot": True,
+               "summary": "no verify slot came free in 12 attempts"}
+
+    def test_a_rerun_that_never_started_for_want_of_a_slot_stops_with_no_fix_step(self):
+        """VS-03: slot exhaustion on the rerun is no reproduced failure, so no implementer is asked to change code."""
+        result, calls = run(replies={"verify": VerifyRerunTest.OUTSIDE,
+                                     "verify-rerun-1": {"head": SHA, "clean": True, "results": [self.NO_SLOT]}})
+        names = labels(calls)
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual([l for l in names if l.startswith("verify")], ["verify", "verify-rerun-1"])
+        self.assertEqual([p["summary"] for p in result["problems"]], [self.NO_SLOT["summary"]])
+
+    def test_a_first_verification_that_never_started_for_want_of_a_slot_stops_with_no_fix_step_or_rerun(self):
+        result, calls = run(replies={"verify": {"head": SHA, "clean": True,
+                                                "results": [dict(self.NO_SLOT, outside_diff=True)]}})
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual([l for l in labels(calls) if l.startswith("verify")], ["verify"])
+
+    def test_the_prompt_asks_for_the_no_slot_mark_only_on_slot_exhaustion(self):
+        _, calls = run()
+        self.assertIn("no_slot: true", prompt(calls, "verify"))
+
 
 class ShipTest(unittest.TestCase):
     def test_failed_checks_stop_unmerged(self):

@@ -83,6 +83,17 @@ class HostAdmissionTest(unittest.TestCase):
                     target.write_text(text, encoding="utf-8")
                     host_admission.load_declaration()
                 self.assertEqual(invalid.exception.reason_code, "declaration_invalid")
+            target.unlink()
+            for label, make in (("directory", lambda: target.mkdir()),
+                                ("dangling symlink", lambda: target.symlink_to(Path(raw) / "nowhere"))):
+                with self.subTest(label), self.assertRaises(host_admission.DeclarationError) as unusable:
+                    make()
+                    host_admission.load_declaration()
+                self.assertEqual(unusable.exception.reason_code, "declaration_invalid")
+                if target.is_dir():
+                    target.rmdir()
+                else:
+                    target.unlink()
             committed = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
             target.write_text(COMMITTED_DECLARATION.read_text(encoding="utf-8"), encoding="utf-8")
             self.assertEqual(host_admission.load_declaration(), committed)
