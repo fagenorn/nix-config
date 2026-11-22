@@ -20,6 +20,7 @@ from pathlib import Path
 
 from agent_tools import canonical
 from agent_tools.console import contract_draft as cd
+from agent_tools.project_contract import resolve_project
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .console_test_support import PREK_HOOK
@@ -119,10 +120,50 @@ class ContractDraftTest(unittest.TestCase):
             self.assertIsNone(error)
         return fields
 
+    def test_the_draft_asks_nothing_about_co_author_lines(self):
+        root, fields = self.remote_fields()
+        for table in (cd.FIELDS, cd.LABELS, cd.POINTERS, cd.OPTIONS, cd.TEXT, cd.STARTS, cd.REST_WORDS):
+            self.assertNotIn("co-authored-by", table)
+        self.assertEqual(len(cd.FIELDS), 27)
+        self.assertNotIn("co-authored-by", [f["field"] for f in fields])
+        self.assertNotIn("co-authored-by", [q["subject"] for q in cd.questions(fields)])
+        shown = cd.shown(fields)
+        words = [e["line"] for e in shown] + [o["label"] for e in shown for o in e["options"]]
+        words.append(cd.more_line(fields))
+        for word in words:
+            self.assertNotIn("co-author", word.lower())
+        self.assertEqual(cd.set_value(fields, "co-authored-by", "yes", entries=[], root=root),
+                         (None, cd.UNKNOWN_FIELD))
+
+    def test_the_written_contract_fixes_the_co_author_member_false(self):
+        root, fields = self.remote_fields()
+        fields = self.settled(fields, root, build_command="none", test_command="none",
+                              commit_signed="yes")
+        commit = cd.contract(fields)["bindings"]["vcs"]["commit"]
+        self.assertEqual(commit, {**resolve_project.RETIRED_COMMIT_MEMBERS, "signed": True})
+        self.assertEqual(commit, {"co_authored_by": False, "signed": True})
+
+    def test_a_saved_draft_with_a_co_author_record_reads_back_without_it(self):
+        root, fields = self.remote_fields()
+        saved = list(fields)
+        record = {"field": "co-authored-by", "label": "co-author lines in commits", "value": "yes",
+                  "source": "owner",
+                  "options": [{"value": "yes", "label": "yes"}, {"value": "no", "label": "no"}],
+                  "text": False, "reason": None, "ask": "Should its commits carry co-author lines?"}
+        self.assertEqual(set(record), set(cd.FIELD_KEYS))
+        saved.insert(8, record)
+        refreshed = cd.refresh(root, saved)
+        self.assertEqual([f["field"] for f in refreshed], list(cd.FIELDS))
+        self.assertNotIn("co-authored-by", [e["field"] for e in cd.shown(refreshed)])
+        settled = self.settled(refreshed, root, build_command="none", test_command="none")
+        self.assertIs(cd.contract(settled)["bindings"]["vcs"]["commit"]["co_authored_by"], False)
+        self.assertEqual(cd.set_value(refreshed, "co-authored-by", "no", entries=[], root=root),
+                         (None, cd.UNKNOWN_FIELD))
+
     def test_a_github_remote_is_read_for_id_name_branch_and_tracker(self):
         root, fields = self.remote_fields()
         self.assertEqual([f["field"] for f in fields], list(cd.FIELDS))
-        self.assertEqual(len(cd.FIELDS), 29)
+        self.assertEqual(len(cd.FIELDS), 27)
         for record in fields:
             self.assertEqual(set(record), cd.FIELD_KEYS)
         self.assertEqual(pair(fields, "project-id"), (ID, "remote"))
@@ -224,16 +265,48 @@ class ContractDraftTest(unittest.TestCase):
         root, fields = self.remote_fields()
         fields = self.settled(fields, root, build_command="none", test_command="none")
         self.assertEqual(cd.contract(fields), self.expected_contract())
-        fields = self.settled(
-            fields, root, review_plan_command="true",
-            light_lane='{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}')
+        fields = self.settled(fields, root, review_plan_command="true")
         drafted = cd.contract(fields)
         self.assertEqual(drafted["bindings"]["commands"]["review-plan"],
                          {"argv": ["true"], "cwd": ".", "env": []})
         self.assertEqual(drafted["bindings"]["workflow"]["review"]["plan"], "review-plan")
         self.assertEqual(drafted["capabilities"]["review.plan"], {"support": "supported"})
-        self.assertEqual(drafted["bindings"]["workflow"]["light_lane"],
-                         {"mode": "shadow", "budget_minutes": 90, "risk_paths": []})
+        self.assertNotIn("light_lane", drafted["bindings"]["workflow"])
+
+    def test_the_drafted_contract_asks_no_light_lane(self):
+        root, fields = self.remote_fields()
+        fields = self.settled(fields, root, build_command="none", test_command="none")
+        drafted = cd.contract(fields)
+        refused = cd.set_value(
+            fields, "light-lane", '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
+            entries=[], root=root)
+        for table in (cd.FIELDS, cd.LABELS, cd.STARTS, cd.REST_WORDS, cd.PLACEHOLDERS,
+                      cd.JSON_FIELDS):
+            self.assertNotIn("light-lane", table)
+        for pointers in cd.POINTERS.values():
+            self.assertNotIn("/bindings/workflow/light_lane", pointers)
+        self.assertEqual(refused, (None, cd.UNKNOWN_FIELD))
+        self.assertEqual(sorted(drafted["bindings"]["workflow"]),
+                         ["orchestration", "review", "verification"])
+
+    def test_a_saved_draft_drops_the_retired_light_lane_field(self):
+        root, fields = self.remote_fields()
+        kept = [f for f in fields if f["field"] != "light-lane"]
+        light = {"field": "light-lane", "label": "light lane",
+                 "value": '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
+                 "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
+                 "text": True, "reason": None, "ask": "What is the light lane of sample-app?"}
+        self.assertEqual(set(light), cd.FIELD_KEYS)
+        at = [f["field"] for f in kept].index("attempt-budget") + 1
+        saved = [*kept[:at], light, *kept[at:]]
+        refreshed = cd.refresh(root, saved)
+        self.assertEqual([f["field"] for f in refreshed], [f["field"] for f in kept])
+        for new, old in zip(refreshed, kept):
+            self.assertEqual((new["value"], new["source"], new["reason"]),
+                             (old["value"], old["source"], old["reason"]))
+        cd.shown(refreshed)
+        cd.more_line(refreshed)
+        self.assertNotIn("light_lane", cd.contract(refreshed)["bindings"]["workflow"])
 
     def test_the_drafted_contract_resolves(self):
         root, fields = self.remote_fields()
@@ -283,7 +356,7 @@ class ContractDraftTest(unittest.TestCase):
             by_field(fields)["commit-environment"]["ask"],
             f"Which command opens the development shell the commits of {root.name} run in?\n"
             "Its commit hooks need its development shell: type the command, or say they need none.")
-        self.assertEqual(cd.more_line(fields), "and 22 more settings at their usual values")
+        self.assertEqual(cd.more_line(fields), "and 20 more settings at their usual values")
         fields = self.settled(fields, str(root), build_command="none", test_command="none")
         drafted = cd.contract(fields)
         self.assertEqual(drafted["bindings"]["commands"]["commit-environment"],
@@ -710,7 +783,7 @@ class ContractDraftTest(unittest.TestCase):
     def test_every_settled_value_is_shown_with_its_source(self):
         root, fields = self.remote_fields()
         lines = cd.shown(fields)
-        self.assertEqual(len(lines), 27)
+        self.assertEqual(len(lines), 25)
         self.assertTrue(all(entry["field"] for entry in lines))
         order = [entry["field"] for entry in lines]
         self.assertEqual(order, [f for f in cd.FIELDS if f not in ("build-command", "test-command")])
@@ -740,14 +813,14 @@ class ContractDraftTest(unittest.TestCase):
             for term in ("<num>", "<slug>", "light lane", "hint", "operations path",
                          "rejection path", "the console's starting value"):
                 self.assertNotIn(term, text.lower())
-        (light,) = [e for e in shown if e["field"] == "light-lane"]
-        self.assertEqual([o["label"] for o in light["options"]],
-                         ["Every change takes the full delivery route"])
+        (projections,) = [e for e in shown if e["field"] == "projections"]
+        self.assertEqual([o["label"] for o in projections["options"]],
+                         ["It generates no agent instruction files"])
 
     def test_the_counted_line_says_how_many_and_whether_you_changed_any(self):
         root, fields = self.remote_fields()
         count = len([f for f in cd.FIELDS if f not in cd.MAIN])
-        self.assertEqual(count, 22)
+        self.assertEqual(count, 20)
         self.assertEqual(cd.more_line(fields), f"and {count} more settings at their usual values")
         new, _ = cd.set_value(fields, "max-parallel", "2", entries=[], root=root)
         self.assertEqual(cd.more_line(new), f"and {count} more settings, 1 of them set by you")
@@ -762,7 +835,7 @@ class ContractDraftTest(unittest.TestCase):
             else:
                 self.assertIsNone(cd.placeholder(field))
         self.assertEqual([f for f in cd.FIELDS if cd.placeholder(f) is None],
-                         ["commit-signed", "co-authored-by", "delete-branch", "tracker"])
+                         ["commit-signed", "delete-branch", "tracker"])
         self.assertEqual(cd.placeholder("project-id"), "owner/name")
         self.assertEqual(cd.placeholder("build-command"), "the build command")
         self.assertEqual(cd.placeholder("test-command"), "the test command")

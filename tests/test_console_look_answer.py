@@ -124,7 +124,19 @@ class LookAnswerTest(QuestionRoutes):
         return next(item for item in view_of(svc)["inbox"]["open"]
                     if item["reason"] == "question" and item["sprint_id"] == sid)
 
+    def card_pictures(self):
+        """The (pair, id) of the pictures on the look card, read from the questions.asked row the test appended."""
+        (asked,) = self.rows("questions.asked")
+        (question,) = asked["questions"]
+        return [(picture.get("pair"), picture["picture"]) for picture in question["pictures"]]
+
     def marker_for(self, seq):
+        return look_marker.approval_body(
+            ISSUE, PR, HEAD, "approved", str(seq),
+            pictures=look_marker.picture_digest(self.card_pictures()))
+
+    def legacy_marker_for(self, seq):
+        """The marker the console posted before it named the pictures."""
         return look_marker.approval_body(ISSUE, PR, HEAD, "approved", str(seq))
 
     def test_an_approve_answer_posts_the_marker_the_merge_guard_admits(self):
@@ -146,6 +158,25 @@ class LookAnswerTest(QuestionRoutes):
         (message,) = [m for m in self.answers(svc, sid) if m["kind"] == "answer"]
         self.assertEqual(message["id"], seq)
         self.assertTrue(all(call["token_visible"] is False for call in self.world.calls()))
+
+    def test_an_approval_names_the_digest_of_the_cards_pictures(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.pull()
+        self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        ids = self.card_pictures()
+        self.assertEqual(len(ids), 2)
+        (comment,) = self.world.stored()
+        marker = forge_markers.parse(comment)
+        self.assertEqual(marker.fields["pictures"], look_marker.picture_digest(ids))
+        self.assertEqual(marker.fields["answer"], "approved")
+        candidate = look_marker.carry_candidate(self.world.stored(), ISSUE, PR, "f" * 40)
+        self.assertEqual(candidate.pictures, look_marker.picture_digest(ids))
+        # The digest names each picture's role: the same two ids with their roles swapped are another card.
+        self.assertEqual(sorted(pair for pair, _ in ids), ["after", "before"])
+        swapped = [(ids[0][0], ids[1][1]), (ids[1][0], ids[0][1])]
+        self.assertNotEqual(marker.fields["pictures"], look_marker.picture_digest(swapped))
 
     def test_an_approve_for_a_moved_head_records_nothing_and_the_card_says_why(self):
         svc = self.open()
@@ -218,6 +249,58 @@ class LookAnswerTest(QuestionRoutes):
         (posted,) = [r for r in self.rows("look.recorded") if r["outcome"] == "posted"]
         self.assertEqual(posted["comment_id"], 900)
         self.assertEqual(len(self.world.stored()), 1)
+
+    def test_a_retry_after_a_lost_reply_finds_a_marker_posted_before_the_upgrade(self):
+        svc = self.open()
+        sid, round_id, seq = self.failed_post(svc)
+        before = len(posts(self.world))
+        self.world.append_comment({"id": 900, "body": self.legacy_marker_for(seq),
+                                   "author_association": "OWNER", "created_at": "2026-11-06T10:00:00Z",
+                                   "updated_at": "2026-11-06T10:00:00Z"})
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        self.assertEqual(len(posts(self.world)), before)
+        (posted,) = [r for r in self.rows("look.recorded") if r["outcome"] == "posted"]
+        self.assertEqual(posted["comment_id"], 900)
+        self.assertEqual(len(self.world.stored()), 1)
+
+    def test_record_look_without_pictures_posts_todays_marker(self):
+        world = ForgeWorld(self)
+        world.respond_json("gh", PULL, {"number": PR, "state": "open", "merged": False,
+                                        "head": {"sha": HEAD}})
+        world.comment_store(SLUG, ISSUE, [], labels=[])
+        answer.record_look(SLUG, ISSUE, PR, HEAD, "41")
+        (comment,) = world.stored()
+        self.assertEqual(comment["body"], look_marker.approval_body(ISSUE, PR, HEAD, "approved", "41"))
+
+    def test_a_retry_finds_the_answers_marker_whatever_its_digest(self):
+        ids = ["c" * 64, "d" * 64]
+        digest = look_marker.picture_digest(ids)
+        stamp = {"author_association": "OWNER", "created_at": "2026-11-06T10:00:00Z",
+                 "updated_at": "2026-11-06T10:00:00Z"}
+        legacy = look_marker.approval_body(ISSUE, PR, HEAD, "approved", "41")
+        table = (
+            ("the same digest", [{"id": 900, "body": look_marker.approval_body(
+                ISSUE, PR, HEAD, "approved", "41", pictures=digest), **stamp}], 900),
+            ("no digest", [{"id": 900, "body": legacy, **stamp}], 900),
+            ("no digest, ended", [{"id": 900, "body": legacy, **stamp},
+                                  {"id": 901, "body": forge_markers.end_body(900, "withdrawn"),
+                                   **stamp}], 900),
+            ("another digest", [{"id": 900, "body": look_marker.approval_body(
+                ISSUE, PR, HEAD, "approved", "41",
+                pictures=look_marker.picture_digest(["b" * 64])), **stamp}], None))
+        for name, comments, found in table:
+            with self.subTest(name):
+                world = ForgeWorld(self)
+                world.comment_store(SLUG, ISSUE, comments, labels=[])
+                if found is None:
+                    with self.assertRaises(answer.Refused) as caught:
+                        answer.record_look(SLUG, ISSUE, PR, HEAD, "41", ids)
+                    self.assertEqual(str(caught.exception), answer.LOOK_PICTURES_DIFFER)
+                else:
+                    self.assertEqual(answer.record_look(SLUG, ISSUE, PR, HEAD, "41", ids), found)
+                self.assertEqual(posts(world), [])
+                self.assertEqual([a for a in gh_argvs(world) if any("pulls/" in x for x in a)], [])
+                self.assertEqual(len(world.stored()), len(comments))
 
     def test_record_look_refuses_a_comment_not_counted_as_the_owner(self):
         world = ForgeWorld(self)
@@ -358,6 +441,21 @@ class LookAnswerTest(QuestionRoutes):
         stamp = {"author_association": "OWNER", "created_at": "2026-11-06T10:00:00Z",
                  "updated_at": "2026-11-06T10:00:00Z"}
         self.world.append_comment({"id": 900, "body": self.marker_for(seq), **stamp})
+        self.world.append_comment({"id": 901, "body": forge_markers.end_body(900, "withdrawn"),
+                                   **stamp})
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        self.assertEqual(len(posts(self.world)), before)
+        self.assertEqual(len(self.world.stored()), 2)
+        (posted,) = [r for r in self.rows("look.recorded") if r["outcome"] == "posted"]
+        self.assertEqual(posted["comment_id"], 900)
+
+    def test_a_retry_does_not_undo_a_withdrawn_approval_posted_before_the_upgrade(self):
+        svc = self.open()
+        sid, round_id, seq = self.failed_post(svc)
+        before = len(posts(self.world))
+        stamp = {"author_association": "OWNER", "created_at": "2026-11-06T10:00:00Z",
+                 "updated_at": "2026-11-06T10:00:00Z"}
+        self.world.append_comment({"id": 900, "body": self.legacy_marker_for(seq), **stamp})
         self.world.append_comment({"id": 901, "body": forge_markers.end_body(900, "withdrawn"),
                                    **stamp})
         self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
@@ -527,7 +625,7 @@ class LookAnswerTest(QuestionRoutes):
     def test_a_sprint_closed_during_the_backoff_posts_nothing(self):
         calls, closing = [], []
 
-        def recorder(slug, issue, pr, head, message):
+        def recorder(slug, issue, pr, head, message, pictures):
             calls.append(message)
             raise ForgeError("gh_failed", "gh: Bad Gateway (HTTP 502)", transient=True)
 
@@ -665,7 +763,7 @@ class LookAnswerTest(QuestionRoutes):
     def test_a_second_retry_while_one_is_posting_is_refused(self):
         gate, entered, calls = threading.Event(), threading.Event(), []
 
-        def recorder(slug, issue, pr, head, message):
+        def recorder(slug, issue, pr, head, message, pictures):
             calls.append(message)
             if len(calls) == 1:
                 raise answer.Refused(answer.LOOK_UNTRUSTED)

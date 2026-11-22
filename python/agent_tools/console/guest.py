@@ -238,7 +238,7 @@ from agent_tools.console.view import project_for
 OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
     "capacity": None, "digest": None, "spend": None, "activation": None,
     "activation_run": None, "signin_runs": None, "accounts_added": (), "pin": None,
-    "pin_launches": (), "registration": None, "adoption_items": (), "release_items": (), "retry_items": (),
+    "pin_launches": (), "registration": None, "adoption_items": (), "release_items": (), "prompt_items": (), "retry_items": (),
     "apply_items": (), "confirm_items": (), "trust_items": (), "failure_items": (),
     "project_questions": None, "sharing": None})
 PASSED_INPUTS = frozenset({"now_ms", "managers", "nudges", "looked"})

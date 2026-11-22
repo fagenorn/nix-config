@@ -1,9 +1,11 @@
 import ast
 import concurrent.futures
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shlex
 import subprocess
@@ -5343,6 +5345,20 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         "an extra member": {"derived_repositories": {NODO: NODO_ROW}, "grants": []},
     }
 
+    @staticmethod
+    def installed_launcher(command):
+        """The launcher of this checkout's flake output `packages.<system>.agent-platform`, the package every host installs, so a hook pinned to an older package revision differs."""
+        system = {("Darwin", "arm64"): "aarch64-darwin", ("Linux", "x86_64"): "x86_64-linux"}[
+            (platform.system(), platform.machine())]
+        root = Path(__file__).resolve().parents[1]
+        done = subprocess.run(
+            ["nix", "--extra-experimental-features", "nix-command flakes", "eval", "--raw",
+             f"{root}#packages.{system}.agent-platform.launchers.{command}"],
+            capture_output=True, text=True, timeout=600, check=False)
+        if done.returncode != 0:
+            raise AssertionError(f"nix eval of the {command} launcher failed:\n{done.stderr[-4000:]}")
+        return done.stdout
+
     def test_built_base_policy_holds_exactly_the_five_trusted_members(self):
         """Issue 377 R1, R5; issue 384 D3: the store file holds the trusted members and no
         literal integration row, since every repository with one is a registered project."""
@@ -5368,7 +5384,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         script = row_check.read_text(encoding="utf-8")
         self.assertRegex(script, r'\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n')
         self.assertRegex(script, r'export PATH="/nix/store/\S+-git-[^:"]+/bin:')
-        self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-guard-policy derive "\$@"\n')
+        self.assertIn(f'exec {self.installed_launcher("guard-policy")} derive "$@"\n', script)
         launcher = Path(script.split("exec ", 1)[1].split(" ", 1)[0])
         self.assertRegex(launcher.read_text(encoding="utf-8"), r'\A#!/nix/store/\S+/bin/\S+ -p\n')
 
@@ -6550,6 +6566,109 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     self.LOOK_PINNED, repo, self.look_carry_env(comments, compares, **extra))
                 self.assert_look_refusal(result)
 
+    LOOK_DIGEST = hashlib.sha256(("a" * 64 + "\n" + "c" * 64).encode()).hexdigest()
+
+    def look_pics_comment(self, cid, head):
+        return {"id": cid,
+                "body": look_marker.approval_body(
+                    1200, 1300, head, "approved", f"m{cid}", pictures=self.LOOK_DIGEST),
+                "updated_at": "2026-11-16T10:00:00Z", "author_association": "OWNER"}
+
+    def look_carry_comment(self, cid, a, h, pictures=LOOK_DIGEST, association="OWNER"):
+        return {"id": cid, "body": look_marker.carry_body(1200, 1300, a, h, pictures),
+                "updated_at": "2026-11-16T10:00:00Z", "author_association": association}
+
+    def merges_world(self, after):
+        base, a, h = self.LOOK_BASE, self.LOOK_APPROVED, self.LOOK_HEAD
+        return {
+            f"{base}...{a}": self.look_compare([self.PAGE], commits=[(a, [self.LOOK_FORK])]),
+            f"{a}...{h}": self.look_compare([self.DOC]),
+            f"{base}...{h}": self.look_compare(commits=[(a, [self.LOOK_FORK])] + list(after)),
+        }
+
+    def test_a_carried_look_approval_admits_a_head_that_only_merged_main(self):
+        repo = self.look_repo()
+        a, h, x, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X, self.LOOK_T
+        comments = [self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)]
+        for name, after in {"one merge": [(h, [a, x])],
+                            "two merges": [(t, [a, x]), (h, [t, self.LOOK_F])]}.items():
+            with self.subTest(case=name):
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo,
+                    self.look_carry_env(comments, self.merges_world(after), look_files={}))
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("", result.stderr)
+
+    def test_a_line_that_does_not_carry_still_admits_a_head_the_look_files_keep(self):
+        a, h, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_T
+        compares = self.merges_world([(t, [a]), (h, [t])])
+        compares[f"{a}...{t}"] = self.look_compare([self.DOC])
+        compares[f"{t}...{h}"] = self.look_compare([self.DOC])
+        comments = [self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)]
+        result = self.run_guard(
+            self.LOOK_PINNED, self.look_repo(), self.look_carry_env(comments, compares))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stderr)
+
+    def test_the_look_gate_refuses_each_shape_a_carry_does_not_cover(self):
+        repo = self.look_repo()
+        a, h, x, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X, self.LOOK_T
+        pics, line = self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)
+        merged = self.merges_world([(h, [a, x])])
+        diverged = self.merges_world([(h, [a, x])])
+        diverged[f"{a}...{h}"]["status"] = "diverged"
+        cases = {
+            "no carry line": ([pics], merged),
+            "a line whose digest differs": ([pics, self.look_carry_comment(
+                11, a, h, hashlib.sha256(("b" * 64).encode()).hexdigest())], merged),
+            "an approval without pictures": ([self.look_comment(10, head=a), line], merged),
+            "a line naming another head": ([pics, self.look_carry_comment(11, a, t)], merged),
+            "a line naming another approved head": ([pics, self.look_carry_comment(11, x, h)], merged),
+            "a one-parent commit": ([pics, line], self.merges_world([(h, [a])])),
+            "a pull request commit as second parent": (
+                [pics, line], self.merges_world([(t, [a]), (h, [t, a])])),
+            "a merge of an earlier pull request merge": (
+                [pics, line], self.merges_world([(t, [a, x]), (self.LOOK_F, [t, x]), (h, [self.LOOK_F, t])])),
+            "a line by a collaborator": (
+                [pics, self.look_carry_comment(11, a, h, association="COLLABORATOR")], merged),
+            "a line that was ended": ([pics, line, self.look_end_comment(12, of=11)], merged),
+            "A...H diverged": ([pics, line], diverged),
+            "a later changes answer": (
+                [pics, line, self.look_comment(12, head=x, answer="changes")], merged),
+        }
+        for name, (comments, compares) in cases.items():
+            with self.subTest(case=name):
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo,
+                    self.look_carry_env(comments, compares, look_files={}))
+                self.assert_look_refusal(result)
+
+    def test_a_pictured_approval_is_kept_by_no_look_file_rule_without_its_carry_line(self):
+        # Issue 1566 review: the owner looked at pictures, so a head the look files alone would keep needs the carry line.
+        repo = self.look_repo()
+        a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
+        cases = {
+            "a non-merge commit outside the look files": self.look_world([(h, [a])], [self.TESTF]),
+            "a clean merge of main": self.look_world(
+                [(h, [a, x])], [self.DOC], extra=[(a, x, [self.DOC]), (x, a, [self.PAGE]), (x, h, [self.PAGE])]),
+        }
+        for name, compares in cases.items():
+            with self.subTest(case=name):
+                plain = self.run_guard(
+                    self.LOOK_PINNED, repo, self.look_carry_env([self.look_comment(10, head=a)], compares))
+                self.assertEqual(0, plain.returncode, plain.stderr)
+                pictured = self.run_guard(
+                    self.LOOK_PINNED, repo, self.look_carry_env([self.look_pics_comment(10, a)], compares))
+                self.assert_look_refusal(pictured)
+
+    def test_a_carried_head_still_needs_the_pinned_head(self):
+        a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
+        comments = [self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)]
+        result = self.run_guard(
+            self.LOOK_MERGE, self.look_repo(),
+            self.look_carry_env(comments, self.merges_world([(h, [a, x])]), look_files={}))
+        self.assert_look_refusal(result, self.LOOK_UNPINNED_REFUSAL)
+
     def test_a_worded_fix_admits_one_look_commit(self):
         repo = self.look_repo()
         a, h, f, f1 = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_F, self.LOOK_F1
@@ -6708,7 +6827,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         look_check = Path(wrapper.split("--look-bin ", 1)[1].split(" ", 1)[0])
         script = look_check.read_text(encoding="utf-8")
         self.assertRegex(script, r"\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n")
-        self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-look-approval judge "\$@"\n')
+        self.assertIn(f'exec {self.installed_launcher("look-approval")} judge "$@"\n', script)
 
     def test_the_merge_commit_text_reaches_the_look_gate_on_the_release_arm(self):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")

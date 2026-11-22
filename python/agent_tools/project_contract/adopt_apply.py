@@ -1107,7 +1107,7 @@ def commit_environment(payload: object, worktree: Path) -> dict | None:
 
 
 def run_leashed(argv: list[str], *, cwd: str, env: dict[str, str], stdout,
-                timeout: float) -> int:
+                timeout: float, stderr=subprocess.STDOUT) -> int:
     """Run `argv` so that its whole process tree ends with it, on every outcome.
 
     `subprocess.run(timeout=...)` kills only the process it started, and the
@@ -1122,6 +1122,7 @@ def run_leashed(argv: list[str], *, cwd: str, env: dict[str, str], stdout,
     value is the launcher's exit code; `subprocess.TimeoutExpired` and
     `OSError` propagate after the group is ended. A launcher that starts its
     own session escapes the group, but is itself killed and reaped here.
+    `stderr` is merged into `stdout` unless a file is given.
     """
     leash = subprocess.Popen(
         ["sh", "-c", "read _; kill -KILL 0", "commit-leash"],
@@ -1131,7 +1132,7 @@ def run_leashed(argv: list[str], *, cwd: str, env: dict[str, str], stdout,
     try:
         launcher = subprocess.Popen(
             argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
-            stderr=subprocess.STDOUT, process_group=leash.pid)
+            stderr=stderr, process_group=leash.pid)
         return launcher.wait(timeout=timeout)
     finally:
         leash.stdin.close()

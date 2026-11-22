@@ -12,3 +12,4 @@ include = ["agent_tools*"]
 
 [tool.setuptools.package-data]
 "agent_tools.console" = ["page.html", "spend.html", "manager-contract.md"]
+"agent_tools.delivery" = ["command_verdicts.json", "procedures/*.json", "procedures/*.md"]

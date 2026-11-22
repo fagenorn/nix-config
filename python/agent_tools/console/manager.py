@@ -79,8 +79,9 @@ per-sprint settings file (mode 0600, replaced on a retry) and passes `--settings
 Code applies a settings file's `env` to that session. Only the path is on argv. The file holds
 three more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}`, because a manager
 writes no code and every delivery makes its own worktree, and `hooks`, which hold three. One `PermissionRequest`
-command hook prints the client's deny decision with `REFUSAL`, one fixed sentence, because nobody
-watches a manager's session (a plain `printf`, no interpreter start). A `PreToolUse` and a
+command hook runs `PROMPT_COMMAND` (`sprint permit --prompt`, `timeout` `PROMPT_TIMEOUT`) and, should it
+crash, prints the client's deny decision with `REFUSAL`, one fixed sentence, through `|| printf`
+(#1424, ADR-console-021 as amended). A `PreToolUse` and a
 `PostToolUse` command hook, each with matcher `Bash` and no `if` filter, run `PERMIT_COMMAND`
 (`sprint permit`, `PERMIT_TIMEOUT` 60 seconds) and `LANDED_COMMAND` (`sprint permit --landed`,
 `LANDED_TIMEOUT` 30 seconds): the console judges each Bash call of the session and allows only the
@@ -96,7 +97,10 @@ allow rule, no ask rule, no `autoMode` and no `disableAllHooks`. A launch built 
 permission carries `permission.FALLBACK`,
 so `auto`. `settings_document(env, permission)` is that content and `write_settings(path, env,
 permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a
-stopped or removed session (`service._refresh_settings`).
+stopped or removed session (`service._refresh_settings`). A manager's Bash prompt the permit does
+not decide is held by its hook for `PROMPT_HOLD_SECONDS`, polled every `PROMPT_POLL_SECONDS`, and the hook's
+`timeout` is `PROMPT_TIMEOUT` seconds (#1424); the constants live here so the cycle `sprint -> manager` stays
+whole.
 
 Runner. On macOS `run_launch` runs it with `run_in_own_group`, so a launch that times out ends the
 wrapper and the client it waits for together, not the wrapper alone. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
@@ -200,6 +204,10 @@ PERMIT_COMMAND = "sprint permit"
 LANDED_COMMAND = "sprint permit --landed"
 PERMIT_TIMEOUT = 60
 LANDED_TIMEOUT = 30
+PROMPT_COMMAND = "sprint permit --prompt"
+PROMPT_HOLD_SECONDS = 600
+PROMPT_POLL_SECONDS = 2
+PROMPT_TIMEOUT = 660
 MANAGER_DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)")
 LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 
@@ -235,7 +243,9 @@ _PLAIN_TABLE = (
     ("secret is missing", SECRET_TEXT),
 )
 
-_DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV)
+# `AGENT_PLATFORM_ROOT` is the console launcher's own package root: a session's commands set it
+# again through their launchers, and a source-run child must read `$HOME`'s manifest (ADR-system-005).
+_DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV, "AGENT_PLATFORM_ROOT")
 
 
 def plain_reason(reason: str | None) -> str:
@@ -511,7 +521,7 @@ def launcher_for(platform: str) -> Callable[[Launch], None] | None:
 
 
 def settings_document(env: Mapping[str, str], permission: permissions.Permission) -> dict:
-    """The settings a manager's session runs under: its environment, no isolation guard, no prompts, the mode, the permit hooks and the deny rule."""
+    """The settings a manager's session runs under: its environment, no isolation guard, a Bash prompt held for the owner, the mode, the permit hooks and the deny rule."""
     refusal = json.dumps({"hookSpecificOutput": {
         "hookEventName": "PermissionRequest",
         "decision": {"behavior": "deny", "message": REFUSAL}}})
@@ -519,7 +529,9 @@ def settings_document(env: Mapping[str, str], permission: permissions.Permission
             "worktree": {"bgIsolation": "none"},
             "hooks": {
                 "PermissionRequest": [{"hooks": [{
-                    "type": "command", "command": f"printf '%s\\n' {shlex.quote(refusal)}"}]}],
+                    "type": "command",
+                    "command": f"{PROMPT_COMMAND} || printf '%s\\n' {shlex.quote(refusal)}",
+                    "timeout": PROMPT_TIMEOUT}]}],
                 "PreToolUse": [{"matcher": "Bash", "hooks": [{
                     "type": "command", "command": PERMIT_COMMAND, "timeout": PERMIT_TIMEOUT}]}],
                 "PostToolUse": [{"matcher": "Bash", "hooks": [{

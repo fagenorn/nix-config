@@ -85,6 +85,17 @@ says `(project schema 2)`. The resolver and adoption tests read a pinned
 schema-2 contract, `home/common/agent-skills/tests/fixtures/project-contract-schema-2.json`
 (P11).
 
+The platform defines two commands every snapshot carries in `bindings.commands`:
+`codex-plan-review` and `codex-diff-review` (`agent_platform.PLATFORM_COMMANDS`,
+ADR-project-contract-010). The resolver adds each one the contract does not
+author under its id, with `cwd` made absolute like any other; an entry the
+contract authors under a platform id is read as authored and replaces the
+platform's whole. A reference to a command id (verification, review, the commit
+environment, production commands) is checked against the authored and platform
+ids together, so a contract may name a platform command without authoring it.
+Schema 2 is unchanged: a supported `review.plan` or `review.code` still needs
+its authored `bindings.workflow.review` id.
+
 `write-projections` is the tool's only writer. It renders each declared
 projection from the single instruction source and brings its native entry
 target into sync: a wholly generated file for one agent, one managed import
@@ -221,6 +232,11 @@ MERGE_MEMBERS = ("strategy", "delete_branch")
 # never inserts it.
 MERGE_OPTIONAL_MEMBERS = ("required_checks",)
 COMMIT_MEMBERS = ("co_authored_by", "signed")
+# Issue 1449 (decided in #1430): attribution is decided only by the generated
+# Claude Code settings, so nothing reads or asks for a co-author setting.
+# Schema 2 still requires the member, so a writer of a schema-2 contract writes
+# it with this value; the schema-3 migration (#1453) deletes it.
+RETIRED_COMMIT_MEMBERS: dict[str, bool] = {"co_authored_by": False}
 # Issue 1249 / ADR-project-contract-008: the id of the `bindings.commands`
 # entry the adoption commit runs through. Absent means the commit runs git
 # alone, and the resolver never inserts it.
@@ -239,8 +255,9 @@ COMMAND_MEMBERS = ("argv", "cwd", "env")
 WORKFLOW_MEMBERS = ("verification", "orchestration", "review")
 # The workflow members an author may leave out: `light_lane` (#279) and
 # `verification_conditions` (issue 437). For each, `null` and absent both mean
-# none (no light lane; every declared verification id runs), and the resolver
-# never inserts either member itself.
+# none (every declared verification id runs), and the resolver never inserts
+# either member itself. `light_lane` is accepted on a schema-2 contract until
+# the schema-3 slice (#1453) removes it, and no tool reads it.
 WORKFLOW_OPTIONAL_MEMBERS = ("light_lane", "verification_conditions")
 # #310: the one orchestration member an author may leave out; never defaulted.
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
@@ -353,11 +370,11 @@ CANONICAL_PATH_MESSAGE = ("must be spelled canonically: '/'-separated, with no "
 
 
 def is_canonical_path(path: str) -> bool:
-    """The one spelling `lane-triage` matches: '/'-separated, with no backslash,
+    """The one spelling contract path globs are matched in: '/'-separated, with no backslash,
     no empty or `.` segment and no trailing `/` (#279 D11).
 
-    `risk_paths` globs and triage record paths both meet it, because
-    `fnmatchcase` compares the strings unchanged.
+    Contract globs and the paths they are matched against both meet it,
+    because `fnmatchcase` compares the strings unchanged.
     """
     return "\\" not in path and all(segment not in ("", ".") for segment in path.split("/"))
 
@@ -366,8 +383,8 @@ def any_path_matches(paths: list[str], globs: list[str]) -> bool:
     """True when some path matches some glob under `fnmatch.fnmatchcase`.
 
     Both are compared as spelled, so `*` also crosses `/` (#279 D4, issue 437
-    D3). It is the one matcher for contract path globs; `lane-triage` calls it
-    for `risk_paths` and `verified-tree` for `when_changed`.
+    D3). It is the one matcher for contract path globs; `verified-tree` calls it
+    for `when_changed`.
     """
     return any(fnmatch.fnmatchcase(path, glob) for path in paths for glob in globs)
 
@@ -983,8 +1000,9 @@ def validate_bindings(source: dict, violations: list[dict]) -> None:
                 violations):
             present[namespace] = bindings[namespace]
     commands = present.get("commands")
+    known = effective_commands(commands)
     if "vcs" in present:
-        validate_vcs(present["vcs"], commands, violations)
+        validate_vcs(present["vcs"], known, violations)
     if "tracker" in present:
         validate_tracker(present["tracker"], violations)
     if "paths" in present:
@@ -992,7 +1010,7 @@ def validate_bindings(source: dict, violations: list[dict]) -> None:
     if commands is not None:
         validate_commands(commands, violations)
     if "workflow" in present:
-        validate_workflow(present["workflow"], commands, violations)
+        validate_workflow(present["workflow"], known, violations)
 
 
 def validate_capabilities(source: dict, violations: list[dict]) -> None:
@@ -1168,11 +1186,26 @@ def check_production_entries(
                 "contract.production.route_both_ways"))
 
 
+def effective_commands(authored: dict | None) -> dict | None:
+    """The authored commands plus every platform command the contract does not author.
+
+    None stays None. An authored id always wins whole (ADR-project-contract-010);
+    each platform entry is a deep copy, so no caller can change the definition.
+    """
+    if authored is None:
+        return None
+    merged = {command_id: copy.deepcopy(entry)
+              for command_id, entry in agent_platform.PLATFORM_COMMANDS.items()
+              if command_id not in authored}
+    merged.update(authored)
+    return merged
+
+
 def production_commands(source: dict) -> dict | None:
-    """The `bindings.commands` object, or None when it is not one (as `validate_bindings`)."""
+    """The authored `bindings.commands` object with the platform's, or None when it is not one (as `validate_bindings`)."""
     bindings = source.get("bindings")
     commands = bindings.get("commands") if isinstance(bindings, dict) else None
-    return commands if isinstance(commands, dict) else None
+    return effective_commands(commands if isinstance(commands, dict) else None)
 
 
 def validate_production(source: dict, violations: list[dict]) -> None:
@@ -1322,10 +1355,12 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
 def normalize_bindings(source_bindings: dict, root: Path) -> dict:
     """The source bindings with every authored path made absolute under `root`.
 
-    Exactly the artifact paths, the six knowledge path lists and each command's
-    `cwd` are rewritten; every other value is passed through byte-for-byte.
+    The platform commands the contract does not author are added first. Exactly
+    the artifact paths, the six knowledge path lists and each command's `cwd`
+    are rewritten; every other value is passed through byte-for-byte.
     """
     bindings = copy.deepcopy(source_bindings)
+    bindings["commands"] = effective_commands(bindings["commands"])
     paths = bindings["paths"]
     artifacts = paths["artifacts"]
     for name in ("specs", "plans"):

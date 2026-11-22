@@ -15,8 +15,9 @@
         "prefix": "worktree-"
       },
       "commit": {
-        "co_authored_by": true,
-        "signed": true
+        "co_authored_by": false,
+        "signed": true,
+        "environment": "commit-environment"
       },
       "merge": {
         "strategy": "merge",
@@ -44,7 +45,7 @@
         "docs/standards"
       ],
       "architecture": [
-        "CLAUDE.md"
+        "docs/guides/architecture.md"
       ],
       "operations": [],
       "hints": [],
@@ -77,6 +78,22 @@
         "cwd": ".",
         "env": []
       },
+      "lint": {
+        "argv": [
+          "just",
+          "lint"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "test": {
+        "argv": [
+          "just",
+          "test"
+        ],
+        "cwd": ".",
+        "env": []
+      },
       "codex-plan-review": {
         "argv": [
           "codex-companion",
@@ -98,11 +115,21 @@
         ],
         "cwd": ".",
         "env": []
+      },
+      "commit-environment": {
+        "argv": [
+          "devenv",
+          "shell",
+          "--"
+        ],
+        "cwd": ".",
+        "env": []
       }
     },
     "workflow": {
       "verification": [
-        "nix-build"
+        "lint",
+        "test"
       ],
       "orchestration": {
         "max_parallel": 2,
@@ -111,17 +138,6 @@
       "review": {
         "plan": "codex-plan-review",
         "code": "codex-diff-review"
-      },
-      "light_lane": {
-        "mode": "shadow",
-        "budget_minutes": 90,
-        "risk_paths": [
-          "home/common/claude-code/lifecycle_guard.py",
-          "python/agent_tools/release/transaction_*.py",
-          "python/agent_tools/project_contract/resolve_project.py",
-          "python/agent_tools/delivery/lane_triage.py",
-          ".agents/project.json"
-        ]
       }
     }
   },

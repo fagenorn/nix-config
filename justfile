@@ -15,9 +15,12 @@ build target_host=hostname flags="":
 trace target_host=hostname: (build target_host "--show-trace")
 
 # Build the nix-darwin configuration and switch to it
+# Fleet preflight (issue 1451) runs between the build and the activation, as a body line so --no-deps cannot skip it.
+# It reads the working directory's tree (the one built and activated), not the justfile's, so --working-directory cannot split them.
 [macos]
 switch target_host=hostname: (build target_host)
   @echo "switching to new config for {{target_host}}"
+  PYTHONPATH="$PWD/python" nix --extra-experimental-features 'nix-command flakes' shell --inputs-from "$PWD" nixpkgs#python3 --command python3 -B -m agent_tools.project_contract.fleet_preflight --manifest "$PWD/home/common/agent-skills/platform-manifest.json"
   sudo ./result/sw/bin/darwin-rebuild switch --flake ".#{{target_host}}"
 
 # Mint a one-hour registration token per self-hosted runner (see
@@ -64,9 +67,12 @@ build target_host=hostname flags="":
 trace target_host=hostname: (build target_host "--show-trace")
 
 # Build the NixOS configuration and switch to it.
+# Fleet preflight (issue 1451) runs between the build and the activation, as a body line so --no-deps cannot skip it.
+# It reads the working directory's tree (the one built and activated), not the justfile's, so --working-directory cannot split them.
 [linux]
 switch target_host=hostname: (build target_host)
   @echo "Switching NixOS config for {{target_host}}..."
+  PYTHONPATH="$PWD/python" nix --extra-experimental-features 'nix-command flakes' shell --inputs-from "$PWD" nixpkgs#python3 --command python3 -B -m agent_tools.project_contract.fleet_preflight --manifest "$PWD/home/common/agent-skills/platform-manifest.json"
   sudo nixos-rebuild switch --flake .#{{target_host}}
 
 ## colmena
@@ -91,6 +97,14 @@ evals skill id:
 agent_tools_path := justfile_directory() / "python"
 system_result := justfile_directory() / "result"
 
+# Run the lints (verification command `lint`): every member runs and each failing one is named.
+lint:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command lint
+
+# Run the build then the agent workflow suite (verification command `test`), naming each failing member.
+test:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command test
+
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output).
 agent-workflow-tests *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
@@ -109,6 +123,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_resolve_platform.py \
     home/common/agent-skills/tests/test_resolve_platform_status.py \
+    home/common/agent-skills/tests/test_fleet_preflight.py \
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
@@ -124,7 +139,9 @@ agent-workflow-tests *args:
     tests/test_agent_tools_siblings.py \
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
-    tests/test_lane_triage.py \
+    tests/test_engine_check.py \
+    tests/test_engine_ledger.py \
+    tests/test_engine_core.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -133,6 +150,8 @@ agent-workflow-tests *args:
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
     tests/test_host_readings.py \
+    tests/test_platform_package_hosts.py \
+    tests/test_fleet_preflight_recipes.py \
     tests/test_darwin_user_agent_reload.py \
     tests/test_darwin_path_order.py \
     tests/test_pinned_file.py \
@@ -195,6 +214,7 @@ agent-workflow-tests *args:
     tests/test_promotion_deployment.py \
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
+    tests/test_adr_number.py \
     tests/test_docs_tree.py \
     tests/test_standard_ids.py \
     tests/test_decision_record_wording.py \
@@ -205,9 +225,13 @@ agent-workflow-tests *args:
     tests/test_branch_protection.py \
     tests/test_devenv_cache_ignored.py \
     tests/test_suite_runner.py \
+    tests/test_verify_slot.py \
+    tests/test_verification_command.py \
     tests/test_console_event_log.py \
     tests/test_console_release_card.py \
     tests/test_console_release_card_service.py \
+    tests/test_console_prompt_card.py \
+    tests/test_console_prompt_card_service.py \
     tests/test_console_view.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
@@ -254,6 +278,8 @@ agent-workflow-tests *args:
     tests/test_console_run_line_check.py \
     tests/test_console_look_check.py \
     tests/test_console_look_kept_check.py \
+    tests/test_console_live_fault_check.py \
+    tests/test_pr_green.py \
     tests/test_console_page.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
@@ -326,7 +352,7 @@ agent-instruction-budget *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 104 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 110 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail
@@ -366,6 +392,10 @@ agent-installed-skill-tests: build
       tests/test_promotion_installed.py \
       tests/test_impeccable_installed.py \
       tests/test_claude_code_installed.py
+
+# Compare the skills activated on this host (~/.claude/skills) with the skill source; run it after a switch, since `test` checks the skills from source only (issue 1580).
+agent-activated-skill-tests:
+  env -u WORKFLOW_POLICY_SURFACE PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v -k test_installed_policy_surface_matches_source_contract home/common/agent-skills/tests/test_workflow_skill_contracts.py
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.

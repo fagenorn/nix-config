@@ -1,0 +1,8 @@
+#!/bin/sh
+# Verify check for issue 1451: the fleet preflight, run from this checkout's source without writing
+# bytecode, judges every project in this host's fleet registry against the checkout's own platform
+# manifest, and its rows must match the registry's entries one for one. Prints one JSON line; the
+# block's expect requires at least one row. Exit 0 every project can run on it, 1 one cannot or the
+# rows do not match, 2 the manifest or the registry will not read.
+# verify-pending runs it from the repository root at the commit the block names.
+PYTHONPATH=python exec python3 -B -m agent_tools.verification.verify_checks fleet-preflight "$@"

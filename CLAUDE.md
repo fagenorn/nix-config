@@ -14,6 +14,8 @@ just build            # build only, no activation — use this to validate a cha
 just trace            # build with --show-trace (debug eval errors)
 just switch           # build + darwin-rebuild/nixos-rebuild switch (may prompt for sudo)
 just build mbp        # target a specific host explicitly
+just lint             # the repository's lints (verification command lint)
+just test             # just build, then the agent workflow suite (verification command test)
 just show-claude-settings # print the generated settings JSON (builds first)
 just agent-instruction-budget # the Instruction Budget gate against origin/main (--raise-label for a labelled raise)
 just update           # nix flake update (advances ALL inputs, incl. claude-code)
@@ -21,30 +23,9 @@ just gc 5             # delete old generations (keep 5) + nix-store --gc
 just install <IP>     # remote-provision a fresh NixOS box over SSH
 ```
 
-There is **no unit-test suite for the Nix configs** — `just build` (a successful Nix evaluation + build) is the local verification step. After editing any `.nix`, run `just build` before claiming success; switch only when asked. CI (`.github/workflows/ci.yaml`) runs on pull requests and on push to `main`: `Flake Checker` annotates `flake.lock` health without failing, and **`.github/branch-protection.json` makes three contexts required on `main`: `Nix Eval` (evaluates `nixosConfigurations.anis-desktop` on Linux), `Agent Workflow Tests` and `Instruction Budget` (`.github/workflows/instruction-budget.yaml`)** — once `just protect-main` has been applied, `gh pr merge` (including `--admin`) is refused until all are green on a branch that is up to date with `main`, and direct pushes to `main` are refused outright (a commit that has never reached the remote can carry no status). CI builds a portable oMLX adapter check, but does not build, deploy, or evaluate the darwin configurations (`mbp`, `eleven-m5`), so macOS configuration verification remains the author's local responsibility. `just protect-main` / `just unprotect-main` / `just show-protection` manage that protection from `.github/branch-protection.json`.
+There is **no unit-test suite for the Nix configs** — `just build` (a successful Nix evaluation + build) is how a Nix change is validated, and local verification is the contract's two commands, run from the root with no arguments: `just lint` (the repository's lints) and `just test` (`just build`, then `just agent-workflow-tests`). After editing any `.nix`, run `just build` before claiming success; switch only when asked. CI (`.github/workflows/ci.yaml`) runs on pull requests and on push to `main`: `Flake Checker` annotates `flake.lock` health without failing, and **`.github/branch-protection.json` makes three contexts required on `main`: `Nix Eval` (evaluates `nixosConfigurations.anis-desktop` on Linux), `Agent Workflow Tests` and `Instruction Budget` (`.github/workflows/instruction-budget.yaml`)** — once `just protect-main` has been applied, `gh pr merge` (including `--admin`) is refused until all are green on a branch that is up to date with `main`, and direct pushes to `main` are refused outright (a commit that has never reached the remote can carry no status). CI builds a portable oMLX adapter check, but does not build, deploy, or evaluate the darwin configurations (`mbp`, `eleven-m5`), so macOS configuration verification remains the author's local responsibility. `just protect-main` / `just unprotect-main` / `just show-protection` manage that protection from `.github/branch-protection.json`.
 
-## Architecture
-
-`flake.nix` → imports `vars/` (→ `myvars`) and `lib/` (→ `libx`) → builds `darwinConfigurations.{mbp,eleven-m5}` and `nixosConfigurations.anis-desktop` via `libx.mkDarwin` / `libx.mkNixos` (both in **`lib/helpers.nix`** — the structural heart of the repo).
-
-Each builder assembles a layered module list:
-
-```
-hosts/common/common-packages.nix      # packages shared by ALL hosts/platforms
-hosts/common/{darwin,linux}-common.nix # system-level: nix settings, OS defaults, homebrew (darwin)
-home-manager (as a nix-darwin/NixOS module)
-  └─ home/default.nix                  # platform-agnostic user config
-  └─ home/{darwin,linux}-common.nix    # platform-specific user config
-```
-
-Two repo-specific helpers in `lib/helpers.nix` drive almost everything — understand them first:
-
-- **`scanPaths <dir>`** — auto-imports every subdirectory and `.nix` file in `<dir>` (excluding `default.nix` itself). This is why `home/default.nix`, `home/darwin-common.nix`, and `home/linux-common.nix` end in `imports = (libx.scanPaths ./common/./darwin/./linux)`. **To add a module, just create `home/common/<name>/default.nix` (or `home/darwin/...`, `home/linux/...`) — it is picked up automatically. Never maintain an import list.**
-- **`mergeFilesOrdered [dirs]`** — reads regular files from each dir in sorted order and concatenates their contents. Used to build the zsh rc from `data/zshrc/` fragments (see below).
-
-`myvars` (`vars/default.nix`: `username`, sops paths) and `libx` are threaded through `specialArgs`/`extraSpecialArgs`, so every module receives them as function args. Change the username in one place (`vars/default.nix`) and it propagates.
-
-**Agent helper package.** All agent-workflow Python is one standard-library package, `agent_tools`, under `python/` (with its `pyproject.toml`). Each command is a module plus a row in the `lib/agent-tools.nix` command table, and `docs/standards/agent-helpers.md` binds it. The `just` recipes that run package code set `PYTHONPATH` to `python/`, and tests run commands as `python -m agent_tools.<area>.<module>` (`agent_tools.<module>` for the top-level modules `docs/standards/package-layout.md` keeps flat). Each command's contract is its module docstring, the package overview (layout, running, testing) is [`python/README.md`](python/README.md), and decisions are ADRs under `docs/areas/`; new detail goes where [`docs/README.md`](docs/README.md) routes it, not here.
+The flake layout, module layering, helpers and the agent helper package are described in [the architecture guide](docs/guides/architecture.md).
 
 ## Key conventions & gotchas
 

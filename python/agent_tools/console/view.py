@@ -112,9 +112,10 @@ null when `derive_view` is given none.
 The headline is "1 thing needs you" or "<n> things need you" for open items (a waiting brief is one,
 and so is each open question of the registration's plan, and each retry, apply, confirm,
 failure or trust card, see below, and each running sprint whose `ball` is `owner` and that no item
-above already counts: its manager waits for an answer or a permission at its terminal, #1247; it
-has no card, so the heading and its `TERMINAL_SENTENCE` are all that name it; a manager that
-cannot hear the console, #1229, is counted too but is not a terminal question), else
+above already counts: its manager cannot hear the console, #1229; it has no card, so the heading
+and its `DEAF_SENTENCE` are all that name it, #1247; and each open permission card, below, counts
+once. A manager's waiting state alone (a session waiting for an answer or a permission) counts
+nothing, #1424: only an open permission card does), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
@@ -122,10 +123,10 @@ stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` whe
 stalled, else `FAILED_START_SENTENCE` when a manager failed to start, else `PROGRESS_SENTENCE`
 when a manager stopped making progress, else `SIGNIN_SENTENCE`
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
-merge, else `QUESTION_SENTENCE` when any manager question is open, else, when only such sprints are
-counted, `TERMINAL_SENTENCE` for managers waiting at their terminals (an answer, or a permission unless the manager cannot hear the console), `DEAF_SENTENCE` for managers
-that cannot hear the console or are otherwise not waiting at a terminal (nothing to answer there),
-`TERMINAL_DEAF_SENTENCE` for both, else
+merge, else `QUESTION_SENTENCE` when any manager question is open, else `PERMISSION_SENTENCE` when any permission card is open (a
+held prompt is refused when its ten minutes run out, so it outranks every item below, a tracker
+item that waits included), else, when only sprints whose managers cannot hear the console are
+counted, `DEAF_SENTENCE`, else
 `REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
 can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
@@ -264,6 +265,19 @@ yet. Its entry is
 
 The item is listed per `approve.inbox_entries`, and Merge is offered (`merge` true, `why` null) only per
 `approve.merge_refusal`; otherwise `why` says in plain words why the card offers no Merge.
+
+A permission card (#1424, `prompt_card.inbox_entries`) arrives through the `prompt_items` argument, one mapping
+each, and is one entry of `inbox.open`, copied, right after the release entries, in the order given. It counts
+once in `inbox_items` and the headline, is not filtered by the registered projects, and its `sprint_id` marks
+that sprint `prompted` (its ball is `owner`, its now-sentence `NOW_PERMISSION_TEXT`, and it is never counted a
+second time). Its entry is
+
+    {"type": "inbox_item", "reason": "permission", "key": "permission/<prompt>", "project_id": "<project>",
+     "sprint_id": "<sprint>", "prompt": <prompt number>, "title": "<sprint title>",
+     "headline": "The manager of <title> asks to run a command", "words": "<what the command is for>",
+     "command": "<the command>", "answered": false, "waiting_since": "<time the prompt opened>"}
+
+A guest view never carries one.
 
 A release card (#1401, `release_card.inbox_entries`) arrives through the `release_items` argument, one mapping each,
 and is one entry of `inbox.open`, copied, right after the adoption entries, in the order given. It counts in
@@ -481,6 +495,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "kind": "claim" | "heads-up" | "hand-off", "kind_text": "<text>",
                       "text": "<text>", "what": "<text>" | null, "until_text": "<text>" | null,
                       "to_text": "<text>" | null, "at": "<time>", "owner": <bool>}
+    <live fault entry> = {"id": <int>, "issue": <int>, "observed", "when", "proven",
+                          "at": "<time>", "text": "<text>"}
     <overlap entry> = {"sprints": [<earlier-started sprint id>, <other sprint id>],
                        "files": ["<path>", ...], "text": "<text>"}
     <sprint entry> = {"type": "sprint", "sprint_id", "title", "goal",
@@ -505,6 +521,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "waiting": <int>,
                       "checks": [{"project_id", "key", "issue", "question", "text"}, ...],
                       "waits": [<wait entry>, ...],
+                      "live_faults": [<live fault entry>, ...],
                       "sessions": [<session entry>, ...],
                       "messages": [<message entry>, ...],
                       "reach_text": "manager not reachable" | null,
@@ -640,13 +657,14 @@ phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track
 sprint has exactly one ball and a non-empty now-sentence, and `state` and `state_text` are
 unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on you") when `waiting`
 is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
-set, its manager failed to start with no brief (`sprints.failed_start`), one of the sprint's listed sessions is waiting for an answer or a permission (the manager
-waits on the owner at its terminal), or its manager cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
+set, its manager failed to start with no brief (`sprints.failed_start`), the sprint has an open permission card
+(`prompted`, #1424; a listed session waiting for an answer or a permission is no longer read here), or its manager
+cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
 else `nobody` ("nothing running, may be stuck"), except that a stated pause (`paused`, "paused") or a stated wait whose time is ahead (`waiting`, "waiting"; `sprints.stated_hold`, #1380) holds it, after the owner's rules and before the movement reading, until the stated time has passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
-that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, `NOW_ANSWER_TEXT`; a manager that cannot hear the console
+that holds: a stop requested, `NOW_STOPPING_TEXT`; a manager that cannot hear the console
 (#1229: the sprint's manager session has `SessionMovement.held`, its transcript's last peer message
-being one the client held and did not deliver), `NOW_DEAF_TEXT`; a listed session waiting for a
-permission, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
+being one the client held and did not deliver), `NOW_DEAF_TEXT`; an open permission card of the sprint,
+`NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
 `drafting`); no brief or one the owner asked to change,
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
@@ -735,6 +753,11 @@ landed gives none) whose rule is `OVERLAP_UNSETTLED`, in `claim_overlaps` order,
 is `OVERLAP_UNSETTLED_TEXT` over the two sprints' titles in that order and the files joined with
 `", "`. A settled overlap gives no entry. An overlap entry is never an inbox item and changes no
 `inbox`, count, headline, sentence or `stale` (#1347, ADR-console-091).
+Every sprint entry, running or finished, carries `live_faults`: the sprint's standing live-fault
+declarations (`open_faults`, so never a withdrawn one) in id order, `[]` when none. `text` is
+`LIVE_FAULT_TEXT` over the issue, `observed`, `when` and `proven`; `at` is the declaration's own time,
+unchanged. A live fault is never an inbox item and changes no `inbox`, count, headline, sentence or
+`stale` (#1432).
 Every entry carries `owner`, false for a sprint's notice. The project's open owner notices
 (`owner_notices`, a map from project id to its folded owner notices, default none; only
 `open_owner_notices` of them, so never a withdrawn one) join the same list, ordered by `id` with the
@@ -837,7 +860,6 @@ from agent_tools.console.sprints import (
     NOTICE_OWNER,
     NOT_PICKED_UP,
     NOT_PICKED_UP_TEXT,
-    NOW_ANSWER_TEXT,
     NOW_BRIEF_TEXT,
     NOW_CI_TEXT,
     NOW_COMMITTING_TEXT,
@@ -905,6 +927,7 @@ from agent_tools.console.sprints import (
     WAIT_UNTIL,
     age_text,
     claim_overlaps,
+    fault_entry,
     closing_text,
     cut,
     ended_at,
@@ -917,6 +940,7 @@ from agent_tools.console.sprints import (
     open_questions,
     pending_looks,
     project_notices,
+    open_faults,
     open_notices,
     open_owner_notices,
     progress_text,
@@ -946,6 +970,7 @@ NOTICE_OWNER_TEXT = "for you"
 NOTICE_FOR_TEXT = "for {title}"
 NOTICE_OTHER_TEXT = "for another sprint"
 NOTICE_YOU_TEXT = "You"
+LIVE_FAULT_TEXT = "Live fault in production on #{issue}: {observed}, seen {when}, proven by {proven}"
 OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a live fault in {files}; "
                           "the rule could not decide which lands first")
 ASK_WORKING_TEXT = "Working on it"
@@ -964,8 +989,6 @@ _ASK_STATE_TEXT = {project_question.WORKING: ASK_WORKING_TEXT,
 _RANK = {state: rank for rank, state in enumerate(
     (WAITING_ANSWER, WAITING_PERMISSION, WORKING, LIMIT, IDLE))}
 _WAITING = (WAITING_ANSWER, WAITING_PERMISSION)
-_SPRINT_STATE_TEXT = {**STATE_TEXT, WAITING_ANSWER: "waiting for an answer",
-                      WAITING_PERMISSION: "waiting for a permission"}
 _SUMMARY_PARTS = (
     ("working", (WORKING,)),
     ("waiting", _WAITING),
@@ -986,9 +1009,8 @@ FAILED_START_SENTENCE = "Retry to start the manager, or drop the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
-TERMINAL_SENTENCE = "Answer it in the manager's terminal."
 DEAF_SENTENCE = "Bring the manager back, or drop the sprint."
-TERMINAL_DEAF_SENTENCE = "Answer it in the manager's terminal, or bring the other manager back, or drop its sprint."
+PERMISSION_SENTENCE = "Allow the command once or refuse it on its card."
 ADOPTION_SENTENCE = "Merge the adoption from its card; when it cannot be merged there, the card says why."
 REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
@@ -1632,12 +1654,13 @@ def brief_pending(state: SprintState) -> bool:
 
 def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
                 listed: Collection[str], waits: WaitSignals = NO_WAITS,
-                failed_start: bool = False, deaf: bool = False) -> str | None:
+                failed_start: bool = False, deaf: bool = False,
+                prompted: bool = False) -> str | None:
     """Who holds a running sprint's ball (#1086), or None once it has ended. `listed` is the
     `state` of each of the sprint's own listed sessions. The owner when anything waits on them: an
-    open item (`waiting`), a brief awaiting a decision, a stall, no progress, or a manager session
-    waiting at its terminal, or a manager that failed to start with no brief (`failed_start`, the
-    owner's retry card). Else the manager while `sprint_quiet_for` reads the sprint moving, else
+    open item (`waiting`), a brief awaiting a decision, a stall, no progress, an open permission
+    card of its manager (`prompted`, #1424; a session's own waiting state is never read here), or a
+    manager that failed to start with no brief (`failed_start`, the owner's retry card). Else the manager while `sprint_quiet_for` reads the sprint moving, else
     nobody; a `failed` manager with no listed session drops only the goal's stated time from the
     signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
     run, report, approval or wait signal inside the window keeps it manager whatever its order
@@ -1648,9 +1671,8 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
-    if (waiting or deaf or brief_pending(state) or state.stalled is not None
-            or state.no_progress_at is not None or failed_start
-            or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
+    if (waiting or deaf or prompted or brief_pending(state) or state.stalled is not None
+            or state.no_progress_at is not None or failed_start):
         return BALL_OWNER
     hold = stated_hold(state, now_ms)
     if hold is not None:
@@ -1686,22 +1708,21 @@ def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
                stages: Sequence[tuple[int, str, str]], ball: str | None,
                wait: str | None = None, failed_start: bool = False,
-               deaf: bool = False, hold: tuple[str, str] | None = None) -> str | None:
+               deaf: bool = False, prompted: bool = False,
+               hold: tuple[str, str] | None = None) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
     ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
     `ball`, `wait` (`sprint_wait`), `failed_start`, `deaf` (the manager holds the console's wake
-    behind a prompt no one at a terminal answers, #1229) and `hold` (`sprints.stated_hold`, #1380)
-    are the entry's own."""
+    behind a prompt no one answers, #1229), `prompted` (an open permission card of its manager,
+    #1424) and `hold` (`sprints.stated_hold`, #1380) are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
     if state.stop_at is not None:
         return NOW_STOPPING_TEXT
-    if WAITING_ANSWER in listed:
-        return NOW_ANSWER_TEXT
     if deaf:
         return NOW_DEAF_TEXT
-    if WAITING_PERMISSION in listed:
+    if prompted:
         return NOW_PERMISSION_TEXT
     if failed_start:
         return NOW_FAILED_START_TEXT
@@ -1806,7 +1827,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   movement: ProjectMovement | None = None,
                   wait_lines: Sequence[Mapping] = (),
                   waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None,
-                  ) -> dict:
+                  prompted: bool = False) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1838,11 +1859,12 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     own = sorted((m for m in (() if movement is None else movement.sessions)
                   if m.sprint_id == state.sprint_id), key=lambda m: m.session_id)
     deaf = any(m.held and m.session_id in manager_ids for m in own)
-    ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf)
+    ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf,
+                       prompted=prompted)
     hold = stated_hold(state, now_ms)
     now_text = sprint_now(state, quota, listed, waiting, stages, ball,
                           sprint_wait(state, now_ms, listed, waits), failed_start=failed,
-                          deaf=deaf, hold=hold)
+                          deaf=deaf, prompted=prompted, hold=hold)
     minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
@@ -1882,7 +1904,10 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                     "text": CHECK_LINE_TEXT.format(question=r.item["question"])}
                    for r in checks],
         "waits": [dict(w) for w in wait_lines],
-        "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT, waits_of)
+        "live_faults": [{**fault_entry(f), "text": LIVE_FAULT_TEXT.format(
+            issue=f.issue, observed=f.observed, when=f.when, proven=f.proven)}
+                        for f in open_faults(state)],
+        "sessions": [_session_entry(s, deliveries, now_ms, STATE_TEXT, waits_of)
                      for s in _ordered(sessions)],
         "messages": [_message_entry(m, now_ms, minute, retry, looked, ended is not None)
                      for m in _shown_messages(state.messages, looked)],
@@ -1928,7 +1953,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
                    waits: Sequence[Mapping] = (),
                    read: ReadState | None = None,
-                   questions: Mapping | None = None) -> dict:
+                   questions: Mapping | None = None,
+                   prompted: Collection[str] = ()) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -1946,7 +1972,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked, movement,
-                              (sprint_waits or {}).get(s.sprint_id, ()), waits_of)
+                              (sprint_waits or {}).get(s.sprint_id, ()), waits_of,
+                              prompted=s.sprint_id in prompted)
                 for s in group]
 
     return {
@@ -2274,6 +2301,7 @@ def derive_view(
     registration: Mapping | None = None,
     adoption_items: Iterable[Mapping] = (),
     release_items: Iterable[Mapping] = (),
+    prompt_items: Iterable[Mapping] = (),
     retry_items: Iterable[Mapping] = (),
     apply_items: Iterable[Mapping] = (),
     confirm_items: Iterable[Mapping] = (),
@@ -2335,6 +2363,8 @@ def derive_view(
                      key=lambda e: e["profile"])
     adoptions = [dict(item) for item in adoption_items]
     releases = [dict(item) for item in release_items]
+    prompts = [dict(item) for item in prompt_items]
+    prompted = {item["sprint_id"] for item in prompts}
     retries = [dict(item) for item in retry_items]
     applies = [dict(item) for item in apply_items]
     confirms = [dict(item) for item in confirm_items]
@@ -2409,7 +2439,8 @@ def derive_view(
                               notice_post=notice_post[s.project_id],
                               overlaps=overlaps[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
-                              read=health.get(s.project_id), questions=asks[s.project_id])
+                              read=health.get(s.project_id), questions=asks[s.project_id],
+                              prompted=prompted)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
@@ -2417,34 +2448,20 @@ def derive_view(
                                     notices=notices[s.project_id],
                                     notice_post=notice_post[s.project_id],
                                     overlaps=overlaps[s.project_id],
-                                    read=health.get(s.project_id), questions=asks[s.project_id])
+                                    read=health.get(s.project_id), questions=asks[s.project_id],
+                                    prompted=prompted)
                      for s in quiet]
     counted = {s.sprint_id for s in (*briefs, *stalls, *starts, *unprogressed)}
     counted.update(s.sprint_id for s, _ in asked)
-    at_terminal_sprints = [sprint for project in (*entries, *quiet_entries)
+    counted.update(prompted)
+    deaf_sprints = [sprint for project in (*entries, *quiet_entries)
                            for sprint in project["sprints"]
                            if sprint["ball"] == BALL_OWNER and not sprint["waiting"]
                            and sprint["sprint_id"] not in counted]
-    at_terminal = [sprint["sprint_id"] for sprint in at_terminal_sprints]
-    # Only a manager with a session waiting at its terminal sends the owner there, read from the
-    # sessions rather than `now_text` (a stopping sprint's `now_text` is the stop sentence even while
-    # its manager waits); any other counted sprint (one that cannot hear the console,
-    # ADR-console-042 D5) has no terminal to go to and reads the recovery sentence.
-    held_sessions = {m.session_id for read in (movement or {}).values() for m in read.sessions if m.held}
-
-    def asks_at_terminal(sprint: dict) -> bool:
-        # The order `sprint_now` reads: an answer, then a manager that cannot hear the console,
-        # then a permission, so a deaf manager's permission wait is not a terminal question.
-        if any(s["state"] == WAITING_ANSWER for s in sprint["sessions"]):
-            return True
-        deaf = any(m["manager"] and m["session_id"] in held_sessions
-                   for m in sprint["movement"]["sessions"])
-        return not deaf and any(s["state"] == WAITING_PERMISSION for s in sprint["sessions"])
-
-    at_terminal_asks = [sprint["sprint_id"] for sprint in at_terminal_sprints if asks_at_terminal(sprint)]
+    deaf = [sprint["sprint_id"] for sprint in deaf_sprints]
     open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
-                  + len(releases) + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
-                  + len(failures) + len(trusts) + len(open_items) + len(at_terminal))
+                  + len(releases) + len(prompts) + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
+                  + len(failures) + len(trusts) + len(open_items) + len(deaf))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -2464,10 +2481,10 @@ def derive_view(
         sentence = ADOPTION_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
-    elif at_terminal and open_count == len(at_terminal):
-        sentence = (DEAF_SENTENCE if not at_terminal_asks
-                    else TERMINAL_SENTENCE if len(at_terminal_asks) == len(at_terminal)
-                    else TERMINAL_DEAF_SENTENCE)
+    elif prompts:
+        sentence = PERMISSION_SENTENCE
+    elif deaf and open_count == len(deaf):
+        sentence = DEAF_SENTENCE
     elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
         sentence = REGISTER_SENTENCE
     elif any(e["text"] for e in registering):
@@ -2515,6 +2532,7 @@ def derive_view(
                           + [_signin_entry(e, signin_runs) for e in signins]
                           + adoptions
                           + releases
+                          + prompts
                           + [_question_entry(s, q) for s, q in asked]
                           + retries
                           + trusts

@@ -894,6 +894,22 @@ class RowTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 register.ended(bad)
 
+    def test_a_ready_plan_saved_with_a_retired_draft_record_is_marked_for_planning_again(self):
+        retired = {"field": "co-authored-by", "label": "co-author lines in commits", "value": "yes",
+                   "source": "owner", "options": [], "text": False, "reason": None,
+                   "ask": "Should its commits carry co-author lines?"}
+        current = draft_fields()
+        saved = register.summary("/srv/a", plan_doc(state="ready"), draft=[*current, retired])
+        found = register.latest([Event(1, "t1", register.ENDED, None, saved)])
+        self.assertIs(found["replan"], True)
+        self.assertEqual(found["plan_id"], saved["plan_id"])
+        self.assertEqual([f["field"] for f in found["draft"]], [f["field"] for f in current])
+        for row in (register.summary("/srv/a", plan_doc(state="ready"), draft=current),
+                    register.summary("/srv/a", plan_doc(state="ready"))):
+            with self.subTest(draft=row["draft"]):
+                self.assertNotIn(
+                    "replan", register.latest([Event(1, "t1", register.ENDED, None, row)]))
+
     def test_a_drafting_row_asks_the_open_fields(self):
         fields = draft_fields()
         row = register.drafting("/x/sample-app", fields)
@@ -921,12 +937,12 @@ class RowTest(unittest.TestCase):
                    "texts": {}}
         now = contract_draft.draft("/x/sample-app", reading)
         # The same draft as an earlier console saved it: internal labels, old option and card words.
-        old_label = {"light-lane": "light lane", "worktree-prefix": "worktree name prefix"}
+        old_label = {"projections": "projections", "worktree-prefix": "worktree name prefix"}
         saved = []
         for f in now:
             f = {**f, "label": old_label.get(f["field"], f["label"])}
-            if f["field"] == "light-lane":
-                f["options"] = [{"value": "none", "label": "It has no light lane"}]
+            if f["field"] == "projections":
+                f["options"] = [{"value": "none", "label": "It has no projections"}]
             if f["field"] == "default-branch":
                 f["ask"] = ("Which branch is the default branch of sample-app?\n"
                             "Its remote did not say: choose a branch or type its name.")
@@ -936,9 +952,9 @@ class RowTest(unittest.TestCase):
         row = register.drafting("/x/sample-app", saved)
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
         draft = {f["field"]: f for f in found["draft"]}
-        self.assertEqual(draft["light-lane"]["label"], "short route for light changes")
-        self.assertEqual(draft["light-lane"]["options"],
-                         [{"value": "none", "label": "Every change takes the full delivery route"}])
+        self.assertEqual(draft["projections"]["label"], "generated agent files")
+        self.assertEqual(draft["projections"]["options"],
+                         [{"value": "none", "label": "It generates no agent instruction files"}])
         self.assertEqual(draft["worktree-prefix"]["label"], "start of each work copy's name")
         self.assertEqual((draft["worktree-prefix"]["value"], draft["worktree-prefix"]["source"]),
                          ("mine-", "owner"))
@@ -949,7 +965,154 @@ class RowTest(unittest.TestCase):
         self.assertNotIn("Its remote", "".join(q["ask"] for q in found["questions"]))
         self.assertEqual(found["plan_id"], row["plan_id"])
         shown = {e["field"]: e["line"] for e in register.view_entry(None, found)["draft"]}
-        self.assertNotIn("light lane", shown["light-lane"])
+        self.assertNotIn("projections", shown["projections"].lower())
+
+    def test_a_row_saved_with_the_light_lane_field_reads_back_without_it(self):
+        reading = {"remotes": [], "default_branch": None, "branches": ["trunk"], "files": [],
+                   "texts": {}}
+        now = contract_draft.draft("/x/sample-app", reading)
+        light = {"field": "light-lane", "label": "light lane",
+                 "value": '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
+                 "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
+                 "text": True, "reason": None, "ask": "What is the light lane of sample-app?"}
+        kept = [f for f in now if f["field"] != "light-lane"]
+        saved = []
+        for f in kept:
+            saved.append(f)
+            if f["field"] == "attempt-budget":
+                saved.append(light)
+        row = register.drafting("/x/sample-app", saved)
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        entry = register.view_entry(None, found)
+        self.assertEqual([f["field"] for f in found["draft"]], [f["field"] for f in kept])
+        self.assertNotIn("light-lane", [e["field"] for e in entry["draft"]])
+        self.assertEqual(found["plan_id"], row["plan_id"])
+
+    def planned_with_light_lane(self, light_value, *, state, refused=None):
+        """The row an earlier console saved: a full draft carrying the retired light-lane record."""
+        root = "/x/sample-app"
+        reading = {"remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
+                   "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"],
+                   "texts": {}}
+        fields = contract_draft.draft(root, reading)
+        for field in ("build-command", "test-command"):
+            fields, _ = contract_draft.set_value(fields, field, "none", entries=[], root=root)
+        light = {"field": "light-lane", "label": "light lane", "value": light_value,
+                 "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
+                 "text": True, "reason": refused, "ask": "What is the light lane of sample-app?"}
+        at = [f["field"] for f in fields].index("attempt-budget") + 1
+        saved = [*fields[:at], light, *fields[at:]]
+        if state is None:
+            return root, register.drafting(root, saved)
+        return root, register.summary(root, plan_doc(outcome="bootstrap", state=state),
+                                      draft=saved)
+
+    SHADOW = '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}'
+
+    def test_a_ready_plan_that_wrote_a_light_lane_is_planned_again_before_apply(self):
+        root, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        self.assertEqual((row["state"], row["plan_id"]), ("ready", PLAN_ID))
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual((found["result"], found["state"]), ("drafting", "drafting"))
+        self.assertEqual(found["plan_id"], PLAN_ID)
+        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
+        answered, refusal = contract_draft.set_value(
+            found["draft"], "project-id", "sample-owner/sample-app", entries=[], root=root)
+        self.assertIsNone(refusal)
+        self.assertEqual(contract_draft.open_fields(answered), [])
+        self.assertNotIn("light_lane", contract_draft.contract(answered)["bindings"]["workflow"])
+
+    def test_a_cancel_naming_the_saved_plan_still_ends_a_replanned_registration(self):
+        root, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        events = [Event(1, "t1", register.ENDED, None, row),
+                  Event(2, "t2", *register.cancelled_row(root, PLAN_ID))]
+        self.assertIsNone(register.fold(events).latest)
+
+    def test_a_replanned_registration_keeps_the_plan_id_adoptions_are_keyed_by(self):
+        _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual((found["plan_id"], found["state"]), (PLAN_ID, "drafting"))
+
+    def adoption_entry(self, step, state=None):
+        return {"status": "done", "step": step, "state": state, "headline": "adopted",
+                "lines": [], "note": None, "branch": None, "commit": None, "url": None}
+
+    def test_a_replanned_registration_with_an_adoption_past_a_failed_apply_has_no_question(self):
+        _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        for step, state in (("applied", None), ("push_failed", None), ("open_failed", None),
+                            ("opened", "ready"), ("opened", "failing"), ("opened", "merged")):
+            with self.subTest(step=step, state=state):
+                shown = register.view_entry(None, found, adoption=self.adoption_entry(step, state))
+                self.assertEqual(shown["questions"], [])
+                self.assertFalse(register.plans_again(step, state))
+        for step, state in ((None, None), ("apply_failed", None), ("opened", "closed")):
+            with self.subTest(step=step, state=state):
+                shown = register.view_entry(None, found, adoption=self.adoption_entry(step, state))
+                self.assertEqual([q["subject"] for q in shown["questions"]], ["project-id"])
+                self.assertTrue(register.plans_again(step, state))
+        self.assertEqual([q["subject"] for q in register.view_entry(None, found)["questions"]],
+                         ["project-id"])
+
+    def test_the_saved_plan_stands_in_for_the_replanned_row_once_its_adoption_is_past_a_failed_apply(self):
+        _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        state = register.fold([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual(state.latest["state"], "drafting")
+        self.assertEqual(register.shown(state, {}), state.latest)
+        for step, pull in (("applied", None), ("push_failed", None), ("open_failed", None),
+                           ("opened", "open"), ("opened", "merged")):
+            with self.subTest(step=step, pull=pull):
+                found = register.shown(state, {PLAN_ID: {"step": step, "pull_state": pull}})
+                self.assertEqual((found["state"], found["plan_id"]), ("ready", PLAN_ID))
+        for step, pull in (("apply_failed", None), ("opened", "closed")):
+            with self.subTest(step=step, pull=pull):
+                found = register.shown(state, {PLAN_ID: {"step": step, "pull_state": pull}})
+                self.assertEqual(found["state"], "drafting")
+        _, plain = self.planned_with_light_lane(self.SHADOW, state=None)
+        drafting = register.fold([Event(1, "t1", register.ENDED, None, plain)])
+        self.assertEqual(drafting.held, ())
+
+    def test_the_saved_plan_stands_in_again_when_the_page_falls_back_to_its_row(self):
+        """Another root's registration pushes the replanned row into `before` (#1445)."""
+        _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
+        other = register.failed("/x/other", "failed")
+        adoptions = {PLAN_ID: {"step": "push_failed", "pull_state": None}}
+        opened = [Event(1, "t1", register.ENDED, None, row),
+                  Event(2, "t2", register.ENDED, None, other),
+                  Event(3, "t3", "project.registered", "c/other", {"root": "/x/other"})]
+        gone = Event(4, "t4", "project.unregistered", "c/other", {"root": "/x/other"})
+        cancelled = Event(4, "t4", *register.cancelled_row("/x/other", other["plan_id"], restore=True))
+        for name, last in (("unregistered", gone), ("cancelled", cancelled)):
+            with self.subTest(fall_back=name):
+                before = register.fold(opened)
+                self.assertEqual(register.shown(before, adoptions)["root"], "/x/other")
+                state = register.fold([last], before)
+                self.assertEqual(state.latest["state"], "drafting")
+                found = register.shown(state, adoptions)
+                self.assertEqual((found["state"], found["plan_id"]), ("ready", PLAN_ID))
+                self.assertEqual(register.shown(state, {})["state"], "drafting")
+                whole = register.fold([*opened, last])
+                self.assertEqual(register.shown(whole, adoptions)["state"], "ready")
+
+    def test_a_ready_plan_whose_light_lane_was_none_keeps_its_plan(self):
+        _, row = self.planned_with_light_lane("none", state="ready")
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual((found["result"], found["state"], found["plan_id"]),
+                         ("planned", "ready", PLAN_ID))
+        self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
+
+    def test_a_draft_whose_only_question_was_the_light_lane_still_has_a_card(self):
+        _, row = self.planned_with_light_lane(
+            self.SHADOW, state=None,
+            refused="The plan refused the light lane: not a light lane")
+        self.assertEqual([q["subject"] for q in row["questions"]], ["light-lane"])
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual((found["result"], found["state"]), ("drafting", "drafting"))
+        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        self.assertEqual(found["note"], "The draft has 1 open question.")
+        self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
 
     def test_ended_takes_thirteen_members_and_checks_the_draft(self):
         row = register.drafting("/x/sample-app", draft_fields())
@@ -982,7 +1145,7 @@ class RowTest(unittest.TestCase):
             "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
             "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
         shown = register.view_entry(None, {**register.drafting("/x/sample-app", full), "at": "t"})
-        self.assertEqual(shown["draft_more"], "and 22 more settings at their usual values")
+        self.assertEqual(shown["draft_more"], "and 20 more settings at their usual values")
 
     def test_the_draft_id_follows_the_values(self):
         one = draft_fields()

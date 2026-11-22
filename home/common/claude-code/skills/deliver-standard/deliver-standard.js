@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-standard',
   description: 'Deliver one standard-lane tracker issue: plan, implement and review each task, final review, verify once, ship',
-  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, look? (with cont: {answer: approve, head, message?}, {answer: fix, head, words, message?} to approve that head with one fix, or {answer: changes, words}), review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of the status clerk steps (a trial, #803); the setup steps and every step that emits a lifecycle verb stay on sonnet (#813); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
+  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, look? (with cont: {answer: approve, head, message?}, {answer: fix, head, words, message?} to approve that head with one fix, or {answer: changes, words}), review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; lane live, chosen by a standing live-fault declaration of the issue (sprint recap), has no plan: one implementer that shows a test failing before its change and passing after it, one reviewer; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of the status clerk steps (a trial, #803); the setup steps and every step that emits a lifecycle verb stay on sonnet (#813); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
   phases: [
     { title: 'Setup', detail: 'resolve contract, pre-flight, claim, worktree' },
     { title: 'Plan', detail: 'plan outside the tree, then review' },
@@ -19,8 +19,8 @@ export const meta = {
 // head, branch, worktree, verify, flaky? (#972: [{id, summary}], each check that failed outside the branch's changed files and passed on its one rerun), outside_fixes? (#972: [{file, why}], each file outside the branch's diff a verification fix edited, with the cause it established; a done result carries both too), tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
 // ship, the default: merge. A ready cont resumed in ship skips the final review and verify when
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
-// implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
-// its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
+// implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; or live (#1433): no planner, one implementer that returns a test run failing at its start head and passing at its commit, and one reviewer of that commit, chosen by a standing live-fault declaration of the issue (sprint recap), which a lane-less fresh run reads in its setup, a failed read stopping it at live-fault before any planner; a cont keeps
+// its lane and no direct or live plan mode exists), cont (the `cont` object of an earlier stop, passed
 // back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), look (#1139: with cont, in ship mode, the owner's answer to an awaiting-look stop: {answer: approve, head: <the 40-hex head the owner saw>, message? (a string, or the number the sprint inbox prints; an approve ignores it)} lands on the approval recorded for that head (look-approval status), never posting one, when the pull request head is still it, first verifying it in a look-verify step when it is not the verified head (landed only when it gained nothing but clean merges of the integration branch and its verification passes); an approval it cannot find recorded stops with a reason naming the approved head and the head found; {answer: fix, head, words, message?} (#1211) records the approval of that head with the owner's words when the pull request head is still it, runs one fix round on the words, verifies again and lands the fixed head when look-approval status keeps the approval for it; {answer: changes, words} runs one fix round on the owner's words, verifies again and stops at awaiting-look at the new head; an unmarked delivery ignores an approve answer), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, look-pr, look-push, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
@@ -66,6 +66,7 @@ export const meta = {
 // check passed and every required name passing. The look path syncs and pushes on a behind answer (twice at most, then sync-contention), spends the one red-check fix on a failed one (fix-ci, fix-ci-review, look-push, so a second
 // red poll stops at checks), and verifies a moved head again (look-reverify) and waits on the forge once more before the stop; a re-ask only waits. An approve of the unmoved approved head reuses the pull request and pushes nothing.
 // A read with neither verdict stops at stage look after verify (in ship and ready mode alike), and ready mode reports look: {verdict, covers}.
+// #1566: a landing resync that brings a marked delivery's head past the owner's approved head asks look-approval status first; when that says needed it verifies the new head (look-carry-verify: only clean merges of the integration branch past the owner's head, the declared verification, the pictures) and asks look-approval carry (look-carry) to record a carry line for it. A usable carried lands the new head under the owner's approval; anything else shows the owner the new head with its pictures (awaiting-look) or stops at look-carry, never merging. The program never posts an approval.
 // A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place as the plan numbered it (cont.look_acs), never by the plan's wording), so no owner check is posted for it (#1356). A landing that leaves a criterion out first makes a read-only look-stale call: when a hold posted earlier still checks that criterion on a split child, or on the issue with nothing else left to hold, it stops at hold with look_checks, and a reply it cannot read stops at hold too; a check on the issue with another criterion still open is removed in place by the hold. A replay after the PR merged stops at look when the setup's look read failed, and always reads the merged head: the approval is always read again with look-approval status for the merged PR and head, never taken from a cont (which may hold another PR's), and anything but approved holds the look criterion and ticks nothing; the landing commit is resolved first (a PR merged indirectly has none on the pull) and both status and tick name it with --merge-commit. The look-stale read must say complete, and a hold of this issue with recorded results is never rewritten (its block version would change); a split child's returned fence naming an answered criterion stops the landing.
 //
 // FOLDS (#801): consecutive clerk steps with no program decision between them share one call. Folded: the lock release into the hold call,
@@ -85,10 +86,15 @@ if (!REPO || !ISSUE) return { stage: 'args', error: 'repo_root and issue are req
 const MODE = args.mode === undefined ? 'ship' : args.mode
 if (!['plan', 'ready', 'ship'].includes(MODE)) return { stage: 'args', error: 'mode must be plan, ready or ship' }
 let CONT = args.cont || null
-if (args.lane !== undefined && !['standard', 'direct'].includes(args.lane)) return { stage: 'args', error: 'lane must be standard or direct' }
+if (args.lane !== undefined && !['standard', 'direct', 'live'].includes(args.lane)) return { stage: 'args', error: 'lane must be standard, direct or live' }
 if (CONT && args.lane && args.lane !== (CONT.lane || 'standard')) return { stage: 'args', error: 'a cont keeps its lane; start again without cont: setup re-adopts the branch and the claim' }
-const LANE = args.lane || (CONT && CONT.lane) || 'standard'
+// #1433: a lane-less fresh run reads the live-fault declaration in its setup and may switch to live there (the only lane change), so LANE is a let.
+let LANE = args.lane || (CONT && CONT.lane) || 'standard'
 if (LANE === 'direct' && MODE === 'plan') return { stage: 'args', error: 'the direct lane has no plan mode' }
+if (LANE === 'live' && MODE === 'plan') return { stage: 'args', error: 'the live-fault lane has no plan mode' }
+const LIVE_ASKED = args.lane === 'live' || !!(CONT && CONT.lane === 'live')
+const LIVE_AUTO = !CONT && args.lane === undefined
+const LIVE_READING = LIVE_ASKED || LIVE_AUTO
 if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return { stage: 'args', error: 'review_sizing must be a boolean' }
 const REVIEW_SIZING = args.review_sizing === true
 if (args.clerk_model !== undefined && !['sonnet', 'haiku'].includes(args.clerk_model)) return { stage: 'args', error: 'clerk_model must be sonnet or haiku' }
@@ -206,6 +212,8 @@ const fuller = (a, b) => { const x = normSha(a), y = normSha(b); return y.length
 const REVIEW_STATE = { type: 'string', enum: ['available', 'blocked', 'unsupported', 'absent'] }
 // #1139: the look-approval marked verdict the setup reads once per run; error carries the detail of its failure.
 const LOOK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['marked', 'unmarked', 'error'] }, covers: STRS, acs: STRS, detail: { type: 'string' } }, required: ['verdict'] }
+// #1433: the live-fault declaration of this issue as the console's sprint recap reports it (declared: fault is the entry of live_faults for this issue); read in the setup only when the lane may be live.
+const LIVE_READ = { type: 'object', properties: { verdict: { type: 'string', enum: ['declared', 'none', 'no-sprint', 'error'] }, sprint_id: { type: 'string' }, fault: { type: 'object', properties: { id: { type: 'integer' }, issue: { type: 'integer' }, observed: { type: 'string' }, when: { type: 'string' }, proven: { type: 'string' }, at: { type: 'string' } } }, detail: { type: 'string' } }, required: ['verdict'] }
 const SETUP_SCHEMA = {
   type: 'object',
   properties: {
@@ -225,6 +233,7 @@ const SETUP_SCHEMA = {
     knowledge: { type: 'object', properties: { standards: STRS, hints: STRS, rejections: STRS } },
     verification: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' }, when_changed: STRS, skip_reason: { type: 'string' }, pre_commit: { type: 'boolean' } }, required: ['id', 'argv', 'cwd'] } },
     look: LOOK_SCHEMA,
+    live_fault: LIVE_READ,
   },
   required: ['ok'],
 }
@@ -422,15 +431,16 @@ if (AMEND !== null) {
 // it clears blocked and runs the implementer on the unchanged task file with no planner step, and is never kept as a decision.
 const NOTES_MAX = 2000
 const BLOCKED = CONT && isEntry(CONT.blocked) && Number.isInteger(CONT.blocked.task) && CONT.partial === CONT.blocked.task &&
-  !(Array.isArray(CONT.done) && CONT.done.some(d => isEntry(d) && d.n === CONT.blocked.task)) && (LANE === 'direct' || (isEntry(CONT.plan) && CONT.plan_reviewed === true))
+  !(Array.isArray(CONT.done) && CONT.done.some(d => isEntry(d) && d.n === CONT.blocked.task)) && (LANE !== 'standard' || (isEntry(CONT.plan) && CONT.plan_reviewed === true))
   ? { task: CONT.blocked.task, notes: typeof CONT.blocked.notes === 'string' ? CONT.blocked.notes : '', ...(CONT.blocked.asked === true ? { asked: true } : {}) } : null
 const RERUN_WORD = typeof args.decisions === 'string' && args.decisions.trim() === 'rerun'
 const RERUN = !!BLOCKED && RERUN_WORD
 const heldDecision = d => !!CONT && Array.isArray(CONT.decisions) && CONT.decisions.includes(d)
 // The decision that settles the blocked task: one this resume brings that the cont does not hold.
 let newDecision = BLOCKED && !RERUN_WORD && typeof args.decisions === 'string' && args.decisions.trim() && !heldDecision(args.decisions) ? args.decisions : null
-const WAYS_OUT = LANE === 'direct' ? 'resume with decisions (the implementer gets it with these notes), or decisions rerun if the cause was outside the task' : 'resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file'
-const UNSETTLED = { details: 'not run again: this resume brings nothing new from the owner', ways: WAYS_OUT }
+// Read at call time: the lane of a lane-less fresh run is decided after the setup.
+const waysOut = () => LANE !== 'standard' ? 'resume with decisions (the implementer gets it with these notes), or decisions rerun if the cause was outside the task' : 'resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file'
+const UNSETTLED = { details: 'not run again: this resume brings nothing new from the owner', ways: waysOut() }
 if (BLOCKED && !RERUN && newDecision === null && AMEND === null && !(BLOCKED.asked && LANE === 'standard')) return why({ stage: 'task', task: { n: BLOCKED.task }, blocked: BLOCKED, ...UNSETTLED, cont: CONT })
 // (Hoisted above the gates that read them.)
 // Bounded on the way out and on the way in (at most CARRY_MAX findings, each text capped), so a cont cannot grow from stop to stop.
@@ -443,7 +453,7 @@ const carryOf = list => carryable(list).slice(0, CARRY_MAX)
 // does: a decision the cont does not hold (the first fix wave and its re-review get it as binding) or an amend of the plan.
 const OSC_KEPT = CONT && isEntry(CONT.oscillating) && typeof CONT.oscillating.file === 'string' && CONT.oscillating.file.trim() && Array.isArray(CONT.oscillating.rounds) && Array.isArray(CONT.fix_findings) && CONT.fix_findings.length ? CONT.oscillating : null
 const oscDecision = OSC_KEPT && !RERUN_WORD && typeof args.decisions === 'string' && args.decisions.trim() && !heldDecision(args.decisions) ? args.decisions : null
-const OSC_WAYS = `resume with decisions (the approach)${LANE === 'direct' ? '' : ', or amend'}`
+const OSC_WAYS = `resume with decisions (the approach)${LANE !== 'standard' ? '' : ', or amend'}`
 if (OSC_KEPT && oscDecision === null && AMEND === null) return why({ stage: 'fix-wave-review', oscillating: OSC_KEPT, details: UNSETTLED.details, ways: OSC_WAYS, fix_waves: CONT.fix_waves || 0, cont: CONT })
 // #1370: one full review and two scoped rounds (owner, 21 Nov): a round's verdict that leaves findings open after ROUND_CAP rounds stops before any
 // fix wave and keeps round_cap in cont. A resume of that cont goes on only on something new from the owner, as an oscillating one does. The gate
@@ -493,6 +503,9 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).
 Then run alone and exactly: look-approval marked --repo <slug> --issue ${ISSUE} and return its verdict (marked or unmarked), covers and acs (the array of its acs, [] when it names none) as look; on a non-zero exit return look with verdict error and the error and detail of its JSON line as detail.`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
+// #1433: read once in the setup when the lane may be live; the answer picks the lane and names the declaration a live delivery stands on.
+const LIVE_STEP = LIVE_READING ? `
+Also run alone and exactly: sprint recap, before you return any refusal, and return live_fault on every reply, a refusal included. When it exits 0 its one JSON line gives sprint_id: return verdict declared, that sprint_id and fault (the entry of its live_faults whose issue is ${ISSUE}, every member as printed) when there is one, and verdict none when it lists none for issue ${ISSUE}. When it exits 2 printing sprint: no sprint id, return verdict no-sprint; on any other non-zero exit return verdict error and the stderr line as detail. Change nothing.` : ''
 const DEAD = []
 // #992: labels of reviews that answered twice with no usable review (readReview). Not dead agents: the breaker does not count them.
 const LOST = []
@@ -538,12 +551,18 @@ const unusable = (r, { fileless = false, ruled = false } = {}) => {
   const named = f => present(f.file) || present(f.failing_input) || (ruled && (present(f.ac) || present(f.rule)))
   return !fileless && blocking.some(f => !named(f)) ? 'a blocking finding named neither a file nor a failing input' : ''
 }
-const readReview = async (asked, opts, { fileless = false, ruled = false, optional = false } = {}) => {
+const readReview = async (asked, opts, { fileless = false, ruled = false, optional = false, once = false } = {}) => {
   const lax = { fileless, ruled }
   const prompt = `${asked}\n${READ_ONLY}`
   const first = await call(prompt, opts, optional)
   const why = unusable(first, lax)
   if (!why) return first
+  // #1433: a step that may run once only (the live-fault lane's one review) is never asked again: its unusable reply is a lost review.
+  if (once) {
+    log(`${opts.label}: the reply is no review (${why}); the review is lost`)
+    LOST.push(opts.label)
+    return null
+  }
   log(`${opts.label}: the reply is no review (${why}); the step runs once more`)
   const again = await call(`${prompt}\nAn earlier reply to this step was discarded: ${why}. Finish the review before you reply.`, { ...opts, label: opts.label + AGAIN }, optional)
   if (!unusable(again, lax)) return again
@@ -593,13 +612,13 @@ const ownMerged = heads => {
 }
 const OWN_ID = OWN_PR !== null ? `#${OWN_PR}` : `a PR whose commits include one of ${OWN_COMMITS.join(', ')}`
 const setupCall = () => call(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
-1. ${CONTRACT_READ}
+1. ${CONTRACT_READ}${LIVE_STEP}
 2. ${REDERIVE ? `${DERIVE_LOCATION} ` : ''}${OWN_PR !== null || OWN_COMMITS.length ? `List the merged PRs whose head is ${RES_BRANCH} (gh pr list --repo <slug> --state merged --head ${RES_BRANCH} --json number) and, for each, its commits (gh pr view <number> --repo <slug> --json commits); return them as merged_heads, one {number, commits} each with every commit oid. This delivery's own merged PR is the one that is ${OWN_ID}: return ok=true with merged_pr set to that PR's number only for it (the worktree may already be gone). Any other merged PR on that head is not this delivery's: leave merged_pr unset for it.` : 'This delivery has no commit and no PR yet, so look for no merged PR and leave merged_pr and merged_heads unset.'}
 3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}. ${REATTACH(CONT.setup && CONT.setup.branch, CONT.setup && CONT.setup.worktree)}`} If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty. Return head: git -C <worktree> rev-parse HEAD (the full sha).${SINCE_REVIEWED}${BRANCH_READ}
 ${CONT.claim_incomplete ? `4. After git -C ${REPO} fetch origin: ${EXISTING_READ(RES_BRANCH, RES_PATH)} An earlier worktree step may have created the branch, the worktree or both before it failed, so report existing afresh.
 5.` : '4.'} Return every contract field read fresh, ${REDERIVE ? 'with branch and worktree_path as derived' : 'branch as in the earlier setup'}. Change nothing but that re-attach.
 ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} before delivery. Change nothing in this step except one issue comment named below, the claim of step 5 and the worktree of step ${WT_STEP}.
-1. ${CONTRACT_READ}
+1. ${CONTRACT_READ}${LIVE_STEP}
 2. ${DERIVE_LOCATION} Then gh issue view ${ISSUE} --repo <slug> --json state,labels,title and gh pr list --repo <slug> --state all --search ${ISSUE} --json number,state,headRefName,closingIssuesReferences. Return merged_refs: one {number, closes} per merged PR that list holds, closes true only when its closingIssuesReferences lists issue ${ISSUE}. Refuse (ok=false) with reason closed, parked (label needs-verification or parked), duplicate (a merged PR whose closes is true, a possible duplicate delivery: set duplicate_pr to its number; a merged PR that only mentions or Refs the issue, such as an approved spec merged in its own docs PR, is no duplicate) or open-pr (an open PR referencing this issue whose head is not branch).
 3. After git -C ${REPO} fetch origin, re-adopt instead of refusing when the work already exists. ${EXISTING_READ('<branch>', '<worktree_path>')}
 4. Read the issue and the code at origin/<integration_branch>: if the issue no longer applies (already fixed or obsolete), comment the evidence on the issue and refuse with reason no-longer-applies. Otherwise return in details, in a few lines, what still applies, where (files and symbols) and what already exists.
@@ -627,6 +646,26 @@ if (lookIncomplete(setup)) setup.look = { verdict: 'error', detail: 'look-approv
 // #1019: said once in the log, never kept: the cont's setup must not claim it for a later run.
 if (setup.reattached === true) log('setup: the worktree was on a detached HEAD at its branch tip with a clean tree; it is back on its branch')
 delete setup.reattached
+// #1433: the live-fault read, taken out of setup so no cont keeps it. A standing entry is a declaration of this issue with a positive id, a time and a sprint id. A lane-less fresh run
+// becomes live on a standing entry, on a failed read, and on an ok reply with no usable read, so a declared issue is never planned by mistake; the gate below stops the unread ones.
+// The lane is fixed here, before the first exit that builds a cont.
+const LIVE_RAW = setup.live_fault
+delete setup.live_fault
+const liveStanding = r => isEntry(r) && r.verdict === 'declared' && typeof r.sprint_id === 'string' && /^[0-9a-f]{16}$/.test(r.sprint_id) && isEntry(r.fault)
+  && Number.isInteger(r.fault.issue) && r.fault.issue === Number(ISSUE) && typeof r.fault.at === 'string' && r.fault.at.trim() !== '' && Number.isInteger(r.fault.id) && r.fault.id > 0
+const liveText = v => (typeof v === 'string' ? v : '')
+const LIVE = liveStanding(LIVE_RAW)
+  ? { id: LIVE_RAW.fault.id, sprint_id: LIVE_RAW.sprint_id, issue: LIVE_RAW.fault.issue, observed: liveText(LIVE_RAW.fault.observed), when: liveText(LIVE_RAW.fault.when), proven: liveText(LIVE_RAW.fault.proven), at: LIVE_RAW.fault.at }
+  : null
+const LIVE_USABLE = liveStanding(LIVE_RAW) || (isEntry(LIVE_RAW) && (LIVE_RAW.verdict === 'none' || LIVE_RAW.verdict === 'no-sprint'))
+const LIVE_UNREAD = isEntry(LIVE_RAW) && LIVE_RAW.verdict === 'error' ? true : !LIVE_USABLE && setup.ok === true
+if (LIVE_AUTO && (LIVE || LIVE_UNREAD)) LANE = 'live'
+const LIVE_REC = CONT && isEntry(CONT.live_fault) ? { id: CONT.live_fault.id, sprint_id: CONT.live_fault.sprint_id, issue: CONT.live_fault.issue, at: CONT.live_fault.at }
+  : LIVE ? { id: LIVE.id, sprint_id: LIVE.sprint_id, issue: LIVE.issue, at: LIVE.at } : null
+const liveSame = (a, b) => isEntry(a) && isEntry(b) && a.id === b.id && a.sprint_id === b.sprint_id && a.at === b.at
+// The stages that end a live-fault delivery for good (a resume stops at once), and the one way out every such stop names.
+const LIVE_FINAL = ['live-evidence', 'live-refused', 'live-review', 'live-bound']
+const LIVE_WAY = 'deliver the fault in an ordinary delivery: rerun with lane standard and no cont'
 // The fresh reply's folded claim, read once and removed so setup (and every cont built from it) keeps its old shape.
 // A batch child's folded acquire answers already_held, because the batch's own acquire claimed first and is kept since it gates the readopt path;
 // that acquire refreshes nothing, so the setup renews (issue 745).
@@ -644,7 +683,7 @@ const CLAIM_TAKEN = !!(FOLD_ACQ && (FOLD_ACQ.verdict === 'acquired' || FOLD_ACQ.
 if (CLAIM_TAKEN && FOLD_CLAIM && FOLD_CLAIM.ok === true && !present(setup.worktree_path) && present(FOLD_CLAIM.worktree)) setup.worktree_path = FOLD_CLAIM.worktree
 const BUILT = present(setup.host) ? `${setup.host}/${HOLDER_ID}` : null
 // Every stop after the folded claim was taken keeps a cont that finishes it on resume, whatever fields are missing (stop() is not defined yet).
-const earlyCont = () => (CLAIM_TAKEN ? { cont: { setup: { ...setup, ...(BUILT && HOLDER_RE.test(BUILT) ? { holder: BUILT } : {}) }, lane: LANE, plan: null, plan_reviewed: false, done: [], fix_waves: 0, claim_incomplete: true } } : {})
+const earlyCont = () => (CLAIM_TAKEN ? { cont: { setup: { ...setup, ...(BUILT && HOLDER_RE.test(BUILT) ? { holder: BUILT } : {}) }, lane: LANE, ...(LANE === 'live' && LIVE_REC ? { live_fault: LIVE_REC } : {}), plan: null, plan_reviewed: false, done: [], fix_waves: 0, claim_incomplete: true } } : {})
 // Held by another holder: nothing of ours exists yet, so the stop carries no cont.
 if (FOLD_ACQ && (FOLD_ACQ.verdict === 'held_by' || FOLD_ACQ.verdict === 'lost_to')) return { stage: 'claimed', verdict: FOLD_ACQ.verdict, by: FOLD_ACQ.by }
 // The folded renew after an already_held acquire (#745) is graded before any other setup exit, so a setup failure cannot mask a lost renewal.
@@ -762,7 +801,7 @@ const keyOf = f => {
 const followUpOf = (f, filed) => {
   if (!isEntry(f) || !textOf(f.file) || !textOf(f.summary) || !fullSha(f.commit)) return null
   const key = keyOf(f)
-  const rest = { file: textOf(f.file), summary: textOf(f.summary), ...(textOf(f.failing_input) ? { failing_input: textOf(f.failing_input) } : {}), commit: normSha(f.commit), ...(key ? { key } : {}) }
+  const rest = { file: textOf(f.file), summary: textOf(f.summary), ...(textOf(f.failing_input) ? { failing_input: textOf(f.failing_input) } : {}), commit: normSha(f.commit), ...(key ? { key } : {}), ...(textOf(f.lead) ? { lead: textOf(f.lead) } : {}) }
   if (filed) return Number.isInteger(f.issue) && f.issue > 0 ? { issue: f.issue, ...rest } : null
   return ['critical', 'important', 'minor'].includes(f.severity) ? { severity: f.severity, ...rest } : null
 }
@@ -774,14 +813,14 @@ const followUpKey = f => (f.key ? `${textOf(f.file)}\n${f.key}` : `${textOf(f.fi
 // title (no shell quote character in it) and body; an entry is confirmed only by exactly one issue number of its own, so a lost, partial or shared
 // reply leaves it pending, and the gate before Verify files it again.
 const titleOf = f => `Follow-up of #${ISSUE}: ${f.file}: ${f.summary}`.replace(/['"`$\\]/g, '').replace(/\s+/g, ' ').slice(0, 120)
-const bodyOf = f => [`Follow-up of #${ISSUE}: a scoped review round of its delivery raised this ${f.severity} finding, which does not block that delivery.`, '', `File: ${f.file}`, `Commit: ${f.commit}`, `Finding: ${f.summary}`, ...(f.failing_input ? [`Failing input: ${f.failing_input}`] : []), ...(f.key ? [`Identity: ${f.key}`] : [])].join('\n')
+const bodyOf = f => [f.lead || `Follow-up of #${ISSUE}: a scoped review round of its delivery raised this ${f.severity} finding, which does not block that delivery.`, '', `File: ${f.file}`, `Commit: ${f.commit}`, `Finding: ${f.summary}`, ...(f.failing_input ? [`Failing input: ${f.failing_input}`] : []), ...(f.key ? [`Identity: ${f.key}`] : [])].join('\n')
 const LOOKUP_LIMIT = 1000
 const fileFollowUps = async list => {
   const m = ++followUpCalls
   const entries = list.map((f, i) => ({ n: i + 1, title: titleOf(f), body: bodyOf(f) }))
   let r = null
   try {
-    r = await call(`Issue #${ISSUE} of ${SLUG}. A review round after the first full review raised the findings below, which do not block the merge: file one follow-up issue for each, changing nothing in any worktree.
+    r = await call(`Issue #${ISSUE} of ${SLUG}. ${list.every(f => f.lead) ? 'The live-fault lane of this issue left the items below out of the fix or raised them in its diff review; they do not block the merge' : 'A review round after the first full review raised the findings below, which do not block the merge'}: file one follow-up issue for each, changing nothing in any worktree.
 Follow-ups: ${JSON.stringify(entries)}
 First run once ${UNSET}gh issue list --repo ${SLUG} --state all --search "Follow-up of #${ISSUE} in:title" --limit ${LOOKUP_LIMIT} --json number,body
 When that list holds ${LOOKUP_LIMIT} issues it may be cut short: then, before creating any issue, look for each entry on its own with ${UNSET}gh issue list --repo ${SLUG} --state all --search "<the entry's title> in:title" --limit ${LOOKUP_LIMIT} --json number,body, and leave out an entry whose own list also holds ${LOOKUP_LIMIT} issues instead of creating it.
@@ -900,9 +939,13 @@ const LOOK_REASON = `issue ${ISSUE} needs the owner's look before merge`
 const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, message?} to land on the approval recorded for that head (the owner records it where they answered; this program never posts one, so an approve with none recorded stops), or look {answer: fix, head: <head>, words: <the owner's words>, message?} to approve that head with one fix, or look {answer: changes, words: <the owner's words>} to ask for a change.`
 // #1139: the head the owner's approval was recorded for (an approved cont carries it); a marked delivery stops at awaiting-look until it holds one.
 // The pull request and head the awaiting-look stop left for the owner, carried in cont.look; a resume keeps it only when well formed.
-const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved } : {}) } : null)
+const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved, ...(typeof l.owner === 'string' && SHA_RE.test(l.owner) ? { owner: l.owner } : {}) } : {}) } : null)
 let lookAt = lookOf(CONT && CONT.look)
 let approvedHead = lookAt && lookAt.approved ? lookAt.approved : null
+// #1566: the head the owner's recorded approval names; a kept or carried head never moves it (approvedHead does), and it rides in cont.look.owner, so a later resync, in this run or after a stop, carries from the owner's head, not from a kept one.
+let ownerHead = approvedHead && lookAt.owner ? lookAt.owner : approvedHead
+// The look entry of cont for an approved head: owner is there only when the approved head is not the owner's own.
+const approvedLook = (pr, head) => ({ pr, head, approved: head, ...(ownerHead && ownerHead !== head ? { owner: ownerHead } : {}) })
 let LOOK_STOP = MARKED && approvedHead === null
 // #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established. Carried in cont on its
 // own, not with the verified head: the edit stays on the branch when a resume finds the head moved, so the flag stays too.
@@ -920,13 +963,21 @@ let amendApplied = false
 let blocked = RERUN ? null : BLOCKED
 let decisionPending = newDecision !== null
 const keptDecisions = () => decisions.filter(d => !(decisionPending && d === newDecision) && !(oscPending && d === oscDecision) && !(capPending && d === capDecision))
-const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog.some(d => d.n === blocked.task)
+const blockedKept = () => !!blocked && (LANE !== 'standard' || !!plan) && !taskLog.some(d => d.n === blocked.task)
 // #1246: why an owner's approval was not recorded, naming the approved head and the head found; once set, every later stop's reason starts with it.
 let lookWhy = null
+// #1433: a live stop that names the ordinary delivery as its way on is final: its cont says so, and a resume stops at once. A live-review stop is final only when it carries findings or the review answered with no usable review; any other stop keeps the mark its cont came with.
+const liveFinalOf = (stage, extra) => (LIVE_FINAL.includes(stage) && (stage !== 'live-review' || !!(extra && extra.findings) || LOST.includes('live-review')) ? stage
+  : CONT && isEntry(CONT.live_fault) && LIVE_FINAL.includes(CONT.live_fault.final) ? CONT.live_fault.final : null)
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(plan && !planReviewed && codexSkipped ? { codex_plan_skipped: true } : {}), ...(plan && !planReviewed && codexOwed ? { codex_plan_owed: true } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(carried.length && capMark ? { round_cap: capMark } : {}), ...(dropped > 0 && carried.length ? { fix_findings_dropped: dropped } : {}), ...(reviewRounds > 0 ? { review_rounds: reviewRounds } : {}), ...(reviewRounds > 0 && reviewed ? { reviewed } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), ...(pending.length ? { follow_ups_pending: pending } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(untested ? { untested } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
+  const liveFinal = LANE === 'live' && LIVE_REC ? liveFinalOf(stage, extra) : null
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, ...(LANE === 'live' && LIVE_REC ? { live_fault: { ...LIVE_REC, ...(liveFinal ? { final: liveFinal } : {}) } } : {}), plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(plan && !planReviewed && codexSkipped ? { codex_plan_skipped: true } : {}), ...(plan && !planReviewed && codexOwed ? { codex_plan_owed: true } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(carried.length && capMark ? { round_cap: capMark } : {}), ...(dropped > 0 && carried.length ? { fix_findings_dropped: dropped } : {}), ...(reviewRounds > 0 ? { review_rounds: reviewRounds } : {}), ...(reviewRounds > 0 && reviewed ? { reviewed } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), ...(pending.length ? { follow_ups_pending: pending } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(untested ? { untested } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
+
+// #1433: the live-fault lane's bound stop: the delivered commit is the one head every later step reads, and a step that would need a second implementer or reviewer stops here, final, naming the ordinary delivery as its way on.
+const liveCommit = () => taskLog.find(d => d.n === 1).commit
+const liveBound = (details, extra) => stop('live-bound', { ...extra, details: details + '; ' + LIVE_WAY })
 
 // #1425: the plan directory is a checkout path and may hold spaces, quotes or shell metacharacters, so the clerk's two commands name it shell-quoted
 // (bare when every character is plain, else in single quotes with each embedded one written '\'').
@@ -939,7 +990,7 @@ const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { .
 const haltImpl = (n, extra) => {
   const said = isEntry(extra.impl) && extra.impl.status === 'blocked'
   if (said) blocked = { task: n, notes: typeof extra.impl.notes === 'string' ? extra.impl.notes.slice(0, NOTES_MAX) : '' }
-  return haltTask(n, 'task', said ? { ...extra, ways: WAYS_OUT } : extra)
+  return haltTask(n, 'task', said ? { ...extra, ways: waysOut() } : extra)
 }
 
 if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
@@ -1019,6 +1070,36 @@ const INDIRECT_FOR = (PR, fail, same = false) => ` When that mergeCommit is null
 let landRelease = null
 // #1356: the landing commit a merged replay resolved before it judged the approval; its tick names it too.
 let landedCommit = null
+// #1433: the declaration the live-fault lane's pull request names; it holds no quote, dollar sign, backtick or backslash.
+const LIVE_LINE = () => `Live-fault lane: declaration ${LIVE_REC.id} of sprint ${LIVE_REC.sprint_id} for issue #${LIVE_REC.issue}, declared ${LIVE_REC.at}`
+// #1433: the seconds from the declaration to the green time, kept to the microsecond (the first-use verifier compares them unrounded), or null when either is unreadable or green is before the declaration.
+const secondsBetween = (declaredAt, greenAt) => {
+  const us = v => {
+    const m = typeof v === 'string' ? /^([^.]*?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$/.exec(v.trim()) : null
+    const whole = m ? Date.parse(m[1] + (m[3] || '')) : NaN
+    return Number.isFinite(whole) ? BigInt(whole) * 1000n + BigInt(((m[2] || '') + '000000').slice(0, 6)) : null
+  }
+  const d = us(declaredAt), g = us(greenAt)
+  return d !== null && g !== null && g >= d ? Number(g - d) / 1e6 : null
+}
+const LIVE_GREEN = { type: 'object', properties: { state: { enum: ['green', 'failed', 'pending', 'error'] }, head: FULL_SHA, green_at: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['state'] }
+// The timing is reported, never a gate: an unread, failed or pending green time still lands the delivery.
+const liveTiming = async PR => {
+  let green = null
+  try {
+    green = await call(`Issue #${ISSUE} of ${SLUG}: read when the pull request #${PR} went green, changing nothing: post, edit, label and run nothing else. Run alone and exactly: pr-green --repo ${SLUG} --pr ${PR}
+It prints one JSON line. Return its state, head and green_at (error as state, with the stderr line as detail, on exit 2). Run nothing else.
+${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'live-green', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LIVE_GREEN }, true)
+  } catch (error) {
+    green = null
+  }
+  const read = isEntry(green) && green.state === 'green' && sameSha(green.head, liveCommit()) && typeof green.green_at === 'string' ? green.green_at : null
+  const seconds = read === null ? null : secondsBetween(LIVE_REC.at, read)
+  const within = seconds !== null && seconds <= 3600
+  log(read === null || seconds === null ? `live fault ${LIVE_REC.id}: no green time was read (${isEntry(green) && typeof green.state === 'string' ? green.state : 'no reply'})` : `live fault ${LIVE_REC.id}: declared ${LIVE_REC.at}, green ${read}: ${seconds} s, ${within ? 'within' : 'over'} the hour`)
+  return { id: LIVE_REC.id, sprint_id: LIVE_REC.sprint_id, issue: LIVE_REC.issue, declared_at: LIVE_REC.at, pr: PR, green_at: read, seconds, within_hour: within }
+}
+
 const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
   const planned = plan ? plan.acceptance : null
   // #1356: a landing under a recorded approval answers the criterion the issue's look-marker line names: the close-out ticks it, so the hold leaves it out and raises no second ask.
@@ -1200,7 +1281,8 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType
   if (!co || co.issue_state !== want || co.decision_ended !== true || co.released !== true || (notes.length && co.notes_posted !== true)) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
   const lookTick = tickStep ? (co.look_tick || null) : null
   if (tickStep && !(lookTick && ['ticked', 'already', 'unmarked'].includes(lookTick.verdict))) log(`close-out: the look marker of issue ${ISSUE} was not ticked: ${lookTick ? lookTick.verdict : 'no reply'}`)
-  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, ...(tickStep ? { look_tick: lookTick } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), acceptance: planned, fix_waves: fixWaves }
+  const liveFault = LANE === 'live' && LIVE_REC ? await liveTiming(PR) : null
+  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, ...(liveFault ? { live_fault: liveFault } : {}), ...(tickStep ? { look_tick: lookTick } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), acceptance: planned, fix_waves: fixWaves }
 }
 
 if (CONT && setup.merged_pr) {
@@ -1229,13 +1311,35 @@ ${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'look-read', phase: 'Shi
   return await closeOut(setup.merged_pr, null, setup.worktree, null)
 }
 
+// ---------------- Live-fault gate (#1433) ----------------
+let LIVE_ENDED = null
+// The live lane acts on the declaration it started under, before any agent: first hit wins. A stop here before the claim was validated keeps claim_incomplete, so its resume finishes the claim.
+if (LANE === 'live') {
+  const unreadWhy = LIVE_RAW === undefined || LIVE_RAW === null ? 'the setup returned no live_fault' : isEntry(LIVE_RAW) && LIVE_RAW.verdict === 'error' ? (present(LIVE_RAW.detail) ? String(LIVE_RAW.detail).slice(0, 80) : 'the read failed') : 'the read was no usable live_fault'
+  const liveStop = (stage, details) => { if (!CONT) claimIncomplete = true; return stop(stage, { details }) }
+  const seen = CONT && isEntry(CONT.live_fault) ? CONT.live_fault : null
+  if (seen && LIVE_FINAL.includes(seen.final)) {
+    const ended = () => liveStop(seen.final, `this live-fault delivery already stopped at ${seen.final}; ${LIVE_WAY}`)
+    // The final stop ends the delivery, not the filing: a follow-up it left unconfirmed is filed again first, once the agents' rules exist.
+    if (!pending.length) return ended()
+    LIVE_ENDED = ended
+  }
+  if (!LIVE_ENDED) {
+    if (LIVE_UNREAD) return liveStop('live-fault', `the live-fault declaration of issue #${ISSUE} could not be read (${unreadWhy}); resume once the console answers, or ${LIVE_WAY}`)
+    if (!LIVE) return liveStop('live-fault', `issue #${ISSUE} has no standing live-fault declaration (${LIVE_RAW.verdict}); ${LIVE_WAY}`)
+    if (seen && !liveSame(seen, LIVE)) return liveStop('live-fault', `the live-fault declaration this delivery started under (${seen.id}) was withdrawn or replaced; ${LIVE_WAY}`)
+    if (MODE === 'plan') return liveStop('live-fault', `issue #${ISSUE} is a declared live fault and the live-fault lane has no plan mode: run it in ready or ship mode`)
+  }
+}
+
 const RS = setup.review_state || {}
-for (const k of ['plan', 'code']) {
+// The live lane runs no Codex review of any kind, so its capability state stops nothing.
+for (const k of LANE === 'live' ? [] : ['plan', 'code']) {
   // Before any claim nothing is held, so the stop carries no cont: fix the capability and start again.
   if (RS[k] === 'blocked') return CONT || CLAIM_TAKEN ? stop('review-blocked', { review: k }) : why({ stage: 'review-blocked', review: k })
 }
-const REVIEW_CODE = RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
-const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
+const REVIEW_CODE = LANE !== 'live' && RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
+const REVIEW_PLAN = LANE !== 'live' && RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
 
 // A fresh run's setup already ran the claim and the worktree: validate its nested results. A claim_incomplete resume runs them itself,
 // and so does a fresh run whose folded acquire was transient (its acquire step runs once more, then the worktree).
@@ -1281,6 +1385,12 @@ ${RULES_FOR(setup.worktree_path)}`, { label: 'worktree', phase: 'Setup', agentTy
 
 const W = setup.worktree
 let RULES = RULES_FOR(W)
+if (LIVE_ENDED) {
+  const again = pending
+  pending = []
+  await fileFollowUps(again)
+  return LIVE_ENDED()
+}
 // The nested renew instruction a folded prompt starts with.
 const RENEW_FIRST = `First renew the claim: run, alone and exactly, forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch} (it prints one JSON line) and return its verdict (error, with detail, on exit 1 or 2), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
 // Grades a renew result. null = renewed; else the stop to return.
@@ -1509,7 +1619,7 @@ const planRefs = () => {
   GRANTS = declared(plan); RULES = RULES_FOR(W)
   for (const b of declared(plan)) if (!own(branchTips, b.name)) branchTips[b.name] = headOf(setup.branch_heads, b.name) || b.head
   ACS = JSON.stringify(plan.acceptance)
-  PLAN_REF = plan.plan_root ? `Plan: ${plan.plan_root} (task files beside it).` : 'No plan: direct lane.'
+  PLAN_REF = plan.plan_root ? `Plan: ${plan.plan_root} (task files beside it).` : `No plan: ${LANE === 'live' ? 'live-fault' : 'direct'} lane.`
 }
 const declaredRanges = () => declared(plan).map(b => `git -C ${b.worktree} diff ${b.base}...${b.name}`)
 const EXTRA_RANGES = () => (declared(plan).length ? ` The plan's declared branches belong to this delivery: also review ${declaredRanges().join(' and ')}.` : '')
@@ -1548,6 +1658,74 @@ const NO_VERIFY_AC = 'Do not write the declared verification commands as an acce
 // #935: a fix round whose findings are all ungraded criteria produces their evidence; FOCUSED would forbid the command a criterion names.
 const EVIDENCE_FIX = `Produce the evidence each criterion asks for: run the command it names (or the test that asserts it, written first when none exists) in the worktree, and report in notes, per criterion id, the command, its exit status and its last lines. The focused-tests-only rule does not apply to a command a criterion names. If it fails, fix the cause with a regression test and commit; when nothing has to change, commit nothing and return commit equal to start_head. ${FMT}`
 const EVIDENCE_REREVIEW = ' These findings are acceptance criteria the review did not see shown met, and the notes carry the evidence produced for each (the command, its exit status and last lines; the diff is empty when nothing had to change): a criterion that evidence shows met is resolved, and one without it, or whose command failed, is still unresolved.'
+
+// #1433: the live-fault lane's one implementer returns the test it ran twice: failing at start_head, passing at its commit.
+const RUN = { type: 'object', properties: { command: { type: 'string' }, exit: { type: 'integer' }, head: FULL_SHA, failed: STRS, passed: STRS, output: { type: 'string' } }, required: ['command', 'exit', 'head'] }
+// #1433: a finding of the live-fault review blocks only when it is critical, names a criterion of the issue the review did not grade met with evidence, is an ungraded code criterion, or cannot be filed; every other finding is a follow-up issue, as is each item the implementer left out.
+const LIVE_FINDING_LEAD = f => `Follow-up of #${ISSUE}: the live-fault lane's diff review raised this ${f.severity} finding, which does not block that delivery.`
+const LIVE_BEYOND_LEAD = `Follow-up of #${ISSUE}: the live-fault lane left this out of the fix, which stops the harm and nothing more.`
+const metWithEvidence = (review, id) => (Array.isArray(review.acceptance) ? review.acceptance : []).some(x => isEntry(x) && x.id === id && x.met === true && typeof x.evidence === 'string' && x.evidence.trim() !== '')
+const liveSplit = (review, criteria) => {
+  const blocking = []
+  const filed = []
+  for (const f of review.findings.filter(isEntry)) {
+    const entry = f.severity === 'critical' || (namesAc(f) && criteria.some(a => a.id === f.ac) && !metWithEvidence(review, f.ac)) ? null : followUpOf({ ...f, lead: LIVE_FINDING_LEAD(f) }, false)
+    if (entry) filed.push(entry)
+    else blocking.push(f)
+  }
+  return { blocking: blocking.concat(ungradedFindings(review, criteria)), filed }
+}
+const LIVE_IMPL = {
+  ...IMPL,
+  properties: {
+    ...IMPL.properties,
+    acceptance: PLAN_SCHEMA.properties.acceptance,
+    fault_test: { type: 'object', properties: { name: { type: 'string' }, file: { type: 'string' }, red: RUN, green: RUN }, required: ['name', 'file', 'red', 'green'] },
+    beyond: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, summary: { type: 'string' } }, required: ['file', 'summary'] } },
+  },
+}
+const LIVE_FINDINGS = withItems({ ...GRADED_FINDINGS, properties: { ...GRADED_FINDINGS.properties, head: FULL_SHA }, required: [...GRADED_FINDINGS.required, 'head'] }, SCOPED_ITEM)
+// #1433: the diff the one live-fault review reads is bounded and read for sensitivity first; the rows are those of git diff --numstat --no-renames, so a rename is a deletion row for its old path and an addition row for its new one.
+const LIVE_MAX_LINES = 80
+const LIVE_MAX_FILES = 3
+const TEST_PATH = /(^|\/)(tests?|__tests__|specs?)\/|(^|\/)test_[^/]*$|[^/]*(_test\.|\.test\.|\.spec\.)[^/]*$/
+const isTestPath = path => TEST_PATH.test(path)
+const LIVE_SIZE = { type: 'object', properties: { measured: { type: 'boolean' }, head: FULL_SHA, files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, added: { type: 'integer', minimum: 0 }, deleted: { type: 'integer', minimum: 0 } }, required: ['path', 'added', 'deleted'] } }, sensitive: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, why: { type: 'string' } }, required: ['path', 'why'] } } }, required: ['measured'] }
+const countOf = v => Number.isInteger(v) && v >= 0
+const liveMeasured = size => isEntry(size) && size.measured === true && Array.isArray(size.files) && Array.isArray(size.sensitive)
+  && size.files.every(f => isEntry(f) && typeof f.path === 'string' && f.path.trim() !== '' && countOf(f.added) && countOf(f.deleted))
+  && size.sensitive.every(f => isEntry(f) && typeof f.path === 'string' && typeof f.why === 'string')
+// null, or the one reason a measured diff is refused; the first check that fails wins.
+const liveRefusal = size => {
+  const rows = new Map()
+  for (const f of size.files) rows.set(f.path, (rows.get(f.path) || 0) + f.added + f.deleted)
+  let lines = 0
+  for (const [k, n] of rows) if (!isTestPath(k)) lines += n
+  if (lines > LIVE_MAX_LINES) return `the diff changes ${lines} lines outside tests, over the live lane's ${LIVE_MAX_LINES}`
+  if (rows.size > LIVE_MAX_FILES) return `the diff changes ${rows.size} files, over the live lane's ${LIVE_MAX_FILES}`
+  if (size.sensitive.length) return `the diff touches ${size.sensitive[0].why} in ${size.sensitive[0].path}`
+  return null
+}
+// The evidence is structural: one command runs at start_head and fails (not 126 or 127: it ran), the runner names the test failed and gives its failure line; the same command at the commit passes and the runner names the test passed.
+// null, or a short text naming the first missing piece.
+const faultTestProblem = impl => {
+  const ft = impl && impl.fault_test
+  if (!isEntry(ft)) return 'no fault_test was returned'
+  const text = v => typeof v === 'string' && v.trim() !== ''
+  const { red, green } = ft
+  if (!text(ft.name) || !text(ft.file)) return 'the test has no name or file'
+  if (!isEntry(red) || !isEntry(green) || !text(red.command) || !text(green.command)) return 'a run names no command'
+  if (red.command.trim() !== green.command.trim()) return 'the two runs are not the same command'
+  if (!Number.isInteger(red.exit) || [0, 126, 127].includes(red.exit)) return 'the first run did not fail'
+  if (!Array.isArray(red.failed) || !red.failed.includes(ft.name)) return 'the runner did not report the test failed'
+  if (!text(red.output)) return 'the first run gave no failure line'
+  if (green.exit !== 0) return 'the second run did not pass'
+  if (!Array.isArray(green.passed) || !green.passed.includes(ft.name)) return 'the runner did not report the test passed'
+  if (!sameSha(red.head, impl.start_head)) return 'the first run was not at start_head'
+  if (!sameSha(green.head, impl.commit)) return 'the second run was not at the commit'
+  if (sameSha(impl.commit, impl.start_head)) return 'the implementer committed nothing: its commit is start_head, so the two runs show no change'
+  return null
+}
 
 // ---------------- Direct lane ----------------
 if (LANE === 'direct') {
@@ -1620,6 +1798,72 @@ Re-review only these previously reported findings against the fix: ${span(fix)};
     }
     Object.assign(d1, { reviewed_head: fix ? fix.commit : reviewHead, review_rounds: fix ? 1 : 0, reviewer: passedBy })
   }
+} else if (LANE === 'live') {
+  // #1433: no plan, one implementer on the declared fault, one reviewer; the implementer's commit is the one head every later step reads.
+  let impl = null
+  if (!taskLog.some(d => d.n === 1)) {
+    phase('Tasks')
+    const lostRenew = await renew('tasks', 'Tasks')
+    if (lostRenew) return lostRenew
+    impl = await call(`${CTX}
+Deliver issue #${ISSUE} in the live-fault lane: no plan; you are its one implementer. The issue is a declared live fault, as the owner's sprint recorded it: ${JSON.stringify({ observed: LIVE.observed, when: LIVE.when, proven: LIVE.proven })}.
+Make the smallest change that stops the harm, and nothing more. A schema, a query, a decision record or any follow-through is never part of it: list each in beyond as {file, summary}, and it is filed as a follow-up issue. The change is at most 80 changed lines outside tests and at most 3 files in all, tests included; it never touches authentication, authorization, secrets, credentials or a permission or command guard: when the fix needs more or touches one, change nothing and return status blocked with the reason in notes.
+Work in this order. First write one test that reproduces the harm, and run it before you change any other file, with a command that selects that test alone: it must fail, and the runner must report it failed. Return the command, its exit status, the failed test names and the failure line as fault_test.red, with head the output of git -C ${W} rev-parse HEAD at that run, which is start_head; commit nothing before that run. Then make the change and commit the test and the change. Then, with a clean tree, run the same command again at the committed head: it must pass, and the runner must report it passed. When it fails, fix, commit again and run the same command again. Return that run as fault_test.green (command, exit status, the passed test names), with head the commit. Return fault_test with name, file (its path from the worktree root, as git diff prints it), red and green.
+Return acceptance (the issue's criteria; ${KIND_GUIDE}) and beyond. ${NO_VERIFY_AC} ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
+An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure every test was seen failing first; of the removals, make only those not already made against the final result; start_head is the head before this task's first commit.` : ''}
+${RULES}`, { label: 'live-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: LIVE_IMPL })
+    if (impl && impl.status === 'blocked') return stop('live-bound', { details: `the live-fault implementer returned blocked: ${clip(typeof impl.notes === 'string' ? impl.notes : '').slice(0, 100)}; ${LIVE_WAY}` })
+    if (!implDone(impl)) return haltTask(1, 'task', { task: { n: 1 }, impl })
+    // The commit exists: asking again would be a second implementer, so a reply without criteria is final here, never a partial task.
+    if (!Array.isArray(impl.acceptance) || !impl.acceptance.length) { partial = undefined; return liveBound(`the live-fault implementer committed ${impl.commit} and returned no acceptance criteria, and asking again would be a second implementer`) }
+    const problem = faultTestProblem(impl)
+    if (problem !== null) {
+      partial = undefined
+      return stop('live-evidence', { impl, details: `the change carries no test shown failing before it and passing after it: ${problem}; ${LIVE_WAY}` })
+    }
+    plan = { status: 'planned', plan_root: null, acceptance: impl.acceptance, tasks: [{ n: 1, title: 'live', file: null, risk: 'standard' }] }
+    planReviewed = true
+    lookAcs = LOOK_ACS
+    const beyond = (Array.isArray(impl.beyond) ? impl.beyond : []).filter(isEntry).map(b => ({ file: textOf(b.file), summary: textOf(b.summary) })).filter(b => b.file && b.summary)
+    taskLog.push({ n: 1, commit: impl.commit, review_rounds: 0, reviewer: null, reviewed_head: null, fault_test: impl.fault_test, beyond })
+    if (partial === 1) partial = undefined
+  }
+  planRefs()
+  log('live-fault lane: one implementer, one reviewer')
+  const d1 = taskLog.find(d => d.n === 1)
+  let liveReview = null
+  let liveSplitOf = { blocking: [], filed: [] }
+  if (!(SKIP_REVIEW || (!impl && present(d1.reviewed_head) && sameSha(d1.reviewed_head, setup.head)))) {
+    phase('Final review')
+    const lost = await renew('final-review', 'Final review')
+    if (lost) return lost
+    const size = await call(`${CTX}
+Measure the live-fault diff before its review. Run git -C ${W} fetch origin, then return head (git -C ${W} rev-parse HEAD).
+Run git -C ${W} diff --numstat --no-renames ${RANGE} and return measured true and files: one {path, added, deleted} per line it prints, where a binary file's - counts are 0, and a rename appears as two lines, its old path and its new path.
+Read git -C ${W} diff --no-renames ${RANGE} and return sensitive: one {path, why} per changed path whose change touches authentication or authorization, secrets or credentials, or a permission or command guard (a hook, policy or rule that allows or refuses commands or actions), or [] when none.
+On a non-zero exit, return measured false. Run nothing else and change nothing.
+${RULES}`, { label: 'live-size', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'medium', schema: LIVE_SIZE })
+    if (!liveMeasured(size)) return stop('live-size', { details: 'the live-fault diff could not be measured' })
+    if (!sameSha(size.head, d1.commit)) return liveBound(`the diff was measured at ${typeof size.head === 'string' ? size.head : 'no head'}, not the delivered commit ${d1.commit}`)
+    const refusal = liveRefusal(size)
+    if (refusal !== null) return stop('live-refused', { details: `${refusal}; ${LIVE_WAY}` })
+    // The evidence test must be one this diff changes: a run of a test the diff leaves alone shows nothing about this change.
+    const testFile = d1.fault_test.file.trim().replace(/^\.\//, '')
+    if (!size.files.some(f => f.path === testFile)) return stop('live-evidence', { details: `the change carries no test shown failing before it and passing after it: the test file ${testFile} is not a path the diff changes; ${LIVE_WAY}` })
+    const review = await readReview(`${CTX}
+lane: live. Review git -C ${W} diff ${RANGE} for issue #${ISSUE}, the fix of the live fault ${JSON.stringify({ observed: LIVE.observed, when: LIVE.when, proven: LIVE.proven })}: it must stop the harm and nothing more. Acceptance criteria: ${ACS}. The implementer's failing-then-passing test: ${JSON.stringify(d1.fault_test)}. Confirm the test is in the diff and that the failure line of its first run is the observed harm. Return head (git -C ${W} rev-parse HEAD). ${KNOW} ${CRITICAL_MEANS} ${COMMIT_ASK(d1.commit)} Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a code criterion that is not met, or has no evidence, is an Important finding, and criteria of other kinds are not findings (grade them and give what you observed). Do not edit anything.`, { label: 'live-review', phase: 'Final review', agentType: 'reviewer', schema: LIVE_FINDINGS }, { once: true })
+    // An answered review that was no review is spent (the lane asks once): that stop is final. A reviewer that answered nothing is the one step a resume runs again.
+    if (!review) return LOST.includes('live-review') ? stop('live-review', { review: null, details: `the live-fault review answered with no usable review, and asking again would be a second reviewer; ${LIVE_WAY}` }) : stop('live-review', { review: null })
+    if (!sameSha(review.head, d1.commit)) return stop('live-bound', { details: `the review read ${typeof review.head === 'string' ? review.head : 'no head'}, not the delivered commit ${d1.commit}; ${LIVE_WAY}` })
+    liveReview = review
+    liveSplitOf = liveSplit(review, plan.acceptance)
+  }
+  // #1433: every filing comes first, whatever the outcome: the filed findings and the items the implementer left out, then d1.beyond is gone, and only then does a blocking finding stop the lane.
+  const liveEntries = liveSplitOf.filed.concat((Array.isArray(d1.beyond) ? d1.beyond : []).map(b => followUpOf({ severity: 'minor', file: b.file, summary: b.summary, commit: d1.commit, lead: LIVE_BEYOND_LEAD }, false)).filter(Boolean))
+  if (liveEntries.length) await fileFollowUps(liveEntries)
+  delete d1.beyond
+  if (liveSplitOf.blocking.length) return stop('live-review', { review: liveReview, findings: liveSplitOf.blocking, details: `a critical finding blocks the live-fault lane; ${LIVE_WAY}` })
+  if (liveReview) Object.assign(d1, { reviewed_head: d1.commit, reviewer: 'reviewer' })
 } else {
 phase('Plan')
 if (plan) {
@@ -2413,13 +2657,19 @@ if (pending.length) {
 phase('Verify')
 const VERIFY = {
   type: 'object',
-  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' }, outside_diff: { type: 'boolean' } }, required: ['id', 'status', 'summary'] } }, pictures: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: ['before', 'after'] }, path: { type: 'string' } }, required: ['kind', 'path'] } } },
+  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' }, outside_diff: { type: 'boolean' }, no_slot: { type: 'boolean' } }, required: ['id', 'status', 'summary'] } }, pictures: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: ['before', 'after'] }, path: { type: 'string' } }, required: ['kind', 'path'] } } },
   required: ['head', 'clean', 'results'],
 }
 // #1139: the before and after pictures a verification command wrote, kept when well formed.
 const picturesOf = v => (v && Array.isArray(v.pictures) ? v.pictures.filter(p => isEntry(p) && (p.kind === 'before' || p.kind === 'after') && typeof p.path === 'string' && p.path.trim()).map(p => ({ kind: p.kind, path: p.path })) : [])
-const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. On each failure also return outside_diff: true only when no failing test file and no erroring file is in that git diff --name-only list, else false. When a command's output names image files it wrote as before or after pictures of the change, return them as pictures, one {kind: before or after, path: its absolute path} each; otherwise return no pictures. Do not change any file.
+// #1383: each declared argv runs behind verify-slot, which holds one of the host's verify slots while the command runs; the declared entries stay the contract.
+const SLOT_WAIT_SECONDS = 600
+const SLOT_ATTEMPTS = 12
+const slotted = e => ({ ...e, argv: ['verify-slot', 'run', '--wait-limit', String(SLOT_WAIT_SECONDS), '--', ...e.argv] })
+const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries.map(slotted))}. Run each argv with <worktree>/<its cwd> as working directory. Each argv runs its declared command inside one of the host's verify slots: verify-slot run holds the slot while the command runs and gives it back when it ends. An attempt that prints verify-slot: no verify slot came free within ${SLOT_WAIT_SECONDS}s; nothing ran and exits 75 ran nothing and does not count as a run of that command: run the same argv again, up to ${SLOT_ATTEMPTS} attempts in all, and after the last return that id as fail with the summary no verify slot came free in ${SLOT_ATTEMPTS} attempts and no_slot: true (no_slot is true on that result only, never on a command that ran). Every other exit is the command's own result. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. On each failure also return outside_diff: true only when no failing test file and no erroring file is in that git diff --name-only list, else false. When a command's output names image files it wrote as before or after pictures of the change, return them as pictures, one {kind: before or after, path: its absolute path} each; otherwise return no pictures. Do not change any file.
 ${RULES}`
+// #1383: a result whose command never ran, because no slot came free in every attempt, is no test failure: nothing below fixes or reruns it.
+const noSlot = v => !!v && Array.isArray(v.results) && v.results.some(r => isEntry(r) && r.status === 'fail' && r.no_slot === true)
 const verifyBody = verifyBodyFor(setup.verification)
 const verifyPrompt = `${CTX}\n${verifyBody}`
 // The first verification also renews the claim (#716); the reruns do not.
@@ -2473,12 +2723,14 @@ let rerunFailed = false
 const noteFlaky = rs => { for (const r of Array.isArray(rs) ? rs : []) if (isEntry(r) && present(r.flaky) && !flakySeen.some(f => f.id === r.id && f.summary === r.flaky)) flakySeen.push({ id: r.id, summary: r.flaky }) }
 const rerunOnce = async (v, n) => {
   rerunFailed = false
-  if (!v || !v.clean || !Array.isArray(v.results)) return v
+  if (!v || !v.clean || !Array.isArray(v.results) || noSlot(v)) return v
   const fails = verifyProblems(v)
   if (!fails.length || !fails.every(p => p.status === 'fail' && p.outside_diff === true && VERIFY_IDS.includes(p.id))) return v
   const ids = fails.map(p => p.id)
   log(`verify: ${ids.join(', ')} failed outside the branch's changed files; one rerun before any fix`)
-  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun each failed command below once, whole and exactly as declared, and never a second time, whatever the outcome.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun each failed command below once, whole and exactly as its argv below is written, and never a second time once it has run, whatever its outcome; an attempt that exits 75 with the no-slot line ran nothing, so it is not that rerun and is retried as below.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  // A rerun that never started is not a reproduced failure: the verification stops on it, with no fix step.
+  if (complete(again, VERIFY) && noSlot(again)) return { ...v, results: v.results.map(r => again.results.find(a => a.id === r.id && a.status === 'fail' && a.no_slot === true) || r) }
   if (!complete(again, VERIFY) || !again.clean || !Array.isArray(again.results) || !sameSha(again.head, v.head)) return v
   const passed = id => { const rs = again.results.filter(r => r.id === id); return rs.length === 1 && rs[0].status === 'pass' ? rs[0] : null }
   rerunFailed = ids.some(id => !passed(id))
@@ -2571,6 +2823,7 @@ const base64Utf8 = text => {
 }
 // A look marker the setup could not read is neither marked nor unmarked: a fix answer stops here, before the head check, the approval and the fix round.
 if (!LOOK_READ && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') return LOOK_UNREAD()
+if (LANE === 'live' && LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === 'fix')) return liveBound('the owner asked for a change at the look, and a fix would be a second implementer')
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') {
   const hd = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
@@ -2607,7 +2860,8 @@ if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === '
   // The fix answer's approval was recorded for the head it was given for: the delivery lands the fixed head when look-approval status keeps it.
   if (MARKED && LOOK_ANSWER.answer === 'fix') {
     approvedHead = LOOK_ANSWER.head
-    lookAt = { pr: lookAt.pr, head: approvedHead, approved: approvedHead }
+    ownerHead = approvedHead
+    lookAt = approvedLook(lookAt.pr, approvedHead)
     LOOK_STOP = false
   }
 }
@@ -2621,8 +2875,13 @@ if (verify) {
   if (!complete(verify, VERIFY)) verify = null
 }
 verify = await rerunOnce(verify, 1)
+if (LANE === 'live' && verify) {
+  if (!sameSha(verify.head, liveCommit())) return liveBound(`the verification read ${typeof verify.head === 'string' ? verify.head : 'no head'}, not the delivered commit ${liveCommit()}`)
+  const failed = verifyProblems(verify)
+  if (failed.length) return liveBound(`the verification failed at ${liveCommit()} (${failed.map(p => p.id).join(', ')}), and a fix would be a second implementer`, { verify })
+}
 let vRounds = 0
-while (verify && verifyProblems(verify).length && vRounds < 2) {
+while (verify && !noSlot(verify) && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
   const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify).map(p => ({ id: p.id, status: p.status, summary: p.summary })))}.${rerunFailed ? ' It failed again on the one rerun at the same head, so it is not flaky.' : ''} Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. When what fails lies outside that diff, first establish with evidence why it fails here: this branch's change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown may you edit a file outside the diff, and then return outside_diff: [{file, why}], one entry per such file with the cause. With no cause established (it fails without this branch${rerunFailed ? '' : ', or it is flaky'}), change and commit nothing and return status blocked with unrelated {test, evidence}, evidence being what you ran or read: establish it by reading, or by running the test, never by checking out another commit in the worktree. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: FIX_OR_UNRELATED })
   // #972: a failure for which the fix step can establish no cause here (the branch's change or the delivery's environment) is not edited
@@ -2817,6 +3076,8 @@ ${lockMaybe && !sameSha(lockMaybe, lockSha) ? RELEASE_AGAIN(lockMaybe) : ''}${RU
 // that made a commit and its review (the release of the lock, when the fix step did not report it).
 // #1371: a committed fix with no test command recorded is refused before its review and its push, and its commit is carried in cont.
 const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false, rerun = false, schema = IMPL, committed = null }) => {
+  // #1433: the live-fault lane has no second implementer: its caller stops, bound, before any fix or review.
+  if (LANE === 'live') return { fix: null, ok: false, bound: true }
   const fix = await call(fixPrompt, { label, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema })
   if (noteUntested(stage, fix, expected)) return { fix, ok: false, details: UNTESTED }
   if (!implDone(fix) || !sameSha(fix.start_head, expected)) return { fix, ok: false }
@@ -2828,7 +3089,7 @@ const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, reb
   return { fix, review, moved, ok: true }
 }
 // #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call. #1246: a function, so its Evidence names the results of verify as it is when the call is made (an approved head's verification replaces them).
-const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
+const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : LANE === 'live' ? 'live-fault lane review: one reviewer, no plan' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}${LANE === 'live' && LIVE_REC ? `; the Evidence section also holds, on a line of its own, exactly: ${LIVE_LINE()}` : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
 const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is read back
 // (look-approval status, #1260: the owner records it where they answered; this program never posts one) only for the head the owner saw, when that is the pull request head. #1246: a head that is not the verified head is verified first (a look-verify step), and recorded only when it
@@ -2855,6 +3116,8 @@ ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK
     lookWhy = `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head}`
     return lookWaitStop(P, hd.head)
   }
+  // The live lane lands only the commit its one reviewer read: an approved head that moved (an integration merge, a push) is never verified, recorded or merged here.
+  if (LANE === 'live' && !sameSha(A, liveCommit())) return liveBound(`the owner approved ${A}, not the delivered commit ${liveCommit()}, and landing it would merge a commit the live review never read`)
   let recordable = sameSha(A, V0)
   if (!recordable) {
     const lv = await call(`${CTX}
@@ -2888,9 +3151,57 @@ ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK
     if (!read || typeof read.verdict !== 'string' || read.verdict === 'error') return stop('look-approve', { details: `the approval of ${A} could not be checked: the verified head was ${V0} and ${answered}`, result: read })
     if (read.verdict !== 'approved') return stop('look-approve', { details: `${NOT_RECORDED}: the verified head was ${V0} and ${answered}`, result: read })
     approvedHead = A
-    lookAt = { pr: P, head: approvedHead, approved: approvedHead }
+    ownerHead = A
+    lookAt = approvedLook(P, approvedHead)
   }
   LOOK_STOP = MARKED && approvedHead === null
+}
+// #1566: a landing resync that moved a marked head past the owner's approved head. LOOK_CARRY_VERIFY adds merge_only to the verification reply; the carry command's JSON line is LOOK_CARRY_SCHEMA.
+const LOOK_CARRY_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only'] }
+const LOOK_CARRY_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, from: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] }, comment_id: { type: ['integer', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
+// The reasons look-approval carry gives for a needed answer; any other reason is an unreadable reply.
+const CARRY_REASONS = ['no-approval', 'source-differs', 'no-pictures', 'pictures-differ', 'not-merges']
+// A picture path the carry command is given: absolute and on one line; shq quotes it, so a space or a shell character is fine.
+const USABLE_PICTURE = /^\/[^\0\r\n]+$/
+// A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry line). The verification of H always runs, so every later stop shows H's verified record and pictures.
+const carryLook = async H => {
+  const S = ownerHead
+  const lv = await call(`${CTX}
+The owner approved head ${S} of PR #${PR}; the landing brought it to ${H}. Run only git commands and the declared verification, in this order:
+1. git -C ${W} fetch origin. When git -C ${W} rev-parse HEAD is not ${H}, run nothing more and return head (git -C ${W} rev-parse HEAD), clean, results [] and merge_only false.
+2. merge_only is true only when git -C ${W} merge-base --is-ancestor ${S} ${H} succeeds, git -C ${W} rev-list --no-merges ${S}..${H} ^origin/${INT} prints nothing, and every merge in git -C ${W} rev-list --merges ${S}..${H} ^origin/${INT} is a clean two-parent merge, meaning git -C ${W} merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C ${W} rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged); else false.
+3. Whatever merge_only is: ${verifyBody}`, { label: 'look-carry-verify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_VERIFY })
+  if (!complete(lv, LOOK_CARRY_VERIFY) || !SHA_RE.test(lv.head) || !sameSha(lv.head, H)) return stop('look-carry', { pr: PR, head: H, details: `the verification of ${H} returned no usable reply for it`, result: lv })
+  if (verifyProblems(lv).length) return stop('look-carry', { pr: PR, head: H, problems: verifyProblems(lv) })
+  verify = { head: fuller(H, lv.head), clean: true, results: lv.results, ...(picturesOf(lv).length ? { pictures: picturesOf(lv) } : {}) }
+  if (lv.merge_only !== true) {
+    lookWhy = `the approval of ${S} does not carry to ${H}: it adds commits that are not clean merges of ${INT}`
+    return lookWaitStop(PR, H)
+  }
+  const pics = picturesOf(lv)
+  if (!pics.length || pics.some(x => !USABLE_PICTURE.test(x.path))) {
+    lookWhy = `the approval of ${S} does not carry to ${H}: the verification wrote no pictures it can compare`
+    return lookWaitStop(PR, H)
+  }
+  const reply = await call(`${CTX}
+Record whether the owner's look approval of issue #${ISSUE} of ${SLUG} carries from ${S} to the head ${H} of PR #${PR}. Run alone and exactly: look-approval carry --repo ${SLUG} --issue ${ISSUE} --pr ${PR} --from ${S} --head ${H}${pics.map(x => ` --${x.kind} ${shq(x.path)}`).join('')}
+It prints one JSON line. Return its verdict, from, reason, comment_id and any detail. Run nothing else.
+${RULES}`, { label: 'look-carry', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_SCHEMA })
+  // approved: the owner approved exactly H between the status read and this call, so H lands under that approval and is the owner's head from now on.
+  if (isEntry(reply) && reply.verdict === 'approved') {
+    log(`look-carry: the owner approved ${H} itself; nothing to carry`)
+    ownerHead = H
+    return null
+  }
+  if (isEntry(reply) && reply.verdict === 'carried' && typeof reply.from === 'string' && SHA_RE.test(reply.from) && sameSha(reply.from, S) && Number.isInteger(reply.comment_id) && reply.comment_id > 0) {
+    log(`look-carry: the approval of ${S} carried to ${H} (comment ${reply.comment_id})`)
+    return null
+  }
+  if (isEntry(reply) && reply.verdict === 'needed' && CARRY_REASONS.includes(reply.reason)) {
+    lookWhy = `the approval of ${S} does not carry to ${H}: ${reply.reason}`
+    return lookWaitStop(PR, H)
+  }
+  return stop('look-carry', { pr: PR, head: H, result: reply })
 }
 const landBody = async () => {
   // The pr call may take the lock (--wait) after opening the PR: mark the verified head as possibly held before it, so a lost reply still reaches the release.
@@ -2965,6 +3276,7 @@ ${RULES}`, { label: `land-lock-${k}`, phase: 'Ship', agentType: 'clerk', model: 
   // #1018: with prelock, the pr call read a failed check at a head behind ${INT} while another landing held the lock: the same sync
   // step (and, on a conflict, the same resolution and review) runs before the lock is asked for, and spends none of that budget either.
   const syncRound = async (early, prelock = false) => {
+    if (LANE === 'live') return liveBound(`the branch is behind ${INT} or conflicts with it, and a sync merge would be a second implementer`, { pr: PR })
     if (!early && !prelock && !raced) {
       if (contended >= 2) return stop('sync-contention', { pr: PR, syncs })
       contended++
@@ -3113,6 +3425,7 @@ ${RULES}`, { label: 'look-push', phase: 'Ship', agentType: 'clerk', model: DEFAU
         if (checksFixes >= 1) return stop('checks', { pr: PR, failing: rd.failing, checks: ck })
         checksFixes++
         const w = await ciFix(ck, rd.failing, 'unasked')
+        if (w.bound) return liveBound(`a check failed at ${expected}, and a fix would be a second implementer`, { pr: PR })
         if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
         if (w.rerun) {
           reran = true
@@ -3185,6 +3498,7 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
       if (checksFixes >= 1) return unheld(stop('checks', { pr: PR, failing: failingNames, checks: ck }))
       checksFixes++
       const w = await ciFix(ck, failingNames, 'unasked')
+      if (w.bound) return unheld(liveBound(`a check failed at ${expected}, and a fix would be a second implementer`, { pr: PR }))
       if (!w.ok) return unheld(stop('checks-fix', { pr: PR, checks: ck, fix: w.fix, ...(w.details ? { details: w.details } : {}) }))
       if (w.rerun) reran = true
       else {
@@ -3304,6 +3618,7 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
       // #1001: no sync has changed the head under the lock, so the red check is the branch's own: its fix goes outside the lock.
       const first = lockSyncs === 0
       const w = await ciFix(ck, failingNames, first ? 'first' : 'held')
+      if (w.bound) return liveBound(`a check failed at ${expected}, and a fix would be a second implementer`, { pr: PR })
       if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix, ...(w.details ? { details: w.details } : {}) })
       // #818: the failed jobs were rerun at the unchanged head. The loop polls again; checksFixes still ends a second red poll at the checks stop.
       // #986: that next poll alone may rerun a stale gate (STALE_RERUN).
@@ -3328,9 +3643,14 @@ Read whether the owner's look approval of issue #${ISSUE} of ${SLUG} still cover
 It prints one JSON line. Return its verdict, kept_from and any detail. Run nothing else.
 ${RULES}`, { label: 'look-status', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_STATUS_SCHEMA })
         if (!complete(ls, LOOK_STATUS_SCHEMA) || (ls.verdict !== 'approved' && ls.verdict !== 'needed')) return stop('look-status', { pr: PR, head, result: ls })
-        if (ls.verdict === 'needed') return lookStop(PR, head)
+        if (ls.verdict === 'needed') {
+          const row = await carryLook(head)
+          if (row) return row
+        }
+        // The owner's head: a kept approval's own (kept_from), the head itself when the owner approved it exactly; a carry leaves it where it was.
+        if (ls.verdict === 'approved') ownerHead = typeof ls.kept_from === 'string' && SHA_RE.test(ls.kept_from) ? ls.kept_from : head
         approvedHead = head
-        lookAt = { pr: PR, head, approved: head }
+        lookAt = approvedLook(PR, head)
       }
       // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
       mg = await recall(() => call(`${CTX}

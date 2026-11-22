@@ -54,6 +54,7 @@ from agent_tools.project_contract import adopt_inspection
 
 UNAVAILABLE = "answering the adoption's questions is not available on this host"
 STALE = "that plan is no longer the one shown; answer the plan shown now"
+ADOPTED = "that plan is already being adopted; there is nothing left to answer"
 REFUSED_REPAIRS = ("adopt.decisions.invalid_answer", "adopt.decisions.unmatched_answer")
 NO_ANSWER = (
     "This question cannot be answered here: answer it with adopt-project plan --answer in a "

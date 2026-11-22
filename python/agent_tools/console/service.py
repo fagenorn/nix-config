@@ -60,7 +60,11 @@ stream `Content-Length`):
     POST /api/notice 200 application/json, a manager posts one notice for its project (below)
     POST /api/notices 200 application/json, a manager lists its project's open notices (below)
     POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
+    POST /api/live-fault 200 application/json, a manager declares an issue a fault live in production (below)
+    POST /api/live-fault-withdraw 204, a JSON body, the page withdraws a live fault (below)
     POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
+    POST /api/permission-prompt 200 application/json, a manager's hook holds one Bash prompt on the console (below)
+    POST /api/permission-answer 204, a JSON body, the page allows or refuses a manager's held prompt (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
@@ -73,8 +77,9 @@ stream `Content-Length`):
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/permit`,
-                    `/api/picture`, `/api/release-card`, `/api/release-answer` and `/api/round-answer`;
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/live-fault`, `/api/permit`,
+                    `/api/picture`, `/api/release-card`, `/api/release-answer`, `/api/permission-prompt`,
+                    `/api/permission-answer` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
 Guest door (#1237, ADR-console-066, #1299, ADR-console-077). With `guest_socket` (`console
@@ -269,7 +274,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/adoption-merge`, `POST /api/plan-defer`,
 `POST /api/register-confirm`, `POST /api/trust-check`,
-`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
+`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/live-fault-withdraw`, `POST /api/project-question`, `POST /api/activate`,
 `POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code`, `POST /api/guest-signin-cancel`, `POST /api/guest-account-signout` and `POST /api/guest-account-remove` (the last five are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
@@ -345,7 +350,9 @@ round's `questions.asked` row as `look_repo` when a question carries a look, and
 that, never to the checkout's origin at answer time (a card issued without one is `LOOK_NO_REPOSITORY`).
 Otherwise the refusals of any answer are checked again (a question withdrawn or answered meanwhile is refused
 and nothing is posted), one `question.answered` row is appended with its `look` member (the repository too), and the approval is
-posted through `look_recorder` with `str(<that row's seq>)` as the message, outside the lock, retrying
+posted through `look_recorder` with `str(<that row's seq>)` as the message and the ids of every picture on the
+card as the sixth argument, each with its pair (the marker names their digest, #1566; the digest is no part of the answer's
+identity, so a retry finds an earlier marker of the answer whatever it carries), outside the lock, retrying
 transient failures (each retry logs `console: look_post_retry <sprint> <round> <index> <attempt> <code>:
 <detail>`). It then appends `look.recorded posted` and nudges the manager, or `look.recorded failed` with the
 plain reason after logging `console: look_post_failed <sprint> <round> <index> <code>: <detail>` (`refused:
@@ -927,12 +934,14 @@ recap_failed <Type>: <message>` and 500 `recap failed`. `recap(sprint_id, secret
 ingest lock and is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`) and a read: it appends
 nothing, publishes nothing and marks nothing read. It answers 200 `application/json`,
 `json.dumps(recap, sort_keys=True, separators=(",", ":"))` of `{"sprint_id", "goal", "brief",
-"report", "unread"}`: `brief` is null until a brief is sent, else `{"version", "decision" ("none",
+"report", "live_faults", "unread"}`: `brief` is null until a brief is sent, else `{"version", "decision" ("none",
 "approved" or "changes"), "reply" (the owner's words, or null), "parts"}` of the latest version;
 `report` is null until a report is sent, else the last report `{"at", "status", "phase",
 "milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}` and the
 `wait_until` and `paused` the report states, only when it states them (#1380), which a newer
-brief does not remove; `unread` is the number of the owner's messages not yet read.
+brief does not remove; `live_faults` is `[sprints.fault_entry(f) for f in sprints.open_faults(sprint)]`,
+the sprint's standing live-fault declarations in id order; `unread` is the number of the owner's
+messages not yet read.
 
 Questions (#891): `POST /api/ask` is a manager write dispatched like `/api/brief`, before
 `PAGE_WRITES`: `_checked_length(MAX_ASK_BYTES)` (65536: any `Origin` 403 `origin refused`, 415, 411,
@@ -1031,6 +1040,37 @@ folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_spr
 nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
 writer; a refusal appends and publishes nothing.
 
+Live faults (#1432): `POST /api/live-fault` is a manager write dispatched like `/api/notice`, before
+`PAGE_WRITES`, through `_checked_length(MAX_LIVE_FAULT_BYTES)` (16384: any `Origin` 403 `origin
+refused`, 415, 411, 413 `too large`), so it is owner-only on the guest port. A body
+`sprints.parse_live_fault_request` (`sprint_id`, `secret`, `fault`) does not accept is 400 `bad live
+fault`; a `sprints.SecretRefused` is `console: live_fault_refused <sprint_id> secret refused` and 403
+`secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
+reason (a fixed `sprints.py` text: neither the secret nor the evidence text is printed); any other
+exception is `console: live_fault_failed <Type>: <message>` and 500 `live fault failed`. Success is
+200 `application/json` (sorted keys, compact) `{"fault":<id>}`, the new row's `seq`.
+`declare_live_fault(sprint_id, secret, fault)`, under the ingest lock, is `_manager_sprint`
+(`NOT_OPEN`, then `SecretRefused`), then `sprints.declarable_fault`; it appends exactly one
+`fault.declared` row (project the sprint's project) `{"sprint_id", "goal", "fault": <checked>}`,
+folds, publishes and returns the row's `seq`. It nudges nobody and calls no tracker writer; a
+refusal appends and publishes nothing.
+
+The owner withdraws a live fault (#1432): `POST /api/live-fault-withdraw` (`{"project_id", "sprint_id",
+"fault"}`, at most `MAX_LIVE_FAULT_WITHDRAW_BYTES` 4096) is a page write, so it passes `_page_write`'s guard
+before any body is read (no or a foreign `Origin` 403 `origin refused`, a missing or wrong token 403 `token
+refused`, nothing appended) and is owner-only on the guest port. A body `sprints.parse_live_fault_withdrawal`
+does not accept is 400 `bad live fault withdrawal`; a `sprints.Refused` is 409 with the reason and the one
+line `console: live_fault_withdraw_refused <sprint_id> <reason>`, where `<sprint_id>` is the id the parser
+checked as 16 lowercase hex and `<reason>` a fixed `sprints.py` text: the request's `project_id`, which may
+hold any text, is never printed; any other exception is `console: live_fault_withdraw_failed <Type>:
+<message>` and 500 `live fault withdrawal failed`. Success is 204.
+`withdraw_live_fault(project_id, sprint_id, fault_id)`, under the ingest lock, takes the folded sprint
+(`NOT_OPEN` when there is none or its project is not `project_id`), then `sprints.withdrawable_fault`
+(unknown or already withdrawn), and appends exactly one `fault.withdrawn` row (project the sprint's project)
+`{"sprint_id", "goal", "fault": <id>}`, folds, publishes and returns the id. It applies no stop or end gate:
+the owner withdraws a declaration of an ended sprint too. It nudges nobody and sends no message; a refusal
+appends and publishes nothing.
+
 Owner notice nudges (#1120, ADR-console-053, D6): with a nudger, `post_owner_notice` records, still under the
 lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
 and `_reachable` (every `_nudgeable` condition but the unread message), and reserves in `_nudging` and
@@ -1079,6 +1119,38 @@ appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "rep
 "target": {"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and
 the allow of that same tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago;
 otherwise it is False and appends nothing.
+
+Permission card (#1424, `prompt_card`): `POST /api/permission-prompt` is a manager write dispatched beside
+`/api/permit` through `_checked_length(MAX_PROMPT_BYTES)` (262144: twelve bytes for each of the
+`prompt_card.MAX_COMMAND_CHARS` characters a command may have, as JSON escapes them, and 65536 more for the
+rest); its body is `prompt_card.parse_ask`'s, else 400
+`bad permission prompt`; a `sprints.SecretRefused` is 403, any other `sprints.Refused` 409, any other
+exception 500 `permission prompt failed`, with one stderr line `console: permission_prompt_refused
+<sprint_id> <reason>` or `console: permission_prompt_failed <Type>: <message>` (no line carries the command
+or the secret). The body carries no secret: `prompt_secret` (the ingest lock; an unknown sprint is 409, a sprint
+with no secret file or an `auth` that does not match 403) recomputes the request's `auth` from the secret it holds
+(`prompt_card.request_auth` over the body's `signed_bytes`) and returns the secret to the handler, which then calls
+the methods below with it. Success is 200 `{"prompt": <int|null>, "state": <str>, "mac": <hex>}`: phase `ask` calls
+`ask_prompt`, `wait` `prompt_state` and `close` `close_prompt`, and `mac` is `prompt_card.reply_mac` for the request's
+nonce, which the hook checks before it honours the reply, so whatever else listens on the port neither learns the secret
+nor has a decision honoured. The `state` of a prompt the console closed
+(`prompt.closed`, reason `ended`) is `ended`, not `closed` (`prompt_card.wire_state`), so the hook can say why. Each holds the ingest lock for its check, append and fold. `ask_prompt`
+checks the secret first, then answers `(None, prompt_card.REFUSED)` and appends nothing unless the sprint is
+`prompt_card.active` and `session_id` is its manager session; else it appends one `prompt.asked` row, folds it,
+remembers the console's time as the prompt's contact (`_prompt_contact`, memory only), publishes and answers
+`(seq, open)`. It never closes another prompt: the prompts of one session are held side by side. `prompt_state`
+refuses (`sprints.Refused`) a prompt that is unfolded or of another sprint or session, renews the contact of an
+`open` one and answers `open` while `prompt_card.open_prompts` lists it, else appends `prompt.closed` with reason
+`ended` and answers `closed`; any other folded state is returned as it is. `close_prompt` is the same check; an
+`open` prompt gets `prompt.closed` with reason `expired` and `closed`, any other state is returned as it is (an
+answer accepted before the close is what the hook gets) and the contact is dropped. `POST /api/permission-answer`
+(`{"prompt", "answer"}`, at most `MAX_PROMPT_ANSWER_BYTES` 1024) is a page write, owner-only (in `PAGE_WRITES`,
+in neither `GUEST_WRITES`, `GUEST_ACCOUNT_WRITES` nor `MANAGER_WRITES`): 400 `bad permission answer`; 409
+`prompt_card.NOT_OPEN` unless the prompt is listed by `open_prompts` now (one whose hook stopped asking, or any
+prompt after a restart before its hook's next wait, takes no answer); 500 `permission answer failed`; otherwise
+`answer_prompt` appends one `prompt.answered` row and the shared 204 follows. The first answer wins. The prompts are folded
+(`prompt_card.prompts`) at construction and on every append, and the view lists the open ones through
+`prompt_items`. `/api/hooks` and the lifecycle guard are not touched.
 
 Owner notices (#1120, ADR-console-053): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
 `MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
@@ -1944,9 +2016,9 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     LOOK_RECORDED, PERMIT_JUDGED, PERMIT_LANDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
@@ -2017,8 +2089,12 @@ MESSAGE_REPLY_PATH = "/api/message-reply"
 ASK_PATH = "/api/ask"
 WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
 NOTICE_PATH = "/api/notice"
+LIVE_FAULT_PATH = "/api/live-fault"
+LIVE_FAULT_WITHDRAW_PATH = "/api/live-fault-withdraw"
 NOTICES_PATH = "/api/notices"
 PERMIT_PATH = "/api/permit"
+PROMPT_PATH = prompt_card.ASK_PATH
+PROMPT_ANSWER_PATH = prompt_card.ANSWER_PATH
 WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
 OWNER_NOTICE_PATH = "/api/owner-notice"
 OWNER_NOTICE_WITHDRAW_PATH = "/api/owner-notice-withdraw"
@@ -2068,10 +2144,11 @@ PAGE_WRITES: frozenset[str] = frozenset({
     ACCOUNT_REMOVE_PATH, ACCOUNT_SIGNOUT_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, ADOPTION_MERGE_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH,
     TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, LIVE_FAULT_WITHDRAW_PATH,
+    PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
-    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH})
+    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH, PROMPT_ANSWER_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -2104,13 +2181,19 @@ MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
                                             MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, WITHDRAW_QUESTION_PATH,
                                             NOTICE_PATH, NOTICES_PATH, WITHDRAW_NOTICE_PATH,
-                                            PERMIT_PATH, PICTURE_PATH})
+                                            LIVE_FAULT_PATH, PERMIT_PATH, PROMPT_PATH, PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
 MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_NOTICE_BYTES = 16384
+MAX_LIVE_FAULT_BYTES = 16384
+MAX_LIVE_FAULT_WITHDRAW_BYTES = 4096
 MAX_NOTICES_BYTES = 4096
 MAX_PERMIT_BYTES = 16384
+# The body is JSON with its default escaping, which writes one character as up to twelve bytes (an
+# astral one is two `\uXXXX` escapes), so a command of `MAX_COMMAND_CHARS` characters needs that many.
+MAX_PROMPT_BYTES = 12 * prompt_card.MAX_COMMAND_CHARS + 65536
+MAX_PROMPT_ANSWER_BYTES = 1024
 PERMIT_LANDED_SECONDS = 30 * 60
 MAX_WITHDRAW_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_BYTES = 4096
@@ -2351,8 +2434,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._notice_request()
         if route == NOTICES_PATH:
             return self._notices_request()
+        if route == LIVE_FAULT_PATH:
+            return self._live_fault_request()
         if route == PERMIT_PATH:
             return self._permit_request()
+        if route == PROMPT_PATH:
+            return self._prompt_request()
         if route == WITHDRAW_NOTICE_PATH:
             return self._withdraw_notice_request()
         if route == PICTURE_PATH:
@@ -2851,6 +2938,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _prompt_answer_request(self, console: "ConsoleService") -> bool:
+        """The owner's answer to a manager's held prompt; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_PROMPT_ANSWER_BYTES)
+        if body is None:
+            return False
+        try:
+            prompt, answer_word = prompt_card.parse_answer(body)
+        except ValueError:
+            self._refuse(400, "bad permission answer")
+            return False
+        try:
+            console.answer_prompt(prompt, answer_word)
+        except prompt_card.Refused as error:
+            print(f"console: permission_answer_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: permission_answer_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "permission answer failed")
+            return False
+        return True
+
     def _plan_defer_request(self, console: "ConsoleService") -> bool:
         """Carry out the Not now write; True when the shared 204 is to be sent."""
         body = self._json_body(MAX_PLAN_DEFER_BYTES)
@@ -3174,6 +3284,31 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self._send(200, "application/json", json.dumps(
             {"notice": notice_id}, sort_keys=True, separators=(",", ":")).encode())
 
+    def _live_fault_request(self):
+        """The manager's route: one live fault declared for its sprint, with the sprint's secret."""
+        length = self._checked_length(MAX_LIVE_FAULT_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, fault = sprints.parse_live_fault_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad live fault")
+        try:
+            fault_id = self.server.console.declare_live_fault(sprint_id, secret, fault)
+        except sprints.SecretRefused:
+            print(f"console: live_fault_refused {sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: live_fault_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: live_fault_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "live fault failed")
+        self._send(200, "application/json", json.dumps(
+            {"fault": fault_id}, sort_keys=True, separators=(",", ":")).encode())
+
     def _notices_request(self):
         """The manager's route: the project's open notices, read with the sprint's secret."""
         length = self._checked_length(MAX_NOTICES_BYTES)
@@ -3229,6 +3364,47 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: permit_failed {type(error).__name__}: {error}", file=sys.stderr)
             return self._refuse(500, "permit failed")
+        self._send(200, "application/json", json.dumps(
+            reply, sort_keys=True, separators=(",", ":")).encode())
+
+    def _prompt_request(self):
+        """The manager's route: one Bash prompt of the sprint's manager held on the console."""
+        length = self._checked_length(MAX_PROMPT_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            request = prompt_card.parse_ask(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad permission prompt")
+        console = self.server.console
+        try:
+            secret = console.prompt_secret(request.sprint_id, request.auth, request.signed)
+            if request.phase == "ask":
+                prompt, state = console.ask_prompt(
+                    request.sprint_id, secret, request.session_id, request.command,
+                    request.description)
+                reply = {"prompt": prompt, "state": state}
+            elif request.phase == "wait":
+                reply = {"prompt": request.prompt, "state": console.prompt_state(
+                    request.sprint_id, secret, request.session_id, request.prompt)}
+            else:
+                reply = {"prompt": request.prompt, "state": console.close_prompt(
+                    request.sprint_id, secret, request.session_id, request.prompt)}
+            reply["mac"] = prompt_card.reply_mac(
+                secret, request.sprint_id, request.nonce, reply["prompt"], reply["state"])
+        except sprints.SecretRefused:
+            print(f"console: permission_prompt_refused {request.sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: permission_prompt_refused {request.sprint_id} {error}",
+                  file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: permission_prompt_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            return self._refuse(500, "permission prompt failed")
         self._send(200, "application/json", json.dumps(
             reply, sort_keys=True, separators=(",", ":")).encode())
 
@@ -3464,6 +3640,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             print(f"console: owner_notice_withdraw_failed {type(error).__name__}: {error}",
                   file=sys.stderr)
             self._refuse(500, "owner notice withdrawal failed")
+            return False
+        return True
+
+    def _live_fault_withdraw_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's withdrawal of a live fault; False when it was refused."""
+        body = self._json_body(MAX_LIVE_FAULT_WITHDRAW_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, sprint_id, fault_id = sprints.parse_live_fault_withdrawal(body)
+        except ValueError:
+            self._refuse(400, "bad live fault withdrawal")
+            return False
+        try:
+            console.withdraw_live_fault(project_id, sprint_id, fault_id)
+        except sprints.Refused as error:
+            print(f"console: live_fault_withdraw_refused {sprint_id} {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: live_fault_withdraw_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "live fault withdrawal failed")
             return False
         return True
 
@@ -3725,6 +3924,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._release_answer_request(console):
                 return
+        elif route == PROMPT_ANSWER_PATH:
+            self.close_connection = True
+            if not self._prompt_answer_request(console):
+                return
         elif route == PLAN_DEFER_PATH:
             self.close_connection = True
             if not self._plan_defer_request(console):
@@ -3748,6 +3951,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == OWNER_NOTICE_WITHDRAW_PATH:
             self.close_connection = True
             if not self._owner_notice_withdraw_request(console):
+                return
+        elif route == LIVE_FAULT_WITHDRAW_PATH:
+            self.close_connection = True
+            if not self._live_fault_withdraw_request(console):
                 return
         elif route == ACTIVATE_PATH:
             self.close_connection = True
@@ -4381,7 +4588,7 @@ class ConsoleService:
                  write_sleep: Callable[[float], object] | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
                  look_reader: Callable[[str, int], tuple[str, str | None]] = answer.look_head,
-                 look_recorder: Callable[[str, int, int, str, str], int] = answer.record_look,
+                 look_recorder: Callable[[str, int, int, str, str, Sequence[tuple[str | None, str]]], int] = answer.record_look,
                  look_ender: Callable[[str, int, int], None] = answer.end_look,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
@@ -4466,6 +4673,8 @@ class ConsoleService:
             self._on_approval_thread if approval_dispatch is None else approval_dispatch)
         self._adoptions: dict[str, dict] = {}
         self._release_cards: dict[int, release_card.Card] = {}
+        self._prompts: dict[int, prompt_card.Prompt] = {}
+        self._prompt_contact: dict[int, int] = {}
         self._deferred: frozenset[str] = frozenset()
         self._registering: str | None = None
         self._answering = False
@@ -4701,9 +4910,10 @@ class ConsoleService:
             self._account_identities = account_add.identities_state(events)
             self._trust_failures = folder_trust.failures(events)
             self._registration_fold = register.fold(events)
-            self._registration = self._registration_fold.latest
             self._adoptions = approve.adoptions(events)
+            self._registration = register.shown(self._registration_fold, self._adoptions)
             self._release_cards = release_card.cards(events)
+            self._prompts = prompt_card.prompts(events)
             self._deferred = approve.deferrals(events)
             self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
@@ -4964,6 +5174,7 @@ class ConsoleService:
                 shown_root=None if self._registration is None else self._registration["root"]),
             release_items=release_card.inbox_entries(
                 release_card.live(self._release_cards, self._now())),
+            prompt_items=prompt_card.inbox_entries(self._open_prompts(), self._sprints),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),
@@ -5177,6 +5388,78 @@ class ConsoleService:
             if found is None or found.state != release_card.OPEN:
                 raise release_card.Refused(release_card.NOT_OPEN)
             self._apply(self.log.append([release_card.answered_row(card_id, answer)]))
+
+    def _open_prompts(self) -> list[prompt_card.Prompt]:
+        """The prompts a card is shown for now (the caller holds the ingest lock)."""
+        return prompt_card.open_prompts(
+            self._prompts, int(self._clock() * 1000), self._sprints, self._sessions,
+            self._prompt_contact)
+
+    def _held_prompt(self, sprint_id: str, secret: str, session_id: str,
+                     prompt_id: int) -> prompt_card.Prompt:
+        """The folded prompt of this sprint and session, else `sprints.Refused` (under the lock)."""
+        self._manager_sprint(sprint_id, secret)
+        prompt = self._prompts.get(prompt_id)
+        if prompt is None or prompt.sprint_id != sprint_id or prompt.session_id != session_id:
+            raise sprints.Refused(prompt_card.NOT_OPEN)
+        return prompt
+
+    def ask_prompt(self, sprint_id: str, secret: str, session_id: str, command: str,
+                   description: str | None) -> tuple[int | None, str]:
+        """Hold one prompt of the sprint's manager as a card; see the module docstring."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if not prompt_card.active(sprint) or session_id != sprint.manager_session:
+                return None, prompt_card.REFUSED
+            (appended,) = self.log.append([prompt_card.asked_row(
+                sprint.project_id, sprint_id, session_id, command, description)])
+            self._prompt_contact[appended.seq] = int(self._clock() * 1000)
+            self._apply([appended])
+            return appended.seq, prompt_card.OPEN
+
+    def prompt_secret(self, sprint_id: str, auth: str, signed: bytes) -> str:
+        """The sprint's secret, when `auth` is the hook's HMAC under it of `signed` (the secret is never sent)."""
+        with self._ingest:
+            if sprint_id not in self._sprints:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            expected = sprints.read_secret(self._sprint_secrets, sprint_id)
+            if expected is None or not hmac.compare_digest(
+                    prompt_card.request_auth(expected, signed).encode(), auth.encode()):
+                raise sprints.SecretRefused(sprints.SECRET_REFUSED)
+            return expected
+
+    def prompt_state(self, sprint_id: str, secret: str, session_id: str, prompt_id: int) -> str:
+        """The state of a held prompt as its hook's wait reads it; see the module docstring."""
+        with self._ingest:
+            prompt = self._held_prompt(sprint_id, secret, session_id, prompt_id)
+            if prompt.state != prompt_card.OPEN:
+                return prompt_card.wire_state(prompt)
+            shown = any(open.prompt_id == prompt_id for open in self._open_prompts())
+            self._prompt_contact[prompt_id] = int(self._clock() * 1000)
+            if any(open.prompt_id == prompt_id for open in self._open_prompts()):
+                if not shown:
+                    self._publish()
+                return prompt_card.OPEN
+            self._apply(self.log.append([prompt_card.closed_row(prompt.project_id, prompt_id, "ended")]))
+            return prompt_card.ENDED
+
+    def close_prompt(self, sprint_id: str, secret: str, session_id: str, prompt_id: int) -> str:
+        """The hook gives a prompt up: closed, unless the owner's answer was accepted first."""
+        with self._ingest:
+            prompt = self._held_prompt(sprint_id, secret, session_id, prompt_id)
+            self._prompt_contact.pop(prompt_id, None)
+            if prompt.state != prompt_card.OPEN:
+                return prompt_card.wire_state(prompt)
+            self._apply(self.log.append([prompt_card.closed_row(prompt.project_id, prompt_id, "expired")]))
+            return prompt_card.CLOSED
+
+    def answer_prompt(self, prompt_id: int, answer: str) -> None:
+        """Record the owner's answer to a prompt that is open now; see the module docstring."""
+        with self._ingest:
+            found = next((open for open in self._open_prompts() if open.prompt_id == prompt_id), None)
+            if found is None:
+                raise prompt_card.Refused(prompt_card.NOT_OPEN)
+            self._apply(self.log.append([prompt_card.answered_row(found.project_id, prompt_id, answer)]))
 
     def defer_plan(self, plan_id: str) -> None:
         """Record `Not now` for the shown plan's apply card; see the module docstring."""
@@ -6316,6 +6599,10 @@ class ConsoleService:
             latest = self._registration
             if latest is None or latest["plan_id"] != plan_id:
                 raise sprints.Refused(plan_questions.STALE)
+            adopted = self._adoptions.get(plan_id)
+            if adopted is not None and not register.plans_again(adopted["step"],
+                                                                adopted["pull_state"]):
+                raise sprints.Refused(plan_questions.ADOPTED)
             root = latest["root"]
             changed = None
             if question == contract_draft.QUESTION_ID:
@@ -6514,11 +6801,34 @@ class ConsoleService:
                 if found["pull_state"] == "merged":
                     raise sprints.Refused(approve.MERGED)
             root = latest["root"]
-            shown = dict(latest)
-            adoption = None if found is None else dict(found)
-            self._admit_run(root)
-            self._approving = True
-            self._announce_run()
+            again = latest.get("replan") is True and (found is None or found["step"] == "apply_failed")
+            if again:
+                answers, draft = list(latest["answered"]), latest["draft"]
+                remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
+                self._admit_run(root)
+                self._answering = True
+                self._answer_refusal = None
+                self._announce_run()
+            else:
+                shown = dict(latest)
+                adoption = None if found is None else dict(found)
+                self._admit_run(root)
+                self._approving = True
+                self._announce_run()
+        if again:
+            # A plan made from a draft that held a retired record (#1449) is never applied: approving
+            # it plans again from the refreshed draft, and the owner approves the new plan shown.
+            try:
+                self._dispatch(lambda: self._run_answer(
+                    root, plan_id, answers, {"id": "plan-approve", "subject": plan_id}, draft,
+                    None, remote))
+            except BaseException:
+                with self._ingest:
+                    self._end_run()
+                    self._answering = False
+                    self._publish()
+                raise
+            return
         try:
             self._approval_dispatch(lambda: self._run_approval(root, shown, adoption))
         except BaseException:
@@ -9061,6 +9371,7 @@ class ConsoleService:
                     "inbox": list(report.inbox), "next": report.next_step,
                     **({} if report.wait_until is None else {"wait_until": report.wait_until}),
                     **({} if report.paused is None else {"paused": report.paused})},
+                "live_faults": [sprints.fault_entry(fault) for fault in sprints.open_faults(sprint)],
                 "unread": len(sprints.unread(sprint))}
 
     def answer_message(self, sprint_id: str, secret: str, message_id: int, reply: str) -> str:
@@ -9170,6 +9481,28 @@ class ConsoleService:
                 "sprint_id": sprint_id, "goal": sprint.goal, "notice": checked})])
             self._apply(appended)
             return appended[-1].seq
+
+    def declare_live_fault(self, sprint_id: str, secret: str, fault: dict) -> int:
+        """Append one `fault.declared` event for the sprint's project; its seq, the fault's id."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            checked = sprints.declarable_fault(sprint, fault)
+            appended = self.log.append([(FAULT_DECLARED, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "fault": checked})])
+            self._apply(appended)
+            return appended[-1].seq
+
+    def withdraw_live_fault(self, project_id: str, sprint_id: str, fault_id: int) -> int:
+        """Append one `fault.withdrawn` event for a standing live fault; the fault's id."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            sprints.withdrawable_fault(sprint, fault_id)
+            appended = self.log.append([(FAULT_WITHDRAWN, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "fault": fault_id})])
+            self._apply(appended)
+            return fault_id
 
     def post_owner_notice(self, project_id: str, text: str) -> int:
         """Append one owner `notice.posted` event for the project; its seq, the notice's id."""
@@ -9466,7 +9799,7 @@ class ConsoleService:
                 else answer.LOOK_MOVED.format(found=head[:7], head=look.head[:7]))
         seq = appended[-1].seq
         try:
-            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq, asked)
         except answer.LookMoved as error:
             raise sprints.Refused(str(error)) from None
         except (ForgeError, answer.Refused):
@@ -9474,12 +9807,15 @@ class ConsoleService:
         return seq
 
     def _post_look(self, project_id: str, sprint_id: str, round_id: int, index: int, slug: str,
-                   look: sprints.QuestionLook, seq: int) -> None:
+                   look: sprints.QuestionLook, seq: int, asked: sprints.Question) -> None:
         """Post the approval of the answer `seq` and record the outcome; a failure is raised after it is recorded.
+
+        The marker names the digest of the ids of every picture on `asked`, the card the owner answered.
 
         A pull request found closed or at another head is recorded as `moved` with the answer's id, which
         takes the answer back and opens the question again; `answer.LookMoved` is raised after it."""
         key = f"{sprint_id} {round_id} {index}"
+        ids = tuple((picture.pair, picture.picture) for picture in asked.pictures)
 
         def on_retry(attempt: int, error: ForgeError) -> None:
             print(f"console: look_post_retry {key} {attempt} {error.code}: "
@@ -9492,7 +9828,7 @@ class ConsoleService:
                 current = self._sprints.get(sprint_id)
                 if current is None or not sprints.takes_questions(current):
                     raise answer.Refused(sprints.ENDED)
-            return self._look_recorder(slug, look.issue, look.pr, look.head, str(seq))
+            return self._look_recorder(slug, look.issue, look.pr, look.head, str(seq), ids)
 
         try:
             comment = answer.with_retries(
@@ -9571,7 +9907,7 @@ class ConsoleService:
                 raise sprints.Refused(answer.LOOK_NOT_PENDING)
             self._look_sending.add(slot)
         try:
-            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq, asked)
         except answer.LookMoved as error:
             raise sprints.Refused(str(error)) from None
         finally:
@@ -9606,7 +9942,12 @@ class ConsoleService:
         self._publish()
 
     def poll_sessions(self) -> list[Event]:
-        """Append what the session registry shows that the folded sessions do not, and publish."""
+        """Append what the session registry shows that the folded sessions do not, and publish.
+
+        A session that waits is then read once more outside the ingest lock: when its transcripts
+        (its own and its agents') hold a turn newer than the wait, a row puts it back to working,
+        unless a row was folded for it since (`last_seq`), which the transcript read never beats (#1424).
+        """
         with self._ingest:
             observations = {
                 session_id: seen
@@ -9627,7 +9968,22 @@ class ConsoleService:
                 self._fold(appended)
             self._publish()
             self._note_choice(self._session_choice(self._profiles))
+            waits = sessions.waiting_snapshot(self._sessions)
+            # The registry's own time of a wait it still shows: a session first read late is not newer than it.
+            marks = {sid: seen.updated_ms for sid, seen in observations.items()
+                     if sid in waits and seen.updated_ms is not None
+                     and sessions.registry_state(seen) == self._sessions[sid].state}
+            dirs = self._projects_dirs()
+        turns = {sid: (seq, turn) for sid, seq in waits.items()
+                 if (turn := movement.transcript_turn_ms(dirs, sid)) is not None}
+        if not turns:
             return appended
+        with self._ingest:
+            moved = self.log.append(sessions.moved_on(self._sessions, turns, project_of, marks))
+            if moved:
+                self._fold(moved)
+                self._publish()
+        return appended + moved
 
     def _session_choice(self, profiles: frozenset[str], excluded: frozenset[str] | None = None,
                         pinned: object = _FOLDED) -> str | None:
@@ -9943,9 +10299,10 @@ class ConsoleService:
         self._account_identities = account_add.identities_state(appended, self._account_identities)
         self._trust_failures = folder_trust.failures(appended, self._trust_failures)
         self._registration_fold = register.fold(appended, self._registration_fold)
-        self._registration = self._registration_fold.latest
         self._adoptions = approve.adoptions(appended, self._adoptions)
+        self._registration = register.shown(self._registration_fold, self._adoptions)
         self._release_cards = release_card.cards(appended, self._release_cards)
+        self._prompts = prompt_card.prompts(appended, self._prompts)
         self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
@@ -9989,9 +10346,10 @@ class ConsoleService:
                 self._account_identities = account_add.identities_state(events)
                 self._trust_failures = folder_trust.failures(events)
                 self._registration_fold = register.fold(events)
-                self._registration = self._registration_fold.latest
                 self._adoptions = approve.adoptions(events)
+                self._registration = register.shown(self._registration_fold, self._adoptions)
                 self._release_cards = release_card.cards(events)
+                self._prompts = prompt_card.prompts(events)
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._project_questions = project_question.asked_questions(events)
