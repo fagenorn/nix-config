@@ -305,6 +305,7 @@ agent-workflow-tests *args:
     tests/test_console_live_fault_check.py \
     tests/test_pr_green.py \
     tests/test_console_page.py \
+    tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
     tests/test_console_service.py \
