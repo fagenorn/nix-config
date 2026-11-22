@@ -52,6 +52,11 @@ def write_file(root: Path, relative: str, text: str = "x\n") -> Path:
     return target
 
 
+def suppression(token: str, reason: str = "") -> str:
+    """A suppression marker, assembled so this file holds no literal marker."""
+    return "suppress" + "-standard:" + token + (" " + reason if reason else "")
+
+
 class PathClassificationTest(ReportAssertions, unittest.TestCase):
     """#72: the four lifecycle classes are closed. A path matching none of them
     is a finding, never a new implicit class, and every offender is named
@@ -510,6 +515,55 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
             code, _, by_id = self.ci(root)
             self.assertEqual(by_id[self.CHECK_ID]["status"], "passed")
             self.assertEqual(code, 0)
+
+    def test_a_new_reasoned_suppression_passes_ci_and_is_listed(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = git(root, "rev-parse", "HEAD").strip()
+            write_file(root, "src/new.py", "x = 1\n" * 1500 + "x = 1  # "
+                       + suppression("B17", "generated fixture table") + "\n")
+            commit_all(root, "suppressed")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["passed", None, None, {
+                    "merge_base": base,
+                    "suppressions": ["B17 src/new.py:1501 generated fixture table"],
+                    "suppression_count": 1}])
+            self.assert_validates(report)
+
+    def test_a_new_bare_suppression_turns_ci_red(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = git(root, "rev-parse", "HEAD").strip()
+            write_file(root, "src/new.py", "x = 1\n" * 1500 + "x = 1  # "
+                       + suppression("B17") + "\n")
+            commit_all(root, "bare")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce", {
+                    "merge_base": base, "rule": "B17", "base_count": 0,
+                    "branch_count": 2,
+                    "violations": ["B17 src/new.py:1501", "B17 src/new.py:1501"],
+                    "rules": ["B17"]}])
+            self.assert_validates(report)
+
+    def test_the_new_suppressions_are_bounded(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            for index in range(9):
+                write_file(root, f"src/n{index}.py", "x = 1  # "
+                           + suppression("B17", f"reason {index}") + "\n")
+            commit_all(root, "many")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 0)
+            facts = by_id[self.CHECK_ID]["facts"]
+            self.assertEqual(
+                [len(facts["suppressions"]), facts["suppression_count"]], [8, 9])
+            self.assert_validates(report)
 
     def test_the_new_violations_are_bounded(self):
         with fixture() as tmp:

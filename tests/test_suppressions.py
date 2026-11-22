@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import never_rise
+from agent_tools.delivery import context_map_lint, never_rise, rule_ids
 from agent_tools.delivery.never_rise import (
     Enforcer, Rise, Suppression, Violation, counted)
 
@@ -352,6 +352,16 @@ class SuppressionLintTest(unittest.TestCase):
         self.assertEqual(done.stdout.splitlines(), [
             "B1. One", "B2. Two", "P1. One", "  reasoned suppressions: 1",
             "judged rules: 3", "enforcers citing nothing: 0"])
+
+
+class SuppressionDocsTest(unittest.TestCase):
+    README = REPO_ROOT / "home/common/agent-skills/standards/README.md"
+
+    def test_the_readme_states_the_suppression_form(self):
+        block = context_map_lint.section(self.README.read_text("utf-8"), "Rule ids")
+        self.assertTrue(any(
+            span.startswith(rule_ids.SUPPRESS)
+            for span in context_map_lint.CODE_RE.findall(block)))
 
 
 if __name__ == "__main__":

@@ -781,7 +781,9 @@ def check_never_rise(context: "Context") -> "Outcome":
 
     It starts only read-only, bounded git children, which read committed
     history and never the working tree; the authored contract supplies the
-    branch. No readable merge base is a failed check, never a pass.
+    branch. No readable merge base is a failed check, never a pass. A reasoned
+    suppression the branch adds is listed in the facts, passed or failed, and
+    never fails the check (ADR-project-contract-018).
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
     verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
@@ -789,14 +791,17 @@ def check_never_rise(context: "Context") -> "Outcome":
     if verdict is None:
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})
+    listed = verdict.suppressions
+    extra = ({"suppressions": bound_facts([s.text() for s in listed]),
+              "suppression_count": len(listed)} if listed else {})
     if not verdict.rises:
-        return Outcome("passed", facts={"merge_base": verdict.merge_base})
+        return Outcome("passed", facts={"merge_base": verdict.merge_base, **extra})
     first = verdict.rises[0]
     return Outcome("failed", "violation_count_rose", "violations.never_rise.reduce", {
         "merge_base": verdict.merge_base, "rule": first.rule,
         "base_count": first.base_count, "branch_count": first.branch_count,
         "violations": [bound_fact(v.text()) for v in first.new[:MAX_FACT_LIST]],
-        "rules": bound_facts([r.rule for r in verdict.rises])})
+        "rules": bound_facts([r.rule for r in verdict.rises]), **extra})
 
 
 # --------------------------------------------------------------------------
