@@ -24,6 +24,19 @@ directory:
 - exit 2, stdout empty and one stderr line: a usage error, an issue that is not
   an integer of 1 or more, runs of several projects with no `--project`, an
   unreadable `run.json`, or an event file the ledger refuses.
+
+`engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a
+procedure of `command` and `decide` steps; default: the package's `procedures`
+directory) for the issue, in the project the current directory belongs to, to
+`done` or a stop, and prints one line of compact sorted-key JSON when it ends
+(`engine_shell` is the contract):
+
+- exit 0: `{"detail", "end": "done", "need": null, "run"}`;
+- exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
+- exit 1, stdout empty and one stderr line: a fault during the run;
+- exit 2, stdout empty and one stderr line: a usage error, or a refusal before
+  any run exists (no project contract, no `deliver.json`, a procedure that fails
+  the check or that the engine cannot run); no run directory is created.
 """
 
 from __future__ import annotations
@@ -33,7 +46,7 @@ import json
 import sys
 from pathlib import Path
 
-from agent_tools.delivery import engine_ledger, procedure_check
+from agent_tools.delivery import engine_ledger, engine_shell, procedure_check
 
 PROCEDURES_DIR = Path(__file__).with_name("procedures")
 
@@ -71,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="print the state a run's recorded events fold to")
     status_parser.add_argument("issue", type=_issue_number)
     status_parser.add_argument("--project")
+    deliver_parser = commands.add_parser(
+        "deliver", help="run a procedure of command steps to done or a stop")
+    deliver_parser.add_argument("issue", type=_issue_number)
+    deliver_parser.add_argument("--procedures", type=Path, default=PROCEDURES_DIR)
     return parser
 
 
@@ -95,6 +112,18 @@ def _status(issue: int, project: str | None) -> int:
     return 0
 
 
+def _deliver(issue: int, procedures: Path) -> int:
+    try:
+        code, line = engine_shell.deliver(issue, procedures)
+    except engine_shell.Refused as error:
+        return _usage(str(error))
+    except engine_shell.Fault as error:
+        sys.stderr.write("engine: " + " ".join(str(error).split()) + "\n")
+        return engine_shell.EXIT_FAULT
+    sys.stdout.write(compact(line))
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
@@ -102,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(str(error))
     if args.command == "status":
         return _status(args.issue, args.project)
+    if args.command == "deliver":
+        return _deliver(args.issue, args.procedures)
     if not args.procedures.is_dir():
         return _usage(f"--procedures is not a directory: {args.procedures}")
     try:
