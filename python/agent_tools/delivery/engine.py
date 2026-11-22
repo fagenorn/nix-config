@@ -32,7 +32,10 @@ fold of the run's `events.jsonl` derives. It writes nothing and creates no direc
 account launcher, graded only by its structured reply, its files kept under the run's
 `sessions/`; default: the package's `procedures` directory) for the issue, in the project the
 current directory belongs to, to `done` or a stop, and prints one line of compact sorted-key
-JSON when it ends (`engine_shell` is the contract):
+JSON when it ends (`engine_shell` is the contract). Once its run exists it drops the history
+lines older than 180 days and deletes the run directories of issues closed more than 14 days
+ago, never changing its own exit; a run that ends in `done` or a stop appends one line to
+`~/.agents/state/engine/history.jsonl`:
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;

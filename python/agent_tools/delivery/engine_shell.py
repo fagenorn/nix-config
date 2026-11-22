@@ -30,6 +30,10 @@ step, its detail carrying the verdict and what the call printed on stdout and st
 
 An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done` or `stop_reached`.
 
+Once the run exists and before its first step, `engine_housekeeping.housekeep` prunes the history and
+sweeps expired run directories; a run that ends in done or a stop then appends one history line
+(`_record_history`) before its lock is released. Neither changes the call's code or result line.
+
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
 until `deliver` returns. A run whose lock is held makes the call exit `EXIT_RUNNING`; a run not done and
 not locked is refused (continuing a run is a later slice).
@@ -43,14 +47,16 @@ import fcntl
 import json
 import os
 import socket
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_commands, engine_core, engine_ledger, engine_session, procedure_check,
+    engine_commands, engine_core, engine_housekeeping, engine_ledger, engine_session,
+    procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.delivery.engine_ledger import creation_lock_path
@@ -223,10 +229,15 @@ def _running(runs: list[Path], issue: int) -> tuple[int, dict] | None:
     return None
 
 
-def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
+def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] | None = None,
+            tracker: engine_housekeeping.Tracker | None = None) -> tuple[int, dict]:
     procedures_dir = Path(procedures_dir)
     snapshot, table = _resolve()
     project = snapshot["project"]["id"]
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    tracker_factory = ((lambda: tracker) if tracker is not None else
+                       (lambda: engine_housekeeping.default_tracker(
+                           snapshot["bindings"]["tracker"])))
     try:
         running = _running(engine_ledger.find_runs(engine_ledger.runs_root(), issue, project),
                            issue)
@@ -275,12 +286,30 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
         _release(held)
         raise
     try:
-        return _walk(run_dir, table, inputs)
+        engine_housekeeping.housekeep(project=project, run=run_dir.name, clock=clock,
+                                      tracker=tracker_factory)
+        code, line = _walk(run_dir, table, inputs)
+        if code in (EXIT_DONE, EXIT_STOP):
+            _record_history(run_dir, clock)
+        return code, line
     except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
             OSError, ValueError, KeyError) as error:
         raise Fault(str(error)) from error
     finally:
         _release(held)
+
+
+def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
+    """Append the run's history line; a failure is one stderr line, never the delivery's result."""
+    try:
+        state = engine_ledger.fold(engine_ledger.read_run(run_dir),
+                                   engine_ledger.replay(run_dir / "events.jsonl"),
+                                   lambda pid, started: False)
+        engine_housekeeping.append_history(engine_housekeeping.history_line(state, clock()),
+                                           engine_housekeeping.history_path())
+    except Exception as error:
+        sys.stderr.write(f"engine: the history line of run {run_dir.name} was not recorded: "
+                         f"{type(error).__name__}: {' '.join(str(error).split())}\n")
 
 
 def _lock_creation(issue: int) -> int:

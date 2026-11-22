@@ -27,6 +27,10 @@ from agent_tools.delivery.engine_housekeeping import (
 )
 from agent_tools.system import forge_api
 from tests.guard_policy_world import install_platform_manifest_in_environ
+from tests.test_engine_deliver import EngineProject, step
+from tests.test_engine_session import (
+    DRAFT_REPLY, agent_step, canned_result, copy_roles, install_stub, write_procedures,
+)
 
 TIER = "integration"  # Task 5's cases run engine deliver with the stand-in commands
 
@@ -640,6 +644,463 @@ class ForgeTrackerTest(unittest.TestCase):
                         return_value={**self.BASE, "state": "open"}) as patched:
             default_tracker({"kind": "github", "repo_slug": PROJECT})(101)
         self.assertEqual(patched.call_args.args, ("repos/example/engine/issues/101",))
+
+
+DEFAULT = object()
+T0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
+T1 = T0 + timedelta(days=30)
+DONE_DETAIL = "The deliver procedure reached done after 1 step visit."
+GATE = {"id": "gate", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+        "on": {"accept": "draft", "revise": "needs-owner"}}
+
+
+def deliver(project, issue, procedures, *, at=None, clock=None, tracker=DEFAULT):
+    options = {"clock": clock or (lambda: at)}
+    if tracker is not DEFAULT:
+        options["tracker"] = tracker
+    with project.inside():
+        return engine_shell.deliver(issue, procedures, **options)
+
+
+def history(project) -> list[dict]:
+    path = project.world.home / ".agents/state/engine/history.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def runs_dir(project) -> Path:
+    return project.world.home / ".agents/state/engine/runs"
+
+
+def run_of(project, issue: int) -> list[Path]:
+    return [run for run in project.runs() if run.name.startswith(f"{issue}-")]
+
+
+def reset_cursor(project) -> None:
+    (project.world.home / ".agents/state/engine/sweep-cursor.json").unlink(missing_ok=True)
+
+
+def stamp(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class DeliverHousekeepingTest(unittest.TestCase):
+    def deliver_stderr(self, *args, **kw):
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            result = deliver(*args, **kw)
+        return result, captured.getvalue().splitlines()
+
+    def test_starting_the_engine_deletes_only_the_runs_whose_issue_closed_more_than_14_days_ago(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        names = []
+        for issue in (201, 202, 203, 204, 205):
+            code, line = deliver(project, issue, procedures, at=T0, tracker=FakeTracker({}))
+            self.assertEqual(code, 0)
+            names.append(line["run"])
+        descriptor = os.open(run_of(project, 205)[0] / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        tracker = FakeTracker({201: T1 - timedelta(days=20), 202: T1 - timedelta(days=13),
+                               203: T1 - timedelta(days=5), 204: None,
+                               205: T1 - timedelta(days=20)})
+        code, line = deliver(project, 206, procedures, at=T1, tracker=tracker)
+        self.assertEqual(code, 0)
+        self.assertEqual([run.name.split("-")[0] for run in project.runs()],
+                         ["202", "203", "204", "205", "206"])
+        self.assertNotIn(206, tracker.asked)
+        names.append(line["run"])
+        lines = history(project)
+        self.assertEqual([entry["run"] for entry in lines], names)
+        self.assertEqual({entry["end"] for entry in lines}, {"done"})
+        self.assertEqual(len(lines), 6)
+
+    def test_a_run_ending_in_done_or_a_stop_appends_one_line_with_every_member(self):
+        done = canned_result()
+        stuck = canned_result(structured_output={"status": "stuck", "summary": "s", "items": []})
+        cases = [("done", done, 0, "done", None, "drafted"),
+                 ("stop", stuck, 3, "needs-owner", "owner-decision", "stuck")]
+        accounts = [("an override", "acct-1519"), ("a launcher choice", "work")]
+        for name, canned, code, end, need, outcome in cases:
+            for how, account in accounts:
+                with self.subTest(name, account=how):
+                    project = EngineProject(self)
+                    if how == "an override":
+                        project.env["CLAUDE_ACCOUNT"] = account
+                    else:
+                        project.env.pop("CLAUDE_ACCOUNT", None)
+                        project.env["ENGINE_STUB_ACCOUNT"] = account
+                    copy_roles(project, "implementer")
+                    install_stub(project, canned)
+                    procedures = write_procedures(project, [
+                        step("a", "standin-json", "gate"), GATE,
+                        agent_step("draft", "implementer",
+                                   {"drafted": "done", "stuck": "needs-owner"})])
+                    got, result = deliver(project, 1519, procedures, at=T0,
+                                          tracker=FakeTracker({}))
+                    self.assertEqual(got, code)
+                    run = run_of(project, 1519)[0]
+                    stored = [e for e in engine_ledger.replay(run / "events.jsonl")
+                              if e["event"] == "result_stored" and e["step"] == "a"][0]
+                    lines = history(project)
+                    self.assertEqual(len(lines), 1)
+                    steps = lines[0].pop("steps")
+                    self.assertEqual(lines[0], {
+                        "format": 1, "run": run.name, "project": "example/engine",
+                        "issue": 1519, "end": end, "need": need, "ended": "2026-11-01T00:00:00Z"})
+                    for entry in steps:
+                        self.assertEqual(set(entry), {"step", "visit", "outcome", "wall_seconds",
+                                                      "waits", "tokens", "spend_usd", "account"})
+                    self.assertEqual([(s["step"], s["visit"], s["outcome"]) for s in steps],
+                                     [("a", 1, "ok"), ("gate", 1, "accept"), ("draft", 1, outcome)])
+                    first, gate, draft = steps
+                    self.assertEqual((first["waits"], first["account"], first["tokens"],
+                                      first["spend_usd"], first["wall_seconds"]),
+                                     ([], None, ZERO, 0, stored["wall_seconds"]))
+                    self.assertEqual((gate["wall_seconds"], gate["tokens"], gate["spend_usd"],
+                                      gate["account"], gate["waits"]), (None, None, None, None, []))
+                    self.assertEqual(
+                        (draft["account"], draft["tokens"], draft["spend_usd"],
+                         draft["wall_seconds"], draft["waits"]),
+                        (account, {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44},
+                         0.4321, 12.345, []))
+
+    def test_an_earlier_run_of_the_delivered_issue_expires_and_the_new_run_stays(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        self.assertEqual(deliver(project, 207, procedures, at=T0, tracker=FakeTracker({}))[0], 0)
+        tracker = FakeTracker({207: T1 - timedelta(days=20)})
+        code, line = deliver(project, 207, procedures, at=T1, tracker=tracker)
+        self.assertEqual(code, 0)
+        self.assertEqual([run.name for run in run_of(project, 207)], [line["run"]])
+        self.assertEqual(tracker.asked, [207])
+        self.assertEqual(len(history(project)), 2)
+
+    def test_the_sweep_runs_after_the_run_exists_and_before_its_first_step(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        self.assertEqual(deliver(project, 901, procedures, at=T0, tracker=FakeTracker({}))[0], 0)
+        record = []
+
+        def tracker(issue):
+            with project.inside():
+                for run in engine_ledger.find_runs(engine_ledger.runs_root(), 902,
+                                                   "example/engine"):
+                    record.append([e["event"] for e in engine_ledger.replay(run / "events.jsonl")])
+            return None
+        self.assertEqual(deliver(project, 902, procedures, at=T1, tracker=tracker)[0], 0)
+        self.assertEqual(record, [[]])
+
+    def test_the_history_line_is_written_while_the_run_lock_is_held(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        original = engine_housekeeping.append_history
+        holders = []
+
+        def wrapper(line, path=None):
+            holders.append(engine_shell.lock_holder(run_of(project, 903)[0]))
+            return original(line, path)
+        with mock.patch.object(engine_housekeeping, "append_history", side_effect=wrapper):
+            self.assertEqual(deliver(project, 903, procedures, at=T0,
+                                     tracker=FakeTracker({}))[0], 0)
+        self.assertEqual(len(holders), 1)
+        self.assertIsNotNone(holders[0])
+        self.assertEqual(holders[0]["pid"], os.getpid())
+
+    def test_a_fault_appends_no_history_line(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-says-maybe", "done")])
+        with self.assertRaises(engine_shell.Fault):
+            deliver(project, 904, procedures, at=T0, tracker=FakeTracker({}))
+        self.assertEqual(history(project), [])
+
+    def test_a_tracker_error_during_the_sweep_deletes_nothing_and_the_delivery_runs(self):
+        for name, error, expected in [
+                ("tracker error", TrackerError("down"), []),
+                ("other error", RuntimeError("boom"),
+                 "engine: housekeeping skipped the run sweep: RuntimeError: boom")]:
+            with self.subTest(name):
+                project = EngineProject(self)
+                procedures = project.procedures([step("a", "standin-json", "done")])
+                for issue in (301, 303):
+                    self.assertEqual(deliver(project, issue, procedures, at=T0,
+                                             tracker=FakeTracker({}))[0], 0)
+                reset_cursor(project)
+                tracker = FakeTracker({301: T1 - timedelta(days=20), 303: error})
+                (code, line), lines = self.deliver_stderr(project, 304, procedures, at=T1,
+                                                          tracker=tracker)
+                self.assertEqual(code, 0)
+                self.assertEqual(line, {"detail": DONE_DETAIL, "end": "done", "need": None,
+                                        "run": run_of(project, 304)[0].name})
+                self.assertEqual(tracker.asked, [301, 303])
+                self.assertEqual(len(run_of(project, 301)), 1)
+                self.assertEqual(len(run_of(project, 303)), 1)
+                if expected == []:
+                    self.assertEqual(lines, [])
+                else:
+                    self.assertEqual(len(lines), 1)
+                    self.assertTrue(lines[0].startswith(expected), lines)
+
+    def test_engine_start_drops_history_lines_older_than_180_days_and_keeps_younger_ones_unchanged(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        path = project.world.home / ".agents/state/engine/history.jsonl"
+        engine_ledger.make_root(path.parent)
+        young = compact({"ended": stamp(T1 - timedelta(days=10)), "run": "young"})
+        path.write_bytes(compact({"ended": stamp(T1 - timedelta(days=181)), "run": "old"}) + young)
+        self.assertEqual(deliver(project, 401, procedures, at=T1, tracker=FakeTracker({}))[0], 0)
+        self.assertTrue(path.read_bytes().startswith(young))
+        lines = history(project)
+        self.assertNotIn("old", [entry["run"] for entry in lines])
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0]["run"], "young")
+
+    def test_no_history_line_holds_a_prompt_a_reply_or_an_environment_value(self):
+        prompt, role, reply, env = ("prompt-marker-1519-a7", "role-marker-1519-d0",
+                                    "reply-marker-1519-b8", "env-marker-1519-c9")
+        project = EngineProject(self)
+        copy_roles(project, "implementer")
+        with (project.world.home / ".claude/agents/implementer.md").open("a") as handle:
+            handle.write(f"\n{role}\n")
+        install_stub(project, canned_result(
+            structured_output={"status": "drafted", "summary": reply, "items": [reply]},
+            result=reply))
+        project.env["CLAUDE_ACCOUNT"] = "acct-1519"
+        project.env["ENGINE_HISTORY_MARKER"] = env
+        project.env["ANTHROPIC_API_KEY"] = env
+        procedures = write_procedures(
+            project, [agent_step("draft", "implementer", {"drafted": "done", "stuck": "needs-owner"})],
+            {"draft.md": "Draft issue {{run.issue}}. " + prompt + "\n",
+             "draft.reply.json": json.dumps(DRAFT_REPLY)})
+        self.assertEqual(deliver(project, 501, procedures, at=T0, tracker=FakeTracker({}))[0], 0)
+        run = run_of(project, 501)[0]
+        for member, marker in [("results/draft.1.json", reply), ("sessions/draft.1.json", reply),
+                               ("sessions/draft.1.prompt.md", prompt),
+                               ("sessions/draft.1.system.md", role)]:
+            self.assertIn(marker, (run / member).read_text(encoding="utf-8"), member)
+        text = (project.world.home / ".agents/state/engine/history.jsonl").read_text()
+        self.assertEqual(len(text.splitlines()), 1)
+        for marker in (prompt, role, reply, env):
+            self.assertNotIn(marker, text)
+        self.assertEqual(json.loads(text)["steps"][0]["account"], "acct-1519")
+
+    def test_any_history_failure_keeps_the_result_and_writes_one_stderr_line(self):
+        for name, command, code in [("done", "standin-json", 0), ("stop", "standin-fail", 3)]:
+            control = EngineProject(self)
+            procedures = control.procedures([step("a", command, "done")])
+            expected, expected_line = deliver(control, 1, procedures, at=T0,
+                                              tracker=FakeTracker({}))
+            self.assertEqual(expected, code)
+            for failure in ("append raises", "history is a directory"):
+                with self.subTest(name, failure=failure):
+                    project = EngineProject(self)
+                    procedures = project.procedures([step("a", command, "done")])
+                    patch = mock.patch.object(engine_housekeeping, "append_history",
+                                              side_effect=KeyError("boom"))
+                    if failure == "append raises":
+                        with patch:
+                            (got, line), lines = self.deliver_stderr(
+                                project, 1519, procedures, at=T0, tracker=FakeTracker({}))
+                    else:
+                        path = project.world.home / ".agents/state/engine/history.jsonl"
+                        engine_ledger.make_root(path.parent)
+                        path.mkdir()
+                        (got, line), lines = self.deliver_stderr(
+                            project, 1519, procedures, at=T0, tracker=FakeTracker({}))
+                    self.assertEqual(got, code)
+                    run = run_of(project, 1519)[0].name
+                    self.assertEqual(line, {**expected_line, "run": run})
+                    prefix = f"engine: the history line of run {run} was not recorded:"
+                    recorded_lines = [text for text in lines if text.startswith(prefix)]
+                    self.assertEqual(len(recorded_lines), 1)
+                    if failure == "append raises":
+                        self.assertEqual(lines, recorded_lines)
+                        self.assertIn("KeyError", recorded_lines[0])
+                    else:
+                        self.assertEqual(len(lines), 2)
+                        others = [text for text in lines if text not in recorded_lines]
+                        self.assertTrue(others[0].startswith(
+                            "engine: housekeeping skipped the history prune:"), lines)
+                        self.assertIn("Error", recorded_lines[0])
+
+    def test_a_failing_start_clock_or_tracker_costs_the_delivery_nothing(self):
+        with self.subTest("clock"):
+            project = EngineProject(self)
+            procedures = project.procedures([step("a", "standin-json", "done")])
+            calls = []
+
+            def clock():
+                calls.append(True)
+                if len(calls) == 1:
+                    raise OSError("no clock")
+                return T0
+            (code, line), lines = self.deliver_stderr(project, 905, procedures, clock=clock,
+                                                      tracker=FakeTracker({}))
+            self.assertEqual((code, line["end"]), (0, "done"))
+            self.assertEqual(lines, ["engine: housekeeping skipped the history prune and the run "
+                                     "sweep: OSError: no clock"])
+            self.assertEqual([entry["ended"] for entry in history(project)],
+                             ["2026-11-01T00:00:00Z"])
+        with self.subTest("tracker"):
+            project = EngineProject(self)
+            procedures = project.procedures([step("a", "standin-json", "done")])
+            with mock.patch.object(engine_housekeeping, "default_tracker",
+                                   side_effect=KeyError("kind")):
+                (code, line), lines = self.deliver_stderr(project, 906, procedures, at=T1)
+            self.assertEqual((code, line["end"]), (0, "done"))
+            self.assertEqual(lines,
+                             ["engine: housekeeping skipped the run sweep: KeyError: 'kind'"])
+            self.assertEqual(len(history(project)), 1)
+
+    def test_a_late_refusal_or_a_running_answer_housekeeps_nothing(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        stopped = project.procedures([step("a", "standin-fail", "done")])
+        path = project.world.home / ".agents/state/engine/history.jsonl"
+        engine_ledger.make_root(path.parent)
+        path.write_bytes(compact({"ended": stamp(T1 - timedelta(days=181)), "run": "old"}))
+        self.assertEqual(deliver(project, 602, stopped, at=T0, tracker=FakeTracker({}))[0], 3)
+        self.assertEqual(deliver(project, 603, procedures, at=T0, tracker=FakeTracker({}))[0], 0)
+        seeded = engine_ledger.create_run(
+            project="example/engine", issue=604, procedure="deliver", procedures_dir=procedures,
+            platform_revision="source", host="test", inputs={"issue": 604}, now=T0,
+            root=runs_dir(project))
+        descriptor = os.open(seeded / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        os.write(descriptor, json.dumps({"pid": os.getpid(),
+                                         "started": "2026-11-01T00:00:00Z"}).encode())
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        tracker = FakeTracker({603: T1 - timedelta(days=20), 604: T1 - timedelta(days=20)})
+        with self.subTest("late refusal"):
+            before = path.read_bytes()
+            with self.assertRaises(engine_shell.Refused):
+                deliver(project, 602, stopped, at=T1, tracker=tracker)
+            self.assertEqual(path.read_bytes(), before)
+        with self.subTest("running"):
+            entries = sorted(os.listdir(runs_dir(project)))
+            before = path.read_bytes()
+            self.assertEqual(deliver(project, 604, procedures, at=T1, tracker=tracker)[0],
+                             engine_shell.EXIT_RUNNING)
+            self.assertEqual(sorted(os.listdir(runs_dir(project))), entries)
+            self.assertNotIn(".604.deliver.lock", entries)
+            self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(tracker.asked, [])
+        self.assertEqual(len(run_of(project, 603)), 1)
+
+    def test_a_procedure_edited_after_the_first_check_is_refused_by_the_staged_check(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-record", "done")])
+        seen = []
+        validate, lock = engine_shell._validate, engine_shell._lock_creation
+
+        def checked(directory, table):
+            seen.append(("validate", Path(directory)))
+            return validate(directory, table)
+
+        def locked(issue):
+            seen.append(("edit",))
+            edited = json.loads((procedures / "deliver.json").read_text())
+            edited["steps"][0]["on"]["ok"] = "b"
+            edited["steps"].append(step("b", "no-such-command", "done"))
+            (procedures / "deliver.json").write_text(json.dumps(edited), encoding="utf-8")
+            return lock(issue)
+        with mock.patch.object(engine_shell, "_validate", checked), \
+                mock.patch.object(engine_shell, "_lock_creation", locked):
+            with self.assertRaises(engine_shell.Refused) as caught:
+                deliver(project, 1512, procedures, at=T0, tracker=FakeTracker({}))
+        self.assertIn("unknown_command", str(caught.exception))
+        self.assertEqual(seen[0], ("validate", procedures))
+        self.assertEqual(seen[1], ("edit",))
+        self.assertEqual(seen[2][0], "validate")
+        self.assertEqual(seen[2][1].name, "procedure")
+        self.assertFalse(project.record.exists())
+        self.assertEqual(project.runs(), [])
+
+    def test_a_deliver_waiting_on_a_paused_sweep_starts_after_it(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        self.assertEqual(deliver(project, 702, procedures, at=T0, tracker=FakeTracker({}))[0], 0)
+        locked, proceed, waiting = threading.Event(), threading.Event(), threading.Event()
+        outcome = {}
+        lock = engine_shell._lock_creation
+
+        def announcing(issue):
+            waiting.set()
+            return lock(issue)
+
+        def pause(run):
+            locked.set()
+            proceed.wait(30)
+
+        def sweeper():
+            try:
+                outcome["swept"] = sweep_runs(
+                    engine_ledger.runs_root(), project="example/engine",
+                    tracker=FakeTracker({702: T1 - timedelta(days=20)}), now=T1,
+                    cursor=project.tmp / "cursor.json", on_locked=pause)
+            except BaseException as error:
+                outcome["sweep error"] = error
+
+        def delivering():
+            try:
+                outcome["deliver"] = engine_shell.deliver(
+                    702, procedures, clock=lambda: T1, tracker=FakeTracker({}))
+            except BaseException as error:
+                outcome["deliver error"] = error
+        with project.inside(), mock.patch.object(engine_shell, "_lock_creation", announcing):
+            sweep = threading.Thread(target=sweeper)
+            sweep.start()
+            try:
+                self.assertTrue(locked.wait(30))
+                start = threading.Thread(target=delivering)
+                start.start()
+                try:
+                    self.assertTrue(waiting.wait(30))
+                    self.assertTrue(start.is_alive())
+                finally:
+                    proceed.set()
+                start.join(60)
+            finally:
+                proceed.set()
+                sweep.join(60)
+        self.assertEqual(set(outcome), {"swept", "deliver"}, outcome)
+        code, line = outcome["deliver"]
+        self.assertEqual((code, line["end"]), (0, "done"))
+        self.assertEqual([run.name for run in run_of(project, 702)], [line["run"]])
+        self.assertEqual(len(outcome["swept"]), 1)
+
+    def test_the_default_tracker_reads_the_forge_and_keeps_each_mismatch(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        for issue in range(801, 806):
+            self.assertEqual(deliver(project, issue, procedures, at=T0,
+                                     tracker=FakeTracker({}))[0], 0)
+        closed = stamp(T1 - timedelta(days=20))
+        home = "https://api.github.com/repos/example/engine"
+        asked = []
+
+        def api_get(path, allow=()):
+            asked.append(path)
+            number = int(path.rsplit("/", 1)[1])
+            payload = {"number": number, "repository_url": home, "state": "closed",
+                       "closed_at": closed}
+            if number == 801:
+                payload["pull_request"] = {}
+            elif number == 802:
+                payload["repository_url"] = "https://api.github.com/repos/other/repo"
+            elif number == 803:
+                payload["number"] = 999
+            elif number == 804:
+                return None
+            return payload
+        with mock.patch("agent_tools.system.forge_api.api_get", side_effect=api_get):
+            self.assertEqual(deliver(project, 806, procedures, at=T1)[0], 0)
+        self.assertEqual([run.name.split("-")[0] for run in project.runs()],
+                         ["801", "802", "803", "804", "806"])
+        self.assertEqual(sorted(asked),
+                         [f"repos/example/engine/issues/{n}" for n in range(801, 806)])
 
 
 if __name__ == "__main__":
