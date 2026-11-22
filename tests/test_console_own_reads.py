@@ -136,6 +136,21 @@ class OwnReadsTest(unittest.TestCase):
         self.assertFalse(self.check(f"cat /dev/fd/{fd}"))
         self.assertFalse(self.check(f"cat /proc/self/fd/{fd}"))
 
+    def test_a_root_on_the_device_of_dev_is_not_barred(self):
+        dev = os.stat("/dev").st_dev
+        real = os.lstat
+
+        def on_dev(path, *args, **kwargs):
+            status = real(path, *args, **kwargs)
+            if path != str(self.T):
+                return status
+            fields = list(status)
+            fields[2] = dev  # st_dev
+            return os.stat_result(fields)
+
+        with mock.patch.object(own_reads.os, "lstat", side_effect=on_dev):
+            self.assertTrue(self.check("cat README.md"))
+
     def test_a_case_alias_of_the_root_is_the_root(self):
         alias = str(self.root).swapcase()
         if not os.path.exists(alias):

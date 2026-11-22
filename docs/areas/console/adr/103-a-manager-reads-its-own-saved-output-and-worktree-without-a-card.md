@@ -25,7 +25,7 @@ The owner bound the first three: the rule fails closed, the lifecycle guard is u
 
 **D7. The hook input is parsed once and a request to leave the sandbox is refused before the rule runs.** `prompt_hook` returns the session, command, description and cwd. Its sandbox check is identity-strict: only an absent flag, `null` or `false` proceeds, so `0` is refused with `SANDBOX_TEXT` like `1`, and nothing is sent.
 
-**D8. Resolution is physical and refuses process-relative links.** Each operand is walked component by component (`lstat`, `readlink`, `..` after links, at most 40 links); a missing or non-directory middle component goes to the card, as does any component on the filesystem of `/proc` or `/dev`, because `/proc/self/cwd`, `/proc/self/fd/N` and `/dev/fd/N` name the hook's own objects in the hook and the utility's in the read.
+**D8. Resolution is physical and refuses process-relative links.** Each operand is walked component by component (`lstat`, `readlink`, `..` after links, at most 40 links); a missing or non-directory middle component goes to the card, as does any component on the filesystem of `/proc`, because `/proc/self/cwd`, `/proc/self/fd/N` and `/dev/fd/N` (a link into `/proc` on Linux) name the hook's own objects in the hook and the utility's in the read. `/dev` itself is not barred, so a scratch directory under `/dev/shm` still resolves; a device node outside the root refuses as a non-file.
 
 ## Consequences
 

@@ -32,9 +32,11 @@ The path rule. Each operand is resolved by `resolve`, a physical walk of `os.pat
 the hook (no `~` expansion): one component at a time with `os.lstat`, a link's target spliced in front of
 the rest, `..` popping the resolved prefix after links as the kernel does, more than 40 links refused, a
 missing or non-directory middle component refused, a missing last component returned as spelled. A path
-component, a link target's included, on the device of `/proc` or `/dev` refuses: a process-relative link
-(`/proc/self/cwd`, `/proc/self/fd/N`, `/dev/fd/N`) resolves in the hook to a different object than in the
-utility. The resolved path must lie inside the real path of `root` (`project_question_hook._inside`,
+component, a link target's included, on the device of `/proc` refuses: a process-relative link
+(`/proc/self/cwd`, `/proc/self/fd/N`, and `/dev/fd/N`, a link into `/proc` on Linux) resolves in the hook to a
+different object than in the utility. `/dev` itself is not barred: `/dev/shm`, where a scratch directory
+may live, is under it, and a device node there lies outside the root and refuses as a non-file.
+The resolved path must lie inside the real path of `root` (`project_question_hook._inside`,
 spelling then identity, so a case alias of the root is the root) or inside the session's own saved output
 (`project_question_hook.session_results`, genuine directories only). An operand that resolves to a
 regular file with more than one link refuses: a hard link could name a file outside the root. An operand
@@ -131,9 +133,9 @@ def operands(command: str) -> list[str] | None:
 
 
 def _barred_devices() -> frozenset[int]:
-    """The devices of `/proc` and `/dev`, where they exist."""
+    """The device of `/proc`, the process-relative file system, where it exists."""
     found = set()
-    for name in ("/proc", "/dev"):
+    for name in ("/proc",):
         try:
             found.add(os.stat(name).st_dev)
         except (FileNotFoundError, NotADirectoryError):
