@@ -20,11 +20,13 @@ from unittest import mock
 from agent_tools.delivery import engine_core, engine_graders, procedure_check
 from agent_tools.delivery.engine_core import (
     Done,
+    Reentry,
     RunCommand,
     StartSession,
     Stop,
     Transition,
     next_action,
+    reentry,
     replay,
 )
 from agent_tools.delivery.engine_graders import Grader
@@ -240,6 +242,197 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(next_action(toy(), INPUTS, approved), Done())
 
 
+DRAFTED = {"status": "drafted", "summary": "s"}
+E1 = (
+    pair("scope", "ok")
+    + pair("draft", "drafted", DRAFTED)
+    + [
+        {"type": "entered", "step": "review"},
+        {"type": "outcome", "step": "review", "outcome": "revise", "result": {"verdict": "revise"}, "head": "h1"},
+    ]
+)
+DONE_EVENTS = (
+    pair("scope", "ok") + pair("draft", "drafted", DRAFTED) + pair("review", "approve", {"verdict": "approve"})
+)
+
+
+def C(step_id: str, visit: int | None) -> dict:
+    return {"type": "continued", "step": step_id, "visit": visit}
+
+
+def DRAFT(visit: int) -> StartSession:
+    return StartSession(
+        step="draft",
+        visit=visit,
+        role="implementer",
+        prompt="draft.md",
+        reply="draft.reply.json",
+        args=(("run.issue", "1510"),),
+    )
+
+
+def SCOPE(visit: int, recheck: bool = False) -> RunCommand:
+    return RunCommand(
+        step="scope",
+        visit=visit,
+        command="diff-scope",
+        subcommand=None,
+        args=(("run.range", "a..b"),),
+        recheck=recheck,
+    )
+
+
+def M(visit: int, recheck: bool) -> RunCommand:
+    return RunCommand(
+        step="m",
+        visit=visit,
+        command="diff-scope",
+        subcommand=None,
+        args=(("run.range", "a..b"),),
+        recheck=recheck,
+    )
+
+
+def inline(steps: list[dict], reenter: str) -> dict:
+    return {
+        "inputs": ["holder", "issue", "range", "repo"],
+        "stops": {"needs-owner": {"need": "owner-decision", "reenter": reenter}},
+        "steps": steps,
+    }
+
+
+DECIDE = inline(
+    [
+        {"id": "scope", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "run",
+         "in": ["run.range"], "on": {"ok": "tally", "failed": "needs-owner"}},
+        {"id": "tally", "stage": "final review", "kind": "decide", "grader": "toy-tally", "holds": "run",
+         "in": ["scope.verdict"], "on": {"accept": "done", "revise": "needs-owner"}},
+    ],
+    "tally",
+)
+LOOP = inline(
+    [
+        {"id": "a", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "live",
+         "in": ["run.range"], "on": {"ok": "m", "failed": "needs-owner"}},
+        {"id": "m", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+         "mutates": True, "check": {"command": "diff-scope"}, "max_visits": 3, "in": ["run.range"],
+         "on": {"ok": "m", "failed": "needs-owner", "exhausted": "done"}},
+    ],
+    "a",
+)
+
+
+class ContinueTest(unittest.TestCase):
+    def test_a_moved_head_reenters_at_the_head_step_and_rewinds_its_visit(self) -> None:
+        self.assertEqual(reentry(toy(), INPUTS, E1, "h2"), Reentry(step="review", visit=1, stale=("review",)))
+        self.assertEqual(
+            next_action(toy(), INPUTS, E1 + [C("review", 1)]),
+            StartSession(
+                step="review",
+                visit=2,
+                role="reviewer",
+                prompt="review.md",
+                reply="review.reply.json",
+                args=(("draft.summary", "s"),),
+            ),
+        )
+
+    def test_a_rewind_forgets_the_heads_it_discarded(self) -> None:
+        self.assertEqual(reentry(toy(), INPUTS, E1 + [C("review", 1)], "h2"), Reentry("review", 2, ()))
+
+    def test_an_unchanged_head_reenters_at_the_stops_reenter_step(self) -> None:
+        self.assertEqual(reentry(toy(), INPUTS, E1, "h1"), Reentry("draft", 1, ()))
+
+    def test_a_stop_reenter_step_never_reached_is_entered_fresh(self) -> None:
+        events = pair("scope", "failed")
+        self.assertEqual(reentry(toy(), INPUTS, events, "h1"), Reentry("draft", None, ()))
+        self.assertEqual(next_action(toy(), INPUTS, events + [C("draft", None)]), DRAFT(1))
+
+    def test_a_rewind_to_a_stop_reenter_restores_its_visit_bound(self) -> None:
+        events = pair("scope", "ok") + pair("draft", "stuck") * 2
+        self.assertEqual(reentry(toy(), INPUTS, events, None), Reentry("draft", 2, ()))
+        self.assertEqual(next_action(toy(), INPUTS, events + [C("draft", 2)]), DRAFT(3))
+        result = replay(toy(), INPUTS, events + [C("draft", 2)] + pair("draft", "stuck"))
+        self.assertEqual(result.action, STOP)
+        self.assertEqual(result.transitions[-1], Transition("draft", "exhausted", "needs-owner"))
+
+    def test_a_stop_reentering_a_graded_decide_rewinds_it_at_its_visit(self) -> None:
+        events = pair("scope", "ok", {"verdict": "revise"})
+        self.assertEqual(reentry(DECIDE, INPUTS, events, None), Reentry("tally", 1, ()))
+        result = replay(DECIDE, INPUTS, events + [C("tally", 1)])
+        self.assertEqual(result.action, Stop("needs-owner", "owner-decision", "tally"))
+        self.assertEqual(result.transitions, replay(DECIDE, INPUTS, events).transitions)
+
+    def test_an_interrupted_step_is_reentered_under_a_new_visit(self) -> None:
+        events = pair("scope", "ok") + [{"type": "entered", "step": "draft"}]
+        self.assertEqual(reentry(toy(), INPUTS, events, None), Reentry("draft", 1, ()))
+        self.assertEqual(next_action(toy(), INPUTS, events + [C("draft", 1)]), DRAFT(2))
+
+    def test_a_step_never_entered_keeps_its_visit(self) -> None:
+        events = pair("scope", "ok")
+        self.assertEqual(reentry(toy(), INPUTS, events, None), Reentry("draft", 1, ()))
+        self.assertEqual(next_action(toy(), INPUTS, events + [C("draft", 1)]), DRAFT(1))
+
+    def test_a_live_result_is_stale_whatever_the_head(self) -> None:
+        doc = toy()
+        step(doc, "scope")["holds"] = "live"
+        events = pair("scope", "ok") + [{"type": "entered", "step": "draft"}]
+        self.assertEqual(reentry(doc, INPUTS, events, "h1"), Reentry("scope", 1, ("scope",)))
+        self.assertEqual(next_action(doc, INPUTS, events + [C("scope", 1)]), SCOPE(2))
+
+    def test_an_unreadable_or_unrecorded_head_is_stale(self) -> None:
+        self.assertEqual(reentry(toy(), INPUTS, E1, None).stale, ("review",))
+        unrecorded = copy.deepcopy(E1)
+        del unrecorded[-1]["head"]
+        self.assertEqual(reentry(toy(), INPUTS, unrecorded, "h1").stale, ("review",))
+
+    def test_the_earliest_stale_result_in_executed_order_wins(self) -> None:
+        doc = toy()
+        by_id = {item["id"]: item for item in doc["steps"]}
+        doc["steps"] = [by_id[name] for name in ("scope", "tally", "review", "draft")]
+        by_id["draft"]["holds"] = "live"
+        self.assertEqual(reentry(doc, INPUTS, E1, "h2"), Reentry("draft", 1, ("draft", "review")))
+        self.assertEqual(next_action(doc, INPUTS, E1 + [C("draft", 1)]), DRAFT(2))
+
+    def test_only_a_steps_latest_result_is_judged(self) -> None:
+        doc = toy()
+        step(doc, "draft")["holds"] = "head"
+        events = (
+            pair("scope", "ok")
+            + [
+                {"type": "entered", "step": "draft"},
+                {"type": "outcome", "step": "draft", "outcome": "stuck", "head": "h0"},
+                {"type": "entered", "step": "draft"},
+                {"type": "outcome", "step": "draft", "outcome": "drafted", "result": DRAFTED, "head": "h1"},
+                {"type": "entered", "step": "review"},
+            ]
+        )
+        self.assertEqual(reentry(doc, INPUTS, events, "h1"), Reentry("review", 1, ()))
+
+    def test_a_mutating_command_is_rechecked_once_for_each_visit_a_rewind_discarded(self) -> None:
+        history = pair("a", "ok") + pair("m", "ok") + [{"type": "entered", "step": "m"}]
+        self.assertEqual(next_action(LOOP, INPUTS, pair("a", "ok")), M(1, False))
+        self.assertEqual(
+            next_action(LOOP, INPUTS, pair("a", "ok") + [{"type": "entered", "step": "m"}, C("m", 1)]),
+            M(2, True),
+        )
+        rewound = history + [C("a", 1)]
+        again = next_action(LOOP, INPUTS, rewound)
+        self.assertIsInstance(again, RunCommand)
+        self.assertEqual((again.step, again.visit, again.recheck), ("a", 2, False))
+        self.assertEqual(next_action(LOOP, INPUTS, rewound + pair("a", "ok")), M(3, True))
+        self.assertEqual(next_action(LOOP, INPUTS, rewound + pair("a", "ok") + pair("m", "ok")), M(4, True))
+        self.assertEqual(next_action(LOOP, INPUTS, rewound + pair("a", "ok") + pair("m", "ok") * 2), M(5, False))
+        second = rewound + pair("a", "ok") + [{"type": "entered", "step": "m"}, C("m", 3)]
+        self.assertEqual(next_action(LOOP, INPUTS, second), M(4, True))
+        self.assertEqual(next_action(LOOP, INPUTS, second + pair("m", "ok")), M(5, True))
+        self.assertEqual(next_action(toy(), INPUTS, [{"type": "entered", "step": "scope"}, C("scope", 1)]), SCOPE(2))
+
+    def test_a_done_run_has_no_reentry(self) -> None:
+        with self.assertRaises(engine_core.CoreError):
+            reentry(toy(), INPUTS, DONE_EVENTS, "h1")
+
+
 class EventErrorTest(unittest.TestCase):
     def test_an_unknown_event_type_raises(self) -> None:
         cases = (
@@ -292,6 +485,16 @@ class EventErrorTest(unittest.TestCase):
                 pair("scope", "ok") + pair("draft", "drafted", {"status": "drafted"}) + pair("review", "approve", {"verdict": "approve"}),
             ),
             ("missing run input", toy(), {}, []),
+            ("continued after done", toy(), INPUTS, DONE_EVENTS + [C("scope", 1)]),
+            ("continued to an arrival the walk lacks", toy(), INPUTS, pair("scope", "ok") + [C("review", 1)]),
+            ("continued with no visit while a step is pending", toy(), INPUTS, pair("scope", "ok") + [C("draft", None)]),
+            ("continued to no step", toy(), INPUTS, pair("scope", "failed") + [C("nope", None)]),
+            (
+                "continued without a step",
+                toy(),
+                INPUTS,
+                pair("scope", "failed") + [{"type": "continued", "visit": None}],
+            ),
             (
                 "group step",
                 shipped,
