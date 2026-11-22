@@ -8269,7 +8269,7 @@ class ConsoleService:
     def _refresh_settings(self, sprint_id: str, root: str) -> permission.Permission:
         """Write the sprint's manager settings file again before a wake (ADR-console-021); the mode it wrote.
 
-        The content is what a launch writes, from the sprint's stored secret, the mode the project's
+        The content is what a launch writes, from the sprint's stored secret, the project's root as `CONSOLE_SPRINT_ROOT` (ADR-console-103), the mode the project's
         production rules choose now (ADR-console-060) and the allow rules its slug and merge binding give now
         (ADR-console-102), each read off the lock again, never copied from the launch. The write runs under the ingest lock,
         as `withdraw_goal` removes the secret and the file, so a withdrawal can never fall between the read
@@ -8292,7 +8292,7 @@ class ConsoleService:
                 raise nudge.NudgeFailed("the sprint's secret is missing")
             try:
                 manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
-                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret},
+                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret, manager.ROOT_ENV: root},
                                        chosen, allow)
             except manager.LaunchFailed as error:
                 raise nudge.NudgeFailed(str(error)) from error

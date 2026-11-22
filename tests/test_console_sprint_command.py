@@ -1695,7 +1695,7 @@ class PromptCommandTest(unittest.TestCase):
         with mock.patch.object(sprint, "ask", side_effect=fake), \
                 mock.patch.dict(os.environ, environment), \
                 mock.patch.object(sys, "stdin", StringIO(stdin)), redirect_stdout(out):
-            for name in (manager.ID_ENV, manager.SECRET_ENV):
+            for name in (manager.ID_ENV, manager.SECRET_ENV, manager.ROOT_ENV):
                 if name not in environment:
                     os.environ.pop(name, None)
             args = sprint.build_parser().parse_args(["permit", "--prompt"])

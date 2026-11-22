@@ -1,4 +1,4 @@
-# ADR-console-103 — A manager's permission prompt with no reason is sent back for one
+# ADR-console-104 — A manager's permission prompt with no reason is sent back for one
 
 - **Status:** accepted
 - **Decided in:** #1622
