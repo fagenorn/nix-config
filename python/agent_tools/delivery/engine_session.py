@@ -46,7 +46,7 @@ fault, never a transition.
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
-other exception both do. A launcher that cannot start gives exit 127 and the
+other exception, `engine_stop.Stopped` from a polled `stop` included, both do. A launcher that cannot start gives exit 127 and the
 `OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line.
@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.delivery import engine_stop
 from agent_tools.delivery.engine_commands import argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
 from agent_tools.delivery.procedure_check import PLACEHOLDER_RE, ROLES
@@ -304,8 +305,11 @@ def _terminate(signum: int, frame: object) -> None:
 
 
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
-           on_start: Callable[[int], None]) -> Launched:
-    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
+           on_start: Callable[[int], None],
+           stop: Callable[[], bool] | None = None) -> Launched:
+    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written.
+
+    A `stop` that turns true raises `Stopped` after the group is killed."""
     started = time.monotonic()
     try:
         previous = signal.signal(signal.SIGTERM, _terminate)
@@ -321,7 +325,7 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)
         on_start(process.pid)
-        stdout, stderr = process.communicate(prompt.encode("utf-8"))
+        stdout, stderr = engine_stop.communicate(process, prompt.encode("utf-8"), stop=stop)
     except BaseException:
         if process is not None:
             try:

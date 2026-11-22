@@ -14,8 +14,10 @@ result (`{}`).
 
 A command that cannot start (an `OSError` from the spawn) is `failed` with exit 127 and no pid, and
 `on_start` is not called. When `on_start` raises, the process is killed and reaped before the error
-propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group at
-the timeout and bounds the drain by `DRAIN_SECONDS`. `Ran.stdout`/`stderr` are what it printed
+propagates. Every run is the leader of its own process group, and any exception while it waits kills
+that group. A timed run (`timeout` given) also has captured stderr, kills the group at the timeout and
+bounds the drain by `DRAIN_SECONDS`. A run given `stop` polls it (`engine_stop.communicate`) and raises
+`Stopped` once it is true. `Ran.stdout`/`stderr` are what it printed
 (stderr is empty untimed). The module runs processes, so the pure engine core never imports it.
 """
 
@@ -31,7 +33,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery import procedure_check
+from agent_tools.delivery import engine_stop, procedure_check
 from agent_tools.delivery.procedure_check import CommandDeclaration
 from agent_tools.system.siblings import sibling_argv
 
@@ -127,7 +129,7 @@ class Ran:
 
 def run(table: CommandTable, command: str, subcommand: str | None,
         args: Sequence[tuple[str, object]], *, on_start: Callable[[int], None],
-        timeout: float | None = None) -> Ran:
+        timeout: float | None = None, stop: Callable[[], bool] | None = None) -> Ran:
     """Run one command step to its end; `on_start(pid)` is called once, before waiting."""
     invocation = table.invocation(command, subcommand, args)
     started = time.monotonic()
@@ -135,7 +137,7 @@ def run(table: CommandTable, command: str, subcommand: str | None,
         process = subprocess.Popen(
             invocation.argv, cwd=invocation.cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
-            start_new_session=timeout is not None)
+            start_new_session=True)
     except OSError:
         return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
     try:
@@ -145,7 +147,7 @@ def run(table: CommandTable, command: str, subcommand: str | None,
         process.communicate()
         raise
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = engine_stop.communicate(process, None, stop=stop, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -157,10 +159,15 @@ def run(table: CommandTable, command: str, subcommand: str | None,
             stdout, stderr = late.output or b"", late.stderr or b""
             process.stdout.close(), process.stderr.close(), process.wait()
         return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr)
-    except BaseException:  # an interrupt must not leave a timed run's group alive
-        if timeout is not None:
+    except BaseException:  # an interrupt or a stop must not leave the run's group alive
+        try:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
+        except ProcessLookupError:
+            pass
+        process.wait()
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
         raise
     outcome, result = grade(stdout, process.returncode)
     return Ran(outcome, result, process.returncode, time.monotonic() - started,
