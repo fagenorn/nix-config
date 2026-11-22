@@ -15,6 +15,8 @@ from unittest import mock
 from agent_tools.delivery import engine_shell
 from tests.test_engine_deliver import ANY_SENTENCE, EngineProject, step
 
+TIER = "integration"  # every case runs `engine deliver` against the stand-in command
+
 KEEP_ALIVE = {"command": "standin-keep-alive", "in": ["run.issue"]}
 RENEWED = {"stdout": '{"verdict":"renewed"}', "exit": 0}
 
