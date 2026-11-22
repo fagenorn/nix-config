@@ -37,7 +37,7 @@ import os
 import re
 import secrets
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -460,6 +460,7 @@ class RunState:
     last_event: str | None
     process: dict | None
     alive: bool
+    steps: tuple[dict, ...] = field(default=(), hash=False)
 
     def as_json(self) -> dict:
         return {"run": self.run, "project": self.project, "issue": self.issue,
@@ -474,25 +475,61 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
 
     `process` is the last recorded process whose step visit has no stored result, and `alive` is
     the probe's answer for it, whatever the stop or done state: reading those first is the caller's.
+    `steps` holds one summary per (step, visit), in the order the visits were first named.
     """
     stage = step = last_event = None
     wait = stop = None
     open_processes: dict[tuple[str, int], dict] = {}
     done = False
+    entries: dict[tuple[str, int], dict] = {}
+    graded: set[tuple[str, int]] = set()
+    current: tuple[str, int] | None = None
+    open_waits: list[tuple[dict, str]] = []
+
+    def close_waits(at: str, kind: str | None) -> None:
+        """Close the first open wait of `kind`, or every open wait when `kind` is None."""
+        for pair in list(open_waits):
+            summary, started = pair
+            if kind is None or summary["wait"] == kind:
+                summary["seconds"] = (parse_rfc3339_utc(at)
+                                      - parse_rfc3339_utc(started)).total_seconds()
+                open_waits.remove(pair)
+                if kind is not None:
+                    return
+
     for event in events:
         kind = event["event"]
         last_event = event["at"]
+        visit = (event["step"], event["visit"]) if "visit" in event else None
+        if kind in ("step_entered", "transition_taken") and visit not in entries:
+            entries[visit] = {"step": visit[0], "visit": visit[1], "outcome": None,
+                              "wall_seconds": None, "waits": [], "tokens": None,
+                              "spend_usd": None, "account": None}
+            current = visit
         if kind == "step_entered":
             stage, step = event["stage"], event["step"]
+        elif kind == "session_starting" and visit in entries:
+            entries[visit]["account"] = event["account"]
+        elif kind == "outcome_graded" and visit in entries:
+            entries[visit]["outcome"] = event["outcome"]
+            graded.add(visit)
+        elif kind == "transition_taken" and visit not in graded:
+            entries[visit]["outcome"] = event["outcome"]
         elif kind == "wait_started":
             wait = {"wait": event["wait"], "since": event["at"], "until": event["until"]}
+            if current is not None:
+                summary = {"wait": event["wait"], "seconds": None}
+                entries[current]["waits"].append(summary)
+                open_waits.append((summary, event["at"]))
         elif kind == "wait_ended":
+            close_waits(event["at"], event["wait"])
             if wait is not None and wait["wait"] == event["wait"]:
                 wait = None
         elif kind == "stop_reached":
             stop = {"name": event["stop"], "need": event["need"]}
         elif kind == "run_continued":
             wait = stop = None
+            close_waits(event["at"], None)
         elif kind == "run_done":
             done = True
         elif kind == "process_started":
@@ -502,11 +539,15 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
                                    "step": event["step"], "visit": event["visit"]}
         elif kind == "result_stored":
             open_processes.pop((event["step"], event["visit"]), None)
+            if visit in entries:
+                entries[visit].update(wall_seconds=event["wall_seconds"],
+                                      tokens=dict(event["tokens"]), spend_usd=event["spend_usd"])
     process = list(open_processes.values())[-1] if open_processes else None
     running = alive(process["pid"], process["started"]) if process is not None else False
     return RunState(run=run["run"], project=run["project"], issue=run["issue"],  # type: ignore[arg-type]
                     stage=stage, step=step, wait=wait, stop=stop, done=done,
-                    last_event=last_event, process=process, alive=running)
+                    last_event=last_event, process=process, alive=running,
+                    steps=tuple(entries.values()))
 
 
 def process_alive(pid: int, started: str) -> bool:
