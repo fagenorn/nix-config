@@ -31,6 +31,7 @@ cannot be started exits 2 and one ended by a signal exits 1.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -89,7 +90,18 @@ def subdirs(parent: Path) -> list[Path]:
     return sorted(path for path in parent.iterdir() if path.is_dir() and not path.name.startswith("."))
 
 
-def area_dirs_agree(areas_dir: Path, areas: dict, rel_map: str, rel) -> list[str]:
+def escapes(path: Path, root: Path) -> bool:
+    """True when `path`, links followed, resolves outside `root` (already resolved)."""
+    resolved = path.resolve()
+    return resolved != root and root not in resolved.parents
+
+
+def escape_finding(path: Path, root: Path) -> str:
+    """The finding for a link that leaves the checkout, named by the link, never its target."""
+    return f"{os.path.relpath(path, root)}: resolves outside the repository, so it is not read"
+
+
+def area_dirs_agree(areas_dir: Path, areas: dict, rel_map: str, rel, root: Path) -> list[str]:
     """Every area directory owns a map row, and every map row lands in areas/."""
     errors: list[str] = []
     claimed: set[str] = set()
@@ -104,22 +116,32 @@ def area_dirs_agree(areas_dir: Path, areas: dict, rel_map: str, rel) -> list[str
                 f"— every area lives at docs/areas/<slug>/CONTEXT.md"
             )
     for area_dir in subdirs(areas_dir):
-        if area_dir.name not in claimed:
+        if escapes(area_dir, root):
+            errors.append(escape_finding(area_dir, root))
+        elif area_dir.name not in claimed:
             errors.append(f"{rel(area_dir)}: area directory has no row in {rel_map}'s Areas table")
     return errors
 
 
-def index_records(areas_dir: Path, rel) -> tuple[dict[tuple[str, str], Path], list[str]]:
+def index_records(areas_dir: Path, rel, root: Path) -> tuple[dict[tuple[str, str], Path], list[str]]:
     """Index docs/areas/*/adr/ by (slug, number), checking each record's shape."""
     index: dict[tuple[str, str], Path] = {}
     errors: list[str] = []
     for area_dir in subdirs(areas_dir):
         adr_dir = area_dir / "adr"
+        if escapes(area_dir, root):
+            continue  # reported once by area_dirs_agree
+        if escapes(adr_dir, root):
+            errors.append(escape_finding(adr_dir, root))
+            continue
         if not adr_dir.is_dir():
             continue
         slug = area_dir.name
         taken: dict[str, Path] = {}
         for record in sorted(adr_dir.glob("*.md")):
+            if escapes(record, root):
+                errors.append(escape_finding(record, root))
+                continue
             rel_record = rel(record)
             name_match = ADR_FILE_RE.match(record.name)
             if not name_match:
@@ -145,10 +167,13 @@ def index_records(areas_dir: Path, rel) -> tuple[dict[tuple[str, str], Path], li
     return index, errors
 
 
-def check_citations(docs: Path, index: dict[tuple[str, str], Path], rel) -> list[str]:
+def check_citations(docs: Path, index: dict[tuple[str, str], Path], rel, root: Path) -> list[str]:
     """Every ADR citation under docs/ resolves; no retired four-digit id survives."""
     errors: list[str] = []
     for doc in sorted(docs.rglob("*.md")):
+        if escapes(doc, root):
+            errors.append(escape_finding(doc, root))
+            continue
         try:
             text = doc.read_text()
         except (OSError, UnicodeDecodeError):
@@ -168,11 +193,11 @@ def check_citations(docs: Path, index: dict[tuple[str, str], Path], rel) -> list
     return errors
 
 
-def check_docs_root(docs: Path, rel) -> list[str]:
+def check_docs_root(docs: Path, rel, root: Path) -> list[str]:
     """The docs root holds two files and the reserved directories, plus whatever README routes."""
     errors: list[str] = []
     readme = docs / "README.md"
-    routed = readme.read_text() if readme.is_file() else ""
+    routed = readme.read_text() if readme.is_file() and not escapes(readme, root) else ""
     for entry in sorted(docs.iterdir()):
         if entry.name.startswith("."):
             continue
@@ -234,7 +259,7 @@ def check(root: Path, map_path: Path) -> list[str]:
         for pattern in globs:
             try:
                 matched = next(root.glob(pattern), None)
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, NotImplementedError):
                 matched = None
                 errors.append(f"{rel_map}: area '{name}' has an unparseable glob `{pattern}`")
                 continue
@@ -249,6 +274,11 @@ def check(root: Path, map_path: Path) -> list[str]:
     defined: dict[Path, set[str]] = {}
     for name, (area_file, _globs) in areas.items():
         if area_file is None:
+            continue
+        if root.resolve() not in area_file.parents:
+            # Contained before it is opened: an area file the map points outside
+            # the checkout is a finding, never read.
+            errors.append(f"{rel_map}: area '{name}' points at {rel(area_file)}, outside the repository")
             continue
         if not area_file.is_file():
             errors.append(f"{rel_map}: area '{name}' points at missing file {rel(area_file)}")
@@ -286,12 +316,18 @@ def check(root: Path, map_path: Path) -> list[str]:
             errors.append(f"{rel(area_file)}: term '{term}' is defined but missing from the map's term table")
 
     # The standard docs layout — only where the repo has adopted it.
-    if areas_dir.is_dir():
-        errors += area_dirs_agree(areas_dir, areas, rel_map, rel)
-        records, record_errors = index_records(areas_dir, rel)
+    if areas_dir.is_dir() and root.resolve() not in areas_dir.parents:
+        # Contained before it is listed: a docs/areas that resolves outside the
+        # checkout is a finding, and neither it nor its siblings are read.
+        errors.append("docs/areas: resolves outside the repository, so docs/ is not linted")
+    elif areas_dir.is_dir():
+        contained = root.resolve()
+        errors += area_dirs_agree(areas_dir, areas, rel_map, rel, contained)
+        records, record_errors = index_records(areas_dir, rel, contained)
         errors += record_errors
-        errors += check_citations(areas_dir.parent, records, rel)
-        errors += check_docs_root(areas_dir.parent, rel)
+        errors += check_citations(areas_dir.parent, records, rel, contained)
+        errors += check_docs_root(areas_dir.parent, rel, contained)
+        errors = list(dict.fromkeys(errors))  # a link is reported once, by the first check to meet it
 
     return errors
 
