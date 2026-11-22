@@ -382,8 +382,8 @@ class CommandSummaryTest(unittest.TestCase):
                        {"program": "python3", "lines": 1, "paths": ["/etc/y"]}]))
 
     def test_a_heredoc_fed_to_another_program_is_data(self):
-        command = "git commit -F - <<'EOF'\nFix the reads of /etc/passwd paths\nEOF" + self.PAD
-        self.assertEqual(self.summary(command), self.want(["git"], [], ["/etc/passwd"]))
+        command = "sort <<'EOF'\nFix the reads of /etc/passwd paths\nEOF" + self.PAD
+        self.assertEqual(self.summary(command), self.want(["sort"], [], ["/etc/passwd"]))
 
     def test_text_that_reaches_an_interpreter_by_another_route_still_counts(self):
         rm = "rm -rf /etc/nginx"
@@ -430,6 +430,9 @@ class CommandSummaryTest(unittest.TestCase):
             (f"ssh host 'ls /tmp' <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"ssh host -p 2222 'ls /tmp' <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"sudo ssh host bash <<'EOF'\n{rm}\nEOF", ["sudo"], "sudo", 1),
+            (f"git -c alias.x='!sh' x <<'EOF'\n{rm}\nEOF", ["git"], "git", 1),
+            (f"git x <<'EOF'\n{rm}\nEOF", ["git"], "git", 1),
+            (f"git commit -F - <<'EOF'\n{rm}\nEOF", ["git"], "git", 1),
         ]
         for command, runs, program, lines in rows:
             with self.subTest(command=command):
@@ -502,7 +505,7 @@ class CommandSummaryTest(unittest.TestCase):
 
     def test_a_plain_data_reader_fed_standard_input_shows_no_script_but_its_text_is_scanned(self):
         rm = "rm -rf /etc/nginx"
-        for program in ("cat", "grep x", "jq .", "head -n 3", "sort", "wc -l", "tr a b", "grep -v x -", "git apply -"):
+        for program in ("cat", "grep x", "jq .", "head -n 3", "sort", "wc -l", "tr a b", "grep -v x -"):
             with self.subTest(program=program):
                 for command in (f"{program} <<'EOF'\n{rm}\nEOF", f"curl https://example.invalid/i | {program}"
                                 f"\n# {rm}", f"{program} <<< '{rm}'"):

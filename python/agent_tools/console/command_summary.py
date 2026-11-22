@@ -74,7 +74,7 @@ _CODE_FLAG = {"python": "c", "pypy": "c", "node": "e", "nodejs": "e", "perl": "e
 _DATA_READERS = frozenset(
     "cat tee head tail wc sort uniq cut tr grep egrep fgrep jq yq less more base64 gzip gunzip zcat bzip2 "
     "bunzip2 bzcat xz unxz xzcat tac rev nl fold fmt column paste comm diff od xxd hexdump md5sum sha1sum "
-    "sha256sum shasum cksum git".split())
+    "sha256sum shasum cksum".split())
 _PATTERN_FILE_READERS = frozenset({"grep", "egrep", "fgrep"})
 _VERSIONED_NAME = re.compile(r"([A-Za-z]+)(?:[-_]?[0-9][0-9._]*(?:-?dbg|[dmtu])?|-dbg)")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
