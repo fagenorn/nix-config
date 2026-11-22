@@ -1,4 +1,4 @@
-# ADR-project-contract-013 — The conformance workflow is a projection the resolver renders
+# ADR-project-contract-015 — The conformance workflow is a projection the resolver renders
 
 - **Status:** accepted
 - **Decided in:** #1452 (per #1413, #1417)
