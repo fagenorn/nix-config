@@ -34,7 +34,8 @@ captures its stderr. The module runs processes, so the pure engine core never im
 Every command passes the lifecycle guard first, in the guard's accepted spelling (`command_text`),
 and runs marked as an agent session so the pre-push hook judges a push it makes (issue 1515). A
 refusal, a timeout or an unusable guard is the outcome `refused`, with the guard's reason as the
-result and no process.
+result and no process. A run given `stop` polls it while the guard runs and checks it before a
+refusal is returned: a stop raises `Stopped` there, the guard reaped, and no refusal is graded.
 """
 
 from __future__ import annotations
@@ -229,12 +230,14 @@ def run(table: CommandTable, command: str, subcommand: str | None,
     started = time.monotonic()
     text = command_text(invocation.argv)
     if shlex.split(text) != list(invocation.argv):
+        if stop is not None and stop():
+            raise engine_stop.Stopped
         return _refused(f"The command text {text} does not split back to its words.", started)
-    verdict = engine_guard.judge(guard, text, invocation.cwd)
+    verdict = engine_guard.judge(guard, text, invocation.cwd, stop)
+    if stop is not None and stop():  # a stop is honored before a refusal is returned
+        raise engine_stop.Stopped
     if not verdict.allowed:
         return _refused(verdict.reason or "The lifecycle guard refused.", started)
-    if stop is not None and stop():
-        raise engine_stop.Stopped
     started = time.monotonic()  # the wall bound counts from the spawn, not from the guard
     deferred: list[int] = []
     previous = None

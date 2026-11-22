@@ -72,7 +72,9 @@ the shell polls it; a request for this holder ends that process's group, appends
 `stopped-by-request` (need `retry`) for the pending step, then removes the file, and the call exits
 `EXIT_STOP` with the run left open. The cut visit records no result, grade or transition.
 The API-error retry pause is polled too: a request in it ends the visit at once, with no resume.
-A request is published (`request_stop`) and removed (`_stopped`) under one lock, so none outlives the stop.
+A request is published (`request_stop`) under one lock with the engine's recording of every end of
+the run (`run_done` and each stop) and removal of the file, and the engine checks for a pending
+request under that lock, so a request that was accepted is honored and none outlives the run.
 
 Exit codes: `engine.py` lists them; `Fault` and `Refused` print nothing on stdout.
 """
@@ -372,7 +374,10 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict,
         walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger))
         action = walk.action
         if isinstance(action, engine_core.Done):
-            engine_ledger.append_event(run_dir, {"event": "run_done", "at": _now()})
+            with engine_stop.publication(run_dir):  # a request is honored or published after
+                if stop():
+                    return _record_stop(run_dir, walk.transitions[-1].step, "", "", "", True)
+                engine_ledger.append_event(run_dir, {"event": "run_done", "at": _now()})
             return EXIT_DONE, {
                 "detail": f"The {ENTRY} procedure reached done after {ran} step "
                           f"{'visit' if ran == 1 else 'visits'}.",
@@ -381,7 +386,7 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict,
             step = walk.transitions[-1].step
             return _stop(run_dir, step, action.name, action.need,
                          f"The {ENTRY} procedure stopped at step {step} with "
-                         f"{action.name}, which needs {action.need}.")
+                         f"{action.name}, which needs {action.need}.", stop)
         if isinstance(action, engine_core.StartSession):
             try:
                 stopped = _visit_session(run_dir, table.root, steps[action.step], action, stop)
@@ -404,22 +409,34 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict,
         ran += 1
 
 
-def _stop(run_dir: Path, step: str, name: str, need: str, detail: str) -> tuple[int, dict]:
+def _record_stop(run_dir: Path, step: str, name: str, need: str, detail: str,
+                requested: bool) -> tuple[int, dict]:
+    """Record the stop, the caller holding the publication lock; `requested` says a request ended it.
+
+    A request pending for this run is honored in place of `name`, so a request accepted late is
+    never left behind; the file goes once the stop is recorded."""
+    if requested:
+        name, need = engine_stop.STOPPED_BY_REQUEST, engine_stop.STOP_NEED
+        detail = (f"The {ENTRY} procedure stopped at step {step} on request, "
+                  "which needs a retry.")
     engine_ledger.append_event(run_dir, {"event": "stop_reached", "at": _now(), "step": step,
                                          "stop": name, "need": need})
+    if requested:
+        engine_stop.clear(run_dir)
     return EXIT_STOP, {"detail": detail, "end": name, "need": need, "run": run_dir.name}
 
 
-def _stopped(run_dir: Path, step: str) -> tuple[int, dict]:
-    """The stop a request ended `step`'s process with; the request goes once it is recorded.
-
-    Recording and removal happen under the publication lock, so no request is published between."""
+def _stop(run_dir: Path, step: str, name: str, need: str, detail: str,
+          stop: Callable[[], bool]) -> tuple[int, dict]:
+    """The stop that ends the run; recording and the request's removal are one step under the
+    publication lock, so no request is published between and a pending one wins."""
     with engine_stop.publication(run_dir):
-        result = _stop(run_dir, step, engine_stop.STOPPED_BY_REQUEST, engine_stop.STOP_NEED,
-                       f"The {ENTRY} procedure stopped at step {step} on request, "
-                       "which needs a retry.")
-        engine_stop.clear(run_dir)
-    return result
+        return _record_stop(run_dir, step, name, need, detail, stop())
+
+
+def _stopped(run_dir: Path, step: str) -> tuple[int, dict]:
+    """The stop a request ended `step`'s process with."""
+    return _stop(run_dir, step, "", "", "", lambda: True)
 
 
 def request_stop(run_dir: Path) -> dict | None:
@@ -463,7 +480,7 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
     need = procedure["stops"][procedure_check.CLAIM_LOST]["need"]
     return _stop(run_dir, action.step, procedure_check.CLAIM_LOST, need,
                  f"The claim was not renewed before step {action.step}, the keep-alive "
-                 f"answered {verdict}: {text}.")
+                 f"answered {verdict}: {text}.", stop)
 
 
 def _graded(run_dir: Path, step: dict, visit: int, outcome: str, *, bound: bool = False) -> None:
@@ -624,7 +641,7 @@ def _launch_until_answered(
                    detail: str) -> tuple:
         record(launched, reading)
         return launched, reading, _stop(run_dir, name, procedure_check.QUOTA_WAIT, QUOTA_NEED,
-                                        detail), False
+                                        detail, stop), False
 
     while True:
         started: list[int] = []

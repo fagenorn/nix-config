@@ -26,9 +26,9 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.delivery.engine_guard import Hook
+from agent_tools.delivery.engine_guard import Hook, Unavailable
 from agent_tools.delivery import (
-    engine, engine_commands, engine_ledger, engine_session, engine_shell, engine_stop,
+    engine, engine_commands, engine_core, engine_ledger, engine_session, engine_shell, engine_stop,
 )
 from tests.engine_guards import standin_guard
 from tests.test_engine_commands import project, table
@@ -165,6 +165,36 @@ class StopPollTest(unittest.TestCase):
             os.kill(pid, 0)
         gone(self, int(self.pidfile.read_text()))
 
+    def test_a_stop_during_the_guard_wait_reaps_the_guard_and_starts_no_command(self):
+        pids = self.dir / "guard.pids"
+        sleeper = Hook(str(standin_guard(self.dir, "sleeper", "sleep-away", str(pids))), 30)
+        entry = project("hold", str(self.pidfile), "0", cwd=self.tmp.name)
+        self.addCleanup(lambda: [reap(int(word)) for word in pids.read_text().split()]
+                        if pids.exists() else None)
+        began = time.monotonic()
+        with self.assertRaises(engine_stop.Stopped):
+            engine_commands.run(table(hold=entry), "hold", None, (), guard=sleeper,
+                                on_start=self.on_start,
+                                stop=lambda: len(pids.read_text().split()) == 2
+                                if pids.exists() else False)
+        self.assertLess(time.monotonic() - began, 10, "the guard wait did not poll the stop")
+        guard_pid, child_pid = (int(word) for word in pids.read_text().split())
+        gone(self, guard_pid)
+        gone(self, child_pid)
+        self.assertEqual(self.started, [])
+        self.assertFalse(self.pidfile.exists())
+
+    def test_a_stop_is_honored_before_a_guard_refusal_is_returned(self):
+        refuse = Hook(str(standin_guard(self.dir, "refuse", "refuse", str(self.dir / "r.log"),
+                                        "not allowed")), 5)
+        entry = project("hold", str(self.pidfile), "0", cwd=self.tmp.name)
+        for label, guard in (("a refusing guard", refuse),
+                             ("an unusable guard", Unavailable("no"))):
+            with self.subTest(label), self.assertRaises(engine_stop.Stopped):
+                engine_commands.run(table(hold=entry), "hold", None, (), guard=guard,
+                                    on_start=self.on_start, stop=lambda: True)
+        self.assertEqual(self.started, [])
+
     def test_a_stop_ends_a_timed_command_before_its_timeout(self):
         with self.assertRaises(engine_stop.Stopped):
             self.hold(stop=self.stop_soon, timeout=60)
@@ -243,13 +273,15 @@ class StopPollTest(unittest.TestCase):
         gone(self, launcher[0], group=True)
 
     def test_a_failing_on_start_does_not_wait_for_a_child_holding_the_pipe(self):
-        entry = project("hold", str(self.pidfile), "0", cwd=self.tmp.name)
+        entry = project("hold", str(self.pidfile), "1", cwd=self.tmp.name)  # the child escapes the group
         timer = threading.Timer(10, reap_from, args=(self.pidfile,))  # frees the pipe if it hangs
         self.addCleanup(timer.cancel)
         timer.start()
+        launcher: list[int] = []
 
         def refuse(pid: int) -> None:
             self.addCleanup(reap, pid)
+            launcher.append(pid)
             until(self, lambda: pid_in(self.pidfile), 8)
             raise OSError("the ledger refused the event")
 
@@ -258,7 +290,7 @@ class StopPollTest(unittest.TestCase):
             engine_commands.run(table(hold=entry), "hold", None, (), guard=self.allow,
                                 on_start=refuse)
         self.assertLess(time.monotonic() - began, 8, "the child held the callback failure open")
-        gone(self, int(self.pidfile.read_text()))
+        gone(self, launcher[0], group=True)
 
     def test_ending_a_group_whose_unreaped_leader_refuses_the_signal_still_reaps_it(self):
         # macOS answers EPERM to killpg on a group whose only member is an unreaped zombie
@@ -381,6 +413,8 @@ def pid_in(path: Path) -> bool:
 
 
 class EngineStopTest(unittest.TestCase):
+    stop_began: float | None = None
+
     def start(self, engine_project: EngineProject, procedures: Path, issue: int):
         argv, options = engine_project.command(
             "deliver", str(issue), "--procedures", str(procedures),
@@ -394,6 +428,7 @@ class EngineStopTest(unittest.TestCase):
 
     def stop(self, engine_project: EngineProject, issue: int):
         argv, options = engine_project.command("stop", str(issue))
+        self.stop_began = time.monotonic()  # the bound counts from the request, not from its answer
         return subprocess.run(argv, capture_output=True, timeout=60, **options)
 
     def started(self, engine_project: EngineProject, name: str) -> bool:
@@ -403,8 +438,8 @@ class EngineStopTest(unittest.TestCase):
             for e in engine_project.events(runs[0]))
 
     def ended_with_stop(self, engine_project: EngineProject, process, run: Path):
-        began = time.monotonic()
-        self.assertEqual(process.wait(15), 3)
+        began = self.stop_began if self.stop_began is not None else time.monotonic()
+        self.assertEqual(process.wait(max(0.1, 15 - (time.monotonic() - began))), 3)
         self.assertLess(time.monotonic() - began, 15)
         out, _ = process.communicate()
         (line,) = out.splitlines()
@@ -619,6 +654,39 @@ class EngineStopTest(unittest.TestCase):
         self.assertEqual(line["end"], "stopped-by-request")
         self.assertEqual(seen, [("stop_reached", True)])
         self.assertFalse((project_.runs()[0] / "stop-request").exists())
+
+    def accepted_at(self, project_: EngineProject, procedures: Path, action_type: type):
+        """Deliver in process, a stop request accepted the moment the walk reaches `action_type`."""
+        real = engine_core.replay
+        accepted: list[object] = []
+
+        def replay(*arguments, **keywords):
+            walk = real(*arguments, **keywords)
+            if isinstance(walk.action, action_type) and not accepted:
+                accepted.append(engine_shell.request_stop(project_.runs()[0]))
+            return walk
+
+        with project_.inside(), mock.patch.object(engine_core, "replay", side_effect=replay):
+            code, line = engine_shell.deliver(1512, procedures)
+        self.assertEqual(len(accepted), 1)
+        self.assertIsNotNone(accepted[0], "the request was refused, so it is not accepted late")
+        (run,) = project_.runs()
+        events = project_.events(run)
+        self.assertEqual((code, line["end"]), (engine_shell.EXIT_STOP, "stopped-by-request"))
+        self.assertEqual((events[-1]["event"], events[-1]["stop"], events[-1]["need"]),
+                         ("stop_reached", "stopped-by-request", "retry"))
+        self.assertNotIn("run_done", {e["event"] for e in events})
+        self.assertFalse((run / "stop-request").exists())
+
+    def test_a_request_accepted_as_the_run_reaches_done_is_honored_not_left_behind(self):
+        project_ = EngineProject(self)
+        self.accepted_at(project_, project_.procedures([step("a", "standin-json", "done")]),
+                         engine_core.Done)
+
+    def test_a_request_accepted_as_the_run_reaches_a_procedure_stop_is_honored(self):
+        project_ = EngineProject(self)
+        self.accepted_at(project_, project_.procedures([step("a", "standin-fail", "done")]),
+                         engine_core.Stop)
 
     def test_a_second_stop_racing_the_engines_stop_leaves_no_request_behind(self):
         project_ = EngineProject(self)
