@@ -69,7 +69,17 @@ class EngineProject:
             "standin-says-exhausted": entry("verdict", "exhausted", "0"),
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
+            "count-a": entry("record", str(self.tmp / "a.log")),
+            "count-b": entry("record", str(self.tmp / "b.log")),
+            "count-c": entry("record", str(self.tmp / "c.log")),
+            "count-d": entry("record", str(self.tmp / "d.log")),
+            "standin-gate": entry("gate", str(self.tmp / "gate.log"),
+                                  str(self.tmp / "gate-open")),
         })
+
+    def calls(self, name: str) -> int:
+        log = self.tmp / f"{name}.log"
+        return len(log.read_text().splitlines()) if log.exists() else 0
 
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
@@ -130,6 +140,263 @@ def step(id: str, command: str, ok: str | None, *, failed: str = "needs-owner",
 
 def shape(events: list[dict]) -> list[tuple]:
     return [(e["event"], e.get("step"), e.get("visit")) for e in events]
+
+
+def start_deliver(test: unittest.TestCase, project: EngineProject,
+                  procedures: Path) -> subprocess.Popen:
+    argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(argv, **options)
+    test.addCleanup(process.communicate)
+    test.addCleanup(process.kill)
+    test.addCleanup(project.release.write_text, "go", encoding="utf-8")
+    return process
+
+
+def wait_for_process_started(project: EngineProject) -> Path:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        runs = project.runs()
+        if runs and any(e["event"] == "process_started" for e in project.events(runs[0])):
+            return runs[0]
+        time.sleep(0.05)
+    raise AssertionError("the run never started its step process")
+
+
+LAUNCH = """
+import os, runpy, shutil, sys
+from agent_tools.delivery import engine_shell
+real = engine_shell._validate
+edited, source = sys.argv[1], sys.argv[-1]
+
+def wrapper(directory, table):
+    result = real(directory, table)
+    engine_shell._validate = real
+    shutil.copyfile(edited, os.path.join(source, "deliver.json"))
+    return result
+
+engine_shell._validate = wrapper
+sys.argv = ["engine"] + sys.argv[2:]
+runpy.run_module("agent_tools.delivery.engine", run_name="__main__")
+"""
+
+
+def gated(project: EngineProject, b_holds: str = "head", c_holds: str = "run") -> Path:
+    return project.procedures([
+        step("a", "count-a", "c"), step("b", "count-b", "g", holds=b_holds),
+        step("c", "count-c", "b", holds=c_holds), step("g", "standin-gate", "done"),
+        step("d", "count-d", "done")],
+        stops={"needs-owner": {"need": "owner-decision", "reenter": "d"}})
+
+
+def head(project: EngineProject) -> str:
+    return project.world.git(project.root, "rev-parse", "HEAD").strip()
+
+
+def heads(events: list[dict], step_id: str) -> list:
+    return [e.get("head") for e in events
+            if e["event"] == "result_stored" and e["step"] == step_id]
+
+
+def run_continued(events: list[dict]) -> list[dict]:
+    return [e for e in events if e["event"] == "run_continued"]
+
+
+class ContinueTest(unittest.TestCase):
+    def first_stop(self, project: EngineProject, procedures: Path) -> Path:
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        return project.runs()[0]
+
+    def test_a_second_deliver_continues_a_stopped_run_at_its_stops_reentry_step(self):
+        project = EngineProject(self)
+        procedures = gated(project)
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        self.assertEqual(json.loads(first.stdout)["end"], "needs-owner")
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        line = json.loads(second.stdout)
+        self.assertEqual(line["end"], "done")
+        self.assertEqual(line["run"], json.loads(first.stdout)["run"])
+        self.assertEqual(len(project.runs()), 1)
+        events = project.events(project.runs()[0])
+        continued = run_continued(events)
+        self.assertEqual(len(continued), 1)
+        self.assertIsInstance(continued[0].pop("at"), str)
+        self.assertEqual(continued[0], {"event": "run_continued", "step": "d"})
+        kinds = [e["event"] for e in events]
+        self.assertLess(kinds.index("stop_reached"), kinds.index("run_continued"))
+        self.assertEqual([project.calls(n) for n in ("a", "c", "b", "gate", "d")],
+                         [1, 1, 1, 1, 1])
+        self.assertEqual(heads(events, "b"), [head(project)])
+        self.assertEqual(heads(events, "a"), [None])
+        self.assertEqual(heads(events, "c"), [None])
+        self.assertTrue(all("head" not in e for e in events
+                            if e["event"] == "result_stored" and e["step"] != "b"))
+
+    def test_a_moved_head_reenters_at_the_earliest_head_step_and_runs_no_earlier_run_step_again(self):
+        project = EngineProject(self)
+        procedures = gated(project, c_holds="head")
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        before = head(project)
+        project.world.git(project.root, "commit", "--quiet", "--allow-empty", "-m", "moved")
+        (project.tmp / "gate-open").write_text("go", encoding="utf-8")
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        self.assertEqual(json.loads(second.stdout)["run"], json.loads(first.stdout)["run"])
+        events = project.events(project.runs()[0])
+        continued = run_continued(events)
+        self.assertEqual([(e["step"], e["visit"]) for e in continued], [("c", 1)])
+        self.assertEqual([project.calls(n) for n in ("a", "c", "b", "gate", "d")],
+                         [1, 2, 2, 2, 0])
+        self.assertEqual(heads(events, "c"), [before, head(project)])
+        self.assertEqual(heads(events, "b"), [before, head(project)])
+        for name in ("c", "b", "g"):
+            self.assertEqual([e["visit"] for e in events
+                              if e["event"] == "step_entered" and e["step"] == name], [1, 2])
+
+    def test_a_live_result_is_redone_by_a_continued_run_though_the_head_stayed(self):
+        project = EngineProject(self)
+        procedures = gated(project, b_holds="live", c_holds="live")
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        (project.tmp / "gate-open").write_text("go", encoding="utf-8")
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        events = project.events(project.runs()[0])
+        self.assertEqual([(e["step"], e["visit"]) for e in run_continued(events)], [("c", 1)])
+        self.assertEqual([project.calls(n) for n in ("a", "c", "b", "gate", "d")],
+                         [1, 2, 2, 2, 0])
+
+    def test_a_stop_that_reenters_a_graded_decide_grades_it_again_at_its_visit(self):
+        project = EngineProject(self)
+        procedures = project.procedures([
+            step("r", "count-a", "t"),
+            {"id": "t", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+             "in": ["run.issue"], "holds": "run", "on": {"accept": "done",
+                                                         "revise": "needs-owner"}}],
+            stops={"needs-owner": {"need": "owner-decision", "reenter": "t"}})
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["run"], json.loads(first.stdout)["run"])
+        self.assertEqual(len(project.runs()), 1)
+        events = project.events(project.runs()[0])
+        continued = run_continued(events)
+        self.assertEqual(len(continued), 1)
+        self.assertIsInstance(continued[0].pop("at"), str)
+        self.assertEqual(continued[0], {"event": "run_continued", "step": "t", "visit": 1})
+        self.assertEqual(len([e for e in events if e["event"] == "stop_reached"]), 2)
+        self.assertEqual(project.calls("a"), 1)
+
+    def test_a_result_stored_just_before_its_grading_is_graded_from_the_ledger_not_run_again(self):
+        project = EngineProject(self)
+        procedures = project.procedures([
+            step("a", "standin-gate", "c", failed="b"), step("b", "count-b", "done"),
+            step("c", "count-c", "done")])
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        run = project.runs()[0]
+        lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
+        cut = next(i for i, line in enumerate(lines)
+                   if json.loads(line)["event"] == "result_stored") + 1
+        self.assertEqual(json.loads(lines[cut - 1])["outcome"], "failed")
+        (run / "events.jsonl").write_text("".join(lines[:cut]), encoding="utf-8")
+        (run / "results/b.1.json").unlink()
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["run"], run.name)
+        after = project.events(run)[cut:]
+        self.assertEqual(shape(after), [
+            ("outcome_graded", "a", 1), ("transition_taken", "a", 1),
+            ("run_continued", "b", 1), ("step_entered", "b", 1), ("process_started", "b", 1),
+            ("result_stored", "b", 1), ("outcome_graded", "b", 1),
+            ("transition_taken", "b", 1), ("run_done", None, None)])
+        self.assertEqual(after[0]["outcome"], "failed")
+        self.assertEqual(after[1]["to"], "b")
+        self.assertEqual([project.calls("gate"), project.calls("c"), project.calls("b")],
+                         [1, 0, 2])
+
+    def test_a_head_that_moves_while_its_step_runs_leaves_the_result_stale(self):
+        project = EngineProject(self)
+        procedures = project.procedures(
+            [step("a", "standin-block", "g", holds="head"), step("g", "standin-gate", "done")],
+            stops={"needs-owner": {"need": "owner-decision", "reenter": "g"}})
+        first = start_deliver(self, project, procedures)
+        run = wait_for_process_started(project)
+        project.world.git(project.root, "commit", "--quiet", "--allow-empty", "-m", "moved")
+        project.release.write_text("go", encoding="utf-8")
+        stdout, stderr = first.communicate(timeout=60)
+        self.assertEqual(first.returncode, 3, stdout + stderr)
+        self.assertEqual(heads(project.events(run), "a"), [None])
+        (project.tmp / "gate-open").write_text("go", encoding="utf-8")
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        events = project.events(run)
+        self.assertEqual([(e["step"], e["visit"]) for e in run_continued(events)], [("a", 1)])
+        self.assertEqual(len([e for e in events
+                              if e["event"] == "process_started" and e["step"] == "a"]), 2)
+        self.assertEqual(project.calls("gate"), 2)
+        self.assertEqual(heads(events, "a"), [None, head(project)])
+
+    def test_a_continued_run_reads_its_own_procedure_copy_not_the_source(self):
+        project = EngineProject(self)
+        procedures = gated(project)
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        shutil.rmtree(procedures)
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        self.assertEqual(project.calls("d"), 1)
+
+    def seed(self, project: EngineProject, procedures: Path, *tokens: str) -> list[Path]:
+        root = project.world.home / ".agents/state/engine/runs"
+        now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+        return [engine_ledger.create_run(
+            project="example/engine", issue=1512, procedure="deliver",
+            procedures_dir=procedures, platform_revision="source", host="test",
+            inputs={"issue": 1512}, now=now, token=token, root=root) for token in tokens]
+
+    def test_two_open_runs_of_the_issue_are_refused_and_left_unchanged(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-record", "done")])
+        runs = self.seed(project, procedures, "aaaa", "bbbb")
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        for run in runs:
+            self.assertIn(run.name, done.stderr)
+            self.assertEqual((run / "events.jsonl").read_bytes(), b"")
+        self.assertEqual(project.runs(), sorted(runs))
+        self.assertFalse(project.record.exists())
+
+    def test_a_run_that_reached_done_without_its_done_event_is_finished_without_running_a_step(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-record", "done")])
+        (run,) = self.seed(project, procedures, "aaaa")
+        at = "2026-11-21T00:00:01Z"
+        engine_ledger.append_event(run, {"event": "step_entered", "at": at, "step": "a",
+                                         "visit": 1, "stage": "setup"})
+        engine_ledger.store_result(run, step="a", visit=1, result={}, at=at, wall_seconds=0,
+                                   turns=0, tokens=dict(engine_shell.NO_TOKENS), spend_usd=0,
+                                   outcome="ok")
+        engine_ledger.append_event(run, {"event": "outcome_graded", "at": at, "step": "a",
+                                         "visit": 1, "outcome": "ok"})
+        engine_ledger.append_event(run, {"event": "transition_taken", "at": at, "step": "a",
+                                         "visit": 1, "outcome": "ok", "to": "done"})
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        events = project.events(run)
+        self.assertEqual(events[-1]["event"], "run_done")
+        self.assertEqual(run_continued(events), [])
+        self.assertFalse(project.record.exists())
 
 
 class DeliverTest(unittest.TestCase):
@@ -371,13 +638,7 @@ class RefusalTest(unittest.TestCase):
 
 class LockTest(unittest.TestCase):
     def start(self, project: EngineProject, procedures: Path) -> subprocess.Popen:
-        argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        process = subprocess.Popen(argv, **options)
-        self.addCleanup(process.communicate)
-        self.addCleanup(process.kill)
-        self.addCleanup(project.release.write_text, "go", encoding="utf-8")
-        return process
+        return start_deliver(self, project, procedures)
 
     def test_a_second_deliver_during_a_run_exits_already_running_and_appends_nothing(self):
         project = EngineProject(self)
@@ -444,27 +705,52 @@ class LockTest(unittest.TestCase):
         project.release.write_text("go", encoding="utf-8")
         self.assertEqual(first.wait(60), 0)
 
-    def test_the_procedure_that_runs_is_the_one_checked_when_the_source_changes_meanwhile(self):
+    def test_the_procedure_that_runs_is_the_one_checked_when_the_source_changes_after_its_check(self):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-record", "done")])
-        root = project.world.home / ".agents/state/engine/runs"
-        root.mkdir(parents=True, mode=0o700)
-        descriptor = os.open(creation_lock_path(root, 1512), os.O_RDWR | os.O_CREAT, 0o600)
-        self.addCleanup(os.close, descriptor)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        process = self.start(project, procedures)
-        time.sleep(1.0)
-        self.assertIsNone(process.poll())
         edited = json.loads((procedures / "deliver.json").read_text())
         edited["steps"][0]["on"]["ok"] = "b"
         edited["steps"].append(step("b", "no-such-command", "done"))
-        (procedures / "deliver.json").write_text(json.dumps(edited), encoding="utf-8")
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        stdout, stderr = process.communicate(timeout=60)
-        self.assertEqual(process.returncode, 2, stdout + stderr)
-        self.assertIn("unknown_command", stderr)
+        edited_path = project.tmp / "edited.json"
+        edited_path.write_text(json.dumps(edited), encoding="utf-8")
+        _, options = project.command()
+        process = subprocess.run(
+            [sys.executable, "-c", LAUNCH, str(edited_path), "deliver", "1512",
+             "--procedures", str(procedures)], capture_output=True, timeout=120, **options)
+        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+        self.assertIn("unknown_command", process.stderr)
         self.assertFalse(project.record.exists())
         self.assertEqual(project.runs(), [])
+
+    def test_a_continuer_waits_for_a_lock_renewal_and_reports_the_renewed_holder(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-fail", "done")])
+        self.assertEqual(project.deliver(procedures).returncode, 3)
+        run = project.runs()[0]
+        root = project.world.home / ".agents/state/engine/runs"
+        creation = os.open(creation_lock_path(root, 1512), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, creation)
+        fcntl.flock(creation, fcntl.LOCK_EX)
+        held = os.open(run / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        os.ftruncate(held, 0)
+        before = (run / "events.jsonl").read_bytes()
+        runs_before = project.runs()
+        process = self.start(project, procedures)
+        time.sleep(1.0)
+        self.assertIsNone(process.poll())
+        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+        os.write(held, json.dumps({"pid": os.getpid(),
+                                   "started": "2026-11-21T00:00:00Z"}).encode("utf-8"))
+        fcntl.flock(creation, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 4, stdout + stderr)
+        line = json.loads(stdout)
+        self.assertEqual(line["process"]["pid"], os.getpid())
+        self.assertEqual(line["run"], run.name)
+        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+        self.assertEqual(project.runs(), runs_before)
 
     def test_status_reports_the_later_run_of_a_second_not_the_one_with_the_greater_token(self):
         project = EngineProject(self)
@@ -474,18 +760,17 @@ class LockTest(unittest.TestCase):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(json.loads(status.stdout)["run"], later.name)
 
-    def test_a_stopped_run_is_not_joined_by_a_new_run(self):
+    def test_a_stopped_run_is_continued_not_joined_by_a_new_run(self):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-fail", "done")])
         self.assertEqual(project.deliver(procedures).returncode, 3)
-        run = project.runs()[0]
-        before = (run / "events.jsonl").read_bytes()
         again = project.deliver(procedures)
-        self.assertEqual(again.returncode, 2, again.stdout + again.stderr)
-        self.assertEqual(again.stdout, "")
-        self.assertEqual(len(again.stderr.splitlines()), 1, again.stderr)
+        self.assertEqual(again.returncode, 3, again.stdout + again.stderr)
         self.assertEqual(len(project.runs()), 1)
-        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+        events = project.events(project.runs()[0])
+        self.assertEqual([(e["step"], e["visit"]) for e in run_continued(events)], [("a", 1)])
+        self.assertEqual([e["visit"] for e in events
+                          if e["event"] == "step_entered" and e["step"] == "a"], [1, 2])
 
     def test_a_done_run_lets_the_next_deliver_start_a_new_run(self):
         project = EngineProject(self)
@@ -524,14 +809,14 @@ class LockTest(unittest.TestCase):
         self.assertEqual(json.loads(second.stdout)["run"], running.name)
         self.assertEqual(project.runs(), runs_before)
 
-    def test_a_done_run_never_hides_a_stopped_run_started_in_the_same_second(self):
+    def test_a_done_run_never_hides_an_open_run_started_in_the_same_second(self):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-json", "done")])
-        stopped = self.seed_runs(project, procedures, done="zzzz", other="aaaa")
+        open_run = self.seed_runs(project, procedures, done="zzzz", other="aaaa")
         runs_before = project.runs()
         second = project.deliver(procedures)
-        self.assertEqual(second.returncode, 2, second.stdout + second.stderr)
-        self.assertIn(stopped.name, second.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["run"], open_run.name)
         self.assertEqual(project.runs(), runs_before)
 
     def test_lock_holder_reads_only_a_held_lock(self):

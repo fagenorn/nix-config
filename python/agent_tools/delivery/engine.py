@@ -36,8 +36,9 @@ directory:
 `engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a
 procedure of `command` and `decide` steps; default: the package's `procedures`
 directory) for the issue, in the project the current directory belongs to, to
-`done` or a stop, and prints one line of compact sorted-key JSON when it ends
-(`engine_shell` is the contract):
+`done` or a stop, or continues the issue's open run on its own procedure copy,
+and prints one line of compact sorted-key JSON when it ends (`engine_shell` is
+the contract):
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
@@ -45,7 +46,8 @@ directory) for the issue, in the project the current directory belongs to, to
   "run"}`, another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
 - exit 2, stdout empty and one stderr line: a usage error, or a refusal before
-  any run exists, which creates no run directory.
+  any run is created or continued (two open runs of the issue included), which
+  creates no run directory.
 """
 
 from __future__ import annotations

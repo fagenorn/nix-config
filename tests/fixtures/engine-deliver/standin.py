@@ -9,6 +9,8 @@ prints at most one compact JSON line.
   record <log> rest...           appends {"argv", "cwd", "pid"} to <log>, prints it, exits 0
   block <release> rest...        waits for <release> to exist (exits 1 after 120 s),
                                  then prints {"argv": rest} and exits 0
+  gate <log> <flag> rest...      appends {"argv": rest} to <log>, prints it, exits 0 when
+                                 <flag> exists, else 1 (no verdict in the document)
 """
 
 import json
@@ -48,6 +50,12 @@ def main(argv: list[str]) -> int:
             time.sleep(0.05)
         emit({"argv": rest})
         return 0
+    if mode == "gate":
+        log, flag, rest = words[0], words[1], words[2:]
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"argv": rest}, sort_keys=True, separators=(",", ":")) + "\n")
+        emit({"argv": rest})
+        return 0 if os.path.exists(flag) else 1
     return 2
 
 
