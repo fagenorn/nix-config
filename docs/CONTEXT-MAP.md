@@ -15,7 +15,6 @@
 | System | [CONTEXT](./areas/system/CONTEXT.md) | Decisions spanning areas | `*` |
 
 ## Terms
-
 | Term | Area |
 |---|---|
 | Account binding | Hosts |
@@ -29,6 +28,7 @@
 | Approved release path | Guard |
 | Answered item | Console |
 | Approved adoption | Console |
+| Attempt | Delivery |
 | Awaiting look | Delivery |
 | Base policy | Guard |
 | Blocking edge | Claims |

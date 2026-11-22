@@ -3,6 +3,7 @@
   "adr-number": null,
   "agent-model-matrix": null,
   "artifact-budget": null,
+  "attempt-budget": null,
   "bypass-proof": null,
   "cache-proxy": null,
   "conformance": null,

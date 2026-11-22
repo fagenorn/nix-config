@@ -15,6 +15,10 @@ The three shapes (D3), judged only over the literal-word grammar of `words`:
    owner has not approved on the console (ADR-release-016), so the permit reads no forge and checks no
    approval (ADR-console-098).
 
+Each of the three shapes may follow one credential-scrub prefix, exactly a spelling of
+`SCRUB_PREFIXES`, which equals the lifecycle guard's (#1592, ADR-console-102); `strip_scrub` removes it
+once, and only the merge and the rerun are read through it: the release run takes none (ADR-console-098).
+
 `words(command)` is a small scanner, not `shlex` (which accepts expansions and comments the shell
 would act on). It splits on spaces and tabs only. A word is a plain run of `[A-Za-z0-9_./:@%+=,-]`
 not beginning with `=`, a single-quoted run, or a double-quoted run without `$`, a backtick, a
@@ -35,10 +39,15 @@ owner's word and disposes on the owner's yes to a token). A literal command is j
 value is never an option: `--notes-file /tmp/a--dispose.md` is an ordinary run. The one word read
 as a command line is a shell wrapper's body (the word after a `-c` style flag, or after `eval`): an
 abandon or a dispose inside it is `ABANDON` or `DISPOSE`. The plain run is
-`RELEASE` only as the literal shape above and only as the first command. Every other run spelling (a
-preview, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a repeated flag, a
-value beginning with `-`, a wrapper, text built at run time and piped to a shell) gets no decision and
-falls to the session's classifier, as a merge spelling does; the release command's own approval
+`RELEASE` only as the literal shape above and only as the first command. A command that runs
+`release transaction run` at a command position (the text start, after a chain or pipe operator, or behind
+a wrapper the client strips before it matches rules), and that is neither the plain run nor abandon or
+dispose (a preview flag, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a
+repeated flag, a value beginning with `-`, a chain, an expansion), is `DENY` with `RELEASE_SPELLING`, so
+every text the manager's release allow rule matches, which the client matches for each subcommand of a
+chain on its own, is decided (#1592, ADR-console-102). Every other release
+spelling (a preview, text built at run time and piped to a shell) gets no decision
+and falls to the session's classifier, as a merge spelling does; the release command's own approval
 check is what makes that safe, and the residual is that an abandon or dispose spelling the scan cannot
 see also gets no decision.
 
@@ -46,7 +55,8 @@ see also gets no decision.
 and no reader is called. A command that does is `ALLOW` only in a granted shape and `DENY` otherwise,
 never None. The checks run in this order, the first that applies deciding:
 
-- Every verb: the words are None, or do not begin with the verb's own words: `ALONE`.
+- Every verb: the words of `strip_scrub(command)` are None, or do not begin with the verb's own words:
+  `ALONE`.
 - Merge: `--admin` anywhere is `ADMIN`; no `grant.slug` or `grant.strategy` is `NOT_GRANTED`; a
   `--repo` (or `-R`) value other than the slug is `OTHER_REPO`; words other than the exact shape are
   `NOT_GRANTED`. Then `forge.read_pr` is read: a head repository other than the slug, a branch that
@@ -61,7 +71,18 @@ never None. The checks run in this order, the first that applies deciding:
   run's latest attempt, all pages, whose conclusion is not `success`: a failed rerun also runs the
   skipped dependents of a failed job) or one not named by `read_required(slug, base)` is
   `NOT_CHECK_RUN`. Else `ALLOW` with target `{"run", "pr"}`.
+- Release: the plain run is `ALLOW` with its target; any other leading run is `RELEASE_SPELLING`.
 - A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`.
+
+`ALONE` and `NOT_GRANTED` for a merge or rerun are composed by `spelling_refusal(sentence, verb, grant,
+missing)`: the sentence, ` Missing: <flags>.` when `missing` is not empty, and ` Accepted: <form>; <prefix
+clause>`, where `accepted_form(verb, grant)` is the granted spelling filled with the grant's slug and
+strategy and `PREFIX_CLAUSE` is the optional prefix the guard prints. `_missing` lists, in the form's order,
+the flags of the form (`--repo`, the strategy flag, `--match-head-commit` and `--delete-branch` for a
+merge; `--failed` and `--repo` for a rerun) that the words lack. `NOT_GRANTED` names them over the words;
+`ALONE` names them over the words from the first exact opening when the words parse and hold one, so a
+readable merge behind a bad prefix still names its omitted flag, and names none otherwise. Every other
+reason keeps its sentence.
 
 `Verdict.payload()` is `{"verb", "decision", "reason", "target"}`; `verb` is `merge`, `rerun`,
 `release` (target `{"commit", "version"}`, None for a member the run does not name), `release-abandon` or
@@ -86,7 +107,7 @@ check bound to another app is left out, even when the legacy `contexts` list rep
 """
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from agent_tools.console import deliveries
@@ -100,6 +121,9 @@ ALONE = "This command runs only alone, spelled exactly as the permitted form, wi
 NOT_GRANTED = "The permit grants only the exact merge and rerun forms, and this one differs."
 NO_ABANDON = "A manager never abandons a release; the lead does, on the owner's word."
 NO_DISPOSE = "A manager never disposes of a release; the lead does, on the owner's yes to its token."
+RELEASE_SPELLING = ("A release runs only as the plain release transaction run: each flag one of --repo-root, "
+                    "--profile, --commit, --version, --title, --notes-file, --confirm, each followed by its "
+                    "value as the next word, and only --confirm repeated.")
 ADMIN = "An administrator merge is never permitted."
 OTHER_REPO = "The command names another repository than this sprint's project."
 NOT_OWN_PR = "Pull request {pr} is not this sprint's own pull request."
@@ -118,6 +142,36 @@ MERGE, RERUN = "merge", "rerun"
 RELEASE, ABANDON, DISPOSE = "release", "release-abandon", "release-dispose"
 RELEASE_FLAGS = ("--repo-root", "--profile", "--commit", "--version", "--title", "--notes-file",
                  "--confirm")
+# The credential names a scrub prefix may drop, and the prefixes the lifecycle guard accepts: the guard's
+# own derivation, copied (the package never imports the guard), and a test holds the two equal (#1592).
+GH_ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
+SCRUB_PREFIXES = tuple(sorted(
+    {
+        spelling
+        for names in [(name,) for name in GH_ENV_TOKEN_NAMES] + [
+            (first, second)
+            for first in GH_ENV_TOKEN_NAMES for second in GH_ENV_TOKEN_NAMES
+            if first != second
+        ]
+        for spelling in (
+            "unset " + " ".join(names) + " && ",
+            "env " + " ".join(f"-u {name}" for name in names) + " ",
+        )
+    },
+    key=lambda spelling: (-len(spelling), spelling),
+))
+
+
+def _prefix_clause() -> str:
+    """The guard's `prefix_clause()`: the documented two-name `env -u`, the one-name `unset` and the
+    one-name `env -u` spelling, in `SCRUB_PREFIXES` order."""
+    first, second = GH_ENV_TOKEN_NAMES
+    printed = (["env", "-u", first, "-u", second], ["unset", first, "&&"], ["env", "-u", first])
+    return "optional prefix: " + " | ".join(
+        spelling.rstrip() for spelling in SCRUB_PREFIXES if spelling.split() in printed)
+
+
+PREFIX_CLAUSE = _prefix_clause()
 ACTIONS_APP, ANY_APP = 15368, -1
 
 _PLAIN = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
@@ -338,6 +392,21 @@ def words(command: str) -> list[str] | None:
 
 _SPLIT = re.compile(r"[\s;|&()<>$`,\[\]{}]+")
 _SHELL_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+# A release run at a command position: the text start or after an operator, past leading `NAME=value`
+# assignments, shell keywords and `!`, and after the wrappers the client strips before it matches rules (the
+# guard refuses the detaching one). The client matches each subcommand of a chain on its own, so the
+# manager's release allow rule matches such a segment wherever it stands (#1592). Whether the client also
+# strips assignments or splits keyword bodies is unconfirmed, so the permit decides them all. A value's
+# unquoted character excludes quotes and backslashes, so each value parses one way: with `\S` there it split
+# a quoted value many ways and a failed search backtracked exponentially on every Bash call.
+# Likewise a wrapper's argument is a run of `[\w=.,:-]` that is no wrapper word (a wrapper word starts the
+# next wrapper instead), so each token parses one way here too.
+_RELEASE_RUN_TEXT = re.compile(
+    r"(?:\A|[;&|\n(){`]|\$\()\s*"
+    r"(?:(?:(?:then|do|else|elif|if|while|until|!)|[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\\.|[^\s\"'\\])*)\s+)*"
+    r"(?:(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)"
+    r"(?:\s+(?!(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)\s)[\w=.,:-]+)*?\s+)*"
+    r"release\s+transaction\s+run(?:\s|\Z)")
 
 
 def release_target(command: str) -> dict | None:
@@ -407,7 +476,10 @@ def _verb_of(command: str) -> str | None:
             return MERGE
         if name == "gh" and rest == ["run", "rerun"]:
             return RERUN
-    return release_operation(command)
+    found = release_operation(command)
+    if found is None and _RELEASE_RUN_TEXT.search(command):
+        return RELEASE
+    return found
 
 
 def verb_of(command: str) -> str | None:
@@ -443,8 +515,43 @@ def _merge_shape(parts: list[str], grant: Grant) -> dict | None:
     return {"pr": int(parts[3]), "head": parts[8]}
 
 
+def strip_scrub(command: str) -> str:
+    """The rest after the first `SCRUB_PREFIXES` spelling `command` starts with, when that rest is
+    non-empty and does not begin with whitespace; else `command` unchanged. Stripped at most once."""
+    for prefix in SCRUB_PREFIXES:
+        if command.startswith(prefix):
+            rest = command[len(prefix):]
+            return rest if rest and not rest[0].isspace() else command
+    return command
+
+
+def accepted_form(verb: str, grant: Grant) -> str:
+    """The granted spelling of `verb`, filled with the grant's slug and strategy where it has them."""
+    slug = grant.slug or "<slug>"
+    if verb == RERUN:
+        return f"gh run rerun <id> --failed --repo {slug}"
+    form = f"gh pr merge <n> --repo {slug} --{grant.strategy or '<strategy>'} --match-head-commit <sha>"
+    return form + (" --delete-branch" if grant.delete_branch else "")
+
+
+def spelling_refusal(sentence: str, verb: str, grant: Grant, missing: Sequence[str] = ()) -> str:
+    """`sentence`, the flags the command omits, the accepted form and the optional prefix clause."""
+    named = f" Missing: {', '.join(missing)}." if missing else ""
+    return f"{sentence}{named} Accepted: {accepted_form(verb, grant)}; {PREFIX_CLAUSE}"
+
+
+def _missing(verb: str, parts: list[str], grant: Grant) -> tuple[str, ...]:
+    """The flags of the granted form that `parts` lacks, in the form's order."""
+    if verb == RERUN:
+        wanted = ["--failed", "--repo"]
+    else:
+        wanted = ["--repo"] + ([f"--{grant.strategy}"] if grant.strategy is not None else [])
+        wanted += ["--match-head-commit"] + (["--delete-branch"] if grant.delete_branch else [])
+    return tuple(flag for flag in wanted if flag not in parts)
+
+
 def merge_target(command: str, grant: Grant) -> dict | None:
-    parts = words(command)
+    parts = words(strip_scrub(command))
     return None if parts is None else _merge_shape(parts, grant)
 
 
@@ -465,14 +572,15 @@ def _with_verb(verdict: Verdict, verb: str) -> Verdict:
 def _judge_merge(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
     if any(part == "--admin" or part.startswith("--admin=") for part in parts):
         return _deny(MERGE, ADMIN)
+    refusal = spelling_refusal(NOT_GRANTED, MERGE, grant, _missing(MERGE, parts, grant))
     if grant.slug is None or grant.strategy is None:
-        return _deny(MERGE, NOT_GRANTED)
+        return _deny(MERGE, refusal)
     repo = _repo_value(parts)
     if repo is not None and repo != grant.slug:
         return _deny(MERGE, OTHER_REPO)
     target = _merge_shape(parts, grant)
     if target is None:
-        return _deny(MERGE, NOT_GRANTED)
+        return _deny(MERGE, refusal)
     pull = forge.read_pr(grant.slug, target["pr"])
     if pull["repo"] != grant.slug:
         return _deny(MERGE, NOT_OWN_PR.format(pr=target["pr"]))
@@ -490,7 +598,7 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         return _deny(RERUN, OTHER_REPO)
     if (grant.slug is None or len(parts) != 7 or not _NUMBER.fullmatch(parts[3])
             or parts[:3] + parts[4:] != ["gh", "run", "rerun", "--failed", "--repo", grant.slug]):
-        return _deny(RERUN, NOT_GRANTED)
+        return _deny(RERUN, spelling_refusal(NOT_GRANTED, RERUN, grant, _missing(RERUN, parts, grant)))
     slug, run_id = grant.slug, int(parts[3])
     run = forge.read_run(slug, run_id)
     if run["event"] != "pull_request":
@@ -522,14 +630,15 @@ def judge(command: str, grant: Grant, forge: Forge) -> Verdict:
     if verb is None:
         return _no_decision()
     if verb == RELEASE:
-        return _allow(RELEASE, release_target(command))
+        target = release_target(command)
+        return _allow(RELEASE, target) if target is not None else _deny(RELEASE, RELEASE_SPELLING)
     if verb == ABANDON:
         return _deny(ABANDON, NO_ABANDON)
     if verb == DISPOSE:
         return _deny(DISPOSE, NO_DISPOSE)
-    parts = words(command)
+    parts = words(strip_scrub(command))
     if parts is None:
-        return _deny(verb, ALONE)
+        return _deny(verb, spelling_refusal(ALONE, verb, grant))
     try:
         if parts[:3] == _OPENING[MERGE]:
             return _judge_merge(parts, grant, forge)
@@ -537,4 +646,7 @@ def judge(command: str, grant: Grant, forge: Forge) -> Verdict:
             return _judge_rerun(parts, grant, forge)
     except ForgeUnreadable as error:
         return _deny(verb, FORGE_UNREADABLE.format(reason=error))
-    return _deny(verb, ALONE)
+    opening = _OPENING[verb]
+    start = next((i for i in range(len(parts)) if parts[i:i + 3] == opening), None)
+    missing = () if start is None else _missing(verb, parts[start:], grant)
+    return _deny(verb, spelling_refusal(ALONE, verb, grant, missing))
