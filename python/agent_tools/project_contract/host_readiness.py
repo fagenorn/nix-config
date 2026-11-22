@@ -45,7 +45,10 @@ extends it lifts the match, as the lifecycle guard lifts it), or a
 `release transaction` verb other than `status` and a `--read-only` `preview`,
 is not run, and its check fails with `<reason>; not run`. A word of shell text
 is split into commands and read the same way; text that cannot be read is
-refused whole.
+refused whole. The project root, and an existing absolute path with no operator
+character, is a plain path argument and never shell text. A one-word production
+verb hits only as a command's program or behind a program that runs a later
+word (`timeout`, `env`, `devenv`), never as another program's argument.
 
 The probe commit proves itself: after the commit the clone's HEAD must have the
 old HEAD as its parent and the probe subject (D6). The release preview carries
@@ -87,6 +90,13 @@ STRIPPED_ENV = TOKEN_ENV + GIT_REDIRECT_ENV
 
 SHELL_CHARACTERS = frozenset(";&|()<>$`")
 OPERATOR_CHARACTERS = frozenset(";&|()")
+# Programs that run a later word of their own as a command (the lifecycle guard's runners and
+# command wrappers, copied: package code never loads the guard). A one-word production verb
+# hits at a later word only behind one of these.
+PASS_THROUGH_PROGRAMS = frozenset({
+    "xargs", "timeout", "nice", "ionice", "stdbuf", "watch", "chrt", "taskset", "flock",
+    "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
+    "devenv", "direnv", "command", "builtin", "exec", "env", "sudo"})
 BUDGET_EXIT = 3
 READ_DEPTH = 4
 UNREADABLE = "would run shell text it cannot read"
@@ -172,15 +182,21 @@ def _split_shell_text(text: str) -> list[list[str]] | None:
     return [command for command in commands if command]
 
 
-def _is_shell_text(word: str) -> bool:
-    return any(c.isspace() or c in SHELL_CHARACTERS for c in word)
+def _is_shell_text(word: str, root: str) -> bool:
+    """True when `word` may hold commands. The project root and an existing absolute path
+    without an operator character are plain paths, whatever quote or space they hold."""
+    if word == root:
+        return False
+    if not any(c.isspace() or c in SHELL_CHARACTERS for c in word):
+        return False
+    return not (os.path.isabs(word) and not SHELL_CHARACTERS & set(word) and os.path.lexists(word))
 
 
-def _commands(argv: Sequence[str], depth: int) -> list[list[str]] | None:
+def _commands(argv: Sequence[str], depth: int, root: str) -> list[list[str]] | None:
     """`argv` and the commands of every shell-text word in it, or None when one is unreadable."""
     found = [list(argv)]
     for word in argv:
-        if not _is_shell_text(word):
+        if not _is_shell_text(word, root):
             continue
         if depth >= READ_DEPTH:
             return None
@@ -188,7 +204,7 @@ def _commands(argv: Sequence[str], depth: int) -> list[list[str]] | None:
         if parts is None:
             return None
         for part in parts:
-            inner = _commands(part, depth + 1)
+            inner = _commands(part, depth + 1, root)
             if inner is None:
                 return None
             found.extend(inner)
@@ -229,6 +245,8 @@ def _production_reason(words: Sequence[str], snapshot: Mapping, commands: Sequen
         verb = _verb(bound[name]["argv"])
         for each in commands:
             for i, word in enumerate(each):
+                if len(verb) == 1 and i > 0 and _basename(each[0]) not in PASS_THROUGH_PROGRAMS:
+                    break
                 if (_basename(word) == verb[0] and _occurs_in_order(each[i + 1:], verb[1:])
                         and not _lifted([_basename(each[i]), *each[i + 1:]], verb, read_only)):
                     return f"would run production command {name}"
@@ -257,7 +275,7 @@ def _release_reason(commands: Sequence[list[str]]) -> str | None:
 def refusal(argv: Sequence[str], snapshot: Mapping) -> str | None:
     """Why `argv` must not run: a declared production command, a release run, or shell text
     that cannot be read. None when it may run."""
-    commands = _commands(argv, 0)
+    commands = _commands(argv, 0, str((snapshot.get("project") or {}).get("root", "")))
     if commands is None:
         return UNREADABLE
     commands = [[_basename(w) if i == 0 else w for i, w in enumerate(each)] for each in commands]

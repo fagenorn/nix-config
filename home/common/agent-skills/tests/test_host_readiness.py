@@ -538,6 +538,34 @@ class RefusalTest(ReadinessCase):
         none = fake_snapshot(self.root, **{"production.status": "none"})
         self.assertIsNone(refusal(["just", "switch"], none))
 
+    def test_a_one_word_production_verb_is_not_hit_as_another_programs_argument(self):
+        snap = fake_snapshot(self.root, **{
+            "bindings.commands": {"deploy": {"argv": ["./scripts/deploy.sh"], "cwd": str(self.root), "env": []}},
+            "production.read_only": {"commands": [], "mcp_tools": []}})
+        for argv in (["shellcheck", "scripts/deploy.sh"], ["git", "add", "scripts/deploy.sh"],
+                     ["sh", "-c", "shellcheck scripts/deploy.sh"]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(refusal(argv, snap))
+        for argv in (["./scripts/deploy.sh"], ["timeout", "5", "./scripts/deploy.sh"],
+                     ["sh", "-c", "true && ./scripts/deploy.sh"]):
+            with self.subTest(argv=argv):
+                self.assertEqual("would run production command deploy", refusal(argv, snap))
+
+    def test_a_project_root_with_a_quote_or_a_space_is_a_plain_path_argument(self):
+        base = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, base, True)
+        for name in ("bob's app", 'say "hi" app'):
+            root = base / name
+            root.mkdir()
+            snap = fake_snapshot(root)
+            with self.subTest(name=name):
+                self.assertIsNone(refusal(["git", "-C", str(root), "remote", "get-url", "origin"], snap))
+                self.assertIsNone(refusal(["x", "--repo-root", str(root)], snap))
+                self.assertEqual("would run production command deploy", refusal(
+                    ["sh", "-c", f"cd {shlex.quote(str(root))} && just switch"], snap))
+        self.assertEqual("would run shell text it cannot read",
+                         refusal(["sh", "-c", "/no/such dir's/just switch"], fake_snapshot(self.root)))
+
 
 class RenderTest(unittest.TestCase):
     def test_exit_code_is_one_on_any_failure_and_three_when_only_the_budget_failed(self):
