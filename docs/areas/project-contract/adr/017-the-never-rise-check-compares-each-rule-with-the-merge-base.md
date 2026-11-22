@@ -1,4 +1,4 @@
-# ADR-project-contract-016 — The never-rise check compares each rule with the merge base
+# ADR-project-contract-017 — The never-rise check compares each rule with the merge base
 
 - **Status:** accepted
 - **Decided in:** #1455 (per #1414, #1422)

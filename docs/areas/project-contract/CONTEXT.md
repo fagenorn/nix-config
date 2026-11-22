@@ -28,7 +28,7 @@ One pure, named executor the platform manifest lists, which rewrites a checkout 
 _Avoid_: upgrade script
 
 **Never-rise check**:
-The conformance check that runs each enforcer on the merge base and on the branch head and fails when a rule's violation count rises. The baseline is computed on every run and has no raise path (ADR-project-contract-016).
+The conformance check that runs each enforcer on the merge base and on the branch head and fails when a rule's violation count rises. The baseline is computed on every run and has no raise path (ADR-project-contract-017).
 _Avoid_: ratchet, baseline file
 
 **Platform manifest**:
