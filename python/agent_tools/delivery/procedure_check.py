@@ -94,9 +94,14 @@ checks), `unknown_member` (`X` is an agent step whose reply schema resolved and
 `m` is not in its `properties` or not in its `required` list, because a value
 the reply may leave out cannot be consumed; `X` is a decide step and `m` is
 not `verdict`, the only member its result publishes; the result of any other
-kind declares no schema and is not member-checked) and `unknown_placeholder` (a
+kind declares no schema and is not member-checked), `unknown_placeholder` (a
 `{{<path>}}` of the step's prompt that is none of its `in` paths; skipped when
-the prompt is missing).
+the prompt is missing) and `each_not_a_list` (a `call` step's `each` path that
+resolved with no refusal above and reads a value that is not a list: a run
+input, a decide step's `verdict`, or an agent reply member whose property schema
+has no `"type": "array"`; a path that did not resolve keeps its own refusal alone,
+and a producer of any other kind, or an agent whose reply did not resolve,
+declares no schema and is not list-checked).
 """
 
 from __future__ import annotations
@@ -122,7 +127,7 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "invalid_reply", "unknown_grader", "missing_procedure",
            "unreachable_step", "unreachable_done", "unmapped_outcome",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
-           "unknown_member", "unknown_placeholder")
+           "unknown_member", "unknown_placeholder", "each_not_a_list")
 EXHAUSTED = "exhausted"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -163,6 +168,7 @@ class StepResolved:
     outcomes: tuple[str, ...] | None = None
     reply_properties: frozenset[str] | None = None
     reply_required: frozenset[str] | None = None
+    reply_lists: frozenset[str] | None = None
     child_stops: tuple[str, ...] | None = None
     prompt: str | None = None
 
@@ -517,6 +523,7 @@ class _Reply:
     properties: frozenset[str]
     required: frozenset[str]
     outcomes: tuple[str, ...]
+    lists: frozenset[str]
 
 
 def _reply_schema(path: Path, outcome_from: str) -> _Reply | str:
@@ -542,7 +549,9 @@ def _reply_schema(path: Path, outcome_from: str) -> _Reply | str:
         return f"properties.{outcome_from} has no enum of distinct non-empty strings."
     if EXHAUSTED in enum:
         return f"properties.{outcome_from} enum names {EXHAUSTED!r}, which is reserved."
-    return _Reply(frozenset(properties), frozenset(required), tuple(enum))
+    lists = frozenset(name for name, schema in properties.items()
+                      if isinstance(schema, dict) and schema.get("type") == "array")
+    return _Reply(frozenset(properties), frozenset(required), tuple(enum), lists)
 
 
 def _command_outcomes(reference: dict, commands: Mapping[str, CommandDeclaration | None],
@@ -602,7 +611,8 @@ def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | s
     if isinstance(reply, str):
         found.add("invalid_reply", reply, label)
         return StepResolved(prompt=prompt)
-    return StepResolved(reply.outcomes, reply.properties, reply.required, prompt=prompt)
+    return StepResolved(reply.outcomes, reply.properties, reply.required,
+                        reply.lists, prompt=prompt)
 
 
 def check_references(name: str, doc: dict, directory: Path,
@@ -780,13 +790,15 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
     dom = dominators(graph, procedure["steps"][0]["id"])
     inputs = set(procedure["inputs"])
 
-    def check_path(path: str, step: dict | None) -> None:
+    def check_path(path: str, step: dict | None) -> bool:
+        """Report a path that does not resolve; true when it resolved."""
+        refused = len(found.refusals)
         label = None if step is None else step["id"]
         producer, member = path.split(".", 1)
         if producer == "run":
             if member not in inputs:
                 found.add("unproduced_input", f"{path!r} is not an input of the procedure.", label)
-            return
+            return len(found.refusals) == refused
         if step is not None:
             owner = group_of.get(label, label)
             if owner in dom:
@@ -805,13 +817,29 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
             found.add("unknown_member",
                       f"{path!r} is not a member the result of {producer!r} carries; a decide step publishes only 'verdict'.",
                       label)
+        return len(found.refusals) == refused
+
+    def is_list(path: str) -> bool:
+        """Whether a resolved path reads a list; a producer with no schema is taken as one."""
+        producer, member = path.split(".", 1)
+        if producer == "run":
+            return False
+        kind = by_id[producer]["kind"] if producer in by_id else None
+        if kind == "decide":
+            return False
+        known = resolved.steps.get(producer)
+        if kind == "agent" and known is not None and known.reply_lists is not None:
+            return member in known.reply_lists
+        return True
 
     for path in procedure["keep_alive"]["in"]:
         check_path(path, None)
     for item in procedure["steps"]:
         reads = item.get("in", [])
-        for path in reads:
-            check_path(path, item)
+        resolved_reads = {path: check_path(path, item) for path in reads}
+        each = item.get("each") if item["kind"] == "call" else None
+        if resolved_reads.get(each) and not is_list(each):
+            found.add("each_not_a_list", f"{each!r} is not a list the producer publishes.", item["id"])
         prompt = resolved.steps[item["id"]].prompt
         if item["kind"] == "agent" and prompt is not None:
             for name in dict.fromkeys(PLACEHOLDER_RE.findall(prompt)):

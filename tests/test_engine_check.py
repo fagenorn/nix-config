@@ -241,6 +241,18 @@ def _exhausted_reply_value(schema: dict) -> None:
     schema["properties"]["status"]["enum"].append("exhausted")
 
 
+def _each_over(path: str) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        children = step(toy, "children")
+        children["in"] = [path]
+        children["each"] = path
+    return change
+
+
+def _drop_first_pass_set(toy: dict) -> None:
+    del step(toy, "review")["members"][0]["pass"]
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -377,6 +389,25 @@ CASES = [
          [("toy", None, "invalid_field")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
+    Case("each_over_a_string", editing("toy", _each_over("draft.summary")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_run_input", editing("toy", _each_over("run.issue")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_decide_verdict", editing("toy", _each_over("tally.verdict")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_missing_member", editing("toy", _each_over("draft.missing")),
+         [("toy", "children", "unknown_member")]),
+    Case("group_pass_unmapped",
+         editing("toy", _without(lambda toy: step(toy, "review")["on"], "pass")),
+         [("toy", "review", "unmapped_outcome")]),
+    Case("call_done_unmapped",
+         editing("toy", _set(lambda toy: step(toy, "children"), "on", {"child-stop": "done"})),
+         [("toy", "children", "unmapped_outcome")]),
+    Case("group_member_without_a_pass_set", editing("toy", _drop_first_pass_set),
+         [("toy", "review", "invalid_field")]),
+    Case("parallel_below_one",
+         editing("toy", _set(lambda toy: step(toy, "children"), "parallel", 0)),
+         [("toy", "children", "invalid_field")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
