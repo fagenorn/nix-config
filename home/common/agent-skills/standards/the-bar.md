@@ -75,3 +75,7 @@ No source or test file is over 1,500 lines. A file already over it may not grow 
 ### B18. No skipped or disabled test is added
 
 A test its framework skips, disables, focuses away or excludes from the run proves nothing while it still looks like coverage. The project's count of them may not rise against the change's merge base, so the existing ones stay until someone removes them and no new one lands. ([decision](https://github.com/fagenorn/nix-config/issues/1421))
+
+### B19. No two tests share a body
+
+A test whose body, once comments and whitespace are removed, repeats another test's adds suite time and reading cost without adding a check: give the case to the first test as data, or test something else. The project's count of repeated bodies may not rise against the change's merge base. ([decision](https://github.com/fagenorn/nix-config/issues/1421))

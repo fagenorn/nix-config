@@ -546,6 +546,29 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
                   "violations": ["B18 tests/test_b.py:4"], "rules": ["B18"]}])
             self.assert_validates(report)
 
+    def test_one_more_copied_body_turns_ci_red_naming_its_rule(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "tests/test_a.py", "\n".join([
+                "import unittest", "class A(unittest.TestCase):",
+                "    def test_a(self):", "        self.assertEqual(compute(5), 6)",
+                "    def test_b(self):", "        self.assertEqual(compute(5), 6)", ""]))
+            commit_all(root, "base")
+            git(root, "update-ref", INTEGRATION_REF, "HEAD")
+            base = git(root, "rev-parse", "HEAD").strip()
+            write_file(root, "tests/test_b.py", "\n".join([
+                "import unittest", "", "class B(unittest.TestCase):", "    # a third copy",
+                "    def test_c(self):", "        self.assertEqual(compute(5), 6)", ""]))
+            commit_all(root, "a copy more")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B19", "base_count": 1, "branch_count": 2,
+                  "violations": ["B19 tests/test_b.py:5"], "rules": ["B19"]}])
+            self.assert_validates(report)
+
 
 class LintChecksTest(ReportAssertions, unittest.TestCase):
     """The context-map lint and the standards lint, each run in process by the

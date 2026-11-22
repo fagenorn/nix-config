@@ -9,6 +9,7 @@
   "conformance": null,
   "console": null,
   "context-map-lint": null,
+  "copied-test-lint": null,
   "diff-scope": {
     "verdicts": []
   },

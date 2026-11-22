@@ -22,8 +22,8 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    context_map_lint, host_admission, never_rise, size_lint, skipped_test_lint,
-    standards_lint,
+    context_map_lint, copied_test_lint, host_admission, never_rise, size_lint,
+    skipped_test_lint, standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
@@ -773,7 +773,8 @@ def check_standards_lint(context: "Context") -> "Outcome":
     return Outcome("passed")
 
 
-NEVER_RISE_ENFORCERS = (size_lint.ENFORCER, skipped_test_lint.ENFORCER)
+NEVER_RISE_ENFORCERS = (
+    size_lint.ENFORCER, skipped_test_lint.ENFORCER, copied_test_lint.ENFORCER)
 
 
 def check_never_rise(context: "Context") -> "Outcome":

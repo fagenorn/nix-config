@@ -52,6 +52,7 @@ let
     "conformance" = "project_contract.conformance";
     "console" = "console.console";
     "context-map-lint" = "delivery.context_map_lint";
+    "copied-test-lint" = "delivery.copied_test_lint";
     "diff-scope" = "delivery.diff_scope";
     "engine" = "delivery.engine";
     "fallback-audit" = "project_contract.fallback_audit";

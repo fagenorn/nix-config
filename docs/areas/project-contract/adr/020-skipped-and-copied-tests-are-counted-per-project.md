@@ -17,6 +17,8 @@ A test its framework skips or disables still looks like coverage, and a test who
 
 **D4. One violation per skipped test.** A skipped test is one violation at its line, however many markers mark it. A marker on a suite header applies to each test inside the suite, a JavaScript declaration with no callback is skipped, and a marker that marks no test counts once at its own line, except a C# attribute on anything but a test or a suite, which counts nothing. Focusing markers count, because they exclude the other tests from the run. An expected failure runs the test and does not count.
 
+**D5. Body identity.** Two tests are copies when their file family and their body tokens are equal: the body is the test's statements as tokens with comments and whitespace dropped, so the name, decorators, attributes, parameters and a JavaScript title never tell two tests apart and a body one token apart is another body. Within one body held by n tests, ordered by path and line, the first is kept and each of the other n - 1 is one violation at its line. A JavaScript declaration with no callback has no body and is never a copy.
+
 ## Consequences
 
 - A skipped test already in the tree stays until someone removes it, and a test added under a skipped suite is a rise.
@@ -25,3 +27,4 @@ A test its framework skips or disables still looks like coverage, and a test who
 - Rejected: one violation per marker, because a test added under a skipped suite would be invisible.
 - Rejected: an assertion-count heuristic, because issue 1464 found it mostly false positives.
 - Rejected: committed fixture files, because the suites build each fixture in a temporary git world.
+- A parametrised case is the way to keep two cases of one body: the cases become data of one test.
