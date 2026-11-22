@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -21,9 +22,11 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_ledger, engine_session, engine_shell
+from agent_tools.delivery import (
+    engine, engine_ledger, engine_session, engine_shell, procedure_check,
+)
 from agent_tools.delivery.engine_session import (
-    NOT_STARTED, Reading, Role, RoleError, diagnostic, launch, launch_argv, read_result,
+    NOT_STARTED, ROLE_BOUNDS, Bounds, Reading, Role, RoleError, diagnostic, launch, launch_argv, read_result,
     read_role, render_prompt,
 )
 from tests.test_engine_deliver import EngineProject, shape
@@ -34,6 +37,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 STUB = REPO_ROOT / "tests/fixtures/engine-session/claude_stub.py"
 RESULT_NORMAL = REPO_ROOT / "tests/fixtures/engine-session/result-normal.json"
+RESULT_MAX_TURNS = REPO_ROOT / "tests/fixtures/engine-session/result-max-turns.json"
+RESULT_MAX_BUDGET = REPO_ROOT / "tests/fixtures/engine-session/result-max-budget.json"
 ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 DENIAL = {"tool_name": "Write", "tool_use_id": "toolu_01",
           "tool_input": {"file_path": "/etc/hosts"}}
@@ -243,9 +248,20 @@ class LaunchArgvTest(unittest.TestCase):
             '"required":["verdict"],"type":"object"}',
             "--session-id", "0b0b8a8e-6f0e-4d47-9d6a-3f1f2b9c1a11", "--strict-mcp-config",
             "--permission-mode", "dontAsk", "--model", "opus", "--effort", "high",
+            "--max-turns", "150", "--max-budget-usd", "15.00",
             "--tools", "Read,Bash", "--allowedTools", f"Read,{GIT_READ_ONLY}",
             "--disallowedTools", GIT_WRITING,
             "--append-system-prompt-file", "/run/sessions/review.1.system.md"))
+
+    def test_the_role_bounds_table_is_the_issue_table(self):
+        self.assertEqual(dict(ROLE_BOUNDS), {
+            "planner": Bounds(1800, 150, 15.0), "implementer": Bounds(3600, 300, 20.0),
+            "reviewer": Bounds(1800, 150, 15.0), "reviewer-lite": Bounds(900, 80, 3.0)})
+        self.assertEqual(set(ROLE_BOUNDS), set(procedure_check.ROLES))
+
+    def test_a_role_with_no_bounds_is_refused(self):
+        with self.assertRaises(RoleError):
+            launch_argv(Role("stranger", "opus", "high", None, None, ""), SCHEMA, SESSION, SYSTEM)
 
     def test_a_role_with_disallowed_tools_passes_only_disallowed_tools(self):
         argv = launch_argv(IMPLEMENTER, SCHEMA, SESSION, SYSTEM)
@@ -316,6 +332,44 @@ class LaunchTest(unittest.TestCase):
                 self.assertIn("No such file or directory", diagnostic(launched.stderr))
                 self.assertIn(word, diagnostic(launched.stderr))
                 self.assertEqual(started, [])
+
+    def test_a_sigterm_during_the_spawn_still_ends_the_launchers_group_and_restores_the_handler(self):
+        real = subprocess.Popen
+        pids: list[int] = []
+        started: list[int] = []
+
+        def spawn_then_term(*args, **kwargs):
+            child = real(*args, **kwargs)
+            pids.append(child.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+
+        def kill_group() -> None:
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        self.addCleanup(kill_group)
+        before = lambda signum, frame: None  # noqa: E731
+        outer = signal.signal(signal.SIGTERM, before)
+        self.addCleanup(signal.signal, signal.SIGTERM, outer)
+        with mock.patch.object(engine_session.subprocess, "Popen", spawn_then_term):
+            with self.assertRaises(SystemExit) as raised:
+                launch([sys.executable, "-c", "import time; time.sleep(60)"],
+                       tempfile.gettempdir(), "p", on_start=started.append, timeout=30)
+        self.assertEqual(raised.exception.code, 143)
+        self.assertEqual(started, [])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pids[0], 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail("the launcher's group outlived the engine's SIGTERM")
 
     def test_a_sigterm_to_the_engine_ends_the_launchers_whole_group_and_restores_the_handler(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -401,6 +455,55 @@ class LaunchTest(unittest.TestCase):
                         pass
 
 
+    def test_a_launcher_past_its_timeout_gets_sigterm_and_its_grace_before_sigkill(self):
+        code = ("import signal, sys, time; "
+                "signal.signal(signal.SIGTERM, lambda s, f: open(sys.argv[1], 'w').write('term')); "
+                "print('ready', flush=True); time.sleep(60)")
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "marker"
+            seen: list[int] = []
+            began = time.monotonic()
+            with mock.patch.object(engine_session, "GRACE_SECONDS", 2):
+                launched = launch([sys.executable, "-c", code, str(marker)], directory, "p",
+                                  on_start=seen.append, timeout=1)
+            elapsed = time.monotonic() - began
+            self.assertTrue(launched.timed_out)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "term")
+            self.assertGreaterEqual(elapsed, 1 + 2 - 0.25)
+            self.assertLess(elapsed, 1 + 2 + engine_session.DRAIN_SECONDS + 5)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(seen[0], 0)
+
+    def test_time_spent_recording_the_start_counts_against_the_wall_bound(self):
+        launched = launch([sys.executable, "-c", "import time; time.sleep(1.5); print('{}')"],
+                          tempfile.gettempdir(), "p", on_start=lambda pid: time.sleep(1.2),
+                          timeout=1)
+        self.assertIs(launched.timed_out, True)
+
+    def test_a_stalled_start_callback_cannot_keep_the_group_past_its_wall_bound(self):
+        code = "import sys, time\nwhile True:\n    open(sys.argv[1], 'a').write('x')\n    time.sleep(0.05)\n"
+        with tempfile.TemporaryDirectory() as directory:
+            beat = Path(directory) / "beat"
+            sizes: list[tuple[int, int]] = []
+
+            def stalled(pid: int) -> None:
+                time.sleep(2.5)
+                before = beat.stat().st_size
+                time.sleep(0.5)
+                sizes.append((before, beat.stat().st_size))
+
+            launched = launch([sys.executable, "-c", code, str(beat)], directory, "p",
+                              on_start=stalled, timeout=1)
+        self.assertIs(launched.timed_out, True)
+        self.assertEqual(sizes[0][0], sizes[0][1], "the group still ran while on_start stalled")
+
+    def test_an_untimed_launch_is_not_timed_out(self):
+        launched = launch([sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+                          tempfile.gettempdir(), "word", on_start=lambda pid: None)
+        self.assertIs(launched.timed_out, False)
+        self.assertEqual(launched.stdout, b"word\n")
+
+
 DRAFT_REPLY = {"type": "object",
                "properties": {"status": {"enum": ["drafted", "stuck"]},
                               "summary": {"type": "string"},
@@ -414,7 +517,7 @@ ROLE_NAMES = ("planner", "implementer", "reviewer", "reviewer-lite")
 
 
 def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
-                 diagnostic: str | None = None) -> Path:
+                 diagnostic: str | None = None, hold: Path | None = None) -> Path:
     """Put the stand-in launcher first on the project's PATH; return the log it appends to."""
     log = project.tmp / "claude.log"
     if not isinstance(canned, Path):
@@ -426,7 +529,7 @@ def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
         Path(diagnostic_path).write_text(diagnostic, encoding="utf-8")
     launcher = project.bin / "claude-account"
     launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {log} {canned} {exit} "
-                        f"{diagnostic_path} \"$@\"\n", encoding="utf-8")
+                        f"{diagnostic_path} {hold if hold else '-'} \"$@\"\n", encoding="utf-8")
     launcher.chmod(0o755)
     return log
 
@@ -439,6 +542,8 @@ def copy_roles(project: EngineProject, *names: str) -> None:
 
 
 def agent_step(id: str, role: str, on: dict, **members) -> dict:
+    on = {**on}
+    on.setdefault("out-of-bounds", "needs-owner")
     document = {"id": id, "stage": "building", "kind": "agent", "role": role,
                 "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
                 "in": ["run.issue"], "on": on}
@@ -446,8 +551,9 @@ def agent_step(id: str, role: str, on: dict, **members) -> dict:
     return document
 
 
-def write_procedures(project: EngineProject, steps: list[dict], files: dict | None = None) -> Path:
-    directory = project.procedures(steps)
+def write_procedures(project: EngineProject, steps: list[dict], files: dict | None = None,
+                     stops: dict | None = None) -> Path:
+    directory = project.procedures(steps, stops=stops)
     for name, text in (files or {"draft.md": "Draft issue {{run.issue}}.\n",
                                  "draft.reply.json": json.dumps(DRAFT_REPLY)}).items():
         (directory / name).write_text(text, encoding="utf-8")
@@ -554,6 +660,24 @@ class DeliverSessionTest(unittest.TestCase):
             self.assertEqual(event["account"], "console")
         self.assertEqual(len(set(ids)), 4)
 
+    def test_each_role_reaches_the_stub_with_its_turn_and_spend_bounds(self):
+        project = self.project
+        log = install_stub(project, RESULT_NORMAL)
+        steps = [agent_step(name[0] if name != "reviewer-lite" else "l", name,
+                            {"drafted": nxt, "stuck": "needs-owner"})
+                 for name, nxt in zip(ROLE_NAMES, ("i", "r", "l", "done"))]
+        procedures = write_procedures(project, steps)
+        done = project.deliver(procedures, issue=1520)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = self.log(log)
+        self.assertEqual(len(lines), 4)
+        expected = (("150", "15.00"), ("300", "20.00"), ("150", "15.00"), ("80", "3.00"))
+        for line, pair in zip(lines, expected):
+            argv = line["argv"]
+            self.assertEqual((after(argv, "--max-turns"), after(argv, "--max-budget-usd")), pair)
+            self.assertEqual(argv.count("--max-turns"), 1)
+            self.assertEqual(argv.count("--max-budget-usd"), 1)
+
     def test_the_session_is_recorded_before_its_process_starts(self):
         log = install_stub(self.project, RESULT_NORMAL)
         done = self.project.deliver(one_step(self.project), issue=1514)
@@ -576,12 +700,13 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         seen: list[tuple] = []
 
-        def checking(argv, cwd, prompt, *, on_start):
+        def checking(argv, cwd, prompt, *, on_start, **options):
+            self.assertEqual(options["timeout"], 3600)
             (run,) = project.runs()
             events = engine_ledger.replay(run / "events.jsonl")
             seen.append((events[-1]["event"], events[-1].get("session"),
                          [e["event"] for e in events], after(list(argv), "--session-id")))
-            return real(argv, cwd, prompt, on_start=on_start)
+            return real(argv, cwd, prompt, on_start=on_start, **options)
 
         with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
             code, line = engine_shell.deliver(1514, procedures)
@@ -668,6 +793,112 @@ class DeliverSessionTest(unittest.TestCase):
                          "tool_input": {"file_path": "/etc/hosts"}}],
             "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
             "session": self.starting()["session"], "subtype": "success"})
+
+    def capped_procedures(self) -> Path:
+        copy_roles(self.project, "implementer")
+        step = agent_step("draft", "implementer", {"drafted": "done", "stuck": "needs-owner",
+                                                   "out-of-bounds": "step-failed"})
+        return write_procedures(self.project, [step], stops={
+            "needs-owner": {"need": "owner-decision", "reenter": "draft"},
+            "step-failed": {"need": "retry", "reenter": "draft"}})
+
+    def test_a_turn_cap_or_a_spend_cap_is_out_of_bounds_naming_the_bound_with_no_second_session(self):
+        for fixture, bound, turns, spend in ((RESULT_MAX_TURNS, "turns", 300, 1.25),
+                                             (RESULT_MAX_BUDGET, "spend", 42, 20.01)):
+            with self.subTest(bound=bound):
+                self.setUp()
+                log = install_stub(self.project, fixture, exit=1)
+                done = self.project.deliver(self.capped_procedures(), issue=1520)
+                self.assertEqual(done.returncode, 3, done.stderr)
+                self.assertEqual(json.loads(done.stdout)["end"], "step-failed")
+                self.assertEqual(json.loads(done.stdout)["need"], "retry")
+                run = self.run_dir()
+                self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+                    encoding="utf-8")), {"bound": bound})
+                events = self.project.events(run)
+                (stored,) = [e for e in events if e["event"] == "result_stored"]
+                self.assertEqual((stored["turns"], stored["spend_usd"], stored["wall_seconds"]),
+                                 (turns, spend, 54.321))
+                self.assertEqual(stored["tokens"],
+                                 {"input": 1, "cache_write": 2, "cache_read": 3, "output": 4})
+                self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                                 ["out-of-bounds"])
+                self.assertEqual([e["to"] for e in events if e["event"] == "transition_taken"],
+                                 ["step-failed"])
+                (line,) = log.read_text(encoding="utf-8").splitlines()
+                self.assertNotIn("--resume", line)
+                self.assertNotIn("--continue", line)
+
+    def test_a_session_past_a_shortened_wall_bound_ends_with_its_child_as_out_of_bounds(self):
+        project = self.project
+        hold = project.tmp / "hold.pids"
+        log = install_stub(project, RESULT_NORMAL, hold=hold)
+        procedures = self.capped_procedures()
+        bounds = {**engine_session.ROLE_BOUNDS, "implementer": engine_session.Bounds(3, 300, 20.0)}
+        began = time.monotonic()
+        with project.inside(), mock.patch.object(engine_session, "ROLE_BOUNDS", bounds):
+            code, line = engine_shell.deliver(1520, procedures)
+        elapsed = time.monotonic() - began
+        pids: list[int] = []
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not pids:
+            pids = [int(word) for word in hold.read_text(encoding="utf-8").split()] \
+                if hold.exists() else []
+            time.sleep(0.05)
+        self.assertEqual(len(pids), 2)
+        for pid in pids:
+            self.addCleanup(self.kill_quietly, pid)
+        self.assertEqual((code, line["end"]), (3, "step-failed"), line)
+        self.assertLess(elapsed, 30)
+        run = self.run_dir()
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+            encoding="utf-8")), {"bound": "wall-time"})
+        events = project.events(run)
+        (stored,) = [e for e in events if e["event"] == "result_stored"]
+        self.assertGreaterEqual(stored["wall_seconds"], 3)
+        self.assertLess(stored["wall_seconds"], 30)
+        self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                         ["out-of-bounds"])
+        self.assertEqual(len([e for e in events if e["event"] == "process_started"]), 1)
+        self.assertLessEqual(len(self.log(log)), 1)
+        deadline = time.monotonic() + 5
+        for pid in pids:
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() > deadline:
+                    self.fail(f"process {pid} outlived the wall-time ending")
+                time.sleep(0.05)
+
+    @staticmethod
+    def kill_quietly(pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def test_a_capped_session_denied_a_shell_command_is_still_out_of_bounds(self):
+        document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
+        document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_03",
+                                           "tool_input": {"command": "make build"}}]
+        install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
+        done = self.project.deliver(self.capped_procedures(), issue=1520)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        run = self.run_dir()
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+            encoding="utf-8")), {"bound": "turns"})
+
+    def test_a_session_ending_with_an_error_subtype_that_is_no_cap_is_still_a_fault(self):
+        document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
+        document["subtype"] = "error_during_execution"
+        install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
+        done = self.project.deliver(self.capped_procedures(), issue=1520)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(len(done.stderr.strip().splitlines()), 1)
+        self.assertEqual([e for e in self.project.events(self.run_dir())
+                          if e["event"] == "outcome_graded"], [])
 
     def test_a_denied_shell_command_is_a_fault_not_a_graded_reply(self):
         denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",

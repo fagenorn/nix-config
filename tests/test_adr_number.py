@@ -243,7 +243,7 @@ class RenumberTest(unittest.TestCase):
             "rewritten": ["docs/areas/console/adr/013-branch-choice.md", "docs/guides/branch-guide.md",
                           "docs/guides/notes.md", "src/note.py"]})
         self.assertFalse((root / RECORDS / "012-branch-choice.md").exists())
-        index, errors = context_map_lint.index_records(root / "docs" / "areas", str)
+        index, errors = context_map_lint.index_records(root / "docs" / "areas", str, root)
         self.assertEqual(errors, [])
         self.assertEqual(index[("console", "013")], root / RECORDS / "013-branch-choice.md")
         self.assertEqual(index[("console", "012")], root / RECORDS / "012-base-choice.md")
@@ -272,7 +272,7 @@ class RenumberTest(unittest.TestCase):
         done = run_tool(*renumber_args(root, "--to", "020"))
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout)["record"], "docs/areas/console/adr/020-branch-choice.md")
-        index, errors = context_map_lint.index_records(root / "docs" / "areas", str)
+        index, errors = context_map_lint.index_records(root / "docs" / "areas", str, root)
         self.assertEqual(errors, [])
         self.assertIn(("console", "020"), index)
         self.assertEqual(context_map_lint.check(root, root / MAP), [])
