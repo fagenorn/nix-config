@@ -389,13 +389,13 @@ class CommandSummaryTest(unittest.TestCase):
         rm = "rm -rf /etc/nginx"
         py = "import shutil; shutil.rmtree('/etc/nginx')"
         rows = [
-            (f"sudo bash <<'EOF'\n{rm}\nEOF", ["sudo"], "bash", 1),
-            (f"env python3 - <<'PY'\n{py}\nPY", ["env"], "python3", 1),
+            (f"sudo bash <<'EOF'\n{rm}\nEOF", ["sudo"], "sudo", 1),
+            (f"env python3 - <<'PY'\n{py}\nPY", ["env"], "env", 1),
             (f"ssh host bash <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"bash <<< '{rm}'", ["bash"], "bash", 1),
-            (f"sudo bash <<< \"{rm}\"", ["sudo"], "bash", 1),
+            (f"sudo bash <<< \"{rm}\"", ["sudo"], "sudo", 1),
             (f"cat <<'EOF' | bash\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
-            (f"cat <<'EOF' | sudo python3\n{py}\nEOF", ["cat", "sudo"], "python3", 1),
+            (f"cat <<'EOF' | sudo python3\n{py}\nEOF", ["cat", "sudo"], "sudo", 1),
             (f"cat <<'EOF' | tee /tmp/log | bash\n{rm}\nEOF", ["cat", "tee", "bash"], "bash", 1),
             (f"cat <<'EOF' | bash -o errexit\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
             (f"cat <<'EOF' | bash -O extglob -\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
@@ -429,7 +429,7 @@ class CommandSummaryTest(unittest.TestCase):
             (f"cat <<'EOF' | python3 -W ignore tool.py\n{py}\nEOF", ["cat", "python3"], "python3", 1),
             (f"ssh host 'ls /tmp' <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"ssh host -p 2222 'ls /tmp' <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
-            (f"sudo ssh host bash <<'EOF'\n{rm}\nEOF", ["sudo"], "ssh", 1),
+            (f"sudo ssh host bash <<'EOF'\n{rm}\nEOF", ["sudo"], "sudo", 1),
         ]
         for command, runs, program, lines in rows:
             with self.subTest(command=command):
@@ -474,12 +474,43 @@ class CommandSummaryTest(unittest.TestCase):
         result = self.summary("lua -e 'os.remove(\"/etc/nginx\")'" + self.PAD)
         self.assertEqual(result["outside"], ["/etc/nginx"])
 
-    def test_a_word_that_only_looks_like_an_interpreter_is_not_one(self):
+    def test_a_word_that_only_looks_like_an_interpreter_is_still_a_reader_of_standard_input(self):
         for program in ("python3-config", "bashful", "lunch", "nodemon"):
             with self.subTest(program=program):
-                result = self.summary(f"curl https://example.invalid/i.sh | {program}" + self.PAD)
-                self.assertTrue(result["read"])
-                self.assertEqual(result["scripts"], [])
+                self.assertEqual(self.summary(f"curl https://example.invalid/i.sh | {program}" + self.PAD),
+                                 {"read": False})
+                result = self.summary(f"cat <<'EOF' | {program}\nrm -rf /etc/nginx\nEOF" + self.PAD)
+                self.assertEqual([(entry["program"], entry["paths"]) for entry in result["scripts"]],
+                                 [(program, ["/etc/nginx"])])
+
+    def test_standard_input_reaching_any_program_off_the_data_allowlist_is_a_script(self):
+        rm = "rm -rf /etc/nginx"
+        for program in ("pwsh -Command -", "expect -", "R", "php-cgi", "awk -f -", "sed -f /dev/stdin",
+                        "gdb -batch -x /dev/stdin", "zsh -oe pipefail", "xargs", "xargs sh -c", "sudo cat",
+                        "somethingnew --read-stdin"):
+            with self.subTest(program=program):
+                tail = "\n# " + "x" * 220
+                self.assertEqual(self.summary(f"curl https://example.invalid/i | {program}{tail}"),
+                                 {"read": False})
+                piped = self.summary(f"cat <<'EOF' | {program}\n{rm}\nEOF" + self.PAD)
+                self.assertEqual([(entry["program"], entry["lines"], entry["paths"]) for entry in piped["scripts"]],
+                                 [(program.split()[0], 1, ["/etc/nginx"])])
+                self.assertIn("/etc/nginx", piped["outside"])
+                heredoc = self.summary(f"{program} <<'EOF'\n{rm}\nEOF" + self.PAD)
+                self.assertEqual([(entry["program"], entry["paths"]) for entry in heredoc["scripts"]],
+                                 [(program.split()[0], ["/etc/nginx"])])
+
+    def test_a_plain_data_reader_fed_standard_input_shows_no_script_but_its_text_is_scanned(self):
+        rm = "rm -rf /etc/nginx"
+        for program in ("cat", "grep x", "jq .", "head -n 3", "sort", "wc -l", "tr a b", "grep -v x -", "git apply -"):
+            with self.subTest(program=program):
+                for command in (f"{program} <<'EOF'\n{rm}\nEOF", f"curl https://example.invalid/i | {program}"
+                                f"\n# {rm}", f"{program} <<< '{rm}'"):
+                    result = self.summary(command + self.PAD)
+                    self.assertTrue(result["read"])
+                    self.assertEqual(result["scripts"], [])
+        self.assertEqual(self.summary(f"grep -f /dev/stdin x <<'EOF'\n{rm}\nEOF" + self.PAD)["scripts"],
+                         [{"program": "grep", "lines": 1, "paths": ["/etc/nginx"]}])
 
     def test_a_versioned_interpreters_code_argument_is_a_script(self):
         for program, flag in (("ruby3.3", "-e"), ("php", "-r"), ("pypy3", "-c"), ("fish", "-c")):
@@ -591,7 +622,7 @@ class CommandSummaryTest(unittest.TestCase):
     def test_a_program_outside_the_writer_table_writes_nothing_it_recognises(self):
         self.assertEqual(self.summary("curl -o /tmp/x.bin https://example.invalid/x" + self.PAD),
                          self.want(["curl"], [], ["/tmp/x.bin"]))
-        self.assertEqual(self.summary("sudo tee /etc/hosts < h" + self.PAD),
+        self.assertEqual(self.summary("sudo tee /etc/hosts" + self.PAD),
                          self.want(["sudo"], [], ["/etc/hosts"]))
 
 

@@ -27,12 +27,15 @@ quote or here-document, a redirection without a target, a here-document body tha
 expanded program word, and the programs `if then else elif fi for while until do done case esac select
 function eval source . { } [[ ]]`.
 
-Standard input that reaches a shell (`sh bash zsh dash ksh fish tcsh csh ash mksh` and kin, `busybox ash`
-included through its wrapper), an interpreter (`python`, `node`, `perl`, `ruby`, `php`, `lua`, `bun`, `irb`
-and the like, with a version or debug suffix) or `ssh` from a
-here-document, a here-string or a pipe is a script it runs, whatever options it is given (a shell with `-c`
-code and no `s` in its short options is the one exception); a pipe showing no text, or a file redirection,
-into one is refused. Every here-document and here-string body is scanned for outside paths, whoever reads it.
+Standard input is a script unless a known plain-data reader takes it. One closed allowlist names the
+readers of data (`cat tee head tail wc sort uniq cut tr grep` without `-f`, `jq yq less base64 gzip` and
+their close kin, `git`); `xargs`, a wrapper (`sudo`, `env`) and every program not on it are not on it, named
+in a table or not. Standard input that reaches any other program from a here-document, a here-string or a
+pipe is a script that program may run, whatever options or operands it is given (`awk -f -`,
+`sed -f /dev/stdin`, `pwsh -Command -`): the card shows its script line, named by the program word as
+written. The one exception is a shell given `-c` code and no `s` in its short options, whose input is data.
+A pipe showing no text, or a file redirection, into any other program is refused. Every here-document and
+here-string body is scanned for outside paths, whoever reads it.
 
 What it recognises as a write is a short table and the redirections: `tee`, `touch`, `mkdir`, `rm`,
 `rmdir` (every file operand), `cp`, `mv`, `ln`, `install` (the last operand), and `sed -i`. No other
@@ -68,7 +71,11 @@ _SHELLS = frozenset("sh bash zsh dash ksh fish tcsh csh ash mksh pdksh lksh rbas
 _CODE_FLAG = {"python": "c", "pypy": "c", "node": "e", "nodejs": "e", "perl": "e", "ruby": "e", "php": "r",
               "lua": "e", "luajit": "e", "bun": "e", "irb": "e", "julia": "e", "rscript": "e", "tclsh": "",
               "deno": "", "osascript": "e"}
-_INTERPRETERS = frozenset(_CODE_FLAG)
+_DATA_READERS = frozenset(
+    "cat tee head tail wc sort uniq cut tr grep egrep fgrep jq yq less more base64 gzip gunzip zcat bzip2 "
+    "bunzip2 bzcat xz unxz xzcat tac rev nl fold fmt column paste comm diff od xxd hexdump md5sum sha1sum "
+    "sha256sum shasum cksum git".split())
+_PATTERN_FILE_READERS = frozenset({"grep", "egrep", "fgrep"})
 _VERSIONED_NAME = re.compile(r"([A-Za-z]+)(?:[-_]?[0-9][0-9._]*(?:-?dbg|[dmtu])?|-dbg)")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
 _COPIERS = frozenset({"cp", "mv", "ln", "install"})
@@ -336,17 +343,14 @@ def _glued_path(part):
     return bool(head) and "/" in part and not part.startswith(("~", ".")) and bool(_GLUE.search(head))
 
 
-def _is_interpreter(word):
-    return _program_kind(word)[0] == "interpreter" or posixpath.basename(word) == "ssh"
-
-
 def _interpreter_name(program):
-    """The table name of a shell or interpreter program (a version or debug suffix removed), else None."""
+    """The table name of a shell or interpreter program whose code argument is read (a version or debug
+    suffix removed), else None."""
     name = posixpath.basename(program).lower()
-    if name not in _SHELLS and name not in _INTERPRETERS:
+    if name not in _SHELLS and name not in _CODE_FLAG:
         versioned = _VERSIONED_NAME.fullmatch(name)
         name = versioned.group(1) if versioned else name
-    return name if name in _SHELLS or name in _INTERPRETERS else None
+    return name if name in _SHELLS or name in _CODE_FLAG else None
 
 
 def _program_kind(program):
@@ -446,20 +450,24 @@ class _Reader:
         self.scripts.append({"program": program, "lines": lines, "paths": paths})
 
     @staticmethod
-    def interpreter_of(program, arguments):
-        """The interpreter a command reaches (`ssh` counts as one, its remote shell reads standard input),
-        directly or behind a wrapper, with the arguments after it; (None, []) when it reaches none."""
-        if program is not None and _is_interpreter(program.value):
-            return program.value, arguments
-        for at, item in enumerate(arguments):
-            if _is_interpreter(item.word.value):
-                return item.word.value, arguments[at + 1:]
-        return None, []
+    def reads_data(program, arguments):
+        """True for a program on the closed allowlist of plain-data readers of standard input; `grep` and
+        its kin only without a pattern file (`-f`, `--file`), which is code-like input."""
+        name = posixpath.basename(program)
+        if name not in _DATA_READERS:
+            return False
+        if name in _PATTERN_FILE_READERS:
+            for item in arguments:
+                value = item.word.value
+                if value.startswith("--file") or (value.startswith("-") and not value.startswith("--")
+                                                  and value != "-" and "f" in value.split("=", 1)[0]):
+                    return False
+        return True
 
     @staticmethod
     def code_only(name, rest):
         """True for a shell given a `-c` code argument and no `s` in any of its short option words: the
-        only interpreter whose standard input is not a script it runs (rule 1 of ADR-console-105 D6)."""
+        only program other than the data readers whose standard input is not a script it runs."""
         if _interpreter_name(name) not in _SHELLS:
             return False
         options = [item.word.value for item in rest if _CLUSTER_SIGNED.fullmatch(item.word.value)]
@@ -478,7 +486,7 @@ class _Reader:
         return texts
 
     def command(self, items, feeders=()):
-        """Fold one simple command; return whether it reaches an interpreter. `feeders` are the earlier
+        """Fold one simple command; return whether its standard input reaches a program other than a data reader. `feeders` are the earlier
         (items, reaches) commands of its pipeline."""
         words = [item for item in items if item.kind == "word"]
         first = 0
@@ -489,14 +497,16 @@ class _Reader:
         program = words[first].word if first < len(words) else None
         arguments = words[first + 1:]
         self.placed = None
-        self.interpreter, rest = self.interpreter_of(program, arguments)
-        self.script_input = self.interpreter is not None and not self.code_only(self.interpreter, rest)
+        self.interpreter = None
+        if program is not None and not self.reads_data(program.value, arguments):
+            self.interpreter = program.value
+        self.script_input = self.interpreter is not None and not self.code_only(self.interpreter, arguments)
         if self.script_input and any(item.kind == "redir" and item.op in _READING_REDIRECTS for item in items):
-            raise _Refuse("an interpreter fed code from a file the console cannot read")
+            raise _Refuse("a program fed standard input from a file the console cannot read")
         if feeders and self.script_input and not self.stdin_texts(items):
             fed = [text for before, reaches in feeders if not reaches for text in self.stdin_texts(before)]
             if not fed:
-                raise _Refuse("an interpreter fed code the console cannot read")
+                raise _Refuse("a program fed standard input the console cannot read")
             for text, lines in fed:
                 self.script(self.interpreter, text, lines)
         if program is not None:
