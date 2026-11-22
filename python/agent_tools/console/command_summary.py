@@ -127,7 +127,7 @@ def summarize(command, root):
     if not is_long(command):
         return None
     try:
-        return _Reader(root).read(_scan(command))
+        return _Reader(root).read(*_scan(command))
     except (ValueError, IndexError, RecursionError):
         return {"read": False}
 
@@ -136,8 +136,10 @@ def _scan(text):
     """Split the text into simple commands (lists of items), refusing what the grammar does not read."""
     size = len(text)
     commands = []
+    piped = []
     items = []
     pending = []
+    pipe_next = False
 
     def blanks(at):
         while at < size:
@@ -236,9 +238,11 @@ def _scan(text):
         return at
 
     def end_command():
-        nonlocal items
+        nonlocal items, pipe_next
         if items:
             commands.append(items)
+            piped.append(pipe_next)
+            pipe_next = False
             items = []
 
     def read_bodies(at):
@@ -278,7 +282,9 @@ def _scan(text):
             at += 1
         elif char in "&|" and not text.startswith("&>", at):
             end_command()
-            at += 2 if text[at + 1:at + 2] in (("&", "|") if char == "|" else ("&",)) else 1
+            follow = text[at + 1:at + 2]
+            pipe_next = char == "|" and follow != "|"
+            at += 2 if follow in (("&", "|") if char == "|" else ("&",)) else 1
         elif char in "<>&":
             at = redirect(at)
         else:
@@ -290,7 +296,7 @@ def _scan(text):
     if pending:
         raise _Refuse("here-document without its delimiter")
     end_command()
-    return commands
+    return commands, piped
 
 
 def _named_paths(text):
@@ -334,9 +340,11 @@ class _Reader:
         self.runs, self.writes, self.outside = {}, {}, {}
         self.scripts = []
 
-    def read(self, commands):
-        for items in commands:
-            self.command(items)
+    def read(self, commands, piped):
+        chain = []
+        for items, fed in zip(commands, piped):
+            chain = chain if fed else []
+            chain.append((items, self.command(items, list(chain))))
         return {"read": True, "runs": list(self.runs), "writes": list(self.writes),
                 "outside": list(self.outside), "scripts": self.scripts}
 
@@ -410,7 +418,39 @@ class _Reader:
             self.touch(path)
         self.scripts.append({"program": program, "lines": lines, "paths": paths})
 
-    def command(self, items):
+    @staticmethod
+    def interpreter_of(program, arguments):
+        """(name, the arguments after it) for the interpreter a command reaches, directly or behind a wrapper."""
+        if program is not None and _program_kind(program.value)[0] == "interpreter":
+            return program.value, arguments
+        for at, item in enumerate(arguments):
+            if _program_kind(item.word.value)[0] == "interpreter":
+                return item.word.value, arguments[at + 1:]
+        return None, []
+
+    def reads_stdin(self, name, rest):
+        """True when the interpreter takes its code from standard input (no code argument, no script operand)."""
+        flag = _program_kind(name)[1]
+        if any(item.word.option and self.code_flag(name, flag, item.word.value) for item in rest):
+            return False
+        if any(item.word.value == "-s" for item in rest):
+            return True
+        return all(item.word.option or item.word.value == "-" for item in rest)
+
+    @staticmethod
+    def stdin_texts(items):
+        """The here-document and here-string texts of a command: (text, line count)."""
+        texts = []
+        for item in items:
+            if item.kind == "heredoc":
+                texts.append(("\n".join(item.body), len(item.body)))
+            elif item.kind == "redir" and item.op == "<<<":
+                texts.append((item.word.value, item.word.value.count("\n") + 1))
+        return texts
+
+    def command(self, items, feeders=()):
+        """Fold one simple command; return whether it reaches an interpreter. `feeders` are the earlier
+        (items, reaches) commands of its pipeline."""
         words = [item for item in items if item.kind == "word"]
         first = 0
         while first < len(words) and (words[first].word.value == "!"
@@ -420,6 +460,14 @@ class _Reader:
         program = words[first].word if first < len(words) else None
         arguments = words[first + 1:]
         self.placed = None
+        self.interpreter, rest = self.interpreter_of(program, arguments)
+        if (feeders and self.interpreter is not None and not self.stdin_texts(items)
+                and self.reads_stdin(self.interpreter, rest)):
+            fed = [text for before, reaches in feeders if not reaches for text in self.stdin_texts(before)]
+            if not fed:
+                raise _Refuse("an interpreter fed code the console cannot read")
+            for text, lines in fed:
+                self.script(self.interpreter, text, lines)
         if program is not None:
             if program.expanded or program.value in _RESERVED:
                 raise _Refuse("a program the console cannot read")
@@ -430,6 +478,7 @@ class _Reader:
             self.emit(item, program)
         if program is not None and program.value == "cd":
             self.base = self.placed
+        return self.interpreter is not None
 
     def classify(self, program, arguments):
         """Assign each argument its role for this program."""
@@ -513,10 +562,11 @@ class _Reader:
             else:
                 self.argument(word)
         elif item.kind == "heredoc":
-            if program is not None and _program_kind(program.value)[0] == "interpreter":
-                self.script(program.value, "\n".join(item.body), len(item.body))
+            if self.interpreter is not None:
+                self.script(self.interpreter, "\n".join(item.body), len(item.body))
         elif item.op == "<<<":
-            return
+            if self.interpreter is not None:
+                self.script(self.interpreter, word.value, word.value.count("\n") + 1)
         else:
             value = word.value
             if item.op in (">&", "<&") and _COPY_TARGET.fullmatch(value):

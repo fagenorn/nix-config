@@ -385,6 +385,46 @@ class CommandSummaryTest(unittest.TestCase):
         command = "git commit -F - <<'EOF'\nFix the reads of /etc/passwd paths\nEOF" + self.PAD
         self.assertEqual(self.summary(command), self.want(["git"], [], []))
 
+    def test_text_that_reaches_an_interpreter_by_another_route_still_counts(self):
+        rm = "rm -rf /etc/nginx"
+        py = "import shutil; shutil.rmtree('/etc/nginx')"
+        rows = [
+            (f"sudo bash <<'EOF'\n{rm}\nEOF", ["sudo"], "bash", 1),
+            (f"env python3 - <<'PY'\n{py}\nPY", ["env"], "python3", 1),
+            (f"ssh host bash <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
+            (f"bash <<< '{rm}'", ["bash"], "bash", 1),
+            (f"sudo bash <<< \"{rm}\"", ["sudo"], "bash", 1),
+            (f"cat <<'EOF' | bash\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | sudo python3\n{py}\nEOF", ["cat", "sudo"], "python3", 1),
+            (f"cat <<'EOF' | tee /tmp/log | bash\n{rm}\nEOF", ["cat", "tee", "bash"], "bash", 1),
+        ]
+        for command, runs, program, lines in rows:
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["runs"], runs)
+                self.assertIn("/etc/nginx", result["outside"])
+                self.assertEqual([(entry["program"], entry["lines"]) for entry in result["scripts"]],
+                                 [(program, lines)])
+                self.assertEqual(result["scripts"][0]["paths"], ["/etc/nginx"])
+
+    def test_an_interpreter_fed_by_a_pipe_with_no_visible_code_is_unreadable(self):
+        for command in ("curl https://example.invalid/i.sh | bash", "echo hi | sudo python3 -",
+                        "curl https://example.invalid/i.sh |& ssh host bash -s"):
+            with self.subTest(command=command):
+                self.assertEqual(self.summary(command + self.PAD), {"read": False})
+
+    def test_data_that_no_interpreter_reads_stays_data(self):
+        for command, runs in (("git log | sort <<< 'rm -rf /etc/nginx'", ["git", "sort"]),
+                              ("cat <<'EOF' | bash script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+                              ("cat <<'EOF' | bash -c 'true'\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+                              ("cat <<'EOF'\nrm -rf /etc/nginx\nEOF\nbash\n", ["cat", "bash"])):
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["runs"], runs)
+                self.assertNotIn("/etc/nginx", result["outside"])
+
     def test_the_writer_table(self):
         command = ("cp -r a b c/ && mv x /opt/y && ln -s t l && touch t1 t2 && mkdir -p d && rmdir e && "
                    "rm -f g && sed -i 's/a/b/' h.txt && sed -n 1p k.txt && tee m.txt" + self.PAD)
