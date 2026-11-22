@@ -35,6 +35,11 @@ README = REPO_ROOT / "home/common/agent-skills/standards/README.md"
 BAR = REPO_ROOT / "home/common/agent-skills/standards/the-bar.md"
 
 
+MALFORMED_TOKENS = (
+    "b7", "B07", "B7a", "B", "7", "_B7", "B7_x", "-B7", ".B7", "B7-x", "B7.x", "/B7", "#B7", ".",
+    "`", "B7/x", "B7:x", "B7+x", "B7#x", "B7=x", "<id>", "B7`x", "..", "-", "_", "/", "B7/")
+
+
 def cite(token: str) -> str:
     """One citation of `token`, assembled so this file holds no literal citation."""
     return "standard" + ":" + token
@@ -54,13 +59,29 @@ class CitationFormTest(unittest.TestCase):
                 self.assertEqual(citations(text), [])
 
     def test_a_token_that_is_no_rule_id_is_malformed(self):
-        for token in ("b7", "B07", "B7a", "B", "7", "_B7", "B7_x", "-B7", ".B7", "B7-x", "B7.x"):
+        for token in MALFORMED_TOKENS:
             with self.subTest(token=token):
                 self.assertEqual(citations(cite(token)), [Citation(1, token, False)])
+
+    def test_a_malformed_token_is_reported_whole_when_text_follows_it(self):
+        for token in MALFORMED_TOKENS:
+            if not token.strip(".`"):
+                continue
+            with self.subTest(token=token):
+                self.assertEqual(citations(cite(token) + " tail"), [Citation(1, token, False)])
+                self.assertEqual(citations("`" + cite(token) + "`"), [Citation(1, token, False)])
+
+    def test_a_form_followed_by_a_space_or_the_end_is_prose_not_a_citation(self):
+        for text in (cite(""), cite("") + " no worktree", cite("") + "\nB7"):
+            with self.subTest(text=text):
+                self.assertEqual(citations(text), [])
 
     def test_trailing_punctuation_ends_the_token(self):
         self.assertEqual(citations(cite("B7") + "."), [Citation(1, "B7", True)])
         self.assertEqual(citations("(" + cite("NET10") + ")"), [Citation(1, "NET10", True)])
+        for tail in (",", ";", ":", "!", "?", ")", "`", "'", '"', "`.", ").", "...", "*"):
+            with self.subTest(tail=tail):
+                self.assertEqual(citations(cite("B7") + tail), [Citation(1, "B7", True)])
 
     def test_prefix_of_reads_the_capital_letters(self):
         self.assertEqual([prefix_of(i) for i in ("P4", "PY3", "NET10", "B1")], ["P", "PY", "NET", "B"])
@@ -224,7 +245,7 @@ class CheckTest(LintTestCase):
 
 
     def test_a_citation_led_or_continued_by_a_separator_is_malformed_in_an_enforcer(self):
-        for token in ("_B7", "-B7", ".B7", "B7-x", "B7_x"):
+        for token in MALFORMED_TOKENS:
             with self.subTest(token=token):
                 root, platform, project = self.fixture(
                     files={"tests/test_a.py": "# " + cite(token) + "\n"}, members=["tests/test_a.py"])
