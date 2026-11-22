@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-five screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-seven screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -85,7 +85,14 @@ Contract:
   question back with three choices; on a page with the reading panel (`READING_PANEL`) the
   Questions fold and the thread's line are clicked, so the answer reads in the main column, and
   on a page without it the fold and the thread's summary are clicked, which is the before
-  picture, its reading None). `activation-tooling` and `activation-host` are the desk with no sprint and an
+  picture, its reading None).
+  `deeper-offer` and `deeper-answer` seed the same desk, `owner/web` with no sprint and two
+  threads: thread `DEEPER_THREAD`, a light answer (asked 40 minutes ago) and the Dig deeper
+  answer to the same question on a stronger model (asked 30, answered 12), each with its own
+  `Spent ...` line from a seeded transcript; and thread `DEEPER_OFFER_THREAD`, a light answer
+  (asked 10 minutes ago) whose Dig deeper is still offered, so its estimate is the first
+  thread's deeper spend (the spend before). `deeper-answer` opens the first thread in the
+  reading panel and `deeper-offer` opens the second and its Dig deeper confirmation. `activation-tooling` and `activation-host` are the desk with no sprint and an
   activation reading of merged changes this host is built from, none a console file: the first
   changes only agent tooling (a `python/` file and a skill), so its one line reads the
   agent-tooling wording; the second also changes the host configuration, so its line reads the
@@ -167,7 +174,7 @@ Contract:
   picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
   card opens on the plan's own first line and its draft shows nothing.
   `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 106 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 114 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -277,7 +284,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
-          "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
+          "ask-goal", "question-read", "deeper-offer", "deeper-answer", "activation-tooling", "activation-host", "register-apply",
           "register-draft", "register-reconcile-apply", "register-reconcile-draft", "adoption-merge", "adoption-moved", "adoption-failed", "sharing-panel",
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors",
           "owner-accounts")
@@ -492,6 +499,44 @@ REFUSED_CARD = ("Ask for changes", "", True, "Say what to change.")
 # look-check question is seeded with it only where the service keeps it (the base commit's is not).
 NEEDS_WORDS_KEPT = "needs_words" in {field.name for field in fields(Question)}
 READ_SESSION = "7c2f9d4e-1a8b-4e63-b5d0-9f3a6c1e8b27"
+# The Dig deeper states (#1435): thread 1 holds a light answer and its deeper answer, thread 2 a
+# light answer whose Dig deeper is still offered, so its estimate is thread 1's deeper spend.
+DEEPER_STATES = ("deeper-offer", "deeper-answer")
+DEEPER_THREAD = "1435a1"
+DEEPER_ID = "1435a2"
+DEEPER_QUESTION = "Where do agents spend time and tokens on issues, and which parts take long?"
+DEEPER_LIGHT_SESSION = "4a8e2c61-9d3f-4b70-8e15-c2f6a9d4b183"
+DEEPER_SESSION = "b7d14e93-2a6c-4f85-9b30-e8c5f1a27d46"
+DEEPER_LIGHT_ANSWER = (
+    "Answer: The console's records hold spend by day and project, not by phase or issue, so they "
+    "do not say which parts of an issue take long.\n"
+    "Read: the console's records\n"
+    "Ran: none\n"
+    "Could not find out: the time and tokens of each phase\n"
+    "Question for you: none")
+DEEPER_ANSWER = "\n".join((
+    "Answer: **Review and planning take most of the time; the tasks take most of the tokens.** "
+    "Over the last 30 days, 14 delivery runs:",
+    "",
+    "- Plan: 31% of the agent-seconds, 18% of the tokens",
+    "- Tasks: 44% of the agent-seconds, 61% of the tokens",
+    "- Review: 25% of the agent-seconds, 21% of the tokens",
+    "",
+    "Issue 12 took longest: 3 runs and 2 h 10 min, most of it in review.",
+    "Read: the transcripts part of the console's records",
+    "Ran: none",
+    "Could not find out: none",
+    "Question for you: none"))
+DEEPER_OFFER_THREAD = "1435b1"
+DEEPER_OFFER_QUESTION = "Which checks fail most often on this project's pull requests?"
+DEEPER_OFFER_SESSION = "e3c95a07-6b2d-4e18-a4f9-0d7b3c58e912"
+DEEPER_OFFER_ANSWER = (
+    "Answer: The test check fails most often: 9 of the last 40 pull requests, then the lint "
+    "check on 4.\n"
+    "Read: the console's records\n"
+    "Ran: none\n"
+    "Could not find out: none\n"
+    "Question for you: none")
 
 
 def thread_line(qid: str) -> str:
@@ -2499,6 +2544,22 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "profile": "work-main", "session_id": READ_SESSION})
         seed.put(4 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
             "question_id": "1226a1", "outcome": "answered", "answer": read[1]})
+    elif state in DEEPER_STATES:
+        seed.put(40 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
+            "question_id": DEEPER_THREAD, "question": DEEPER_QUESTION,
+            "profile": "work-main", "session_id": DEEPER_LIGHT_SESSION})
+        seed.put(38 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
+            "question_id": DEEPER_THREAD, "outcome": "answered", "answer": DEEPER_LIGHT_ANSWER})
+        seed.put(30 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
+            "question_id": DEEPER_ID, "question": DEEPER_QUESTION, "thread_id": DEEPER_THREAD,
+            "deep": True, "profile": "work-main", "session_id": DEEPER_SESSION})
+        seed.put(12 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
+            "question_id": DEEPER_ID, "outcome": "answered", "answer": DEEPER_ANSWER})
+        seed.put(10 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
+            "question_id": "1435b1", "question": DEEPER_OFFER_QUESTION,
+            "profile": "work-main", "session_id": DEEPER_OFFER_SESSION})
+        seed.put(8 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
+            "question_id": "1435b1", "outcome": "answered", "answer": DEEPER_OFFER_ANSWER})
     elif state == "spend-page":
         return (seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
                             report=2 * MINUTE)[0],)
@@ -2527,12 +2588,13 @@ class _Assistant:
         self.now_s = now_s
         self.count = 0
 
-    def __call__(self, sid: str, cwd: str, days_ago: int, input: int, output: int) -> dict:
+    def __call__(self, sid: str, cwd: str, days_ago: int, input: int, output: int,
+                 model: str = "claude-sonnet-4-6") -> dict:
         self.count += 1
         when = datetime.fromtimestamp(self.now_s, timezone.utc) - timedelta(days=days_ago)
         return {"type": "assistant", "sessionId": sid, "cwd": cwd,
                 "timestamp": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-                "message": {"id": f"msg-{self.count:04d}", "model": "claude-sonnet-4-6",
+                "message": {"id": f"msg-{self.count:04d}", "model": model,
                             "usage": {"input_tokens": input, "cache_creation_input_tokens": 0,
                                       "cache_read_input_tokens": input * 8,
                                       "output_tokens": output}}}
@@ -2595,6 +2657,25 @@ def _write_desk_spend(fixture: Fixture, now_s: float, running: str, ended: str) 
         assistant(DESK_OUTSIDE, web, ago, 50_000, 4_000) for ago in (0, 2)]))
     (run / "agent-q1.jsonl").write_bytes(_transcript([
         assistant(DESK_OUTSIDE, web, ago, 80_000, 6_000) for ago in (0, 1, 3)]))
+
+
+def _write_deeper(fixture: Fixture, now_s: float) -> None:
+    """Transcripts for the Dig deeper states: each question's session, written today.
+
+    The light sessions total 544,000 and 362,000 tokens; the deeper one runs on `claude-opus-4-6`
+    and totals 2,184,000, so its dollars per token are the dearer.
+    """
+    web = str(fixture.projects[0])
+    assistant = _Assistant(now_s)
+    slug = fixture.config / "projects" / "-web"
+    slug.mkdir(parents=True, exist_ok=True)
+    (slug / f"{DEEPER_LIGHT_SESSION}.jsonl").write_bytes(_transcript([
+        assistant(DEEPER_LIGHT_SESSION, web, 0, 30_000, 2_000) for _ in range(2)]))
+    (slug / f"{DEEPER_SESSION}.jsonl").write_bytes(_transcript([
+        assistant(DEEPER_SESSION, web, 0, 60_000, 6_000, model="claude-opus-4-6")
+        for _ in range(4)]))
+    (slug / f"{DEEPER_OFFER_SESSION}.jsonl").write_bytes(_transcript([
+        assistant(DEEPER_OFFER_SESSION, web, 0, 20_000, 1_000) for _ in range(2)]))
 
 
 def _write_held_manager(fixture: Fixture, now_s: float) -> None:
@@ -2707,6 +2788,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         _write_spend(fixture, now_s, sprint_ids[0])
     elif state == "desk-spend":
         _write_desk_spend(fixture, now_s, *sprint_ids)
+    elif state in DEEPER_STATES:
+        _write_deeper(fixture, now_s)
     return fixture
 
 

@@ -1034,8 +1034,8 @@ def uncovered(moved, rows) -> list[str]:
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifty_five_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 55)
+    def test_the_set_is_fifty_seven_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 57)
         self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:5],
                          ("permission-stale", "permission-card", "waiting-until", "paused",
                           "owner-check"))
@@ -1061,11 +1061,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.STATES[shots.STATES.index("adoption-moved") + 1],
                          "adoption-failed")
         self.assertEqual(shots.ADOPTION_STATES, ("adoption-merge", "adoption-moved", "adoption-failed"))
-        self.assertEqual(shots.STATES[-32:-8], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-34:-8], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read",
+                                              "deeper-offer", "deeper-answer",
                                               "activation-tooling", "activation-host",
                                               "register-apply", "register-draft",
                                               "register-reconcile-apply",
@@ -1903,6 +1904,59 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(asked["question"], "Q?")
         self.assertEqual(asked["answer"], "plain")
         self.assertIsNone(asked["back_text"])
+
+    def test_the_deeper_seed_holds_a_deeper_answer_with_its_spend_and_an_offer_with_its_estimate(
+            self) -> None:
+        spent = re.compile(r"Spent ([\d,]+) tokens, about \$(\d+\.\d\d)")
+        for state in ("deeper-offer", "deeper-answer"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                now_s = time.time()
+                fixture = shots.build_fixture(Path(tmp), state, now_s)
+                svc = shots.start_service(fixture, now_s)
+                try:
+                    view = json.loads(svc.view_bytes)
+                finally:
+                    svc.close()
+                web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
+                threads = {t["id"]: t for t in web["questions"]["threads"]}
+                self.assertEqual(sorted(threads),
+                                 sorted([shots.DEEPER_THREAD, shots.DEEPER_OFFER_THREAD]))
+                light, deep = threads[shots.DEEPER_THREAD]["questions"]
+                self.assertEqual([q["id"] for q in (light, deep)],
+                                 [shots.DEEPER_THREAD, shots.DEEPER_ID])
+                self.assertEqual([q["question"] for q in (light, deep)],
+                                 [shots.DEEPER_QUESTION] * 2)
+                self.assertEqual([q["state"] for q in (light, deep)], ["answered", "answered"])
+                self.assertEqual([q["deep"] for q in (light, deep)], [False, True])
+                self.assertEqual([(q["deep_offer"], q["deep_text"]) for q in (light, deep)],
+                                 [(False, None), (False, None)])
+                self.assertTrue(deep["answer"].startswith(
+                    "**Review and planning take most of the time"))
+                self.assertIn("\n- Tasks: 44% of the agent-seconds", deep["answer"])
+                self.assertEqual(light["unknown_text"],
+                                 "Could not find out: the time and tokens of each phase")
+                light_spent = spent.fullmatch(light["spend_text"])
+                deep_spent = spent.fullmatch(deep["spend_text"])
+                self.assertIsNotNone(light_spent)
+                self.assertIsNotNone(deep_spent)
+                (light_t, light_d), (deep_t, deep_d) = light_spent.groups(), deep_spent.groups()
+                self.assertEqual((light_t, deep_t), ("544,000", "2,184,000"))
+                # From the published per-million rates: sonnet 3/0.30/15, opus 5/0.50/25.
+                self.assertEqual((light_d, deep_d), ("0.38", "2.76"))
+                self.assertGreater(float(deep_d) / int(deep_t.replace(",", "")),
+                                   float(light_d) / int(light_t.replace(",", "")))
+                (offer,) = threads[shots.DEEPER_OFFER_THREAD]["questions"]
+                self.assertEqual((offer["state"], offer["deep"], offer["deep_offer"]),
+                                 ("answered", False, True))
+                self.assertIs(threads[shots.DEEPER_OFFER_THREAD]["follow_up"], True)
+                self.assertEqual(spent.fullmatch(offer["spend_text"]).group(1), "362,000")
+                self.assertEqual(
+                    offer["deep_text"],
+                    "Dig deeper asks again on a stronger model for up to 20 minutes. "
+                    "Earlier deeper answers here spent about 2,184,000 tokens, $" + deep_d
+                    + " each.")
+                self.assertEqual(all_sprints(view), [])
+                self.assertEqual(view["statement"]["inbox_items"], 0)
 
     def test_a_shot_with_a_short_control_fails_the_command(self) -> None:
         out = StringIO()
@@ -2824,6 +2878,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(asked["back_choices"], list(shots.READ_CHOICES))
                     self.assertTrue(asked["back_text"].startswith("Question for you: "))
                     self.assertEqual(running, [])
+                elif state in shots.DEEPER_STATES:
+                    web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
+                    self.assertEqual(web["questions"]["count"], 2)
+                    self.assertEqual(view["statement"]["inbox_items"], 0)
+                    self.assertEqual(running, [])
                 elif state in ("questions-closed", "questions-open"):
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
                     self.assertEqual(web["questions"]["count"], 2)
@@ -2858,6 +2917,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         len(set().union(*(d["phase"] for d in days[-7:]))), 2)
                     self.assertIn(running[0]["sprint_id"],
                                   set().union(*(d["sprint"] for d in days[-7:])))
+                elif state in shots.DEEPER_STATES:
+                    self.assertGreater(days[-1]["total"]["dollars"], 0)
                 else:
                     self.assertEqual(days[-1]["total"]["dollars"], 0)
 
