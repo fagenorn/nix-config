@@ -21,7 +21,7 @@ from agent_tools.delivery import context_map_lint, standards_lint
 from agent_tools.project_contract import resolve_project
 
 from .conformance_test_support import (
-    CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
+    CLEAN_AREA, CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
     commit_all, doctor, fixture, git, load_module, make_root, platform_env, run,
     write_clean_map,
 )
@@ -541,6 +541,88 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
             self.assertEqual([facts["base_count"], facts["branch_count"],
                               len(facts["violations"])], [0, 9, 8])
             self.assert_validates(report)
+
+    REC = "docs/areas/demo/adr/001-demo.md"
+
+    def record_root(self, tmp: Path) -> tuple[Path, str]:
+        """A root whose base holds a committed, lint-clean area `demo`; its sha."""
+        root = make_root(tmp)
+        write_file(root, "docs/CONTEXT-MAP.md",
+                   CLEAN_MAP.replace("./fixture-CONTEXT.md", "./areas/demo/CONTEXT.md"))
+        (root / "docs/fixture-CONTEXT.md").unlink()
+        write_file(root, "docs/areas/demo/CONTEXT.md", CLEAN_AREA)
+        commit_all(root, "area")
+        return root, self.mark_base(root)
+
+    def mark_base(self, root: Path) -> str:
+        git(root, "update-ref", INTEGRATION_REF, "HEAD")
+        return git(root, "rev-parse", "HEAD").strip()
+
+    def record(self, root: Path, relative: str, number: int, body: str) -> None:
+        write_file(root, relative, f"# ADR-demo-00{number} \u2014 Demo\n\n{body}")
+        commit_all(root, f"record {number}")
+
+    def passed_facts(self, root: Path) -> dict:
+        code, _, by_id = self.ci(root)
+        self.assertEqual(code, 0)
+        return by_id[self.CHECK_ID]["facts"]
+
+    def assert_rose(self, root: Path, base: str, rule: str, base_count: int, line: int,
+                    rules: list, added: list | None = None) -> None:
+        code, report, by_id = self.ci(root)
+        self.assertEqual([code, report["outcome"]], [1, {
+            "status": "failed", "primary_check_id": self.CHECK_ID}])
+        listed = {"added_records": added, "added_record_count": len(added)} if added else {}
+        self.assertEqual(self.summary(by_id[self.CHECK_ID]), [
+            "failed", "violation_count_rose", "violations.never_rise.reduce",
+            {"merge_base": base, "rule": rule, "base_count": base_count, "branch_count": 1,
+             "violations": [f"{rule} {(added or [self.REC])[0]}:{line}"], "rules": rules, **listed}])
+        self.assert_validates(report)
+
+    def test_an_added_record_over_the_cap_with_a_status_line_turns_ci_red_and_is_listed(self):
+        with fixture() as tmp:
+            root, base = self.record_root(tmp)
+            write_file(root, "notes/plain.txt")
+            self.record(root, self.REC, 1, "- **Status:** accepted\n\n" + "x" * 1950 + "\n")
+            self.assert_rose(root, base, "B18", 0, 5, ["B18", "B19"], [self.REC])
+
+    def test_an_added_conforming_record_passes_and_is_listed(self):
+        with fixture() as tmp:
+            root, base = self.record_root(tmp)
+            self.record(root, self.REC, 1, "One paragraph naming the rejected alternative.\n")
+            self.assertEqual(self.passed_facts(root), {
+                "merge_base": base, "added_records": [self.REC], "added_record_count": 1})
+
+    def test_an_over_cap_record_that_grows_turns_ci_red(self):
+        with fixture() as tmp:
+            root, _ = self.record_root(tmp)
+            self.record(root, self.REC, 1, "x" * 1574 + "\n")
+            base = self.mark_base(root)
+            self.record(root, self.REC, 1, "x" * 1575 + "\n")
+            self.assert_rose(root, base, "B18", 1, 3, ["B18"])
+
+    def test_a_deleted_breaching_record_does_not_cover_an_added_one(self):
+        old, new = "docs/areas/demo/adr/001-old.md", "docs/areas/demo/adr/002-new.md"
+        prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(8))
+        with fixture() as tmp:
+            root, _ = self.record_root(tmp)
+            self.record(root, old, 1, "- **Status:** accepted\n\n## Context\n\n" + prose)
+            base = self.mark_base(root)
+            git(root, "rm", "-q", old)
+            self.record(root, new, 2, f"- **Status:** accepted\n\n{prose}Superseded by the new backend.\n")
+            self.assertRegex(git(root, "diff-tree", "-r", "-M", "--diff-filter=R",
+                                 "--name-status", base, "HEAD"), rf"R\d+\t{old}\t{new}")
+            self.assert_rose(root, base, "B19", 1, 3, ["B19"], [new])
+
+    def test_more_added_records_than_the_list_holds_are_counted(self):
+        with fixture() as tmp:
+            root, _ = self.record_root(tmp)
+            paths = [f"docs/areas/demo/adr/00{n}-r{n}.md" for n in range(1, 10)]
+            for n, path in enumerate(paths, 1):
+                self.record(root, path, n, f"Paragraph {n}.\n")
+            facts = self.passed_facts(root)
+            self.assertEqual([facts["added_record_count"], facts["added_records"]],
+                             [9, paths[:8]])
 
 
 class LintChecksTest(ReportAssertions, unittest.TestCase):

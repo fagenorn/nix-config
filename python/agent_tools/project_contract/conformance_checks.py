@@ -774,7 +774,7 @@ def check_standards_lint(context: "Context") -> "Outcome":
     return Outcome("passed")
 
 
-NEVER_RISE_ENFORCERS = (size_lint.ENFORCER,)
+NEVER_RISE_ENFORCERS = (size_lint.ENFORCER, *context_map_lint.RECORD_ENFORCERS)
 
 
 def check_never_rise(context: "Context") -> "Outcome":
@@ -784,6 +784,16 @@ def check_never_rise(context: "Context") -> "Outcome":
     It starts only read-only, bounded git children, which read committed
     history and never the working tree; the authored contract supplies the
     branch. No readable merge base is a failed check, never a pass.
+
+    The record enforcers judge both sides. The facts list each record the
+    branch adds, for the reviewer to judge against the gate: at most
+    `MAX_FACT_LIST` paths, with the true count beside them. The membership is
+    `context_map_lint.added_records`'s: each path `git diff-tree -r -M
+    --diff-filter=AR --name-status <merge_base> HEAD` names as added or as a
+    rename target that `context_map_lint.is_record_path` accepts, less each
+    rename whose source is a record path and whose pair
+    `context_map_lint.is_record_migration` accepts (a migration). Naming the
+    records past the bound is #1629.
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
     verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
@@ -791,14 +801,17 @@ def check_never_rise(context: "Context") -> "Outcome":
     if verdict is None:
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})
+    added = context_map_lint.added_records(verdict)
+    listed = ({"added_records": bound_facts(added), "added_record_count": len(added)}
+              if added else {})
     if not verdict.rises:
-        return Outcome("passed", facts={"merge_base": verdict.merge_base})
+        return Outcome("passed", facts={"merge_base": verdict.merge_base, **listed})
     first = verdict.rises[0]
     return Outcome("failed", "violation_count_rose", "violations.never_rise.reduce", {
         "merge_base": verdict.merge_base, "rule": first.rule,
         "base_count": first.base_count, "branch_count": first.branch_count,
         "violations": [bound_fact(v.text()) for v in first.new[:MAX_FACT_LIST]],
-        "rules": bound_facts([r.rule for r in verdict.rises])})
+        "rules": bound_facts([r.rule for r in verdict.rises]), **listed})
 
 
 # --------------------------------------------------------------------------
