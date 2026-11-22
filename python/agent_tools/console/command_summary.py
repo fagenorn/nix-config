@@ -53,6 +53,7 @@ _NAME_SPLIT = re.compile(r"[\s'\"`()\[\]{},;=<>|&]+")
 _COPY_TARGET = re.compile(r"[0-9]+-?|-")
 _CLUSTER = re.compile(r"-[A-Za-z]+")
 _COMMA_COLON = re.compile(r"[,:]")
+_GLUE = re.compile(r"[^A-Za-z0-9_.+-]")
 _EXTENSION = re.compile(r"[A-Za-z0-9]{1,8}")
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _CODE_FLAG = {"sh": "c", "bash": "c", "zsh": "c", "dash": "c", "ksh": "c", "python": "c", "python3": "c",
@@ -311,6 +312,12 @@ def _path_like(part):
     return bool(part) and (part.startswith(("/", "~", "./", "../")) or part in (".", "..") or "/" in part)
 
 
+def _glued_path(part):
+    """True when a path hides behind a prefix (`@/etc/x`): joining it under the base would hide it."""
+    head = part.split("/", 1)[0]
+    return bool(head) and "/" in part and not part.startswith(("~", ".")) and bool(_GLUE.search(head))
+
+
 def _program_kind(program):
     name = posixpath.basename(program)
     if name in _SHELLS or name in ("python", "python3", "node", "perl", "ruby") or _PYTHON_VERSION.fullmatch(name):
@@ -385,17 +392,17 @@ class _Reader:
                 self.touch(path, word.expanded)
         else:
             if value.startswith("-"):
-                if "=" in value:
-                    value = value.split("=", 1)[1]
-                elif len(value) > 2 and value[1] != "-" and "/" in value:
+                if len(value) > 2 and value[1] != "-" and "/" in value.split("=", 1)[0]:
                     value = value[2:]
+                elif "=" in value:
+                    value = value.split("=", 1)[1]
                 else:
                     return
             elif _WORD_ASSIGNMENT.match(value):
                 value = value.split("=", 1)[1]
             for part in _COMMA_COLON.split(value):
                 if _path_like(part):
-                    self.touch(part, word.expanded)
+                    self.touch(part, word.expanded or _glued_path(part))
 
     def script(self, program, text, lines):
         paths = list(dict.fromkeys(_named_paths(text)))
