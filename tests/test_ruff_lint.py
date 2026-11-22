@@ -373,19 +373,67 @@ class FailClosedTest(unittest.TestCase):
         root = covered_world(self.tmp)
         inside = root / "inside"
         inside.mkdir()
+        probe = mock.Mock(side_effect=AssertionError("tempfile probed for a directory"))
 
         with mock.patch.object(ruff_lint.tempfile, "tempdir", None), \
+                mock.patch.object(ruff_lint.tempfile, "_get_default_tempdir", probe), \
+                mock.patch.object(ruff_lint.tempfile, "gettempdir", probe), \
                 mock.patch.dict(os.environ, {"TMPDIR": str(inside)}):
             reason = self.failure(snapshot_of(root))
 
         self.assertEqual(reason, "scratch_inside_repository")
         self.assertEqual(list(inside.iterdir()), [])
 
+    def test_a_current_directory_inside_the_repository_is_never_a_scratch_candidate(self):
+        require_ruff(self)
+        root = covered_world(self.tmp)
+        inside = root / "inside"
+        inside.mkdir()
+        written = []
+        real_open = os.open
+
+        def watch(path, *args, **kwargs):
+            written.append(os.fspath(path))
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(ruff_lint.tempfile, "tempdir", None), \
+                mock.patch.object(ruff_lint, "TEMPORARY_DIRECTORIES", ()), \
+                mock.patch.object(os, "getcwd", return_value=str(inside)), \
+                mock.patch.object(os, "open", watch), \
+                mock.patch.dict(os.environ, {}, clear=False) as env:
+            for name in ruff_lint.TEMPORARY_VARIABLES:
+                env.pop(name, None)
+            reason = self.failure(snapshot_of(root))
+
+        self.assertEqual(reason, "scratch_unwritable")
+        self.assertEqual([path for path in written if str(inside) in path], [])
+        self.assertEqual(list(inside.iterdir()), [])
+
+    def test_a_scratch_directory_found_in_the_platform_list_is_used(self):
+        require_ruff(self)
+        root = covered_world(self.tmp)
+        elsewhere = Path(tempfile.mkdtemp(prefix="scratch-parent-"))
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+
+        with mock.patch.object(ruff_lint.tempfile, "tempdir", None), \
+                mock.patch.object(ruff_lint, "TEMPORARY_DIRECTORIES", (str(elsewhere),)), \
+                mock.patch.dict(os.environ, {}, clear=False) as env:
+            for name in ruff_lint.TEMPORARY_VARIABLES:
+                env.pop(name, None)
+            findings = ruff_lint.findings(snapshot_of(root))
+
+        self.assertEqual(findings, (Violation("PY6", "pkg/m.py", 1),))
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
     def test_a_failing_scratch_discovery_fails_closed(self):
         require_ruff(self)
         root = covered_world(self.tmp)
 
-        with mock.patch.object(ruff_lint.tempfile, "gettempdir", side_effect=OSError("no")):
+        with mock.patch.object(ruff_lint.tempfile, "tempdir", None), \
+                mock.patch.object(ruff_lint, "TEMPORARY_DIRECTORIES", ()), \
+                mock.patch.dict(os.environ, {}, clear=False) as env:
+            for name in ruff_lint.TEMPORARY_VARIABLES:
+                env.pop(name, None)
             reason = self.failure(snapshot_of(root))
 
         self.assertEqual(reason, "scratch_unwritable")

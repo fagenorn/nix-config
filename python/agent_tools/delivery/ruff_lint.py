@@ -91,6 +91,7 @@ MEMO_SIZE = 4
 NOQA = re.compile(r"#\s*(?:(?:ruff|flake8)\s*:\s*)?noqa(?![A-Za-z0-9_])(?P<tail>.*)", re.I)
 CODED = re.compile(r"\s*:\s*(?P<codes>[A-Z]+[0-9]+(?:[\s,]+[A-Z]+[0-9]+)*)(?P<rest>.*)")
 TEMPORARY_VARIABLES = ("TMPDIR", "TEMP", "TMP")
+TEMPORARY_DIRECTORIES = ("/tmp", "/var/tmp", "/usr/tmp")
 REASON_PADDING = re.compile(r"[\s,:;#-]*")
 _memo: dict[tuple[str, str, str], tuple[Violation, ...]] = {}
 
@@ -152,6 +153,29 @@ def _inside(directory: str | Path | None, root: Path | None) -> bool:
         return False
     path = Path(directory).resolve()
     return path == root or root in path.parents
+
+
+def _scratch_parent(root: Path | None) -> Path:
+    """The directory the scratch tree is made in, found without writing anything.
+
+    `tempfile.gettempdir()` discovers by creating a probe file in each candidate
+    and ends with the current directory, which is the repository under `just
+    lint`; so discovery here only inspects: a candidate inside the repository is
+    refused, and the current directory is never a candidate.
+    """
+    if tempfile.tempdir is not None:
+        chosen = Path(tempfile.tempdir).resolve()
+        if _inside(chosen, root):
+            raise EnforcerFailed(COMMAND, "scratch_inside_repository")
+        return chosen
+    candidates = [os.environ.get(name) for name in TEMPORARY_VARIABLES]
+    candidates = [name for name in candidates if name] + list(TEMPORARY_DIRECTORIES)
+    if any(_inside(name, root) for name in candidates):
+        raise EnforcerFailed(COMMAND, "scratch_inside_repository")
+    for name in candidates:
+        if os.path.isdir(name) and os.access(name, os.W_OK | os.X_OK):
+            return Path(name).resolve()
+    raise OSError("no writable scratch directory")
 
 
 def _check_paths(paths: list[str]) -> None:
@@ -219,15 +243,9 @@ def findings(snapshot: Snapshot) -> tuple[Violation, ...]:
     _check_paths(paths)
     contents = never_rise.read_files(snapshot, paths)
     root = snapshot.root.resolve() if snapshot.root is not None else None
-    if tempfile.tempdir is None:
-        for name in TEMPORARY_VARIABLES:
-            if _inside(os.environ.get(name), root):
-                raise EnforcerFailed(COMMAND, "scratch_inside_repository")
     found: list[Violation] = []
     try:
-        parent = Path(tempfile.gettempdir()).resolve()
-        if _inside(parent, root):
-            raise EnforcerFailed(COMMAND, "scratch_inside_repository")
+        parent = _scratch_parent(root)
         with tempfile.TemporaryDirectory(prefix="ruff-lint-", dir=parent) as tmp:
             scratch = Path(tmp).resolve()
             for path, data in contents.items():
