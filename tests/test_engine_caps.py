@@ -137,6 +137,21 @@ class BoundaryTest(unittest.TestCase):
         pkg = package({"engine.py": pad(10), "engine_core.py": pad(600) + "x = 1"})
         self.assertEqual(measure(pkg), (Breach("core", 601, 600, "lines"),))
 
+    def test_cr_lf_and_crlf_each_separate_lines_at_the_boundaries(self):
+        for name, separator in (("CR", b"\r"), ("LF", b"\n"), ("CRLF", b"\r\n")):
+            for trailing in (True, False):
+                with self.subTest(separator=name, trailing=trailing):
+                    for count, expected in ((600, ()), (601, (Breach("core", 601, 600, "lines"),))):
+                        body = separator.join(b"x = 1" for _ in range(count)) + (separator if trailing else b"")
+                        pkg = base_package()
+                        (pkg / "engine_core.py").write_bytes(body)
+                        self.assertEqual(measure(pkg), expected)
+                    pkg = base_package(core=10, engine=0)
+                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(2490)) + separator)
+                    self.assertEqual(measure(pkg), ())
+                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(2491)) + separator)
+                    self.assertEqual(measure(pkg), (Breach("engine package", 2501, 2500, "lines"),))
+
     def test_a_package_of_2500_lines_passes_and_2501_is_refused(self):
         self.assertEqual(measure(base_package(core=600, engine=1900)), ())
         self.assertEqual(
@@ -242,6 +257,51 @@ class BoundaryTest(unittest.TestCase):
         (copy / "bad.json").write_text("{", encoding="utf-8")
         (copy / "odd.json").write_text('{"steps": 5}', encoding="utf-8")
         self.assertEqual(measure(base_package(), copy), ())
+
+    def test_a_symlink_out_of_the_procedure_directory_is_not_measured(self):
+        outside = temp_dir()
+        write_json(outside, "big", chain(41))
+        (outside / "big.md").write_bytes(b"a" * 9000)
+        copy = procedures_copy()
+        (copy / "linked.json").symlink_to(outside / "big.json")
+        (copy / "linked.md").symlink_to(outside / "big.md")
+        self.assertEqual(measure(base_package(), copy), ())
+
+    def test_a_symlink_inside_the_procedure_directory_is_measured(self):
+        copy = procedures_copy()
+        (copy / "target.md").write_bytes(b"a" * 8193)
+        (copy / "linked.md").symlink_to(copy / "target.md")
+        self.assertEqual(
+            measure(base_package(), copy),
+            (Breach("prompt linked.md", 8193, 8192, "bytes"), Breach("prompt target.md", 8193, 8192, "bytes")),
+        )
+
+    def test_a_deeply_nested_procedure_is_left_to_phase_a(self):
+        copy = procedures_copy()
+        (copy / "deep.json").write_bytes(b"[" * 100000 + b"]" * 100000)
+        self.assertEqual(measure(base_package(), copy), ())
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = engine.main(["check", "--procedures", str(copy)])
+        self.assertEqual((code, err.getvalue()), (1, ""))
+        document = json.loads(out.getvalue())
+        self.assertEqual(document["breaches"], [])
+        self.assertIn(("deep", "unreadable_procedure"), [(r["procedure"], r["defect"]) for r in document["refusals"]])
+
+    def test_a_prompt_removed_after_enumeration_is_a_value_error(self):
+        copy = procedures_copy()
+        real = engine_caps.procedure_check._inside
+
+        def vanish(directory, name):
+            found = real(directory, name)
+            if name == "toy-review.md":
+                found.unlink()
+            return found
+
+        with mock.patch.object(engine_caps.procedure_check, "_inside", vanish):
+            with self.assertRaises(ValueError) as caught:
+                measure(base_package(), copy)
+        self.assertNotIn("\n", str(caught.exception))
 
     def test_every_md_file_is_a_prompt_and_only_md_files_are(self):
         copy = procedures_copy()
@@ -487,6 +547,15 @@ class CheckRefusesTest(unittest.TestCase):
                     self.assertEqual(code, 0)
                     self.assertEqual(out, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"}))
 
+    def test_a_filesystem_error_while_measuring_is_usage(self):
+        error = FileNotFoundError(2, "No such file or directory", "toy-review.md")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(engine_caps, "_breaches", side_effect=error):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = engine.main(["check"])
+        self.assertEqual((code, out.getvalue()), (2, ""))
+        self.assertEqual(len(err.getvalue().splitlines()), 1)
+
     def test_an_unmeasurable_grader_is_usage(self):
         code, out, err = check_in_process({"builtin": Grader(("ok",), len)})
         self.assertEqual(code, 2)
@@ -525,7 +594,9 @@ class ImmunityTest(unittest.TestCase):
             if isinstance(action, argparse._HelpAction):
                 for option in action.option_strings:
                     with self.subTest(help=option):
-                        _, out, _ = run_copy(self.root, option)
+                        code, out, err = run_copy(self.root, option)
+                        self.assertEqual((code, err), (0, ""))
+                        self.assertTrue(out.startswith("usage:"), out)
                         self.assertNotIn('"verdict"', out)
 
     def test_no_environment_variable_lifts_a_cap(self):

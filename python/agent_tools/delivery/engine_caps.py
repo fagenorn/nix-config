@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import ast
 import inspect
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from agent_tools.delivery import procedure_check
 from agent_tools.delivery.engine_graders import Grader
 
 CORE_LINES = 600
@@ -47,8 +47,8 @@ def _read(path: Path) -> bytes:
 
 
 def physical_lines(path: Path) -> int:
-    data = _read(path)
-    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+    # Python reads LF, CR and CRLF each as one line break; bytes.splitlines splits on exactly those.
+    return len(_read(path).splitlines())
 
 
 def _imports(path: Path, package_dir: Path) -> set[str]:
@@ -109,7 +109,7 @@ def _grader_breaches(graders: Mapping[str, Grader]) -> list[Breach]:
 
 def _step_count(path: Path) -> int | None:
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc = procedure_check._strict_load(path)
     except (OSError, ValueError):
         return None
     if not isinstance(doc, dict) or not isinstance(doc.get("steps"), list):
@@ -118,6 +118,13 @@ def _step_count(path: Path) -> int | None:
 
 
 def breaches(package_dir: Path, procedures_dir: Path, graders: Mapping[str, Grader]) -> tuple[Breach, ...]:
+    try:
+        return _breaches(package_dir, procedures_dir, graders)
+    except OSError as error:
+        raise ValueError(f"cannot measure the engine: {' '.join(str(error).split())}") from error
+
+
+def _breaches(package_dir: Path, procedures_dir: Path, graders: Mapping[str, Grader]) -> tuple[Breach, ...]:
     out = []
     core = physical_lines(package_dir / "engine_core.py")
     if core > CORE_LINES:
@@ -127,14 +134,18 @@ def breaches(package_dir: Path, procedures_dir: Path, graders: Mapping[str, Grad
         out.append(Breach("engine package", total, PACKAGE_LINES, "lines"))
     out.extend(_grader_breaches(graders))
     documents = sorted(
-        (p for p in procedures_dir.glob("*.json") if p.is_file() and not p.name.endswith(".reply.json")),
+        (
+            p
+            for p in procedures_dir.glob("*.json")
+            if not p.name.endswith(".reply.json") and procedure_check._inside(procedures_dir, p.name)
+        ),
         key=lambda p: p.stem,
     )
     for path in documents:
         steps = _step_count(path)
         if steps is not None and steps > PROCEDURE_STEPS:
             out.append(Breach(f"procedure {path.stem}", steps, PROCEDURE_STEPS, "steps"))
-    for path in sorted((p for p in procedures_dir.glob("*.md") if p.is_file()), key=lambda p: p.name):
+    for path in sorted((p for p in procedures_dir.glob("*.md") if procedure_check._inside(procedures_dir, p.name)), key=lambda p: p.name):
         size = path.stat().st_size
         if size > PROMPT_BYTES:
             out.append(Breach(f"prompt {path.name}", size, PROMPT_BYTES, "bytes"))
