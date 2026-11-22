@@ -118,6 +118,13 @@ class CommentSyntaxTest(unittest.TestCase):
             Block(4, 4, ("# b",), False),
         ))
 
+    def test_a_here_string_queues_no_heredoc(self):
+        for first in ('read -r a <<< "$x"', "cat <<<EOF", 'jq . <<<"$EVAL"'):
+            with self.subTest(first=first):
+                text = first + "\n# c\necho\n"
+                self.assertEqual(
+                    comment_syntax.blocks("a.sh", text), (Block(2, 2, ("# c",), False),))
+
     def test_an_apostrophe_inside_a_plain_scalar_opens_no_quote(self):
         text = "- name: Download this run's suite timing\n  # TODO later\n  run: echo it's\n# end\n"
         self.assertEqual(comment_syntax.blocks("a.yaml", text), (

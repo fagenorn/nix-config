@@ -260,7 +260,11 @@ class _Shell:
             return self.enter("ansi", 2)
         elif c == "(" and self.cmd_start and text.startswith("((", i):
             return self.enter("arith", 2, 2)
-        elif c == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
+        elif text.startswith("<<<", i):
+            self.code()
+            self.i += 3
+            self.cmd_start = False
+        elif text.startswith("<<", i):
             self.heredoc()
         elif c in ";&|(":
             self.code()
