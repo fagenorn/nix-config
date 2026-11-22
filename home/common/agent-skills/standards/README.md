@@ -5,8 +5,25 @@ Three layers, most specific wins. Machine-global layers live here (`~/.agents/st
 | Layer | Where | Content |
 |---|---|---|
 | 0 — the bar | `the-bar.md` | Universal principles, every language, every project. |
-| 1 — stack | `stacks/{dotnet,typescript-react,node,python}.md` | Project-independent idioms and trap libraries for one language or framework. Version-stamped. |
+| 1 — stack | `stacks/{dotnet,dotnet-data,dotnet-ai,typescript-react,node,python}.md` | Project-independent idioms and trap libraries for one language or framework. Version-stamped. |
 | 2 — project | the repo's `docs/standards/` | Deltas only: layout, fixture machinery, telemetry names, tenant rules, migration registries. |
+
+## Rule ids
+
+Every rule in the three layers is one `###` heading that opens with its id, written `### B12. Fail loud`, the form the planning rules' `R1` to `R9` use.
+
+| Layer file | Prefix |
+|---|---|
+| `the-bar.md` | `B` |
+| `stacks/dotnet.md` | `NET` |
+| `stacks/dotnet-data.md` | `NET` |
+| `stacks/dotnet-ai.md` | `NET` |
+| `stacks/node.md` | `NODE` |
+| `stacks/python.md` | `PY` |
+| `stacks/typescript-react.md` | `TSR` |
+| the repo's `docs/standards/` shards | `P` |
+
+A heading carries one id, and a new rule takes the next unused number of its prefix. The files of one stack share its prefix, and its numbers are unique across them. Ids are never renumbered or reused. Project ids are local to their repository, so a report that spans projects prefixes the repository name. `R1` to `R9` keep their ids and form and stay outside the layers.
 
 ## Precedence
 
@@ -20,9 +37,10 @@ Nobody reads a whole standards corpus. Briefs paste **Layer 0 in full** (~600 to
 
 A repo's `docs/standards/` is a directory of shards plus a **README index of at most 40 lines**, one row per shard carrying its `governs:` globs and a one-line gist — the same index-not-store discipline as `CONTEXT-MAP.md`.
 
+- **Shape.** Each `governs` cell holds one or more code-span path globs relative to the repository root, never prose and never a glob made only of `*` and `/`. A shard in any layer is at most 8 KB (8192 bytes), and a heading, its hashes and id included, is at most 100 characters. `standards-lint` checks these shapes, the index and the ids; whether a rule restates a higher layer or is process filed as a standard stays with the reviewer.
 - **Deltas only.** Anything that restates Layer 0 or 1 gets deleted, not copied. If a rule is true for every project on this stack, it belongs upstream in `stacks/`.
-- **Case law is written rule-first**: the rule in at most two sentences, plus one issue or ADR link. The narrative lives in the issue. Incident memoirs are what make a standards file grow linearly with project age.
-- **Process content is not a standard.** Deploy checklists go to `.claude/hints/`, review procedure to `REVIEW-CONTRACT.md`, lint commands nowhere — the environment already names them.
+- **Case law is written rule-first**: each rule is one `### P<n>.` heading, then the rule in at most two sentences, plus one issue or ADR link. The narrative lives in the issue. Incident memoirs are what make a standards file grow linearly with project age.
+- **Process content is not a standard.** It is a hint: process content for one delivery phase, never a rule with an id. Hints live at `.agents/knowledge/hints/`, one file per phase, named for the phase that reads it and within the platform line budget `standards-lint` sets. A review rule about the code is a Layer 2 standard with an id; review procedure is a hint. Lint commands go nowhere — the environment already names them.
 
 ## Planning rules
 

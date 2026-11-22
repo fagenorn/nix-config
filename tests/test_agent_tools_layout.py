@@ -49,6 +49,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "delivery": frozenset({
         "agent_tools.console.inbox",  # look_approval
         "agent_tools.claims.forge_markers",  # look_marker, look_approval
+        "agent_tools.project_contract.agent_platform",  # standards_lint
         "agent_tools.project_contract.resolve_project",  # issue_branch, engine_shell
     }),
     "guard": frozenset({
@@ -63,6 +64,8 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.release.release_adapter",  # resolve_project, conformance_checks
         "agent_tools.release.release_profile",  # resolve_project, conformance_checks
         "agent_tools.delivery.host_admission",  # conformance_checks
+        "agent_tools.release.railway_deploy_adapter",  # host_readiness
+        "agent_tools.release.codesigned_artifact_adapter",  # host_readiness
     }),
     "release": frozenset({
         "agent_tools.claims.forge_land_lock",  # release_lock
