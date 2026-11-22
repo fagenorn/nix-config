@@ -37,11 +37,6 @@ needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
 one that is denied a shell command anyway is a fault (`engine_shell`), never a
 graded reply.
 
-`reply_problem` checks a structured reply against the reply schema's keywords
-`type`, `enum`, `const`, `required`, `properties`, `additionalProperties` and
-`items` (the engine carries no schema library) so an incomplete reply is a
-fault, never a transition.
-
 `launch` starts the argv as its own process group (`start_new_session`) because
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
@@ -238,50 +233,6 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) 
     if role.disallowed is not None or disallowed:
         argv += ["--disallowedTools", ",".join(disallowed)]
     return (*argv, "--append-system-prompt-file", str(system_prompt))
-
-
-_TYPES: dict[str, Callable[[object], bool]] = {
-    "object": lambda v: isinstance(v, dict),
-    "array": lambda v: isinstance(v, list),
-    "string": lambda v: isinstance(v, str),
-    "boolean": lambda v: isinstance(v, bool),
-    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
-    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
-    "null": lambda v: v is None,
-}
-
-
-def reply_problem(schema: Mapping, value: object, where: str = "reply") -> str | None:
-    """The first way `value` breaks `schema`, or None when it conforms."""
-    kind = schema.get("type")
-    if kind is not None:
-        kinds = kind if isinstance(kind, list) else [kind]
-        if not any(name in _TYPES and _TYPES[name](value) for name in kinds):
-            return f"{where} is not of type {kind}"
-    if "enum" in schema and not any(value == item and type(value) is type(item)
-                                    for item in schema["enum"]):
-        return f"{where} is {value!r}, not one of {schema['enum']}"
-    if "const" in schema and not (value == schema["const"]
-                                  and type(value) is type(schema["const"])):
-        return f"{where} is not {schema['const']!r}"
-    if isinstance(value, dict):
-        for name in schema.get("required", ()):
-            if name not in value:
-                return f"{where} lacks the required {name!r}"
-        properties = schema.get("properties", {})
-        for name, member in value.items():
-            if name in properties:
-                problem = reply_problem(properties[name], member, f"{where}.{name}")
-                if problem:
-                    return problem
-            elif schema.get("additionalProperties") is False:
-                return f"{where} has the member {name!r} the schema does not allow"
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for index, member in enumerate(value):
-            problem = reply_problem(schema["items"], member, f"{where}[{index}]")
-            if problem:
-                return problem
-    return None
 
 
 @dataclass(frozen=True)

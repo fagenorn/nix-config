@@ -50,7 +50,7 @@ from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_commands, engine_core, engine_ledger, engine_session, procedure_check,
+    engine_commands, engine_core, engine_ledger, engine_reply, engine_session, procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.project_contract import resolve_project
@@ -439,7 +439,7 @@ def _visit_session(run_dir: Path, root: str, step: dict,
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=reply, at=_now(),
                                wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
                                spend_usd=reading.spend_usd)
-    problem = engine_session.reply_problem(schema, reply)
+    problem = engine_reply.reply_problem(schema, reply)
     if problem is not None:
         raise Fault(f"step {name} gave a reply that breaks its schema: {problem}")
     outcome = reply.get(step["outcome_from"])

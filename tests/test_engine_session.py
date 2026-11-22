@@ -405,11 +405,13 @@ DRAFT_REPLY = {"type": "object",
                "properties": {"status": {"enum": ["drafted", "stuck"]},
                               "summary": {"type": "string"},
                               "items": {"type": "array", "items": {"type": "string"}}},
-               "required": ["status", "summary", "items"]}
+               "required": ["status", "summary", "items"],
+               "additionalProperties": False}
 REVIEW_REPLY = {"type": "object",
                 "properties": {"verdict": {"enum": ["approve", "revise"]},
                                "status": {"type": "string"}},
-                "required": ["verdict", "status"]}
+                "required": ["verdict", "status"],
+                "additionalProperties": False}
 ROLE_NAMES = ("planner", "implementer", "reviewer", "reviewer-lite")
 
 
@@ -753,7 +755,9 @@ class DeliverSessionTest(unittest.TestCase):
     def test_a_reply_that_breaks_its_schema_is_a_fault_before_any_grade(self):
         cases = {"missing members": {"status": "drafted"},
                  "wrong member type": {"status": "drafted", "summary": 3, "items": []},
-                 "wrong item type": {"status": "drafted", "summary": "s", "items": [1]}}
+                 "wrong item type": {"status": "drafted", "summary": "s", "items": [1]},
+                 "extra member": {"status": "drafted", "summary": "s", "items": [],
+                                  "extra": 1}}
         for name, reply in cases.items():
             with self.subTest(name):
                 project = EngineProject(self)

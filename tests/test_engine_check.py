@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_graders, procedure_check
+from agent_tools.delivery import engine, engine_graders, engine_reply, procedure_check
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
 from tests.guard_policy_world import install_platform_manifest_in_environ
@@ -286,6 +286,10 @@ def _exhausted_reply_value(schema: dict) -> None:
     schema["properties"]["status"]["enum"].append("exhausted")
 
 
+def _summary_with_min_length(schema: dict) -> None:
+    schema["properties"]["summary"] = {"type": "string", "minLength": 1}
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -436,6 +440,9 @@ CASES = [
          [("toy", None, "invalid_field")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
+    Case("reply_schema_outside_the_subset",
+         _editing_draft_reply(_summary_with_min_length),
+         [("toy", "draft", "unsupported_reply")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -540,6 +547,110 @@ class RefusalTableTest(unittest.TestCase):
                          set(procedure_check.DEFECTS))
 
 
+class RefusalDetailTest(unittest.TestCase):
+    def test_a_schema_outside_the_subset_names_the_schema_and_the_construct(self):
+        directory = broken_copy(_editing_draft_reply(_summary_with_min_length))
+        code, out, _ = run_check("--procedures", str(directory))
+        refusals = json.loads(out)["refusals"]
+        self.assertEqual(code, 1)
+        self.assertEqual(len(refusals), 1)
+        self.assertIn("toy-draft.reply.json", refusals[0]["detail"])
+        self.assertIn("minLength", refusals[0]["detail"])
+
+
+def _object(**properties: object) -> dict:
+    return {"type": "object", "properties": properties, "additionalProperties": False}
+
+
+class ReplySubsetTest(unittest.TestCase):
+    def test_the_subset_schemas_pass(self):
+        for path in sorted(PROCEDURES.glob("*.reply.json")):
+            with self.subTest(path.name):
+                self.assertIsNone(engine_reply.schema_problem(
+                    json.loads(path.read_text(encoding="utf-8"))))
+        schema = {"type": "object",
+                  "properties": {"n": {"type": "integer"}, "ok": {"type": "boolean"},
+                                 "tags": {"type": "array",
+                                          "items": {"enum": ["a", "b"], "type": "string"}},
+                                 "inner": {"type": "object", "properties": {},
+                                           "additionalProperties": False}},
+                  "required": ["n"], "additionalProperties": False}
+        self.assertIsNone(engine_reply.schema_problem(schema))
+
+    def test_each_construct_outside_the_subset_is_named(self):
+        rows = [
+            ({"type": "number"}, "number"),
+            ({"type": ["string", "null"]}, "type"),
+            ({"const": "x"}, "const"),
+            ({"oneOf": [{"type": "string"}]}, "oneOf"),
+            ({"$ref": "#/x"}, "$ref"),
+            ({"type": "string", "description": "d"}, "description"),
+            ({"type": "string", "pattern": "a"}, "pattern"),
+            ({"enum": [1, 2]}, "enum"),
+            ({"enum": []}, "enum"),
+            ({"enum": ["a", "a"]}, "enum"),
+            ({"type": "array"}, "items"),
+            ({"type": "object", "properties": {}}, "additionalProperties"),
+        ]
+        for node, word in rows:
+            with self.subTest(node=node):
+                problem = engine_reply.schema_problem(_object(p=node))
+                self.assertIsNotNone(problem)
+                self.assertIn(word, problem)
+        open_root = {"type": "object", "properties": {}, "additionalProperties": True}
+        self.assertIn("additionalProperties", engine_reply.schema_problem(open_root))
+        absent = {"type": "object", "properties": {}, "required": ["absent"],
+                  "additionalProperties": False}
+        self.assertIn("absent", engine_reply.schema_problem(absent))
+        self.assertIn("not an object", engine_reply.schema_problem([]))
+
+    def test_a_phrase_names_where_the_construct_is(self):
+        self.assertEqual(
+            engine_reply.schema_problem(_object(summary={"type": "string", "minLength": 1})),
+            "the keyword 'minLength' at reply.properties.summary")
+        self.assertEqual(
+            engine_reply.schema_problem(_object(n={"type": "number"})),
+            "the type 'number' at reply.properties.n")
+        self.assertEqual(
+            engine_reply.schema_problem({"type": "object", "properties": {}}),
+            "an object with no additionalProperties false at reply")
+        self.assertEqual(
+            engine_reply.schema_problem(_object(a={"type": "array", "items": {"type": "number"}})),
+            "the type 'number' at reply.properties.a.items")
+
+    def test_the_root_must_be_an_object_node(self):
+        for node in ({"type": "string"}, {"enum": ["a"]},
+                     {"type": "array", "items": {"type": "string"}}):
+            with self.subTest(node=node):
+                problem = engine_reply.schema_problem(node)
+                self.assertIsNotNone(problem)
+                self.assertIn("root", problem)
+                self.assertIsNone(engine_reply.schema_problem(_object(p=node)))
+
+
+class ReplyValidatorTest(unittest.TestCase):
+    def test_a_reply_is_checked_against_exactly_the_subset(self):
+        draft = json.loads((PROCEDURES / "toy-draft.reply.json").read_text(encoding="utf-8"))
+        good = {"status": "drafted", "summary": "s", "items": ["a"]}
+        self.assertIsNone(engine_reply.reply_problem(draft, good))
+        bad = {
+            "extra member": {"status": "drafted", "summary": "s", "items": [], "extra": 1},
+            "outside the enum": {**good, "status": "maybe"},
+            "wrong type": {**good, "summary": 3},
+            "wrong item type": {**good, "items": [1]},
+            "missing member": {"summary": "s", "items": []},
+        }
+        for name, reply in bad.items():
+            with self.subTest(name):
+                self.assertIsNotNone(engine_reply.reply_problem(draft, reply))
+        integer = _object(n={"type": "integer"})
+        self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": True}))
+        self.assertIsNone(engine_reply.reply_problem(integer, {"n": 2}))
+        self.assertIsNotNone(engine_reply.reply_problem({"type": "number"}, 1))
+        self.assertIsNotNone(engine_reply.reply_problem({"type": "string"}, "x"))
+        self.assertIsNone(engine_reply.reply_problem(_object(s={"type": "string"}), {"s": "x"}))
+
+
 class GraphTest(unittest.TestCase):
     def test_a_step_reached_only_through_claim_lost_is_reachable(self):
         directory = broken_copy(editing("toy-child", _recovery))
@@ -587,7 +698,8 @@ class NoSideEffectTest(unittest.TestCase):
         self.assertEqual(json.loads(done.stdout), {"called": [], "codes": [0, 1]})
 
     def test_the_check_modules_import_no_process_or_socket_module(self):
-        for name in ("engine.py", "procedure_check.py", "engine_graders.py", "engine_caps.py"):
+        for name in ("engine.py", "procedure_check.py", "engine_graders.py", "engine_caps.py",
+                     "engine_reply.py"):
             tree = ast.parse((DELIVERY / name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
