@@ -14,7 +14,9 @@ of the justfile's `agent-workflow-tests` recipe (`suite_runner.suite_members`) a
 file of each module the `lint` verification command runs (`verification_command.members`),
 as repository-relative paths under `python/`. A file outside that set is never read.
 
-A rule is a `###` rule-id heading. The platform layer is `the-bar.md` and each
+A rule is a `###` rule-id heading outside a fence and an HTML comment or block
+(`agent_tools.delivery.markdown_scan`, the reading the heading test uses), so a rule commented
+out or shown as an example defines nothing. The platform layer is `the-bar.md` and each
 `stacks/*.md` of `--platform-standards`; the project layer is each `*.md` of
 `--project-standards` except `README.md`. A well-formed citation resolves against exactly one
 layer by its prefix: an id with the project prefix (`P`) against the project layer, any other
@@ -43,7 +45,8 @@ then the project shards by filename, each in heading order):
   enforcer is a problem and is not counted.
 
 Exit status 2, with one `standards-lint: <reason>` line on stderr: an argument path that is not
-absolute or not an existing directory, a platform directory without `the-bar.md`, a justfile
+absolute or not an existing directory, a project-standards directory outside `--root` (the
+project's rules are its own), a platform directory without `the-bar.md`, a justfile
 without the suite recipe, a lint member run without `-m`; argparse misuse also exits 2.
 """
 
@@ -55,6 +58,7 @@ from pathlib import Path
 from typing import NamedTuple, Sequence
 
 from agent_tools.delivery.context_map_lint import CITATION_RE
+from agent_tools.delivery.markdown_scan import scan
 from agent_tools.delivery.rule_ids import (
     CITATION, CITE, PROJECT_PREFIX, RULE_ID_HEADING, citations, prefix_of)
 from agent_tools.delivery.suite_runner import suite_members
@@ -71,7 +75,7 @@ class Rule(NamedTuple):
 
 def _headings(path: Path) -> list[Rule]:
     rules = []
-    for line in path.read_text("utf-8").splitlines():
+    for _, _, line in scan(path.read_text("utf-8")):
         match = RULE_ID_HEADING.match(line)
         if match and match["hashes"] == "###":
             rules.append(Rule(match["prefix"] + match["number"], match["title"]))
@@ -130,9 +134,12 @@ def problems(root: Path, paths: list[str], platform: list[Rule], project: list[R
     return found
 
 
-def rule_index(root: Path, paths: list[str], rules: list[Rule]) -> list[str]:
-    """The index lines: each rule with the enforcers citing it, then the two counts."""
-    citing: dict[str, set[str]] = {}
+def rule_index(root: Path, paths: list[str], platform: list[Rule], project: list[Rule]) -> list[str]:
+    """The index lines: each rule with the enforcers citing it, then the two counts.
+
+    A citation credits a rule of the layer it resolves to, as `problems` resolves it.
+    """
+    citing: dict[tuple[bool, str], set[str]] = {}
     nothing = 0
     for path in paths:
         if not (root / path).is_file():
@@ -140,14 +147,18 @@ def rule_index(root: Path, paths: list[str], rules: list[Rule]) -> list[str]:
         text = (root / path).read_text("utf-8")
         for citation in citations(text):
             if citation.well_formed:
-                citing.setdefault(citation.token, set()).add(path)
+                layer = prefix_of(citation.token) == PROJECT_PREFIX
+                citing.setdefault((layer, citation.token), set()).add(path)
         if not CITATION.search(text) and not CITATION_RE.search(text):
             nothing += 1
     lines: list[str] = []
-    for rule in rules:
-        lines.append(f"{rule.id}. {rule.title}")
-        lines += [f"  {path}" for path in sorted(citing.get(rule.id, ()))]
-    judged = sum(1 for rule in rules if rule.id not in citing)
+    judged = 0
+    for layer, rules in ((False, platform), (True, project)):
+        for rule in rules:
+            lines.append(f"{rule.id}. {rule.title}")
+            cited = sorted(citing.get((layer, rule.id), ()))
+            lines += [f"  {path}" for path in cited]
+            judged += not cited
     return lines + [f"judged rules: {judged}", f"enforcers citing nothing: {nothing}"]
 
 
@@ -175,6 +186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         root = _directory("--root", args.root)
         platform_directory = _directory("--platform-standards", args.platform_standards)
         project_directory = _directory("--project-standards", args.project_standards)
+        if not project_directory.resolve().is_relative_to(root.resolve()):
+            raise ValueError(f"--project-standards is not under --root: {args.project_standards}")
         paths = enforcers(root)
         platform = platform_rules(platform_directory)
     except (ValueError, OSError) as error:
@@ -185,7 +198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for problem in found:
         print(f"{PREFIX} {problem}", file=sys.stderr)
     if args.index:
-        print("\n".join(rule_index(root, paths, platform + project)))
+        print("\n".join(rule_index(root, paths, platform, project)))
         return 1 if found else 0
     if found:
         return 1

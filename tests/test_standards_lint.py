@@ -54,7 +54,7 @@ class CitationFormTest(unittest.TestCase):
                 self.assertEqual(citations(text), [])
 
     def test_a_token_that_is_no_rule_id_is_malformed(self):
-        for token in ("b7", "B07", "B7a", "B", "7"):
+        for token in ("b7", "B07", "B7a", "B", "7", "_B7", "B7_x"):
             with self.subTest(token=token):
                 self.assertEqual(citations(cite(token)), [Citation(1, token, False)])
 
@@ -223,6 +223,45 @@ class CheckTest(LintTestCase):
         self.assertIn("cites B2", after.stderr)
 
 
+    def test_a_citation_led_by_an_underscore_is_malformed_in_an_enforcer(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": "# " + cite("_B7") + "\n"}, members=["tests/test_a.py"])
+
+        result = self.run_lint(root, platform, project)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("standards-lint: tests/test_a.py:1: malformed citation " + cite("_B7"),
+                      result.stderr.splitlines())
+
+    def test_a_commented_out_or_fenced_rule_heading_is_no_rule(self):
+        hidden = {
+            "comment.md": "# C\n\n<!--\n### P1. Retired\n\nBody.\n-->\n",
+            "one_line.md": "# O\n\n<!-- ### P2. Retired -->\n",
+            "fence.md": "# F\n\n```md\n### P3. Example\n```\n",
+            "tilde.md": "# T\n\n~~~md\n### P4. Example\n~~~\n"}
+        for token in ("P1", "P2", "P3", "P4"):
+            with self.subTest(token=token):
+                root, platform, project = self.fixture(
+                    files={"tests/test_a.py": cite(token) + "\n"}, members=["tests/test_a.py"],
+                    project_shards=hidden)
+
+                result = self.run_lint(root, platform, project)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"cites {token}, which is in no applicable layer", result.stderr)
+
+    def test_a_commented_out_bar_heading_is_no_rule(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": cite("B3") + "\n"}, members=["tests/test_a.py"])
+        bar = platform / "the-bar.md"
+        bar.write_text(bar.read_text("utf-8") + "\n<!--\n### B3. Retired\n\nBody.\n-->\n", "utf-8")
+
+        result = self.run_lint(root, platform, project)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cites B3", result.stderr)
+
+
 class LayerTest(LintTestCase):
     def test_a_project_id_resolves_only_against_its_own_shards(self):
         files = {"tests/test_a.py": cite("P1") + "\n"}
@@ -272,6 +311,20 @@ class LayerTest(LintTestCase):
 
 
 class UsageTest(LintTestCase):
+    def test_project_standards_of_another_project_are_a_usage_error(self):
+        files = {"tests/test_a.py": cite("P1") + "\n"}
+        root_a, platform_a, project_a = self.fixture(
+            files=files, members=["tests/test_a.py"],
+            project_shards={"a.md": "# A\n\n### P1. A rule\n\nBody.\n"})
+        root_b, platform_b, project_b = self.fixture(files=files, members=["tests/test_a.py"])
+
+        result = self.run_lint(root_b, platform_b, project_a)
+
+        self.assertEqual(self.run_lint(root_a, platform_a, project_a).returncode, 0)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--project-standards", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_a_relative_path_is_a_usage_error(self):
         root, platform, project = self.fixture(files={}, members=["tests/test_a.py"])
 
@@ -337,6 +390,19 @@ class IndexTest(LintTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(rule_lines, ["B1. One", "B2. Two", "PY1. Py", "P1. One", "P2. Two"])
         self.assertIn("judged rules: 5", lines)
+
+    def test_a_bar_id_shadowed_by_a_project_rule_is_not_credited_in_the_index(self):
+        root, platform, project = self.fixture(
+            files={"tests/test_a.py": cite("B9") + "\n"}, members=["tests/test_a.py"],
+            project_shards={"x.md": "# X\n\n### B9. Shadow\n\nBody.\n"})
+        (platform / "stacks" / "python.md").unlink()
+
+        result = self.run_lint(root, platform, project, "--index")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cites B9", result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "B1. One", "B2. Two", "B9. Shadow", "judged rules: 3", "enforcers citing nothing: 0"])
 
     def test_the_index_still_fails_on_an_unknown_citation(self):
         root, platform, project = self.index_fixture("# " + cite("Z9") + "\n")
