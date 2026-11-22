@@ -5,7 +5,7 @@ Three layers, most specific wins. Machine-global layers live here (`~/.agents/st
 | Layer | Where | Content |
 |---|---|---|
 | 0 — the bar | `the-bar.md` | Universal principles, every language, every project. |
-| 1 — stack | `stacks/{dotnet,typescript-react,node,python}.md` | Project-independent idioms and trap libraries for one language or framework. Version-stamped. |
+| 1 — stack | `stacks/{dotnet,dotnet-data,dotnet-ai,typescript-react,node,python}.md` | Project-independent idioms and trap libraries for one language or framework. Version-stamped. |
 | 2 — project | the repo's `docs/standards/` | Deltas only: layout, fixture machinery, telemetry names, tenant rules, migration registries. |
 
 ## Rule ids
@@ -16,12 +16,14 @@ Every rule in the three layers is one `###` heading that opens with its id, writ
 |---|---|
 | `the-bar.md` | `B` |
 | `stacks/dotnet.md` | `NET` |
+| `stacks/dotnet-data.md` | `NET` |
+| `stacks/dotnet-ai.md` | `NET` |
 | `stacks/node.md` | `NODE` |
 | `stacks/python.md` | `PY` |
 | `stacks/typescript-react.md` | `TSR` |
 | the repo's `docs/standards/` shards | `P` |
 
-A heading carries one id, and a new rule takes the next unused number of its prefix. Ids are never renumbered or reused. Project ids are local to their repository, so a report that spans projects prefixes the repository name. `R1` to `R9` keep their ids and form and stay outside the layers.
+A heading carries one id, and a new rule takes the next unused number of its prefix. The files of one stack share its prefix, and its numbers are unique across them. Ids are never renumbered or reused. Project ids are local to their repository, so a report that spans projects prefixes the repository name. `R1` to `R9` keep their ids and form and stay outside the layers.
 
 ## Precedence
 

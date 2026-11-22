@@ -6,6 +6,7 @@ standards README names one prefix per layer file) and criterion 2 (every
 project rule is a heading with a `P` id, none a numbered list item).
 """
 
+import collections
 import re
 import unittest
 from pathlib import Path
@@ -235,11 +236,29 @@ class LiveStandardsTest(unittest.TestCase):
             set(table),
             {"the-bar.md", "docs/standards/"}
             | {f"stacks/{path.name}" for path in (GLOBAL / "stacks").glob("*.md")})
-        self.assertEqual(len(set(table.values())), len(table))
+        counts = collections.Counter(table.values())
+        self.assertEqual(counts["NET"], 3)
+        self.assertEqual({prefix for prefix, n in counts.items() if n > 1}, {"NET"})
         self.assertEqual(table["the-bar.md"], "B")
         self.assertEqual(table["docs/standards/"], "P")
         self.assertEqual(table["stacks/python.md"], "PY")
         self.assertEqual(table["stacks/dotnet.md"], "NET")
+        self.assertEqual(table["stacks/dotnet-data.md"], "NET")
+        self.assertEqual(table["stacks/dotnet-ai.md"], "NET")
+
+    def test_the_dotnet_shards_keep_every_net_id(self):
+        paths = [GLOBAL / "stacks" / name
+                 for name in ("dotnet.md", "dotnet-data.md", "dotnet-ai.md")]
+        counts = collections.Counter()
+        for path in paths:
+            ids, problems = rule_headings(path.read_text())
+            self.assertEqual(problems, [], path.name)
+            counts.update(f"{p}{n}" for p, n, _ in ids)
+            self.assertLessEqual(len(path.read_bytes()), 8192, path.name)
+        for n in range(1, 12):
+            with self.subTest(id=f"NET{n}"):
+                self.assertEqual(counts[f"NET{n}"], 1)
+        self.assertEqual(max(counts.values()), 1)
 
     def test_every_rule_heading_in_the_three_layers_carries_one_id(self):
         bar, stacks, project = layer_files()
