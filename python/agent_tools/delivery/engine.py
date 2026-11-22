@@ -33,10 +33,14 @@ directory) for the issue, in the project the current directory belongs to, to
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
+- exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"},
+  "run"}`, another deliver of the issue holds its newest run's lock; nothing is
+  written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
 - exit 2, stdout empty and one stderr line: a usage error, or a refusal before
   any run exists (no project contract, no `deliver.json`, a procedure that fails
-  the check or that the engine cannot run); no run directory is created.
+  the check or that the engine cannot run, or a newest run that is not done and
+  not running); no run directory is created.
 """
 
 from __future__ import annotations

@@ -21,19 +21,29 @@ is a `Fault` with no `outcome_graded`. `decide` steps are walked by the core and
 record nothing. The run ends with `run_done`, or `stop_reached` naming the step
 of the last core transition.
 
+Single writer: under the issue's creation lock (`creation_lock_path`) the shell
+finds the issue's newest run, creates the run and takes `<run>/lock`, an
+exclusive `flock` it holds until `deliver` returns, holding
+`{"pid", "started"}`. A newest run whose lock is held makes the call exit
+`EXIT_RUNNING` and write nothing; a newest run with a free lock that is not done
+is refused (continuing a run is a later slice); a done run lets a new run start.
+
 Exit codes and the result line (one compact sorted-key JSON line on stdout for
-0 and 3, nothing for 1 and 2):
+0, 3 and 4, nothing for 1 and 2):
 
 - `EXIT_DONE` 0: `{"detail", "end": "done", "need": null, "run"}`;
 - `EXIT_FAULT` 1: a fault during the run (`Fault`);
 - `EXIT_REFUSED` 2: refused before a run exists (`Refused`);
-- `EXIT_STOP` 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`.
+- `EXIT_STOP` 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
+- `EXIT_RUNNING` 4: `{"detail", "end": null, "need": null, "process": {"pid",
+  "started"}, "run"}`, the process that holds the newest run's lock.
 
 `detail` is one sentence ending in a full stop.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import socket
@@ -50,6 +60,8 @@ EXIT_DONE = 0
 EXIT_FAULT = 1
 EXIT_REFUSED = 2
 EXIT_STOP = 3
+EXIT_RUNNING = 4
+LOCK_NAME = "lock"
 ENTRY = "deliver"
 SUPPLIED_INPUTS = ("issue",)
 RUNNABLE_KINDS = ("command", "decide")
@@ -139,22 +151,108 @@ def _prepare(procedures_dir: Path) -> tuple[dict, CommandTable]:
     return snapshot, table
 
 
+def creation_lock_path(root: Path, issue: int) -> Path:
+    return Path(root) / f".{issue}.deliver.lock"
+
+
+def lock_holder(run_dir: Path) -> dict | None:
+    """The `{"pid", "started"}` of the process holding `run_dir/lock`, or None.
+
+    The file is opened read-only and never created; a lock nobody holds is None.
+    """
+    try:
+        descriptor = os.open(Path(run_dir) / LOCK_NAME, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            with os.fdopen(os.dup(descriptor), encoding="utf-8") as handle:
+                document = json.load(handle)
+            return {"pid": document["pid"], "started": document["started"]}
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _take_run_lock(run_dir: Path, at: str) -> int:
+    descriptor = os.open(run_dir / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, json.dumps({"pid": os.getpid(), "started": at},
+                                        sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        os.fsync(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
     snapshot, table = _prepare(Path(procedures_dir))
     source = _load(Path(procedures_dir) / f"{ENTRY}.json")
     inputs = {name: issue for name in source["inputs"]}
+    project = snapshot["project"]["id"]
+    held: list[int] = []
     try:
-        run_dir = engine_ledger.create_run(
-            project=snapshot["project"]["id"], issue=issue, procedure=ENTRY,
-            procedures_dir=Path(procedures_dir), platform_revision=platform_revision(os.environ),
-            host=_host(), inputs=inputs, now=datetime.now(timezone.utc))
-    except (engine_ledger.LedgerError, OSError) as error:
+        creation = _lock_creation(issue)
+        try:
+            newest = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
+            if newest is not None:
+                holder = lock_holder(newest)
+                if holder is not None:
+                    return EXIT_RUNNING, {
+                        "detail": f"The {ENTRY} procedure of issue {issue} is already running "
+                                  f"as process {holder['pid']}.",
+                        "end": None, "need": None,
+                        "process": {"pid": holder["pid"], "started": holder["started"]},
+                        "run": newest.name}
+                state = engine_ledger.fold(
+                    engine_ledger.read_run(newest),
+                    engine_ledger.replay(newest / "events.jsonl"), engine_ledger.process_alive)
+                if not state.done:
+                    raise Refused(f"run {newest.name} is not done, and continuing a run is a "
+                                  "later slice of the engine")
+            run_dir = engine_ledger.create_run(
+                project=project, issue=issue, procedure=ENTRY,
+                procedures_dir=Path(procedures_dir),
+                platform_revision=platform_revision(os.environ),
+                host=_host(), inputs=inputs, now=datetime.now(timezone.utc))
+            held.append(_take_run_lock(run_dir, _now()))
+        finally:
+            os.close(creation)
+    except (engine_ledger.LedgerError, OSError, KeyError) as error:
+        _release(held)
         raise Refused(str(error)) from error
+    except BaseException:
+        _release(held)
+        raise
     try:
         return _walk(run_dir, table, inputs)
     except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
             OSError, ValueError, KeyError) as error:
         raise Fault(str(error)) from error
+    finally:
+        _release(held)
+
+
+def _lock_creation(issue: int) -> int:
+    root = engine_ledger.runs_root()
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    descriptor = os.open(creation_lock_path(root, issue), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _release(held: list[int]) -> None:
+    while held:
+        os.close(held.pop())
 
 
 def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:

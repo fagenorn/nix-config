@@ -7,6 +7,7 @@ child process from source.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from agent_tools.delivery import engine, engine_ledger
 from agent_tools.delivery.engine_ledger import RUN_ID_RE
-from agent_tools.delivery.engine_shell import platform_revision
+from agent_tools.delivery.engine_shell import creation_lock_path, lock_holder, platform_revision
 from tests.guard_policy_world import GuardPolicyWorld
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -292,6 +293,97 @@ class RefusalTest(unittest.TestCase):
             outside = Path(tempfile.mkdtemp(dir=project.tmp))
             self.assertRefused(project, project.deliver(procedures, cwd=outside),
                                "not_onboarded")
+
+
+class LockTest(unittest.TestCase):
+    def start(self, project: EngineProject, procedures: Path) -> subprocess.Popen:
+        argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(argv, **options)
+        self.addCleanup(process.communicate)
+        self.addCleanup(process.kill)
+        self.addCleanup(project.release.write_text, "go", encoding="utf-8")
+        return process
+
+    def test_a_second_deliver_during_a_run_exits_already_running_and_appends_nothing(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-block", "done")])
+        first = self.start(project, procedures)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            runs = project.runs()
+            if runs and any(e["event"] == "process_started" for e in project.events(runs[0])):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the run never started its step process")
+        run = runs[0]
+        before = (run / "events.jsonl").read_bytes()
+        runs_before = project.runs()
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 4, second.stdout + second.stderr)
+        self.assertEqual(len(second.stdout.splitlines()), 1)
+        line = json.loads(second.stdout)
+        ANY_SENTENCE(self, line.pop("detail"))
+        self.assertIsInstance(line["process"].pop("started"), str)
+        self.assertEqual(line, {"end": None, "need": None, "process": {"pid": first.pid},
+                                "run": run.name})
+        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+        self.assertEqual(project.runs(), runs_before)
+        self.assertEqual(json.loads((run / "lock").read_text())["pid"], first.pid)
+        project.release.write_text("go", encoding="utf-8")
+        self.assertEqual(first.wait(60), 0)
+        self.assertEqual(project.events(run)[-1]["event"], "run_done")
+
+    def test_creating_a_run_waits_for_the_issue_creation_lock(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        root = project.world.home / ".agents/state/engine/runs"
+        root.mkdir(parents=True, mode=0o700)
+        descriptor = os.open(creation_lock_path(root, 1512), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        process = self.start(project, procedures)
+        time.sleep(1.0)
+        self.assertIsNone(process.poll())
+        self.assertEqual(project.runs(), [])
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        self.assertEqual(process.wait(60), 0)
+        self.assertEqual(len(project.runs()), 1)
+
+    def test_a_stopped_run_is_not_joined_by_a_new_run(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-fail", "done")])
+        self.assertEqual(project.deliver(procedures).returncode, 3)
+        run = project.runs()[0]
+        before = (run / "events.jsonl").read_bytes()
+        again = project.deliver(procedures)
+        self.assertEqual(again.returncode, 2, again.stdout + again.stderr)
+        self.assertEqual(again.stdout, "")
+        self.assertEqual(len(again.stderr.splitlines()), 1, again.stderr)
+        self.assertEqual(len(project.runs()), 1)
+        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+
+    def test_a_done_run_lets_the_next_deliver_start_a_new_run(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        self.assertEqual(project.deliver(procedures).returncode, 0)
+        again = project.deliver(procedures)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(len(project.runs()), 2)
+
+    def test_lock_holder_reads_only_a_held_lock(self):
+        with tempfile.TemporaryDirectory() as name:
+            run_dir = Path(name)
+            self.assertIsNone(lock_holder(run_dir))
+            self.assertFalse((run_dir / "lock").exists())
+            content = {"pid": 42, "started": "2026-11-21T00:00:00Z"}
+            (run_dir / "lock").write_text(json.dumps(content), encoding="utf-8")
+            self.assertIsNone(lock_holder(run_dir))
+            descriptor = os.open(run_dir / "lock", os.O_RDWR)
+            self.addCleanup(os.close, descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            self.assertEqual(lock_holder(run_dir), content)
 
 
 class ShapeTest(unittest.TestCase):
