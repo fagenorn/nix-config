@@ -18,13 +18,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from agent_tools.console import approve, contract_draft, register, register_check
+from agent_tools.console import approve, register, register_check
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from . import console_test_support as support
 from . import test_console_approve_service as approve_tests
 from .test_console_approve_service import ApproveCase
-from .test_console_register_service import ROOT, CancelChecks, answer_of, git, sample_repository
+from .test_console_register_service import ROOT, CancelChecks, git
 from .test_console_stream import next_frame, next_view, open_stream
 
 SLUG = "fixture/console-commit-failure"
@@ -191,96 +191,6 @@ class CommitEnvironmentApprovalTest(CommitFailureCase):
                          approve.hook_signing_note("pre-commit", "it ended with exit status 1"))
         self.assertNotIn(UNTRUE, card["why"])
         self.assertTrue((self.kept_worktree() / ".entered").is_file())
-
-
-class DraftedEnvironmentTest(CommitFailureCase):
-    """A devenv checkout with an installed hook registers through its proposed environment (#1268)."""
-
-    def arrange(self, *, devenv: bool) -> None:
-        self.repo = sample_repository(self.parent, remote=True)
-        if devenv:
-            (self.repo / "devenv.nix").write_text("{ ... }: { }\n")
-            git(self.repo, "add", "-A")
-            git(self.repo, "commit", "-q", "-m", "devenv")
-        common = Path(git(self.repo, "rev-parse", "--path-format=absolute",
-                          "--git-common-dir").strip())
-        (common / "hooks").mkdir(exist_ok=True)
-        hook = common / "hooks" / "pre-commit"
-        hook.write_text(NEEDS_CONFIG + f"printf 'passed\\n' > '{self.parent / 'hook-passed'}'\n")
-        hook.chmod(0o755)
-        (self.parent / "bin").mkdir()
-        stub = self.parent / "bin" / "devenv"
-        stub.write_text(
-            "#!/bin/sh\n"
-            f"echo \"$*\" >> '{self.parent / 'devenv-calls'}'\n"
-            "if [ \"$1\" != shell ] || [ \"$2\" != -- ]; then exit 64; fi\n"
-            "shift 2\n"
-            "printf 'generated\\n' > .generated-hook-config\n"
-            "exec \"$@\"\n")
-        stub.chmod(0o755)
-        saved = os.environ["PATH"]
-        os.environ["PATH"] = f"{self.parent / 'bin'}{os.pathsep}{saved}"
-        self.addCleanup(os.environ.__setitem__, "PATH", saved)
-        self.start(register.Adopter(), pusher=approve.push,
-                   slug_of=lambda root: "sample-owner/sample-app")
-        self.shown = self.become_ready()
-
-    def stored(self, plan_id: str) -> dict:
-        path = self.home / ".agents/state/adopt/plans" / (plan_id.partition(":")[2] + ".json")
-        return json.loads(path.read_text("utf-8"))["plan"]["contract_draft"]
-
-    def test_a_devenv_checkout_with_a_hook_plans_its_commit_environment_and_applies_through_it(self):
-        self.arrange(devenv=True)
-        (card,) = self.apply_cards()
-        self.assertEqual(card["lines"][0],
-                         "commits run in its development shell: devenv shell (found in its files)")
-        plan = self.stored(self.shown["plan_id"])
-        self.assertEqual(plan["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
-        self.assertEqual(plan["bindings"]["commands"]["commit-environment"]["argv"],
-                         ["devenv", "shell", "--"])
-        self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
-        self.assertEqual(self.steps(), ["applied", "opened"])
-        self.assertIsNone(approve.retained(self.shown["plan_id"]))
-        calls = (self.parent / "devenv-calls").read_text().splitlines()
-        self.assertTrue(calls[0].startswith("shell -- env GIT_TRACE2_EVENT="), calls[0])
-        self.assertEqual((self.parent / "hook-passed").read_text(), "passed\n")
-        self.assertFalse((self.repo / ".generated-hook-config").exists())
-        branch = self.view()["registration"]["adoption"]["branch"]
-        shipped = json.loads(git(self.repo, "show", f"{branch}:.agents/project.json"))
-        self.assertEqual(shipped["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
-
-    def test_the_owner_changes_the_proposed_command_before_applying(self):
-        self.arrange(devenv=True)
-        plan_id = self.shown["plan_id"]
-        self.assertEqual(self.defer(plan_id)[0], 204)
-        self.assertEqual(self.apply_cards(), [])
-        (entry,) = [d for d in self.view()["registration"]["draft"]
-                    if d["field"] == "commit-environment"]
-        self.assertEqual(entry["line"],
-                         "commits run in its development shell: devenv shell (found in its files)")
-        self.assertIs(entry["more"], False)
-        given = {"id": contract_draft.QUESTION_ID, "subject": "commit-environment", "value": "none"}
-        self.assertEqual(self.answer(answer_of(plan_id, given))[0], 204)
-        self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] != plan_id
-                      and r["state"] == "ready")
-        (card,) = self.apply_cards()
-        self.assertEqual(card["lines"][0], "commits run in its development shell: none (set by you)")
-        plan = self.stored(self.view()["registration"]["plan_id"])
-        self.assertNotIn("environment", plan["bindings"]["vcs"]["commit"])
-        self.assertNotIn("commit-environment", plan["bindings"]["commands"])
-
-    def test_the_same_checkout_without_devenv_plans_as_today_and_stops_at_its_hook(self):
-        self.arrange(devenv=False)
-        (card,) = self.apply_cards()
-        self.assertFalse([x for x in card["lines"] if x.startswith("commits run in its development shell")])
-        plan = self.stored(self.shown["plan_id"])
-        self.assertNotIn("environment", plan["bindings"]["vcs"]["commit"])
-        self.assertNotIn("commit-environment", plan["bindings"]["commands"])
-        card = self.failed()
-        self.assertIn("pre-commit hook", card["headline"])
-        self.assertEqual(card["lines"], ["hook config missing"])
-        self.assertFalse((self.parent / "devenv-calls").exists())
-        self.assertFalse((self.parent / "hook-passed").exists())
 
 
 class ReconciledEnvironmentTest(CommitFailureCase):

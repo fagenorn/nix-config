@@ -1,6 +1,6 @@
 # ADR-console-033 — The drafted contract and the question cards read plainly and fit the screen
 
-- **Status:** accepted; D1 amended by ADR-console-082; D3 amended in #1445
+- **Status:** accepted; D1 amended by ADR-console-082; D3 amended in #1445; D1, D2, D3, D4 and D10 amended in place by #1485 (five fields and five facts)
 - **Decided in:** #1079
 
 ## Context
@@ -19,21 +19,21 @@ The owner's rules for this sprint: everything that needs the owner is a counted 
 
 ## Decision
 
-**D1. The main group is a fixed field set.** `project-id`, `project-name`, `default-branch`, `tracker`, `docs-paths`, `build-command` and `test-command`, in field order, whatever their source. Every other settled field is in the more group. Each main entry keeps its own Change control, so at most seven are visible before the fold opens.
+**D1. The main group is a fixed set.** The three main fields `integration-branch`, `lint-command` and `test-command`, then the five fact lines (the project id and issue tracker, the checks a pull request must pass, the platform versions it runs on, the minutes per delivery attempt, the agent knowledge files it holds), in that order, whatever their source. Every other settled field (`release`, `production`) is in the more group. Each main field keeps its own Change control, so at most three are visible before the fold opens; a fact line is `<label>: <value> (<source>)` and has none.
 
 **D2. Plain words.** `contract_draft.py` owns every drafted-value word, and the page shows them verbatim. A draft saved before this wording is read back through `contract_draft.refresh`, which gives it the current labels, option labels and card questions and leaves every value, source and reason as saved.
 
 - A more-group field at its start value reads as one plain sentence with no source suffix, for example `work branches are named after their issue`. At any other value it reads `<plain label>: <value> (<source words>)`.
 - Labels are plain everywhere: asks, refusals and lines.
-- The counted line is `and 20 more settings at their usual values`, or `and 20 more settings, 3 of them set by you` once the owner changed any. A count of one is singular: `and 1 more setting at its usual value`, `and 1 more setting, set by you`.
+- The counted line is `and 2 more settings at their usual values`, or `and 2 more settings, 1 of them set by you` once the owner changed any. A count of one is singular: `and 1 more setting at its usual value`, `and 1 more setting, set by you`.
 
 **D3. The more group is changed by choosing a value.**
 
 - The counted line is a fold. Its opened list is plain lines, each a quiet button that opens the same change box as Change, so the list adds no Change buttons.
 - The fold opens by itself when its entry has a refusal or an open change. Otherwise it keeps its open or closed state across every redraw of the same repository's registration. It starts closed for another repository, and after any draw that showed no fold (a running registration).
-- The choice buttons of a change box are drafted-value text too, so they are plain: `projections` offers `It generates no agent instruction files`, and `release` offers `It makes no releases`.
+- The choice buttons of a change box are drafted-value text too, so they are plain: `production` offers `It declares no production rules`, and `release` offers `It makes no releases`.
 
-**D4. Placeholders come from the view.** `contract_draft.placeholder(field)` gives every text field its words, such as `owner/name`, `the build command` or `the test command`. The page falls back to `Type your answer` and `Type the new value` only for a frame without one.
+**D4. Placeholders come from the view.** `contract_draft.placeholder(field)` gives every text field its words, such as `a branch name`, `the lint command` or `the test command`. The page falls back to `Type your answer` and `Type the new value` only for a frame without one.
 
 **D5. The key hint is the strip, and it sits on its card.**
 
@@ -52,7 +52,7 @@ The owner's rules for this sprint: everything that needs the owner is a counted 
 
 **D9. A single option is the action.** A `register` card with exactly one option and no text field shows no option list. Its one action button is labelled with the option and is pre-picked, so Enter sends it. `plan_questions` no longer appends `This is the only thing the adoption can do with this file.`, which amends ADR-console-029 D5. The retry card keeps its why line and its `Retry` option, and the apply card of #1073 has two options and is untouched.
 
-**D10. The default-branch ask follows the remote count.**
+**D10. The integration-branch ask follows the remote count.** The card reads `Which branch does finished work of <name> merge into?` and then one of three tails:
 
 - No remote: `It has no remote, so the console cannot tell: choose a branch or type its name.`
 - More than one: `It has N remotes, so the console cannot tell which one to ask: choose a branch or type its name.`

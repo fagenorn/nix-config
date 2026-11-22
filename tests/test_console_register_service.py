@@ -561,13 +561,12 @@ class RegisterRunTest(Case):
         self.assertEqual((reg["result"], reg["outcome"]), ("drafting", None))
         self.assertEqual(
             reg["headline"], f"What the console read from {repo.name}: it has no project contract yet")
-        self.assertEqual([q["subject"] for q in reg["questions"]],
-                         ["project-id", "tracker", "build-command", "test-command"])
-        self.assertTrue(reg["questions"][0]["ask"].endswith(
-            "Its remote does not name a project: type its id, as owner/name."))
-        self.assertIn("default branch: main (read from its remote)",
+        self.assertEqual([q["subject"] for q in reg["questions"]], ["lint-command", "test-command"])
+        self.assertIn("branch finished work merges into: main (read from its remote)",
                       [d["line"] for d in reg["draft"]])
-        self.assertEqual(reg["note"], "The draft has 4 open questions.")
+        self.assertIn("cannot be derived until its origin remote names a GitHub repository",
+                      [d["value"] for d in reg["draft"]])
+        self.assertEqual(reg["note"], "The draft has 2 open questions.")
         self.assertFalse((self.home / ".agents/state/adopt/plans").exists()
                          and list((self.home / ".agents/state/adopt/plans").iterdir()))
         self.assertEqual(git(repo, "status", "--porcelain"), "")
@@ -1034,7 +1033,7 @@ class RegisterCancelTest(CancelChecks, Case):
         self.assert_cancelled(repo)
 
     def test_cancel_with_contract_questions_open(self):
-        self.start(Fake(plan=READY), draft_reader=lambda root: READ_NO_BUILD)
+        self.start(Fake(plan=READY), draft_reader=lambda root: READ_NO_LINT)
         repo = git_repo(self.parent / "r", contract=False)
         shown = self.registered(repo)
         self.assertEqual(shown["result"], "drafting")
@@ -1533,7 +1532,7 @@ class PlanAnswerRealTest(Case):
         self.assertEqual(home_state(self.home), snapshot)
 
 
-def sample_repository(parent: Path, *, remote: bool) -> Path:
+def sample_repository(parent: Path, *, remote: bool, derivable: bool = False) -> Path:
     root = parent / "sample-app"
     root.mkdir(parents=True)
     git(root, "init", "-q", "-b", "trunk")
@@ -1541,6 +1540,13 @@ def sample_repository(parent: Path, *, remote: bool) -> Path:
     git(root, "config", "user.email", "t@example.invalid")
     git(root, "config", "commit.gpgsign", "false")
     (root / "README.md").write_text("# sample\n")
+    if derivable:  # a protection file and the platform's own manifest: the values adoption derives
+        (root / ".github").mkdir()
+        (root / ".github/branch-protection.json").write_text(
+            '{"required_status_checks": {"strict": true, "checks": [{"context": "CI"}]}}\n')
+        tree = root / "home/common/agent-skills"
+        tree.mkdir(parents=True)
+        shutil.copy(ROOT / "home/common/agent-skills/platform-manifest.json", tree)
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "one")
     if remote:
@@ -1562,10 +1568,10 @@ def checkout_state(root: Path) -> tuple:
 READ_ALL = {
     "remotes": [("origin", "https://github.com/sample-owner/sample-app.git")],
     "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md", "justfile"],
-    "texts": {"justfile": "build:\n\techo b\ntest:\n\techo t\n"}}
-READ_NO_BUILD = {**READ_ALL, "files": ["README.md"], "texts": {}}
-NO_REMOTE_ASK = ("Which project is this repository?\n"
-                 "It has no remote that names it: type its id, as owner/name.")
+    "texts": {"justfile": "lint:\n\techo l\ntest:\n\techo t\n"}}
+READ_NO_LINT = {**READ_ALL, "files": ["README.md"], "texts": {}}
+NO_REMOTE_ASK = ("Which branch does finished work of sample-app merge into?\n"
+                 "It has no remote, so the console cannot tell: choose a branch or type its name.")
 
 
 def taken_entry(project_id, parent):
@@ -1600,7 +1606,7 @@ class DraftRealTest(DraftCase):
     def setUp(self):
         super().setUp()
         self.before = real_home_state()
-        self.repo = sample_repository(self.parent, remote=True)
+        self.repo = sample_repository(self.parent, remote=True, derivable=True)
         self.begin(register.Adopter(), dispatch=None)
         self.addCleanup(self.untouched)
 
@@ -1610,8 +1616,8 @@ class DraftRealTest(DraftCase):
 
     def ready(self):
         first = self.registered(self.repo)
-        second = self.answered_draft(first["plan_id"], "build-command", "none")
-        return self.answered_draft(second["plan_id"], "test-command", "none")
+        second = self.answered_draft(first["plan_id"], "lint-command", "true")
+        return self.answered_draft(second["plan_id"], "test-command", "true")
 
     def test_the_draft_read_runs_git_in_its_own_group_under_the_stop(self):
         runs = []
@@ -1631,13 +1637,13 @@ class DraftRealTest(DraftCase):
     def test_a_repository_with_no_contract_is_drafted_from_its_remote(self):
         reg = self.registered(self.repo)
         self.assertEqual(reg["result"], "drafting")
-        for line in ("project id: sample-owner/sample-app (read from its remote)",
-                     "project name: sample-app (read from its remote)",
-                     "default branch: trunk (read from its remote)",
-                     "issue tracker: GitHub, as sample-owner/sample-app (read from its remote)"):
+        for line in ("branch finished work merges into: trunk (read from its remote)",
+                     "project id and issue tracker: GitHub, as sample-owner/sample-app "
+                     "(read from its remote)",
+                     "checks a pull request must pass: CI (found in its files)"):
             self.assertIn(line, [d["line"] for d in reg["draft"]])
         items = self.register_items()
-        self.assertEqual([i["subject"] for i in items], ["build-command", "test-command"])
+        self.assertEqual([i["subject"] for i in items], ["lint-command", "test-command"])
         self.assertEqual({i["title"] for i in items}, {"Register sample-app"})
         self.assertEqual(self.view()["statement"]["inbox_items"], 2)
 
@@ -1651,10 +1657,10 @@ class DraftRealTest(DraftCase):
                   / (reg["plan_id"].partition(":")[2] + ".json"))
         document = json.loads(stored.read_text())
         draft = document["plan"]["contract_draft"]
-        self.assertEqual(draft["project"], {"id": "sample-owner/sample-app", "name": "sample-app"})
-        self.assertEqual(draft["bindings"]["vcs"]["default_branch"], "trunk")
-        self.assertEqual(draft["bindings"]["tracker"]["kind"], "github")
-        self.assertEqual(draft["bindings"]["tracker"]["repo_slug"], "sample-owner/sample-app")
+        self.assertEqual(draft["schema_version"], 3)
+        self.assertEqual(draft["bindings"]["vcs"], {"integration_branch": "trunk"})
+        self.assertEqual(draft["bindings"]["commands"]["lint"], {"argv": ["true"]})
+        self.assertEqual(reg["project_id"], "sample-owner/sample-app")
 
     def test_the_checkout_is_unchanged_before_approval(self):
         before = checkout_state(self.repo)
@@ -1666,68 +1672,49 @@ class DraftRealTest(DraftCase):
 
     def test_a_drafted_value_the_resolver_refuses_is_a_card_with_its_plain_reason(self):
         reg = self.ready()
-        shown = self.answered_draft(reg["plan_id"], "docs-paths", "../outside")
+        shown = self.answered_draft(reg["plan_id"], "release", '{"oops": 1}')
         self.assertEqual(shown["result"], "drafting")
         (question,) = shown["questions"]
-        self.assertEqual(question["subject"], "docs-paths")
-        self.assertEqual(
-            question["why"],
-            "The plan refused the documentation: must be a non-empty repository-relative "
-            "path with no '..' segment")
+        self.assertEqual(question["subject"], "release")
+        self.assertEqual(question["why"],
+                         "The plan refused the how it is released: release is missing profiles")
         self.assertIs(question["text"], True)
         text = json.dumps(self.view())
-        for word in ("adopt.draft", "contract.paths", "unsafe_path", "/bindings"):
+        for word in ("adopt.draft", "contract.release", "/release", "/bindings"):
             self.assertNotIn(word, text)
 
 
 class DraftNoRemoteTest(DraftCase):
     def setUp(self):
         super().setUp()
-        support.write_registry(self.registry, [taken_entry("someone/taken", self.parent)])
         self.repo = sample_repository(self.parent, remote=False)
         self.begin(register.Adopter(), dispatch=None)
 
-    def test_the_project_id_card_has_a_text_field(self):
+    def test_the_integration_branch_card_has_a_text_field(self):
         self.registered(self.repo)
-        (item,) = [i for i in self.register_items() if i["subject"] == "project-id"]
+        (item,) = [i for i in self.register_items() if i["subject"] == "integration-branch"]
         self.assertIs(item["text"], True)
-        self.assertEqual(item["questions"], [])
         self.assertEqual(item["headline"], NO_REMOTE_ASK)
 
-    def test_a_typed_id_that_breaks_the_id_rule_is_refused_in_plain_words(self):
+    def test_the_integration_branch_card_keeps_its_no_remote_sentence_after_another_answer(self):
         reg = self.registered(self.repo)
-        rows = self.rows("registration.ended")
-        self.assertEqual(
-            self.refusal_of(reg["plan_id"], "project-id", "not an id"),
-            "a project id is two names joined by one slash, like owner/name, with no spaces")
-        self.assertEqual(self.rows("registration.ended"), rows)
-
-    def test_a_typed_id_registered_for_another_checkout_is_refused(self):
-        reg = self.registered(self.repo)
-        self.assertEqual(self.refusal_of(reg["plan_id"], "project-id", "someone/taken"),
-                         "someone/taken is already registered for another checkout")
-        shown = self.answered_draft(reg["plan_id"], "project-id", "sample-owner/sample-app")
-        self.assertIn("project id: sample-owner/sample-app (set by you)",
-                      [d["line"] for d in shown["draft"]])
-        self.assertNotIn("project-id", [i["subject"] for i in self.register_items()])
-
-    def test_the_id_card_keeps_its_no_remote_sentence_after_another_answer(self):
-        reg = self.registered(self.repo)
-        shown = self.answered_draft(reg["plan_id"], "tracker", "none")
+        shown = self.answered_draft(reg["plan_id"], "lint-command", "make lint")
         self.assertEqual(shown["result"], "drafting")
-        (item,) = [i for i in self.register_items() if i["subject"] == "project-id"]
+        (item,) = [i for i in self.register_items() if i["subject"] == "integration-branch"]
         self.assertEqual(item["headline"], NO_REMOTE_ASK)
 
-    def test_an_unreadable_command_is_refused_in_plain_words(self):
+    def test_an_unreadable_command_or_none_is_refused_in_plain_words(self):
         reg = self.registered(self.repo)
         rows = self.rows("registration.ended")
         for value in ('echo "unterminated', "echo trailing\\"):
             self.assertEqual(
-                self.refusal_of(reg["plan_id"], "build-command", value),
+                self.refusal_of(reg["plan_id"], "lint-command", value),
                 "the command could not be read: close every quote and do not end it with a "
                 "backslash")
+        self.assertEqual(self.refusal_of(reg["plan_id"], "test-command", "none"),
+                         "Every project has a test command: type the command that runs it.")
         self.assertEqual(self.rows("registration.ended"), rows)
-        self.assertIn("build-command", [i["subject"] for i in self.register_items()])
+        self.assertIn("lint-command", [i["subject"] for i in self.register_items()])
 
 
 class DraftRunTest(DraftCase):
@@ -1754,37 +1741,6 @@ class DraftRunTest(DraftCase):
         self.registered(git_repo(self.parent / "r"))
         self.assertEqual(self.refusal_of(PID_A, "project-id", "a/b"),
                          "that plan has no drafted contract to change")
-
-    def test_a_remote_id_registered_for_another_checkout_reopens_the_id_card(self):
-        support.write_registry(
-            self.registry, [taken_entry("sample-owner/sample-app", self.parent)])
-        fake = Fake(plan=PLANNED)
-        self.begin(fake, draft_reader=lambda root: READ_ALL)
-        reg = self.registered(git_repo(self.parent / "r", contract=False))
-        self.assertEqual(reg["result"], "drafting")
-        (question,) = reg["questions"]
-        self.assertEqual(question["subject"], "project-id")
-        self.assertEqual(question["why"],
-                         "sample-owner/sample-app is already registered for another checkout")
-        self.assertIs(question["text"], True)
-        self.assertEqual(fake.calls, [])
-
-    def test_the_id_is_checked_again_before_the_plan_runs(self):
-        fake = Fake(plan=READY)
-        self.begin(fake, draft_reader=lambda root: READ_NO_BUILD)
-        reg = self.registered(git_repo(self.parent / "r", contract=False))
-        self.assertEqual(len(reg["questions"]), 2)
-        self.assertEqual(fake.calls, [])
-        support.write_registry(
-            self.registry, [taken_entry("sample-owner/sample-app", self.parent)])
-        reg = self.answered_draft(reg["plan_id"], "build-command", "none")
-        reg = self.answered_draft(reg["plan_id"], "test-command", "none")
-        self.assertEqual(reg["result"], "drafting")
-        (question,) = reg["questions"]
-        self.assertEqual(question["subject"], "project-id")
-        self.assertEqual(question["why"],
-                         "sample-owner/sample-app is already registered for another checkout")
-        self.assertEqual(fake.calls, [])
 
 
 def remote_checkout(parent: Path, *, contract: bool, ahead: bool,
@@ -1931,7 +1887,7 @@ class RegisterRemoteTest(Case):
 
     def test_an_unreadable_remote_on_a_checkout_with_no_contract_drafts_and_says_so(self):
         root = self.missing_origin(contract=False)
-        self.begin(Fake(plan=PLANNED), draft_reader=lambda root: READ_NO_BUILD)
+        self.begin(Fake(plan=PLANNED), draft_reader=lambda root: READ_NO_LINT)
         self.assertEqual(self.post({"path": str(root)})[0], 204)
         row = self.settled_row(root)
         self.assertEqual(row["result"], "drafting")
@@ -1951,12 +1907,12 @@ class RegisterRemoteTest(Case):
 
     def test_a_draft_answer_keeps_the_unreadable_remote_sentence(self):
         root = self.missing_origin(contract=False)
-        self.begin(Fake(plan=PLANNED), draft_reader=lambda root: READ_NO_BUILD)
+        self.begin(Fake(plan=PLANNED), draft_reader=lambda root: READ_NO_LINT)
         self.assertEqual(self.post({"path": str(root)})[0], 204)
         first = self.settled_row(root)
         self.assertEqual(first["remote"], register.REMOTE_UNREAD)
         status, _, _ = self.answer(answer_of(
-            first["plan_id"], {"id": "contract-draft", "subject": "build-command", "value": "none"}))
+            first["plan_id"], {"id": "contract-draft", "subject": "lint-command", "value": "true"}))
         self.assertEqual(status, 204)
         row = self.settled_row(root)
         self.assertEqual(row["result"], "drafting")

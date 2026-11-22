@@ -1,32 +1,41 @@
-"""The console's drafted project contract for a repository that has none (#1067).
+"""The console's drafted project contract for a repository that has none (#1067, #1485).
 
-Decided in ADR-console-031. The plain words and the main/more split are ADR-console-033. The proposed
-commit environment is ADR-console-082. A repository with no `.agents/project.json` is registered with a contract
-the console drafts from what the repository says and what the owner answers. This module reads the
-repository, drafts the 27 fields of the contract, words the open ones as cards, takes the owner's
-answers, and renders the wire-format contract that `adopt-project plan --contract-draft` takes. It
-judges only what it must to stay total (the project id's shape, the registry, a command that
-`shlex` can read, JSON that parses): every other value is the resolver's to judge (plan D2).
+Decided in ADR-console-031. The plain words and the main/more split are ADR-console-033. The reconcile
+proposal of a commit environment is ADR-console-083. A repository with no `.agents/project.json` is registered with
+a project-schema-3 contract the console drafts from what the repository says and what the owner answers.
+This module reads the repository, drafts the five values schema 3 authors, shows the values the platform
+derives as facts, words the open fields as cards, takes the owner's answers, and renders the wire-format
+contract that `adopt-project plan --contract-draft` takes. It judges only what it must to stay total (a
+command that `shlex` can read, JSON that parses): every other value is the resolver's to judge (plan D2).
 
-Reading. `read(root)` returns `{"remotes": [(name, url)], "default_branch", "branches", "files",
-"texts", "hooks", "environments"}` and never raises and never writes. Every git child has no shell, `stdin` and `stderr` to
+Reading. `read(root, cancel=None)` returns `{"remotes": [(name, url)], "default_branch", "branches", "files",
+"texts", "platform_version", "tree_platform_version", "protection_after", "pins_platform", "attempt"}` and
+never raises and never writes. Every git child has no shell, `stdin` and `stderr` to
 `DEVNULL`, `GIT_TIMEOUT` (10 seconds), `GIT_TERMINAL_PROMPT=0` and `GIT_NO_LAZY_FETCH=1`; an `OSError`,
 a timeout or a non-zero exit reads as empty or None. Remotes are the authored URLs (`config --get-regexp`, before
 `insteadOf`), sorted by name, one URL per name. The default branch is asked of the remote only when
 there is exactly one (`ls-remote --symref`). Branches are the local heads, files the tracked paths,
-texts the tracked build files (`justfile`, `Makefile`, `package.json` and their spellings), at most
-65536 bytes each. `hooks` are the `COMMIT_HOOKS` names (`pre-commit`, `prepare-commit-msg`,
-`commit-msg`; never `post-commit`, which cannot stop a commit) installed as executable files in the
-repository's own hooks directory (the `core.hooksPath` its own configuration sets, else its
-`hooks` directory; a global, system or command-line hooks path never counts, and Git's checkout trust
-is kept), in `COMMIT_HOOKS` order. A relative `core.hooksPath` is resolved in each checkout, so such a
-hook counts only when `HEAD` tracks it as an executable file or as a link inside the tree to one. `environments` are the `ENVIRONMENTS`
-file names present in the `HEAD` commit as a regular file (the revision Apply's worktree starts from,
-so an untracked, staged-only or directory entry never counts), in `ENVIRONMENTS` order. A set cancel
-reads both as empty, as it reads the rest.
+texts the tracked build files (`justfile`, `Makefile`, `package.json` and their spellings) and the
+tracked `.github/branch-protection.json` and `devenv.lock`, at most 65536 bytes each, read from `HEAD`.
+`platform_version` is the running platform manifest's version (None on any error) and
+`tree_platform_version` the `platform_version` of a tracked `platform-manifest.json` of the tree at `HEAD`
+(None when there is none or it holds no version). The conformance the adoption would plan is read without
+writing, with `adopt_conformance.plan_conformance` over `HEAD`: `protection_after` is the text of the
+protection file the adoption writes, else the committed one, else None, and `pins_platform` says the
+adoption pins the platform in `devenv.lock` (any failure there gives the committed text and False).
+`attempt` is `{"minutes", "source"}` of `attempt_history.read` (`history` or `fallback`). A set cancel
+reads what git says as empty.
 
-`read_hooks(root, cancel, *, search_path=None)` reads the same `hooks` and `environments` and adds
-`stranded`, as `{"hooks", "stranded", "environments"}`; it never raises and never writes. `stranded`
+`read_hooks(root, cancel, *, search_path=None)` reads the commit hooks and the environment files a
+reconcile plan needs, as `{"hooks", "stranded", "environments"}`; it never raises and never writes. `hooks` are the
+`COMMIT_HOOKS` names (`pre-commit`, `prepare-commit-msg`, `commit-msg`; never `post-commit`, which cannot stop
+a commit) installed as executable files in the repository's own hooks directory (the `core.hooksPath` its
+own configuration sets, else its `hooks` directory; a global, system or command-line hooks path never counts,
+and Git's checkout trust is kept), in `COMMIT_HOOKS` order. A relative `core.hooksPath` is resolved in each
+checkout, so such a hook counts only when `HEAD` tracks it as an executable file or as a link inside the tree
+to one. `environments` are the `ENVIRONMENTS` file names present in the `HEAD` commit as a regular file (the
+revision Apply's worktree starts from, so an untracked, staged-only or directory entry never counts), in
+`ENVIRONMENTS` order. `stranded`
 is the sublist, in `COMMIT_HOOKS` order, of the hooks whose text `hook_stranded(text, search_path)`
 judges stranded: a hook that execs a runner found neither at its recorded absolute path nor on the
 plain `PATH` (`search_path`, else the console's own), so it fails in the commit Apply runs outside a
@@ -54,66 +63,70 @@ A runner that is unassigned, empty, relative, an option, or carries `$`, a backt
 unjudged too. Reading a hook never fetches a missing blob (`GIT_NO_LAZY_FETCH=1`), and reads a tracked hook by the
 blob id it first resolved, so the size bound and the content are one blob.
 
-Fields. `FIELDS` lists the 27 field ids in order; each is a record with exactly the keys
-`FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES` or None),
-`options` (`{"value", "label"}` rows), `text` (a typed value is accepted), `reason` (why its card is
+Fields. `FIELDS` lists the five authored field ids in order (`integration-branch`, `lint-command`,
+`test-command`, `release`, `production`), each pointing only at a member `schema_three.authored` accepts; each is a
+record with exactly the keys `FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES`
+or None), `options` (`{"value", "label"}` rows), `text` (a typed value is accepted), `reason` (why its card is
 open though it has a value) and `ask` (its card's question, fixed by `draft` so it never changes
-with later answers). `draft(root, reading, entries=())` fills each from the remote (the project id,
-its name, the default branch, the GitHub tracker), the tracked files (the documentation paths, the
-build and test commands) or the console's starting value, and opens the project id's card with
-`taken(<id>)` when the id it read is registered for another checkout. A field is open (`open_fields`)
-when it has no value and is one of `ASKED` (the project id, the default branch, the tracker, the build
-and test commands), or when it has a `reason`; `questions` words each open field as one card; `shown`
-gives every other field as one entry that can be changed. `refresh(root, fields)` gives a saved draft today's
-label, option labels and card question (ADR-console-033) without touching a value, a source or a reason,
-and drops a saved record whose field is no longer drafted (a retired field, `RETIRED_FIELDS`, or a `co-authored-by` record saved before #1449); `retired_in_use(fields)` says a saved draft held one
-that a stored plan may rest on (a value other than `none`, or a refusal), and `replanned(fields)` opens the project
-id's card with `PLAN_AGAIN` so an answer plans again, unless a card is already open. `MAIN` lists the seven fields read from the
-repository or asked; each of them is one line `<label>: <display> (<source>)`. Every other field has
-the flag `more` in `shown`, and while its value is its start value its line is its start sentence
-(`REST_WORDS`, plain words with no source), so it reads as a settled default; once it is another value
-it reads `<label>: <value> (<source>)`. `more_line` counts those shown `more` entries in one line,
-`and <n> more settings at their usual values`, or `and <n> more settings, <k> of them set by you`.
-`placeholder` gives a typed field the words its empty box shows (`PLACEHOLDERS`), None for a choice.
-Every label is plain words, never a contract term.
+with later answers). `draft(root, reading)` fills each from the remote's default branch, the tracked files
+(the lint and test commands) or the console's starting value, and follows them with the facts. A field is open
+(`open_fields`) when it has no value and is one of `ASKED` (the integration branch, the lint and test
+commands), or when it has a `reason`; `questions` words each open field as one card; `shown` gives every
+other record as one entry. `MAIN` lists the fields and facts that keep their own line, each one line
+`<label>: <display> (<source>)`; the other two fields have the flag `more` in `shown`, and while their value
+is its start value its line is its start sentence (`REST_WORDS`, plain words with no source), so it reads as a
+settled default; once it is another value it reads `<label>: <value> (<source>)`. `more_line` counts those
+shown `more` entries in one line, `and <n> more settings at their usual values`, or `and <n> more settings,
+<k> of them set by you`. `placeholder` gives a typed field the words its empty box shows (`PLACEHOLDERS`),
+None for a choice. Every label is plain words, never a contract term.
 
-Proposed field. `PROPOSED` lists the fields `draft` adds after the 27 only when proposed: today the
-`commit-environment` field (`commits run in its development shell`), drafted with the command of the first
-`ENVIRONMENTS` file in `reading["environments"]` (source `files`) when `reading["hooks"]` is not empty,
-and never otherwise, so a draft without it is exactly the 27 records. It is a main field, a typed
-choice with the one option `none`, never open. Its shown line leaves a trailing `--` off the command
-(`devenv shell`); the value and the command the contract names keep it. `proposed_lines(fields)` gives
-the `shown` line of each `PROPOSED` field present in a draft list, in `PROPOSED` order, `[]` for a
-non-list or a draft without one; the ready Apply card shows them first.
+Facts. `FACTS` lists the values the platform derives and the adoption writes from the repository, as records
+with the field keys, `options` `[]`, `text` False, `reason` None and `ask` `""`: the project id and issue
+tracker (`project-identity`, the origin remote's slug), the checks a pull request must pass
+(`required-checks`, `derived_values.checks_in` of `protection_after`, or `none`), the platform range
+(`platform-range`: a tree's own manifest first, else the running manifest's when `pins_platform`), the
+minutes per delivery attempt (`attempt-minutes`) and the knowledge files it holds (`knowledge-homes`: the
+platform homes that are a tracked path or directory). `FACT_POINTERS` names the pointers each stands for.
+A fact is never open, never answered (`UNKNOWN_FIELD`), never a refusal's target; a `source` of None means it
+cannot be derived and its value is then the words naming why. `facts(root, reading)` builds them,
+`with_facts(fields, reading, root)` appends them, `has_facts(fields)` says a list holds any and
+`fact_refused(error)` says an adoption refusal names only facts (or a registered project id), so it is a failed
+plan and no field's card reopens.
 
-A reconcile plan proposes the same field alone (#1333). `reconcile_fields(root, reading)` is `[]`
-unless `reading["stranded"]` is not empty and an `ENVIRONMENTS` file is in `reading["environments"]`;
-otherwise it is the one `commit-environment` record `draft` would add, built by the same helper.
-`amends(fields)` is true for a non-empty list whose every record is a `PROPOSED` field, which no
-`draft` list is. `environment(fields)` is that record's value, None when it is None or `none`.
-`carried(fields, plan)` keeps `fields` for a plan, except an amendment that names an environment
-which the plan's document does not carry, which is None. The drafted path's `_proposal` is unchanged.
+Earlier drafts. `refresh(root, fields)` gives a saved draft today's label, option labels and card question.
+An amendment (a reconcile proposal) keeps its records. Any other saved draft is carried onto `FIELDS`
+(`integration-branch` from its saved value, else the earlier default branch; a test command unless it was
+`none`; the release; the production) and the saved facts; every other record of an earlier table
+(`RETIRED_FIELDS`) is dropped and the lint command is asked. `retired_in_use(fields)` says a saved draft held
+one whose value is not `none`, or a refusal, and `replanned(fields)` opens the integration branch's card with
+`PLAN_AGAIN` so an answer plans again, unless a card is already open.
 
-Answers. `set_value(fields, field, value, entries=, root=)` returns `(new_fields, None)` or `(None,
-text)`, refusing in order with `UNKNOWN_FIELD`, `EMPTY_VALUE`, `NOT_OFFERED` (a choice field), `ID_RULE`
-(two names joined by one slash), `taken(<id>)`, `COMMAND_UNREADABLE` (a command `shlex` cannot read) and
-`NOT_JSON`, and never mutates its input. `taken_id` is the registry check. `draft_id` is the digest
-of the root and the fields, so two different drafts never share a plan.
+Reconcile proposal. `PROPOSED` lists the one field a reconcile plan proposes alone (#1333), never drafted
+(#1485): `commit-environment` (`commits run in its development shell`), a typed choice with the one option
+`none`, never open. `reconcile_fields(root, reading)` is `[]` unless `reading["stranded"]` is not empty and an
+`ENVIRONMENTS` file is in `reading["environments"]`; otherwise it is that one record with the command of the first
+file (source `files`). `amends(fields)` is true for a non-empty list whose every record is a `PROPOSED` field,
+which no `draft` list is. `environment(fields)` is that record's value, None when it is None or `none`.
+`carried(fields, plan)` keeps `fields` for a plan, except an amendment that names an environment which the plan's
+document does not carry, which is None. `proposed_lines(fields)` gives the `shown` line of each `PROPOSED` field
+present in a list, `[]` for a non-list or a draft without one; the ready Apply card shows them first. Its shown
+line leaves a trailing `--` off the command.
 
-Contract. `contract(fields)` is total on every list `draft` and `set_value` produced. It has
-`schema_version` 2, `project`, `bindings` (`vcs`, `tracker`, `paths`, `commands`, `workflow`),
-`capabilities` (each `{"support": "supported" | "unsupported"}`), `projections` and `release`; a
-`none` command is left out, `yes`/`no` are booleans, a
-path list splits on commas, and a count that is all digits is an int. It has no `platform` member:
-the adoption plan adds it. `bindings.vcs.commit` carries `resolve_project.RETIRED_COMMIT_MEMBERS` (the
-retired co-author member, always false, #1449) and `signed`. A `commit-environment` value other than None or `none` adds the command
-`bindings.commands["commit-environment"]` and names it in `bindings.vcs.commit.environment`; it never
-changes `workflow.verification` or `capabilities`.
+Answers. `set_value(fields, field, value)` returns `(new_fields, None)` or `(None, text)`, refusing in order
+with `UNKNOWN_FIELD`, `EMPTY_VALUE`, `NOT_OFFERED` (a choice field), `none` for a lint or test command (every
+project has both), `COMMAND_UNREADABLE` (a command `shlex` cannot read) and `NOT_JSON`, and never mutates its
+input. `draft_id` is the digest of the root and the fields, so two different drafts never share a plan.
 
-Refusals. `refused_field(error)` maps an `adopt.draft.invalid` or `adopt.draft.id_taken` error to the
-field its first matching violation names (the longest matching pointer wins) and the one wording `The
-plan refused the <label>: <message>`; `mark_refused` opens that field's card with it as the reason.
-No text here carries a pointer or a repair id.
+Contract. `contract(fields)` is total on every list `draft`, `set_value` and `refresh` produced. It has exactly
+`schema_version` 3, `bindings` (`vcs.integration_branch` and the commands `lint` and `test`, each only
+`argv`: `cwd` and `env` are platform constants), `capabilities` (nine, each `{"support": "supported" |
+"unsupported"}`: `knowledge.<x>` is supported exactly when its platform home is in the `knowledge-homes` fact, a
+missing fact reading as `none`, and every other one is supported), `projections` `[]`, `release`, and `production`
+only when it is not `none`. It has no `project`, `platform` or constant member: the platform derives them.
+
+Refusals. `refused_field(error)` maps an `adopt.draft.invalid` error to the field its first matching violation
+names (the longest matching pointer wins) and the one wording `The plan refused the <label>: <message>`;
+`mark_refused` opens that field's card with it as the reason. No text here carries a pointer or a repair id.
 """
 
 from __future__ import annotations
@@ -132,8 +145,9 @@ from pathlib import Path
 
 from agent_tools import canonical
 from agent_tools.console import manager
-from agent_tools.project_contract import adopt_planning, resolve_project
-from agent_tools.project_contract.adopt_planning import normalize_remote_url
+from agent_tools.project_contract import (
+    adopt_conformance, agent_platform, attempt_history, derived_values, schema_three)
+from agent_tools.system.semver import parse_semver
 
 QUESTION_ID = "contract-draft"
 GIT_TIMEOUT = 10
@@ -142,11 +156,14 @@ FIELD_KEYS = {"field", "label", "value", "source", "options", "text", "reason", 
 SOURCES = {
     "remote": "read from its remote",
     "files": "found in its files",
-    "folder": "taken from its folder name",
+    "lock": "locked in devenv.lock by the adoption",
+    "history": "from its recorded deliveries",
+    "platform": "the platform's value until enough deliveries are recorded",
     "start": "the console's starting value",
     "owner": "set by you",
 }
-ID_RULE = "a project id is two names joined by one slash, like owner/name, with no spaces"
+# The words of a fact's source where the key alone would say less: (fact, source) -> words.
+SOURCE_WORDS = {("platform-range", "files"): "from its own platform manifest"}
 UNKNOWN_FIELD = "that value is not part of the drafted contract"
 EMPTY_VALUE = "type a value"
 NOT_OFFERED = "choose one of the offered answers"
@@ -154,7 +171,8 @@ COMMAND_UNREADABLE = ("the command could not be read: close every quote and do n
                       "backslash")
 NOT_JSON = "type it as JSON, or choose one of the offered answers"
 NO_DRAFT = "that plan has no drafted contract to change"
-REPAIRS = ("adopt.draft.invalid", "adopt.draft.id_taken")
+REPAIRS = ("adopt.draft.invalid",)
+ID_TAKEN = "adopt.draft.id_taken"
 # The hooks whose exit status can stop `git commit` (githooks(5): post-commit cannot).
 COMMIT_HOOKS: tuple[str, ...] = ("pre-commit", "prepare-commit-msg", "commit-msg")
 MAX_LINKS = 8  # tracked links followed from a relative hooks path before the hook is read as absent
@@ -162,17 +180,7 @@ MAX_LINKS = 8  # tracked links followed from a relative hooks path before the ho
 ENVIRONMENTS: tuple[tuple[str, str], ...] = (("devenv.nix", "devenv shell --"),)
 ENVIRONMENT_FIELD = "commit-environment"
 PROPOSED: tuple[str, ...] = (ENVIRONMENT_FIELD,)
-ENVIRONMENT_COMMAND = adopt_planning.COMMIT_ENVIRONMENT_ID
-ID_PATTERN = re.compile(r"^[^\s/]+/[^\s/]+$")
 DIGITS = re.compile(r"^[0-9]+$")
-
-
-def taken(value: str) -> str:
-    return f"{value} is already registered for another checkout"
-
-
-def _yes_no() -> list[dict]:
-    return [{"value": "yes", "label": "yes"}, {"value": "no", "label": "no"}]
 
 
 def _none(label: str) -> list[dict]:
@@ -181,157 +189,85 @@ def _none(label: str) -> list[dict]:
 
 # id, label, pointers (the first is the field's member), options, text.
 _TABLE = (
-    ("project-id", "project id", ("/project/id", "/bindings/tracker/repo_slug"), [], True),
-    ("project-name", "project name", ("/project/name",), [], True),
-    ("default-branch", "default branch", ("/bindings/vcs/default_branch",), [], True),
-    ("integration-branch", "branch finished work merges into", ("/bindings/vcs/integration_branch",), [], True),
-    ("branch-pattern", "work branch names", ("/bindings/vcs/branch_pattern",), [], True),
-    ("worktree-root", "folder for work copies",
-     ("/bindings/vcs/worktree/root", "/capabilities/worktrees"), [], True),
-    ("worktree-prefix", "start of each work copy's name", ("/bindings/vcs/worktree/prefix",), [], True),
-    ("commit-signed", "signed commits", ("/bindings/vcs/commit/signed",), _yes_no(), False),
-    ("merge-strategy", "how pull requests are merged", ("/bindings/vcs/merge/strategy",), [], True),
-    ("delete-branch", "branch deletion after merge", ("/bindings/vcs/merge/delete_branch",),
-     _yes_no(), False),
-    ("tracker", "issue tracker", ("/bindings/tracker", "/capabilities/tracker"),
-     [{"value": "github", "label": "Track its issues on GitHub"},
-      {"value": "none", "label": "Track no issues here"}], False),
-    ("specs-path", "design specs folder", ("/bindings/paths/artifacts/specs",), [], True),
-    ("plans-path", "plans folder", ("/bindings/paths/artifacts/plans",), [], True),
-    ("docs-paths", "documentation",
-     ("/bindings/paths/architecture", "/capabilities/knowledge.architecture"), [], True),
-    ("context-paths", "glossary files",
-     ("/bindings/paths/context", "/capabilities/knowledge.context"), [], True),
-    ("standards-paths", "coding standards files",
-     ("/bindings/paths/standards", "/capabilities/knowledge.standards"), [], True),
-    ("hints-paths", "notes that guide agents", ("/bindings/paths/hints", "/capabilities/knowledge.hints"),
+    ("integration-branch", "branch finished work merges into", ("/bindings/vcs/integration_branch",),
      [], True),
-    ("operations-paths", "notes on how it is run", ("/bindings/paths/operations",), [], True),
-    ("rejections-paths", "records of ruled-out ideas", ("/bindings/paths/rejections",), [], True),
-    ("build-command", "build command",
-     ("/bindings/commands/build", "/bindings/workflow/verification", "/capabilities/verification"),
-     _none("It has no build command"), True),
-    ("test-command", "test command", ("/bindings/commands/test",),
-     _none("It has no test command"), True),
-    ("review-plan-command", "plan review command",
-     ("/bindings/commands/review-plan", "/bindings/workflow/review/plan",
-      "/capabilities/review.plan"), _none("It has no plan review command"), True),
-    ("review-code-command", "code review command",
-     ("/bindings/commands/review-code", "/bindings/workflow/review/code",
-      "/capabilities/review.code"), _none("It has no code review command"), True),
-    ("max-parallel", "deliveries at once",
-     ("/bindings/workflow/orchestration/max_parallel",), [], True),
-    ("attempt-budget", "minutes per delivery attempt",
-     ("/bindings/workflow/orchestration/attempt_budget_minutes",), [], True),
-    ("projections", "generated agent files", ("/projections",),
-     _none("It generates no agent instruction files"), True),
+    ("lint-command", "lint command", ("/bindings/commands/lint",), [], True),
+    ("test-command", "test command", ("/bindings/commands/test",), [], True),
     ("release", "how it is released", ("/release",),
      [{"value": "unsupported", "label": "It makes no releases"}], True),
+    ("production", "production rules", ("/production",),
+     _none("It declares no production rules"), True),
 )
-# A field an earlier console drafted that no longer exists (#1445): `refresh` drops its saved record.
-RETIRED_FIELDS: tuple[str, ...] = ("light-lane",)
-PLAN_AGAIN = ("The console no longer drafts a light lane, so the plan is made again: "
-              "type the project id to go on.")
-# Fields `draft` adds only when proposed; they are not among the 27 `FIELDS`.
+# An earlier console's field ids that are no longer drafted: `refresh` drops their saved records.
+RETIRED_FIELDS: tuple[str, ...] = (
+    "project-id", "project-name", "default-branch", "branch-pattern", "worktree-root",
+    "worktree-prefix", "commit-signed", "merge-strategy", "delete-branch", "tracker", "specs-path",
+    "plans-path", "docs-paths", "context-paths", "standards-paths", "hints-paths", "operations-paths",
+    "rejections-paths", "build-command", "review-plan-command", "review-code-command", "max-parallel",
+    "attempt-budget", "projections", "light-lane")
+PLAN_AGAIN = ("The console now drafts fewer settings, so the plan is made again: choose the branch "
+              "finished work merges into to go on.")
+# The field a reconcile plan proposes alone; `draft` never adds it (#1485).
 _PROPOSED_TABLE = (
     (ENVIRONMENT_FIELD, "commits run in its development shell",
      ("/bindings/vcs/commit/environment", "/bindings/commands/commit-environment"),
      _none("Commits run outside a development shell"), True),
 )
+# id, label, the pointers the platform derives for it.
+_FACT_TABLE = (
+    ("project-identity", "project id and issue tracker",
+     ("/project/id", "/bindings/tracker/repo_slug")),
+    ("required-checks", "checks a pull request must pass", ("/bindings/vcs/merge/required_checks",)),
+    ("platform-range", "platform versions it runs on", ("/platform",)),
+    ("attempt-minutes", "minutes per delivery attempt",
+     ("/bindings/workflow/orchestration/attempt_budget_minutes",)),
+    ("knowledge-homes", "agent knowledge files it holds", ("/capabilities",)),
+)
 FIELDS: tuple[str, ...] = tuple(row[0] for row in _TABLE)
-ASKED = frozenset({"project-id", "default-branch", "tracker", "build-command", "test-command"})
-COMMAND_FIELDS = ("build-command", "test-command", "review-plan-command", "review-code-command",
-                  ENVIRONMENT_FIELD)
-JSON_FIELDS = ("projections", "release")
-LABELS = {row[0]: row[1] for row in (*_TABLE, *_PROPOSED_TABLE)}
+FACTS: tuple[str, ...] = tuple(row[0] for row in _FACT_TABLE)
+FACT_POINTERS = {row[0]: row[2] for row in _FACT_TABLE}
+ASKED = frozenset({"integration-branch", "lint-command", "test-command"})
+COMMAND_FIELDS = ("lint-command", "test-command", ENVIRONMENT_FIELD)
+JSON_FIELDS = ("release", "production")
+LABELS = {**{row[0]: row[1] for row in (*_TABLE, *_PROPOSED_TABLE)},
+          **{row[0]: row[1] for row in _FACT_TABLE}}
 POINTERS = {row[0]: row[2] for row in (*_TABLE, *_PROPOSED_TABLE)}
-OPTIONS = {row[0]: row[3] for row in (*_TABLE, *_PROPOSED_TABLE)}
-TEXT = {row[0]: row[4] for row in (*_TABLE, *_PROPOSED_TABLE)}
-# field -> (value, source) the console starts from; the project id, name, default branch, tracker,
-# documentation paths and the build and test commands are read, not started.
-STARTS = {
-    "integration-branch": None,
-    "branch-pattern": "issue-<num>-<slug>",
-    "worktree-root": ".worktrees",
-    "worktree-prefix": "worktree-",
-    "commit-signed": "no",
-    "merge-strategy": "merge",
-    "delete-branch": "yes",
-    "specs-path": ".agents/artifacts/specs",
-    "plans-path": ".agents/artifacts/plans",
-    "context-paths": "none",
-    "standards-paths": "none",
-    "hints-paths": "none",
-    "operations-paths": "none",
-    "rejections-paths": "none",
-    "review-plan-command": "none",
-    "review-code-command": "none",
-    "max-parallel": "1",
-    "attempt-budget": "240",
-    "projections": "none",
-    "release": "unsupported",
-}
+OPTIONS = {**{row[0]: row[3] for row in (*_TABLE, *_PROPOSED_TABLE)}, **{f: [] for f in FACTS}}
+TEXT = {**{row[0]: row[4] for row in (*_TABLE, *_PROPOSED_TABLE)}, **{f: False for f in FACTS}}
+# field -> the value the console starts from; the integration branch and the commands are read, not started.
+STARTS = {"release": "unsupported", "production": "none"}
 # The more group's start sentences: what a field reads as while it still has its start value.
 REST_WORDS = {
-    "integration-branch": "finished work merges into the default branch",
-    "branch-pattern": "work branches are named after their issue",
-    "worktree-root": "each piece of work gets its own copy of the repository in the .worktrees folder",
-    "worktree-prefix": "each work copy's folder name starts with worktree-",
-    "commit-signed": "commits are not signed",
-    "merge-strategy": "pull requests are merged with a merge commit",
-    "delete-branch": "a work branch is deleted once it is merged",
-    "specs-path": "design specs are kept in .agents/artifacts/specs",
-    "plans-path": "plans are kept in .agents/artifacts/plans",
-    "context-paths": "no glossary files are named",
-    "standards-paths": "no coding standards files are named",
-    "hints-paths": "no notes that guide agents are named",
-    "operations-paths": "no notes on how it is run are named",
-    "rejections-paths": "no records of ruled-out ideas are named",
-    "review-plan-command": "no command reviews its plans",
-    "review-code-command": "no command reviews its code",
-    "max-parallel": "one delivery runs at a time",
-    "attempt-budget": "a delivery attempt may take up to 240 minutes",
-    "projections": "it generates no agent instruction files",
     "release": "it makes no releases",
+    "production": "it declares no production rules",
 }
-# The fields whose values are read from the repository or asked: they keep their own line.
-MAIN: tuple[str, ...] = ("project-id", "project-name", "default-branch", "tracker", "docs-paths",
-                         "build-command", "test-command", ENVIRONMENT_FIELD)
+# The fields and facts that keep their own line.
+MAIN: tuple[str, ...] = ("integration-branch", "lint-command", "test-command", *FACTS, ENVIRONMENT_FIELD)
 _JSON = "the value as JSON"
 PLACEHOLDERS = {
-    "project-id": "owner/name",
-    "project-name": "the project name",
-    "default-branch": "a branch name",
     "integration-branch": "a branch name",
-    "branch-pattern": "a branch name pattern",
-    "worktree-root": "a folder in the repository",
-    "specs-path": "a folder in the repository",
-    "plans-path": "a folder in the repository",
-    "worktree-prefix": "the start of each folder name",
-    "merge-strategy": "the merge method",
-    "docs-paths": "paths, separated by commas",
-    "context-paths": "paths, separated by commas",
-    "standards-paths": "paths, separated by commas",
-    "hints-paths": "paths, separated by commas",
-    "operations-paths": "paths, separated by commas",
-    "rejections-paths": "paths, separated by commas",
-    "build-command": "the build command",
+    "lint-command": "the lint command",
     "test-command": "the test command",
     ENVIRONMENT_FIELD: "the development shell command",
-    "review-plan-command": "the review command",
-    "review-code-command": "the review command",
-    "max-parallel": "a number",
-    "attempt-budget": "a number of minutes",
-    "projections": _JSON,
     "release": _JSON,
+    "production": _JSON,
 }
-DOC_FILES = ("README.md", "README", "README.rst", "ARCHITECTURE.md", "CONTEXT.md")
+# The platform home of each knowledge capability a draft declares, by the pointer that names the home.
+KNOWLEDGE = (("knowledge.context", "/bindings/paths/context"),
+             ("knowledge.standards", "/bindings/paths/standards"),
+             ("knowledge.architecture", "/bindings/paths/architecture"),
+             ("knowledge.hints", "/bindings/paths/hints"))
 JUST_FILES = ("justfile", "Justfile", ".justfile")
 MAKE_FILES = ("Makefile", "makefile", "GNUmakefile")
-TEXT_FILES = (*JUST_FILES, *MAKE_FILES, "package.json")
-NPM = {"build": "npm run build", "test": "npm test"}
-OTHER_TOOLS = (("Cargo.toml", {"build": "cargo build", "test": "cargo test"}),
-               ("go.mod", {"build": "go build ./...", "test": "go test ./..."}))
+TEXT_FILES = (*JUST_FILES, *MAKE_FILES, "package.json", derived_values.PROTECTION_SOURCE,
+              derived_values.LOCK_SOURCE)
+NPM = {"lint": "npm run lint", "test": "npm test"}
+OTHER_TOOLS = (("Cargo.toml", {"lint": "cargo clippy", "test": "cargo test"}),
+               ("go.mod", {"lint": "go vet ./...", "test": "go test ./..."}))
+
+
+def _home(pointer: str) -> str:
+    return schema_three.CONSTANTS[pointer][0]
 
 
 # --------------------------------------------------------------------------
@@ -476,19 +412,57 @@ def _hook_sources(root: str, cancel: threading.Event | None = None) -> list[tupl
             if (directory / name).is_file() and os.access(directory / name, os.X_OK)]
 
 
-def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
-    """The `COMMIT_HOOKS` that will run when Apply commits in its fresh worktree of `HEAD`."""
-    return [name for name, _ in _hook_sources(root, cancel)]
-
-
 def _environments(root: str, cancel: threading.Event | None = None) -> list[str]:
     """The `ENVIRONMENTS` files in the `HEAD` commit, the revision Apply's worktree starts from."""
     return [name for name, _ in ENVIRONMENTS
             if _entry(root, name, cancel) in (("100644", "blob"), ("100755", "blob"))]
 
 
+def _tree_platform_version(root: str, files: list[str], cancel: threading.Event | None) -> str | None:
+    """The `platform_version` of the manifest the tree tracks at `HEAD`, None when there is none."""
+    if derived_values.TREE_MANIFEST not in files:
+        return None
+    body = _git(root, "show", f"HEAD:{derived_values.TREE_MANIFEST}", cancel=cancel)
+    try:
+        document = json.loads(body[:TEXT_LIMIT]) if body is not None else None
+    except (ValueError, RecursionError):
+        return None
+    version = document.get("platform_version") if isinstance(document, dict) else None
+    return version if isinstance(version, str) and parse_semver(version) is not None else None
+
+
+def _platform_version() -> str | None:
+    try:
+        version = agent_platform.load_manifest()[0].get("platform_version")
+    except Exception:  # an unreadable manifest is a platform range that cannot be derived
+        return None
+    return version if isinstance(version, str) else None
+
+
+def _conformance(root: str, branch: str | None, committed: str | None,
+                 cancel: threading.Event | None) -> tuple[str | None, bool]:
+    """`(protection_after, pins_platform)`: what adopting `root` writes of the protection file, and whether it pins."""
+    try:
+        head = _git(root, "rev-parse", "--verify", "HEAD^{commit}", cancel=cancel)
+        if head is None or (cancel is not None and cancel.is_set()):
+            return committed, False
+        plan = adopt_conformance.plan_conformance(
+            Path(root), head.decode("ascii").strip(),
+            {"schema_version": 3, "bindings": {"vcs": {"integration_branch": branch or "main"}}}, {})
+        written = plan.contents.get(adopt_conformance.PROTECTION_FILE)
+        return (written.decode("utf-8", "replace") if written is not None else committed,
+                plan.member is not None)
+    except Exception:  # a conformance that cannot be planned changes nothing the draft shows
+        return committed, False
+
+
+def _origin_slug(remotes: list[tuple[str, str]]) -> str | None:
+    url = dict(remotes).get("origin")
+    return derived_values.normalize_remote_url(url) if url else None
+
+
 def read(root: str, cancel: threading.Event | None = None) -> dict:
-    """What the repository says: remotes, default branch, branches, files, texts, hooks, environments.
+    """What the repository says: remotes, default branch, branches, files, texts and what adoption derives.
 
     A set `cancel` ends the running git child's whole group and reads the rest as empty.
     """
@@ -504,12 +478,20 @@ def read(root: str, cancel: threading.Event | None = None) -> dict:
                 body = _git(root, "show", f"HEAD:{name}", cancel=cancel)
                 if body is not None:
                     texts[name] = body[:TEXT_LIMIT].decode("utf-8", "replace")
-        return {"remotes": remotes, "default_branch": _default_branch(root, remotes, cancel),
-                "branches": branches, "files": files, "texts": texts,
-                "hooks": _hooks(root, cancel), "environments": _environments(root, cancel)}
+        default = _default_branch(root, remotes, cancel)
+        after, pins = _conformance(root, default, texts.get(derived_values.PROTECTION_SOURCE), cancel)
+        budget = attempt_history.read(Path(root), _origin_slug(remotes))
+        return {"remotes": remotes, "default_branch": default, "branches": branches, "files": files,
+                "texts": texts, "platform_version": _platform_version(),
+                "tree_platform_version": _tree_platform_version(root, files, cancel),
+                "protection_after": after, "pins_platform": pins,
+                "attempt": {"minutes": budget.minutes,
+                            "source": "history" if budget.basis.get("source") == "history" else "fallback"}}
     except Exception:  # read never raises: an unreadable repository reads as empty
         return {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {},
-                "hooks": [], "environments": []}
+                "platform_version": None, "tree_platform_version": None, "protection_after": None,
+                "pins_platform": False,
+                "attempt": {"minutes": attempt_history.FALLBACK_MINUTES, "source": "fallback"}}
 
 
 _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
@@ -735,18 +717,6 @@ def read_hooks(root: str, cancel: threading.Event | None = None, *,
         return {"hooks": [], "stranded": [], "environments": []}
 
 
-def _host(url: str) -> str | None:
-    value = url.strip()
-    if value.startswith("git@"):
-        host, separator, _ = value[len("git@"):].partition(":")
-        return host.lower() if separator and host else None
-    if "://" in value:
-        authority = value.partition("://")[2].partition("/")[0]
-        host = authority.rpartition("@")[2].partition(":")[0]
-        return host.lower() or None
-    return None
-
-
 # --------------------------------------------------------------------------
 # Drafting
 # --------------------------------------------------------------------------
@@ -788,112 +758,143 @@ def _command(reading: Mapping, which: str) -> str | None:
     return None
 
 
-def _docs(files: list) -> str:
-    found = [name for name in DOC_FILES if name in files]
-    if any(str(path).startswith("docs/") for path in files):
-        found.append("docs")
-    return ", ".join(found) if found else "none"
-
-
-def _resolved(path: object) -> Path | None:
-    try:
-        return Path(str(path)).resolve()
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-
-def _held(project_id: str | None, entries: Iterable[Mapping], root: str) -> str | None:
-    if project_id is None:
-        return None
-    here = _resolved(root)
-    for entry in entries:
-        if entry.get("project_id") == project_id and _resolved(entry.get("root")) != here:
-            return taken(project_id)
-    return None
-
-
-def taken_id(fields: Iterable[Mapping], entries: Iterable[Mapping], root: str) -> str | None:
-    """`taken(<id>)` when the project id is registered for another checkout, else None."""
-    value = next((f["value"] for f in fields if f["field"] == "project-id"), None)
-    return _held(value, entries, root)
-
-
 def _ask(field: str, name: str, remotes: int) -> str:
-    if field == "project-id":
-        tail = ("It has no remote that names it" if remotes == 0 else
-                f"It has {remotes} remotes, so the console cannot tell which one names it"
-                if remotes > 1 else "Its remote does not name a project")
-        return f"Which project is this repository?\n{tail}: type its id, as owner/name."
-    if field == "default-branch":
+    if field == "integration-branch":
         tail = ("It has no remote, so the console cannot tell" if remotes == 0 else
                 f"It has {remotes} remotes, so the console cannot tell which one to ask"
                 if remotes > 1 else "Its remote did not say")
-        return (f"Which branch is the default branch of {name}?\n"
+        return (f"Which branch does finished work of {name} merge into?\n"
                 f"{tail}: choose a branch or type its name.")
-    if field == "tracker":
-        return f"Where are the issues of {name} tracked?"
-    if field in ("build-command", "test-command"):
-        verb = "builds" if field == "build-command" else "tests"
+    if field in ("lint-command", "test-command"):
+        verb = "lints" if field == "lint-command" else "tests"
         return (f"Which command {verb} {name}?\nThe console found none in its files: "
-                "type the command, or say it has none.")
+                "type the command that runs it.")
     if field == ENVIRONMENT_FIELD:
         return (f"Which command opens the development shell the commits of {name} run in?\n"
                 "Its commit hooks need its development shell: type the command, or say they need none.")
+    if field in FACTS:
+        return ""
     return f"What should the {LABELS[field]} of {name} be?"
 
 
-def _proposal(reading: Mapping) -> str | None:
-    """The command commits run through, when a development environment and a commit hook exist."""
-    environments = reading.get("environments") or ()
-    if not reading.get("hooks"):
-        return None
-    return next((command for name, command in ENVIRONMENTS if name in environments), None)
+def _record(field: str, value: str | None, source: str | None, name: str, remotes: int, *,
+            options: list | None = None, reason: str | None = None) -> dict:
+    return {"field": field, "label": LABELS[field], "value": value, "source": source,
+            "options": copy.deepcopy(OPTIONS[field] if options is None else options),
+            "text": TEXT[field], "reason": reason, "ask": _ask(field, name, remotes)}
 
 
 def _environment_record(command: str, name: str, remotes: int) -> dict:
-    return {"field": ENVIRONMENT_FIELD, "label": LABELS[ENVIRONMENT_FIELD],
-            "value": command, "source": "files",
-            "options": copy.deepcopy(OPTIONS[ENVIRONMENT_FIELD]),
-            "text": TEXT[ENVIRONMENT_FIELD], "reason": None,
-            "ask": _ask(ENVIRONMENT_FIELD, name, remotes)}
+    return _record(ENVIRONMENT_FIELD, command, "files", name, remotes)
 
 
-def draft(root: str, reading: Mapping, *, entries: Iterable[Mapping] = ()) -> list[dict]:
-    """The 27 fields, filled from the reading and the console's starting values."""
-    remotes = list(reading.get("remotes") or ())
+def _cannot(words: str) -> tuple[str, None]:
+    return words, None
+
+
+def _identity(reading: Mapping) -> tuple[str, str | None]:
+    slug = _origin_slug(list(reading.get("remotes") or ()))
+    return (slug, "remote") if slug else _cannot(
+        "cannot be derived until its origin remote names a GitHub repository")
+
+
+def _checks(reading: Mapping) -> tuple[str, str | None]:
+    text = reading.get("protection_after")
+    if text is None:
+        return _cannot(
+            f"cannot be derived until {derived_values.PROTECTION_SOURCE} is in the repository")
+    try:
+        found = derived_values.checks_in(text)
+    except derived_values.Underivable as error:
+        return _cannot(error.message)
+    return (", ".join(found) or "none"), "files"
+
+
+def _range_words(version: str) -> str:
+    interval = derived_values.platform_range(version)
+    return f"{interval['min_inclusive']} up to {interval['max_exclusive']}"
+
+
+def _platform(reading: Mapping) -> tuple[str, str | None]:
+    tree, running = reading.get("tree_platform_version"), reading.get("platform_version")
+    try:
+        if tree:
+            return _range_words(tree), "files"
+        if reading.get("pins_platform") and running:
+            return _range_words(running), "lock"
+    except derived_values.Underivable as error:
+        return _cannot(error.message)
+    if derived_values.LOCK_SOURCE in (reading.get("files") or ()):
+        return _cannot(
+            f"cannot be derived until {derived_values.LOCK_SOURCE} can pin the agent platform")
+    return _cannot(f"cannot be derived until {derived_values.LOCK_SOURCE} is in the repository")
+
+
+def _attempt(reading: Mapping) -> tuple[str, str | None]:
+    found = reading.get("attempt") or {}
+    minutes = found.get("minutes", attempt_history.FALLBACK_MINUTES)
+    return str(minutes), "history" if found.get("source") == "history" else "platform"
+
+
+def _homes(reading: Mapping) -> tuple[str, str | None]:
+    files = list(reading.get("files") or ())
+    held = [home for _, pointer in KNOWLEDGE
+            for home in (_home(pointer),)
+            if any(path == home or path.startswith(home + "/") for path in files)]
+    return (", ".join(held) or "none"), "files"
+
+
+def facts(root: str, reading: Mapping) -> list[dict]:
+    """One fact record per `FACTS`, each from what the adoption would write (never a tracked file alone)."""
+    derived = {"project-identity": _identity, "required-checks": _checks, "platform-range": _platform,
+               "attempt-minutes": _attempt, "knowledge-homes": _homes}
+    return [_record(field, *derived[field](reading), Path(root).name, 0) for field in FACTS]
+
+
+def with_facts(fields: Iterable[Mapping], reading: Mapping, root: str) -> list[dict]:
+    """`fields` followed by the facts of `reading`."""
+    return [*(dict(f) for f in fields), *facts(root, reading)]
+
+
+def has_facts(fields: Iterable[Mapping]) -> bool:
+    return any(f["field"] in FACTS for f in fields)
+
+
+def _violations(error: Mapping) -> list[Mapping]:
+    found = error.get("violations")
+    return [v for v in found if isinstance(v, Mapping) and isinstance(v.get("pointer"), str)
+            ] if isinstance(found, list) else []
+
+
+def fact_refused(error: Mapping) -> bool:
+    """Whether an adoption refusal is about the project id it derived or only about derived values."""
+    if error.get("repair_id") == ID_TAKEN:
+        return True
+    members = [member for pointers in FACT_POINTERS.values() for member in pointers]
+    violations = _violations(error)
+    return (error.get("repair_id") == "adopt.draft.invalid" and bool(violations)
+            and len(violations) == len(error["violations"])
+            and all(any(_matches(v["pointer"], member) for member in members) for v in violations))
+
+
+def draft(root: str, reading: Mapping) -> list[dict]:
+    """The five fields, filled from the reading and the console's starting values, then the facts."""
+    remotes = len(reading.get("remotes") or ())
     name = Path(root).name
-    read_id = None
-    if len(remotes) == 1:
-        read_id = normalize_remote_url(remotes[0][1])
-    github = (len(remotes) == 1 and read_id is not None and _host(remotes[0][1]) == "github.com")
+    branch = reading.get("default_branch")
     values: dict[str, tuple[str | None, str | None]] = {
         field: (value, "start") for field, value in STARTS.items()}
-    values["project-id"] = (read_id, "remote" if read_id else None)
-    values["project-name"] = ((read_id.partition("/")[2], "remote") if read_id
-                              else (name, "folder"))
-    branch = reading.get("default_branch")
-    values["default-branch"] = (branch, "remote" if branch else None)
-    values["tracker"] = ("github", "remote") if github else (None, None)
-    values["docs-paths"] = (_docs(list(reading.get("files") or ())), "files")
-    for field, which in (("build-command", "build"), ("test-command", "test")):
+    values["integration-branch"] = (branch, "remote" if branch else None)
+    for field, which in (("lint-command", "lint"), ("test-command", "test")):
         found = _command(reading, which)
         values[field] = (found, "files" if found else None)
     fields = []
     for field in FIELDS:
-        options = copy.deepcopy(OPTIONS[field])
-        if field == "default-branch":
+        options = None
+        if field == "integration-branch":
             options = [{"value": b, "label": b} for b in reading.get("branches") or ()]
-        value, source = values[field]
-        fields.append({"field": field, "label": LABELS[field], "value": value, "source": source,
-                       "options": options, "text": TEXT[field], "reason": None,
-                       "ask": _ask(field, name, len(remotes))})
-    proposal = _proposal(reading)
-    if proposal is not None:
-        fields.append(_environment_record(proposal, name, len(remotes)))
-    held = taken_id(fields, entries, root)
-    if held is not None:
-        fields[0]["reason"] = held
-    return fields
+        fields.append(_record(field, *values[field], name, remotes, options=options))
+    return [*fields, *facts(root, reading)]
 
 
 def reconcile_fields(root: str, reading: Mapping) -> list[dict]:
@@ -926,21 +927,53 @@ def carried(fields: list[dict] | None, plan: Mapping) -> list[dict] | None:
 
 
 def _remote_count(fields: list[Mapping]) -> int:
-    """The remotes the draft was made from, as the project id's card recorded them."""
-    ask = next((f["ask"] for f in fields if f["field"] == "project-id"), "")
-    if "has no remote" in ask:
-        return 0
-    found = re.search(r"It has (\d+) remotes", ask)
-    return int(found.group(1)) if found else 1
+    """The remotes the draft was made from, as an earlier card recorded them."""
+    for field in fields:
+        if field["field"] in ("integration-branch", "default-branch", "project-id"):
+            if "has no remote" in field["ask"]:
+                return 0
+            found = re.search(r"It has (\d+) remotes", field["ask"])
+            if found:
+                return int(found.group(1))
+    return 1
+
+
+def _carry(fields: list[dict], name: str, remotes: int) -> list[dict]:
+    """A saved draft of an earlier table on today's: its values where they still mean the same."""
+    saved = {f["field"]: f for f in fields}
+    branch = saved.get("integration-branch")
+    earlier = saved.get("default-branch")
+    if branch is not None and isinstance(branch["value"], str) and branch["value"]:
+        kept = _record("integration-branch", branch["value"], branch["source"], name, remotes,
+                       options=branch["options"], reason=branch["reason"])
+    else:
+        source = earlier or branch or {"value": None, "source": None, "options": []}
+        kept = _record("integration-branch", source["value"], source["source"], name, remotes,
+                       options=source["options"],
+                       reason=branch["reason"] if branch is not None else None)
+    carried_over = [kept]
+    for field in ("lint-command", "test-command", "release", "production"):
+        found = saved.get(field)
+        if found is None or (field == "test-command" and found["value"] in (None, "none")):
+            value, source = (None, None) if field in ASKED else (STARTS[field], "start")
+            carried_over.append(_record(field, value, source, name, remotes))
+        else:
+            carried_over.append(_record(field, found["value"], found["source"], name, remotes,
+                                        reason=found["reason"]))
+    return [*carried_over, *(_record(f["field"], f["value"], f["source"], name, remotes)
+                             for f in fields if f["field"] in FACTS)]
 
 
 def refresh(root: str, fields: Iterable[Mapping]) -> list[dict]:
-    """A saved draft with today's wording: label, option labels and card question, values untouched.
+    """A saved draft with today's wording and fields: labels, option labels and card questions.
 
-    A saved record whose field is no longer drafted (a retired field, #1445, or #1449) is dropped.
+    An amendment keeps its records. Any other draft is carried onto `FIELDS` and its saved facts.
     """
-    fields = [dict(f) for f in fields if f["field"] in LABELS]
+    fields = [dict(f) for f in fields]
     remotes, name = _remote_count(fields), Path(root).name
+    if not amends(fields):
+        return _carry(fields, name, remotes)
+    fields = [f for f in fields if f["field"] in LABELS]
     for field in fields:
         known = field["field"]
         if not isinstance(field["options"], list):
@@ -954,15 +987,15 @@ def refresh(root: str, fields: Iterable[Mapping]) -> list[dict]:
 
 
 def retired_in_use(fields: Iterable[Mapping]) -> bool:
-    """Whether a saved draft holds a retired field whose value or refusal a stored plan may rest on."""
+    """Whether a saved draft holds an earlier field whose value or refusal a stored plan may rest on."""
     return any(f["field"] in RETIRED_FIELDS and (f["value"] not in (None, "none")
                                                  or f["reason"] is not None) for f in fields)
 
 
 def replanned(fields: Iterable[Mapping]) -> list[dict]:
-    """The fields with the project id's card open to plan again, unless a card is already open."""
+    """The fields with the integration branch's card open to plan again, unless a card is already open."""
     fields = list(fields)
-    return fields if open_fields(fields) else mark_refused(fields, "project-id", PLAN_AGAIN)
+    return fields if open_fields(fields) else mark_refused(fields, "integration-branch", PLAN_AGAIN)
 
 
 def open_fields(fields: Iterable[Mapping]) -> list[dict]:
@@ -976,13 +1009,10 @@ def questions(fields: Iterable[Mapping]) -> list[dict]:
              "text": f["text"]} for f in open_fields(fields)]
 
 
-def _display(field: Mapping, fields: Iterable[Mapping]) -> str:
+def _display(field: Mapping) -> str:
     value = field["value"]
-    if field["field"] == "tracker" and value == "github":
-        slug = next(f["value"] for f in fields if f["field"] == "project-id")
-        return f"GitHub, as {slug}"
-    if field["field"] == "integration-branch" and value is None:
-        return "the same as the default branch"
+    if field["field"] == "project-identity" and field["source"] is not None:
+        return f"GitHub, as {value}"
     if field["field"] == ENVIRONMENT_FIELD and isinstance(value, str):
         return value.removesuffix(" --")
     return str(value)
@@ -1002,16 +1032,17 @@ def _at_start(field: Mapping) -> bool:
     return field["value"] == STARTS.get(field["field"])
 
 
-def _line(field: Mapping, fields: list[dict]) -> str:
+def _line(field: Mapping) -> str:
     if field["field"] not in MAIN and _at_start(field):
         return REST_WORDS[field["field"]]
-    return f"{field['label']}: {_display(field, fields)} ({SOURCES.get(field['source'], '')})"
+    words = SOURCE_WORDS.get((field["field"], field["source"]), SOURCES.get(field["source"], ""))
+    return f"{field['label']}: {_display(field)} ({words})"
 
 
 def shown(fields: Iterable[Mapping]) -> list[dict]:
     fields = list(fields)
     still_open = {f["field"] for f in open_fields(fields)}
-    return [{"field": f["field"], "line": _line(f, fields), "value": f["value"],
+    return [{"field": f["field"], "line": _line(f), "value": f["value"],
              "options": copy.deepcopy(f["options"]), "text": f["text"],
              "more": f["field"] not in MAIN, "placeholder": placeholder(f["field"])}
             for f in fields if f["field"] not in still_open]
@@ -1052,8 +1083,7 @@ def _parses(value: str) -> bool:
     return True
 
 
-def set_value(fields: Iterable[Mapping], field: str, value: str, *, entries: Iterable[Mapping],
-              root: str) -> tuple[list[dict] | None, str | None]:
+def set_value(fields: Iterable[Mapping], field: str, value: str) -> tuple[list[dict] | None, str | None]:
     """The fields with `field` set by the owner, or `(None, text)` saying why not."""
     fields = list(fields)
     if (field not in FIELDS and field not in PROPOSED) or not any(
@@ -1065,18 +1095,15 @@ def set_value(fields: Iterable[Mapping], field: str, value: str, *, entries: Ite
     offered = [option["value"] for option in OPTIONS[field]]
     if not TEXT[field] and value not in offered:
         return None, NOT_OFFERED
-    if field == "project-id" and not ID_PATTERN.match(value):
-        return None, ID_RULE
+    if field in ("lint-command", "test-command") and value.lower() == "none":
+        kind = "lint" if field == "lint-command" else "test"
+        return None, f"Every project has a {kind} command: type the command that runs it."
     new = []
     for record in fields:
         record = copy.deepcopy(dict(record))
         if record["field"] == field:
             record.update(value=value, source="owner", reason=None)
         new.append(record)
-    if field == "project-id":
-        held = taken_id(new, entries, root)
-        if held is not None:
-            return None, held
     if field in COMMAND_FIELDS and value != "none":
         try:
             shlex.split(value)
@@ -1097,86 +1124,34 @@ def _json(value: str):
                       parse_constant=canonical.reject_nonfinite_literal)
 
 
-def _paths(value: str | None) -> list[str]:
-    if value is None or value == "none":
-        return []
-    return [part.strip() for part in value.split(",")]
-
-
-def _count(value: str | None):
-    return int(value) if value is not None and value.isascii() and DIGITS.match(value) else value
-
-
-def _flag(value: str | None) -> bool:
-    return value == "yes"
-
-
 def contract(fields: Iterable[Mapping]) -> dict:
-    """The drafted contract in the wire format; total on a list `draft` or `set_value` made."""
+    """The drafted contract in the wire format; total on a list `draft`, `set_value` or `refresh` made."""
     v = {f["field"]: f["value"] for f in fields}
     commands = {}
-    for field, key in (("build-command", "build"), ("test-command", "test"),
-                       ("review-plan-command", "review-plan"),
-                       ("review-code-command", "review-code")):
-        if v[field] is not None and v[field] != "none":
-            commands[key] = {"argv": shlex.split(v[field]), "cwd": ".", "env": []}
-    verification = [key for key in ("build", "test") if key in commands]
-    environment = v.get(ENVIRONMENT_FIELD)
-    if environment is not None and environment != "none":
-        commands[ENVIRONMENT_COMMAND] = {"argv": shlex.split(environment), "cwd": ".", "env": []}
-    github = v["tracker"] == "github"
-    default = v["default-branch"]
-    commit = {**resolve_project.RETIRED_COMMIT_MEMBERS, "signed": _flag(v["commit-signed"])}
-    if ENVIRONMENT_COMMAND in commands:
-        commit["environment"] = ENVIRONMENT_COMMAND
-    workflow = {
-        "verification": verification,
-        "orchestration": {"max_parallel": _count(v["max-parallel"]),
-                          "attempt_budget_minutes": _count(v["attempt-budget"])},
-        "review": {"plan": "review-plan" if "review-plan" in commands else None,
-                   "code": "review-code" if "review-code" in commands else None},
-    }
+    for field, key in (("lint-command", "lint"), ("test-command", "test")):
+        if v.get(field) not in (None, "none"):
+            commands[key] = {"argv": shlex.split(v[field])}
+    homes = {home.strip() for home in (v.get("knowledge-homes") or "none").split(",")}
 
     def support(on: bool) -> dict:
         return {"support": "supported" if on else "unsupported"}
 
+    release = v.get("release", STARTS["release"])
+    production = v.get("production", STARTS["production"])
     return {
-        "schema_version": 2,
-        "project": {"id": v["project-id"], "name": v["project-name"]},
-        "bindings": {
-            "vcs": {"kind": "git", "default_branch": default,
-                    "integration_branch": v["integration-branch"] or default,
-                    "branch_pattern": v["branch-pattern"],
-                    "worktree": {"root": v["worktree-root"], "prefix": v["worktree-prefix"]},
-                    "commit": commit,
-                    "merge": {"strategy": v["merge-strategy"],
-                              "delete_branch": _flag(v["delete-branch"])}},
-            "tracker": {"kind": "github" if github else "none", "cli": "gh" if github else "none",
-                        "repo_slug": v["project-id"],
-                        "credential_env": {"unset_before_invocation": []}},
-            "paths": {"artifacts": {"specs": v["specs-path"], "plans": v["plans-path"]},
-                      "context": _paths(v["context-paths"]),
-                      "standards": _paths(v["standards-paths"]),
-                      "architecture": _paths(v["docs-paths"]),
-                      "operations": _paths(v["operations-paths"]),
-                      "hints": _paths(v["hints-paths"]),
-                      "rejections": _paths(v["rejections-paths"])},
-            "commands": commands,
-            "workflow": workflow,
-        },
+        "schema_version": schema_three.SCHEMA_VERSION,
+        "bindings": {"vcs": {"integration_branch": v.get("integration-branch")}, "commands": commands},
         "capabilities": {
-            "tracker": support(github),
+            "tracker": support(True),
             "worktrees": support(True),
-            "knowledge.context": support(bool(_paths(v["context-paths"]))),
-            "knowledge.standards": support(bool(_paths(v["standards-paths"]))),
-            "knowledge.architecture": support(bool(_paths(v["docs-paths"]))),
-            "knowledge.hints": support(bool(_paths(v["hints-paths"]))),
-            "verification": support(bool(verification)),
-            "review.plan": support("review-plan" in commands),
-            "review.code": support("review-code" in commands),
+            **{name: support(_home(pointer) in homes) for name, pointer in KNOWLEDGE},
+            "verification": support(True),
+            "review.plan": support(True),
+            "review.code": support(True),
         },
-        "projections": [] if v["projections"] in (None, "none") else _json(v["projections"]),
-        "release": "unsupported" if v["release"] in (None, "unsupported") else _json(v["release"]),
+        "projections": [],
+        "release": "unsupported" if release in (None, "unsupported") else _json(release),
+        **({} if production in (None, "none") else {"production": _json(production)}),
     }
 
 
@@ -1193,11 +1168,8 @@ def refused_field(error: Mapping) -> tuple[str, str] | None:
     """The field an adoption refusal names, and the plain words saying so, else None."""
     if error.get("repair_id") not in REPAIRS:
         return None
-    violations = error.get("violations")
-    for violation in violations if isinstance(violations, list) else ():
-        pointer = violation.get("pointer") if isinstance(violation, Mapping) else None
-        if not isinstance(pointer, str):
-            continue
+    for violation in _violations(error):
+        pointer = violation["pointer"]
         best, size = None, -1
         for field in (*FIELDS, *PROPOSED):
             for candidate in POINTERS[field]:

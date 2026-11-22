@@ -587,16 +587,16 @@ bring the cancelled card back. It writes no file of
 its own, grants no trust and reads no registry. Any other exception is `console: register_cancel_failed
 <Type>` and 500 `cancelling failed`.
 
-A checkout with no `.agents/project.json` (ADR-console-031) is drafted instead of planned: the run
-reads it (`draft_reader`, `contract_draft.read` by default), drafts the contract from the fleet
-entries the request already read, and, while any field of the draft is open, appends one
-`drafting` row and runs no child. When none is open the registry is read again (a project id the
-registry gained since the draft was read reopens the project-id card, with no child), and otherwise
-the draft is written as JSON to a file `console/drafts/<name>.json` under the state root (mode 0600,
+A checkout with no `.agents/project.json` (ADR-console-031, #1485) is drafted instead of planned: the run
+reads it (`draft_reader`, `contract_draft.read` by default), drafts the schema-3 contract and its facts,
+and, while any field of the draft is open, appends one `drafting` row and runs no child. When none is open
+the draft (given its facts from a fresh reading when it holds none and is no amendment) is written as JSON
+to a file `console/drafts/<name>.json` under the state root (mode 0600,
 never inside the checkout) that the adopter's plan takes as `--contract-draft`; the file is removed
 after the child returns, on every outcome. A plan the resolver refused for a drafted value reopens
-that value's card with the plan's plain reason; any other result is the plan's row, carrying the
-draft. A drafted checkout is never registered by the run: only the adopted one is.
+that value's card with the plan's plain reason; a refusal about a derived value or the project id
+(`contract_draft.fact_refused`) is the failed row with its Retry card, on a run and an answer alike;
+any other result is the plan's row, carrying the draft. A drafted checkout is never registered by the run.
 
 `POST /api/plan-answer` (#1053, ADR-console-029) runs the same checks with `MAX_PLAN_ANSWER_BYTES`
 (4096) and `plan_questions.parse_answer_request`: 400 `bad plan answer`. The service refuses, each
@@ -617,8 +617,8 @@ failed`. The console never reads or writes the plan store or the registry here.
 An answer with the question id `contract-draft` (ADR-console-031) changes one field of the shown
 row's draft instead of answering the plan. Beyond the three refusals above the service refuses,
 each as 409 with the text, appending and running nothing: a row with no draft
-(`contract_draft.NO_DRAFT`), an unreadable registry (`register.registry_unreadable`), and any value
-`contract_draft.set_value` refuses (the id rule, a project id registered for another checkout, a
+(`contract_draft.NO_DRAFT`), and any value
+`contract_draft.set_value` refuses (`none` for a lint or test command, a
 command that cannot be read, JSON that does not parse). Otherwise the answer is a `204` and the run
 drafts the plan again from the changed fields as a registration does, appending a `drafting` row
 or the plan's row. An answer of any other question to a row that holds a draft plans it with the
@@ -6576,7 +6576,7 @@ class ConsoleService:
                         payload = register.behind(root, seen.behind, seen.contract)
                     elif not os.path.lexists(os.path.join(root, ".agents/project.json")):
                         reading = self._draft_reader(root)
-                        fields = contract_draft.draft(root, reading, entries=entries)
+                        fields = contract_draft.draft(root, reading)
                         payload = self._plan_draft(root, fields, [])
                     else:
                         proposal = []
@@ -6656,13 +6656,7 @@ class ConsoleService:
             if question == contract_draft.QUESTION_ID:
                 if latest["draft"] is None:
                     raise sprints.Refused(contract_draft.NO_DRAFT)
-                entries = read_fleet(self.registry)
-                if entries is None:
-                    if os.path.lexists(self.registry):
-                        raise sprints.Refused(register.registry_unreadable())
-                    entries = []
-                changed, refusal = contract_draft.set_value(
-                    latest["draft"], subject, value, entries=entries, root=root)
+                changed, refusal = contract_draft.set_value(latest["draft"], subject, value)
                 if refusal is not None:
                     raise sprints.Refused(refusal)
                 answers = list(latest["answered"])
@@ -6740,27 +6734,21 @@ class ConsoleService:
                     *, refusals: bool = False) -> dict:
         """The row of a drafted checkout: its open cards, else its plan (ADR-console-031).
 
-        With `refusals`, a plan error that names no drafted value is returned as the plan document,
+        A saved draft without facts gets them from a fresh reading first. With `refusals`, a plan
+        error that names no drafted value and no derived one is returned as the plan document,
         not as a failed row.
         """
         if contract_draft.open_fields(fields):
             return register.drafting(root, fields, answers)
-        entries = read_fleet(self.registry)
-        if entries is None:
-            if os.path.lexists(self.registry):
-                raise register.RunFailed("unreadable")
-            entries = []
-        held = contract_draft.taken_id(fields, entries, root)
-        if held is not None:
-            return register.drafting(
-                root, contract_draft.mark_refused(fields, "project-id", held), answers)
+        if not contract_draft.amends(fields) and not contract_draft.has_facts(fields):
+            fields = contract_draft.with_facts(fields, self._draft_reader(root), root)
         plan = self._plan_with(root, fields, answers)
         if "error" in plan:
             refused = contract_draft.refused_field(plan["error"])
             if refused is not None:
                 return register.drafting(
                     root, contract_draft.mark_refused(fields, *refused), answers)
-            if refusals:
+            if refusals and not contract_draft.fact_refused(plan["error"]):
                 return plan
             self._log_registration_error({"root": root, "verb": "plan", "error": plan["error"]})
         return register.summary(root, plan, None, draft=contract_draft.carried(fields, plan))

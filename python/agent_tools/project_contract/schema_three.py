@@ -107,6 +107,18 @@ RETIRED = (
 
 NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow")
 
+# The members a schema-3 contract authors: the only ones a tool that drafts one may write (#1485).
+AUTHORED = (
+    "/bindings/vcs/integration_branch",
+    "/bindings/commands",
+    "/bindings/workflow/verification_conditions",
+    "/bindings/workflow/orchestration/stall_minutes",
+    "/capabilities",
+    "/projections",
+    "/release",
+    "/production",
+)
+
 
 def declares(source: object) -> bool:
     """Whether `source` declares schema 3 as an integer; `3.0` and `true` do not."""
@@ -120,6 +132,31 @@ def declares(source: object) -> bool:
 def _escaped(token: str) -> str:
     """One reference token of an RFC 6901 JSON pointer."""
     return token.replace("~", "~0").replace("/", "~1")
+
+
+def _within(pointer: str, ancestor: str) -> bool:
+    return pointer == ancestor or pointer.startswith(ancestor + "/")
+
+
+def authored(pointer: str) -> bool:
+    """Whether a contract may author `pointer`: the ownership `refusals` enforces, as a question.
+
+    True exactly when `pointer` is an `AUTHORED` member or below one, is neither a platform value
+    (equal to, below or above a constant, derived value, retired member or either container) nor,
+    under `/bindings/commands/<id>`, a platform command id or a `COMMAND_CONSTANTS` member.
+    """
+    if not any(_within(pointer, member) for member in AUTHORED):
+        return False
+    platform = (*CONSTANTS, *DERIVED, *RETIRED, *CONSTANT_CONTAINERS, *DERIVED_CONTAINERS)
+    if any(_within(pointer, other) or _within(other, pointer) for other in platform):
+        return False
+    keys = _segments(pointer)
+    if keys[:2] == ["bindings", "commands"] and len(keys) > 2:
+        if keys[2].replace("~1", "/").replace("~0", "~") in COMMANDS:
+            return False
+        if len(keys) > 3 and keys[3] in COMMAND_CONSTANTS:
+            return False
+    return True
 
 
 def _segments(pointer: str) -> list[str]:
