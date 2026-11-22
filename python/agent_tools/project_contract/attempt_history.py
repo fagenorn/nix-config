@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Iterable, NamedTuple, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.project_contract import derived_values
+from agent_tools.project_contract import derived_values, schema_three
 from agent_tools.project_contract.agent_platform import read_regular_file
 
 WINDOW = 20
@@ -252,3 +252,19 @@ def write_history(root: Path, text: str) -> Path:
         Path(temporary).unlink(missing_ok=True)
         raise
     return path
+
+
+def derive_schema_three(root: Path) -> derived_values.Derived:
+    """What `root` states for a schema-3 contract: the repository's derived values and its attempt budget with the basis of it.
+
+    The resolver and the `platform-constants.retire` migration both call this, so
+    they derive the budget from one function. It reads the history through `read`,
+    which never raises.
+    """
+    derived = derived_values.derive(root)
+    budget = read(root, derived.values.get(derived_values.REPO_SLUG))
+    return derived_values.Derived(
+        {**derived.values,
+         schema_three.ATTEMPT_BUDGET: budget.minutes,
+         schema_three.ATTEMPT_BUDGET_BASIS: budget.basis},
+        derived.violations)

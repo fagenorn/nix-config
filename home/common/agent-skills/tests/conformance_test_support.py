@@ -9,8 +9,10 @@ it is support rather than a suite and is not listed as one.
 Every run is environment-hermetic (D35): the child never inherits the caller's
 environment, so no test can reach the network, the caller's credentials or a
 tool the fixture did not place. HERMETIC_ENV points PATH at a stub bin holding
-one exit-0 script per tool the contract names; a case that needs a different
-tool outcome builds its own bin with make_stub_bin and overrides PATH.
+one exit-0 script per tool the contract names, except `git`, which is a link to
+the real one (the never-rise check reads real history); a case that needs a
+different tool outcome builds its own bin with make_stub_bin and overrides
+PATH.
 
 HERMETIC_ENV's HOME also holds the platform installation the resolver ladder
 binds first — the committed manifest, host declaration and standards
@@ -32,11 +34,16 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.delivery import never_rise
 from agent_tools.project_contract import conformance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-STUB_TOOLS = ("codex-companion", "gh", "git", "just")
+STUB_TOOLS = ("codex-companion", "gh", "just")
+INTEGRATION_REF = "refs/remotes/origin/main"
+REAL_GIT = shutil.which("git")
+if REAL_GIT is None:
+    raise RuntimeError("conformance suites need git on PATH")
 
 
 def make_stub_bin(directory: Path, exits: dict | None = None) -> str:
@@ -44,6 +51,8 @@ def make_stub_bin(directory: Path, exits: dict | None = None) -> str:
 
     Each stub prints nothing and exits 0 unless `exits` names a different code
     for it, so a fixture decides every tool outcome the engine can observe.
+    `git` is the exception: the bin links the real one, so the engine reads
+    the fixture repository's actual history.
     """
     directory.mkdir(parents=True, exist_ok=True)
     for tool in STUB_TOOLS:
@@ -51,6 +60,9 @@ def make_stub_bin(directory: Path, exits: dict | None = None) -> str:
         stub.write_text(f"#!/bin/sh\nexit {(exits or {}).get(tool, 0)}\n",
                         encoding="utf-8")
         stub.chmod(0o755)
+    link = directory / "git"
+    link.unlink(missing_ok=True)
+    link.symlink_to(REAL_GIT)
     return str(directory)
 
 
@@ -69,6 +81,7 @@ HERMETIC_ENV = {
     "HOME": _HERMETIC_HOME,
     "TMPDIR": _HERMETIC_HOME,
     "LANG": "C",
+    "GIT_CONFIG_NOSYSTEM": "1",
     # Absolute, so an engine child with its own `cwd` still imports the
     # package under test (parent D8). Outside a recipe this raises at import.
     "PYTHONPATH": os.pathsep.join(os.path.abspath(entry) for entry
@@ -136,6 +149,28 @@ def write_clean_map(target: Path) -> None:
     (target.parent / "fixture-CONTEXT.md").write_text(CLEAN_AREA, encoding="utf-8")
 
 
+def git(root: Path, *args: str) -> str:
+    """One fixture git call under `root`; its stdout.
+
+    The environment drops every repository-selection variable and pins the
+    configuration and identity, so no inherited setting redirects a write.
+    """
+    env = {key: value for key, value in os.environ.items()
+           if key not in never_rise.SELECTION_VARIABLES}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_AUTHOR_NAME="fixture", GIT_COMMITTER_NAME="fixture",
+               GIT_AUTHOR_EMAIL="fixture@example.invalid",
+               GIT_COMMITTER_EMAIL="fixture@example.invalid")
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                          text=True, timeout=60, check=True, env=env).stdout
+
+
+def commit_all(root: Path, message: str) -> None:
+    """Commit every change under `root` as one commit."""
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", message)
+
+
 def make_root(tmp: Path) -> Path:
     """A temporary project root a clean `doctor` run passes on.
 
@@ -144,7 +179,9 @@ def make_root(tmp: Path) -> Path:
     created (a file-shaped one as an empty file, except the selected context
     map: a `CONTEXT-MAP.md` entry holds a lint-clean map with its area file
     beside it), and the root ignore file covers `.agents/runtime/`, so a
-    fixture refuses only for the mutation a case applies to it.
+    fixture refuses only for the mutation a case applies to it. The root is a
+    committed repository on `main` whose integration ref is its only commit, so
+    the never-rise check finds a merge base level with the head.
     """
     root = tmp / "project"
     (root / ".agents" / "instructions").mkdir(parents=True)
@@ -169,6 +206,9 @@ def make_root(tmp: Path) -> Path:
             else:
                 target.mkdir(parents=True)
     (root / ".gitignore").write_text(".agents/runtime/\n", encoding="utf-8")
+    git(root, "init", "-q", "-b", "main")
+    commit_all(root, "fixture")
+    git(root, "update-ref", INTEGRATION_REF, "HEAD")
     return root
 
 

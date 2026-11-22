@@ -7,24 +7,30 @@ next action, record it) until the walk is `Done` or a `Stop`.
 
 Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
-held run lock answers `EXIT_RUNNING` first; `<procedures_dir>/deliver.json` must
-pass `procedure_check.check_directory` against the platform declarations plus
-every project command, hold only `command`, `agent` and `decide` steps, a `mutates: true`
-step only as a `command` step, and no input but `issue`, and every agent step's role file
-must read (`engine_session.read_role`). The same checks run again on the run's staged copy,
-which is the copy the loop reads (`<run>/procedure/deliver.json`).
+held run lock answers `EXIT_RUNNING` first; the host's settings must name the lifecycle guard as the one
+unconditional Bash hook with no hook switch on (`engine_guard.locate`), checked after that answer;
+`<procedures_dir>/deliver.json` must pass `procedure_check.check_directory` against the platform
+declarations plus every project command, hold only `command`, `agent` and `decide` steps, a
+`mutates: true` step only as a `command` step, and no input but `issue`, and every agent step's role
+file must read (`engine_session.read_role`). The same checks run again on the run's staged copy, which
+is the copy the loop reads (`<run>/procedure/deliver.json`).
 
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
 run's `sessions/`, `session_starting` is on disk before the process is spawned,
 and a session that ends normally is graded only by the `outcome_from` member of its
-structured reply. A session with no structured reply is a `Fault`, so neither the prose nor
-the exit code selects an outcome, and so is a session denied a shell command,
-whose reply may rest on a check it never ran. A session ended by a bound is graded
-`out-of-bounds` before either fault is considered: the bounds are a turn cap or a spend cap
+structured reply, so neither the prose nor the exit code selects an outcome. A reading with no
+usable reply (none, or one that breaks the schema) is a miss when `engine_session.is_miss` accepts
+its stdout: the same session is then resumed once (`session_resuming`, `--resume <session>`,
+`REASK_PROMPT`) and a second miss grades `no-reply` with `{}` stored, its measurements the sums of
+both launches. Any other reading with no usable reply is a `Fault`, and so is a session denied a
+shell command, whose reply may rest on a check it never ran. Before each launch, the resumes included,
+the host's settings are read again and a lifecycle guard hook that is gone is a `Fault`. A session ended
+by a bound is graded `out-of-bounds` before any fault is considered: the bounds are a turn or spend cap
 (`engine_session.CAP_SUBTYPES`) and the wall bound, the engine's own clock per role
-(`engine_session.bounds`), past which `engine_session.launch` ends the session's group. Its stored result names the bound (`wall-time` for the wall bound), its
-measurements are recorded, and the engine never resumes or retries the step.
+(`engine_session.bounds`), past which `engine_session.launch` ends the session's group. Its stored
+result names the bound (`wall-time` for the wall bound), its measurements are recorded, and the
+engine never resumes or retries the step.
 
 A command step runs within its command's wall bound (`CommandTable.wall_seconds`), counted from the
 spawn: past it the step's group is killed, its stored result is `{"bound": "wall-time"}` and it is
@@ -73,13 +79,15 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_commands, engine_core, engine_guard, engine_ledger, engine_session, procedure_check,
+    engine_commands, engine_core, engine_guard, engine_ledger, engine_reply, engine_session,
+    procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.project_contract import resolve_project
@@ -272,6 +280,10 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
         raise Refused(str(error)) from error
     if running is not None:
         return running
+    guard = _guard()
+    if isinstance(guard, engine_guard.Unavailable):
+        raise Refused(f"the host's settings load no lifecycle guard hook, so no run starts: "
+                      f"{guard.reason}")
     procedure = _validate(procedures_dir, table)
     inputs = {name: issue for name in procedure["inputs"]}
     held: list[int] = []
@@ -496,39 +508,31 @@ def _visit_session(run_dir: Path, root: str, step: dict,
         run_dir, root, (name, visit, session), prompt, (role, schema, system))
     if stopped is not None:
         return stopped
+    wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None
+            else reading.wall_seconds)
+
+    def store(result: dict) -> None:
+        engine_ledger.store_result(run_dir, step=name, visit=visit, result=result, at=_now(),
+                                   wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
+                                   spend_usd=reading.spend_usd)
+
     bound = (engine_session.WALL_TIME if launched.timed_out
              else engine_session.CAP_SUBTYPES.get(reading.subtype))
     if bound is not None:
-        wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None
-                else reading.wall_seconds)
-        engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": bound},
-                                   at=_now(), wall_seconds=wall, turns=reading.turns,
-                                   tokens=reading.tokens, spend_usd=reading.spend_usd)
+        store({"bound": bound})
         _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True)
         return None
     if no_reply:
-        wall = reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds
-        engine_ledger.store_result(run_dir, step=name, visit=visit, result={}, at=_now(),
-                                   wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
-                                   spend_usd=reading.spend_usd)
-        if procedure_check.NO_REPLY not in step["on"]:
-            raise Fault(f"step {name} has no mapping for the outcome {procedure_check.NO_REPLY}")
-        engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
-                                             "visit": visit, "outcome": procedure_check.NO_REPLY})
-        engine_ledger.append_event(run_dir, {
-            "event": "transition_taken", "at": _now(), "step": name, "visit": visit,
-            "outcome": procedure_check.NO_REPLY, "to": step["on"][procedure_check.NO_REPLY]})
+        store({})
+        _graded(run_dir, step, visit, procedure_check.NO_REPLY)
         return None
     reply = reading.reply
     if reply is None:
         reason = engine_session.diagnostic(launched.stderr)
         raise Fault(f"step {name} gave no structured reply, exit {launched.exit_code}"
                     + (f": {reason}" if reason else ""))
-    wall = reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds
-    engine_ledger.store_result(run_dir, step=name, visit=visit, result=reply, at=_now(),
-                               wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
-                               spend_usd=reading.spend_usd)
-    problem = engine_session.reply_problem(schema, reply)
+    store(reply)
+    problem = engine_reply.reply_problem(schema, reply)
     if problem is not None:
         raise Fault(f"step {name} gave a reply that breaks its schema: {problem}")
     outcome = reply.get(step["outcome_from"])
@@ -542,14 +546,18 @@ def _launch_until_answered(
         run_dir: Path, root: str, visit_of: tuple[str, int, str], prompt: str,
         launch_of: tuple[engine_session.Role, Mapping, Path],
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
-    """Launch the session, again with `--resume` after each usage limit and after the first other
-    API error (once, after `API_RETRY_SECONDS`), until a launch that is neither, or a second API
-    error, whose result is returned with the visit's record stored and the wait ended. The third
-    member is the `quota-wait` stop (record stored, wait open) when no account can answer, the
-    fourth is true for the second API error, the outcome `no-reply`."""
+    """Launch the session, again with `--resume` after each usage limit, after the first other
+    API error (once, after `API_RETRY_SECONDS`) and after the first miss (once, with `REASK_PROMPT`),
+    until a launch that is none of these, or a second API error or miss, whose result is returned
+    with the visit's record stored and the wait ended; a miss's launch and its resume are summed in
+    the result's measurements. The third member is the `quota-wait` stop (record stored, wait open)
+    when no account can answer, the fourth is true for the second API error or miss, the outcome
+    `no-reply`."""
     name, visit, session = visit_of
     role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = 1, set(), False, False, False, False
+    missed, text = False, prompt
+    missed_once: tuple[engine_session.Launched, engine_session.Reading] | None = None
 
     def event(kind: str, **members: object) -> None:
         engine_ledger.append_event(run_dir, {"event": kind, "at": _now(), **members})
@@ -561,9 +569,13 @@ def _launch_until_answered(
         event("wait_started", wait=engine_session.USAGE_LIMIT, until=until)
         waiting = True
 
+    def record(launched: engine_session.Launched, reading: engine_session.Reading) -> None:
+        _store_record(run_dir, name, visit, session, launched, reading, schema,
+                      ".resume" if missed else "")
+
     def quota_stop(launched: engine_session.Launched, reading: engine_session.Reading,
                    detail: str) -> tuple:
-        _store_record(run_dir, name, visit, session, launched, reading)
+        record(launched, reading)
         return launched, reading, _stop(run_dir, name, procedure_check.QUOTA_WAIT, QUOTA_NEED,
                                         detail), False
 
@@ -574,6 +586,10 @@ def _launch_until_answered(
             started.append(pid)
             event("process_started", step=name, visit=visit, pid=pid, started=_now())
 
+        guard = _guard()
+        if isinstance(guard, engine_guard.Unavailable):
+            raise Fault(f"step {name} was not launched: the host's settings no longer load the "
+                        f"lifecycle guard hook: {guard.reason}")
         if attempt > 1:
             event("session_resuming", step=name, visit=visit, session=session, attempt=attempt)
         with tempfile.TemporaryDirectory() as scratch:
@@ -583,7 +599,7 @@ def _launch_until_answered(
                 env.pop("CLAUDE_ACCOUNT", None)
             launched = engine_session.launch(
                 engine_session.launch_argv(role, schema, session, system, resume=attempt > 1),
-                root, prompt, on_start=on_start, env=env,
+                root, text, on_start=on_start, env=env,
                 timeout=engine_session.bounds(role.name).wall_seconds)
             answer = engine_session.read_answer(answer_path)
         reading = engine_session.read_result(launched.stdout)
@@ -601,7 +617,7 @@ def _launch_until_answered(
         denied = next((d for d in reading.denials
                        if isinstance(d, dict) and d.get("tool_name") == "Bash"), None)
         if denied is not None:
-            _store_record(run_dir, name, visit, session, launched, reading)
+            record(launched, reading)
             tool_input = denied.get("tool_input")
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             raise Fault(f"step {name} was denied the shell command {str(command)[:200]!r}, so "
@@ -614,6 +630,17 @@ def _launch_until_answered(
             time.sleep(API_RETRY_SECONDS)
             continue
         if reading.api_failure != engine_session.USAGE_LIMIT:
+            if engine_session.is_miss(reading) and _problem(schema, reading) is not None:
+                if missed:
+                    no_reply = True
+                    break
+                record(launched, reading)
+                engine_ledger.store_session_file(
+                    run_dir, f"{name}.{visit}.resume.prompt.md",
+                    engine_session.REASK_PROMPT.encode("utf-8"))
+                missed_once = (launched, reading)
+                missed, text, attempt = True, engine_session.REASK_PROMPT, attempt + 1
+                continue
             break
         if account in limited:
             return quota_stop(launched, reading, (
@@ -625,14 +652,30 @@ def _launch_until_answered(
         released, attempt = True, attempt + 1
     if waiting:
         event("wait_ended", wait=engine_session.USAGE_LIMIT)
-    _store_record(run_dir, name, visit, session, launched, reading)
+    record(launched, reading)
+    if missed_once is not None:  # the miss and its resume are one result
+        ran, read = missed_once
+        before = read.wall_seconds if read.wall_seconds is not None else ran.wall_seconds
+        launched = replace(launched, wall_seconds=launched.wall_seconds + before)
+        reading = replace(
+            reading, turns=reading.turns + read.turns, spend_usd=reading.spend_usd + read.spend_usd,
+            wall_seconds=(launched.wall_seconds if reading.wall_seconds is None
+                          else reading.wall_seconds + before),
+            tokens={key: reading.tokens[key] + read.tokens[key] for key in reading.tokens})
     return launched, reading, None, no_reply
 
 
+def _problem(schema: Mapping, reading: engine_session.Reading) -> str | None:
+    return ("no structured_output" if reading.reply is None
+            else engine_reply.reply_problem(schema, reading.reply))
+
+
 def _store_record(run_dir: Path, name: str, visit: int, session: str,
-                  launched: engine_session.Launched, reading: engine_session.Reading) -> None:
+                  launched: engine_session.Launched, reading: engine_session.Reading,
+                  schema: Mapping, suffix: str) -> None:
     record = {"denials": reading.denials, "exit_code": launched.exit_code,
-              "prose": reading.prose, "session": session, "subtype": reading.subtype}
+              "problem": _problem(schema, reading), "prose": reading.prose, "session": session,
+              "subtype": reading.subtype}
     engine_ledger.store_session_file(
-        run_dir, f"{name}.{visit}.json",
+        run_dir, f"{name}.{visit}{suffix}.json",
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
