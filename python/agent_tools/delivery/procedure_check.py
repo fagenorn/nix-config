@@ -50,9 +50,10 @@ first): `unreachable_step` (a step the walk of `flow_graph` from the first step 
 renewal failure as an edge to `claim-lost` into a `mutates` step; a group member is reached when its group is),
 `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
 `unknown_outcome` (a step's `on` keys against `outcomes_of`; an `agent` step also produces `no-reply`, the shell's outcome when
-no valid reply came back, so a non-member agent step whose `on` lacks it is `unmapped_outcome`; a step on a cycle of
-`step_graph` also produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the group,
-where `no-reply` is never a pass outcome) and `unbounded_cycle` (a cycle among steps
+no valid reply came back, so a non-member agent step whose `on` lacks it is `unmapped_outcome`; a command step also produces
+`refused`, because the engine calls the lifecycle guard before every command (issue 1515), so its `on` maps it; a step on a
+cycle of `step_graph` also produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the
+group, where neither `no-reply` nor `refused` passes) and `unbounded_cycle` (a cycle among steps
 with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through the `exhausted`
 entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent; refused at its
 first step). An outcome check whose reference failed phase B is skipped for that step.
@@ -94,6 +95,7 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
 NO_REPLY = "no-reply"
+REFUSED = "refused"
 CLAIM_LOST = "claim-lost"
 START = "(start)"
 
@@ -678,6 +680,8 @@ def outcomes_of(step: dict, resolved: Resolved) -> tuple[str, ...] | None:
         return None if known.child_stops is None else ("done",) + tuple(known.child_stops)
     if kind == "agent" and known.outcomes is not None:
         return known.outcomes + (NO_REPLY,)
+    if kind == "command" and known.outcomes is not None:
+        return known.outcomes + (REFUSED,)
     return known.outcomes
 
 
@@ -842,7 +846,12 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
                 member_outcomes = outcomes_of(by_id[member["step"]], resolved)
                 if member_outcomes is None:
                     continue
-                stray = [o for o in member["pass"] if o not in member_outcomes or o == NO_REPLY]
+                if REFUSED in member["pass"]:
+                    found.add("unknown_outcome",
+                              f"member {member['step']!r} passes on 'refused', which never passes a group.",
+                              label)
+                stray = [o for o in member["pass"]
+                         if o == NO_REPLY or (o not in member_outcomes and o != REFUSED)]
                 if stray:
                     found.add("unknown_outcome",
                               f"member {member['step']!r} cannot produce {', '.join(map(repr, stray))}.",

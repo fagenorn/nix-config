@@ -66,36 +66,11 @@ from agent_tools.project_contract.adopt_inspection import (
 )
 from agent_tools.project_contract.adopt_links import LinkRewrites
 from agent_tools.project_contract.adopt_references import References
+from agent_tools.project_contract.derived_values import normalize_remote_url
 
 # --------------------------------------------------------------------------
 # Project identity (D35)
 # --------------------------------------------------------------------------
-
-
-def normalize_remote_url(url: str) -> str | None:
-    """`owner/repo` for the two documented remote spellings, else None.
-
-    A URL matching neither form is deliberately not normalized: guessing an
-    identity from an unrecognised spelling is exactly the inference the
-    contract forbids, and the caller turns None into an open question.
-    """
-    value = url.strip()
-    if not value:
-        return None
-    if value.endswith(".git"):
-        value = value[:-len(".git")]
-    if value.startswith("git@"):
-        _, separator, suffix = value.partition(":")
-        if not separator or not suffix:
-            return None
-        segments = [part for part in suffix.split("/") if part]
-        return "/".join(segments[-2:]) if len(segments) >= 2 else None
-    if "://" in value:
-        _, _, rest = value.partition("://")
-        segments = [part for part in rest.split("/") if part]
-        # host plus owner plus repo at the very least.
-        return "/".join(segments[-2:]) if len(segments) >= 3 else None
-    return None
 
 
 def remote_urls(root: Path) -> list[str]:
