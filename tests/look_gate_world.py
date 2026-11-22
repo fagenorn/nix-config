@@ -421,6 +421,18 @@ class LookGateWorld:
         proc = self.look_approval(*line.split()[1:])
         return json.loads(proc.stdout.strip().splitlines()[-1])
 
+    def _look_carry_verify(self, message, match):
+        """The verification of a head a merge brought past the owner's: merges only, read from the throwaway Git history."""
+        found = re.search(r"approved head ([0-9a-f]{40}) of PR #\d+; [^\n]*?brought it to ([0-9a-f]{40})", message["prompt"])
+        approved, brought = found.group(1), found.group(2)
+        path = self.worktree_of(message["issue"])
+        at = self.git("rev-parse", "HEAD", cwd=path)
+        merge_only = (at == brought
+                      and self.git("merge-base", "--is-ancestor", approved, brought, cwd=path, check=False).returncode == 0
+                      and not self.git("rev-list", "--no-merges", f"{approved}..{brought}", cwd=path))
+        return {"head": at, "clean": True, "merge_only": merge_only,
+                "results": [{"id": "build", "status": "pass", "summary": "ok"}]}
+
     def _close_out(self, message, match):
         out = {"issue_state": "CLOSED", "branch_deleted": True, "released": True, "decision_ended": True,
                "notes": "ok", "release": {"verdict": "released"}}
@@ -484,6 +496,7 @@ class LookGateWorld:
             (r"^look-checks-\d+$", self._look_checks),
             (r"^look-post$", self._look_post),
             (r"^look-(read|status)$", self._look_read),
+            (r"^look-carry-verify$", self._look_carry_verify),
             (r"^(merge|land-merge-\d+)$", self._merge),
             (r"^land-unlock", const({"verdict": "released"})),
             (r"^land-(re)?lock-", self._lock),
