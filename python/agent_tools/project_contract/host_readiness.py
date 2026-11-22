@@ -152,7 +152,10 @@ PASS_THROUGH_PROGRAMS = frozenset({
     "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
     "devenv", "direnv", "command", "builtin", "exec", "env", "sudo", "time", "nohup", "setsid"})
 # Shells whose every later word is read as shell text whatever it holds (`sh -c deploy`).
-SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "yash", "busybox"})
+SHELL_PROGRAMS = frozenset({"busybox", "elvish", "xonsh", "nu"})
+# Any `sh` family name is a shell too (`fish`, `csh`, `tcsh`, `rbash`, `bash5`, `pwsh`), so a
+# shell missing from a list cannot carry a verb past the scan.
+SHELL_NAME = re.compile(r"r?(?:ba|z|da|k|a|mk|ya|c|tc|fi|pw)?sh[0-9.]*")
 BUDGET_EXIT = 3
 SCRATCH_PREFIX = "host-readiness-"
 READ_DEPTH = 4
@@ -268,7 +271,7 @@ def _shell_words(argv: Sequence[str]) -> list[str]:
         name = _basename(argv[i])
         if name == "eval":
             return [" ".join(argv[i + 1:])] if i + 1 < len(argv) else []
-        if name in SHELL_PROGRAMS:
+        if name in SHELL_PROGRAMS or SHELL_NAME.fullmatch(name):
             return list(argv[i + 1:])
     return []
 

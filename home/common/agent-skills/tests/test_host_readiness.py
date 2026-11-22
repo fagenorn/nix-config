@@ -713,6 +713,17 @@ class RefusalTest(ReadinessCase):
                      ["echo", "sh", "+c", "deploy"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
+        # A shell outside the common list is still a shell: its script is read whole too.
+        for argv in (["fish", "-c", "deploy"], ["csh", "-c", "deploy"], ["tcsh", "-c", "deploy"],
+                     ["fish", "+c", "deploy"], ["rbash", "+c", "deploy"], ["bash5", "+c", "deploy"],
+                     ["/usr/bin/fish", "-c", "deploy"], ["env", "tcsh", "-c", "deploy"],
+                     ["pwsh", "-c", "deploy"], ["xonsh", "-c", "deploy"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(production, refusal(argv, snap))
+        for argv in (["fish", "-c", "echo deploy"], ["echo", "fish", "-c", "deploy"],
+                     ["git", "push", "deploy"]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(refusal(argv, snap))
 
     def test_a_project_root_with_a_quote_or_a_space_is_a_plain_path_argument(self):
         base = Path(tempfile.mkdtemp()).resolve()
