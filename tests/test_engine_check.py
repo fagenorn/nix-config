@@ -662,6 +662,18 @@ class DataFlowTest(unittest.TestCase):
                       agent("reader", {"ok": "done"}, ("a.x",))]}
         self.assertNotIn("a", self._dominating(procedure, "reader"))
 
+    def test_an_exhausted_target_that_is_itself_a_no_reply_step_is_split_too(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = (), **more) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads), **more}
+
+        procedure = {
+            "inputs": [], "stops": {},
+            "steps": [agent("a", {"ok": "p", "no-reply": "a", "exhausted": "s2"}, max_visits=1),
+                      agent("p", {"ok": "s2"}),
+                      agent("s2", {"ok": "done", "no-reply": "t"}),
+                      agent("t", {"ok": "done"}, ("p.x",))]}
+        self.assertNotIn("p", self._dominating(procedure, "t"))
+
 
 class RoleTest(unittest.TestCase):
     def test_each_role_has_its_agent_file(self):

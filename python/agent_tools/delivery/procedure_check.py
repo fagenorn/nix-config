@@ -773,8 +773,10 @@ def _data_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     until nothing changes, so the graph does not depend on the order the steps are listed in.
 
     An `exhausted` entry to such an `s` produces nothing either, and keeps `s`'s earlier result, so the
-    `exhausted` target is reached from the nodes that re-enter `s`, not from `s` itself. The `claim-lost`
-    edges come last, so every node of the finished graph that enters a `mutates` step has one.
+    `exhausted` target is reached from the nodes that re-enter `s`, not from `s` itself, and those edges
+    join the same fixed point, so an `exhausted` target that is itself a split step gets its `no-reply` edge
+    too. The `claim-lost` edges come last, so every node of the finished graph that enters a `mutates`
+    step has one.
     """
     graph = _control_graph(procedure)
     cyclic = on_cycle(step_graph(procedure))
@@ -805,11 +807,12 @@ def _data_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
                     targets += (node,)
                     graph[before] = targets
                     changed = True
-    for name, limit in exhausted.items():
-        again = {name, split[name]} | _reach(graph, name) | _reach(graph, split[name])
-        for before in [b for b, targets in graph.items() if name in targets and b in again]:
-            if limit not in graph[before]:
-                graph[before] += (limit,)
+        for name, limit in exhausted.items():
+            again = {name, split[name]} | _reach(graph, name) | _reach(graph, split[name])
+            for before in [b for b, targets in graph.items() if name in targets and b in again]:
+                if limit not in graph[before]:
+                    graph[before] += (limit,)
+                    changed = True
     _renewal_edges(procedure, graph)
     return graph
 
