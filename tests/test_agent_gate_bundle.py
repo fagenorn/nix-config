@@ -1169,7 +1169,45 @@ class ModuleEntryPointTest(unittest.TestCase):
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-COMMITTED = ("promotion-127", "release-128", "cutover-579")
+
+
+def unmeasured_v1_trials(bound):
+    """The version-1 trials manifest of an issue with no measurement: every core class, no strata."""
+    def unpinned():
+        return {"base": "unpinned", "candidate": "unpinned"}
+    pinned = {"evaluator_version": unpinned(), "rubric_version": unpinned(),
+              "environment_fingerprint": unpinned(),
+              "builds": {"claude": {"agent": unpinned(), "model": unpinned()},
+                         "codex": {"agent": unpinned(), "model": unpinned()}}}
+    return {"schema_version": 1, "kind": "agent-gate-trials",
+            "identity": {"bound": bound, "pinned": pinned},
+            "expansion": {"expanded": False, "checkpoint_ref": None},
+            "cases": [{"case_id": c, "case_class": c, "strata": {}}
+                      for c in gate.CORE_CASE_CLASSES]}
+
+
+# The trials and bundle ids committed for #127, #128 and #579, which left the tree in #1444
+# and are kept at commit 6b06a4e277ab8885d02cca9cec38e85a6de5dc55.
+V1_PINNED = {
+    "promotion-127": ({
+        "commit": {"base": "66ccba5844eab2af9c68962c54a28f874585ee80",
+                   "candidate": "66ccba5844eab2af9c68962c54a28f874585ee80"},
+        "project_contract_version": {"base": "1", "candidate": "1"},
+        "shared_platform_version": {"base": "1.0.0", "candidate": "1.0.0"}},
+        "sha256:18d81ae462a649e5468318c6d580a61266a59aa31787f6304e327a3d55713eb7"),
+    "release-128": ({
+        "commit": {"base": "0a25b8072c8252d069774f68e75981c39c137691",
+                   "candidate": "33149faddfc0e0f2259ee4b52b3995285b93ae57"},
+        "project_contract_version": {"base": "1", "candidate": "1"},
+        "shared_platform_version": {"base": "1.0.0", "candidate": "1.0.0"}},
+        "sha256:aec67518f099cbfaff76b71bbbf748dfde2759b2915b01ffa73e76fe264bd81e"),
+    "cutover-579": ({
+        "commit": {"base": "304aef7f742a9413348428f3007d75e2ee8e8deb",
+                   "candidate": "720c67e538670562ed9a096716ee978dc07377ee"},
+        "project_contract_version": {"base": "1", "candidate": "2"},
+        "shared_platform_version": {"base": "1.2.0", "candidate": "2.0.0"}},
+        "sha256:52e9ebc31dd19207141fd9fb5cf40fb5361e96d453d32d3f6e155a4ff210308d"),
+}
 
 
 def claude_only_manifest(tmp, cases):
@@ -1195,26 +1233,28 @@ def run_cli_text(argv):
 
 
 class GateVersionOneUnchangedTest(unittest.TestCase):
+    def emitted_bundles(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        for name, (bound, pinned_id) in V1_PINNED.items():
+            path = tmp / f"{name}-trials.json"
+            path.write_text(json.dumps(unmeasured_v1_trials(bound)), encoding="utf-8")
+            code, out, _ = run_cli_text(["--trials", str(path)])
+            yield name, pinned_id, code, json.loads(out)
+
     def test_the_default_cli_reproduces_every_committed_bundle_id(self):
-        for name in COMMITTED:
+        for name, pinned_id, code, emitted in self.emitted_bundles():
             with self.subTest(name=name):
-                trials = REPO_ROOT / f".agents/artifacts/evidence/{name}-trials.json"
-                committed = json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-bundle.json")
-                                       .read_text(encoding="utf-8"))
-                code, out, _ = run_cli_text(["--trials", str(trials)])
                 self.assertEqual(code, 3)
-                emitted = json.loads(out)
-                self.assertEqual(emitted["bundle_id"], committed["bundle_id"])
+                self.assertEqual(emitted["bundle_id"], pinned_id)
                 self.assertEqual(emitted["gate_version"], 1)
                 self.assertNotIn("bundle_kind", emitted)
 
     def test_committed_bundles_verify_the_same_with_or_without_a_reader_kind(self):
-        for name in COMMITTED:
+        for name, _, _, emitted in self.emitted_bundles():
             with self.subTest(name=name):
-                committed = json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-bundle.json")
-                                       .read_text(encoding="utf-8"))
-                self.assertEqual(gate.verify_bundle(committed), "unmeasured")
-                self.assertEqual(gate.verify_bundle(committed, kind="cutover"), "unmeasured")
+                self.assertEqual(gate.verify_bundle(emitted), "unmeasured")
+                self.assertEqual(gate.verify_bundle(emitted, kind="cutover"), "unmeasured")
 
     def test_an_approved_version_one_bundle_ignores_the_reader_kind(self):
         tmp = Path(tempfile.mkdtemp())
@@ -1483,54 +1523,50 @@ class NoRegressionCriterionTest(unittest.TestCase):
                     gate.verify_bundle(forged, kind="cutover")
 
 
-COMMITTED_V2 = ("cutover-130", "cutover-130-x10", "cutover-130-x10r")
 CHECKPOINT = {"expanded": True, "checkpoint_ref": "https://example.invalid/issues/757#checkpoint"}
+V2_PINNED_ID = "sha256:1f05a270f480b642f672ce5c14b37581ce3efeeda4e59c867bff93816ff80455"
+V3_PINNED_ID = "sha256:34e5f04b27d3f296316b1958f2231959c43e98dbed7abc2d65735fc61905f420"
+# The bundle ids the three issue-130 runs carried when their bundles were committed (version 2, all unmeasured,
+# kept at commit 6b06a4e277ab8885d02cca9cec38e85a6de5dc55) and the ids and states their recomputation under
+# version 3 recorded, each keyed by run name here and not read from the fixture it checks.
+HISTORICAL_V2 = {
+    "cutover-130": "sha256:8385ddb998a0c493ee5d7861c9f80184722c96bc83682e2110e846ada90a2ac6",
+    "cutover-130-x10": "sha256:bc82101a9bff3b5109b20986d75840d3b61cbab26026a17d645aac26f33223d2",
+    "cutover-130-x10r": "sha256:5093e55306150283683a272edfd8617e979336b881e7e91edcb70499ad83749b",
+}
+HISTORICAL_V3 = {
+    "cutover-130": ("sha256:8310ea65ff817c6d879be18547043eaa1e80cd733f5c0050d5a35815ee16a179", "unmeasured"),
+    "cutover-130-x10": ("sha256:b59ea39a2654e58463c7ab71429927b1ba08f6f04c6e84c03a70343c9139ed96", "rejected"),
+    "cutover-130-x10r": ("sha256:5069c68ade820f510f2cc8dda21240d1c2eafb53e6966e1a181744082e20cd55", "unmeasured"),
+}
 
 
-def absolute_trials(tmp, name):
-    """A committed trials manifest with every cited record made absolute, so the CLI
-    resolves it from any working directory; no recorded field reaches a bundle."""
-    manifest = json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-trials.json")
-                          .read_text(encoding="utf-8"))
-    for case in manifest["cases"]:
-        for block in case["strata"].values():
-            for side in gate.SIDES:
-                for entry in block[side]:
-                    entry["record"] = str(REPO_ROOT / entry["record"])
-    path = Path(tmp) / f"{name}-trials.json"
-    path.write_text(json.dumps(manifest), encoding="utf-8")
-    return path
-
-
-def load_committed(name):
-    return json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-bundle.json")
-                      .read_text(encoding="utf-8"))
+def synthetic_cutover_manifest(tmp):
+    """A deterministic Claude-only cutover manifest, its inputs written out so a change of
+    default cannot move the pinned bundle ids."""
+    return claude_only_manifest(tmp, claude_cases(
+        tmp, base=(1000, 1000, 1000), candidate=(800, 800, 800),
+        quality=NoRegressionCriterionTest.QUALITY))
 
 
 class GateVersionTwoUnchangedTest(unittest.TestCase):
-    """Issue 757 AC2: the committed version-2 bundles verify exactly as before."""
+    """Issue 757 AC2: a version-2 bundle keeps its bytes and verifies only as the cutover kind."""
 
-    def test_the_committed_version_two_bundles_verify_as_before(self):
-        for name in COMMITTED_V2:
-            with self.subTest(name=name):
-                committed = load_committed(name)
-                self.assertEqual((committed["gate_version"], committed["bundle_kind"]),
-                                 (2, "cutover"))
-                self.assertEqual(gate.verify_bundle(committed, kind="cutover"), "unmeasured")
-                for kind in (None, "promotion", "release"):
-                    with self.assertRaises(gate.BundleIntegrityError):
-                        gate.verify_bundle(committed, kind=kind)
-
-    def test_the_version_two_cli_reproduces_every_committed_bundle_id(self):
+    def test_the_version_two_cli_emits_its_pinned_bundle_id(self):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp)
-        for name in COMMITTED_V2:
-            with self.subTest(name=name):
-                code, out, err = run_cli_text(["--trials", str(absolute_trials(tmp, name)),
-                                               "--gate-version", "2", "--kind", "cutover"])
-                self.assertEqual(code, 3, err)
-                emitted = json.loads(out)
-                self.assertEqual(emitted["bundle_id"], load_committed(name)["bundle_id"])
+        path = tmp / "trials.json"
+        path.write_text(json.dumps(synthetic_cutover_manifest(tmp)), encoding="utf-8")
+        code, out, err = run_cli_text(["--trials", str(path),
+                                       "--gate-version", "2", "--kind", "cutover"])
+        emitted = json.loads(out)
+        self.assertEqual(emitted["bundle_id"], V2_PINNED_ID)
+        self.assertEqual(code, 0 if emitted["state"] == "approved" else 3, err)
+        self.assertEqual((emitted["gate_version"], emitted["bundle_kind"]), (2, "cutover"))
+        self.assertEqual(gate.verify_bundle(emitted, kind="cutover"), emitted["state"])
+        for kind in (None, "promotion", "release"):
+            with self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(emitted, kind=kind)
 
 
 def seeded_cases(tmp, seed, n, effect_pct, quality=None):
@@ -1775,31 +1811,49 @@ def load_fixture(name):
 
 
 class RecomputedCutoverBundlesTest(unittest.TestCase):
-    """Issue 757: the three issue-130 runs recomputed under gate version 3."""
+    """Issue 757: the issue-130 runs recomputed under gate version 3 reassemble and verify as recorded."""
 
-    def test_each_fixture_judges_the_committed_measurements(self):
-        for name in COMMITTED_V2:
+    def test_each_fixture_reassembles_from_its_recorded_evidence(self):
+        for name, (bundle_id, state) in HISTORICAL_V3.items():
             with self.subTest(name=name):
-                fixture, committed = load_fixture(name), load_committed(name)
+                fixture = load_fixture(name)
+                self.assertEqual((fixture["bundle_id"], fixture["state"]), (bundle_id, state))
                 self.assertEqual((fixture["gate_version"], fixture["bundle_kind"]),
                                  (3, "cutover"))
-                for key in ("evidence", "identity", "expansion"):
-                    self.assertEqual(fixture[key], committed[key], key)
                 self.assertEqual(gate.verify_bundle(fixture, kind="cutover"), fixture["state"])
                 self.assertEqual([row["case_id"] for row in
                                   fixture["gates"]["distribution"]["claude"]],
-                                 [case["case_id"] for case in committed["evidence"]["cases"]])
+                                 [case["case_id"] for case in fixture["evidence"]["cases"]])
+                reassembled = gate.assemble_bundle(
+                    {"identity": fixture["identity"], "expansion": fixture["expansion"]},
+                    fixture["evidence"], [], fixture["override"], fixture["state"],
+                    gate=gate.gate_profile(3, "cutover"))
+                self.assertEqual(reassembled["bundle_id"], bundle_id)
 
-    def test_the_version_three_cli_reproduces_each_fixture(self):
-        tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, tmp)
-        for name in COMMITTED_V2:
+    def test_each_fixture_reassembles_under_version_two_as_its_historical_bundle(self):
+        for name, bundle_id in HISTORICAL_V2.items():
             with self.subTest(name=name):
                 fixture = load_fixture(name)
-                code, out, err = run_cli_text(["--trials", str(absolute_trials(tmp, name)),
-                                               "--gate-version", "3", "--kind", "cutover"])
-                self.assertEqual(code, 0 if fixture["state"] == "approved" else 3, err)
-                self.assertEqual(json.loads(out)["bundle_id"], fixture["bundle_id"])
+                reassembled = gate.assemble_bundle(
+                    {"identity": fixture["identity"], "expansion": fixture["expansion"]},
+                    fixture["evidence"], [], fixture["override"], "unmeasured",
+                    gate=gate.gate_profile(2, "cutover"))
+                self.assertEqual(reassembled["bundle_id"], bundle_id)
+                self.assertEqual((reassembled["gate_version"], reassembled["bundle_kind"]), (2, "cutover"))
+                self.assertEqual(gate.verify_bundle(reassembled, kind="cutover"), "unmeasured")
+
+    def test_the_version_three_cli_emits_its_pinned_bundle_id(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        path = tmp / "trials.json"
+        path.write_text(json.dumps(synthetic_cutover_manifest(tmp)), encoding="utf-8")
+        code, out, err = run_cli_text(["--trials", str(path),
+                                       "--gate-version", "3", "--kind", "cutover"])
+        emitted = json.loads(out)
+        self.assertEqual(emitted["bundle_id"], V3_PINNED_ID)
+        self.assertEqual(code, 0 if emitted["state"] == "approved" else 3, err)
+        self.assertEqual((emitted["gate_version"], emitted["bundle_kind"]), (3, "cutover"))
+        self.assertEqual(gate.verify_bundle(emitted, kind="cutover"), emitted["state"])
 
 
 if __name__ == "__main__":
