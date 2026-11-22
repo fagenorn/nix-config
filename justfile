@@ -324,6 +324,7 @@ agent-workflow-tests *args:
     tests/test_console_permission.py \
     tests/test_console_manager_service.py \
     tests/test_console_permit.py \
+    tests/test_console_own_reads.py \
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \
     tests/test_console_idle_service.py \

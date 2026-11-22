@@ -77,7 +77,9 @@ The confinement (#1271, ADR-console-089 D2). With a confinement the only file un
 directory that any tool may reach is its records file. A path reaches (`_reaches`) when its real path
 (symlinks resolved, `~` expanded, relative to `cwd`) is not the records file and is the private
 directory, the directory holding the records file or a transcript store, lies inside one, or is an ancestor of one, and is not inside the
-session's own `tool-results` directory of a store (`_own_results`); a reach is `RECORDS_DENIED`. It applies to:
+session's own `tool-results` directory of a store (`_own_results`); a reach is `RECORDS_DENIED`. The same
+rule, `session_results`, admits only genuine directories below a real store and is what a manager's prompt
+hook uses for its own saved output (ADR-console-103). It applies to:
 
 - `Read`: `file_path`.
 - `Grep`: `path` (the client's directory when absent), then the traversal rule below on it; a `glob`
@@ -140,6 +142,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -288,19 +291,37 @@ SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 RESULTS_DIR = "tool-results"
 
 
-def _own_results(path: str, c: Confinement) -> bool:
-    """Whether `path` is inside the session's own saved tool output, `<store>/<slug>/<session>/tool-results`."""
-    if c.session is None or _inside(path, c.private):
+def session_results(path: str, session: str, stores: Sequence[str]) -> bool:
+    """Whether the resolved `path` is inside `<store>/<slug>/<session>/tool-results` of one of `stores`.
+
+    `stores` are real paths, as `transcript_dirs` returns them. Only genuine directories count: the slug
+    is listed without following links, and the session and `tool-results` components must each be a
+    directory by `os.lstat`, so a link at any of the three admits nothing. A missing store or component
+    is skipped; any other `OSError` propagates.
+    """
+    if not SESSION_NAME.fullmatch(session):
         return False
-    for store in c.transcripts:
+    for store in stores:
         try:
             with os.scandir(store) as scan:
-                slugs = [entry.path for entry in scan if entry.is_dir()]
+                slugs = [entry.path for entry in scan if entry.is_dir(follow_symlinks=False)]
         except (FileNotFoundError, NotADirectoryError):
             continue
-        if any(_inside(path, os.path.join(slug, c.session, RESULTS_DIR)) for slug in slugs):
-            return True
+        for slug in slugs:
+            held = os.path.join(slug, session)
+            results = os.path.join(held, RESULTS_DIR)
+            try:
+                genuine = all(stat.S_ISDIR(os.lstat(part).st_mode) for part in (held, results))
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if genuine and _inside(path, results):
+                return True
     return False
+
+
+def _own_results(path: str, c: Confinement) -> bool:
+    """Whether `path` is inside the session's own saved tool output, `<store>/<slug>/<session>/tool-results`."""
+    return c.session is not None and not _inside(path, c.private) and session_results(path, c.session, c.transcripts)
 
 
 def transcript_dirs(environ: Mapping[str, str]) -> tuple[str, ...]:
