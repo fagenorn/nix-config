@@ -306,6 +306,14 @@ REPAIRS = {
     "platform.standards.install": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
+    # No engine command edits code or fetches history, so both repairs are the
+    # reader's own call.
+    "violations.never_rise.reduce": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "violations.history.fetch": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
 }
 
 
@@ -416,6 +424,11 @@ REGISTRY: tuple[Check, ...] = (
            ("standards_lint_failed", "docs.standards.repair"),
            ("standards_unreadable", "docs.standards.repair")),
           "check_standards_lint"),
+    Check("verification.violations.never_rise", "verification", "path", "required",
+          ("repository.contract.valid",),
+          (("violation_count_rose", "violations.never_rise.reduce"),
+           ("history_unavailable", "violations.history.fetch")),
+          "check_never_rise"),
     Check("repository.residue.nested_ledger", "repository", "residue", "optional",
           ("repository.contract.valid",), NESTED_LEDGER_FINDINGS,
           "check_residue_nested_ledger"),

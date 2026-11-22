@@ -3,17 +3,19 @@
   "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
   "inputs": ["holder", "issue", "range", "repo"],
   "stops": {"needs-owner": {"need": "owner-decision", "reenter": "draft"},
-            "claim-lost": {"need": "owner-decision", "reenter": "scope"}},
+            "claim-lost": {"need": "owner-decision", "reenter": "scope"},
+            "step-failed": {"need": "retry", "reenter": "draft"}},
   "steps": [
     {"id": "scope", "stage": "setup", "kind": "command", "command": "diff-scope",
      "in": ["run.range"], "on": {"ok": "draft", "failed": "needs-owner", "refused": "needs-owner"}},
     {"id": "draft", "stage": "building", "kind": "agent", "role": "implementer",
      "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
      "in": ["run.issue"], "max_visits": 2, "mutates": true,
-     "on": {"drafted": "review", "stuck": "draft", "exhausted": "needs-owner"}},
+     "on": {"drafted": "review", "stuck": "draft", "exhausted": "needs-owner",
+            "out-of-bounds": "step-failed"}},
     {"id": "review", "stage": "final review", "kind": "agent", "role": "reviewer",
      "prompt": "review.md", "reply": "review.reply.json", "outcome_from": "verdict",
-     "in": ["draft.summary"], "on": {"approve": "tally", "revise": "tally"}},
+     "in": ["draft.summary"], "on": {"approve": "tally", "revise": "tally", "out-of-bounds": "step-failed"}},
     {"id": "tally", "stage": "final review", "kind": "decide", "grader": "toy-tally",
      "in": ["review.verdict"], "on": {"accept": "done", "revise": "needs-owner"}}
   ]

@@ -1,4 +1,4 @@
-# ADR-project-contract-016 — Adoption locks the platform revision and requires Conformance
+# ADR-project-contract-018 — Adoption locks the platform revision and requires Conformance
 
 - **Status:** accepted
 - **Decided in:** #1454 (per #1413, #1415, #1430)

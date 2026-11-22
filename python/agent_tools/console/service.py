@@ -70,7 +70,7 @@ stream `Content-Length`):
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     GET /api/picture/<id> 200 image/png, the page reads a stored picture (below)
-    GET /api/profile 200 application/json, the profile a new session should use (below)
+    GET /api/profile[?all_out=1] 200 application/json, the profile a new session should use (below)
     GET /api/excluded 200 application/json, the profiles the owner excluded (below)
     GET /api/whoami 200 application/json, what the guest port received (guest port only; 404 on the owner's port)
     anything else   404
@@ -1575,7 +1575,10 @@ answers only a loopback `Host`. The service also keeps that choice in `choice_fi
 the choice differs from the last one written (at construction, what the file holds), and removed when
 nothing can be chosen. A failed write is one stderr line `console: choice_unwritten <Type>:
 <message>` until a write succeeds, and is tried again at the next choice. With `choice_file` None
-no file is read or written.
+no file is read or written. The opt-in query `?all_out=1` answers
+`{"all_out":true,"profile":null,"resumes_at":<UTC time ending in Z, or null>}` when `capacity_view`
+reads every considered profile out (the launcher sends it only for a caller that asked for an answer
+file, ADR-system-006), and the plain body otherwise; the plain route never gains a member.
 
 Exclusion (#1028): `set_exclusion(profile, excluded)` (`POST /api/exclusion`, body `{"profile",
 "excluded"}` with `excluded` a bool, at most `MAX_EXCLUSION_BYTES`; a bad body is 400 `bad
@@ -3989,7 +3992,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._loopback():
             return
-        route = self.path.split("?", 1)[0]
+        route, _, query = self.path.partition("?")
         if route == PAGE_PATH:
             self._send(200, "text/html; charset=utf-8", self.server.console.page_bytes,
                        ("Content-Security-Policy", CSP))
@@ -4005,7 +4008,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == STATUS_PATH:
             self._status_request()
         elif route == PROFILE_PATH:
-            body = json.dumps({"profile": self.server.console.session_profile()},
+            body = json.dumps(self.server.console.session_answer(query == "all_out=1"),
                               sort_keys=True, separators=(",", ":")).encode()
             self._send(200, "application/json", body)
         elif route == EXCLUDED_PATH:
@@ -7803,7 +7806,8 @@ class ConsoleService:
             if launch is None:
                 return
             launch = dataclasses.replace(
-                launch, permission=self._read_permission(launch.project_id, launch.cwd))
+                launch, permission=self._read_permission(launch.project_id, launch.cwd),
+                allow=self._allow_rules(launch.cwd))
             listed = None
             if isinstance(token, _ListedMoveReservation):
                 try:
@@ -8265,8 +8269,9 @@ class ConsoleService:
     def _refresh_settings(self, sprint_id: str, root: str) -> permission.Permission:
         """Write the sprint's manager settings file again before a wake (ADR-console-021); the mode it wrote.
 
-        The content is what a launch writes, from the sprint's stored secret and the mode the project's
-        production rules choose now (ADR-console-060), read off the lock. The write runs under the ingest lock,
+        The content is what a launch writes, from the sprint's stored secret, the mode the project's
+        production rules choose now (ADR-console-060) and the allow rules its slug and merge binding give now
+        (ADR-console-102), each read off the lock again, never copied from the launch. The write runs under the ingest lock,
         as `withdraw_goal` removes the secret and the file, so a withdrawal can never fall between the read
         and the write and leave a file holding the secret. `NudgeFailed` when the sprint is no longer open,
         when its secret is missing (the wake is not sent without the isolation and permission members) or when
@@ -8278,6 +8283,7 @@ class ConsoleService:
                 raise nudge.NudgeFailed("the sprint is no longer open")
             project_id = sprint.project_id
         chosen = self._read_permission(project_id, root)
+        allow = self._allow_rules(root)
         with self._ingest:
             if sprint_id not in self._sprints:
                 raise nudge.NudgeFailed("the sprint is no longer open")
@@ -8287,7 +8293,7 @@ class ConsoleService:
             try:
                 manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
                                        {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret},
-                                       chosen)
+                                       chosen, allow)
             except manager.LaunchFailed as error:
                 raise nudge.NudgeFailed(str(error)) from error
         return chosen
@@ -9649,6 +9655,11 @@ class ConsoleService:
         return (read(self._slug_of, None), read(self._branch_pattern_of, None), strategy,
                 delete_branch)
 
+    def _allow_rules(self, root: str | None) -> tuple[str, ...]:
+        """Off the lock: the allow rules the project's slug and merge binding give a manager's settings (ADR-console-102)."""
+        slug, _, strategy, delete_branch = self._permit_reads(root)
+        return manager.allow_rules(slug, strategy, delete_branch)
+
     def _permit_record(self, sprint: sprints.SprintState, session_id: str, tool_use_id: str,
                        slug: str | None, verdict: permit.Verdict) -> permit.Verdict:
         """Under the ingest lock: append the `permit.judged` row of a decided verdict and return it."""
@@ -10030,20 +10041,30 @@ class ConsoleService:
                 self._publish()
         return appended + moved
 
+    def _session_view(self, profiles: frozenset[str], excluded: frozenset[str] | None = None,
+                      pinned: object = _FOLDED) -> dict:
+        """Under the ingest lock: the capacity view a session choice is made over, over `profiles`.
+
+        `excluded` is the set the view is made over, the folded one when None; `pinned` is the
+        pin it is made over, the folded one when left out and no pin when None.
+        """
+        return capacity.capacity_view(profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins,
+                                      excluded=self._excluded if excluded is None else excluded,
+                                      pinned=self._pinned if pinned is _FOLDED else pinned,
+                                      owners=self._owners_now())
+
+    def _choice_over(self, view: dict) -> str | None:
+        """Under the ingest lock: the profile a new session should use, over `view`."""
+        return manager.session_profile(view, self._use.last, None, self._waiting_logins())
+
     def _session_choice(self, profiles: frozenset[str], excluded: frozenset[str] | None = None,
                         pinned: object = _FOLDED) -> str | None:
         """Under the ingest lock: the profile a new session should use, over `profiles`.
 
-        `excluded` is the set the choice is made over, the folded one when None; `pinned` is the
-        pin it is made over, the folded one when left out and no pin when None.
+        `excluded` and `pinned` are as in `_session_view`.
         """
-        return manager.session_profile(
-            capacity.capacity_view(profiles - self._removing, self._capacity, self._clock(),
-                                   self._signins,
-                                   excluded=self._excluded if excluded is None else excluded,
-                                   pinned=self._pinned if pinned is _FOLDED else pinned,
-                                   owners=self._owners_now()),
-            self._use.last, None, self._waiting_logins())
+        return self._choice_over(self._session_view(profiles, excluded, pinned))
 
     def set_exclusion(self, profile: str, excluded: bool) -> list[Event]:
         """Exclude `profile` from the console's choice, or put it back; `exclusion.Refused` when it cannot.
@@ -10120,6 +10141,24 @@ class ConsoleService:
             profile = self._session_choice(self._read_profiles())
             self._note_choice(profile)
             return profile
+
+    def session_answer(self, all_out: bool) -> dict:
+        """The answer to `GET /api/profile`: `{"profile": name}`, or with `all_out` and every profile out
+        `{"all_out": True, "profile": None, "resumes_at": <UTC time ending in Z, or None>}`.
+
+        One capacity view serves both the answer and the choice, which is kept in the choice file as
+        `session_profile` keeps it.
+        """
+        with self._ingest:
+            view = self._session_view(self._read_profiles())
+            profile = self._choice_over(view)
+            self._note_choice(profile)
+            if all_out and view["all_out"]:
+                resumes = view["resumes_at"]
+                return {"all_out": True, "profile": None,
+                        "resumes_at": None if resumes is None else datetime.fromisoformat(resumes)
+                        .astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            return {"profile": profile}
 
     def _note_choice(self, profile: str | None) -> None:
         """Under the ingest lock: write the choice file when `profile` differs from the last value written."""

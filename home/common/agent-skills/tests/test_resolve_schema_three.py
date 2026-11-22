@@ -18,12 +18,14 @@ import re
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.guard import contract_export
 from agent_tools.project_contract import (
     adopt_inspection,
+    attempt_history,
     derived_values,
     resolve_project,
     schema_three,
@@ -72,7 +74,6 @@ EXPECTED_CONSTANTS = {
     "/bindings/workflow/review/plan": "codex-plan-review",
     "/bindings/workflow/review/code": "codex-diff-review",
     "/bindings/workflow/orchestration/max_parallel": 2,
-    "/bindings/workflow/orchestration/attempt_budget_minutes": 240,
 }
 
 RETIRED_PATHS = (
@@ -141,6 +142,7 @@ EXPECTED_DERIVED = {
     "/platform": {
         "min_inclusive": committed_manifest()["platform_version"],
         "max_exclusive": _next_major(committed_manifest()["platform_version"])},
+    "/bindings/workflow/orchestration/attempt_budget_minutes": 240,
 }
 
 
@@ -556,6 +558,9 @@ class SchemaThreeRefusalTest(SchemaThreeCase):
                 for pointer, value in EXPECTED_CONSTANTS.items()]
         for pointer, value in EXPECTED_DERIVED.items():
             rows.append((f"derived {pointer}", pointer, value, pointer))
+        rows.append(("derived basis", schema_three.ATTEMPT_BUDGET_BASIS,
+                     {"source": "fallback", "reason": "no_history"},
+                     schema_three.ATTEMPT_BUDGET_BASIS))
         rows.append(("empty /project", "/project", {}, "/project"))
         rows.append(("project not an object", "/project", "nix-config", "/project"))
         for container in schema_three.CONSTANT_CONTAINERS:
@@ -880,6 +885,113 @@ class SnapshotRetirementTest(SchemaThreeCase):
                 self.assertEqual([v["pointer"] for v in error["violations"]], pointers)
                 if repair_id is not None:
                     self.assertEqual(error["repair_id"], repair_id)
+
+
+class AttemptBudgetSnapshotTest(SchemaThreeCase):
+    """A schema-3 snapshot carries the budget its recorded history derives, and the basis of it."""
+
+    T = datetime(2026, 11, 22, 12, tzinfo=timezone.utc)
+    SLUG = "fagenorn/nix-config"
+    FALLBACK = 240
+
+    def record(self, root: Path, attempts: list, repo: str = SLUG) -> None:
+        attempt_history.write_history(
+            root, attempt_history.render_history(repo, self.T, attempts))
+
+    def twenty(self) -> list:
+        return [
+            attempt_history.Attempt(
+                i, 100 + i, self.T - timedelta(days=21 - i) - timedelta(seconds=i * 3600 + 30),
+                self.T - timedelta(days=21 - i))
+            for i in range(1, 21)]
+
+    def orchestration(self, snap: dict) -> dict:
+        return snap["bindings"]["workflow"]["orchestration"]
+
+    def assert_fallback(self, root: Path, basis: dict) -> None:
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.orchestration(snap)["attempt_budget_minutes"], self.FALLBACK)
+        self.assertEqual(self.orchestration(snap)["attempt_budget_basis"], basis)
+
+    def test_a_schema_three_snapshot_carries_the_budget_its_recorded_history_derives(self):
+        root = self.schema_three_root(schema_three_contract())
+        self.record(root, self.twenty())
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.orchestration(snap)["attempt_budget_minutes"], 1621)
+        self.assertEqual(self.orchestration(snap)["attempt_budget_basis"], {
+            "source": "history", "delivered": 20, "percentile_90_seconds": 64830,
+            "recorded_at": "2026-11-22T12:00:00Z"})
+
+    def test_a_schema_two_snapshot_keeps_its_authored_budget_beside_a_recorded_history(self):
+        contract = source_contract()
+        contract["bindings"]["workflow"]["orchestration"]["attempt_budget_minutes"] = 180
+        root = self.schema_three_root(contract)
+        self.record(root, self.twenty(), repo=contract["bindings"]["tracker"]["repo_slug"])
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.orchestration(snap)["attempt_budget_minutes"], 180)
+        self.assertNotIn("attempt_budget_basis", self.orchestration(snap))
+
+    def test_a_removed_history_gives_the_fallback_and_the_project_resolves(self):
+        root = self.schema_three_root(schema_three_contract())
+        self.record(root, self.twenty())
+        attempt_history.history_path(root).unlink()
+        self.assert_fallback(root, {"source": "fallback", "reason": "no_history"})
+
+    def test_a_corrupted_history_gives_the_fallback_and_the_project_resolves(self):
+        root = self.schema_three_root(schema_three_contract())
+        self.record(root, self.twenty())
+        attempt_history.history_path(root).write_bytes(b'{"version": 1, "repo"')
+        self.assert_fallback(root, {"source": "fallback", "reason": "unreadable"})
+
+    def test_an_invalid_history_gives_the_fallback(self):
+        root = self.schema_three_root(schema_three_contract())
+        attempts = self.twenty()
+        first = attempts[0]
+        attempts[0] = first._replace(merged_at=first.claimed_at - timedelta(seconds=1))
+        self.record(root, attempts)
+        self.assert_fallback(root, {"source": "fallback", "reason": "invalid"})
+
+    def test_another_repositorys_history_gives_the_fallback(self):
+        root = self.schema_three_root(schema_three_contract())
+        self.record(root, self.twenty(), repo="o/other")
+        self.assert_fallback(root, {"source": "fallback", "reason": "other_repository"})
+
+    def test_nineteen_delivered_give_the_fallback_with_their_count(self):
+        root = self.schema_three_root(schema_three_contract())
+        self.record(root, self.twenty()[:19])
+        self.assert_fallback(
+            root, {"source": "fallback", "reason": "too_few", "delivered": 19})
+
+    def test_a_resolve_leaves_the_history_untouched(self):
+        root = self.schema_three_root(schema_three_contract())
+        self.record(root, self.twenty())
+        path = attempt_history.history_path(root)
+        before = (path.read_bytes(), sorted(os.listdir(path.parent)))
+        for _ in range(2):
+            code, _, err = self.resolve(root)
+            self.assertEqual(code, 0, err)
+            self.assertEqual((path.read_bytes(), sorted(os.listdir(path.parent))), before)
+
+    def test_a_schema_two_source_derives_nothing_and_reads_no_history(self):
+        root = self.schema_three_root(source_contract())
+        self.record(root, self.twenty(), repo=source_contract()["bindings"]["tracker"]["repo_slug"])
+        with mock.patch.object(attempt_history, "read", side_effect=AssertionError("read")):
+            self.assertEqual(
+                resolve_project.derive_for(root, source_contract()),
+                derived_values.Derived({}, []))
+
+    def test_the_schema_three_history_read_starts_no_child_process_and_opens_no_connection(self):
+        root = self.schema_three_root(schema_three_contract())
+        self.record(root, self.twenty())
+        expected = resolve_project.derive_for(root, schema_three_contract())
+        with mock.patch("subprocess.Popen", side_effect=AssertionError), \
+                mock.patch("socket.socket", side_effect=AssertionError):
+            self.assertEqual(
+                resolve_project.derive_for(root, schema_three_contract()), expected)
+        self.assertEqual(expected.values[schema_three.ATTEMPT_BUDGET], 1621)
 
 
 if __name__ == "__main__":

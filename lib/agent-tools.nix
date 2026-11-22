@@ -47,6 +47,7 @@ let
     "adr-number" = "delivery.adr_number";
     "agent-model-matrix" = "agent_model_matrix";
     "artifact-budget" = "delivery.artifact_budget";
+    "attempt-budget" = "delivery.attempt_budget";
     "bypass-proof" = "console.bypass_proof";
     "cache-proxy" = "hosts.cache_proxy";
     "conformance" = "project_contract.conformance";
@@ -72,6 +73,7 @@ let
     "release" = "release.release";
     "release-card" = "console.release_card";
     "resolve-project" = "project_contract.resolve_project";
+    "size-lint" = "delivery.size_lint";
     "skill-lint" = "skill_lint";
     "sprint" = "console.sprint";
     "standards-lint" = "delivery.standards_lint";
