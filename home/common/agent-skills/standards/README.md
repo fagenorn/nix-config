@@ -37,6 +37,7 @@ Nobody reads a whole standards corpus. Briefs paste **Layer 0 in full** (~600 to
 
 A repo's `docs/standards/` is a directory of shards plus a **README index of at most 40 lines**, one row per shard carrying its `governs:` globs and a one-line gist — the same index-not-store discipline as `CONTEXT-MAP.md`.
 
+- **Shape.** Each `governs` cell holds one or more code-span path globs relative to the repository root, never prose and never a glob made only of `*` and `/`. A shard in any layer is at most 8 KB (8192 bytes), and a heading, its hashes and id included, is at most 100 characters. `standards-lint` checks these shapes, the index and the ids; whether a rule restates a higher layer or is process filed as a standard stays with the reviewer.
 - **Deltas only.** Anything that restates Layer 0 or 1 gets deleted, not copied. If a rule is true for every project on this stack, it belongs upstream in `stacks/`.
 - **Case law is written rule-first**: each rule is one `### P<n>.` heading, then the rule in at most two sentences, plus one issue or ADR link. The narrative lives in the issue. Incident memoirs are what make a standards file grow linearly with project age.
 - **Process content is not a standard.** Deploy checklists go to `.claude/hints/`, review procedure to `REVIEW-CONTRACT.md`, lint commands nowhere — the environment already names them.
