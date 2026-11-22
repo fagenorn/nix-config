@@ -145,6 +145,7 @@ agent-workflow-tests *args:
     tests/test_engine_ledger.py \
     tests/test_engine_core.py \
     tests/test_engine_commands.py \
+    tests/test_engine_guard.py \
     tests/test_engine_deliver.py \
     tests/test_engine_session.py \
     tests/test_engine_keep_alive.py \

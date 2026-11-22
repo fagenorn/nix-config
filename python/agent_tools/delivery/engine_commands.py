@@ -17,12 +17,18 @@ A command that cannot start (an `OSError` from the spawn) is `failed` with exit 
 propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group at
 the timeout and bounds the drain by `DRAIN_SECONDS`. `Ran.stdout`/`stderr` are what it printed
 (stderr is empty untimed). The module runs processes, so the pure engine core never imports it.
+
+Every command passes the lifecycle guard first, in the guard's accepted spelling (`command_text`),
+and runs marked as an agent session so the pre-push hook judges a push it makes (issue 1515). A
+refusal, a timeout or an unusable guard is the outcome `refused`, with the guard's reason as the
+result and no process.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import time
@@ -31,7 +37,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery import procedure_check
+from agent_tools.delivery import engine_guard, procedure_check
 from agent_tools.delivery.procedure_check import CommandDeclaration
 from agent_tools.system.siblings import sibling_argv
 
@@ -43,6 +49,9 @@ PROJECT_DECLARATION = CommandDeclaration((), {})
 NOT_STARTED = 127
 TIMED_OUT = "timeout"
 DRAIN_SECONDS = 5
+TEXT_VALUE_FLAGS = ("--body", "--subject", "--title")
+SHELL_ACTIVE = frozenset('"\\$`!')
+SESSION_MARKER = "CLAUDECODE"
 
 
 class UnknownCommand(LookupError):
@@ -56,6 +65,29 @@ def argument(value: object) -> str:
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def command_text(argv: Sequence[str]) -> str:
+    """The argv in the guard's accepted spelling, words joined by one space (issue 1515, D6)."""
+    def bare_or_double(word: str) -> str:
+        if shlex.quote(word) == word:
+            return word
+        if not SHELL_ACTIVE.intersection(word):
+            return f'"{word}"'
+        return shlex.quote(word)
+
+    words: list[str] = []
+    index = 0
+    while index < len(argv):
+        word = argv[index]
+        words.append(bare_or_double(word))
+        if word in TEXT_VALUE_FLAGS and index + 1 < len(argv):
+            value = argv[index + 1]
+            words.append(shlex.quote(value) if SHELL_ACTIVE.intersection(value)
+                         else f'"{value}"')
+            index += 1
+        index += 1
+    return " ".join(words)
 
 
 @dataclass(frozen=True)
@@ -119,21 +151,34 @@ def grade(stdout: bytes, exit_code: int) -> tuple[str, dict]:
 class Ran:
     outcome: str
     result: dict
-    exit_code: int
+    exit_code: int | None
     wall_seconds: float
     stdout: bytes = b""
     stderr: bytes = b""
 
 
+def _refused(reason: str, started: float) -> Ran:
+    return Ran("refused", {"reason": reason, "verdict": "refused"}, None,
+               time.monotonic() - started)
+
+
 def run(table: CommandTable, command: str, subcommand: str | None,
-        args: Sequence[tuple[str, object]], *, on_start: Callable[[int], None],
-        timeout: float | None = None) -> Ran:
-    """Run one command step to its end; `on_start(pid)` is called once, before waiting."""
+        args: Sequence[tuple[str, object]], *, guard: engine_guard.Hook | engine_guard.Unavailable,
+        on_start: Callable[[int], None], timeout: float | None = None) -> Ran:
+    """Run one command step to its end once the guard allows it; `on_start(pid)` is called once,
+    before waiting."""
     invocation = table.invocation(command, subcommand, args)
     started = time.monotonic()
+    text = command_text(invocation.argv)
+    if shlex.split(text) != list(invocation.argv):
+        return _refused(f"The command text {text} does not split back to its words.", started)
+    verdict = engine_guard.judge(guard, text, invocation.cwd)
+    if not verdict.allowed:
+        return _refused(verdict.reason or "The lifecycle guard refused.", started)
     try:
         process = subprocess.Popen(
-            invocation.argv, cwd=invocation.cwd, stdin=subprocess.DEVNULL,
+            shlex.split(text), cwd=invocation.cwd, stdin=subprocess.DEVNULL,
+            env={**os.environ, SESSION_MARKER: os.environ.get(SESSION_MARKER) or "1"},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
             start_new_session=timeout is not None)
     except OSError:
