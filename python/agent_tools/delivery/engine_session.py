@@ -14,7 +14,8 @@ argument words of the step's `in` values.
 its `structured_output` is the only source of the reply, the prose in `result`
 never is, and every measurement that is absent or invalid reads as zero. A result whose
 `is_error` is true with an `api_error` string or an integer `api_error_status` is an API failure
-(`Reading.api_failure`): `usage-limit` for the `api_error` `usage_limit_reached`, else `api-error`.
+(`Reading.api_failure`): `usage-limit` for the `api_error` `usage_limit_reached`, else `api-error`, which the shell retries once and then
+reads as the outcome `no-reply`.
 
 `launch_argv` builds the one launch form: the account launcher's print mode
 (`claude-account run -p`) with the role handed over by flags (`--model`,

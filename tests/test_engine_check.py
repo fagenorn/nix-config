@@ -274,6 +274,10 @@ def _first_step_recovery_reading(path: str) -> Callable[[dict], None]:
     return edit
 
 
+def _no_reply_to_review(toy: dict) -> None:
+    step(toy, "draft")["on"]["no-reply"] = "review"
+
+
 def _exhausted_stop(toy: dict) -> None:
     toy["stops"]["exhausted"] = {"need": "retry", "reenter": "draft"}
 
@@ -440,6 +444,9 @@ CASES = [
          [("toy", None, "invalid_field")]),
     Case("stop_named_quota_wait", editing("toy", _quota_wait_stop),
          [("toy", None, "invalid_field")]),
+    Case("no_reply_to_a_reader_of_the_reply", editing("toy", _no_reply_to_review),
+         [("toy", "children", "unproduced_input"), ("toy", "review-a", "unproduced_input"),
+          ("toy", "review-b", "unproduced_input")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
 ]
@@ -522,6 +529,25 @@ class ToyProcedureTest(unittest.TestCase):
                 code, out, _ = run_check("--procedures", str(directory))
                 self.assertEqual((code, out), (0, compact(
                     {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+
+class NoReplyOutcomeTest(unittest.TestCase):
+    def test_an_agent_step_may_map_no_reply_and_a_command_step_may_not(self):
+        with self.subTest("agent step"):
+            directory = broken_copy(editing(
+                "toy", _set(lambda toy: step(toy, "draft")["on"], "no-reply", "needs-owner")))
+            code, out, _ = run_check("--procedures", str(directory))
+            self.assertEqual((code, out), (0, compact(
+                {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+        with self.subTest("command step"):
+            directory = broken_copy(editing(
+                "toy", _set(lambda toy: step(toy, "scope")["on"], "no-reply", "needs-owner")))
+            code, out, _ = run_check("--procedures", str(directory))
+            document = json.loads(out)
+            self.assertEqual(code, 1)
+            self.assertEqual([(r["procedure"], r["step"], r["defect"])
+                              for r in document["refusals"]],
+                             [("toy", "scope", "unknown_outcome")])
 
 
 class RefusalTableTest(unittest.TestCase):

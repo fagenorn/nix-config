@@ -36,6 +36,7 @@ AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 STUB = REPO_ROOT / "tests/fixtures/engine-session/claude_stub.py"
 RESULT_NORMAL = REPO_ROOT / "tests/fixtures/engine-session/result-normal.json"
 RESULT_LIMIT = REPO_ROOT / "tests/fixtures/engine-session/result-limit.json"
+RESULT_API_ERROR = REPO_ROOT / "tests/fixtures/engine-session/result-api-error.json"
 ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 DENIAL = {"tool_name": "Write", "tool_use_id": "toolu_01",
           "tool_input": {"file_path": "/etc/hosts"}}
@@ -1070,3 +1071,153 @@ class DeliverLimitTest(unittest.TestCase):
         self.assertEqual(line["end"], "done")
         self.assertEqual((connect.call_count, connect_ex.call_count, create.call_count), (0, 0, 0))
         self.assertEqual(len(self.log(log)), 2)
+
+
+class DeliverApiErrorTest(unittest.TestCase):
+    NO_REPLY_ON = {"drafted": "done", "stuck": "needs-owner", "no-reply": "needs-owner"}
+
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, *ROLE_NAMES)
+
+    def log(self, log: Path) -> list[dict]:
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def run_dir(self) -> Path:
+        (run,) = self.project.runs()
+        return run
+
+    def events(self, kind: str) -> list[dict]:
+        return [e for e in self.project.events(self.run_dir()) if e["event"] == kind]
+
+    def api_error(self, account: str = "p1") -> dict:
+        return {"stdout": str(RESULT_API_ERROR), "exit": 1, "account": account}
+
+    def limit(self, account: str = "p1") -> dict:
+        return {"stdout": str(RESULT_LIMIT), "exit": 1, "account": account}
+
+    def normal(self, account: str = "p1") -> dict:
+        return {"stdout": str(RESULT_NORMAL), "exit": 0, "account": account}
+
+    def canned(self, name: str, data: bytes) -> str:
+        path = self.project.tmp / name
+        path.write_bytes(data)
+        return str(path)
+
+    def deliver(self, log: Path, procedures: Path) -> tuple[int, dict, list[tuple[float, int]]]:
+        """`engine_shell.deliver` in process, with each sleep recorded as (seconds, invocations so far)."""
+        sleeps: list[tuple[float, int]] = []
+
+        def record(seconds: float) -> None:
+            sleeps.append((seconds, len(log.read_text(encoding="utf-8").splitlines())))
+
+        with self.project.inside(), mock.patch("time.sleep", side_effect=record):
+            code, line = engine_shell.deliver(1521, procedures)
+        return code, line, sleeps
+
+    def test_an_api_error_is_retried_once_after_thirty_seconds_on_the_same_session(self):
+        log = install_answers(self.project, [self.api_error(), self.normal()])
+        code, line, sleeps = self.deliver(log, one_step(self.project))
+        self.assertEqual(code, 0, line)
+        self.assertEqual(sleeps, [(30, 1)])
+        records = self.log(log)
+        self.assertEqual(len(records), 2)
+        first, second = (record["argv"] for record in records)
+        session = after(first, "--session-id")
+        self.assertNotIn("--resume", first)
+        self.assertEqual(after(second, "--resume"), session)
+        self.assertEqual(len(self.events("step_entered")), 1)
+        self.assertEqual(self.events("wait_started"), [])
+        (graded,) = self.events("outcome_graded")
+        self.assertEqual(graded["outcome"], "drafted")
+        (resuming,) = self.events("session_resuming")
+        self.assertEqual(resuming["attempt"], 2)
+
+    def test_a_second_api_error_is_the_outcome_no_reply(self):
+        log = install_answers(self.project, [self.api_error(), self.api_error(), self.normal()])
+        code, line, sleeps = self.deliver(log, one_step(self.project, on=self.NO_REPLY_ON))
+        self.assertEqual(code, 3, line)
+        self.assertEqual(line["end"], "needs-owner")
+        self.assertEqual(len(self.log(log)), 2)
+        self.assertEqual(sleeps, [(30, 1)])
+        run = self.run_dir()
+        events = self.project.events(run)
+        self.assertEqual(
+            [e["event"] for e in events if e["event"] in (
+                "result_stored", "outcome_graded", "transition_taken")],
+            ["result_stored", "outcome_graded", "transition_taken"])
+        (stored,) = [e for e in events if e["event"] == "result_stored"]
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(encoding="utf-8")), {})
+        self.assertEqual(stored["wall_seconds"], 1.5)
+        (graded,) = [e for e in events if e["event"] == "outcome_graded"]
+        self.assertEqual(graded["outcome"], "no-reply")
+        (taken,) = [e for e in events if e["event"] == "transition_taken"]
+        self.assertEqual((taken["outcome"], taken["to"]), ("no-reply", "needs-owner"))
+
+    def test_a_second_api_error_with_no_mapping_is_a_fault_naming_no_reply(self):
+        log = install_answers(self.project, [self.api_error(), self.api_error(), self.normal()])
+        with self.assertRaises(engine_shell.Fault) as raised:
+            self.deliver(log, one_step(self.project))
+        self.assertIn("no-reply", str(raised.exception))
+        self.assertEqual(len(self.log(log)), 2)
+        self.assertEqual(self.events("outcome_graded"), [])
+
+    def test_a_no_reply_keeps_a_measured_duration_of_zero(self):
+        failed = self.canned("zero.json", canned_result(
+            is_error=True, api_error_status=529, api_error="overloaded_error",
+            structured_output=..., duration_ms=0))
+        entry = {"stdout": failed, "exit": 1, "account": "p1"}
+        log = install_answers(self.project, [entry, entry])
+        code, line, _ = self.deliver(log, one_step(self.project, on=self.NO_REPLY_ON))
+        self.assertEqual(code, 3, line)
+        (stored,) = self.events("result_stored")
+        self.assertEqual(stored["wall_seconds"], 0.0)
+
+    def test_a_limit_after_an_api_error_still_resumes(self):
+        log = install_answers(self.project, [self.api_error(), self.limit(), self.normal("p2")])
+        code, line, sleeps = self.deliver(log, one_step(self.project))
+        self.assertEqual(code, 0, line)
+        self.assertEqual(len(self.log(log)), 3)
+        self.assertEqual(sleeps, [(30, 1)])
+        (graded,) = self.events("outcome_graded")
+        self.assertEqual(graded["outcome"], "drafted")
+        self.assertEqual(len(self.events("wait_started")), 1)
+        self.assertEqual(len(self.events("wait_ended")), 1)
+
+    def test_a_limit_an_api_error_and_a_limit_on_the_same_account_stop_with_the_wait_open(self):
+        log = install_answers(self.project, [
+            self.limit(), self.api_error(), self.limit(), self.normal()])
+        code, line, sleeps = self.deliver(log, one_step(self.project))
+        self.assertEqual(code, 3, line)
+        self.assertEqual(line["end"], "quota-wait")
+        self.assertEqual(len(self.log(log)), 3)
+        self.assertEqual(sleeps, [(30, 2)])
+        self.assertEqual(len(self.events("wait_started")), 1)
+        self.assertEqual(self.events("wait_ended"), [])
+        status = json.loads(self.project.status(1521).stdout)
+        self.assertEqual(status["wait"]["wait"], "usage-limit")
+        self.assertIsNone(status["wait"]["until"])
+        self.assertEqual(status["stop"]["name"], "quota-wait")
+
+    def test_a_denied_shell_command_beside_an_api_error_is_a_fault_before_any_retry(self):
+        denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
+                  "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
+        failed = self.canned("denied.json", canned_result(
+            is_error=True, api_error_status=529, api_error="overloaded_error",
+            structured_output=..., permission_denials=[denial]))
+        log = install_answers(self.project, [
+            {"stdout": failed, "exit": 1, "account": "p1"}, self.normal()])
+        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
+                            prompt="review.md", reply="review.reply.json",
+                            outcome_from="verdict")]
+        procedures = write_procedures(self.project, steps, {
+            "review.md": "Review {{run.issue}}.\n",
+            "review.reply.json": json.dumps(REVIEW_REPLY)})
+        with self.assertRaises(engine_shell.Fault) as raised:
+            self.deliver(log, procedures)
+        self.assertIn("python3 -m unittest tests.test_x", str(raised.exception))
+        self.assertEqual(len(self.log(log)), 1)
+        record = json.loads((self.run_dir() / "sessions/review.1.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(record["denials"], [denial])

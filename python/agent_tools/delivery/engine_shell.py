@@ -31,6 +31,10 @@ after it, so the launcher chooses the next account. The wait ends right before t
 run ends at the engine's own stop `quota-wait` (need `retry`, exit 3, the wait left open) when the launcher
 answers that every account is out (the wait then carries the resume time), or when an account that
 already hit a limit in this visit hits one again; the engine opens no connection of its own for this.
+Any other API error is retried once in the visit, after `API_RETRY_SECONDS`, the same way (`--resume`, no new
+visit); a usage limit never consumes that retry and an API error never opens a wait, and a retried API error
+leaves an open `usage-limit` wait open, so every `quota-wait` stop has one open. A second API error in the visit
+is the outcome `no-reply`: the stored result is `{}` and the step's `on` must map it, else the run is a `Fault`.
 
 Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
@@ -54,6 +58,7 @@ import json
 import os
 import socket
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +77,7 @@ EXIT_REFUSED = 2
 EXIT_STOP = 3
 EXIT_RUNNING = 4
 KEEP_ALIVE_SECONDS = 1200
+API_RETRY_SECONDS = 30
 LOCK_NAME = "lock"
 ENTRY = "deliver"
 SUPPLIED_INPUTS = ("issue",)
@@ -424,11 +430,24 @@ def _visit_session(run_dir: Path, root: str, step: dict,
         "event": "session_starting", "at": _now(), "step": name, "visit": visit,
         "session": session, "role": role.name,
         "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
-    launched, reading, stopped = _launch_until_answered(
+    launched, reading, stopped, no_reply = _launch_until_answered(
         run_dir, root, (name, visit, session), prompt,
         lambda resume: engine_session.launch_argv(role, schema, session, system, resume=resume))
     if stopped is not None:
         return stopped
+    if no_reply:
+        wall = reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds
+        engine_ledger.store_result(run_dir, step=name, visit=visit, result={}, at=_now(),
+                                   wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
+                                   spend_usd=reading.spend_usd)
+        if procedure_check.NO_REPLY not in step["on"]:
+            raise Fault(f"step {name} has no mapping for the outcome {procedure_check.NO_REPLY}")
+        engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
+                                             "visit": visit, "outcome": procedure_check.NO_REPLY})
+        engine_ledger.append_event(run_dir, {
+            "event": "transition_taken", "at": _now(), "step": name, "visit": visit,
+            "outcome": procedure_check.NO_REPLY, "to": step["on"][procedure_check.NO_REPLY]})
+        return None
     reply = reading.reply
     if reply is None:
         reason = engine_session.diagnostic(launched.stderr)
@@ -456,12 +475,14 @@ def _visit_session(run_dir: Path, root: str, step: dict,
 def _launch_until_answered(
         run_dir: Path, root: str, visit_of: tuple[str, int, str], prompt: str,
         argv_for: Callable[[bool], tuple[str, ...]],
-) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None]:
-    """Launch the session, again with `--resume` after each usage limit, until a launch that is
-    no limit, whose result is returned with the visit's record stored and the wait ended. The
-    third member is the `quota-wait` stop (record stored, wait open) when no account can answer."""
+) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
+    """Launch the session, again with `--resume` after each usage limit and after the first other
+    API error (once, after `API_RETRY_SECONDS`), until a launch that is neither, or a second API
+    error, whose result is returned with the visit's record stored and the wait ended. The third
+    member is the `quota-wait` stop (record stored, wait open) when no account can answer, the
+    fourth is true for the second API error, the outcome `no-reply`."""
     name, visit, session = visit_of
-    attempt, limited, waiting, released = 1, set(), False, False
+    attempt, limited, waiting, released, retried, no_reply = 1, set(), False, False, False, False
 
     def event(kind: str, **members: object) -> None:
         engine_ledger.append_event(run_dir, {"event": kind, "at": _now(), **members})
@@ -477,7 +498,7 @@ def _launch_until_answered(
                    detail: str) -> tuple:
         _store_record(run_dir, name, visit, session, launched, reading)
         return launched, reading, _stop(run_dir, name, procedure_check.QUOTA_WAIT, QUOTA_NEED,
-                                        detail)
+                                        detail), False
 
     while True:
         started: list[int] = []
@@ -514,6 +535,13 @@ def _launch_until_answered(
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             raise Fault(f"step {name} was denied the shell command {str(command)[:200]!r}, so "
                         f"its reply is not graded: list it in the role's tools as Bash(<prefix>:*)")
+        if reading.api_failure == engine_session.API_ERROR:
+            if retried:
+                no_reply = True
+                break
+            retried, attempt = True, attempt + 1
+            time.sleep(API_RETRY_SECONDS)
+            continue
         if reading.api_failure != engine_session.USAGE_LIMIT:
             break
         if account in limited:
@@ -527,7 +555,7 @@ def _launch_until_answered(
     if waiting:
         event("wait_ended", wait=engine_session.USAGE_LIMIT)
     _store_record(run_dir, name, visit, session, launched, reading)
-    return launched, reading, None
+    return launched, reading, None, no_reply
 
 
 def _store_record(run_dir: Path, name: str, visit: int, session: str,

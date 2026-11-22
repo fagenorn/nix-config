@@ -48,7 +48,7 @@ Phase C, graph (only on a file with no phase A refusal and no `unknown_target`; 
 first): `unreachable_step` (a step the walk of `flow_graph` from the first step does not reach, `flow_graph` carrying the
 renewal failure as an edge to `claim-lost` into a `mutates` step; a group member is reached when its group is),
 `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
-`unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle of `step_graph` also produces `exhausted`, any
+`unknown_outcome` (a step's `on` keys against `outcomes_of`, an agent step also being allowed to map `no-reply`, which it need not (issue 1525 makes it required); a step on a cycle of `step_graph` also produces `exhausted`, any
 step may map it, and a group member's `pass` entries are checked at the group) and `unbounded_cycle` (a cycle among steps
 with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through the `exhausted`
 entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent; refused at its
@@ -58,7 +58,8 @@ Phase C, data flow (after the graph checks; in step order, the header's `keep_al
 `run.<n>` whose `n` is not a header input, or `<X>.<m>` where `X` is not produced on every route to the step: `X` is a
 non-member step, or a member of a group, among the `dominators` of the step without itself; a group member is dominated
 through its group; a step never reads its own result; a step the walk does not reach, and a member of a group it does not
-reach, skip this route check and keep the `run.<n>` and member checks), `unknown_member` (`X` is an agent step whose reply
+reach, skip this route check and keep the `run.<n>` and member checks; a step's `no-reply` result is `{}`, so the edge
+it maps `no-reply` to produces none of its members, and a reader reached through it is refused), `unknown_member` (`X` is an agent step whose reply
 schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
 consumed; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
 declares no schema and is not member-checked) and `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
@@ -91,6 +92,7 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
 EXHAUSTED = "exhausted"
 CLAIM_LOST = "claim-lost"
 QUOTA_WAIT = "quota-wait"
+NO_REPLY = "no-reply"
 START = "(start)"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -749,8 +751,34 @@ def dominators(graph: Mapping[str, tuple[str, ...]], entry: str) -> dict[str, fr
     return dom
 
 
-def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> None:
+def _data_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """`flow_graph` with each agent step's `no-reply` edge leaving a node of its own.
+
+    A `no-reply` result is `{}`, so a route through that edge does not produce the step's members: for an
+    agent step `s` mapping `no-reply` to a target other than `done`, every predecessor of `s` also goes to
+    `s#no-reply`, whose only successor is the target, and `s` itself drops the target unless another
+    outcome of `s` maps to it.
+    """
     graph = flow_graph(procedure)
+    cyclic = on_cycle(step_graph(procedure))
+    for item in procedure["steps"]:
+        name, target = item["id"], item.get("on", {}).get(NO_REPLY)
+        if item["kind"] != "agent" or name not in graph or target is None or target == "done":
+            continue
+        node = f"{name}#{NO_REPLY}"
+        others = {t for o, t in item["on"].items()
+                  if o != NO_REPLY and (o != EXHAUSTED or name in cyclic)}
+        for before, targets in list(graph.items()):
+            if name in targets:
+                graph[before] = targets + (node,)
+        graph[node] = (target,)
+        if target not in others:
+            graph[name] = tuple(t for t in graph[name] if t != target)
+    return graph
+
+
+def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> None:
+    graph = _data_flow_graph(procedure)
     by_id = {item["id"]: item for item in procedure["steps"]}
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
                 if item["kind"] == "group" for member in item["members"]}
@@ -845,7 +873,8 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
         if unmapped:
             found.add("unmapped_outcome",
                       f"on does not map {', '.join(map(repr, unmapped))}.", label)
-        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED]
+        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED
+                   and not (item["kind"] == "agent" and o == NO_REPLY)]
         if unknown:
             found.add("unknown_outcome",
                       f"on maps {', '.join(map(repr, unknown))}, which the step cannot produce.", label)
