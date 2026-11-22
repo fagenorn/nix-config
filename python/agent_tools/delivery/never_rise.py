@@ -14,8 +14,9 @@ failed git read is no verdict (`None`), never a pass.
 Both sides are judged by the enforcers passed in, so a rule introduced by the
 branch itself is measured on the base by the same code and passes while its
 violations only persist. Each enforcer is a `rule` id and a `find` function
-over a `Snapshot` (the revision and every tracked text file's line count); it
-may emit only its own rule id, else the comparison raises `ValueError`.
+over a `Snapshot` (the revision, every tracked text file's line count and its
+committed bytes); it may emit only its own rule id, else the comparison raises
+`ValueError`.
 
 A `Snapshot` also carries `files` (path to blob oid for every regular text file,
 mode 100644 or 100755, an empty one included; a symlink, a submodule and a
@@ -89,11 +90,17 @@ A file is text or binary by its committed bytes alone: a NUL among its first
 8,000 bytes makes it binary, as git decides it for `grep -I`, whatever a
 `diff` or `binary` attribute says, so no attribute hides a file from an
 enforcer.
+
+`command_snapshot(command, repo_root, revision)` is the preamble the registered
+never-rise commands share: it prints `<command>: <reason>` on stderr and returns
+`None` for a relative root, a root that is not a directory, a root below the
+repository's top level, or a revision it cannot resolve or read.
 """
 
 import os
-import subprocess
 import re
+import subprocess
+import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -181,6 +188,7 @@ class Snapshot(NamedTuple):
     root: Path | None = None
     timeout: float | None = None
     suppressions: tuple[Suppression, ...] = ()
+    contents: Mapping[str, bytes] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -289,7 +297,7 @@ def _read_blobs(root: Path, oids: Sequence[str], timeout: float | None) -> list[
 
 
 def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
-    """Every text file's line count and regular text file at a revision.
+    """Every text file's line count, committed bytes and regular text file at a revision.
 
     Lines are counted as `git grep -c` counts them: the newline-terminated lines
     plus an unterminated last line, empty files not counted. A file with a NUL in
@@ -312,6 +320,7 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
     if contents is None:
         return None
     counts: dict[str, int] = {}
+    texts: dict[str, bytes] = {}
     files: dict[str, str] = {}
     found: list[Suppression] = []
     for (path, (mode, oid)), content in zip(paths.items(), contents):
@@ -319,6 +328,7 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
             continue
         if content:
             counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
+            texts[path] = content
             if rule_ids.SUPPRESS.encode() in content:
                 found.extend(
                     Suppression(m.rule, path, m.line, m.reason)
@@ -327,7 +337,8 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
         if mode in REGULAR_MODES:
             files[path] = oid
     found.sort(key=lambda s: (s.path, s.line))
-    return Snapshot(revision, counts, MappingProxyType(files), root, timeout, tuple(found))
+    return Snapshot(revision, counts, MappingProxyType(files), root, timeout, tuple(found),
+                    MappingProxyType(texts))
 
 
 def read_files(snapshot: Snapshot, paths: Sequence[str]) -> dict[str, bytes]:
@@ -344,6 +355,25 @@ def read_files(snapshot: Snapshot, paths: Sequence[str]) -> dict[str, bytes]:
     if contents is None:
         raise HistoryUnavailable()
     return dict(zip(paths, contents))
+
+
+def command_snapshot(command: str, repo_root: str, revision: str) -> Snapshot | None:
+    """The snapshot a never-rise command judges, or None after one stderr line `<command>: <reason>`."""
+    root = Path(repo_root)
+    if not root.is_absolute():
+        reason = f"--repo-root must be absolute: {root}"
+    elif not root.is_dir():
+        reason = f"not a directory: {root}"
+    elif in_subdirectory(root, timeout=None):
+        reason = f"--repo-root is not the repository top level: {root}"
+    else:
+        sha = resolve_commit(root, revision, timeout=None)
+        snapshot = read_snapshot(root, sha, timeout=None) if sha else None
+        if snapshot is not None:
+            return snapshot
+        reason = f"cannot read {revision} in {root}"
+    print(f"{command}: {reason}", file=sys.stderr)
+    return None
 
 
 def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str, str] | None:

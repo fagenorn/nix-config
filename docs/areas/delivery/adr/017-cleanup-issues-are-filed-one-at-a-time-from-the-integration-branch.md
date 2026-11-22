@@ -9,7 +9,7 @@ The never-rise check (ADR-project-contract-017) stops a branch from adding viola
 
 ## Decision
 
-**D1. Counts at one revision.** Counts are read at one committed revision (default `HEAD`; in CI the pushed integration-branch commit) with the never-rise enforcers. `cleanup_issue.RULES` pairs each enforcer with its `batch` and `guidance`, and a test pins its enforcers to `conformance_checks.NEVER_RISE_ENFORCERS`, so a new enforcer cannot land without saying how its cleanup is sized and worded.
+**D1. Counts at one revision.** Counts are read at one committed revision (default `HEAD`; in CI the pushed integration-branch commit) with the never-rise enforcers. `cleanup_issue.RULES` pairs each enforcer with its `batch` and `guidance`, and a test pins its enforcers to `conformance_checks.never_rise_enforcers`, so a new enforcer cannot land without saying how its cleanup is sized and worded.
 
 **D2. Selection.** The rule with the smallest count above zero is selected; equal counts take the earlier rule in `RULES`.
 

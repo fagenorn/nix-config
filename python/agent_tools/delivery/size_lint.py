@@ -28,8 +28,7 @@ unresolvable revision or a failed git read.
 """
 
 import argparse
-import sys
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from agent_tools.delivery import never_rise
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
@@ -57,29 +56,13 @@ def find(snapshot: Snapshot) -> list[Violation]:
 ENFORCER = Enforcer(RULE_ID, find, per_file=True)
 
 
-def resolve(root: Path, revision: str) -> str | None:
-    return never_rise.resolve_commit(root, revision, timeout=None)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=COMMAND)
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--revision", default="HEAD")
     args = parser.parse_args(argv)
-    root = Path(args.repo_root)
-    if not root.is_absolute():
-        print(f"{COMMAND}: --repo-root must be absolute: {root}", file=sys.stderr)
-        return 2
-    if not root.is_dir():
-        print(f"{COMMAND}: not a directory: {root}", file=sys.stderr)
-        return 2
-    if never_rise.in_subdirectory(root, timeout=None):
-        print(f"{COMMAND}: --repo-root is not the repository top level: {root}", file=sys.stderr)
-        return 2
-    sha = resolve(root, args.revision)
-    snapshot = never_rise.read_snapshot(root, sha, timeout=None) if sha else None
+    snapshot = never_rise.command_snapshot(COMMAND, args.repo_root, args.revision)
     if snapshot is None:
-        print(f"{COMMAND}: cannot read {args.revision} in {root}", file=sys.stderr)
         return 2
     kept, marked = never_rise.counted(ENFORCER, snapshot)
     found = sorted(kept + marked, key=lambda v: (v.path, v.line))
