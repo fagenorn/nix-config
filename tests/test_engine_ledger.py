@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -552,6 +553,38 @@ class ReviewDefectsTest(unittest.TestCase):
             (run / "events.jsonl").write_bytes(b'{"at":"2026')
             engine_ledger.append_event(run, EXAMPLES["run_done"])
             self.assertEqual((run / "events.jsonl").read_bytes(), compact(EXAMPLES["run_done"]).encode())
+
+    def test_a_concurrent_append_never_loses_an_acknowledged_event_to_a_torn_tail_cut(self):
+        stopped = (FIXTURES / "stopped.jsonl").read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            (run / "events.jsonl").write_bytes(stopped + b'{"at":"2026-11-21T16:09:00Z","event":"run_contin')
+            first = {"event": "run_continued", "at": "2026-11-21T16:10:00Z"}
+            second = {"event": "run_done", "at": "2026-11-21T16:11:00Z"}
+            real_truncate = os.ftruncate
+            outcome = []
+
+            def writer_a():
+                engine_ledger.append_event(run, first)
+                outcome.append("acknowledged")
+
+            threads = []
+
+            def truncate_while_a_appends(descriptor, length):
+                # Only the first (writer B's) cut is interrupted by writer A.
+                if not threads:
+                    threads.append(threading.Thread(target=writer_a))
+                    threads[0].start()
+                    threads[0].join(timeout=1)
+                real_truncate(descriptor, length)
+
+            with mock.patch.object(os, "ftruncate", side_effect=truncate_while_a_appends):
+                engine_ledger.append_event(run, second)
+            for thread in threads:
+                thread.join(timeout=10)
+            self.assertEqual(outcome, ["acknowledged"])
+            self.assertCountEqual(engine_ledger.replay(run / "events.jsonl"),
+                                  engine_ledger.replay(FIXTURES / "stopped.jsonl") + [first, second])
 
     def test_a_symlinked_entry_procedure_inside_the_directory_is_copied_under_its_name(self):
         with tempfile.TemporaryDirectory() as tmp:

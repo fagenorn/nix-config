@@ -21,7 +21,9 @@ then linked into place, which refuses a result that exists, before its
 `result_stored` event is appended; `append_event` refuses that event while the
 file is absent. A crash between the two leaves a result with no event, never
 an event naming no result. An append first cuts a write that was cut short back
-to the last newline, so a torn tail never joins the next event.
+to the last newline, so a torn tail never joins the next event; the cut and
+the write run under an exclusive `flock` on `events.jsonl`, so two writers
+never race on the cut.
 
 The ledger holds no environment value and no credential: `run.json` carries
 only the names and values its caller passes as `inputs`.
@@ -29,6 +31,7 @@ only the names and values its caller passes as `inputs`.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
@@ -350,6 +353,9 @@ def _append_line(events_path: Path, line: bytes) -> None:
     except FileNotFoundError as error:
         raise LedgerError(f"{events_path.name} is absent") from error
     try:
+        # One writer at a time: the cut and the write are a unit, so a second
+        # writer's stale cut offset can never erase a first writer's event.
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
         _cut_torn_tail(descriptor)
         view = memoryview(line)
         while view:
