@@ -49,7 +49,11 @@ a hand-edited target is a structural refusal rather than a stale snapshot
 `platform-status` is the administrative operation: it reports the installed
 platform's version facts, and — when asked — one project's declared interval
 and compatibility verdict, or one verdict row per registered fleet member. It
-is never normal workflow context (R3.1).
+is never normal workflow context (R3.1). A schema-3 contract's project id and
+interval, in the `project` block and in every fleet row, are the derived ones
+(`contract_view`; ADR-project-contract-014), and a value that cannot be derived
+refuses a named project like `resolve` and reports a fleet row as
+`project_schema_unsupported`.
 
 `platform-status` republishes `platform.deprecations` verbatim and adds
 `deprecated_uses` to the `project` block and to each `fleet` row: the ascending
@@ -2207,9 +2211,10 @@ def evaluate_named_project(root: Path, source: dict,
     does not publish and an out-of-range interval are the two reported
     verdicts.
     """
+    derived = derive_for(root, source)
+    view = contract_view(source, derived)
     try:
-        raise_for_violations(
-            validate_contract(source, manifest, derive_for(root, source)))
+        raise_for_violations(validate_contract(source, manifest, derived))
     except ContractError as error:
         if error.code != "unsupported_schema":
             raise
@@ -2217,9 +2222,9 @@ def evaluate_named_project(root: Path, source: dict,
     else:
         reason_code = agent_platform.interval_verdict(
             manifest["platform_version"],
-            source["platform"]["min_inclusive"],
-            source["platform"]["max_exclusive"])
-    facts = declared_facts(source)
+            view["platform"]["min_inclusive"],
+            view["platform"]["max_exclusive"])
+    facts = declared_facts(view)
     project = {
         "project_id": facts["project_id"],
         "root": str(root),
@@ -2232,7 +2237,10 @@ def evaluate_named_project(root: Path, source: dict,
 
 
 def fleet_verdict(root: Path, manifest: dict) -> tuple[object, str | None]:
-    """One registered project's contract, and its failing reason code or None.
+    """One registered project's contract view, and its failing reason code or None.
+
+    The view is `contract_view` of the loaded contract: a schema-3 contract's
+    identity and interval are the derived ones (ADR-project-contract-014).
 
     Nothing here refuses. The registry named this project, not the operator, so
     a root that is gone, an unreadable or unparseable contract and a structural
@@ -2243,16 +2251,18 @@ def fleet_verdict(root: Path, manifest: dict) -> tuple[object, str | None]:
         source = load_contract(root)
     except ContractError:
         return None, "project_schema_unsupported"
+    derived = derive_for(root, source)
+    view = contract_view(source, derived)
     try:
-        violations = validate_contract(source, manifest, derive_for(root, source))
+        violations = validate_contract(source, manifest, derived)
     except ContractError as error:
-        return source, error.reason_code or "project_schema_unsupported"
+        return view, error.reason_code or "project_schema_unsupported"
     if violations:
-        return source, "project_schema_unsupported"
-    return source, agent_platform.interval_verdict(
+        return view, "project_schema_unsupported"
+    return view, agent_platform.interval_verdict(
         manifest["platform_version"],
-        source["platform"]["min_inclusive"],
-        source["platform"]["max_exclusive"])
+        view["platform"]["min_inclusive"],
+        view["platform"]["max_exclusive"])
 
 
 def fleet_row(entry: dict, manifest: dict) -> dict:

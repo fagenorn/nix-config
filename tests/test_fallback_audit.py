@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,25 @@ class LaddersTest(unittest.TestCase):
         self.assertEqual([(e["path"], e["marker_id"]) for e in report["exempt"]],
                          [("python/agent_tools/project_contract/adopt_inspection.py", "legacy-skills-config")])
         self.assertNotIn("legacy-skills-config", [f["marker_id"] for f in report["findings"]])
+
+    def test_a_schema_three_nix_config_root_keeps_its_exemptions(self):
+        files = {".agents/project.json": json.dumps({"schema_version": 3}),
+                 "python/agent_tools/project_contract/adopt_inspection.py":
+                 'X = (".claude/skills.config.json",)\n'}
+        cases = (("git@github.com:fagenorn/nix-config.git",
+                  [("python/agent_tools/project_contract/adopt_inspection.py", "legacy-skills-config")]),
+                 ("git@github.com:fagenorn/argus.git", []),
+                 (None, []))
+        for remote, exempt in cases:
+            with self.subTest(remote=remote):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                root = self.make_repo(files)
+                if remote is not None:
+                    git(root, "remote", "add", "origin", remote)
+                code, report, _ = self.ladders(root)
+                self.assertEqual([(e["path"], e["marker_id"]) for e in report["exempt"]], exempt)
+                if not exempt:
+                    self.assertEqual(self.stale(report["findings"]), [])
 
     def test_the_same_marker_elsewhere_is_not_exempt(self):
         root = self.make_repo({"python/agent_tools/other.py": 'X = ".claude/skills.config.json"\n'})
