@@ -71,3 +71,7 @@ A test run creates what it uses and removes it when it ends, takes no fixed port
 ### B17. Files stay under 1,500 lines
 
 No source or test file is over 1,500 lines. A file already over it may not grow and a file under it may grow up to it, judged against the change's merge base, so a file over the limit stops growing without a hand-set exception. ([decision](https://github.com/fagenorn/nix-config/issues/1422))
+
+### B18. No skipped or disabled test is added
+
+A test its framework skips, disables, focuses away or excludes from the run proves nothing while it still looks like coverage. The project's count of them may not rise against the change's merge base, so the existing ones stay until someone removes them and no new one lands. ([decision](https://github.com/fagenorn/nix-config/issues/1421))

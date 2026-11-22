@@ -74,6 +74,7 @@ let
     "resolve-project" = "project_contract.resolve_project";
     "size-lint" = "delivery.size_lint";
     "skill-lint" = "skill_lint";
+    "skipped-test-lint" = "delivery.skipped_test_lint";
     "sprint" = "console.sprint";
     "standards-lint" = "delivery.standards_lint";
     "verified-tree" = "verification.verified_tree";

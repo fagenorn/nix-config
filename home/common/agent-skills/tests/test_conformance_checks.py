@@ -524,6 +524,28 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
                               len(facts["violations"])], [0, 9, 8])
             self.assert_validates(report)
 
+    def test_one_more_skipped_test_turns_ci_red_naming_its_rule(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "tests/test_a.py", "\n".join([
+                "import unittest", "class A(unittest.TestCase):", '    @unittest.skip("x")',
+                "    def test_a(self):", "        self.assertEqual(1, 1)", ""]))
+            commit_all(root, "base")
+            git(root, "update-ref", INTEGRATION_REF, "HEAD")
+            base = git(root, "rev-parse", "HEAD").strip()
+            write_file(root, "tests/test_b.py", "\n".join([
+                "import unittest", "class B(unittest.TestCase):", '    @unittest.skip("x")',
+                "    def test_b(self):", "        self.assertTrue(True)", ""]))
+            commit_all(root, "one more")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B18", "base_count": 1, "branch_count": 2,
+                  "violations": ["B18 tests/test_b.py:4"], "rules": ["B18"]}])
+            self.assert_validates(report)
+
 
 class LintChecksTest(ReportAssertions, unittest.TestCase):
     """The context-map lint and the standards lint, each run in process by the

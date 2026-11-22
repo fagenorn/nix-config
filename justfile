@@ -233,6 +233,7 @@ agent-workflow-tests *args:
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
     tests/test_suite_source.py \
+    tests/test_skipped_test_lint.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \

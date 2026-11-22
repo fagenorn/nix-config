@@ -47,6 +47,7 @@
   "resolve-project": null,
   "size-lint": null,
   "skill-lint": null,
+  "skipped-test-lint": null,
   "sprint": null,
   "standards-lint": null,
   "verified-tree": null,
