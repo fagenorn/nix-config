@@ -18,8 +18,11 @@ from agent_tools.project_contract import adopt_conformance, adopt_inspection, ad
 from .test_adopt_apply import (
     BOOTSTRAP,
     CONTRACT,
+    DEMO_SOURCE,
     ENTRY_AGENTS,
     MANAGED_LINE,
+    NESTED,
+    NESTED_TEXT,
     CleanApplyTestCase,
     apply_repo,
     entry_apply_repo,
@@ -308,6 +311,101 @@ class EntryConversionGuardTest(CleanApplyTestCase):
         self.assertEqual(payload["error"]["code"], "verification_failed")
         self.assertEqual(payload["error"]["repair_id"], "adopt.commit.conversion_unproved")
         self.assertTrue(self.worktree(plan_id).is_dir())
+
+
+class NestedEntryTest(CleanApplyTestCase):
+    def nested_repo(self) -> Path:
+        root = self.owned(entry_apply_repo(self.home))
+        write(root, NESTED, NESTED_TEXT)
+        commit(root, "hand-write a nested entry file")
+        return root
+
+    def deletions(self, document: dict) -> list[list[str]]:
+        return [op["sources"] for op in document["changes"] if op["op"] == "delete-file"]
+
+    def converted(self, document: dict) -> set[str]:
+        return {entry["path"] for entry in document["evidence"]
+                if entry["action"] == "convert-to-source"}
+
+    def set_projections(self, root: Path, rows: list[dict]) -> dict:
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        contract["projections"] = [*contract["projections"], *rows]
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+        return contract
+
+    def test_a_nested_entry_file_joins_the_source_and_is_gone(self):
+        root = self.nested_repo()
+        document = self.ready_plan(root)
+        result = self.succeed(
+            root, document["plan"]["plan_id"], "--acknowledge-deletions")
+        self.assertEqual(
+            [(op["sources"], op["approval_class"]) for op in document["changes"]
+             if op["op"] == "delete-file"], [([NESTED], "destructive")])
+        (entry,) = [e for e in document["evidence"] if e["path"] == NESTED]
+        self.assertEqual((entry["action"], entry["target"]),
+                         ("convert-to-source", BOOTSTRAP))
+        self.assertNotIn(NESTED, self.branch_files(root, result["branch"]))
+        self.assertEqual(self.show(root, f"{result['branch']}:{BOOTSTRAP}"), DEMO_SOURCE)
+
+    def test_the_nested_deletion_needs_the_acknowledgement(self):
+        root = self.nested_repo()
+        self.refuse(root, self.ready_plan(root)["plan"]["plan_id"],
+                    "unacknowledged_deletion")
+
+    def test_a_declared_nested_projection_is_left_as_declared(self):
+        root = self.owned(apply_repo(self.home))
+        self.set_projections(root, [{
+            "id": "claude.docs", "agent": "claude", "kind": "managed_import",
+            "target": "docs/CLAUDE.md", "source": BOOTSTRAP}])
+        write(root, "docs/CLAUDE.md", "# Docs for Claude\n" + MANAGED_LINE)
+        commit(root, "declare a nested projection")
+        document = self.ready_plan(root)
+        self.assertNotIn("docs/CLAUDE.md", self.converted(document))
+        self.assertEqual(self.deletions(document), [])
+
+    def test_a_projection_source_is_never_deleted(self):
+        root = self.owned(apply_repo(self.home))
+        row = {"id": "codex.tools", "agent": "codex", "kind": "generated_file",
+               "target": "tools/AGENTS.md", "source": NESTED}
+        contract = self.set_projections(root, [row])
+        write(root, NESTED, NESTED_TEXT)
+        write(root, "tools/AGENTS.md", resolve_project.render_projection(
+            row, NESTED_TEXT.encode(), contract["schema_version"]).decode())
+        commit(root, "read a nested source")
+        document = self.ready_plan(root)
+        self.assertEqual(self.deletions(document), [])
+        self.assertFalse(self.converted(document) & {NESTED, "tools/AGENTS.md"})
+
+    def test_a_product_source_entry_file_is_not_a_nested_entry_file(self):
+        root = self.owned(entry_apply_repo(self.home))
+        write(root, "home/common/agent-guidance/AGENTS.md", "# guidance\n")
+        commit(root, "add product source")
+        self.assertEqual(self.deletions(self.ready_plan(root)), [])
+
+    def test_a_nested_entry_file_under_a_retained_row_is_converted(self):
+        root = self.owned(entry_apply_repo(self.home))
+        write(root, ".github/AGENTS.md", "# CI agents\n\nKeep workflows pinned.\n")
+        commit(root, "add a workflow entry file")
+        document = self.ready_plan(root)
+        result = self.succeed(
+            root, document["plan"]["plan_id"], "--acknowledge-deletions")
+        self.assertEqual(self.deletions(document), [[".github/AGENTS.md"]])
+        self.assertNotIn(".github/AGENTS.md", self.branch_files(root, result["branch"]))
+        self.assertIn(
+            "<!-- adopted from .github/AGENTS.md -->\n# CI agents\n\n"
+            "Keep workflows pinned.\n",
+            self.show(root, f"{result['branch']}:{BOOTSTRAP}"))
+
+    def test_a_link_to_a_nested_entry_file_keeps_the_plan_draft(self):
+        root = self.nested_repo()
+        write(root, "docs/index.md", "# index\n\n[docs agents](AGENTS.md)\n")
+        commit(root, "link the nested entry file")
+        code, out, err = run("plan", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "draft")
+        self.assertIn({"path": "docs/index.md", "target": "AGENTS.md"},
+                      document["link_rewrites"]["unrewritable"])
 
 
 class PointInTimeRecordTest(unittest.TestCase):

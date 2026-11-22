@@ -29,6 +29,11 @@ from agent_tools.project_contract.adopt_inspection import (
     Candidates,
     Inventory,
     blob_at,
+    classify,
+    evidence_entry,
+    is_agent_path,
+    is_secret_path,
+    object_hash,
     refuse,
     tree_records,
 )
@@ -76,10 +81,35 @@ def decoded(data: bytes, message: str) -> str:
                      message) from None
 
 
+def projection_paths(contract_source: dict) -> set[str]:
+    """Every `target` and `source` a declared projection names."""
+    rows = declared_rows(contract_source.get("projections"))
+    return {row[member] for _, row in rows for member in ("target", "source")
+            if isinstance(row.get(member), str)}
+
+
+def nested_candidates(records: dict[str, tuple[str, str]],
+                      declared: set[str]) -> list[str]:
+    """The tracked nested entry files that convert (D9), sorted: a regular file
+    that no projection names, outside the agent and secret paths, whose
+    classification is none or a `retain-product` row that is not product source."""
+    chosen = []
+    for path, (mode, _) in records.items():
+        rule = classify(path)
+        if ("/" in path and path.rsplit("/", 1)[-1] in ENTRY_FILES
+                and mode in REGULAR_MODES and path not in declared
+                and not is_agent_path(path) and not is_secret_path(path)
+                and (rule is None or (rule[2] == "retain-product"
+                                      and rule[1] != "product-source"))):
+            chosen.append(path)
+    return sorted(chosen)
+
+
 def plan_entry_conversion(root, found: Candidates, inventory: Inventory,
                           contract_source: dict | None) -> EntryConversion:
-    """The root entry files that convert, marked `convert-to-source` in the
-    evidence and the groups. Nothing converts without a contract or a draft."""
+    """The entry files that convert, marked `convert-to-source` in the
+    evidence and the groups: the two root files, then every nested one. Nothing
+    converts without a contract or a draft."""
     if contract_source is None:
         return NO_CONVERSION
     revision = inventory.base_revision
@@ -88,14 +118,13 @@ def plan_entry_conversion(root, found: Candidates, inventory: Inventory,
     source_bytes = blob_at(root, revision, BOOTSTRAP_SOURCE) \
         if BOOTSTRAP_SOURCE in records else None
     seen: list[str] | None = None
-    paths, blocks = [], []
+    paths, nested, blocks = [], [], []
     before: dict[str, bytes] = {}
-    for name in ENTRY_FILES:
-        mode, oid = records.get(name, (None, None))
-        if mode not in REGULAR_MODES:
-            continue
+    roots = [name for name in ENTRY_FILES if records.get(name, (None,))[0] in REGULAR_MODES]
+    for name in (*roots, *nested_candidates(records, projection_paths(contract_source))):
+        oid = records[name][1]
         data = blob_at(root, revision, name)
-        if name == "AGENTS.md" and (data or b"").startswith(
+        if name.rsplit("/", 1)[-1] == "AGENTS.md" and (data or b"").startswith(
                 GENERATED_PREFIX.encode("utf-8")):
             continue  # the projection of a source that may not be UTF-8 text
         text = decoded(data or b"", "a hand-written entry file is not UTF-8 "
@@ -112,12 +141,21 @@ def plan_entry_conversion(root, found: Candidates, inventory: Inventory,
             raise refuse("dirty_worktree", "adopt.worktree.dirty", "/evidence",
                          "an entry file is staged differently from the base "
                          "revision, so its authored text cannot be judged")
-        found.groups[name]["action"] = "convert-to-source"
-        found.groups[name]["target"] = BOOTSTRAP_SOURCE
-        for entry in found.entries:
-            if entry["path"] == name and entry["provenance"] == "tracked":
-                entry["action"] = "convert-to-source"
-                entry["target"] = BOOTSTRAP_SOURCE
+        if name in ENTRY_FILES:
+            found.groups[name]["action"] = "convert-to-source"
+            found.groups[name]["target"] = BOOTSTRAP_SOURCE
+            for entry in found.entries:
+                if entry["path"] == name and entry["provenance"] == "tracked":
+                    entry["action"] = "convert-to-source"
+                    entry["target"] = BOOTSTRAP_SOURCE
+        else:
+            found.entries.append(evidence_entry(
+                name, "tracked", "native-projection", "convert-to-source",
+                BOOTSTRAP_SOURCE, 1, object_hash(oid), None))
+            found.groups[name] = {"action": "convert-to-source",
+                                  "target": BOOTSTRAP_SOURCE,
+                                  "members": [(name, oid)]}
+            nested.append(name)
         paths.append(name)
         before[name] = data or b""
         if ended(authored) not in seen:
@@ -127,7 +165,7 @@ def plan_entry_conversion(root, found: Candidates, inventory: Inventory,
         return NO_CONVERSION
     if source_bytes is not None:
         before[BOOTSTRAP_SOURCE] = source_bytes
-    return EntryConversion(tuple(paths), (), before, tuple(blocks))
+    return EntryConversion(tuple(paths), tuple(nested), before, tuple(blocks))
 
 
 def declared_rows(projections: object) -> list[tuple[int, dict]]:

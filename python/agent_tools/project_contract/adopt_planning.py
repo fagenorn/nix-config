@@ -778,8 +778,9 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     sentinel and the `.gitignore` amendment, then the deletion of any
     superseded evidence record and the two records, then the living-reference
     rewrite, the Markdown link rewrites sorted by target, the path-reference
-    writes sorted by target, the bootstrap-source write when its bytes change
-    and the `CLAUDE.md` write, and finally the projection regenerations.
+    writes sorted by target, the bootstrap-source write when its bytes change,
+    the `CLAUDE.md` write and the nested entry-file deletions sorted by path,
+    and finally the projection regenerations.
     `reference_files` maps the path, after the moves, of each non-Markdown
     file an answered path reference edits onto its `(before, after)` texts,
     `before` being the text at the base revision; it is what
@@ -903,6 +904,10 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                 "write-file", ["CLAUDE.md"], ["CLAUDE.md"],
                 sha256_hash(entries.before["CLAUDE.md"]), sha256_hash(managed)))
             contents["CLAUDE.md"] = managed
+        for path in sorted(entries.nested):
+            tail.append(operation(
+                "delete-file", [path], [],
+                object_hash(object_ids[path]), None))
 
     projections = (amended or {}).get("projections")
     if isinstance(projections, list):

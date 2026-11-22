@@ -36,7 +36,9 @@ from unittest import mock
 
 from agent_tools.delivery import standards_lint
 from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
-                                          adopt_planning)
+                                          adopt_planning, resolve_project)
+
+from . import _inprocess_cli
 
 from .test_adopt_project import (
     CHECK_LINKS,
@@ -2397,6 +2399,79 @@ class EntryConversionApplyTest(CleanApplyTestCase):
             [op["targets"] for op in document["changes"]
              if op["op"] == "regenerate-projection"],
             [["AGENTS.md"], ["CLAUDE.md"]])
+
+
+NESTED = "docs/AGENTS.md"
+NESTED_TEXT = "# Docs\n\nKeep pages short.\n"
+DEMO_SOURCE = ENTRY_SOURCE + "\n<!-- adopted from docs/AGENTS.md -->\n" + NESTED_TEXT
+
+
+def demo_repo(home: Path) -> Path:
+    """The issue's demo: hints under `.claude/hints`, hand-written entry files
+    at the root and one nested, and no projection declared."""
+    root = hinted_apply_repo(home)
+    (root / BOOTSTRAP).unlink()
+    contract = json.loads((root / CONTRACT).read_text("utf-8"))
+    contract["projections"] = []
+    write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+    write(root, "AGENTS.md", ENTRY_AGENTS)
+    write(root, "CLAUDE.md", ENTRY_CLAUDE)
+    write(root, NESTED, NESTED_TEXT)
+    commit(root, "hand-write the entry files")
+    return root
+
+
+class AdoptedFixtureTest(CleanApplyTestCase):
+    def ci_run(self, root: Path) -> dict:
+        done = _inprocess_cli.run_module(
+            "agent_tools.project_contract.conformance",
+            ("run", "--purpose", "ci", "--repo-root", str(root)),
+            env={**os.environ, "HOME": str(self.home)})
+        return json.loads(done.stdout)
+
+    def test_the_fixture_plan_lists_the_entry_file_conversion_and_the_hint_move(self):
+        document = self.ready_plan(self.owned(demo_repo(self.home)))
+        self.assertEqual(
+            [(op["sources"], op["targets"]) for op in document["changes"]
+             if op["op"] == "git-mv" and op["sources"][0].startswith(".claude/hints/")],
+            [([old], [new]) for old, new in sorted(HINTS.items())])
+        self.assertEqual(
+            {entry["path"]: (entry["action"], entry["target"])
+             for entry in document["evidence"]
+             if entry["path"] in ("AGENTS.md", "CLAUDE.md", NESTED)},
+            {path: ("convert-to-source", BOOTSTRAP)
+             for path in ("AGENTS.md", "CLAUDE.md", NESTED)})
+        self.assertEqual(
+            [op["before"] for op in document["changes"]
+             if op["op"] == "write-file" and op["targets"] == [BOOTSTRAP]], [None])
+        self.assertEqual([op["sources"] for op in document["changes"]
+                          if op["op"] == "delete-file"], [[NESTED]])
+
+    def test_the_adopted_fixture_has_generated_entry_files_no_nested_one_and_fresh_projections(self):
+        root = self.owned(demo_repo(self.home))
+        document = self.ready_plan(root)
+        result = self.succeed(
+            root, document["plan"]["plan_id"], "--acknowledge-deletions")
+        git(root, "merge", "--ff-only", "--quiet", result["branch"])
+        report = self.ci_run(root)
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        self.assertEqual(
+            (root / "AGENTS.md").read_bytes(),
+            resolve_project.render_projection(
+                dict(adopt_inspection.ENTRY_PROJECTIONS[0]),
+                (root / BOOTSTRAP).read_bytes(), contract["schema_version"]))
+        self.assertEqual((root / "CLAUDE.md").read_text(), MANAGED_LINE)
+        self.assertFalse((root / NESTED).exists())
+        (fresh,) = [check for check in report["checks"]
+                    if check["id"] == "repository.projection.fresh"]
+        self.assertEqual(fresh["status"], "passed", report)
+        self.assertEqual((root / BOOTSTRAP).read_text(), DEMO_SOURCE)
+        for new in HINTS.values():
+            self.assertTrue((root / new).is_file(), new)
+        self.assertEqual(
+            [p for p in (root / ".claude/hints").rglob("*") if p.is_file()], [])
+        self.assertEqual((root / HINT_GUIDE).read_text(), HINT_GUIDE_AFTER)
+        self.assertEqual((root / HINT_RECORD).read_text(), HINT_RECORD_TEXT)
 
 
 # --------------------------------------------------------------------------

@@ -243,7 +243,10 @@ one plan is never mistaken for an earlier adoption of the same project.
 a contract or draft, their authored text joins `.agents/instructions/bootstrap.md`
 (evidence `convert-to-source`), `CLAUDE.md` becomes the managed line, `AGENTS.md`
 is regenerated and both entry projections are declared. A relative link or
-`@path` import in the moved text keeps the plan `draft`. Refusals:
+`@path` import in the moved text keeps the plan `draft`. A nested `AGENTS.md` or
+`CLAUDE.md` joins the source and is deleted (`delete-file`, so `apply` needs
+`--acknowledge-deletions`), unless an agent, secret or `product-source` path or a
+projection's target or source. Refusals:
 `adopt.entry.undecodable`, `adopt.entry.projection_conflict`, `dirty_worktree`
 (a staged entry file) and, at `apply`, `adopt.commit.conversion_unproved`.
 
@@ -475,7 +478,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
 
     links = adopt_links.derive_link_rewrites(
         root, inventory.base_revision, found.moves,
-        [path for path, _ in adopt_planning.evidence_record_members(found)],
+        [path for path, _ in adopt_planning.evidence_record_members(found)]
+        + list(conversion.nested),
         adopt_planning.generated_targets(contract_source)
         | set(conversion.paths))
     base_text = adopt_entries.entry_base_text(conversion, links)
@@ -632,7 +636,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         contents.update(written)
         changes = head + bookkeeping + tail
         adopt_planning.check_markdown_writes(
-            changes, adopt_entries.markdown_write_targets(links, conversion, source))
+            changes, adopt_entries.markdown_write_targets(links, conversion, source),
+            frozenset(conversion.nested))
         adopt_planning.check_reference_writes(changes, set(reference_files))
         evidence_record = records["evidence_record"]
         migration_map = records["migration_map"]
