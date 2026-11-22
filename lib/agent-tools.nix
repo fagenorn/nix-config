@@ -46,6 +46,7 @@ let
     "adr-number" = "delivery.adr_number";
     "agent-model-matrix" = "agent_model_matrix";
     "artifact-budget" = "delivery.artifact_budget";
+    "attempt-budget" = "delivery.attempt_budget";
     "bypass-proof" = "console.bypass_proof";
     "cache-proxy" = "hosts.cache_proxy";
     "conformance" = "project_contract.conformance";
