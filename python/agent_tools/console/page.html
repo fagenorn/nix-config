@@ -135,6 +135,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
 .card .opts .picked, .rest .opts .picked, .done .opts .picked { color: var(--lav); }
+.card .cmd { margin-top: 10px; max-width: 100%; overflow-x: auto; padding: 10px 14px; background: var(--mantle); border-radius: 8px; font: .8125rem/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .card .reason { display: block; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .head, .rest .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
@@ -1587,6 +1588,64 @@ function releaseCard(item) {
   const act = el("div", "act");
   act.appendChild(approve);
   act.appendChild(decline);
+  if (state !== undefined && state.phase === "failed") {
+    act.appendChild(el("span", "fail", "Could not answer: " + state.reason));
+  }
+  card.appendChild(act);
+  return card;
+}
+function isPermission(item) {
+  return item.reason === "permission";
+}
+// A permission card (#1424): a manager's held prompt; the owner always clicks, so neither answer is picked for them.
+const permissionAnswers = new Map();
+let permissionButtons = new Map();
+async function answerPermission(item, answer) {
+  const current = permissionAnswers.get(item.key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  permissionAnswers.set(item.key, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await fetch("/api/permission-answer", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ prompt: item.prompt, answer }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "the console did not answer";
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (permissionAnswers.get(item.key) !== state) return;
+  if (reason === null) permissionAnswers.delete(item.key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+function permissionCard(item) {
+  const card = el("article", "card permission");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("p", "words", item.words));
+  card.appendChild(el("pre", "cmd", item.command));
+  card.appendChild(phrase("p", "meta", "waiting ", timeEl("since", item.waiting_since, "")));
+  const state = permissionAnswers.get(item.key);
+  const sending = state !== undefined && state.phase === "sending";
+  const allow = actionButton("permission-allow btn-primary", "Allow once", () => answerPermission(item, "allow"));
+  const refuse = actionButton("permission-refuse btn-quiet", "Refuse", () => answerPermission(item, "refuse"));
+  for (const button of [allow, refuse]) {
+    button.dataset.held = item.key + button.textContent;
+    permissionButtons.set(button.dataset.held, button);
+    // aria-disabled, not disabled: a disabled button cannot keep the focus, and answerPermission guards itself.
+    if (sending) button.setAttribute("aria-disabled", "true");
+    markBusy(button, sending);
+  }
+  const act = el("div", "act");
+  act.appendChild(allow);
+  act.appendChild(refuse);
   if (state !== undefined && state.phase === "failed") {
     act.appendChild(el("span", "fail", "Could not answer: " + state.reason));
   }
@@ -5081,6 +5140,9 @@ function drawInbox(view, guest = null) {
     : null;
   // A card the owner focused from a check line is rebuilt by every redraw, so its item key is kept and the replacement card is focused again.
   const heldCard = [...inboxCards].find(([, card]) => card === active);
+  // A permission card's answer button is rebuilt too: its prompt and label find its twin, so Enter never reaches the brief's approve key.
+  const heldAnswer = active?.dataset?.held;
+  permissionButtons = new Map();
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
@@ -5099,7 +5161,7 @@ function drawInbox(view, guest = null) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isRelease(item) && !isLookCard(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isRelease(item) && !isPermission(item) && !isLookCard(item));
   const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
@@ -5204,6 +5266,11 @@ function drawInbox(view, guest = null) {
   for (const key of [...releaseAnswers.keys()]) {
     if (!releases.some((item) => item.key === key)) releaseAnswers.delete(key);
   }
+  const permissions = open.filter(isPermission);
+  for (const item of permissions) section.appendChild(permissionCard(item));
+  for (const key of [...permissionAnswers.keys()]) {
+    if (!permissions.some((item) => item.key === key)) permissionAnswers.delete(key);
+  }
   for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
     const lead = leadItem(tracked[0]);
@@ -5253,6 +5320,8 @@ function drawInbox(view, guest = null) {
     again.setSelectionRange(held.start, held.end);
   } else if (heldCard !== undefined) {
     focusCard(cardOf.get(heldCard[0]));
+  } else if (permissionButtons.has(heldAnswer)) {
+    permissionButtons.get(heldAnswer).focus({ preventScroll: true });
   }
 }
 function momentLine(moment) {
