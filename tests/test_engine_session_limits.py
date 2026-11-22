@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_session, engine_shell
+from agent_tools.delivery import engine_session, engine_shell, engine_stop
 from tests.test_engine_deliver import EngineProject, shape
 from tests.test_engine_session import (
     REVIEW_REPLY, RESULT_API_ERROR, RESULT_LIMIT, RESULT_NORMAL, ROLE_NAMES, after, agent_step,
@@ -292,7 +292,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         # Only the engine's own clock is replaced: patching `time.sleep` itself would also record
         # the polling `subprocess` does while it reaps a launcher that is slow to exit.
         clock = mock.Mock(wraps=time, sleep=record)
-        with self.project.inside(), mock.patch.object(engine_shell, "time", clock):
+        with self.project.inside(), mock.patch.object(engine_stop, "time", clock):
             code, line = engine_shell.deliver(1521, procedures)
         return code, line, sleeps
 
@@ -326,7 +326,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         with mock.patch.object(engine_session, "launch", side_effect=slow_to_exit):
             code, line, sleeps = self.deliver(log, one_step(self.project))
         self.assertEqual(code, 0, line)
-        self.assertEqual(sleeps, [(30, 1)])
+        self.assertEqual(waited(sleeps), [(30, 1)])
 
     def test_a_second_api_error_is_the_outcome_no_reply(self):
         log = install_answers(self.project, [self.api_error(), self.api_error(), self.normal()])

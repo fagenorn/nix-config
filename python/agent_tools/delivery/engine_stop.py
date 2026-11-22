@@ -8,8 +8,11 @@ never ends a later one. `write_request` publishes it atomically with mode 0600; 
 `communicate` is `Popen.communicate` that, given a `stop` predicate, waits in `POLL_SECONDS` slices
 and raises `Stopped` once `stop()` is true, also when the process ended inside the first slice: a
 request made before the process ended is never graded past. It kills nothing: the caller's handler
-calls `end_group`. A retry passes no input, because CPython keeps the unsent offset of the first
-call. `pause` is `time.sleep` that polls `stop` the same way, in slices of at most `POLL_SECONDS`.
+calls `end_group`. The input goes to the child's stdin from a daemon thread that closes it
+after the last byte, never through a retried `communicate`: before Python 3.13 a retry that
+carries input is refused and one that carries none stops writing, so a prompt larger than the
+pipe would never be delivered. `pause` is `time.sleep` that polls `stop` the same way, in slices
+of at most `POLL_SECONDS`.
 `requested` treats only a missing file as no request; any other read error propagates.
 
 `publication` is the exclusive flock on the run directory that orders a request's publication
@@ -29,6 +32,7 @@ import random
 import signal
 import string
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Iterator, Mapping
@@ -144,15 +148,17 @@ def communicate(process: subprocess.Popen, data: bytes | None, *,
     """`process.communicate(data, timeout=timeout)`, raising `Stopped` once `stop()` is true."""
     if stop is None:
         return process.communicate(data, timeout=timeout)
+    if data and process.stdin is not None:
+        feeder = threading.Thread(target=_feed, args=(process.stdin, data), daemon=True)
+        process.stdin = None  # `communicate` leaves stdin to the feeder
+        feeder.start()
     deadline = None if timeout is None else time.monotonic() + timeout
-    first = True
     while True:
         wait = POLL_SECONDS if deadline is None else max(
             0, min(POLL_SECONDS, deadline - time.monotonic()))
         try:
-            output = process.communicate(data if first else None, timeout=wait)
+            output = process.communicate(None, timeout=wait)
         except subprocess.TimeoutExpired:
-            first = False
             if stop():
                 raise Stopped from None
             if deadline is not None and time.monotonic() >= deadline:
@@ -161,6 +167,18 @@ def communicate(process: subprocess.Popen, data: bytes | None, *,
             if stop():
                 raise Stopped
             return output
+
+
+def _feed(stdin, data: bytes) -> None:
+    """Write `data` to `stdin` and close it; a child that left or closed its end ends the write."""
+    try:
+        stdin.write(data)
+        stdin.flush()
+    except (OSError, ValueError):
+        pass
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            stdin.close()
 
 
 def pause(seconds: float, stop: Callable[[], bool] | None) -> None:
