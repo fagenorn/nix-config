@@ -288,6 +288,24 @@ REPAIRS = {
     "release_profile.deadline.require": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
+    "conformance.workflow.regenerate": {
+        "module": "resolve-project", "safety_class": "worktree",
+        "operation": None},
+    # The lints judge authored documents and no engine command edits one, so
+    # every repair here is the reader's own call with a null operation. The
+    # declared repository lint is never run by the engine (#1452 D5).
+    "docs.context_map.repair": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "docs.context_map.run_repository_lint": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "docs.standards.repair": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
+    "platform.standards.install": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
 }
 
 
@@ -380,6 +398,24 @@ REGISTRY: tuple[Check, ...] = (
           "required", ("repository.contract.valid",),
           (("shell_indirection", "contract.commands.destructure"),),
           "check_commands_no_shell_indirection"),
+    Check("verification.conformance_workflow.fresh", "verification", "projection",
+          "required", ("repository.contract.valid",),
+          (("conformance_workflow_stale", "conformance.workflow.regenerate"),),
+          "check_conformance_workflow_fresh"),
+    Check("verification.context_map.lint", "verification", "path", "required",
+          ("repository.contract.valid",),
+          (("context_map_lint_failed", "docs.context_map.repair"),
+           ("context_map_unreadable", "docs.context_map.repair"),
+           ("context_map_ambiguous", "docs.context_map.repair"),
+           ("context_map_outside_root", "docs.context_map.repair"),
+           ("context_map_lint_delegated", "docs.context_map.run_repository_lint")),
+          "check_context_map_lint"),
+    Check("verification.standards.lint", "verification", "path", "required",
+          ("repository.contract.valid",),
+          (("platform_standards_missing", "platform.standards.install"),
+           ("standards_lint_failed", "docs.standards.repair"),
+           ("standards_unreadable", "docs.standards.repair")),
+          "check_standards_lint"),
     Check("repository.residue.nested_ledger", "repository", "residue", "optional",
           ("repository.contract.valid",), NESTED_LEDGER_FINDINGS,
           "check_residue_nested_ledger"),
