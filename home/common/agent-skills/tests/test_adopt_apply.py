@@ -188,7 +188,7 @@ def readoption_repo(home: Path) -> tuple[Path, dict]:
         raise AssertionError(f"the first apply failed: {err or out}")
     first = json.loads(out)
     git(root, "merge", "--ff-only", "--quiet", first["branch"])
-    write(root, "AGENTS.md", "hand-edited\n")
+    write(root, "AGENTS.md", (root / "AGENTS.md").read_text() + "hand-edited\n")
     commit(root, "drift a projection")
     return root, first
 
@@ -2335,6 +2335,68 @@ class HintMoveApplyTest(CleanApplyTestCase):
         self.assertIn(
             "open item hint-without-reader: .agents/knowledge/hints/deploy.md",
             out.splitlines())
+
+
+BOOTSTRAP = ".agents/instructions/bootstrap.md"
+MANAGED_LINE = "@.agents/instructions/bootstrap.md\n"
+ENTRY_AGENTS = "# Agents\n\nRun the tests before you push.\n"
+ENTRY_CLAUDE = "# Claude\n\nPrefer small commits.\n" + MANAGED_LINE
+ENTRY_SOURCE = (
+    "<!-- adopted from AGENTS.md -->\n# Agents\n\nRun the tests before you push.\n"
+    "\n<!-- adopted from CLAUDE.md -->\n# Claude\n\nPrefer small commits.\n")
+
+
+def entry_apply_repo(home: Path, *, agents: str | bytes | None = ENTRY_AGENTS,
+                     claude: str | None = ENTRY_CLAUDE, source: str | None = None,
+                     declared: bool = False) -> Path:
+    """`apply_repo` whose root entry files are hand-written (#1468)."""
+    root = apply_repo(home)
+    if not declared:
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        contract["projections"] = []
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+    if source is None:
+        (root / BOOTSTRAP).unlink()
+    else:
+        write(root, BOOTSTRAP, source)
+    for name, text in (("AGENTS.md", agents), ("CLAUDE.md", claude)):
+        if text is None:
+            (root / name).unlink()
+        elif isinstance(text, bytes):
+            (root / name).write_bytes(text)
+        else:
+            write(root, name, text)
+    commit(root, "hand-write the entry files")
+    return root
+
+
+class EntryConversionApplyTest(CleanApplyTestCase):
+    def test_the_bootstrap_source_holds_every_authored_line_of_the_root_entry_files(self):
+        root = self.owned(entry_apply_repo(self.home))
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        source = self.show(root, f"{result['branch']}:{BOOTSTRAP}")
+        self.assertEqual(source, ENTRY_SOURCE)
+        for line in (*ENTRY_AGENTS.splitlines(), *ENTRY_CLAUDE.splitlines()):
+            if line != MANAGED_LINE.strip():
+                self.assertIn(line, source.splitlines())
+
+    def test_the_plan_lists_the_entry_file_conversion(self):
+        root = self.owned(entry_apply_repo(self.home))
+        document = self.ready_plan(root)
+        actions = {entry["path"]: (entry["action"], entry["target"])
+                   for entry in document["evidence"]
+                   if entry["path"] in ("AGENTS.md", "CLAUDE.md")}
+        self.assertEqual(actions, {name: ("convert-to-source", BOOTSTRAP)
+                                   for name in ("AGENTS.md", "CLAUDE.md")})
+        writes = [(op["targets"], op["before"]) for op in document["changes"]
+                  if op["op"] == "write-file"]
+        self.assertIn(([BOOTSTRAP], None), writes)
+        self.assertIn(["CLAUDE.md"], [targets for targets, _ in writes])
+        self.assertEqual(
+            [op["targets"] for op in document["changes"]
+             if op["op"] == "regenerate-projection"],
+            [["AGENTS.md"], ["CLAUDE.md"]])
 
 
 # --------------------------------------------------------------------------

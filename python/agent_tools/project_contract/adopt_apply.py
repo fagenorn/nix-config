@@ -1311,6 +1311,7 @@ def prove_commit_content(worktree: Path, commit: str,
 
 
 CONFORMANCE_UNPROVED = "adopt.commit.conformance_unproved"
+CONVERSION_UNPROVED = "adopt.commit.conversion_unproved"
 
 
 def prove_conformance_bytes(worktree: Path, commit: str,

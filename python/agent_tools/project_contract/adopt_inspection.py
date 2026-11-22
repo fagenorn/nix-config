@@ -67,6 +67,7 @@ ACTIONS = (
     "archive-history",
     "delete-exact-duplicate",
     "needs-decision",
+    "convert-to-source",
 )
 OUTCOMES = ("bootstrap", "reconcile", "no_change", "migration_required",
             "repair_required")
@@ -208,6 +209,18 @@ LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)
 NATIVE_AGENT_PATHS = (".claude", ".codex", "AGENTS.md", "CLAUDE.md",
                       ".mcp.json")
 
+# The bootstrap source and the two mandatory entry projections (ADR-019): a
+# hand-written root entry file converts into the source, and these rows then
+# render the files back out of it.
+BOOTSTRAP_SOURCE = ".agents/instructions/bootstrap.md"
+ENTRY_FILES = ("AGENTS.md", "CLAUDE.md")
+ENTRY_PROJECTIONS = (
+    {"id": "codex.entry", "agent": "codex", "kind": "generated_file",
+     "target": "AGENTS.md", "source": BOOTSTRAP_SOURCE},
+    {"id": "claude.entry", "agent": "claude", "kind": "managed_import",
+     "target": "CLAUDE.md", "source": BOOTSTRAP_SOURCE},
+)
+
 # The closed classification table, first match wins. Each row is
 # `(group, match, lifecycle_class, action, target)`: `match` is `exact` for one
 # path and `prefix` for a directory tree, and `target` is the destination group
@@ -324,7 +337,8 @@ def action_relocates(action: str) -> bool:
     if action in ("move-canonical", "archive-history"):
         return True
     if action in ("generate-projection", "retain-product",
-                  "delete-exact-duplicate", "needs-decision"):
+                  "delete-exact-duplicate", "needs-decision",
+                  "convert-to-source"):
         return False
     raise ValueError(f"unknown adoption action: {action!r}")
 
@@ -1236,7 +1250,8 @@ def overlap_targets(found: Candidates) -> list[str]:
     targets = {".agents"}
     for group, info in found.groups.items():
         if (action_relocates(info["action"])
-                or info["action"] == "generate-projection"):
+                or info["action"] in ("generate-projection",
+                                      "convert-to-source")):
             targets.add(group)
         if info["target"]:
             targets.add(info["target"])
