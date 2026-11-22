@@ -230,6 +230,13 @@ class RegistryFake(Fake):
 _RECONCILE_TEMPLATES: dict[str, Path] = {}
 
 
+def forget_reconcile_templates(root: Path) -> None:
+    "Remove the template directory with the cache entries that name it, so a second run in this process rebuilds."
+    shutil.rmtree(root, True)
+    if _RECONCILE_TEMPLATES.get("root") == root:
+        _RECONCILE_TEMPLATES.clear()
+
+
 def reconciled(parent: Path, *, contract: bool = False) -> Path:
     """`reconcile_repository(parent, contract=contract)`, copied from one build per flag per process.
 
@@ -238,7 +245,7 @@ def reconciled(parent: Path, *, contract: bool = False) -> Path:
     """
     if "root" not in _RECONCILE_TEMPLATES:
         root = Path(tempfile.mkdtemp(prefix="approve-reconcile-"))
-        unittest.addModuleCleanup(shutil.rmtree, root, True)
+        unittest.addModuleCleanup(forget_reconcile_templates, root)
         _RECONCILE_TEMPLATES["root"] = root
     flag = "contract" if contract else "plain"
     template = _RECONCILE_TEMPLATES["root"] / flag
@@ -262,8 +269,13 @@ def quick_serve_forever(server, poll_interval=SERVER_POLL_SECONDS):
     return socketserver.BaseServer.serve_forever(server, poll_interval)
 
 
+PENDING = object()
+
+
 def awaited(svc, probe, bound: float, recheck: float):
-    """`probe()`'s first truthy answer, waiting on the console's publish between probes; None past `bound`.
+    """`probe()`'s first answer that is not `PENDING`, waiting on the console's publish between probes.
+
+    Any other answer, falsey ones included, ends the wait; `PENDING` comes back past `bound`.
 
     The version is read before each probe, so a publish between the two wakes the next wait at once.
     A closing console answers `wait_for_change` at once, so it is slept out instead of spun on.
@@ -272,7 +284,7 @@ def awaited(svc, probe, bound: float, recheck: float):
     while time.monotonic() < end:
         seen = svc.version
         found = probe()
-        if found:
+        if found is not PENDING:
             return found
         wait = min(recheck, end - time.monotonic())
         if wait > 0:
@@ -280,7 +292,7 @@ def awaited(svc, probe, bound: float, recheck: float):
                 time.sleep(wait)
             else:
                 svc.wait_for_change(seen, wait)
-    return None
+    return PENDING
 
 
 class ApproveCase(Case):
@@ -354,10 +366,10 @@ class ApproveCase(Case):
                 found = self.steps()
                 busy = self.svc._approving
                 shown = self.view()["registration"]
-            return shown if len(found) > after and found[-1] in steps and not busy else None
+            return shown if len(found) > after and found[-1] in steps and not busy else PENDING
 
         found = awaited(self.svc, probe, bound, 0.05)
-        if found is None:
+        if found is PENDING:
             self.fail("the approval never reached the expected step")
         return found
 
@@ -366,20 +378,20 @@ class ApproveCase(Case):
             found = self.view()["registration"]
             if found is not None and found["root"] == str(root) and found["status"] == "done":
                 return found
-            return None
+            return PENDING
 
         found = awaited(self.svc, probe, bound, 0.1)
-        if found is None:
+        if found is PENDING:
             self.fail("no registration result")
         return found
 
     def wait_for(self, predicate, bound=120):
         def probe():
             found = self.view()["registration"]
-            return found if found is not None and predicate(found) else None
+            return found if found is not None and predicate(found) else PENDING
 
         found = awaited(self.svc, probe, bound, 0.1)
-        if found is None:
+        if found is PENDING:
             self.fail("the registration never reached the expected state")
         return found
 
@@ -390,12 +402,14 @@ class ApproveCase(Case):
         which a card or a registered project reduces or drops (ADR-console-035).
         """
         def probe():
-            found = [payload for _, payload in self.rows(event_log.REGISTRATION_ENDED)
-                     if payload.get("root") == str(root)]
-            return found[-1] if self.svc._registering is None and found else None
+            with self.svc._ingest:
+                found = [payload for _, payload in self.rows(event_log.REGISTRATION_ENDED)
+                         if payload.get("root") == str(root)]
+                running = self.svc._registering
+            return found[-1] if running is None and found else PENDING
 
         found = awaited(self.svc, probe, bound, 0.05)
-        if found is None:
+        if found is PENDING:
             self.fail("no registration result")
         return found
 
@@ -520,10 +534,10 @@ class ApproveCase(Case):
             found = self.registrations()
             with self.svc._ingest:
                 busy = PID_B in self.svc._enrolling
-            return found if len(found) >= count and not busy else None
+            return found if len(found) >= count and not busy else PENDING
 
         found = awaited(self.svc, probe, bound, 0.05)
-        if found is None:
+        if found is PENDING:
             self.fail("the registration never settled")
         return found
 
@@ -637,8 +651,8 @@ class PublishWaitTest(ApproveCase):
         self.svc.close()
         sleeps = []
         self.clock(sleeps)
-        found = awaited(self.svc, lambda: None, bound=0.12, recheck=0.05)
-        self.assertIsNone(found)
+        found = awaited(self.svc, lambda: PENDING, bound=0.12, recheck=0.05)
+        self.assertIs(found, PENDING)
         self.assertTrue(sleeps)
         self.assertLessEqual(len(sleeps), 4)
         self.assertTrue(all(s <= 0.05 for s in sleeps), sleeps)
@@ -647,9 +661,9 @@ class PublishWaitTest(ApproveCase):
         now = [0.0]
         svc, waits = self.controlled(now)
         probes = []
-        found = awaited(svc, lambda: (probes.append(now[0]), "late" if now[0] >= 1.0 else None)[1],
+        found = awaited(svc, lambda: (probes.append(now[0]), "late" if now[0] >= 1.0 else PENDING)[1],
                         bound=1.0, recheck=0.5)
-        self.assertIsNone(found)
+        self.assertIs(found, PENDING)
         self.assertEqual(probes, [0.0, 0.5])
         self.assertEqual(waits, [(7, 0.5), (7, 0.5)])
 
@@ -657,11 +671,74 @@ class PublishWaitTest(ApproveCase):
         now = [0.0]
         svc, waits = self.controlled(now)
         probes = []
-        found = awaited(svc, lambda: (probes.append(now[0]), "on time" if now[0] >= 0.5 else None)[1],
+        found = awaited(svc, lambda: (probes.append(now[0]), "on time" if now[0] >= 0.5 else PENDING)[1],
                         bound=1.0, recheck=0.5)
         self.assertEqual(found, "on time")
         self.assertEqual(probes, [0.0, 0.5])
         self.assertEqual(waits, [(7, 0.5)])
+
+    def test_awaited_returns_a_falsey_answer_at_once(self):
+        now = [0.0]
+        svc, waits = self.controlled(now)
+        for answer in (None, [], 0, ""):
+            with self.subTest(answer=answer):
+                self.assertIs(awaited(svc, lambda: answer, bound=1.0, recheck=0.5), answer)
+        self.assertEqual(waits, [])
+
+    def test_settled_of_nothing_returns_at_once_on_an_idle_service(self):
+        self.start(Fake(plan=READY))
+        started = time.monotonic()
+        self.assertEqual(self.settled(0, bound=5), [])
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_until_returns_a_completed_step_whose_registration_view_is_none(self):
+        self.start(Fake(plan=READY))
+        with mock.patch.object(self.svc, "_approving", False), \
+                mock.patch.object(self, "steps", return_value=["opened"]), \
+                mock.patch.object(self, "view", return_value={"registration": None}):
+            started = time.monotonic()
+            self.assertIsNone(self.until("opened", bound=5))
+            self.assertLess(time.monotonic() - started, 5)
+
+    def test_settled_row_never_returns_the_previous_registrations_row(self):
+        self.start(Fake(plan=READY))
+        old, new = {"root": "r", "result": "registered"}, {"root": "r", "result": "failed"}
+        current = [old]
+        self.svc._registering = "r"
+        self.addCleanup(setattr, self.svc, "_registering", None)
+        finish = threading.Thread(target=lambda: self.finish(current, new))
+        started = []
+
+        def rows(kind):
+            found = [(1, payload) for payload in current]
+            if not started:
+                started.append(True)
+                finish.start()
+                finish.join(0.3)
+            return found
+
+        with mock.patch.object(self, "rows", side_effect=rows):
+            self.assertEqual(self.settled_row("r", bound=10), new)
+        finish.join(10)
+
+    def finish(self, current, new):
+        "What a registration's worker does under the lock: record the result, then clear the run mark."
+        with self.svc._ingest:
+            current.append(new)
+            self.svc._registering = None
+
+    def test_the_reconcile_templates_are_forgotten_with_their_directory(self):
+        with mock.patch.dict(_RECONCILE_TEMPLATES, clear=True):
+            first = reconciled(self.parent / "one")
+            self.assertTrue(first.is_dir())
+            root = _RECONCILE_TEMPLATES["root"]
+            forget_reconcile_templates(root)
+            self.assertFalse(root.exists())
+            self.assertEqual(_RECONCILE_TEMPLATES, {})
+            second = reconciled(self.parent / "two")
+            self.assertTrue(second.is_dir())
+            self.assertNotEqual(_RECONCILE_TEMPLATES["root"], root)
+            forget_reconcile_templates(_RECONCILE_TEMPLATES["root"])
 
     def test_wait_done_fails_in_its_words_once_its_bound_passes(self):
         self.start(Fake(plan=READY))

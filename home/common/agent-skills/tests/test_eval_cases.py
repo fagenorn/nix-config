@@ -719,6 +719,15 @@ SANDBOXES = None
 BUILT = {}
 
 
+def forget_sandboxes(root):
+    "Remove the sandbox directory with the cache entries that name it, so a second run in this process rebuilds."
+    global SANDBOXES
+    shutil.rmtree(root, True)
+    if SANDBOXES == root:
+        SANDBOXES = None
+        BUILT.clear()
+
+
 def restored(key, build):
     """The sandbox `build(work)` makes for `key`, built once per run, put back before every use.
 
@@ -728,12 +737,17 @@ def restored(key, build):
     global SANDBOXES
     if SANDBOXES is None:
         SANDBOXES = Path(tempfile.mkdtemp(prefix="eval-sandboxes-")).resolve()
-        unittest.addModuleCleanup(shutil.rmtree, SANDBOXES, True)
+        unittest.addModuleCleanup(forget_sandboxes, SANDBOXES)
     work, pristine = SANDBOXES / key / "work", SANDBOXES / key / "pristine"
     if key not in BUILT:
-        work.mkdir(parents=True)
-        BUILT[key] = build(work)
-        shutil.copytree(work, pristine, symlinks=True)
+        try:
+            work.mkdir(parents=True)
+            built = build(work)
+            shutil.copytree(work, pristine, symlinks=True)
+        except BaseException:
+            shutil.rmtree(SANDBOXES / key, True)
+            raise
+        BUILT[key] = built
     shutil.rmtree(work)
     shutil.copytree(pristine, work, symlinks=True)
     return work, copy.deepcopy(BUILT[key])
@@ -776,6 +790,49 @@ class RestoredSandboxTest(unittest.TestCase):
         status = subprocess.run(["git", "-C", second["repo"], "status", "--porcelain"],
                                 capture_output=True, text=True, check=True).stdout
         self.assertEqual(status, "")
+
+    def test_a_failed_build_leaves_nothing_behind_and_the_next_use_builds_again(self):
+        key = f"probe-{self.id()}"
+
+        def broken(work):
+            (work / "partial").write_text("x", encoding="utf-8")
+            raise RuntimeError("build failed")
+
+        with self.assertRaises(RuntimeError):
+            restored(key, broken)
+        self.assertNotIn(key, BUILT)
+        work, built = restored(key, lambda work: (work / "ok").write_text("y", encoding="utf-8"))
+        self.assertTrue((work / "ok").exists())
+        self.assertFalse((work / "partial").exists())
+
+    def test_a_failed_snapshot_is_not_cached_as_built(self):
+        key = f"probe-{self.id()}"
+        calls = []
+
+        def build(work):
+            calls.append(work)
+
+        with mock.patch.object(shutil, "copytree", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                restored(key, build)
+        self.assertNotIn(key, BUILT)
+        restored(key, build)
+        self.assertEqual(len(calls), 2)
+
+    def test_the_sandboxes_are_forgotten_with_their_directory(self):
+        key = f"probe-{self.id()}"
+        module = sys.modules[__name__]
+        with mock.patch.object(module, "SANDBOXES", None), mock.patch.dict(BUILT, clear=True):
+            first, _ = restored(key, lambda work: None)
+            root = module.SANDBOXES
+            forget_sandboxes(root)
+            self.assertFalse(root.exists())
+            self.assertIsNone(module.SANDBOXES)
+            self.assertEqual(BUILT, {})
+            second, _ = restored(key, lambda work: None)
+            self.assertTrue(second.is_dir())
+            self.assertNotEqual(module.SANDBOXES, root)
+            forget_sandboxes(module.SANDBOXES)
 
     def test_the_first_use_is_already_a_restored_copy(self):
         key = f"probe-{self.id()}"
