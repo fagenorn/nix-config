@@ -94,21 +94,36 @@ def declared_tier(path: Path) -> str | None:
     return None
 
 
+def _without_comment(line: str) -> str:
+    """The line up to a `#` that opens a shell comment: unquoted, at the start of a word."""
+    quote = ""
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index]
+        index += 1
+    return line
+
+
 def _command_words(line: str) -> list[str]:
     """The words a shell reads from one recipe line: quotes removed, a comment dropped."""
-    line = line.rstrip().removesuffix("\\")
+    line = _without_comment(line.rstrip().removesuffix("\\"))
     lexer = shlex.shlex(line, posix=True)
     lexer.whitespace_split = True
-    lexer.commenters = "#"
+    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError:  # an unbalanced quote: the line continues a quoted string
-        words: list[str] = []
-        for word in line.split():
-            if word.startswith("#"):
-                break
-            words.append(word)
-        return words
+        return line.split()
 
 
 def recipe_paths(justfile_text: str, name: str, *, modules: bool = True) -> list[str]:
@@ -284,6 +299,17 @@ class RecipePathsTest(unittest.TestCase):
             "  #!/usr/bin/env bash\n"
         )
         self.assertEqual(recipe_paths(text, "evals"), ["e/run.sh", "q/test_quoted.py"])
+
+    def test_a_hash_inside_a_word_is_not_a_comment(self):
+        text = (
+            "evals skill id:\n"
+            "  run ${x#y} tests/test_n.py\n"
+            "  run a#b q/test_b.py # tests/test_c.py\n"
+            "  run '#' \"#\" r/test_d.py\n"
+        )
+        self.assertEqual(
+            recipe_paths(text, "evals"), ["tests/test_n.py", "q/test_b.py", "r/test_d.py"]
+        )
 
     def test_a_module_run_with_python_dash_m_is_its_path(self):
         text = (
