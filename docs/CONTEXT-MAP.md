@@ -52,11 +52,13 @@
 | Detaching word | Guard |
 | Digest | Console |
 | Drafted contract | Console |
+| Engine | Delivery |
 | Excluded profile | Console |
 | Fleet preflight | Project contract |
 | Fleet registry | Project contract |
 | Folder trust | Console |
 | Goal | Console |
+| Grader | Delivery |
 | Guest | Console |
 | Held issue | Verification |
 | Held work | Console |
@@ -83,6 +85,7 @@
 | Not yet managed | Console |
 | Notice | Console |
 | Nudge | Console |
+| Outcome | Delivery |
 | Outside sprints | Console |
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
@@ -97,6 +100,7 @@
 | Prefix reorder | Hosts |
 | Production rule | Guard |
 | Probe | Verification |
+| Procedure | Delivery |
 | Production rules | Project contract |
 | Project contract | Project contract |
 | Project question | Console |
@@ -123,6 +127,8 @@
 | Spend page | Console |
 | Sprint | Console |
 | Stale claim | Claims |
+| Step | Delivery |
+| Stop | Delivery |
 | Suite member | Delivery |
 | Transaction | Release |
 | Verification pass | Verification |
@@ -132,14 +138,11 @@
 
 ## Relationships
 
-- **Delivery → Claims**: a delivery holds a **Claim** and lands under the **Land lock**.
-- **Delivery → Verification**: a delivery that leaves evidence criteria holds its issue with a **Verify block**.
+- **Delivery → Claims, Verification**: a delivery holds a **Claim** and lands under the **Land lock**; one that leaves evidence criteria holds its issue with a **Verify block**.
 - **Verification → Claims**: an **Owner prompt** is an **Owner-action marker**.
 - **Release → Guard**: the forge adapter passes each mutation through the guard.
 - **Guard → Project contract**: a **Derived row** comes from a resolved **Project contract** and the **Fleet registry**.
-- **Hosts → Verification**: every host runs **Verification passes** on a schedule.
 - **Project contract → every area**: each command reads the **ResolvedProject**.
-- **Hosts → Console**: the **Cache proxy** reports each **Limit reading** to the console.
+- **Hosts → Verification, Console**: every host runs **Verification passes** on a schedule, and the **Cache proxy** reports each **Limit reading** to the console.
 - **Console → Project contract**: the console's projects are the **Fleet registry**'s entries.
-- **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader.
-- **Console → Verification**: an **Inbox item** of a held check is a live **Owner prompt**, answered through the runner's owner path.
+- **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader; an **Inbox item** of a held check is a live **Owner prompt** of Verification, answered through the runner's owner path.

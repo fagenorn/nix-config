@@ -372,6 +372,14 @@ class DocsTreeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_the_delivery_glossary_defines_the_engine_terms(self):
+        area = (REPO_ROOT / "docs/areas/delivery/CONTEXT.md").read_text(encoding="utf-8")
+        context_map = self.doc("docs/CONTEXT-MAP.md")
+        for term in ("Engine", "Grader", "Outcome", "Procedure", "Step", "Stop"):
+            with self.subTest(term=term):
+                self.assertIsNotNone(re.search(rf"^\*\*{term}\*\*:", area, re.M))
+                self.assertIn(f"| {term} | Delivery |", context_map)
+
     def test_every_dissolved_readme_section_is_mapped(self):
         rows, problems = parse_section_map(SECTION_MAP.read_text(encoding="utf-8"))
         base_headings = {source: headings(base_text(source)) for source in SOURCES}

@@ -139,6 +139,8 @@ agent-workflow-tests *args:
     tests/test_agent_tools_siblings.py \
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
+    tests/test_engine_check.py \
+    tests/test_engine_core.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
