@@ -1,4 +1,4 @@
-# ADR-project-contract-018 — Skipped tests and copied test bodies are counted per project
+# ADR-project-contract-020 — Skipped tests and copied test bodies are counted per project
 
 - **Status:** accepted
 - **Decided in:** #1464 (per #1421, #1414, #1412)
