@@ -2,7 +2,8 @@
 
 Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
 
-    run.json            the run's identity: exactly `RUN_MEMBERS`
+    run.json            the run's identity: exactly `RUN_MEMBERS`, plus `parent` (the
+                        id of the run that called it) in a child run
     procedure/          a byte copy of the entry procedure directory's `*.json`
                         and `*.md` files plus `SHA256SUMS`
     events.jsonl        one compact JSON event per line, appended and fsynced
@@ -13,10 +14,13 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
 The run id is `<issue>-<UTC start as %Y%m%dT%H%M%SZ>-<four [a-z0-9]>`. It orders
 only to the second, so `run.json` also carries `sequence`: an integer one above
 the greatest `sequence` among the issue's earlier runs, the order `find_runs`
-returns. The caller serialises the creation of an issue's runs.
+returns. The caller serialises the creation of an issue's runs. `sequence`
+counts every run of the issue, child runs included, but `find_runs` and
+`find_run` return root runs only (a run whose `run.json` has no `parent`).
 
 Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS`
-lists, per type, exactly the other members it carries. A run is assembled in
+lists, per type, exactly the other members it carries; a `call` event records
+that a step started the child run `child` for item `index` of `items`. A run is assembled in
 `<root>/.<run id>.tmp` and renamed into place, so a run directory is either
 complete or absent.
 
@@ -60,6 +64,7 @@ RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 TOKEN_RE = re.compile(r"^[a-z0-9]{4}$")
 RUN_MEMBERS = ("host", "inputs", "issue", "platform_revision", "procedure", "project",
                "run", "sequence", "started")
+PARENT_MEMBER = "parent"
 WAITS = ("usage-limit", "host-slot", "lock")
 TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
@@ -76,6 +81,7 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
     "wait_started": frozenset(("wait", "until")),
     "wait_ended": frozenset(("wait",)),
     "stop_reached": frozenset(("step", "stop", "need")),
+    "call": frozenset(("step", "visit", "child", "index", "items")),
     "run_continued": frozenset(),
     "run_done": frozenset(),
 }
@@ -166,8 +172,11 @@ def _check_inputs(inputs: Mapping[str, str | int]) -> None:
 def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path,
                platform_revision: str, host: str, inputs: Mapping[str, str | int],
                now: datetime, token: str | None = None, root: Path | None = None,
-               before_publish: Callable[[Path], None] | None = None) -> Path:
+               before_publish: Callable[[Path], None] | None = None,
+               parent: str | None = None) -> Path:
     """Create the run directory and return its path.
+
+    With `parent` (a run id) the run is a child: its `run.json` also names the parent.
 
     `before_publish(staged)` is called with the assembled, still unpublished run
     directory; what it raises leaves no run behind.
@@ -182,6 +191,8 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
     if _inside(procedures_dir, f"{procedure}.json") is None:
         raise LedgerError(f"no procedure file {procedure}.json in the procedure directory")
     _check_inputs(inputs)
+    if parent is not None and not (isinstance(parent, str) and RUN_ID_RE.fullmatch(parent)):
+        raise LedgerError("parent is not a run id")
     if token is None:
         token = "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(4))
     run_id = make_run_id(issue, now, token)
@@ -202,6 +213,8 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
                     "platform_revision": platform_revision, "procedure": procedure,
                     "project": project, "run": run_id, "sequence": sequence,
                     "started": started}
+        if parent is not None:
+            document[PARENT_MEMBER] = parent
         _write_file(temporary / "run.json", _compact(document).encode("utf-8"))
         copied = temporary / "procedure"
         os.mkdir(copied, 0o700)
@@ -240,8 +253,13 @@ def _strict_load(path: Path) -> object:
 
 def read_run(run_dir: Path) -> dict:
     document = _strict_load(Path(run_dir) / "run.json")
-    if not isinstance(document, dict) or set(document) != set(RUN_MEMBERS):
+    if not isinstance(document, dict) \
+            or set(document) not in (set(RUN_MEMBERS), {*RUN_MEMBERS, PARENT_MEMBER}):
         raise LedgerError("run.json does not have exactly the run members")
+    if PARENT_MEMBER in document and not (
+            isinstance(document[PARENT_MEMBER], str)
+            and RUN_ID_RE.fullmatch(document[PARENT_MEMBER])):
+        raise LedgerError("run.json parent is not a run id")
     if not isinstance(document["project"], str):
         raise LedgerError("run.json project is not a string")
     if not _is_int(document["sequence"]) or document["sequence"] < 1:
@@ -268,13 +286,15 @@ def _issue_runs(root: Path, issue: int) -> list[tuple[Path, dict]]:
 
 
 def find_runs(root: Path, issue: int, project: str | None) -> list[Path]:
-    """Every run directory of `issue` under `root`, oldest first; it writes nothing.
+    """Every root run directory of `issue` under `root`, oldest first; it writes nothing.
 
-    The order is `run.json`'s `sequence`, then the run's name. With no `project`,
-    runs of more than one project are a `LedgerError`.
+    A child run (its `run.json` has a `parent`) is not returned. The order is
+    `run.json`'s `sequence`, then the run's name. With no `project`, runs of more
+    than one project are a `LedgerError`.
     """
     found = [(entry, document) for entry, document in _issue_runs(root, issue)
-             if project is None or document["project"] == project]
+             if PARENT_MEMBER not in document
+             and (project is None or document["project"] == project)]
     projects = sorted({document["project"] for _, document in found})
     if project is None and len(projects) > 1:
         raise LedgerError(f"runs of issue {issue} belong to several projects: "
@@ -314,6 +334,15 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
     elif key in ("visit", "pid"):
         if not _is_int(value) or value < 1:  # type: ignore[operator]
             raise LedgerError(f"{key} must be an integer of at least 1")
+    elif key == "child":
+        if not isinstance(value, str) or not RUN_ID_RE.fullmatch(value):
+            raise LedgerError("child is not a run id")
+    elif key == "index":
+        if not _is_int(value) or value < 0:  # type: ignore[operator]
+            raise LedgerError("index must be a non-negative integer")
+    elif key == "items":
+        if not _is_int(value) or value < 1:  # type: ignore[operator]
+            raise LedgerError("items must be an integer of at least 1")
     elif key == "turns":
         if not _is_int(value) or value < 0:  # type: ignore[operator]
             raise LedgerError("turns must be a non-negative integer")
@@ -355,6 +384,8 @@ def validate_event(event: object) -> dict:
     # `step` and `visit` are checked before `result`, which is derived from them.
     for key in sorted(event, key=lambda name: name == "result"):
         _check_member(event, key)
+    if kind == "call" and event["index"] >= event["items"]:  # type: ignore[operator]
+        raise LedgerError("call index must be below items")
     return dict(event)
 
 
