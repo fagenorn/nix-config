@@ -693,13 +693,17 @@ class RefusalTest(ReadinessCase):
                      ["bash", "--norc", "-c", "deploy"],
                      ["bash", "-c", "-o", "pipefail", "-e", "--", "deploy"],
                      ["bash", "-co", "pipefail", "deploy"], ["bash", "-e", "-c", "-u", "deploy"],
-                     ["env", "bash", "-O", "extglob", "-c", "--", "deploy"]):
+                     ["env", "bash", "-O", "extglob", "-c", "--", "deploy"],
+                     ["sh", "-c", "-", "deploy"], ["bash", "-c", "+", "deploy"],
+                     ["dash", "-c", "-e", "-", "deploy"],
+                     ["zsh", "--emulate", "sh", "-c", "deploy"]):
             with self.subTest(argv=argv):
                 self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
                 self.assertEqual(production, refusal(argv, snap))
         for argv in (["bash", "-O", "extglob", "-c", "true"], ["bash", "-c", "--", "echo deploy"],
                      ["bash", "-c", "-e", "echo", "deploy"], ["bash", "--rcfile", "deploy", "-c", "true"],
-                     ["bash", "-O", "deploy", "-c", "true"]):
+                     ["bash", "-O", "deploy", "-c", "true"], ["sh", "-c", "-", "echo", "deploy"],
+                     ["zsh", "--emulate", "deploy", "-c", "true"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
 
