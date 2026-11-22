@@ -1,6 +1,6 @@
 # ADR-console-033 — The drafted contract and the question cards read plainly and fit the screen
 
-- **Status:** accepted; D1 amended by ADR-console-082
+- **Status:** accepted; D1 amended by ADR-console-082; D3 amended in #1445
 - **Decided in:** #1079
 
 ## Context
@@ -31,7 +31,7 @@ The owner's rules for this sprint: everything that needs the owner is a counted 
 
 - The counted line is a fold. Its opened list is plain lines, each a quiet button that opens the same change box as Change, so the list adds no Change buttons.
 - The fold opens by itself when its entry has a refusal or an open change. Otherwise it keeps its open or closed state across every redraw of the same repository's registration. It starts closed for another repository, and after any draw that showed no fold (a running registration).
-- The choice buttons of a change box are drafted-value text too, so they are plain: `light-lane` offers `Every change takes the full delivery route`, and `projections` offers `It generates no agent instruction files`.
+- The choice buttons of a change box are drafted-value text too, so they are plain: `projections` offers `It generates no agent instruction files`, and `release` offers `It makes no releases`.
 
 **D4. Placeholders come from the view.** `contract_draft.placeholder(field)` gives every text field its words, such as `owner/name`, `the build command` or `the test command`. The page falls back to `Type your answer` and `Type the new value` only for a frame without one.
 

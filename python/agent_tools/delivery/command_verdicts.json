@@ -32,8 +32,8 @@
   },
   "forge-issue": null,
   "guard-policy": null,
+  "host-readiness": null,
   "issue-branch": null,
-  "lane-triage": null,
   "look-approval": null,
   "look-lint": null,
   "owner-actions": null,
@@ -46,6 +46,8 @@
   "resolve-project": null,
   "skill-lint": null,
   "sprint": null,
+  "standards-lint": null,
   "verified-tree": null,
-  "verify-pending": null
+  "verify-pending": null,
+  "verify-slot": null
 }

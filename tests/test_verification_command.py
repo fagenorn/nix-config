@@ -51,6 +51,8 @@ def stub_just(directory: Path) -> Path:
         "#!/bin/sh\n"
         "printf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$STUB_LOG\"\n"
         "[ \"$1\" = \"${STUB_FAIL:-}\" ] && exit 3\n"
+        "[ \"$1\" = \"${STUB_EXEC_FOR:-}\" ] && exec \"$STUB_PYTHON\" -m unittest -v"
+        " -k \"$STUB_EXEC_K\" \"$STUB_EXEC_FILE\"\n"
         "exit 0\n", "utf-8")
     path.chmod(0o755)
     return path
@@ -96,7 +98,8 @@ class MembersTest(unittest.TestCase):
     def test_test_members_are_the_build_then_the_suite(self):
         self.assertEqual(members("test", Path("/r")), (
             Member("nix-build", ("just", "build")),
-            Member("agent-workflow-tests", ("just", "agent-workflow-tests")),
+            Member("agent-workflow-tests", ("just", "agent-workflow-tests"),
+                   (("WORKFLOW_POLICY_SURFACE", "source"),)),
         ))
 
     def test_no_lint_member_builds_a_host_configuration(self):
@@ -162,6 +165,87 @@ class TestEntryPointTest(JustCase):
         self.assertTrue(
             [l for l in stderr if l.startswith("test: agent-workflow-tests failed (cannot start")])
         self.assertEqual(stderr[-1], "test: failed: nix-build, agent-workflow-tests")
+
+
+COMPARISON = "test_installed_policy_surface_matches_source_contract"
+CONTRACTS = "home/common/agent-skills/tests/test_workflow_skill_contracts.py"
+
+
+class ActivatedSkillsComparisonTest(JustCase):
+    """The host's activated skills are compared with the source only after activation
+    (issue 1580): `test` runs the suite source-only, the way CI does, and the kept
+    entry point `agent-activated-skill-tests` runs the comparison."""
+
+    def fixture_home(self, differing: bool) -> Path:
+        home = self.tmp()
+        skills = home / ".claude" / "skills"
+        shutil.copytree(REPO_ROOT / "home/common/agent-skills/skills", skills)
+        shutil.copytree(REPO_ROOT / "home/common/claude-code/skills", skills, dirs_exist_ok=True)
+        bin_dir = home / ".agents" / "bin"
+        bin_dir.mkdir(parents=True)
+        for name, source in (("resolve-project", "project_contract/resolve_project.py"),
+                             ("context-map-lint", "delivery/context_map_lint.py")):
+            shutil.copy2(REPO_ROOT / "python/agent_tools" / source, bin_dir / name)
+            (bin_dir / name).chmod(0o755)
+        if differing:
+            entry = skills / "deliver-direct" / "SKILL.md"
+            text = entry.read_text(encoding="utf-8")
+            self.assertIn("bindings.workflow.verification", text)
+            entry.write_text(text.replace("bindings.workflow.verification", "the verification"),
+                             encoding="utf-8")
+        return home
+
+    def env_for(self, home: Path, **extra: str) -> dict[str, str]:
+        env = child_env(HOME=str(home))
+        env.pop("WORKFLOW_POLICY_SURFACE", None)
+        env.update(extra)
+        return env
+
+    def run_comparison(self, home: Path, **extra: str):
+        return subprocess.run(
+            [sys.executable, "-m", "unittest", "-v", "-k", COMPARISON, CONTRACTS],
+            cwd=REPO_ROOT, env=self.env_for(home, **extra), capture_output=True, text=True,
+            timeout=600)
+
+    def test_the_test_command_passes_on_a_differing_home_with_the_switch_unset(self):
+        home = self.fixture_home(differing=True)
+        # Control: run bare, the comparison fails, so the fixture really differs.
+        self.assertNotEqual(self.run_comparison(home).returncode, 0)
+        # The production `test` command starts the stubbed suite member with the differing
+        # home and no switch of its own; only the command's own environment can skip it.
+        tmp = self.tmp()
+        stub_just(tmp / "bin")
+        env = self.env_for(
+            home, PATH=f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            STUB_LOG=str(tmp / "log"), STUB_EXEC_FOR="agent-workflow-tests",
+            STUB_PYTHON=sys.executable, STUB_EXEC_K=COMPARISON, STUB_EXEC_FILE=CONTRACTS)
+        result = run_entry(["test"], REPO_ROOT, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1],
+                         "test: passed: nix-build, agent-workflow-tests")
+        self.assertIn("skipped", result.stderr)
+
+    def test_the_kept_entry_point_fails_on_the_same_differing_home(self):
+        home = self.fixture_home(differing=True)
+        result = self.run_just(
+            ["--justfile", str(REPO_ROOT / "justfile"), "agent-activated-skill-tests"],
+            REPO_ROOT, self.env_for(home))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAILED", result.stderr)
+
+    def test_the_kept_entry_point_passes_on_a_matching_home(self):
+        home = self.fixture_home(differing=False)
+        result = self.run_just(
+            ["--justfile", str(REPO_ROOT / "justfile"), "agent-activated-skill-tests"],
+            REPO_ROOT, self.env_for(home))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_kept_entry_point_ignores_the_source_only_switch(self):
+        home = self.fixture_home(differing=True)
+        result = self.run_just(
+            ["--justfile", str(REPO_ROOT / "justfile"), "agent-activated-skill-tests"],
+            REPO_ROOT, self.env_for(home, WORKFLOW_POLICY_SURFACE="source"))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
 
 
 def scratch_checkout() -> Path:
@@ -446,6 +530,10 @@ BUDGET = (
     "  fi\n"
     "fi\n"
     "PYTHONPATH=python python3 -m agent_tools.instruction_load check \"${args[@]}\"")
+SUITE_TIMING_COMPARE = (
+    'PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing compare '
+    '--head suite-timing/head/suite-timing.json --base suite-timing/base/suite-timing.json '
+    '--base-label "$BASE_REF" >> "$GITHUB_STEP_SUMMARY"')
 CHECKOUT, INSTALL = "actions/checkout@v4", "DeterminateSystems/nix-installer-action@v4"
 SETUP = ("not-lint", "runner setup")
 
@@ -472,6 +560,19 @@ CI_STEP_CLASSES = {
      "WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just nixpkgs#nodejs "
      "--command just agent-workflow-tests"):
         ("not-lint", "the suite, the test member agent-workflow-tests"),
+    ("ci.yaml", "agent-workflow-tests", "actions/upload-artifact@v4"):
+        ("not-lint", "uploads the suite timing report"),
+    ("ci.yaml", "suite-timing-baseline", "actions/download-artifact@v4"):
+        ("not-lint", "downloads the run's suite timing report"),
+    ("ci.yaml", "suite-timing-baseline", "actions/cache/save@v4"):
+        ("not-lint", "keeps main's suite timing report as the baseline"),
+    ("ci.yaml", "suite-timing", CHECKOUT): SETUP,
+    ("ci.yaml", "suite-timing", "actions/download-artifact@v4"):
+        ("not-lint", "downloads the run's suite timing report"),
+    ("ci.yaml", "suite-timing", "actions/cache/restore@v4"):
+        ("not-lint", "restores main's suite timing baseline"),
+    ("ci.yaml", "suite-timing", SUITE_TIMING_COMPARE):
+        ("not-lint", "reports suite time growth over main and never fails a run"),
     ("ci.yaml", "nix-eval", "nix build --no-link '.#checks.x86_64-linux.agnostic-lint'"):
         ("lint", "agnostic-lint"),
     ("instruction-budget.yaml", "instruction-budget", BUDGET): ("lint", "instruction-budget"),

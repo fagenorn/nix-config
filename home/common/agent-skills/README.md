@@ -30,7 +30,7 @@ orchestrator context.
    `resolve-project write-projections` to generate its entries.
 2. Write the map skeleton: `docs/CONTEXT-MAP.md` with one area (or run a `grill-with-docs` session
    and let the first terms create it).
-3. Optionally seed `docs/standards/README.md` (empty index) and `.claude/hints/`.
+3. Optionally seed `docs/standards/README.md` (empty index) and `.agents/knowledge/hints/`.
 4. Everything else is machine-global via nix (`home/common/agent-skills/`): the skills, the
    standards layers 0–1, and the linter arrive with the home-manager generation.
 

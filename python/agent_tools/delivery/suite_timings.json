@@ -88,7 +88,6 @@
  "tests/test_forge_issue.py": 6.8,
  "tests/test_console_bypass_proof_checks.py": 6.7,
  "tests/test_console_answer.py": 5.3,
- "tests/test_lane_triage.py": 5.2,
  "tests/test_fallback_audit.py": 5.2,
  "tests/test_program_copies.py": 5.1,
  "home/common/agent-skills/tests/test_resolve_project.py": 5.0,

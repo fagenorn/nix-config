@@ -23,6 +23,7 @@ from agent_tools.delivery.agent_gate_bundle import (GATE_CONTRACT, GATE_VERSION,
 from agent_tools.delivery.promotion_schema import (CLASSIFICATION_RULES, PROJECT_ONLY_RESIDUE,
                                           Refusal, is_safe_relative_path, load_strict,
                                           symlinked_component, violation)
+from agent_tools.delivery.rule_ids import without_rule_id
 
 TRANSITIONS: dict[tuple[str, str], str] = {
     ("captured", "evaluating"): "bind",
@@ -66,11 +67,14 @@ def _blank(value: str | None) -> bool:
     return value is None or not value.strip()
 
 
-def anchor_line_present(root: Path, relative: str, anchor: str) -> bool:
+def anchor_line_present(root: Path, relative: str, anchor: str, standard: bool = False) -> bool:
     """Whether `root/relative` is a readable regular UTF-8 file with no symlinked
     component and a line equal to `anchor` once trailing whitespace is stripped.
 
-    A whole-line match, never a substring (D23). Any `OSError` is `False`.
+    A whole-line match, never a substring (D23). In a standards destination
+    (`standard`) a `###` rule heading also matches when it equals the anchor once
+    its one rule id is removed (#1438); every other line matches exactly. Any
+    `OSError` is `False`.
     """
     try:
         if not is_safe_relative_path(relative) or symlinked_component(root, relative):
@@ -81,7 +85,8 @@ def anchor_line_present(root: Path, relative: str, anchor: str) -> bool:
         text = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError):
         return False
-    return any(line.rstrip() == anchor for line in text.splitlines())
+    return any(line.rstrip() == anchor or (standard and without_rule_id(line.rstrip()) == anchor)
+               for line in text.splitlines())
 
 
 def classify(candidate: dict, root: Path) -> dict:
@@ -93,7 +98,8 @@ def classify(candidate: dict, root: Path) -> dict:
     destination = candidate["destination"]
     for rule, rule_id in CLASSIFICATION_RULES:
         if rule == DUPLICATE_OF_PLATFORM:
-            matched = anchor_line_present(root, destination["path"], destination["anchor"])
+            matched = anchor_line_present(root, destination["path"], destination["anchor"],
+                                          destination["layer"] == "standard_layer")
         else:
             matched = destination["layer"] == rule_id
         if matched:
@@ -270,7 +276,8 @@ def _remeasure(result: dict, root: Path, here: str, arguments: Arguments) -> Non
 def _promote(result: dict, root: Path, here: str, arguments: Arguments) -> None:
     authorization_gates(result, root)
     destination = result["destination"]
-    if not anchor_line_present(root, destination["path"], destination["anchor"]):
+    if not anchor_line_present(root, destination["path"], destination["anchor"],
+                               destination["layer"] == "standard_layer"):
         raise _refuse("destination_missing", "/destination/path",
                       "the destination has no line equal to the anchor")
     result["deployment"] = verify_deployment(result, root, here)

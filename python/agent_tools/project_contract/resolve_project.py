@@ -255,8 +255,9 @@ COMMAND_MEMBERS = ("argv", "cwd", "env")
 WORKFLOW_MEMBERS = ("verification", "orchestration", "review")
 # The workflow members an author may leave out: `light_lane` (#279) and
 # `verification_conditions` (issue 437). For each, `null` and absent both mean
-# none (no light lane; every declared verification id runs), and the resolver
-# never inserts either member itself.
+# none (every declared verification id runs), and the resolver never inserts
+# either member itself. `light_lane` is accepted on a schema-2 contract until
+# the schema-3 slice (#1453) removes it, and no tool reads it.
 WORKFLOW_OPTIONAL_MEMBERS = ("light_lane", "verification_conditions")
 # #310: the one orchestration member an author may leave out; never defaulted.
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
@@ -369,11 +370,11 @@ CANONICAL_PATH_MESSAGE = ("must be spelled canonically: '/'-separated, with no "
 
 
 def is_canonical_path(path: str) -> bool:
-    """The one spelling `lane-triage` matches: '/'-separated, with no backslash,
+    """The one spelling contract path globs are matched in: '/'-separated, with no backslash,
     no empty or `.` segment and no trailing `/` (#279 D11).
 
-    `risk_paths` globs and triage record paths both meet it, because
-    `fnmatchcase` compares the strings unchanged.
+    Contract globs and the paths they are matched against both meet it,
+    because `fnmatchcase` compares the strings unchanged.
     """
     return "\\" not in path and all(segment not in ("", ".") for segment in path.split("/"))
 
@@ -382,8 +383,8 @@ def any_path_matches(paths: list[str], globs: list[str]) -> bool:
     """True when some path matches some glob under `fnmatch.fnmatchcase`.
 
     Both are compared as spelled, so `*` also crosses `/` (#279 D4, issue 437
-    D3). It is the one matcher for contract path globs; `lane-triage` calls it
-    for `risk_paths` and `verified-tree` for `when_changed`.
+    D3). It is the one matcher for contract path globs; `verified-tree` calls it
+    for `when_changed`.
     """
     return any(fnmatch.fnmatchcase(path, glob) for path in paths for glob in globs)
 

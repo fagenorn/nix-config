@@ -1,8 +1,10 @@
 # The platform package (ADR-system-005): the agent_tools package (python/) in one
 # interpreter environment with a build-time import of every module, one isolated
 # launcher per command-table row, the standards directory and the platform
-# manifest. `commands` is still the only command-to-module mapping (#175 D4, D11;
-# parent D2, D10, D13).
+# manifest. `commands` is still the one command-to-module authority (#175 D4, D11;
+# parent D2, D10, D13):
+# `agent_tools.delivery.engine_commands.PLATFORM_MODULES` mirrors the rows of the commands an
+# engine procedure may run, and tests/test_engine_commands.py pins the mirror to these rows.
 { pkgs }:
 let
   inherit (pkgs) lib;
@@ -57,8 +59,8 @@ let
     "forge-claim" = "claims.forge_claim";
     "forge-issue" = "claims.forge_issue";
     "guard-policy" = "guard.guard_policy";
+    "host-readiness" = "project_contract.host_readiness";
     "issue-branch" = "delivery.issue_branch";
-    "lane-triage" = "delivery.lane_triage";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
     "owner-actions" = "claims.owner_actions";
@@ -71,8 +73,10 @@ let
     "resolve-project" = "project_contract.resolve_project";
     "skill-lint" = "skill_lint";
     "sprint" = "console.sprint";
+    "standards-lint" = "delivery.standards_lint";
     "verified-tree" = "verification.verified_tree";
     "verify-pending" = "verification.verify_pending";
+    "verify-slot" = "delivery.verify_slot";
   };
 
   # -I drops every PYTHON* variable, the working directory and the user site.

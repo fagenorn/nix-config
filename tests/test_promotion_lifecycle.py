@@ -37,6 +37,40 @@ class ClassificationTest(LifecycleFixture, unittest.TestCase):
             "rule": 1, "rule_id": "duplicate_of_platform",
             "declared_layer": "standard_layer", "overridden_by_rule_1": True})
 
+    def test_rule_one_matches_a_heading_that_carries_a_rule_id(self):
+        (self.root / DESTINATION).parent.mkdir(parents=True)
+        (self.root / DESTINATION).write_text(
+            "# The bar\n### B17. Investigate before changing\n", encoding="utf-8")
+        self.assertEqual(self.classification(), {
+            "rule": 1, "rule_id": "duplicate_of_platform",
+            "declared_layer": "standard_layer", "overridden_by_rule_1": True})
+
+    def test_only_one_well_formed_id_is_ignored(self):
+        (self.root / DESTINATION).parent.mkdir(parents=True)
+        lines = ("### b17. Investigate before changing",
+                 "### B017. Investigate before changing",
+                 "### B17 Investigate before changing",
+                 "B17. ### Investigate before changing",
+                 "### B17. B18. Investigate before changing",
+                 "### B17. Investigate before changing code")
+        for i, line in enumerate(lines):
+            with self.subTest(line=line):
+                (self.root / DESTINATION).write_text("# The bar\n" + line + "\n",
+                                                     encoding="utf-8")
+                self.assertEqual(self.classification(name=f"{i}.json")["rule"], 4)
+
+    def test_a_rule_id_is_ignored_only_at_level_three_in_a_standards_destination(self):
+        for index, (anchor, line, layer, rule) in enumerate((
+                ("## Retry policy", "## RFC1. Retry policy", "standard_layer", 4),
+                ("#### Retry policy", "#### RFC1. Retry policy", "standard_layer", 4),
+                (HEADING, "### B17. Investigate before changing", "project_local", 2))):
+            with self.subTest(line=line, layer=layer):
+                (self.root / DESTINATION).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / DESTINATION).write_text(f"# The bar\n{line}\n", encoding="utf-8")
+                destination = dict(draft()["destination"], layer=layer, anchor=anchor)
+                got = self.classification(draft(destination=destination), name=f"{index}.json")
+                self.assertEqual([got["rule"], got["overridden_by_rule_1"]], [rule, False])
+
     def test_prefix_headings_and_symlinked_components_never_match_rule_one(self):
         real = self.root / "real"
         real.mkdir()
