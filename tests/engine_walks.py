@@ -10,6 +10,9 @@ a stop or `done` is a terminal walk. Each edge, a `(step id, outcome)` key of a
 core step's `on` map, gets the first terminal walk that takes it; an edge no
 terminal walk takes is reported in `Coverage.unwalked`, never dropped.
 
+`no-reply` is the shell's outcome when no valid reply came back, so its event
+carries the empty result `{}` the shell stores, not a sampled reply.
+
 Later slices (#1517) reuse `edges`, `step_outcomes`, `reply_schemas`,
 `walk_edges` and `describe` to walk further step kinds.
 """
@@ -105,6 +108,8 @@ def result_for(procedure: Mapping, step_id: str, outcome: str, schemas: Mapping[
     owner = next(item for item in procedure["steps"] if item["id"] == step_id)
     if owner["kind"] != "agent":
         return {"verdict": outcome}
+    if outcome == procedure_check.NO_REPLY:
+        return {}
     schema = schemas[step_id]
     prefix = f"{step_id}."
     result = sample(schema)

@@ -443,13 +443,15 @@ def copy_roles(project: EngineProject, *names: str) -> None:
 def agent_step(id: str, role: str, on: dict, **members) -> dict:
     document = {"id": id, "stage": "building", "kind": "agent", "role": role,
                 "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
-                "in": ["run.issue"], "on": on}
+                "in": ["run.issue"], "on": {"no-reply": "step-failed", **on}}
     document.update(members)
     return document
 
 
 def write_procedures(project: EngineProject, steps: list[dict], files: dict | None = None) -> Path:
-    directory = project.procedures(steps)
+    directory = project.procedures(
+        steps, stops={"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]},
+                      "step-failed": {"need": "retry", "reenter": steps[0]["id"]}})
     for name, text in (files or {"draft.md": "Draft issue {{run.issue}}.\n",
                                  "draft.reply.json": json.dumps(DRAFT_REPLY)}).items():
         (directory / name).write_text(text, encoding="utf-8")

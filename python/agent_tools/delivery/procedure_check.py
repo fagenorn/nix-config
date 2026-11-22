@@ -37,7 +37,7 @@ declaration, is the first; a `null` declaration, or a `subcommands`-form declara
 second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply` (no such file in the procedure directory, a file
 that resolves outside it, or for `missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema is not
 a strict-JSON object with a `properties` object, a `required` list of strings that contains `outcome_from`, and an `enum` of
-distinct non-empty strings under `properties[outcome_from]`), `unsupported_reply` (a reply schema that passes
+distinct non-empty strings under `properties[outcome_from]` that names neither `exhausted` nor `no-reply`, both reserved), `unsupported_reply` (a reply schema that passes
 `invalid_reply` but uses a construct outside the subset `engine_reply` defines, named in the detail), `unknown_grader`
 (not in `GRADERS`) and `missing_procedure` (a `call` child file is absent; a child that exists but fails phase A gives the parent no refusal).
 
@@ -49,8 +49,10 @@ Phase C, graph (only on a file with no phase A refusal and no `unknown_target`; 
 first): `unreachable_step` (a step the walk of `flow_graph` from the first step does not reach, `flow_graph` carrying the
 renewal failure as an edge to `claim-lost` into a `mutates` step; a group member is reached when its group is),
 `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
-`unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle of `step_graph` also produces `exhausted`, any
-step may map it, and a group member's `pass` entries are checked at the group) and `unbounded_cycle` (a cycle among steps
+`unknown_outcome` (a step's `on` keys against `outcomes_of`; an `agent` step also produces `no-reply`, the shell's outcome when
+no valid reply came back, so a non-member agent step whose `on` lacks it is `unmapped_outcome`; a step on a cycle of
+`step_graph` also produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the group,
+where `no-reply` is never a pass outcome) and `unbounded_cycle` (a cycle among steps
 with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through the `exhausted`
 entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent; refused at its
 first step). An outcome check whose reference failed phase B is skipped for that step.
@@ -91,6 +93,7 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
+NO_REPLY = "no-reply"
 CLAIM_LOST = "claim-lost"
 START = "(start)"
 
@@ -510,6 +513,8 @@ def _reply_schema(path: Path, outcome_from: str, name: str) -> _Reply | tuple[st
         return "invalid_reply", f"properties.{outcome_from} has no enum of distinct non-empty strings."
     if EXHAUSTED in enum:
         return "invalid_reply", f"properties.{outcome_from} enum names {EXHAUSTED!r}, which is reserved."
+    if NO_REPLY in enum:
+        return "invalid_reply", f"properties.{outcome_from} enum names {NO_REPLY!r}, which is reserved."
     problem = schema_problem(schema)
     if problem:
         return "unsupported_reply", f"{name} uses {problem}, outside the reply schema subset."
@@ -664,13 +669,15 @@ def check_directory(directory: Path,
 
 
 def outcomes_of(step: dict, resolved: Resolved) -> tuple[str, ...] | None:
-    """The outcomes a step can produce but `exhausted`; `None` when unresolved."""
+    """The outcomes a step can produce but `exhausted`; `None` when unresolved. An agent step also produces `no-reply`."""
     kind = step["kind"]
     if kind == "group":
         return ("pass", "blocked")
     known = resolved.steps[step["id"]]
     if kind == "call":
         return None if known.child_stops is None else ("done",) + tuple(known.child_stops)
+    if kind == "agent" and known.outcomes is not None:
+        return known.outcomes + (NO_REPLY,)
     return known.outcomes
 
 
@@ -835,7 +842,7 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
                 member_outcomes = outcomes_of(by_id[member["step"]], resolved)
                 if member_outcomes is None:
                     continue
-                stray = [o for o in member["pass"] if o not in member_outcomes]
+                stray = [o for o in member["pass"] if o not in member_outcomes or o == NO_REPLY]
                 if stray:
                     found.add("unknown_outcome",
                               f"member {member['step']!r} cannot produce {', '.join(map(repr, stray))}.",

@@ -162,6 +162,20 @@ def _without(target: Callable[[dict], dict], key: str) -> Callable[[dict], None]
     return change
 
 
+def _drop_on(step_id: str, outcome: str) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        step(toy, step_id)["on"].pop(outcome, None)
+    return change
+
+
+def _no_reply_reply_value(schema: dict) -> None:
+    schema["properties"]["status"]["enum"].append("no-reply")
+
+
+def _pass_set_with_no_reply(toy: dict) -> None:
+    step(toy, "review")["members"][0]["pass"].append("no-reply")
+
+
 def _unbound_the_loop(toy: dict) -> None:
     for step_id in ("draft", "review", "tally"):
         del step(toy, step_id)["max_visits"]
@@ -440,6 +454,12 @@ CASES = [
          [("toy", None, "invalid_field")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
+    Case("agent_step_without_no_reply", editing("toy", _drop_on("draft", "no-reply")),
+         [("toy", "draft", "unmapped_outcome")]),
+    Case("reply_enum_value_named_no_reply", _editing_draft_reply(_no_reply_reply_value),
+         [("toy", "draft", "invalid_reply")]),
+    Case("pass_set_naming_no_reply", editing("toy", _pass_set_with_no_reply),
+         [("toy", "review", "unknown_outcome")]),
     Case("reply_schema_outside_the_subset",
          _editing_draft_reply(_summary_with_min_length),
          [("toy", "draft", "unsupported_reply")]),
@@ -512,6 +532,11 @@ class ToyProcedureTest(unittest.TestCase):
             self.assertIs(type(item["max_visits"]), int)
             self.assertGreaterEqual(item["max_visits"], 1)
             self.assertIn(item["on"]["exhausted"], toy["stops"])
+
+    def test_the_toy_maps_no_reply_to_the_retry_stop_step_failed(self):
+        toy = load(PROCEDURES, "toy")
+        self.assertEqual(step(toy, "draft")["on"]["no-reply"], "step-failed")
+        self.assertEqual(toy["stops"]["step-failed"]["need"], "retry")
 
     def test_every_stage_is_accepted(self):
         stages = ("setup", "planning", "plan review", "building", "final review",
