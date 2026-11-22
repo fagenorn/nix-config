@@ -80,7 +80,7 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
     ),
     DIFF_REVIEW: (
         "`~/.agents/bin/diff-scope`",
-        "--artifact-path <specification-directory> --artifact-path <plan-directory>",
+        "--root <absolute worktree root>",
         "--format json", "`product.changed_files`", "`files[].path`",
         "`files[].changed_lines`", "`git diff <base>..<head> -- ':(literal)<path>'`",
         "`git merge-base <left> <right>`", "`scope: <K> slices over <M> product files`",
@@ -145,15 +145,15 @@ def normalized(text):
 
 SHARED_POLICY_ENTRIES = {
     "deliver-direct/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
-    "design/SKILL.md": ("bindings.paths.artifacts.specs",),
+    "design/SKILL.md": ("bindings.tracker",),
     "doc-grounded-questions/SKILL.md": ("bindings.paths.context", "bindings.paths.standards", "bindings.paths.architecture", "bindings.paths.hints"),
     "grill-with-docs/SKILL.md": ("bindings.paths.context",),
-    "research/SKILL.md": ("bindings.paths.artifacts.specs",),
+    "research/SKILL.md": ("bindings.tracker",),
     "ship-release/SKILL.md": ("bindings.tracker", "bindings.vcs"),
     "to-issues/SKILL.md": ("bindings.tracker", "bindings.paths"),
     "wayfind/SKILL.md": ("bindings.tracker",),
     "worktrees/SKILL.md": ("bindings.vcs",),
-    "writing-plans/SKILL.md": ("bindings.paths.artifacts.plans",),
+    "writing-plans/SKILL.md": (),
 }
 
 CLAUDE_POLICY_ENTRIES = {
@@ -656,10 +656,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for forbidden in ("open_items:", "decisions:", "adr_paths:", "summary:"):
             self.assertNotRegex(self.writing_plans, rf"(?m)^\s*{re.escape(forbidden)}")
 
-    def test_writing_plans_resolves_its_plan_dir_through_the_resolver(self):
+    def test_writing_plans_resolves_at_entry(self):
         text = normalized(self.writing_plans)
         self.assertIn("resolve-project resolve", text)
-        self.assertIn("bindings.paths.artifacts.plans", text)
 
     def test_writing_plans_no_longer_calls_the_fail_soft_helper(self):
         self.assertNotIn("resolve-bindings", self.writing_plans)  # policy-gate-pattern
@@ -1024,7 +1023,7 @@ IMPROVE_CALL = ('Agent(subagent_type="general-purpose", model="opus", effort="hi
                 "performs the one read-only architecture scan and returns evidence-backed "
                 "deepening candidates without writing to the repository.")
 DESIGN_COMPLETE = (
-    "DESIGN_COMPLETE: spec committed and grilled; control returned before planning or "
+    "DESIGN_COMPLETE: spec drafted and grilled; control returned before planning or "
     "implementation."
 )
 MIT_NOTICE = '''MIT License
@@ -1146,7 +1145,7 @@ path_unchanged_since() { return 0; }
         self.assertEqual({i: (c["name"], c["mode"]) for i, c in cases.items()}, {1: ("scan-only-renders-a-temporary-report", "pipeline"), 2: ("clear-selection-reaches-a-design-worktree", "pipeline"), 3: ("foggy-selection-routes-to-wayfind", "pipeline")})
         required_shells = {
             1: {"temporary report exists outside repository": ('architecture-review-', '"$OUT"', '[ -f "$report" ]', '$REPO'), "report is evidence-backed or truthful": ('"$OUT"', 'python3 - "$report"', "HTMLParser", "data-architecture-candidate", 'data-evidence', "module-callers", "caller-interface-knowledge", "locality-leverage", "deletion-test", "dependency-adapters", "tests-interface-surface", "context-decision-conflict", "data-diagram-text", "before", "after", "no-candidates", "top-recommendation", "expected_candidate_ids", "zero_text !=", "1 <= candidate_count <= 5"), "history miss widened the scan": ("out_matches", "widen"), "repository and branches stayed unchanged": ('test "$WT_COUNT" -eq 0', 'status=$(git -C "$REPO" status --porcelain)', 'test -z "$status"', 'test "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse origin/main)"', "branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads)", 'test "$branches" = "main"')},
-            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "design spec was committed": ('commits_touch "$WT" "${SPEC_DIR#"$REPO"/}"',), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$PLAN_DIR"/*.md "$WT/${PLAN_DIR#"$REPO"/}"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended": ("out_matches", "recommend", "&&", "writing-plans|to-issues"), "design returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', DESIGN_COMPLETE)},
+            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "the design spec draft is in the worktree's git directory and no commit added a spec or plan": ('git -C "$WT" rev-parse --absolute-git-dir', '/specs', 'no_artifact_commits "$REPO"'), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$(git -C "$WT" rev-parse --absolute-git-dir)/plans"/*.md "$PLAN_DIR"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended": ("out_matches", "recommend", "&&", "writing-plans|to-issues"), "design returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', DESIGN_COMPLETE)},
             3: {"new wayfind map exists and prior map stayed unchanged": ('new_map_count=0', 'for map in "$REPO"/.claude/wayfind/*/map.md; do', "*/concurrent-shells/map.md) continue", '[ -f "$map" ] || continue', 'relative_map=${map#"$REPO"/}', 'if git -C "$REPO" cat-file -e "origin/main:$relative_map" 2>/dev/null; then', 'new_map_count=$((new_map_count + 1))', 'test "$new_map_count" -eq 1', 'path_unchanged_since "$REPO" origin/main .claude/wayfind/concurrent-shells'), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$SPEC_DIR"/*.md "$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', "WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.")},
         }
         for case_id, case in cases.items():
@@ -2187,6 +2186,110 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
                 with self.subTest(document=str(path.relative_to(REPO_ROOT))):
                     self.assertEqual(self.chained_waits(path.read_text(encoding="utf-8")), [])
         self.assertGreater(checked, 20)
+
+
+# #1441: a working artifact has one home (a spec is its parent issue's body, a
+# plan lives in the git directory) and no skill commits either. The gate reads
+# every skill file; the `\\` in the first alternative lets it match a JSON-escaped `\"`.
+NOT_AFTER = r"(?<!not )(?<!never )(?<!n't )(?<!no )"
+COMMIT_STEP_RE = re.compile(
+    r"\bgit\b[^`|;&]{0,60}?\bcommit\b[^`|;&]{0,20}?\s-[a-zA-Z]*m\s*[\\\"']{0,2}"
+    r"(?:docs\((?:spec|plan)s?\)|[^\"'`]{0,60}?\b(?:spec|specs|plan|plans|findings)\b)"
+    r"|\bgit\b[^`|;&]{0,60}?\bcommit\b[^`|;&]{0,60}?"
+    r"(?:\s--\s+\S*\b(?:spec|specs|plan|plans|findings)\b|\s\S*(?:spec|plan|findings|-design)\S*\.md\b)"
+    r"|" + NOT_AFTER + r"\bcommit(?:ted|ting|s)?\s+(?:(?:the|a|an|its|of|design|implementation)\s+){0,3}"
+    r"(?:spec|specs|plan|plans|findings|design)\b"
+    r"|\b(?:spec|specs|plan|plans|findings)\b(?:\s+(?!(?:never|not|no|cannot)\b|\S*n't)\S+){0,6}?\s+"
+    + NOT_AFTER + r"committed\b"
+    r"|committed in your worktree|\*\*committed\*\*", re.I)
+
+
+def skill_files():
+    for root in SKILL_ROOTS:
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and path.suffix in (".md", ".json"):
+                yield path
+
+
+class WorkingArtifactHomesTest(unittest.TestCase):
+    def test_no_skill_file_reads_the_artifact_binding(self):
+        offenders = [str(path) for path in skill_files()
+                     if "paths.artifacts" in path.read_text()]
+        self.assertEqual(offenders, [])
+
+    def test_no_skill_file_tells_an_agent_to_commit_a_working_artifact(self):
+        offenders = [f"{path}: {match.group(0)}" for path in skill_files()
+                     for match in COMMIT_STEP_RE.finditer(normalized(path.read_text()))]
+        self.assertEqual(offenders, [])
+
+    def test_the_commit_gate_catches_commit_steps_and_spares_prohibitions(self):
+        positives = (
+            "a commit of the spec in the worktree",
+            "Produce and commit the design spec only",
+            "committed in your worktree",
+            "durability: **committed**, **attached**",
+            "may point to the committed spec and docs",
+            "the plan artifacts are committed",
+            "spec committed and grilled",
+            "complete and commit the design, reach",
+            'git -C "$PRE_WT" add -A && git -C "$PRE_WT" commit -qm "docs(spec): issue 3 rename-flag design"',
+            'git -C "$PRE_WT" add -A && git -C "$PRE_WT" commit -qm "docs(plan): issue 3 rename-flag plan"',
+            'git -C \\"$PRE_WT\\" commit -qm \\"docs(plan): issue 3 rename-flag plan\\"',
+            'git commit -m "add the plan"',
+            "git commit -- plan.md",
+            'git -C "$WT" commit -- specs/2026-10-11-store-design.md',
+            "the plan will be committed",
+        )
+        negatives = (
+            "Commit none of it.",
+            "Commit nothing.",
+            "may point to the committed docs, the spec draft and its issue",
+            "ADR commits and spec/plan docs are Internal",
+            "It holds no decision, requirement, rationale, line number or code excerpt, and is never committed or reported.",
+            "Do not commit the plan",
+            "never commit the spec or a plan",
+            "Don't commit the design",
+            "the spec is not committed",
+            "the spec must never be committed",
+            "a plan must not be committed",
+            "the findings should never get committed",
+            "leave it uncommitted",
+            'git -C "$PRE_WT" commit -qm "feat: rename list --all to --include-done (#3)"',
+        )
+        for row in positives:
+            with self.subTest(positive=row):
+                self.assertRegex(normalized(row), COMMIT_STEP_RE)
+        for row in negatives:
+            with self.subTest(negative=row):
+                self.assertNotRegex(normalized(row), COMMIT_STEP_RE)
+
+    def test_writing_plans_saves_under_the_git_directory(self):
+        text = normalized(WRITING_PLANS.read_text())
+        self.assertIn("`<git-dir>/plans/YYYY-MM-DD-<feature-name>.md`", text)
+        self.assertIn("git rev-parse --absolute-git-dir", text)
+        self.assertNotIn("paths.artifacts", text)
+
+    def test_design_and_research_draft_under_the_git_directory(self):
+        design = normalized(DESIGN.read_text())
+        research = normalized(RESEARCH.read_text())
+        self.assertIn("`<git-dir>/specs/<YYYY-MM-DD>-<topic>-design.md`", design)
+        self.assertIn("`<git-dir>/research/<YYYY-MM-DD>-<topic>.md`", research)
+        for text in (design, research):
+            self.assertIn("git rev-parse --absolute-git-dir", text)
+
+    def test_design_rereads_the_issue_body_before_replacing_it(self):
+        text = normalized(DESIGN.read_text())
+        self.assertIn("reread the issue body, merge any change since the draft was built into it and recheck the budget", text)
+
+    def test_architecture_announces_completion_only_after_a_complete_design_and_grill(self):
+        text = normalized((IMPROVE_DIR / "SKILL.md").read_text())
+        self.assertIn("only if `design` and `grill-with-docs` both returned `complete`", text)
+
+    def test_diff_review_takes_no_artifact_path_and_reads_the_plan_from_the_git_directory(self):
+        text = normalized(DIFF_REVIEW.read_text())
+        self.assertNotIn("--artifact-path", text)
+        self.assertNotIn("<git-dir>/plans/", text)
+        self.assertIn("the plan path (routing context only)", text)
 
 
 PLANNING_DOCUMENTS = (WRITING_PLANS,)

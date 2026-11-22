@@ -5,25 +5,25 @@ description: Researches a question against primary sources in a background agent
 
 # Research
 
-Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.artifacts.specs` for the findings artifact.
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker` to post the findings.
 
-Bound the question sharply, then launch:
+Bound the question, then launch:
 
 <!-- agent-dispatch: id=research-background-researcher role=researcher model=sonnet effort=medium -->
 Agent(subagent_type="general-purpose", model="sonnet", effort="medium", run_in_background=true) performs the bounded primary-source synthesis and writes exactly one cited findings artifact while the caller keeps working.
 
-If the question turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high; record that escalation and the selected role in the caller's existing ledger or fixed-schema report.
+If the question turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high; record that escalation and role in the caller's existing report.
 
 The researcher:
 
 1. Traces every claim to its **primary source**: official docs, source code, specs, first-party APIs.
-2. Writes exactly one Markdown file under `bindings.paths.artifacts.specs`, citing a source per claim, and creates no other artifact. The file's first line states its durability, chosen from the caller's intent: **committed**, **attached** (linked from the asking ticket), or **intentionally temporary** (deleted once the decision is recorded).
-3. Returns exactly `{file_path, key_facts[]}`: the path and only the facts the caller asked for.
+2. Writes exactly one file at `<git-dir>/research/<YYYY-MM-DD>-<topic>.md` (`<git-dir>`: `git rev-parse --absolute-git-dir` in the caller's checkout), citing a source per claim, and no other artifact. It comments the file on the asking issue with `bindings.tracker.cli` on `bindings.tracker.repo_slug`, unsetting `tracker.credential_env.unset_before_invocation` first; with no asking issue or supported tracker it posts nothing.
+3. Returns exactly `{file_path, key_facts[]}`: the path and the facts the caller asked for.
 
 ## Live availability and blocking evidence
 
-A live availability or blocking conclusion keeps the one-file contract and return shape: the evidence goes in the same findings file.
+A live availability or blocking conclusion keeps the one-file contract and return shape: its evidence goes in the findings file.
 
-Record the evidence as a schema-1 object of `kind` `research-observations`. Each observation has a unique `id`, an independent `execution_id`, an `observed_at` with an explicit UTC offset, a `source` and an `outcome`. A `transient` conclusion cites exactly one observation in `observation_ids` and names an independent `follow_up`; a `standing` conclusion needs at least two observations with distinct `execution_id` and `observed_at` values.
+Record the evidence as a schema-1 object of `kind` `research-observations`. Each observation has a unique `id`, an independent `execution_id`, an `observed_at` with an explicit UTC offset, a `source` and an `outcome`. A `transient` conclusion cites one observation in `observation_ids` and names an independent `follow_up`; a `standing` conclusion needs at least two observations with distinct `execution_id` and `observed_at` values.
 
-Return a standing conclusion only when the object meets these rules; otherwise keep the observations in the findings file and return no standing conclusion.
+Return a standing conclusion only when the object meets these rules; otherwise keep the observations in the file and return none.

@@ -52,6 +52,6 @@ Selection is the first point where the repository may change. In order:
 2. **Isolation.** Reuse the workspace only if it is already an isolated linked worktree; otherwise invoke `worktrees` for a candidate-named worktree cut from the configured remote integration-branch ref, before writing any spec or domain document.
 3. **Design.** Invoke `design`, carrying the scan evidence as grounding without re-asking what the selection settled.
 4. **Domain and decisions.** After the design is approved, invoke `grill-with-docs`. If the user rejects the candidate for a reason future scans need, offer to record that decision.
-5. **Scope gate, then stop.** Recommend `writing-plans` for one cohesive build or `to-issues` for several independently shippable slices, without invoking either. Create no issues, plan or implementation. Make the final non-empty output line exactly `DESIGN_COMPLETE: spec committed and grilled; control returned before planning or implementation.` and stop.
+5. **Scope gate, then stop.** Recommend `writing-plans` for one cohesive build or `to-issues` for several independently shippable slices, without invoking either. Create no issues, plan or implementation. Make the final non-empty output line exactly `DESIGN_COMPLETE: spec drafted and grilled; control returned before planning or implementation.` and stop, but only if `design` and `grill-with-docs` both returned `complete`; else report that state.
 
 This is an attributed adaptation; see [LICENSE](LICENSE) for provenance and the upstream notice.
