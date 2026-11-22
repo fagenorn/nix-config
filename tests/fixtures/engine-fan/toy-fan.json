@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
+  "inputs": ["holder", "issue", "range", "repo"],
+  "stops": {"needs-owner": {"need": "owner-decision", "reenter": "draft"}},
+  "steps": [
+    {"id": "draft", "stage": "building", "kind": "agent", "role": "implementer",
+     "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
+     "in": ["run.issue"], "on": {"drafted": "checks", "stuck": "needs-owner"}},
+    {"id": "checks", "stage": "final review", "kind": "group",
+     "members": [{"step": "lint", "pass": ["ok"]}, {"step": "claim", "pass": ["free", "held_by"]}],
+     "max_visits": 2, "on": {"pass": "fan", "blocked": "checks", "exhausted": "needs-owner"}},
+    {"id": "lint", "stage": "final review", "kind": "command", "command": "diff-scope",
+     "in": ["run.range"], "max_visits": 2},
+    {"id": "claim", "stage": "final review", "kind": "command", "command": "forge-claim",
+     "subcommand": "status", "in": ["run.repo", "run.issue", "run.holder"], "max_visits": 2},
+    {"id": "fan", "stage": "landing", "kind": "call", "procedure": "toy-fan-child",
+     "in": ["draft.items"], "each": "draft.items", "parallel": 2,
+     "on": {"done": "once", "child-stop": "needs-owner"}},
+    {"id": "once", "stage": "landing", "kind": "call", "procedure": "toy-fan-child",
+     "on": {"done": "done", "child-stop": "needs-owner"}}
+  ]
+}

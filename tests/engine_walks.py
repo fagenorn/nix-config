@@ -16,6 +16,7 @@ Later slices (#1517) reuse `edges`, `step_outcomes`, `reply_schemas`,
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections import deque
 from collections.abc import Mapping
@@ -23,7 +24,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_tools.delivery import engine_core, procedure_check
-from agent_tools.delivery.engine_core import CORE_KINDS, Done, RunCommand, StartSession, Stop, Transition
+from agent_tools.delivery.engine_core import (
+    CORE_KINDS,
+    Done,
+    RunCall,
+    RunCommand,
+    RunGroup,
+    StartSession,
+    Stop,
+    Transition,
+)
 
 
 @dataclass(frozen=True)
@@ -44,7 +54,7 @@ def edges(procedure: Mapping) -> tuple[tuple[str, str], ...]:
     return tuple(
         (item["id"], outcome)
         for item in procedure["steps"]
-        if item["kind"] in CORE_KINDS
+        if item["kind"] in CORE_KINDS and "on" in item
         for outcome in item["on"]
     )
 
@@ -58,7 +68,7 @@ def step_outcomes(directory: Path, name: str) -> dict[str, tuple[str, ...]]:
     return {
         item["id"]: procedure_check.outcomes_of(item, resolved)
         for item in doc["steps"]
-        if item["kind"] in ("command", "agent")
+        if item["kind"] in ("command", "agent", "call")
     }
 
 
@@ -78,6 +88,8 @@ def sample(schema: Mapping) -> object:
     kind = schema["type"]
     if kind == "object":
         return {member: sample(schema["properties"][member]) for member in schema.get("required", [])}
+    if kind == "array" and "items" in schema:
+        return [sample(schema["items"])]
     return {"string": "x", "integer": 0, "number": 0, "boolean": False, "array": []}[kind]
 
 
@@ -120,6 +132,17 @@ def result_for(procedure: Mapping, step_id: str, outcome: str, schemas: Mapping[
     return result
 
 
+RUN = "1-20261121T000000Z-aaaa"
+
+
+def _entered(step: str) -> dict:
+    return {"type": "entered", "step": step}
+
+
+def _reported(step: str, outcome: str, result: dict) -> tuple[dict, dict]:
+    return _entered(step), {"type": "outcome", "step": step, "outcome": outcome, "result": result}
+
+
 def walk_edges(
     procedure: Mapping,
     inputs: Mapping[str, object],
@@ -134,15 +157,26 @@ def walk_edges(
         replayed = engine_core.replay(procedure, inputs, list(events))
         action = replayed.action
         if isinstance(action, (RunCommand, StartSession)):
-            entered = {"type": "entered", "step": action.step}
             for outcome in outcomes[action.step]:
-                reported = {
-                    "type": "outcome",
-                    "step": action.step,
-                    "outcome": outcome,
-                    "result": result_for(procedure, action.step, outcome, schemas),
-                }
-                queue.append(events + (entered, reported))
+                result = result_for(procedure, action.step, outcome, schemas)
+                queue.append(events + _reported(action.step, outcome, result))
+            continue
+        if isinstance(action, RunGroup):
+            listed = [member.step for member in action.members]
+            for combination in itertools.product(*(outcomes[name] for name in listed)):
+                reported = tuple(
+                    event
+                    for name, outcome in zip(listed, combination)
+                    for event in _reported(name, outcome, result_for(procedure, name, outcome, schemas))
+                )
+                queue.append(events + (_entered(action.step),) + reported)
+            continue
+        if isinstance(action, RunCall):
+            entries = action.items if action.items is not None else (None,)
+            for outcome in ("done",) if not entries else outcomes[action.step]:
+                ends = ["done"] * len(entries) if outcome == "done" else [outcome] + ["done"] * (len(entries) - 1)
+                result = {"items": [{"end": end, "item": item, "run": RUN} for end, item in zip(ends, entries)]}
+                queue.append(events + _reported(action.step, outcome, result))
             continue
         end = "done" if isinstance(action, Done) else action.name
         for taken in replayed.transitions:
