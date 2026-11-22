@@ -19,9 +19,10 @@
 #             there is no setup)
 #   ORIGIN_REFS  the origin's full ref set right after the setup hook, one
 #             "<refname> <sha>" line per ref (compare it to detect a push under any name)
-#   SPEC_DIR / PLAN_DIR  absolute paths from the fixture's retained resolver snapshot:
-#             use them bare under REPO and as "$WT/${SPEC_DIR#"$REPO"/}" under another
-#             checkout, never "$REPO/$SPEC_DIR"
+#   SPEC_DIR / PLAN_DIR  REPO's git directory plus /specs and /plans, where a run on REPO
+#             drafts a spec and a plan. Under a linked worktree use
+#             "$(git -C "$WT" rev-parse --absolute-git-dir)/specs" and /plans, never a path
+#             derived from SPEC_DIR
 #   CLAUDE_EXIT          exit status of the claude run
 
 fail() {
@@ -207,6 +208,53 @@ commits_touch() {
   local touched
   touched=$(git -C "$dir" log --oneline main..HEAD -- "$@" 2>/dev/null)
   [ -n "$touched" ] || fail "no commits between main..HEAD touching: $*"
+}
+
+# new_commits <repo> — one sha per commit object in the repo's object database that is
+# not in $BASE_MAIN's history, reachable or not. Reading the objects, not the refs and
+# reflogs, keeps a commit made in a detached linked worktree counted after that worktree
+# is removed. Use it only in cases with no setup: a setup's own commits are new objects.
+new_commits() {
+  local repo="$1" all base
+  all=$(git -C "$repo" cat-file --batch-all-objects --batch-check='%(objecttype) %(objectname)') || return 1
+  base=$(git -C "$repo" rev-list "$BASE_MAIN") || return 1
+  comm -23 <(printf '%s\n' "$all" | awk '$1 == "commit" { print $2 }' | sort) \
+           <(printf '%s\n' "$base" | sort)
+}
+
+# origin_refs_unchanged — the origin's ref set equals $ORIGIN_REFS (nothing was pushed).
+origin_refs_unchanged() {
+  local refs
+  refs=$(git -C "$ORIGIN" for-each-ref --format='%(refname) %(objectname)') ||
+    { fail "cannot list the refs of: $ORIGIN"; return 1; }
+  [ "$refs" = "$ORIGIN_REFS" ] || { fail "the origin's refs changed"; return 1; }
+}
+
+# no_new_commits <repo> — the run made no commit anywhere and pushed nothing. Fails with
+# "a commit was made after setup: <up to three shas>" when new_commits finds one, and with
+# "the origin's refs changed" when the origin's ref set differs from $ORIGIN_REFS.
+no_new_commits() {
+  local repo="$1" made
+  made=$(new_commits "$repo") || { fail "cannot list the commits of: $repo"; return 1; }
+  [ -z "$made" ] ||
+    { fail "a commit was made after setup: $(printf '%s\n' "$made" | head -n 3 | tr '\n' ' ')"; return 1; }
+  origin_refs_unchanged
+}
+
+# no_artifact_commits <repo> — the run committed no spec or plan and pushed nothing: no
+# new commit (see new_commits) touches a path under a specs/ or plans/ directory or ending
+# in -design.md. Commits of other files, domain docs among them, are allowed. Fails with
+# "a commit added a spec or plan: <sha> <path>" and, like no_new_commits, with "the origin's
+# refs changed".
+no_artifact_commits() {
+  local repo="$1" made sha path
+  made=$(new_commits "$repo") || { fail "cannot list the commits of: $repo"; return 1; }
+  for sha in $made; do
+    path=$(git -C "$repo" diff-tree -m -r --root --no-commit-id --name-only "$sha" |
+      grep -E '(^|/)(specs|plans)/|-design\.md$' | head -n 1)
+    [ -z "$path" ] || { fail "a commit added a spec or plan: $sha $path"; return 1; }
+  done
+  origin_refs_unchanged
 }
 
 # path_unchanged_since <dir> <ref> <pathspec...> — the working tree matches <ref> for

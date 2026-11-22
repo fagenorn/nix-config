@@ -1,29 +1,29 @@
 {
   "skill_name": "design",
-  "notes": "Eval 1 is a pipeline run against the shared tinytask fixture: `design` runs with autonomous decisions authorized on the well-specified issue, on the current branch, and stops after the spec. It grades the spec's form and the code map the skill leaves in the git directory, named after the spec. The three required files are fixture knowledge (#354 D6): the issue decides about the command-line module, the model module that enumerates the states, and the command-line test module.",
+  "notes": "Eval 1 is a pipeline run against the shared tinytask fixture: `design` runs with autonomous decisions authorized on the well-specified issue, on the current branch, and stops after the spec. It grades the spec draft in the git directory as the issue's new body with nothing committed, its form, and the code map beside it, named after it. The three required files are fixture knowledge (#354 D6): the issue decides about the command-line module, the model module that enumerates the states, and the command-line test module.",
   "evals": [
     {
       "id": 1,
       "name": "design-leaves-a-code-map",
       "mode": "pipeline",
-      "prompt": "Use the `design` skill to design `issues/001-well-specified.md`.\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is the issue; refusal is fatal and no value is defaulted or inferred. Work on the current branch without a worktree. I authorize you to make every design decision yourself within this issue's scope: post no question round and wait for nothing. Produce and commit the design spec only; do not edit `tinytask/` or `tests/`.\n\n**Stop after the design.** Do not grill, plan or implement. Report the spec path.",
-      "expected_output": "One design spec under the retained specs directory, committed on the current branch, whose Decisions section names modules and behavior without file paths or line numbers. A code map for that spec in the repository's git directory, named after the spec file with `.code-map.md` in place of `.md`: one entry per module the spec decides about, each with a Why line and a Code line of tracked paths, covering `tinytask/cli.py`, `tinytask/model.py` and `tests/test_cli.py`. No code map is tracked or present in the working tree, and no source or test file is touched.",
+      "prompt": "Use the `design` skill to design `issues/001-well-specified.md`.\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is the issue; refusal is fatal and no value is defaulted or inferred. Work on the current branch without a worktree. I authorize you to make every design decision yourself within this issue's scope: post no question round and wait for nothing. Produce the design spec only; do not edit `tinytask/` or `tests/`.\n\n**Stop after the design.** Do not grill, plan or implement. Report the spec path.",
+      "expected_output": "One design spec draft under the git directory's specs directory, whose Decisions section names modules and behavior without file paths or line numbers. The issue file is rewritten to equal the draft with its Acceptance criteria section unchanged, no commit is made, and nothing else in the working tree changes. A code map beside the draft, named after it with `.code-map.md` in place of `.md`: one entry per module the spec decides about, each with a Why line and a Code line of tracked paths, covering `tinytask/cli.py`, `tinytask/model.py` and `tests/test_cli.py`. No code map is tracked or present in the working tree, and no source or test file is touched.",
       "asserts": [
         {
-          "name": "a spec exists under the retained specs directory and is committed",
-          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; [ -n \"$(git -C \"$REPO\" log --oneline origin/main..HEAD -- \"$spec\" 2>/dev/null)\" ] || { fail \"the spec is not committed on the current branch: $spec\"; exit 1; }; [ -z \"$(git -C \"$REPO\" status --porcelain -- \"$spec\")\" ] || fail \"the spec differs from its committed content: $spec\""
+          "name": "the spec is the issue's body, drafted in the git directory, and nothing was committed",
+          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec draft under $SPEC_DIR\"; exit 1; }; cmp -s \"$spec\" \"$REPO/issues/001-well-specified.md\" || { fail \"the issue body is not the spec draft\"; exit 1; }; [ \"$(awk '/^## /{p=($0==\"## Acceptance criteria\")} p' \"$REPO/issues/001-well-specified.md\")\" = \"$(git -C \"$REPO\" show \"$BASE_MAIN:issues/001-well-specified.md\" | awk '/^## /{p=($0==\"## Acceptance criteria\")} p')\" ] || { fail \"the issue's acceptance criteria section changed\"; exit 1; }; no_new_commits \"$REPO\" || exit 1; [ \"$(git -C \"$REPO\" status --porcelain)\" = \" M issues/001-well-specified.md\" ] || { fail \"the working tree holds more than the issue's new body: $(git -C \"$REPO\" status --porcelain | tr '\\n' ' ')\"; exit 1; }"
         },
         {
           "name": "the spec's Decisions section names no file path or line number",
           "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; spec_decisions_path_free \"$spec\" \"$REPO\""
         },
         {
-          "name": "the code map exists in the git directory, named after the spec",
-          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; map=\"$(git -C \"$REPO\" rev-parse --absolute-git-dir)/$(basename \"$spec\" .md).code-map.md\"; [ -f \"$map\" ] || fail \"no code map at $map\""
+          "name": "the code map sits beside the spec draft, named after it",
+          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; map=\"${spec%.md}.code-map.md\"; [ -f \"$map\" ] || fail \"no code map at $map\""
         },
         {
           "name": "the code map is well-formed and lists the three files the issue decides about",
-          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; map=\"$(git -C \"$REPO\" rev-parse --absolute-git-dir)/$(basename \"$spec\" .md).code-map.md\"; code_map_valid \"$map\" \"$REPO\" tinytask/cli.py tinytask/model.py tests/test_cli.py"
+          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; map=\"${spec%.md}.code-map.md\"; code_map_valid \"$map\" \"$REPO\" tinytask/cli.py tinytask/model.py tests/test_cli.py"
         },
         {
           "name": "no code map is tracked or present in the working tree",

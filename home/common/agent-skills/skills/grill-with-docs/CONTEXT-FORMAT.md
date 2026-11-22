@@ -30,9 +30,7 @@ docs/
 └── archive/             ← dormant or superseded material
 ```
 
-The reserved directories are created only when needed. Every directory under `areas/` is an area with a row in the map's Areas table, and every row points into `areas/`. An extra docs-root directory needs a row in `docs/README.md`'s routing table. `areas/system/` holds decisions spanning areas: its map row has gist "decisions spanning areas" and glob `*`, and its `CONTEXT.md` stays a stub because every grounding pass loads it. There is no central `docs/adr/`. Specs, plans, handoffs and notes are not documentation: they go to their retained `bindings.paths.artifacts` locations.
-
-Order, Invoice and Customer below are illustrative.
+The reserved directories are created only when needed. Every directory under `areas/` is an area with a row in the map's Areas table, and every row points into `areas/`. An extra docs-root directory needs a row in `docs/README.md`'s routing table. `areas/system/` holds decisions spanning areas: its map row has gist "decisions spanning areas" and glob `*`, and its `CONTEXT.md` stays a stub because every grounding pass loads it. There is no central `docs/adr/`. Specs, plans, handoffs and notes are not documentation: a spec is its issue's body, a plan lives in the git directory, handoffs and notes are runtime state.
 
 ## The map: `<selected-context-map>`
 

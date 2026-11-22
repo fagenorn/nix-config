@@ -363,6 +363,27 @@ def section_map_problems(
 
 
 class DocsTreeTest(unittest.TestCase):
+    def test_the_index_routes_each_working_artifact_off_the_tree(self):
+        lines = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8").splitlines()
+        start = lines.index("**Where new knowledge goes**")
+        first = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("|"))
+        table = []
+        for line in lines[first:]:
+            if not line.startswith("|"):
+                break
+            table.append(line)
+        self.assertTrue(table)
+        for row in (
+            "| A spec | The body of its parent issue, never the tree |",
+            "| A plan and its task files | The worktree's git directory, never the tree |",
+            "| A measurement, spike or other evidence | A comment or attachment on the pull request"
+            " or issue it proves, never `docs/` |",
+        ):
+            self.assertIn(row, table)
+        for line in table:
+            self.assertNotIn(".agents/artifacts/", line)
+            self.assertNotIn("archive/", line)
+
     def test_the_docs_tree_passes_the_context_map_lint(self):
         map_path = REPO_ROOT / "docs/CONTEXT-MAP.md"
         result = subprocess.run(
@@ -574,6 +595,15 @@ class DocsTreeTest(unittest.TestCase):
             if d.is_dir() and not list((d / "adr").glob("*.md"))
         )
         self.assertEqual(empty, [])
+
+    def test_no_area_numbers_two_adrs_alike(self):
+        shared = []
+        for adr_dir in sorted((REPO_ROOT / "docs/areas").glob("*/adr")):
+            seen = {}
+            for path in sorted(adr_dir.glob("*.md")):
+                seen.setdefault(path.name[:3], []).append(path.name)
+            shared += [f"{adr_dir.parent.name}/{n}: {names}" for n, names in seen.items() if len(names) > 1]
+        self.assertEqual(shared, [])
 
     def test_every_base_section_is_audited_or_kept(self):
         problems = []
@@ -1887,8 +1917,6 @@ class DocsTreeTest(unittest.TestCase):
 
     def test_the_test_job_measurement_holds_twenty_four_runs(self):
         text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
-        readme = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
-        self.assertIn("| A measurement or other retained evidence | `archive/` |", readme.splitlines())
         section = land_queue_section(text, "Measurements")
         lines = section.splitlines()
         rows, summary, members = awt_tables(text)

@@ -12,7 +12,7 @@ The correctness review of a delivery range; the calling controller runs its own 
 
 ## Caller input
 
-A diff range (`<left>...<right>` or `<left>..<right>`) and the worktree, and when the caller gives them, the plan path (routing context only) and the acceptance criteria. In the worktree, resolve `<head-sha>` with `git rev-parse <right>` and `<base-sha>` with `git merge-base <left> <right>` for a three-dot range or `git rev-parse <left>` for a two-dot one; an unresolvable range stops before packet construction.
+A diff range (`<left>...<right>` or `<left>..<right>`) and the worktree, and when the caller gives them, the spec's issue, the plan path (routing context only) and the acceptance criteria. In the worktree, resolve `<head-sha>` with `git rev-parse <right>` and `<base-sha>` with `git merge-base <left> <right>` for a three-dot range or `git rev-parse <left>` for a two-dot one; an unresolvable range stops before packet construction.
 
 Further ranges the caller names as `git -C <worktree> diff <base>...<branch>` (a plan's declared branches) are each resolved in their own worktree the same way and reviewed with the delivery range, each with its own size pre-flight and slices.
 
@@ -25,11 +25,10 @@ From the worktree root, measure the range (`~/.agents/bin/diff-scope` when the b
 ```
 diff-scope <base-sha>..<head-sha> \
   --root <absolute worktree root> \
-  --artifact-path <specification-directory> --artifact-path <plan-directory> \
   --format json
 ```
 
-The spec and plan directories come from the retained `bindings.paths.artifacts`, with no fallback locations. Read exactly three fields:
+The spec and plan live outside the diff, so no artifact path is passed. Read exactly three fields:
 
 - `product.changed_files`: the budget comparison, and `M` in every disclosure.
 - `files[].path`: consecutive slices of 20 entries in emitted order, taken verbatim with no filtering or re-ranking.
@@ -49,7 +48,7 @@ This operation's packet is built from scratch and contains exactly:
 
 1. The operation name, invocation directory, worktree root, current branch, and the base and head SHAs.
 2. The scope: review the diff `<base-sha>..<head-sha>` in the worktree for code correctness (bugs, boundary error handling, dead branches, assertions that fail to pin the documented contract, DRY against existing helpers, cross-task integration), and any acceptance criterion the caller passed that the diff leaves unmet.
-3. The caller's acceptance criteria and plan path, labelled routing context.
+3. The caller's acceptance criteria, issue and plan path, labelled routing context.
 4. Inferred verify commands, labelled as context on how the change is verified elsewhere, not a request to run anything (the runtime is read-only), plus every applicable `AGENTS.md`/`CLAUDE.md`.
 5. The standards layers matching the diff's file types (`~/.agents/standards/the-bar.md`, its `stacks/` shards, the project's intersecting `docs/standards/` shards).
 
