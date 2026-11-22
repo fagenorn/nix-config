@@ -13,9 +13,9 @@ A permission card reached the owner reading "It did not say why", because the ma
 
 **D2. The console judges.** No hook raises a reasonless card. A prompt the console refuses for its session or sprint is refused first and is never asked for a reason.
 
-**D3. A read the hook allows without the console needs no reason.** The hook allows such a read without asking the console (issue 1620), so it never reaches this check.
+**D3. Every Bash prompt needs a reason today, a read included.** The hook sends every Bash prompt it holds to the console, so a read with no description is sent back like any other. If the hook later allows a read without asking the console (issue 1620), that read never reaches this check and needs no reason; until then no read is exempt.
 
-**D4. The manager's contract says so.** It tells the manager to describe every Bash call and to run a refused reasonless call again with a description.
+**D4. The manager's contract says so.** It tells the manager to give every Bash call a description that says why it runs the command, on the first attempt, and to run a refused reasonless call again with a description.
 
 ## Consequences
 

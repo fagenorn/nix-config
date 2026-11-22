@@ -337,6 +337,16 @@ class PromptHookWireTest(PromptCase):
                                      sleep=lambda seconds: self.fail("the hook waited"))
         return code, out.getvalue()
 
+    def test_a_hook_read_with_no_reason_is_told_to_state_why_too(self):
+        svc, sid = self.boot()
+        for command in ("git status", "ls -la"):
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(svc, sid, {
+                    "session_id": "s-1", "tool_name": "Bash", "tool_input": {"command": command}}),
+                    (0, prompt_card.hook_output("deny", prompt_card.NO_REASON_TEXT) + "\n"))
+        self.assertEqual(self.rows(event_log.PROMPT_ASKED), [])
+        self.assertEqual(self.items(svc), [])
+
     def test_a_hook_prompt_with_no_reason_is_told_to_state_why_and_shows_no_card(self):
         svc, sid = self.boot()
         code, out = self.run_hook(svc, sid, {
