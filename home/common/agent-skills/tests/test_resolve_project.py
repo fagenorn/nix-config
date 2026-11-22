@@ -2211,6 +2211,24 @@ class CommittedProjectionTest(ResolverTestCase):
         claude = (REPO_ROOT / "CLAUDE.md").read_text("utf-8")
         self.assertEqual(claude.splitlines().count(MANAGED_LINE), 1)
 
+    def test_the_committed_conformance_workflow_is_its_render(self):
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err)
+        branch = json.loads(out)["bindings"]["vcs"]["integration_branch"]
+        code, out, err = run("platform-status", "--repo-root", str(REPO_ROOT),
+                             home=self.home)
+        self.assertEqual(code, 0, err)
+        version = json.loads(out)["project"]["project_schema_version"]
+        rendered = resolve_project.render_conformance_workflow(branch, version)
+        self.assertEqual(
+            rendered,
+            (REPO_ROOT / ".github" / "workflows" / "conformance.yaml").read_bytes(),
+            "the committed conformance workflow differs from its render; regenerate it "
+            "by writing render_conformance_workflow(integration_branch, "
+            "project_schema_version) from `resolve-project resolve` and "
+            "`resolve-project platform-status` over .github/workflows/conformance.yaml "
+            "(the tree's own resolver, never by hand)")
+
 
 class CheckProjectionsTest(ResolverTestCase):
     def check(self, root: Path) -> tuple[int, object, str]:
