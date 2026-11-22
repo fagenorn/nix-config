@@ -62,6 +62,7 @@ class EngineProject:
             "standin-fail": entry("silent", "1"),
             "standin-says-failed": entry("verdict", "failed", "0"),
             "standin-says-maybe": entry("verdict", "maybe", "0"),
+            "standin-says-exhausted": entry("verdict", "exhausted", "0"),
             "standin-block": entry("block", str(self.release)),
         })
 
@@ -199,6 +200,23 @@ class DeliverTest(unittest.TestCase):
         self.assertIn("maybe", faulted.stderr)
         last = project.events(project.runs()[0])[-1]
         self.assertEqual((last["event"], last["step"]), ("result_stored", "a"))
+
+    def test_the_reserved_exhausted_verdict_is_a_fault_with_no_outcome_or_transition(self):
+        project = EngineProject(self)
+        bounded = step("a", "standin-says-exhausted", None, on={
+            "ok": "done", "failed": "needs-owner", "exhausted": "needs-owner"})
+        bounded["max_visits"] = 2
+        faulted = project.deliver(project.procedures([bounded]))
+        self.assertEqual(faulted.returncode, 1)
+        self.assertEqual(faulted.stdout, "")
+        self.assertIn("exhausted", faulted.stderr)
+        run = project.runs()[0]
+        events = project.events(run)
+        self.assertEqual((events[-1]["event"], events[-1]["step"]), ("result_stored", "a"))
+        self.assertEqual([e for e in events if e["event"] in ("outcome_graded", "transition_taken")],
+                         [])
+        state = json.loads(project.status(1512).stdout)
+        self.assertEqual((state["stop"], state["done"]), (None, False))
 
     def test_the_run_follows_its_own_procedure_copy(self):
         project = EngineProject(self)

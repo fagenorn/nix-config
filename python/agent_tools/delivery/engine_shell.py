@@ -203,7 +203,7 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
                                spend_usd=0)
-    if ran.outcome not in step["on"]:
+    if ran.outcome == engine_core.EXHAUSTED or ran.outcome not in step["on"]:
         raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
     engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
                                          "visit": visit, "outcome": ran.outcome})
