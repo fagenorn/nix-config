@@ -1,5 +1,6 @@
 """Eval case files as data (#293): setup kinds, setup inputs and pipeline cases."""
 
+import copy
 import json
 import os
 import re
@@ -349,26 +350,29 @@ class WritingPlansPipelineAssertsTest(unittest.TestCase):
 
     DECISION = "self-answered decisions are logged as ledger rows (spec- or plan-hosted; legacy ### accepted)"
 
+    def fixture(self, *, with_plan=True):
+        key = "writing-plans" if with_plan else "writing-plans-no-plan"
+        _, built = restored(key, lambda work: writing_plans_fixture(work, with_plan=with_plan))
+        return built
+
     def test_every_assert_passes_on_a_good_plan(self):
         case = find_case("writing-plans", 1)
         self.assertEqual(len(case["asserts"]), 8)
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = writing_plans_fixture(Path(tmp).resolve())
-            for check in case["asserts"]:
-                with self.subTest(name=check["name"]):
-                    done = run_assert(check["shell"], repo, **env)
-                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        repo, env = self.fixture()
+        for check in case["asserts"]:
+            with self.subTest(name=check["name"]):
+                done = run_assert(check["shell"], repo, **env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_plan_asserts_fail_when_no_plan_was_written(self):
         names = ("a plan root exists in the git directory's plans directory",
                  "every task section (inline or per-task brief) has a falsifiable verification line",
                  self.DECISION)
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = writing_plans_fixture(Path(tmp).resolve(), with_plan=False)
-            for name in names:
-                with self.subTest(name=name):
-                    done = run_assert(case_assert("writing-plans", 1, name), repo, **env)
-                    self.assertNotEqual(done.returncode, 0, done.stdout)
+        repo, env = self.fixture(with_plan=False)
+        for name in names:
+            with self.subTest(name=name):
+                done = run_assert(case_assert("writing-plans", 1, name), repo, **env)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
 
     CLEAN = "nothing was committed and the working tree is clean"
 
@@ -381,44 +385,40 @@ class WritingPlansPipelineAssertsTest(unittest.TestCase):
         subprocess.run(git + ["commit", "-q", "-m", "docs: plan"], check=True)
 
     def test_a_committed_plan_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = writing_plans_fixture(Path(tmp).resolve())
-            self.commit_plan_copy(repo, env)
-            done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
+        repo, env = self.fixture()
+        self.commit_plan_copy(repo, env)
+        done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("a commit was made", done.stdout)
 
     def test_a_plan_committed_on_a_side_branch_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = writing_plans_fixture(Path(tmp).resolve())
-            git = eval_git(repo)
-            subprocess.run(git + ["switch", "-q", "-c", "side"], check=True)
-            self.commit_plan_copy(repo, env)
-            subprocess.run(git + ["switch", "-q", "main"], check=True)
-            subprocess.run(git + ["branch", "-q", "-D", "side"], check=True)
-            done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
+        repo, env = self.fixture()
+        git = eval_git(repo)
+        subprocess.run(git + ["switch", "-q", "-c", "side"], check=True)
+        self.commit_plan_copy(repo, env)
+        subprocess.run(git + ["switch", "-q", "main"], check=True)
+        subprocess.run(git + ["branch", "-q", "-D", "side"], check=True)
+        done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("a commit was made", done.stdout)
 
     def test_a_new_origin_ref_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = writing_plans_fixture(Path(tmp).resolve())
-            subprocess.run(eval_git(repo) + ["push", "-q", "origin", "main:refs/heads/extra"],
-                           check=True, env={**os.environ, **QUIET_GIT})
-            done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
+        repo, env = self.fixture()
+        subprocess.run(eval_git(repo) + ["push", "-q", "origin", "main:refs/heads/extra"],
+                       check=True, env={**os.environ, **QUIET_GIT})
+        done = run_assert(case_assert("writing-plans", 1, self.CLEAN), repo, **env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("origin's refs changed", done.stdout)
 
     def test_a_failed_precondition_reads_no_stdin(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp).resolve()
-            repo, env = writing_plans_fixture(tmp, with_plan=False)
-            feed = tmp / "stdin"
-            feed.write_text('{"name":"the next assert","shell":"true"}\n', encoding="utf-8")
-            with feed.open("rb") as stdin:
-                done = run_assert(case_assert("writing-plans", 1, self.DECISION), repo,
-                                  stdin=stdin, **env)
-                offset = os.lseek(stdin.fileno(), 0, os.SEEK_CUR)
+        work, (repo, env) = restored("writing-plans-no-plan",
+                                     lambda work: writing_plans_fixture(work, with_plan=False))
+        feed = work / "stdin"
+        feed.write_text('{"name":"the next assert","shell":"true"}\n', encoding="utf-8")
+        with feed.open("rb") as stdin:
+            done = run_assert(case_assert("writing-plans", 1, self.DECISION), repo,
+                              stdin=stdin, **env)
+            offset = os.lseek(stdin.fileno(), 0, os.SEEK_CUR)
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("no decision section", done.stdout)
         self.assertNotIn("decision heading vanished", done.stdout)
@@ -426,12 +426,11 @@ class WritingPlansPipelineAssertsTest(unittest.TestCase):
 
     def run_decision_on_ledger(self, ledger):
         """Grade the decision assert over the fixture plan with its ledger section replaced."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = writing_plans_fixture(Path(tmp).resolve())
-            plan = Path(env["PLAN_DIR"]) / "p.md"
-            head = plan.read_text(encoding="utf-8").split("## Decision ledger", 1)[0]
-            plan.write_text(head + ledger, encoding="utf-8")
-            return run_assert(case_assert("writing-plans", 1, self.DECISION), repo, **env)
+        repo, env = self.fixture()
+        plan = Path(env["PLAN_DIR"]) / "p.md"
+        head = plan.read_text(encoding="utf-8").split("## Decision ledger", 1)[0]
+        plan.write_text(head + ledger, encoding="utf-8")
+        return run_assert(case_assert("writing-plans", 1, self.DECISION), repo, **env)
 
     def test_a_header_only_ledger_fails(self):
         done = self.run_decision_on_ledger(
@@ -457,8 +456,8 @@ class PlanningLedgerWriteBackAssertsTest(unittest.TestCase):
     NO_COMMIT = "no commit was made or pushed"
     ONLY_ISSUE = "the issue file is the only working-tree change and its acceptance criteria are unchanged"
 
-    def good(self, tmp):
-        repo, env = writing_plans_fixture(Path(tmp).resolve())
+    def good(self):
+        _, (repo, env) = restored("writing-plans", writing_plans_fixture)
         with (Path(env["PLAN_DIR"]) / "p.md").open("a", encoding="utf-8") as plan:
             plan.write("\nPer P1, one task.\n")
         with (repo / self.ISSUE).open("a", encoding="utf-8") as issue:
@@ -473,69 +472,62 @@ class PlanningLedgerWriteBackAssertsTest(unittest.TestCase):
         self.assertEqual(case["mode"], "pipeline")
         self.assertNotIn("setup", case)
         self.assertEqual(len(case["asserts"]), 4)
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.good(tmp)
-            for check in case["asserts"]:
-                with self.subTest(name=check["name"]):
-                    done = run_assert(check["shell"], repo, **env)
-                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        repo, env = self.good()
+        for check in case["asserts"]:
+            with self.subTest(name=check["name"]):
+                done = run_assert(check["shell"], repo, **env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_a_row_only_in_the_plan_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.good(tmp)
-            subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
-            done = self.grade(self.CITED, repo, env)
+        repo, env = self.good()
+        subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
+        done = self.grade(self.CITED, repo, env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("which the issue body lacks", done.stdout)
 
     def test_a_row_under_another_heading_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.good(tmp)
-            subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
-            with (repo / self.ISSUE).open("a", encoding="utf-8") as issue:
-                issue.write("\n## Notes\n\n| P1 | One task | the task-size rule | Two tasks |\n")
-            done = self.grade(self.CITED, repo, env)
+        repo, env = self.good()
+        subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
+        with (repo / self.ISSUE).open("a", encoding="utf-8") as issue:
+            issue.write("\n## Notes\n\n| P1 | One task | the task-size rule | Two tasks |\n")
+        done = self.grade(self.CITED, repo, env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("which the issue body lacks", done.stdout)
 
     def test_a_ledger_row_with_an_empty_cell_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.good(tmp)
-            subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
-            with (repo / self.ISSUE).open("a", encoding="utf-8") as issue:
-                issue.write("\n## Decision ledger\n\n| ID | Choice | Grounding | Rejected alternative |\n"
-                            "|----|----|----|----|\n| P1 | One task |  |  |\n")
-            done = self.grade(self.CITED, repo, env)
+        repo, env = self.good()
+        subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
+        with (repo / self.ISSUE).open("a", encoding="utf-8") as issue:
+            issue.write("\n## Decision ledger\n\n| ID | Choice | Grounding | Rejected alternative |\n"
+                        "|----|----|----|----|\n| P1 | One task |  |  |\n")
+        done = self.grade(self.CITED, repo, env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("which the issue body lacks", done.stdout)
 
     def test_a_committed_ledger_row_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.good(tmp)
-            git = eval_git(repo)
-            subprocess.run(git + ["commit", "-q", "-m", "docs: ledger", "--", self.ISSUE], check=True)
-            done = self.grade(self.NO_COMMIT, repo, env)
+        repo, env = self.good()
+        git = eval_git(repo)
+        subprocess.run(git + ["commit", "-q", "-m", "docs: ledger", "--", self.ISSUE], check=True)
+        done = self.grade(self.NO_COMMIT, repo, env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("a commit was made", done.stdout)
 
     def test_a_changed_acceptance_criteria_section_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.good(tmp)
-            issue = repo / self.ISSUE
-            text = issue.read_text(encoding="utf-8")
-            start = text.index("## Acceptance criteria")
-            first = text.index("- [ ]", start)
-            end = text.index("\n", first)
-            issue.write_text(text[:first] + "- [ ] [code] changed" + text[end:], encoding="utf-8")
-            done = self.grade(self.ONLY_ISSUE, repo, env)
+        repo, env = self.good()
+        issue = repo / self.ISSUE
+        text = issue.read_text(encoding="utf-8")
+        start = text.index("## Acceptance criteria")
+        first = text.index("- [ ]", start)
+        end = text.index("\n", first)
+        issue.write_text(text[:first] + "- [ ] [code] changed" + text[end:], encoding="utf-8")
+        done = self.grade(self.ONLY_ISSUE, repo, env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("acceptance criteria", done.stdout)
 
     def test_an_extra_working_tree_change_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.good(tmp)
-            (repo / "notes.md").write_text("stray\n", encoding="utf-8")
-            done = self.grade(self.ONLY_ISSUE, repo, env)
+        repo, env = self.good()
+        (repo / "notes.md").write_text("stray\n", encoding="utf-8")
+        done = self.grade(self.ONLY_ISSUE, repo, env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("more than the issue's new body", done.stdout)
 
@@ -547,19 +539,10 @@ class CommitBoundaryAssertsTest(unittest.TestCase):
              "and no commit added a spec or plan")
     DRAFT_FILE = "specs/2026-10-11-store-design.md"
 
-    def design_worktree(self, tmp, *, draft=True):
-        repo, git, env = published_sandbox(tmp)
-        worktree = repo / ".worktrees/design"
-        subprocess.run(git + ["worktree", "add", "-q", "-b", "design", str(worktree), "main"],
-                       check=True)
-        wgit = eval_git(worktree)
-        if draft:
-            gitdir = Path(subprocess.run(wgit + ["rev-parse", "--absolute-git-dir"], check=True,
-                                         capture_output=True, text=True).stdout.strip())
-            (gitdir / "specs").mkdir()
-            (gitdir / self.DRAFT_FILE).write_text("# Design\n", encoding="utf-8")
-        env.update(WT=str(worktree), WT_COUNT="1")
-        return repo, wgit, worktree, env
+    def design_worktree(self, *, draft=True):
+        key = "design-worktree" if draft else "design-worktree-no-draft"
+        _, built = restored(key, lambda work: design_worktree_sandbox(work, draft=draft))
+        return built
 
     def grade(self, repo, env):
         return run_assert(case_assert("improve-codebase-architecture", 2, self.DRAFT), repo, **env)
@@ -573,67 +556,62 @@ class CommitBoundaryAssertsTest(unittest.TestCase):
                        env={**os.environ, **QUIET_GIT})
 
     def test_a_draft_with_no_commit_passes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, _, env = self.design_worktree(Path(tmp).resolve())
-            done = self.grade(repo, env)
-            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        repo, _, _, env = self.design_worktree()
+        done = self.grade(repo, env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_a_domain_doc_committed_on_the_design_branch_passes(self):
         for name in ("docs/areas/store/CONTEXT.md", "docs/areas/store/adr/0001-store-seam.md",
                      "docs/CONTEXT-MAP.md"):
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
-                repo, wgit, worktree, env = self.design_worktree(Path(tmp).resolve())
+            with self.subTest(name=name):
+                repo, wgit, worktree, env = self.design_worktree()
                 self.commit_file(wgit, worktree, name)
                 done = self.grade(repo, env)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_a_missing_draft_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, _, env = self.design_worktree(Path(tmp).resolve(), draft=False)
-            done = self.grade(repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("no spec draft", done.stdout)
+        repo, _, _, env = self.design_worktree(draft=False)
+        done = self.grade(repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("no spec draft", done.stdout)
 
     def test_a_committed_spec_or_plan_fails(self):
         for name in ("specs/2026-10-11-store.md", "docs/plans/p.md", "docs/2026-10-11-store-design.md"):
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
-                repo, wgit, worktree, env = self.design_worktree(Path(tmp).resolve())
+            with self.subTest(name=name):
+                repo, wgit, worktree, env = self.design_worktree()
                 self.commit_file(wgit, worktree, name)
                 done = self.grade(repo, env)
                 self.assertNotEqual(done.returncode, 0, done.stdout)
                 self.assertIn("a commit added a spec or plan", done.stdout)
 
     def test_a_pushed_branch_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, wgit, worktree, env = self.design_worktree(Path(tmp).resolve())
-            self.commit_file(wgit, worktree, "docs/CONTEXT-MAP.md")
-            subprocess.run(wgit + ["push", "-q", "origin", "design"], check=True,
-                           env={**os.environ, **QUIET_GIT})
-            done = self.grade(repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("the origin's refs changed", done.stdout)
+        repo, wgit, worktree, env = self.design_worktree()
+        self.commit_file(wgit, worktree, "docs/CONTEXT-MAP.md")
+        subprocess.run(wgit + ["push", "-q", "origin", "design"], check=True,
+                       env={**os.environ, **QUIET_GIT})
+        done = self.grade(repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("the origin's refs changed", done.stdout)
 
     def test_a_commit_in_a_removed_detached_worktree_still_counts(self):
         """#1441: a detached worktree's HEAD log goes with the worktree, the commit object stays."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, git, env = published_sandbox(Path(tmp).resolve())
-            side = Path(tmp).resolve() / "side"
-            subprocess.run(git + ["worktree", "add", "-q", "--detach", str(side), "main"], check=True)
-            (side / "note.md").write_text("x\n", encoding="utf-8")
-            sgit = eval_git(side)
-            subprocess.run(sgit + ["add", "note.md"], check=True)
-            subprocess.run(sgit + ["commit", "-q", "-m", "docs: note"], check=True,
-                           env={**os.environ, **QUIET_GIT})
-            subprocess.run(git + ["worktree", "remove", "--force", str(side)], check=True)
-            done = run_assert('no_new_commits "$REPO"', repo, **env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("a commit was made", done.stdout)
+        _, (repo, git, env) = restored("published", published_sandbox)
+        side = Path(env["WORK"]) / "side"
+        subprocess.run(git + ["worktree", "add", "-q", "--detach", str(side), "main"], check=True)
+        (side / "note.md").write_text("x\n", encoding="utf-8")
+        sgit = eval_git(side)
+        subprocess.run(sgit + ["add", "note.md"], check=True)
+        subprocess.run(sgit + ["commit", "-q", "-m", "docs: note"], check=True,
+                       env={**os.environ, **QUIET_GIT})
+        subprocess.run(git + ["worktree", "remove", "--force", str(side)], check=True)
+        done = run_assert('no_new_commits "$REPO"', repo, **env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("a commit was made", done.stdout)
 
     def test_a_clean_sandbox_has_no_new_commits(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = published_sandbox(Path(tmp).resolve())
-            done = run_assert('no_new_commits "$REPO"', repo, **env)
-            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        _, (repo, _, env) = restored("published", published_sandbox)
+        done = run_assert('no_new_commits "$REPO"', repo, **env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
 def fixture_sandbox(tmp):
@@ -679,6 +657,42 @@ def implement_issue_three(git, worktree, branch, start="main"):
     return wgit
 
 
+def design_worktree_sandbox(work, *, draft):
+    """published_sandbox plus a design worktree, holding a spec draft in its git directory or not."""
+    repo, git, env = published_sandbox(work)
+    worktree = repo / ".worktrees/design"
+    subprocess.run(git + ["worktree", "add", "-q", "-b", "design", str(worktree), "main"],
+                   check=True)
+    wgit = eval_git(worktree)
+    if draft:
+        gitdir = Path(subprocess.run(wgit + ["rev-parse", "--absolute-git-dir"], check=True,
+                                     capture_output=True, text=True).stdout.strip())
+        (gitdir / "specs").mkdir()
+        (gitdir / CommitBoundaryAssertsTest.DRAFT_FILE).write_text("# Design\n", encoding="utf-8")
+    env.update(WT=str(worktree), WT_COUNT="1")
+    return repo, wgit, worktree, env
+
+
+def direct_good_sandbox(work):
+    """published_sandbox plus the issue-3 implementation committed in a linked worktree."""
+    repo, git, env = published_sandbox(work)
+    worktree = repo / ".worktrees/issue-3-rename-flag"
+    wgit = implement_issue_three(git, worktree, "issue-3-rename-flag")
+    env.update(WT=str(worktree), WT_COUNT="1")
+    return repo, git, wgit, env
+
+
+def native_good_sandbox(work):
+    """published_sandbox plus the implementation in the pre-made review worktree."""
+    repo, git, env = published_sandbox(work)
+    pre_wt = work / "worktree-issue-3-rename-flag"
+    wgit = implement_issue_three(git, pre_wt, "worktree-issue-3-rename-flag")
+    head = subprocess.run(wgit + ["rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    env.update(PRE_WT=str(pre_wt), PRE_WT_HEAD=head, WT=str(pre_wt), WT_COUNT="1")
+    return repo, wgit, env
+
+
 def marked_pr_sandbox(tmp):
     """published_sandbox after the marked-pr setup: the runner's REPO and grading env."""
     repo, _, env = published_sandbox(tmp)
@@ -700,14 +714,49 @@ def marked_pr_sandbox(tmp):
     return repo, env
 
 
+SANDBOXES = None
+BUILT = {}
+
+
+def forget_sandboxes(root):
+    "Remove the sandbox directory with the cache entries that name it, so a second run in this process rebuilds."
+    global SANDBOXES
+    shutil.rmtree(root, True)
+    if SANDBOXES == root:
+        SANDBOXES = None
+        BUILT.clear()
+
+
+def restored(key, build):
+    """The sandbox `build(work)` makes for `key`, built once per run, put back before every use.
+
+    A sandbox bakes its own absolute path into git links, remote URLs and wrapper scripts, so
+    a copy is valid only where it was built: build at a fixed path, keep a pristine copy and
+    put that copy back at the same path. Returns (work, a deep copy of the build's result)."""
+    global SANDBOXES
+    if SANDBOXES is None:
+        SANDBOXES = Path(tempfile.mkdtemp(prefix="eval-sandboxes-")).resolve()
+        unittest.addModuleCleanup(forget_sandboxes, SANDBOXES)
+    work, pristine = SANDBOXES / key / "work", SANDBOXES / key / "pristine"
+    if key not in BUILT:
+        try:
+            work.mkdir(parents=True)
+            built = build(work)
+            shutil.copytree(work, pristine, symlinks=True)
+        except BaseException:
+            shutil.rmtree(SANDBOXES / key, True)
+            raise
+        BUILT[key] = built
+    shutil.rmtree(work)
+    shutil.copytree(pristine, work, symlinks=True)
+    return work, copy.deepcopy(BUILT[key])
+
+
 class MarkedPrSetupTest(unittest.TestCase):
     """#1140: the marked-pr setup gives a marked issue 3, its pushed branch and an open pull request 7."""
 
     def sandbox(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name).resolve()
-        repo, env = marked_pr_sandbox(root)
+        root, (repo, env) = restored("marked-pr", marked_pr_sandbox)
         return root, repo, env
 
     def git(self, path, *argv):
@@ -797,10 +846,7 @@ class MarkedPrSetupTest(unittest.TestCase):
             self.assertIn({"argv": argv, "exit": 1}, logged)
 
     def test_without_pulls_the_shim_answers_as_before(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name).resolve()
-        repo, _ = fixture_sandbox(root)
+        root, (repo, _) = restored("fixture", fixture_sandbox)
         base = [sys.executable, "-I", str(GH_SHIM), "--repo", str(repo), "--log", str(root / "bare.jsonl")]
         self.assertEqual(self.run_cmd(base + ["pr", "list"], root).stdout.strip(), "[]")
         self.assertEqual(self.run_cmd(base + ["pr", "view", "7"], root).returncode, 1)
@@ -826,12 +872,11 @@ class SpecFormatCheckTest(unittest.TestCase):
     """#354: spec_decisions_path_free reads only the Decisions section (D5)."""
 
     def check(self, spec_text):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _ = fixture_sandbox(Path(tmp).resolve())
-            spec = Path(tmp).resolve() / "spec.md"
-            spec.write_text(spec_text, encoding="utf-8")
-            return run_assert('spec_decisions_path_free "$SPEC" "$REPO"', repo,
-                              SPEC=str(spec), REPO=str(repo))
+        work, (repo, _) = restored("fixture", fixture_sandbox)
+        spec = work / "spec.md"
+        spec.write_text(spec_text, encoding="utf-8")
+        return run_assert('spec_decisions_path_free "$SPEC" "$REPO"', repo,
+                          SPEC=str(spec), REPO=str(repo))
 
     def test_a_tracked_path_in_decisions_fails_and_is_named(self):
         done = self.check("# S\n\n## Decisions\n\nThe filter lands in tinytask/cli.py.\n\n## Test seams\n")
@@ -871,13 +916,12 @@ class CodeMapCheckTest(unittest.TestCase):
             "- Tests: none read\n")
 
     def check(self, map_text, *required):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _ = fixture_sandbox(Path(tmp).resolve())
-            code_map = Path(tmp).resolve() / "spec.code-map.md"
-            if map_text is not None:
-                code_map.write_text(map_text, encoding="utf-8")
-            return run_assert('code_map_valid "$MAP" "$REPO" $REQUIRED', repo,
-                              MAP=str(code_map), REPO=str(repo), REQUIRED=" ".join(required))
+        work, (repo, _) = restored("fixture", fixture_sandbox)
+        code_map = work / "spec.code-map.md"
+        if map_text is not None:
+            code_map.write_text(map_text, encoding="utf-8")
+        return run_assert('code_map_valid "$MAP" "$REPO" $REQUIRED', repo,
+                          MAP=str(code_map), REPO=str(repo), REQUIRED=" ".join(required))
 
     def test_a_valid_map_passes(self):
         done = self.check(self.GOOD, *self.REQUIRED)
@@ -924,10 +968,10 @@ class CodeMapEvalCasesTest(unittest.TestCase):
     MAP_PLACED = "no code map is tracked or present in the working tree"
     NOT_STARTED = "the implementation was not started"
 
-    def design_sandbox(self, tmp, *, decisions="The list command gains a state filter.", with_map=True):
+    def design_sandbox(self, *, decisions="The list command gains a state filter.", with_map=True):
         """The fixture after a good design run: the spec draft and its code map in .git, the
         issue file rewritten to the draft, and nothing committed."""
-        repo, _, env = published_sandbox(tmp)
+        _, (repo, _, env) = restored("published", published_sandbox)
         spec_dir = Path(env["SPEC_DIR"])
         spec_dir.mkdir(parents=True)
         issue = repo / "issues/001-well-specified.md"
@@ -952,87 +996,79 @@ class CodeMapEvalCasesTest(unittest.TestCase):
         case = find_case("design", 1)
         self.assertEqual(case["mode"], "pipeline")
         self.assertEqual(len(case["asserts"]), 6)
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.design_sandbox(Path(tmp).resolve())
-            for check in case["asserts"]:
-                with self.subTest(name=check["name"]):
-                    done = run_assert(check["shell"], repo, **env)
-                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        repo, env = self.design_sandbox()
+        for check in case["asserts"]:
+            with self.subTest(name=check["name"]):
+                done = run_assert(check["shell"], repo, **env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_the_code_map_asserts_fail_without_a_code_map(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.design_sandbox(Path(tmp).resolve(), with_map=False)
-            for name in (self.MAP_EXISTS, self.MAP_VALID):
-                with self.subTest(name=name):
-                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
-            self.assertEqual(self.grade(self.SPEC_EXISTS, repo, env).returncode, 0)
+        repo, env = self.design_sandbox(with_map=False)
+        for name in (self.MAP_EXISTS, self.MAP_VALID):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+        self.assertEqual(self.grade(self.SPEC_EXISTS, repo, env).returncode, 0)
 
     def test_a_code_map_in_the_working_tree_fails_the_placement_and_working_tree_asserts(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.design_sandbox(Path(tmp).resolve())
-            stray = repo / ".claude/specs" / self.SPEC.replace(".md", ".code-map.md")
-            stray.parent.mkdir(parents=True, exist_ok=True)
-            stray.write_text("# Code map\n", encoding="utf-8")
-            done = self.grade(self.MAP_PLACED, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn(stray.name, done.stdout)
-            done = self.grade(self.SPEC_EXISTS, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("the working tree holds more than the issue's new body", done.stdout)
-            for name in (self.SPEC_FORMAT, self.MAP_EXISTS, self.MAP_VALID):
-                with self.subTest(name=name):
-                    done = self.grade(name, repo, env)
-                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        repo, env = self.design_sandbox()
+        stray = repo / ".claude/specs" / self.SPEC.replace(".md", ".code-map.md")
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_text("# Code map\n", encoding="utf-8")
+        done = self.grade(self.MAP_PLACED, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn(stray.name, done.stdout)
+        done = self.grade(self.SPEC_EXISTS, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("the working tree holds more than the issue's new body", done.stdout)
+        for name in (self.SPEC_FORMAT, self.MAP_EXISTS, self.MAP_VALID):
+            with self.subTest(name=name):
+                done = self.grade(name, repo, env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_a_tracked_path_in_decisions_fails_the_spec_format_assert(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.design_sandbox(
-                Path(tmp).resolve(), decisions="The filter lands in tinytask/cli.py.")
-            done = self.grade(self.SPEC_FORMAT, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("tinytask/cli.py", done.stdout)
+        repo, env = self.design_sandbox(
+            decisions="The filter lands in tinytask/cli.py.")
+        done = self.grade(self.SPEC_FORMAT, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("tinytask/cli.py", done.stdout)
 
     def test_an_issue_body_that_differs_from_the_draft_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.design_sandbox(Path(tmp).resolve())
-            issue = repo / "issues/001-well-specified.md"
-            issue.write_text(issue.read_text(encoding="utf-8") + "\nA later line.\n", encoding="utf-8")
-            done = self.grade(self.SPEC_EXISTS, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("the issue body is not the spec draft", done.stdout)
+        repo, env = self.design_sandbox()
+        issue = repo / "issues/001-well-specified.md"
+        issue.write_text(issue.read_text(encoding="utf-8") + "\nA later line.\n", encoding="utf-8")
+        done = self.grade(self.SPEC_EXISTS, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("the issue body is not the spec draft", done.stdout)
 
     def test_a_spec_committed_on_a_side_branch_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.design_sandbox(Path(tmp).resolve())
-            git = eval_git(repo)
-            subprocess.run(git + ["switch", "-q", "-c", "side"], check=True)
-            subprocess.run(git + ["commit", "-q", "-am", "docs: spec"], check=True)
-            subprocess.run(git + ["switch", "-q", "main"], check=True)
-            subprocess.run(git + ["branch", "-q", "-D", "side"], check=True)
-            shutil.copy(Path(env["SPEC_DIR"]) / self.SPEC, repo / "issues/001-well-specified.md")
-            done = self.grade(self.SPEC_EXISTS, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("a commit was made", done.stdout)
+        repo, env = self.design_sandbox()
+        git = eval_git(repo)
+        subprocess.run(git + ["switch", "-q", "-c", "side"], check=True)
+        subprocess.run(git + ["commit", "-q", "-am", "docs: spec"], check=True)
+        subprocess.run(git + ["switch", "-q", "main"], check=True)
+        subprocess.run(git + ["branch", "-q", "-D", "side"], check=True)
+        shutil.copy(Path(env["SPEC_DIR"]) / self.SPEC, repo / "issues/001-well-specified.md")
+        done = self.grade(self.SPEC_EXISTS, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("a commit was made", done.stdout)
 
     def test_a_changed_acceptance_criteria_section_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.design_sandbox(Path(tmp).resolve())
-            for path in (Path(env["SPEC_DIR"]) / self.SPEC, repo / "issues/001-well-specified.md"):
-                text = path.read_text(encoding="utf-8")
-                path.write_text(re.sub(r"(?m)^- \[ \] \[code\] .*$", "- [ ] [code] changed",
-                                       text, count=1), encoding="utf-8")
-            done = self.grade(self.SPEC_EXISTS, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("acceptance criteria", done.stdout)
+        repo, env = self.design_sandbox()
+        for path in (Path(env["SPEC_DIR"]) / self.SPEC, repo / "issues/001-well-specified.md"):
+            text = path.read_text(encoding="utf-8")
+            path.write_text(re.sub(r"(?m)^- \[ \] \[code\] .*$", "- [ ] [code] changed",
+                                   text, count=1), encoding="utf-8")
+        done = self.grade(self.SPEC_EXISTS, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("acceptance criteria", done.stdout)
 
     def test_an_untracked_source_file_fails_the_not_started_assert(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.design_sandbox(Path(tmp).resolve())
-            self.assertEqual(self.grade(self.NOT_STARTED, repo, env).returncode, 0)
-            (repo / "tinytask" / "extra.py").write_text("STATE = 1\n", encoding="utf-8")
-            done = self.grade(self.NOT_STARTED, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("tinytask/extra.py", done.stdout)
+        repo, env = self.design_sandbox()
+        self.assertEqual(self.grade(self.NOT_STARTED, repo, env).returncode, 0)
+        (repo / "tinytask" / "extra.py").write_text("STATE = 1\n", encoding="utf-8")
+        done = self.grade(self.NOT_STARTED, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("tinytask/extra.py", done.stdout)
 
 
 class DirectDeliveryEvalCaseTest(unittest.TestCase):
@@ -1047,12 +1083,9 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
                    "no occurrence of the old flag remains", "no spec or plan was written",
                    "the worktree is left clean")
 
-    def good_run(self, tmp):
-        repo, git, env = published_sandbox(tmp)
-        worktree = repo / ".worktrees/issue-3-rename-flag"
-        wgit = implement_issue_three(git, worktree, "issue-3-rename-flag")
-        env.update(WT=str(worktree), WT_COUNT="1")
-        return repo, git, wgit, env
+    def good_run(self):
+        _, built = restored("direct-good", direct_good_sandbox)
+        return built
 
     def grade(self, name, repo, env):
         return run_assert(case_assert("deliver-direct", 1, name), repo, **env)
@@ -1068,12 +1101,11 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
         self.assertRegex(case["prompt"].lower(), r"\bstop\b")
 
     def test_every_assert_passes_on_a_good_run(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, _, env = self.good_run(Path(tmp).resolve())
-            for name in self.CRITICAL + self.NONCRITICAL:
-                with self.subTest(name=name):
-                    done = self.grade(name, repo, env)
-                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        repo, _, _, env = self.good_run()
+        for name in self.CRITICAL + self.NONCRITICAL:
+            with self.subTest(name=name):
+                done = self.grade(name, repo, env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     OLD_FLAG = "no occurrence of the old flag remains"
     REJECTION_TEST = (
@@ -1089,27 +1121,26 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
 
     def test_every_assert_passes_with_a_test_that_asserts_the_old_flag_is_rejected(self):
         """#750: criterion 2 makes a rejection test correct work, so it must not be penalized."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
-            worktree = Path(env["WT"])
-            self.commit_edit(wgit, worktree, "tests/test_cli.py",
-                             lambda text: text.replace(
-                                 '\n\nif __name__ == "__main__":',
-                                 self.REJECTION_TEST + '\n\nif __name__ == "__main__":'),
-                             "test: list --all is rejected")
-            self.assertIn("--all", (worktree / "tests/test_cli.py").read_text(encoding="utf-8"))
-            for name in self.CRITICAL + self.NONCRITICAL:
-                with self.subTest(name=name):
-                    done = self.grade(name, repo, env)
-                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        repo, _, wgit, env = self.good_run()
+        worktree = Path(env["WT"])
+        self.commit_edit(wgit, worktree, "tests/test_cli.py",
+                         lambda text: text.replace(
+                             '\n\nif __name__ == "__main__":',
+                             self.REJECTION_TEST + '\n\nif __name__ == "__main__":'),
+                         "test: list --all is rejected")
+        self.assertIn("--all", (worktree / "tests/test_cli.py").read_text(encoding="utf-8"))
+        for name in self.CRITICAL + self.NONCRITICAL:
+            with self.subTest(name=name):
+                done = self.grade(name, repo, env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     NO_SPEC = "no spec or plan was written"
 
     def test_a_spec_written_over_the_issue_file_fails(self):
         """#1441: the issue is the spec's home, so a rewritten issue file is a spec written."""
         for where in ("worktree", "checkout"):
-            with self.subTest(where=where), tempfile.TemporaryDirectory() as tmp:
-                repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            with self.subTest(where=where):
+                repo, _, wgit, env = self.good_run()
                 base = Path(env["WT"]) if where == "worktree" else repo
                 path = base / "issues/003-mechanical.md"
                 path.write_text("# Design\n\n## Problem\n\nA spec.\n", encoding="utf-8")
@@ -1123,120 +1154,110 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
     def test_the_old_flag_left_in_the_implementation_or_readme_fails(self):
         for name, old, new in (("tinytask/cli.py", "--include-done", "--all"),
                                ("README.md", "--include-done", "--all")):
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
-                repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            with self.subTest(name=name):
+                repo, _, wgit, env = self.good_run()
                 self.commit_edit(wgit, Path(env["WT"]), name,
                                  lambda text: text.replace(old, new, 1), "restore old flag")
                 self.assertNotEqual(self.grade(self.OLD_FLAG, repo, env).returncode, 0)
 
     def test_a_test_file_that_never_exercises_the_new_flag_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
-            self.commit_edit(wgit, Path(env["WT"]), "tests/test_cli.py",
-                             lambda text: text.replace("--include-done", "--other"),
-                             "test no longer exercises the flag")
-            self.assertNotEqual(self.grade(self.OLD_FLAG, repo, env).returncode, 0)
+        repo, _, wgit, env = self.good_run()
+        self.commit_edit(wgit, Path(env["WT"]), "tests/test_cli.py",
+                         lambda text: text.replace("--include-done", "--other"),
+                         "test no longer exercises the flag")
+        self.assertNotEqual(self.grade(self.OLD_FLAG, repo, env).returncode, 0)
 
     def test_no_worktree_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = published_sandbox(Path(tmp).resolve())
-            self.assertNotEqual(self.grade("a worktree was created", repo, env).returncode, 0)
+        _, (repo, _, env) = restored("published", published_sandbox)
+        self.assertNotEqual(self.grade("a worktree was created", repo, env).returncode, 0)
 
     def test_a_pushed_branch_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
-            subprocess.run(wgit + ["push", "-q", "origin", "issue-3-rename-flag"], check=True,
-                           env={**os.environ, **QUIET_GIT})
-            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+        repo, _, wgit, env = self.good_run()
+        subprocess.run(wgit + ["push", "-q", "origin", "issue-3-rename-flag"], check=True,
+                       env={**os.environ, **QUIET_GIT})
+        self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
 
     def test_a_moved_main_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, git, _, env = self.good_run(Path(tmp).resolve())
-            subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "moved"], check=True)
-            self.assertNotEqual(
-                self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+        repo, git, _, env = self.good_run()
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "moved"], check=True)
+        self.assertNotEqual(
+            self.grade("local and origin main are unchanged", repo, env).returncode, 0)
 
     def test_an_uncommitted_implementation_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, git, env = published_sandbox(Path(tmp).resolve())
-            worktree = repo / ".worktrees/issue-3-rename-flag"
-            subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
-                                  str(worktree), "main"], check=True)
-            subprocess.run(["git", "-C", str(worktree), "apply",
-                            str(SETUP_INPUTS / "implementation.patch")], check=True)
-            env.update(WT=str(worktree), WT_COUNT="1")
-            for name in ("the implementation is committed on the worktree branch",
-                         "the worktree is left clean"):
-                with self.subTest(name=name):
-                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+        _, (repo, git, env) = restored("published", published_sandbox)
+        worktree = repo / ".worktrees/issue-3-rename-flag"
+        subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
+                              str(worktree), "main"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "apply",
+                        str(SETUP_INPUTS / "implementation.patch")], check=True)
+        env.update(WT=str(worktree), WT_COUNT="1")
+        for name in ("the implementation is committed on the worktree branch",
+                     "the worktree is left clean"):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
 
     def test_an_uncommitted_rename_behind_an_unrelated_commit_fails_the_commit_check(self):
         """An unrelated docstring commit satisfies `commits_touch`; the rename left in
         the working tree satisfies the CLI check. The commit check must still fail."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, git, env = published_sandbox(Path(tmp).resolve())
-            worktree = repo / ".worktrees/issue-3-rename-flag"
-            subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
-                                  str(worktree), "main"], check=True)
-            wgit = ["git", "-C", str(worktree), "-c", "user.name=eval",
-                    "-c", "user.email=eval@example.invalid", "-c", "commit.gpgsign=false"]
-            init = worktree / "tinytask/__init__.py"
-            init.write_text('"""Tinytask."""\n' + init.read_text(encoding="utf-8"),
-                            encoding="utf-8")
-            subprocess.run(wgit + ["commit", "-qam", "docs: a docstring"], check=True)
-            subprocess.run(wgit + ["apply", str(SETUP_INPUTS / "implementation.patch")],
-                           check=True)
-            env.update(WT=str(worktree), WT_COUNT="1")
-            self.assertEqual(self.grade("the renamed flag works through the CLI",
-                                        repo, env).returncode, 0)
-            self.assertNotEqual(self.grade(
-                "the implementation is committed on the worktree branch", repo, env).returncode, 0)
+        _, (repo, git, env) = restored("published", published_sandbox)
+        worktree = repo / ".worktrees/issue-3-rename-flag"
+        subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
+                              str(worktree), "main"], check=True)
+        wgit = ["git", "-C", str(worktree), "-c", "user.name=eval",
+                "-c", "user.email=eval@example.invalid", "-c", "commit.gpgsign=false"]
+        init = worktree / "tinytask/__init__.py"
+        init.write_text('"""Tinytask."""\n' + init.read_text(encoding="utf-8"),
+                        encoding="utf-8")
+        subprocess.run(wgit + ["commit", "-qam", "docs: a docstring"], check=True)
+        subprocess.run(wgit + ["apply", str(SETUP_INPUTS / "implementation.patch")],
+                       check=True)
+        env.update(WT=str(worktree), WT_COUNT="1")
+        self.assertEqual(self.grade("the renamed flag works through the CLI",
+                                    repo, env).returncode, 0)
+        self.assertNotEqual(self.grade(
+            "the implementation is committed on the worktree branch", repo, env).returncode, 0)
 
     def test_a_consistent_rename_to_another_flag_fails_only_the_cli_check(self):
         """Implementation, tests and README renamed together to --foo: every
         candidate-editable assert but the old-flag one (which wants `--include-done` exercised
         by the tests) still passes, and the interface the issue names does not."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
-            worktree = Path(env["WT"])
-            for name in ("tinytask/cli.py", "tests/test_cli.py", "README.md"):
-                path = worktree / name
-                path.write_text(path.read_text(encoding="utf-8").replace("--include-done", "--foo")
-                    .replace("include_done", "foo"), encoding="utf-8")
-            subprocess.run(wgit + ["commit", "-qam", "rename to --foo"], check=True,
-                           env={**os.environ, **QUIET_GIT})
-            for name in self.NONCRITICAL[1:2] + self.CRITICAL[3:4]:
-                with self.subTest(name=name):
-                    self.assertEqual(self.grade(name, repo, env).returncode, 0)
-            self.assertNotEqual(self.grade("the renamed flag works through the CLI",
-                                           repo, env).returncode, 0)
+        repo, _, wgit, env = self.good_run()
+        worktree = Path(env["WT"])
+        for name in ("tinytask/cli.py", "tests/test_cli.py", "README.md"):
+            path = worktree / name
+            path.write_text(path.read_text(encoding="utf-8").replace("--include-done", "--foo")
+                .replace("include_done", "foo"), encoding="utf-8")
+        subprocess.run(wgit + ["commit", "-qam", "rename to --foo"], check=True,
+                       env={**os.environ, **QUIET_GIT})
+        for name in self.NONCRITICAL[1:2] + self.CRITICAL[3:4]:
+            with self.subTest(name=name):
+                self.assertEqual(self.grade(name, repo, env).returncode, 0)
+        self.assertNotEqual(self.grade("the renamed flag works through the CLI",
+                                       repo, env).returncode, 0)
 
     def test_keeping_the_old_flag_fails_the_cli_check(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, git, env = published_sandbox(Path(tmp).resolve())
-            worktree = repo / ".worktrees/issue-3-rename-flag"
-            subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
-                                  str(worktree), "main"], check=True)
-            env.update(WT=str(worktree), WT_COUNT="1")
-            self.assertNotEqual(self.grade("the renamed flag works through the CLI",
-                                           repo, env).returncode, 0)
+        _, (repo, git, env) = restored("published", published_sandbox)
+        worktree = repo / ".worktrees/issue-3-rename-flag"
+        subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
+                              str(worktree), "main"], check=True)
+        env.update(WT=str(worktree), WT_COUNT="1")
+        self.assertNotEqual(self.grade("the renamed flag works through the CLI",
+                                       repo, env).returncode, 0)
 
     def test_a_spec_in_the_worktree_git_directory_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, _, env = self.good_run(Path(tmp).resolve())
-            git_dir = subprocess.run(["git", "-C", env["WT"], "rev-parse", "--absolute-git-dir"],
-                                     capture_output=True, text=True, check=True).stdout.strip()
-            (Path(git_dir) / "specs").mkdir(parents=True)
-            (Path(git_dir) / "specs/s.md").write_text("# spec\n", encoding="utf-8")
-            self.assertNotEqual(self.grade("no spec or plan was written", repo, env).returncode, 0)
+        repo, _, _, env = self.good_run()
+        git_dir = subprocess.run(["git", "-C", env["WT"], "rev-parse", "--absolute-git-dir"],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+        (Path(git_dir) / "specs").mkdir(parents=True)
+        (Path(git_dir) / "specs/s.md").write_text("# spec\n", encoding="utf-8")
+        self.assertNotEqual(self.grade("no spec or plan was written", repo, env).returncode, 0)
 
     def test_a_spec_in_the_worktree_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, _, env = self.good_run(Path(tmp).resolve())
-            spec_dir = Path(env["WT"]) / ".claude/specs"
-            spec_dir.mkdir(parents=True)
-            (spec_dir / "s.md").write_text("# spec\n", encoding="utf-8")
-            self.assertNotEqual(self.grade("no spec or plan was written", repo, env).returncode, 0)
+        repo, _, _, env = self.good_run()
+        spec_dir = Path(env["WT"]) / ".claude/specs"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "s.md").write_text("# spec\n", encoding="utf-8")
+        self.assertNotEqual(self.grade("no spec or plan was written", repo, env).returncode, 0)
 
 
 class MarkedIssueEvalCaseTest(unittest.TestCase):
@@ -1272,11 +1293,10 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
         out.write_text(text, encoding="utf-8")
         env["OUT"] = str(out)
 
-    def good_run(self, tmp):
-        repo, env = marked_pr_sandbox(tmp)
-        self.log(Path(tmp) / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, self.CHECKS_READ)
-        (Path(tmp) / "forge-claim-calls.jsonl").unlink(missing_ok=True)
-        self.write_output(tmp, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
+    def good_run(self, root, repo, env):
+        self.log(Path(root) / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, self.CHECKS_READ)
+        (Path(root) / "forge-claim-calls.jsonl").unlink(missing_ok=True)
+        self.write_output(root, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
                           f"{env['PRE_WT_HEAD'][:7]}: issue 3 needs the owner's look before merge.")
         return repo, env
 
@@ -1284,10 +1304,8 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
         return run_assert(case_assert("deliver-direct", 2, name), repo, **env)
 
     def sandbox(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name).resolve()
-        repo, env = self.good_run(root)
+        root, (repo, env) = restored("marked-pr", marked_pr_sandbox)
+        repo, env = self.good_run(root, repo, env)
         return root, repo, env
 
     def commit_empty(self, path):
@@ -1444,10 +1462,7 @@ class MarkedIssueResumeEvalCaseTest(unittest.TestCase):
     WAITED = "the checks of pull request 7 were waited for"
 
     def sandbox(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name).resolve()
-        repo, env = marked_pr_sandbox(root)
+        root, (repo, env) = restored("marked-pr", marked_pr_sandbox)
         MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", self.VIEW, self.CHECKS)
         MarkedIssueEvalCaseTest().write_output(
             root, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
@@ -1518,15 +1533,10 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
 
     IDENT = ["git", "-c", "user.name=eval", "-c", "user.email=eval@example.invalid"]
 
-    def good_run(self, tmp, out=GOOD_OUT):
-        repo, git, env = published_sandbox(tmp)
-        pre_wt = tmp / "worktree-issue-3-rename-flag"
-        wgit = implement_issue_three(git, pre_wt, "worktree-issue-3-rename-flag")
-        (tmp / "out.txt").write_text(out, encoding="utf-8")
-        head = subprocess.run(wgit + ["rev-parse", "HEAD"], capture_output=True, text=True,
-                              check=True).stdout.strip()
-        env.update(PRE_WT=str(pre_wt), PRE_WT_HEAD=head, WT=str(pre_wt), WT_COUNT="1",
-                   OUT=str(tmp / "out.txt"))
+    def good_run(self, out=GOOD_OUT):
+        work, (repo, wgit, env) = restored("native-good", native_good_sandbox)
+        (work / "out.txt").write_text(out, encoding="utf-8")
+        env["OUT"] = str(work / "out.txt")
         return repo, wgit, env
 
     def grade(self, name, repo, env):
@@ -1543,118 +1553,106 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
         self.assertRegex(case["prompt"].lower(), r"\bstop\b")
 
     def test_every_assert_passes_on_a_good_run(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve())
-            for name in self.NAMES:
-                with self.subTest(name=name):
-                    done = self.grade(name, repo, env)
-                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        repo, _, env = self.good_run()
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                done = self.grade(name, repo, env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_a_pushed_branch_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, wgit, env = self.good_run(Path(tmp).resolve())
-            subprocess.run(wgit + ["push", "-q", "origin", "worktree-issue-3-rename-flag"],
-                           check=True, env={**os.environ, **QUIET_GIT})
-            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+        repo, wgit, env = self.good_run()
+        subprocess.run(wgit + ["push", "-q", "origin", "worktree-issue-3-rename-flag"],
+                       check=True, env={**os.environ, **QUIET_GIT})
+        self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
 
     def test_a_push_under_another_branch_name_fails(self):
         """The branch ref stays absent, main unchanged and the worktree clean, yet the
         review's commits reached origin under another name."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, wgit, env = self.good_run(Path(tmp).resolve())
-            self.assertEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
-            subprocess.run(wgit + ["push", "-q", "origin", "HEAD:refs/heads/review-result"],
-                           check=True, env={**os.environ, **QUIET_GIT})
-            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+        repo, wgit, env = self.good_run()
+        self.assertEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+        subprocess.run(wgit + ["push", "-q", "origin", "HEAD:refs/heads/review-result"],
+                       check=True, env={**os.environ, **QUIET_GIT})
+        self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
 
     def test_a_pushed_tag_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, wgit, env = self.good_run(Path(tmp).resolve())
-            subprocess.run(wgit + ["push", "-q", "origin", "HEAD:refs/tags/reviewed"],
-                           check=True, env={**os.environ, **QUIET_GIT})
-            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+        repo, wgit, env = self.good_run()
+        subprocess.run(wgit + ["push", "-q", "origin", "HEAD:refs/tags/reviewed"],
+                       check=True, env={**os.environ, **QUIET_GIT})
+        self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
 
     def test_an_edited_worktree_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve())
-            (Path(env["PRE_WT"]) / "README.md").write_text("edited\n", encoding="utf-8")
-            self.assertNotEqual(
-                self.grade("the worktree is left exactly as committed", repo, env).returncode, 0)
+        repo, _, env = self.good_run()
+        (Path(env["PRE_WT"]) / "README.md").write_text("edited\n", encoding="utf-8")
+        self.assertNotEqual(
+            self.grade("the worktree is left exactly as committed", repo, env).returncode, 0)
 
     def test_a_committed_revert_fails(self):
         """A clean tree and a tinytask commit are not enough: HEAD must still be the setup tip."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, wgit, env = self.good_run(Path(tmp).resolve())
-            subprocess.run(wgit + ["revert", "--no-edit", "HEAD"], check=True,
-                           capture_output=True, env={**os.environ, **QUIET_GIT})
-            for name in ("the branch still carries the implementation",
-                         "the worktree is left exactly as committed"):
-                with self.subTest(name=name):
-                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+        repo, wgit, env = self.good_run()
+        subprocess.run(wgit + ["revert", "--no-edit", "HEAD"], check=True,
+                       capture_output=True, env={**os.environ, **QUIET_GIT})
+        for name in ("the branch still carries the implementation",
+                     "the worktree is left exactly as committed"):
+            with self.subTest(name=name):
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
 
     def test_a_committed_edit_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, wgit, env = self.good_run(Path(tmp).resolve())
-            (Path(env["PRE_WT"]) / "README.md").write_text("edited\n", encoding="utf-8")
-            subprocess.run(wgit + ["commit", "-qam", "review edit"], check=True,
-                           env={**os.environ, **QUIET_GIT})
-            self.assertNotEqual(
-                self.grade("the branch still carries the implementation", repo, env).returncode, 0)
+        repo, wgit, env = self.good_run()
+        (Path(env["PRE_WT"]) / "README.md").write_text("edited\n", encoding="utf-8")
+        subprocess.run(wgit + ["commit", "-qam", "review edit"], check=True,
+                       env={**os.environ, **QUIET_GIT})
+        self.assertNotEqual(
+            self.grade("the branch still carries the implementation", repo, env).returncode, 0)
 
     def test_an_untracked_file_in_the_worktree_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve())
-            (Path(env["PRE_WT"]) / "NOTES.wip").write_text("scratch\n", encoding="utf-8")
-            self.assertNotEqual(
-                self.grade("the worktree is left exactly as committed", repo, env).returncode, 0)
+        repo, _, env = self.good_run()
+        (Path(env["PRE_WT"]) / "NOTES.wip").write_text("scratch\n", encoding="utf-8")
+        self.assertNotEqual(
+            self.grade("the worktree is left exactly as committed", repo, env).returncode, 0)
 
     def test_a_moved_main_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve())
-            subprocess.run(self.IDENT + ["-C", str(repo), "commit", "-q", "--allow-empty",
-                                         "-m", "moved"], check=True,
-                           env={**os.environ, **QUIET_GIT})
-            self.assertNotEqual(
-                self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+        repo, _, env = self.good_run()
+        subprocess.run(self.IDENT + ["-C", str(repo), "commit", "-q", "--allow-empty",
+                                     "-m", "moved"], check=True,
+                       env={**os.environ, **QUIET_GIT})
+        self.assertNotEqual(
+            self.grade("local and origin main are unchanged", repo, env).returncode, 0)
 
     def test_an_edit_in_the_base_checkout_fails(self):
         """A review is read-only: an uncommitted edit or a new file in $REPO breaks it
         although main, origin and the review worktree are all untouched."""
         name = "local and origin main are unchanged"
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve())
-            self.assertEqual(self.grade(name, repo, env).returncode, 0)
-            readme = repo / "README.md"
-            readme.write_text(readme.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
-            done = self.grade(name, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("README.md", done.stdout)
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve())
-            (repo / "REVIEW-NOTES.md").write_text("findings\n", encoding="utf-8")
-            done = self.grade(name, repo, env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("REVIEW-NOTES.md", done.stdout)
+        repo, _, env = self.good_run()
+        self.assertEqual(self.grade(name, repo, env).returncode, 0)
+        readme = repo / "README.md"
+        readme.write_text(readme.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+        done = self.grade(name, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("README.md", done.stdout)
+        repo, _, env = self.good_run()
+        (repo / "REVIEW-NOTES.md").write_text("findings\n", encoding="utf-8")
+        done = self.grade(name, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("REVIEW-NOTES.md", done.stdout)
 
     def test_a_moved_origin_main_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve())
-            git = self.IDENT + ["-C", str(repo)]
-            quiet = {**os.environ, **QUIET_GIT}
-            moved = subprocess.run(git + ["commit-tree", "main^{tree}", "-p", "main", "-m", "moved"],
-                                   capture_output=True, text=True, check=True, env=quiet).stdout.strip()
-            subprocess.run(git + ["push", "-q", "origin", f"{moved}:refs/heads/main"], check=True,
-                           env=quiet)
-            self.assertNotEqual(
-                self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+        repo, _, env = self.good_run()
+        git = self.IDENT + ["-C", str(repo)]
+        quiet = {**os.environ, **QUIET_GIT}
+        moved = subprocess.run(git + ["commit-tree", "main^{tree}", "-p", "main", "-m", "moved"],
+                               capture_output=True, text=True, check=True, env=quiet).stdout.strip()
+        subprocess.run(git + ["push", "-q", "origin", f"{moved}:refs/heads/main"], check=True,
+                       env=quiet)
+        self.assertNotEqual(
+            self.grade("local and origin main are unchanged", repo, env).returncode, 0)
 
     def test_an_output_missing_one_severity_section_fails(self):
         name = "the run prints the Critical, Important and Minor sections"
         for missing in ("Critical", "Important", "Minor"):
-            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(missing=missing):
                 out = "".join(f"{word}\n- none\n" for word in ("Critical", "Important", "Minor")
                               if word != missing)
-                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+                repo, _, env = self.good_run(out=out)
                 self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
 
     def test_a_review_declared_unperformed_fails_the_sections_check(self):
@@ -1665,17 +1663,16 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
                     "sections\n",
                     "Critical, Important and Minor: not run, the native route was unsupported.\n",
                     "Critical\n- none\nImportant\n- none\nMinor\n- none\n"):
-            with self.subTest(out=out), tempfile.TemporaryDirectory() as tmp:
-                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+            with self.subTest(out=out):
+                repo, _, env = self.good_run(out=out)
                 self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
 
     def test_markdown_section_headings_pass(self):
         name = "the run prints the Critical, Important and Minor sections"
         out = ("## Critical\n- none\n**Important**\n- tinytask/cli.py:23 help text\n"
                "### Minor:\n- none\n")
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
-            self.assertEqual(self.grade(name, repo, env).returncode, 0)
+        repo, _, env = self.good_run(out=out)
+        self.assertEqual(self.grade(name, repo, env).returncode, 0)
 
     def test_the_native_rubric_headings_pass(self):
         """The native reviewer prompt's own headings carry a parenthetical."""
@@ -1684,16 +1681,15 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
                     "### Minor\n- tinytask/cli.py:23 help text\n",
                     "**Critical (Must Fix)**\n- none\n**Important (Should Fix):**\n- none\n"
                     "**Minor**\n- README wording\n"):
-            with self.subTest(out=out), tempfile.TemporaryDirectory() as tmp:
-                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+            with self.subTest(out=out):
+                repo, _, env = self.good_run(out=out)
                 self.assertEqual(self.grade(name, repo, env).returncode, 0)
 
     def test_an_output_without_the_route_or_sections_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, _, env = self.good_run(Path(tmp).resolve(), out="Looks good to me.\n")
-            for name in self.NAMES[4:]:
-                with self.subTest(name=name):
-                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+        repo, _, env = self.good_run(out="Looks good to me.\n")
+        for name in self.NAMES[4:]:
+            with self.subTest(name=name):
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
 
 
 if __name__ == "__main__":

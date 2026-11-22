@@ -30,11 +30,13 @@ from .test_adopt_conformance import (
     locked_lock_text,
     write_devenv,
 )
+from .test_adopt_apply import BOOTSTRAP, ENTRY_AGENTS
 from .test_adopt_project import (
     MANIFEST,
     AdoptTestCase,
     _resolver_in_process,
     bootstrap_repo,
+    commit,
     git,
     sha256_hash,
     write,
@@ -136,6 +138,19 @@ class SchemaThreeDraftPlanTest(AdoptTestCase):
             {**json.loads(json.dumps(self.draft, sort_keys=True)),
              "projections": [adopt_conformance.PROJECTION_ENTRY]})
         self.assertEqual(write_op["after"], sha256_hash(written))
+
+    def test_a_schema_three_draft_resolves_with_the_converted_bootstrap_source(self):
+        root = self.schema_three_repo()
+        write(root, "AGENTS.md", ENTRY_AGENTS)
+        commit(root, "hand-write the entry file")
+        code, doc, err = self.plan(root, "--contract-draft", self.draft_file())
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+        self.assertEqual(
+            {entry["path"]: entry["action"] for entry in doc["evidence"]}["AGENTS.md"],
+            "convert-to-source")
+        self.assertEqual([op["before"] for op in doc["changes"]
+                          if op["op"] == "write-file" and op["targets"] == [BOOTSTRAP]], [None])
 
     def test_a_schema_three_draft_without_a_protection_file_is_refused_not_derivable(self):
         root = self.schema_three_repo(protection=False)

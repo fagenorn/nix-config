@@ -17,24 +17,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import shlex
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
-from agent_tools.project_contract import (adopt_links, adopt_references, agent_platform,
-                                          schema_three)
+from agent_tools.project_contract import (adopt_entries, adopt_links, adopt_references,
+                                          agent_platform, schema_three)
+from agent_tools.project_contract.adopt_entries import NO_CONVERSION, EntryConversion
 from agent_tools.project_contract.adopt_conformance import (
     ConformancePlan,
     NOT_PLANNED,
     PROJECTION_ENTRY,
 )
+from agent_tools.delivery import hint_phases
 from agent_tools.system import semver
 from agent_tools.project_contract.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
     ARCHIVE_ADOPTED_DIR,
     AdoptError,
+    BOOTSTRAP_SOURCE,
     CANDIDATE_BASIS,
     CONTRACT_FILENAME,
     Candidates,
@@ -62,6 +66,7 @@ from agent_tools.project_contract.adopt_inspection import (
     git_or_fail,
     is_evidence_record_path,
     is_secret_path,
+    matches_group,
     object_hash,
     plan_state_is_terminal,
     question_impact,
@@ -556,7 +561,8 @@ def commit_environment_amendment(contract_source: dict | None,
 
 def amended_contract(source: dict, interval: dict, found: Candidates,
                      environment: tuple[str, list[str]] | None = None,
-                     conformance: bool = False) -> dict:
+                     conformance: bool = False,
+                     entries: EntryConversion = NO_CONVERSION) -> dict:
     """The contract this adoption would write: `platform` plus moved bindings.
 
     Nothing else is touched. The amendment is confined to the one member the
@@ -565,9 +571,14 @@ def amended_contract(source: dict, interval: dict, found: Candidates,
     environment binding with the command it names (an authored command of that
     id is kept as it is) and, when `conformance` is true, the conformance
     workflow's projection entry (unless a `conformance_workflow` entry
-    exists), so a contract cannot acquire policy it did not author.
+    exists) and, when `entries` converts a file, the two entry projections no
+    declared row names, so a contract cannot acquire policy it did not author.
     """
     amended = json.loads(json.dumps(source))
+    if entries.paths:
+        projections = amended.setdefault("projections", [])
+        if isinstance(projections, list):
+            projections.extend(adopt_entries.missing_entry_projections(projections))
     if conformance:
         projections = amended.setdefault("projections", [])
         if isinstance(projections, list) and not any(
@@ -603,19 +614,48 @@ def amended_contract(source: dict, interval: dict, found: Candidates,
         paths["rejections"] = [relocations.get(value, value)
                                if isinstance(value, str) else value
                                for value in rejections]
+    hints = paths.get("hints")
+    if isinstance(hints, list):
+        paths["hints"] = [relocated_binding(value, relocations)
+                          if isinstance(value, str) else value
+                          for value in hints]
     return amended
+
+
+def relocated_binding(value: str, relocations: dict[str, str]) -> str:
+    """`value` under the longest relocated group it names or sits inside, however
+    it is spelled (`./.claude/hints` names `.claude/hints`)."""
+    normal = posixpath.normpath(value)
+    for group in sorted(relocations, key=lambda name: (-len(name), name)):
+        if normal == group or normal.startswith(group + "/"):
+            return relocations[group] + normal[len(group):]
+    return value
+
+
+HINT_WITHOUT_READER = "hint-without-reader"
+
+
+def open_items(found: Candidates) -> list[dict]:
+    """The moved hints no delivery phase reads, as open items (never a gate)."""
+    return [{"id": HINT_WITHOUT_READER, "path": new}
+            for new in sorted(
+                new for old, new in found.moves
+                if matches_group(old, ".claude/hints", "prefix")
+                and new[len(hint_phases.HINT_DIR) + 1:]
+                not in hint_phases.HINT_FILES)]
 
 
 def final_contract(contract_source: dict | None, manifest: dict, found: Candidates,
                    environment: tuple[str, list[str]] | None, *,
-                   conformance: bool) -> dict | None:
+                   conformance: bool,
+                   entries: EntryConversion = NO_CONVERSION) -> dict | None:
     """The contract the plan writes, or None when it has none to amend: the one
     place `amended_contract` is called with the manifest's interval."""
     if contract_source is None:
         return None
     return amended_contract(
         contract_source, derived_interval(manifest["platform_version"]), found,
-        environment, conformance=conformance)
+        environment, conformance=conformance, entries=entries)
 
 
 def evidence_record_members(found: Candidates) -> list[tuple[str, str]]:
@@ -654,14 +694,15 @@ def reference_excluded(contract_source: dict | None) -> set[str]:
              *LEGACY_BINDING_CONFIGS} | generated_targets(contract_source))
 
 
-def check_markdown_writes(changes: list[dict],
-                          link_targets: set[str]) -> None:
+def check_markdown_writes(changes: list[dict], link_targets: set[str],
+                          deleted_entries: frozenset[str] = frozenset()) -> None:
     """Refuse an operation list whose Markdown handling is not the link
     rewrite's alone (D7).
 
     The `write-file` operations that target a Markdown path must be exactly
-    the link rewrites, one per target, and no `delete-file` may name a
-    Markdown path: a plan that rewrites a file's links and deletes it, or
+    `link_targets` (the link rewrites and the entry conversion's writes), one
+    per target, and no `delete-file` may name a Markdown path other than
+    `deleted_entries`: a plan that rewrites a file's links and deletes it, or
     writes it twice, would disagree with itself. This is a derivation bug,
     never a repository condition, so it raises rather than gating."""
     written = [op["targets"][0] for op in changes
@@ -674,7 +715,8 @@ def check_markdown_writes(changes: list[dict],
             f"{sorted(written)!r} against {sorted(link_targets)!r}")
     deleted = [path for op in changes if op["op"] == "delete-file"
                for path in op["sources"]
-               if adopt_links.is_markdown_path(path)]
+               if adopt_links.is_markdown_path(path)
+               and path not in deleted_entries]
     if deleted:
         raise ValueError(
             f"a delete-file operation names Markdown: {sorted(deleted)!r}")
@@ -725,7 +767,9 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                      reference_files: dict[str, tuple[str, str]],
                      drafted: bool = False,
                      environment: tuple[str, list[str]] | None = None,
-                     conformance: ConformancePlan = NOT_PLANNED
+                     conformance: ConformancePlan = NOT_PLANNED,
+                     entries: EntryConversion = NO_CONVERSION,
+                     entry_source: bytes | None = None
                      ) -> tuple[list[dict], list[dict], dict[str, bytes]]:
     """The typed operations either side of the adoption's own bookkeeping.
 
@@ -737,7 +781,9 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     sentinel and the `.gitignore` amendment, then the deletion of any
     superseded evidence record and the two records, then the living-reference
     rewrite, the Markdown link rewrites sorted by target, the path-reference
-    writes sorted by target, and finally the projection regenerations.
+    writes sorted by target, the bootstrap-source write when its bytes change,
+    the `CLAUDE.md` write and the nested entry-file deletions sorted by path,
+    and finally the projection regenerations.
     `reference_files` maps the path, after the moves, of each non-Markdown
     file an answered path reference edits onto its `(before, after)` texts,
     `before` being the text at the base revision; it is what
@@ -753,14 +799,18 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     adds (`commit_environment_amendment`); a drafted contract takes none.
     `conformance` is the plan's conformance work: its projection entry is part
     of the contract written, and one `write-file` per remaining `contents`
-    target follows the `.gitignore` amendment, sorted by target.
+    target follows the `.gitignore` amendment, sorted by target. `entries` and
+    `entry_source` are the entry-file conversion and the source's final bytes
+    (None when they do not change): the source's one write replaces its link
+    write, and the contract written holds both entry projections.
     """
     operations: list[dict] = []
     contents: dict[str, bytes] = {}
 
     amended = final_contract(
         contract_source, manifest, found, environment,
-        conformance=conformance.member is not None and conformance.projection)
+        conformance=conformance.member is not None and conformance.projection,
+        entries=entries)
     # Compared as values, never as bytes: `contract_source` is the file this
     # parsed, so a contract the amendment leaves unchanged is no work however
     # it happens to be formatted, and only a real change is re-serialized.
@@ -822,7 +872,8 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     # One `write-file` per Markdown file whose relative links the moves
     # change, at the path the file has after them: a moved file is written
     # where `git-mv` left it, a retained one where it already is.
-    for target in sorted(links.files):
+    held = {BOOTSTRAP_SOURCE} if entries.paths else set()
+    for target in sorted(set(links.files) - held):
         rewrite = links.files[target]
         before = rewrite.before.encode("utf-8")
         after = rewrite.after.encode("utf-8")
@@ -840,6 +891,26 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
         tail.append(operation("write-file", [target], [target],
                               sha256_hash(before), sha256_hash(after)))
         contents[target] = after
+
+    if entries.paths:
+        if entry_source is not None:
+            previous = entries.before.get(BOOTSTRAP_SOURCE)
+            tail.append(operation(
+                "write-file", [BOOTSTRAP_SOURCE], [BOOTSTRAP_SOURCE],
+                None if previous is None else sha256_hash(previous),
+                sha256_hash(entry_source)))
+            contents[BOOTSTRAP_SOURCE] = entry_source
+        if "CLAUDE.md" in entries.paths:
+            managed = (agent_platform.MANAGED_IMPORT_TEMPLATE.format(
+                source=BOOTSTRAP_SOURCE) + "\n").encode("utf-8")
+            tail.append(operation(
+                "write-file", ["CLAUDE.md"], ["CLAUDE.md"],
+                sha256_hash(entries.before["CLAUDE.md"]), sha256_hash(managed)))
+            contents["CLAUDE.md"] = managed
+        for path in sorted(entries.nested):
+            tail.append(operation(
+                "delete-file", [path], [],
+                object_hash(object_ids[path]), None))
 
     projections = (amended or {}).get("projections")
     if isinstance(projections, list):

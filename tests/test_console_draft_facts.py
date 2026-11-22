@@ -40,7 +40,7 @@ class DraftFactsTest(unittest.TestCase):
                          {f: True for f in contract_draft.FACTS})
         self.assertEqual(registration["draft_more"], "and 2 more settings at their usual values")
 
-    def test_a_fact_draws_beside_an_editable_field_with_no_control(self) -> None:
+    def test_a_fact_entry_draws_no_change_control(self) -> None:
         editable = {"field": "integration-branch", "line": "integration branch: trunk (read from its remote)",
                     "value": "trunk", "options": [], "text": True, "more": False, "fact": False,
                     "placeholder": "a branch name"}
