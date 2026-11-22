@@ -13324,8 +13324,10 @@ class LookCarryLandingTest(unittest.TestCase):
     PICS = [{"kind": "before", "path": "/r/pics/before.png"}, {"kind": "after", "path": "/r/pics/after.png"}]
     NEEDED = dict(LookResumeTest.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None},
                                            "look-checks-1": {"state": "passed", "head": D, "behind": False, "required": ["ci"], "passed": ["ci"]}})
-    CARRIED = {"verdict": "carried", "from": SHA, "reason": None, "comment_id": 501}
+    CARRIED = {"verdict": "carried", "from": SHA, "reason": None, "rule": "pictures", "comment_id": 501}
+    FILES_CARRIED = dict(CARRIED, rule="look-files")
     OK = [{"id": "build", "status": "pass", "summary": "ok"}]
+    BARE = {"head": D, "clean": True, "merge_only": True, "results": OK}
 
     def approve(self, patch=None, replies=None, cont=None):
         if cont is None:
@@ -13358,6 +13360,37 @@ class LookCarryLandingTest(unittest.TestCase):
         self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
         for call in calls:
             self.assertNotIn("look-approval post", call["prompt"])
+
+    def test_a_head_with_no_pictures_carries_by_the_look_file_rule(self):
+        result, calls = self.approve(replies={"look-carry-verify": self.BARE, "look-carry": self.FILES_CARRIED})
+        self.assertEqual(result["stage"], "done", labels(calls))
+        carry = prompt(calls, "look-carry")
+        self.assertIn("look-approval carry --repo owner/repo --issue 9 --pr 42 --from " + SHA + " --head " + D + "\n", carry)
+        for flag in (" --before ", " --after ", " --picture "):
+            self.assertNotIn(flag, carry)
+        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
+        for call in calls:
+            self.assertNotIn("look-approval post", call["prompt"])
+
+    def test_a_changed_look_file_diff_stops_for_a_new_look(self):
+        needed = {"verdict": "needed", "from": SHA, "reason": "look-files-differ", "rule": "look-files", "comment_id": None}
+        result, calls = self.approve(replies={"look-carry-verify": self.BARE, "look-carry": needed})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertEqual(result["reason"], "the approval of " + SHA + " does not carry to " + D + ": look-files-differ; " + AWAIT_REASON)
+        self.assertLess(got.index("look-carry"), got.index("look-checks-1"))
+        self.assertNotIn("merge", got)
+        self.assertIn("land-unlock", got)
+
+    def test_a_carried_reply_must_name_its_rule(self):
+        cases = (("no rule", {}, {k: v for k, v in self.CARRIED.items() if k != "rule"}),
+                 ("another rule", {}, dict(self.CARRIED, rule="other")),
+                 ("pictures rule with no pictures", {"look-carry-verify": self.BARE}, dict(self.CARRIED, rule="pictures")))
+        for name, extra, reply in cases:
+            with self.subTest(case=name):
+                result, calls = self.approve(replies=dict(extra, **{"look-carry": reply}))
+                self.stops_unasked(result, calls)
 
     def test_a_changed_picture_stops_for_a_new_look(self):
         result, calls = self.approve()
@@ -13424,9 +13457,12 @@ class LookCarryLandingTest(unittest.TestCase):
 
     def test_an_unusable_carry_reply_stops_without_asking(self):
         replies = (({"verdict": "moved"}), ({"verdict": "error", "detail": "x"}), None, ({"verdict": "carried"}),
-                   {"verdict": "carried", "from": SHA, "comment_id": None}, {"verdict": "carried", "from": None, "comment_id": 501},
-                   {"verdict": "carried", "from": SHA[:7], "comment_id": 501}, {"verdict": "carried", "from": F, "comment_id": 501},
-                   {"verdict": "carried", "from": SHA, "comment_id": 0}, {"verdict": "needed"}, {"verdict": "needed", "reason": "whatever"})
+                   {"verdict": "carried", "from": SHA, "rule": "pictures", "comment_id": None},
+                   {"verdict": "carried", "from": None, "rule": "pictures", "comment_id": 501},
+                   {"verdict": "carried", "from": SHA[:7], "rule": "pictures", "comment_id": 501},
+                   {"verdict": "carried", "from": F, "rule": "pictures", "comment_id": 501},
+                   {"verdict": "carried", "from": SHA, "rule": "pictures", "comment_id": 0}, {"verdict": "needed"},
+                   {"verdict": "needed", "reason": "whatever"}, {"verdict": "needed", "reason": "no-pictures"})
         for reply in replies:
             with self.subTest(reply=reply):
                 result, calls = self.approve(replies={"look-carry": reply})

@@ -66,7 +66,7 @@ export const meta = {
 // check passed and every required name passing. The look path syncs and pushes on a behind answer (twice at most, then sync-contention), spends the one red-check fix on a failed one (fix-ci, fix-ci-review, look-push, so a second
 // red poll stops at checks), and verifies a moved head again (look-reverify) and waits on the forge once more before the stop; a re-ask only waits. An approve of the unmoved approved head reuses the pull request and pushes nothing.
 // A read with neither verdict stops at stage look after verify (in ship and ready mode alike), and ready mode reports look: {verdict, covers}.
-// #1566: a landing resync that brings a marked delivery's head past the owner's approved head asks look-approval status first; when that says needed it verifies the new head (look-carry-verify: only clean merges of the integration branch past the owner's head, the declared verification, the pictures) and asks look-approval carry (look-carry) to record a carry line for it. A usable carried lands the new head under the owner's approval; anything else shows the owner the new head with its pictures (awaiting-look) or stops at look-carry, never merging. The program never posts an approval.
+// #1566: a landing resync that brings a marked delivery's head past the owner's approved head asks look-approval status first; when that says needed it verifies the new head (look-carry-verify: only clean merges of the integration branch past the owner's head, the declared verification, the pictures) and asks look-approval carry (look-carry) to record a carry line for it. A usable carried lands the new head under the owner's approval; anything else shows the owner the new head with its pictures (awaiting-look) or stops at look-carry, never merging. The program never posts an approval. #1597: when the verification wrote no pictures, the carry is asked with none and judged by the unchanged look-file diff, and the carry line names the rule it was carried by (pictures or look-files).
 // A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place as the plan numbered it (cont.look_acs), never by the plan's wording), so no owner check is posted for it (#1356). A landing that leaves a criterion out first makes a read-only look-stale call: when a hold posted earlier still checks that criterion on a split child, or on the issue with nothing else left to hold, it stops at hold with look_checks, and a reply it cannot read stops at hold too; a check on the issue with another criterion still open is removed in place by the hold. A replay after the PR merged stops at look when the setup's look read failed, and always reads the merged head: the approval is always read again with look-approval status for the merged PR and head, never taken from a cont (which may hold another PR's), and anything but approved holds the look criterion and ticks nothing; the landing commit is resolved first (a PR merged indirectly has none on the pull) and both status and tick name it with --merge-commit. The look-stale read must say complete, and a hold of this issue with recorded results is never rewritten (its block version would change); a split child's returned fence naming an answered criterion stops the landing.
 //
 // FOLDS (#801): consecutive clerk steps with no program decision between them share one call. Folded: the lock release into the hold call,
@@ -3161,9 +3161,11 @@ ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK
 }
 // #1566: a landing resync that moved a marked head past the owner's approved head. LOOK_CARRY_VERIFY adds merge_only to the verification reply; the carry command's JSON line is LOOK_CARRY_SCHEMA.
 const LOOK_CARRY_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only'] }
-const LOOK_CARRY_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, from: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] }, comment_id: { type: ['integer', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
+const LOOK_CARRY_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, from: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] }, rule: { type: ['string', 'null'] }, comment_id: { type: ['integer', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // The reasons look-approval carry gives for a needed answer; any other reason is an unreadable reply.
-const CARRY_REASONS = ['no-approval', 'source-differs', 'no-pictures', 'pictures-differ', 'not-merges']
+const CARRY_REASONS = ['no-approval', 'source-differs', 'pictures-unreadable', 'pictures-missing', 'pictures-differ', 'not-merges', 'no-look-files', 'look-files-differ']
+// The rules a carried reply may name; with no picture passed it must be look-files.
+const CARRY_RULES = ['pictures', 'look-files']
 // A picture path the carry command is given: absolute and on one line; shq quotes it, so a space or a shell character is fine.
 const USABLE_PICTURE = /^\/[^\0\r\n]+$/
 // A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry line). The verification of H always runs, so every later stop shows H's verified record and pictures.
@@ -3182,13 +3184,13 @@ The owner approved head ${S} of PR #${PR}; the landing brought it to ${H}. Run o
     return lookWaitStop(PR, H)
   }
   const pics = picturesOf(lv)
-  if (!pics.length || pics.some(x => !USABLE_PICTURE.test(x.path))) {
+  if (pics.some(x => !USABLE_PICTURE.test(x.path))) {
     lookWhy = `the approval of ${S} does not carry to ${H}: the verification wrote no pictures it can compare`
     return lookWaitStop(PR, H)
   }
   const reply = await call(`${CTX}
 Record whether the owner's look approval of issue #${ISSUE} of ${SLUG} carries from ${S} to the head ${H} of PR #${PR}. Run alone and exactly: look-approval carry --repo ${SLUG} --issue ${ISSUE} --pr ${PR} --from ${S} --head ${H}${pics.map(x => ` --${x.kind} ${shq(x.path)}`).join('')}
-It prints one JSON line. Return its verdict, from, reason, comment_id and any detail. Run nothing else.
+It prints one JSON line. Return its verdict, from, reason, rule, comment_id and any detail. Run nothing else.
 ${RULES}`, { label: 'look-carry', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_SCHEMA })
   // approved: the owner approved exactly H between the status read and this call, so H lands under that approval and is the owner's head from now on.
   if (isEntry(reply) && reply.verdict === 'approved') {
@@ -3196,8 +3198,8 @@ ${RULES}`, { label: 'look-carry', phase: 'Ship', agentType: 'clerk', model: CLER
     ownerHead = H
     return null
   }
-  if (isEntry(reply) && reply.verdict === 'carried' && typeof reply.from === 'string' && SHA_RE.test(reply.from) && sameSha(reply.from, S) && Number.isInteger(reply.comment_id) && reply.comment_id > 0) {
-    log(`look-carry: the approval of ${S} carried to ${H} (comment ${reply.comment_id})`)
+  if (isEntry(reply) && reply.verdict === 'carried' && typeof reply.from === 'string' && SHA_RE.test(reply.from) && sameSha(reply.from, S) && Number.isInteger(reply.comment_id) && reply.comment_id > 0 && CARRY_RULES.includes(reply.rule) && (pics.length > 0 || reply.rule === 'look-files')) {
+    log(`look-carry: the approval of ${S} carried to ${H} by the ${reply.rule} rule (comment ${reply.comment_id})`)
     return null
   }
   if (isEntry(reply) && reply.verdict === 'needed' && CARRY_REASONS.includes(reply.reason)) {
