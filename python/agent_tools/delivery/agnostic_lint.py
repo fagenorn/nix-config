@@ -1,8 +1,8 @@
 """Refuse hosting-project specifics in the installed global agent corpus (#572).
 
-Inside the global standards directory only, a link to an issue on this repository's own tracker in
-exactly the form `https://github.com/fagenorn/nix-config/issues/<n>` is accepted (#1438); every other
-mention of the repository stays refused.
+Inside the global standards directory only, the exact literal
+`](https://github.com/fagenorn/nix-config/issues/<n>)` is accepted (#1438); every other mention of the
+repository, in whatever Markdown form, stays refused.
 """
 
 from __future__ import annotations
@@ -27,12 +27,9 @@ HOSTING_LITERALS = ("fagenorn/nix-config", "nix-config", "origin/main", "--base 
                     "home/common/", "python/agent_tools/", "anis-desktop")
 # A link to an issue on the hosting tracker is accepted in the global standards only (#1438).
 TRACKER_LINK_ROOT = "home/common/agent-skills/standards"
-URL_SPAN = re.compile(r"""https?://[^\s()<>\[\]"'`]+""")
-# An angle-bracket destination opens after `](`, after `]:` (a reference definition) or at a line start
-# (a definition's destination may sit on the line after its label).
-ANGLE_DESTINATION = re.compile(r"(?:\]\([ \t]*|\]:[ \t]*|^[ \t]*)<(?P<url>[^<>\n]*)>")
-AUTOLINK = re.compile(r"<(?P<url>https?://[^\s<>]*)>")
-TRACKER_ISSUE_LINK = re.compile(r"https://github\.com/fagenorn/nix-config/issues/[1-9][0-9]*")
+# The one accepted form is this exact literal: `](https://github.com/fagenorn/nix-config/issues/N)` and
+# nothing else. Every other mention of the repository, in any Markdown form, stays refused.
+TRACKER_ISSUE_LINK = re.compile(r"\]\(https://github\.com/fagenorn/nix-config/issues/[1-9][0-9]*\)")
 # Every exemption is one (file, token) pair with its reason; evals and LICENSE files are skipped by name.
 AGNOSTIC_ALLOW = {
     # retro audits the global environment and legitimately names nix-config as its generator.
@@ -42,55 +39,9 @@ AGNOSTIC_ALLOW = {
 }
 
 
-def opens_token(line: str, start: int) -> bool:
-    """Whether a token at `start` begins on its own: at the line start, after whitespace or after `(`/`[`.
-
-    A run of `(`/`[` is looked through, but a run that follows anything but whitespace is inside a
-    longer destination, bar the single `(` that opens a link destination straight after `]`.
-    """
-    first = start
-    while first and line[first - 1] in "([":
-        first -= 1
-    before = line[first - 1:first]
-    return not before or before.isspace() or (line[first:start] == "(" and before == "]")
-
-
 def without_tracker_links(line: str) -> str:
-    """The line with each tracker issue link blanked out, the whole destination being that link.
-
-    A link destination is read as CommonMark reads it: `](<...>)` and `<...>` hold everything up to
-    the closing `>`, so each is blanked only when that is exactly the issue link, and a URL inside
-    one that is not stays, whatever surrounds it; an autolink `<...>` that does not open a token
-    (`opens_token`) is part of a longer destination and stays. Any other URL
-    is a bare destination or prose: it is blanked (bar trailing punctuation) when it opens a token
-    and is followed by whitespace, `)` or the end of the line. Anything else continues the
-    destination, and the span stays.
-    """
-    def exact(match):
-        return " " * len(match.group(0)) if TRACKER_ISSUE_LINK.fullmatch(match.group("url")) else match.group(0)
-
-    def angle(match):
-        if TRACKER_ISSUE_LINK.fullmatch(match.group("url")):
-            return " " * len(match.group(0))
-        kept.append(match.span("url"))
-        return match.group(0)
-
-    def autolink(match):
-        return exact(match) if opens_token(match.string, match.start()) else match.group(0)
-
-    def blank(match):
-        span = match.group(0)
-        url = span.rstrip(".,;:!?")
-        after = match.string[match.end():match.end() + 1]
-        if any(a <= match.start() < b for a, b in kept):
-            return span
-        if not opens_token(match.string, match.start()) or (after and not (after.isspace() or after == ")")):
-            return span
-        return " " + span[len(url):] if TRACKER_ISSUE_LINK.fullmatch(url) else span
-    kept: list[tuple[int, int]] = []
-    line = ANGLE_DESTINATION.sub(angle, line)
-    line = AUTOLINK.sub(autolink, line)
-    return URL_SPAN.sub(blank, line)
+    """The line with each exact tracker issue link literal blanked out; every other character stays."""
+    return TRACKER_ISSUE_LINK.sub(lambda match: " " * len(match.group(0)), line)
 
 
 def hosting_tokens(snapshot):

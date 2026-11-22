@@ -136,14 +136,24 @@ class AgnosticTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertTrue(self.hits({self.STANDARD: f"{line}\n".encode()}))
 
-    def test_an_exact_tracker_link_is_accepted_in_every_form(self):
-        for line in (f"[x]({self.ISSUE}/1417)", f"[x](<{self.ISSUE}/1417>)", f"<{self.ISSUE}/1417>",
-                     f"see {self.ISSUE}/1417.", f"([x]({self.ISSUE}/1417 \"t\"))", f"({self.ISSUE}/1417)"):
+    def test_only_the_exact_tracker_link_literal_is_accepted(self):
+        for line in (f"[x]({self.ISSUE}/1417)", f"([x]({self.ISSUE}/1417))",
+                     f"a [x]({self.ISSUE}/1)[y]({self.ISSUE}/2) b"):
             with self.subTest(line=line):
                 self.assertEqual(self.hits({self.STANDARD: f"{line}\n".encode()}), [])
 
+    def test_every_other_form_is_refused_including_backslash_escapes(self):
+        for line in (f"[x](<{self.ISSUE}/1417>)", f"<{self.ISSUE}/1417>", f"see {self.ISSUE}/1417.",
+                     f"[x]({self.ISSUE}/1417 \"t\")", f"({self.ISSUE}/1417)", f"{self.ISSUE}/1417",
+                     f"[a]: {self.ISSUE}/1417", f"[a]: <{self.ISSUE}/1417>",
+                     f"[a](<x\\< {self.ISSUE}/1417 >)", f"[a](<x\\> {self.ISSUE}/1417 )>)",
+                     f"[a](<x\\> ({self.ISSUE}/1417)>)", f"[a]: <x\\< {self.ISSUE}/1417 >",
+                     f"[a]: <x\\> {self.ISSUE}/1417 >", f"[a](<x\\> {self.ISSUE}/1417)>)"):
+            with self.subTest(line=line):
+                self.assertTrue(self.hits({self.STANDARD: f"{line}\n".encode()}))
+
     def test_a_bare_mention_beside_an_accepted_link_is_still_refused(self):
-        extra = {self.STANDARD: f"see {self.ISSUE}/12 and nix-config\n".encode()}
+        extra = {self.STANDARD: f"[x]({self.ISSUE}/12) and nix-config\n".encode()}
         self.assertEqual(self.hits(extra), [f"{self.STANDARD}:1:nix-config"])
 
 
