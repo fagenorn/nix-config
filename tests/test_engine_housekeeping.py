@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_housekeeping, engine_ledger, engine_shell
+from agent_tools.delivery import engine, engine_housekeeping, engine_ledger, engine_shell
 from agent_tools.delivery.engine_housekeeping import (
     IssueUnreadable, TrackerError, _update_cursor, append_history, default_tracker,
     forge_tracker, history_line, housekeep, prune_history, sweep_runs,
@@ -154,6 +154,11 @@ def example_line(run: str, ended: datetime) -> dict:
     return {"format": 1, "run": run, "ended": ended.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
+def complete_line(run: str, ended: datetime) -> dict:
+    return {"format": 1, "run": run, "project": PROJECT, "issue": 1, "end": "done", "need": None,
+            "ended": ended.strftime("%Y-%m-%dT%H:%M:%SZ"), "steps": []}
+
+
 def compact(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
@@ -239,6 +244,17 @@ class HistoryFileTest(unittest.TestCase):
                                                      now - timedelta(days=181))) + young)
         self.assertEqual(prune_history(now, path), 1)
         self.assertEqual(path.read_bytes(), deep + young)
+
+    def test_a_timestamp_outside_the_utc_range_is_kept_and_the_other_lines_are_pruned(self):
+        path = self.tmp / "history.jsonl"
+        now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+        odd = [compact({"run": "x", "ended": "0001-01-01T00:00:00+01:00"}),
+               compact({"run": "y", "ended": "9999-12-31T23:59:59-01:00"})]
+        young = compact(example_line("4-20260101T000000Z-aaaa", now - timedelta(days=10)))
+        path.write_bytes(odd[0] + compact(example_line("1-20260101T000000Z-aaaa",
+                                                       now - timedelta(days=181))) + odd[1] + young)
+        self.assertEqual(prune_history(now, path), 1)
+        self.assertEqual(path.read_bytes(), odd[0] + odd[1] + young)
 
     def test_a_prune_of_a_missing_file_creates_nothing(self):
         path = self.tmp / "absent/history.jsonl"
@@ -529,12 +545,41 @@ class SweepTest(unittest.TestCase):
 
     def test_a_run_of_another_tracker_or_of_none_is_kept_whatever_that_tracker_says(self):
         other = seed(self.root, 101, tracker="github:other/repo")
-        legacy = seed(self.root, 102, tracker=None)
         mine = seed(self.root, 103)
-        tracker = FakeTracker({101: ago(20), 102: ago(20), 103: ago(20)})
+        tracker = FakeTracker({101: ago(20), 103: ago(20)})
         self.assertEqual(self.sweep(tracker), [mine.name])
         self.assertEqual(tracker.asked, [103])
-        self.assertEqual(left(self.root), sorted([other.name, legacy.name]))
+        self.assertEqual(left(self.root), [other.name])
+
+    def test_a_run_made_before_runs_recorded_a_tracker_is_swept_when_the_project_id_names_the_repository(self):
+        legacy = seed(self.root, 102, tracker=None)
+        tracker = FakeTracker({102: ago(20)})
+        self.assertEqual(self.sweep(tracker), [legacy.name])
+        self.assertEqual(left(self.root), [])
+        foreign = seed(self.root, 104, project="team/app", tracker=None)
+        tracker = FakeTracker({104: ago(20)})
+        self.assertEqual(sweep_runs(self.root, project="team/app", tracker=tracker,
+                                    tracker_id=TRACKER, now=NOW, cursor=self.cursor,
+                                    history=self.tmp / "history.jsonl"), [])
+        self.assertEqual(tracker.asked, [])
+        self.assertEqual(left(self.root), [foreign.name])
+        host = seed(self.root, 105, tracker=None)
+        self.assertEqual(self.sweep(FakeTracker({105: ago(20)}), tracker_id="github:ghe.example/example/engine"), [])
+        self.assertEqual(left(self.root), sorted([foreign.name, host.name]))
+
+    def test_a_reader_holding_a_shared_run_lock_keeps_the_run(self):
+        run = seed(self.root, 101)
+        self.hold(run / "lock", fcntl.LOCK_SH)
+        self.assertEqual(self.sweep(FakeTracker({101: ago(20)})), [])
+        self.assertEqual(left(self.root), [run.name])
+
+    def test_a_run_that_ended_before_the_history_cutoff_is_not_recorded_again(self):
+        old, young = seed(self.root, 101), seed(self.root, 102)
+        self.finish(old, {"event": "run_done", "at": "2026-05-23T11:59:59Z"})   # 182 days
+        self.finish(young, {"event": "run_done", "at": "2026-05-25T12:00:00Z"})  # exactly 180
+        self.assertEqual(len(self.sweep(FakeTracker({101: ago(20), 102: ago(20)}))), 2)
+        self.assertEqual([line["run"] for line in self.history_runs()], [young.name])
+        self.assertEqual(left(self.root), [])
 
     def finish(self, run: Path, event: dict) -> None:
         engine_ledger.append_event(run, event)
@@ -564,10 +609,19 @@ class SweepTest(unittest.TestCase):
         run = seed(self.root, 101)
         self.finish(run, {"event": "run_done", "at": "2026-10-23T10:00:00Z"})
         (self.tmp / "history.jsonl").write_bytes(
-            b"[" * 100000 + b"\n" + compact({"run": run.name, "ended": "2026-10-23T10:00:01Z"}))
+            b"[" * 100000 + b"\n" + compact(complete_line(run.name, ago(20))))
         before = (self.tmp / "history.jsonl").read_bytes()
         self.assertEqual(self.sweep(FakeTracker({101: ago(20)})), [run.name])
         self.assertEqual((self.tmp / "history.jsonl").read_bytes(), before)
+
+    def test_a_partial_history_object_does_not_count_as_the_runs_line(self):
+        run = seed(self.root, 101)
+        self.finish(run, {"event": "run_done", "at": "2026-10-23T10:00:00Z"})
+        (self.tmp / "history.jsonl").write_bytes(
+            compact({"run": run.name, "ended": "2026-10-23T10:00:01Z"}))
+        self.assertEqual(self.sweep(FakeTracker({101: ago(20)})), [run.name])
+        complete = [line for line in self.history_runs() if "steps" in line]
+        self.assertEqual([line["run"] for line in complete], [run.name])
 
     def test_a_history_line_that_cannot_be_appended_keeps_the_run_and_writes_one_line(self):
         run, plain = seed(self.root, 101), seed(self.root, 102)
@@ -736,7 +790,8 @@ class ForgeTrackerTest(unittest.TestCase):
         with self.subTest("open"):
             result, patched = self.answer({**self.BASE, "state": "open"})
             self.assertIsNone(result)
-            patched.assert_called_once_with("repos/example/engine/issues/101", allow=(404, 410))
+            patched.assert_called_once_with("repos/example/engine/issues/101", allow=(404, 410),
+                                            cli="gh")
         with self.subTest("closed"):
             result, _ = self.answer({**self.BASE, **closed})
             self.assertEqual(result, datetime(2026, 11, 1, tzinfo=timezone.utc))
@@ -763,6 +818,33 @@ class ForgeTrackerTest(unittest.TestCase):
                     self.assertRaises(TrackerError):
                 forge_tracker(PROJECT)(101)
 
+    def test_an_answer_from_another_host_is_unreadable_whatever_its_slug_and_number(self):
+        closed = {**self.BASE, "state": "closed", "closed_at": "2026-11-01T00:00:00Z"}
+        enterprise = {**closed, "repository_url": "https://ghe.example.com/api/v3/repos/example/engine"}
+        with self.subTest("github.com expected"), self.assertRaises(IssueUnreadable):
+            self.answer(enterprise)
+        with self.subTest("enterprise expected"):
+            with mock.patch("agent_tools.system.forge_api.api_get", return_value=enterprise):
+                self.assertEqual(forge_tracker(PROJECT, "gh", "ghe.example.com")(101),
+                                 datetime(2026, 11, 1, tzinfo=timezone.utc))
+            with mock.patch("agent_tools.system.forge_api.api_get", return_value=closed), \
+                    self.assertRaises(IssueUnreadable):
+                forge_tracker(PROJECT, "gh", "ghe.example.com")(101)
+        binding = {"kind": "github", "repo_slug": PROJECT}
+        with mock.patch.dict(os.environ, {"GH_HOST": "GHE.example.com"}):
+            self.assertEqual(engine_housekeeping.tracker_identity(binding),
+                             "github:ghe.example.com/example/engine")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GH_HOST", None)
+            self.assertEqual(engine_housekeeping.tracker_identity(binding), TRACKER)
+
+    def test_the_default_tracker_invokes_the_bindings_cli_not_gh(self):
+        done = mock.Mock(returncode=0, stdout=json.dumps({**self.BASE, "state": "open"}), stderr="")
+        with mock.patch("agent_tools.system.forge_api.subprocess.run", return_value=done) as run:
+            default_tracker({"kind": "github", "repo_slug": PROJECT, "cli": "gh-wrapper"})(101)
+        self.assertEqual(run.call_args.args[0],
+                         ["gh-wrapper", "api", "repos/example/engine/issues/101"])
+
     def test_a_tracker_kind_other_than_github_is_a_tracker_error(self):
         with mock.patch("agent_tools.system.forge_api.api_get") as patched:
             with self.assertRaises(TrackerError):
@@ -770,7 +852,7 @@ class ForgeTrackerTest(unittest.TestCase):
             patched.assert_not_called()
         with mock.patch("agent_tools.system.forge_api.api_get",
                         return_value={**self.BASE, "state": "open"}) as patched:
-            default_tracker({"kind": "github", "repo_slug": PROJECT})(101)
+            default_tracker({"kind": "github", "repo_slug": PROJECT, "cli": "gh"})(101)
         self.assertEqual(patched.call_args.args, ("repos/example/engine/issues/101",))
 
 
@@ -1207,6 +1289,35 @@ class DeliverHousekeepingTest(unittest.TestCase):
         self.assertEqual([run.name for run in run_of(project, 702)], [line["run"]])
         self.assertEqual(len(outcome["swept"]), 1)
 
+    def test_status_looks_again_when_a_sweep_renames_the_selected_run_away(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        first = deliver(project, 301, procedures, at=T0, tracker=FakeTracker({}))[1]["run"]
+        second = deliver(project, 301, procedures, at=T0, tracker=FakeTracker({}))[1]["run"]
+        original = engine_ledger.find_run
+        calls = []
+
+        def renaming(*args):
+            found = original(*args)
+            if not calls and found is not None:
+                calls.append(found)
+                os.rename(found, found.parent / f".{found.name}.expired")
+            return found
+
+        captured = io.StringIO()
+        with project.inside(), mock.patch.object(engine_ledger, "find_run", renaming), \
+                contextlib.redirect_stdout(captured):
+            code = engine.main(["status", "301"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(captured.getvalue())["run"], first)
+        self.assertEqual(calls[0].name, second)
+        for run in run_of(project, 301):
+            os.rename(run, run.parent / f".{run.name}.expired")
+        captured = io.StringIO()
+        with project.inside(), contextlib.redirect_stdout(captured):
+            self.assertEqual(engine.main(["status", "301"]), 1)
+        self.assertEqual(json.loads(captured.getvalue()), {"issue": 301, "run": None})
+
     def test_the_default_tracker_reads_the_forge_and_keeps_each_mismatch(self):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-json", "done")])
@@ -1217,7 +1328,7 @@ class DeliverHousekeepingTest(unittest.TestCase):
         home = "https://api.github.com/repos/example/engine"
         asked = []
 
-        def api_get(path, allow=()):
+        def api_get(path, allow=(), cli="gh"):
             asked.append(path)
             number = int(path.rsplit("/", 1)[1])
             payload = {"number": number, "repository_url": home, "state": "closed",

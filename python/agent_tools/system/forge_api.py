@@ -98,8 +98,8 @@ def _run_cancellable(command: list[str], timeout: float, env: dict[str, str],
 
 
 def run_gh(argv: list[str], allow: Iterable[int] = (),
-           cancelled: Callable[[], bool] | None = None) -> tuple[int, str]:
-    """Run `gh` without any token variable. Returns (0, stdout), or (status, stdout) when the
+           cancelled: Callable[[], bool] | None = None, cli: str = "gh") -> tuple[int, str]:
+    """Run `gh` (or the GitHub CLI wrapper `cli`) without any token variable. Returns (0, stdout), or (status, stdout) when the
     call failed with an HTTP status in `allow`; every other failure is a ForgeError. A true
     `cancelled()` ends the call at once with `ForgeError("cancelled")`."""
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
@@ -112,10 +112,10 @@ def run_gh(argv: list[str], allow: Iterable[int] = (),
         timeout = min(TIMEOUT, left)
     try:
         if cancelled is None:
-            done = subprocess.run(["gh", *argv], capture_output=True, text=True, timeout=timeout,
+            done = subprocess.run([cli, *argv], capture_output=True, text=True, timeout=timeout,
                                   stdin=subprocess.DEVNULL, env=env)
         else:
-            done = _run_cancellable(["gh", *argv], timeout, env, cancelled)
+            done = _run_cancellable([cli, *argv], timeout, env, cancelled)
     except subprocess.TimeoutExpired:
         raise ForgeError("gh_timeout", " ".join(argv)) from None
     except OSError as error:
@@ -139,9 +139,9 @@ def logged_in() -> bool:
 
 
 def gh_json(argv: list[str], allow: Iterable[int] = (),
-            cancelled: Callable[[], bool] | None = None) -> Any:
+            cancelled: Callable[[], bool] | None = None, cli: str = "gh") -> Any:
     """The parsed stdout of a `gh` call, or None when it failed with a status in `allow`."""
-    status, out = run_gh(argv, allow, cancelled)
+    status, out = run_gh(argv, allow, cancelled, cli)
     if status:
         return None
     try:
@@ -150,9 +150,9 @@ def gh_json(argv: list[str], allow: Iterable[int] = (),
         raise ForgeError("payload_invalid", "stdout is not JSON") from None
 
 
-def api_get(path: str, allow: Iterable[int] = ()) -> Any:
+def api_get(path: str, allow: Iterable[int] = (), cli: str = "gh") -> Any:
     """The parsed JSON of one `gh api` read, or None when it failed with a status in `allow`."""
-    return gh_json(["api", path], allow)
+    return gh_json(["api", path], allow, cli=cli)
 
 
 def api_pages(path: str) -> list[Any]:

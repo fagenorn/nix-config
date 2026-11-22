@@ -113,14 +113,21 @@ def _usage(message: str) -> int:
 
 def _status(issue: int, project: str | None) -> int:
     try:
-        run_dir = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
-        if run_dir is None:
-            sys.stdout.write(compact({"issue": issue, "run": None}))
-            return 1
-        state = engine_ledger.fold(
-            engine_ledger.read_run(run_dir),
-            engine_ledger.replay(run_dir / "events.jsonl"),
-            engine_ledger.process_alive)
+        while True:
+            run_dir = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
+            if run_dir is None:
+                sys.stdout.write(compact({"issue": issue, "run": None}))
+                return 1
+            try:
+                state = engine_ledger.fold(
+                    engine_ledger.read_run(run_dir),
+                    engine_ledger.replay(run_dir / "events.jsonl"),
+                    engine_ledger.process_alive)
+            except (engine_ledger.LedgerError, OSError):
+                if run_dir.exists():
+                    raise
+                continue  # a housekeeping sweep renamed the run away: look again
+            break
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
         return _usage(str(error))
     sys.stdout.write(compact(state.as_json()))

@@ -200,9 +200,12 @@ def lock_holder(run_dir: Path) -> dict | None:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            with os.fdopen(os.dup(descriptor), encoding="utf-8") as handle:
-                document = json.load(handle)
-            return {"pid": document["pid"], "started": document["started"]}
+            try:  # a holder that wrote no document (a housekeeping sweep) is no deliver process
+                with os.fdopen(os.dup(descriptor), encoding="utf-8") as handle:
+                    document = json.load(handle)
+                return {"pid": document["pid"], "started": document["started"]}
+            except (ValueError, KeyError, TypeError):
+                return None
         return None
     finally:
         os.close(descriptor)

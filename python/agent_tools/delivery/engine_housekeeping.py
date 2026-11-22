@@ -22,10 +22,13 @@ starts: it asks the tracker once per issue (an open issue never expires), skips 
 cannot read, and deletes nothing at all when the tracker call fails. A run whose lock another process
 holds, or whose issue has a delivery being created, is skipped and swept by a later start. A run is
 swept only under the tracker it was created under: `run.json` carries `tracker` (`tracker_identity`),
-and a run with another identity, or none, is kept, so re-pointing a project's tracker never lets another
-repository's issue of the same number expire a run. Before a finished run (done or stopped) is renamed,
-its history line is appended if the history holds none for it, and a run whose line cannot be appended is
-kept. The tracker budget (`SWEEP_SECONDS`) starts after the run directories are listed and read. A run is
+and a run with another identity is kept, so re-pointing a project's tracker never lets another
+repository's issue of the same number expire a run; a run with none (made before the member existed) is
+swept only when the project id is the tracker's repository slug. The forge answer must come from the host
+`GH_HOST` names (github.com by default) and the read goes through the binding's `cli`. A run is renamed
+under an exclusive run lock, so a reader holding the lock keeps it. Before a finished run (done or
+stopped) is renamed, its complete history line (all eight members) is appended if the history holds none
+for it and the run ended within the history's 180 days, and a run whose line cannot be appended is kept. The tracker budget (`SWEEP_SECONDS`) starts after the run directories are listed and read. A run is
 renamed to `.<run id>.expired` before it is removed, so a removal that fails is finished by the next
 sweep. `.sweep-cursor.json` remembers the last issue asked per project so that a sweep cut short by its
 time budget resumes after it.
@@ -45,12 +48,14 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Mapping
+from urllib.parse import urlsplit
 
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.delivery import engine_ledger
 from agent_tools.system import forge_api
 
 HISTORY_FORMAT = 1
+HISTORY_MEMBERS = ("format", "run", "project", "issue", "end", "need", "ended", "steps")
 HISTORY_DAYS = 180
 RUN_KEEP_DAYS = 14
 SWEEP_SECONDS = 60
@@ -132,13 +137,13 @@ def _expired(line: bytes, cutoff: datetime) -> bool:
 
 
 def _recorded(run: str, path: Path) -> bool:
-    """Whether the history holds a line for `run`."""
+    """Whether the history holds a complete line (exactly the line members) for `run`."""
     try:
         data = Path(path).read_bytes()
     except FileNotFoundError:
         return False
-    return any(isinstance(loaded, dict) and loaded.get("run") == run
-               for loaded in map(_load, data.split(b"\n")))
+    return any(isinstance(loaded, dict) and set(loaded) == set(HISTORY_MEMBERS)
+               and loaded["run"] == run for loaded in map(_load, data.split(b"\n")))
 
 
 def prune_history(now: datetime, path: Path | None = None) -> int:
@@ -177,11 +182,17 @@ def prune_history(now: datetime, path: Path | None = None) -> int:
         return dropped
 
 
-def forge_tracker(slug: str) -> Tracker:
-    """A tracker reading issues of the GitHub repository `slug`: the closed time, or None when open."""
+def forge_host() -> str:
+    """The GitHub host the CLI targets: `GH_HOST`, else github.com."""
+    return (os.environ.get("GH_HOST") or "github.com").casefold()
+
+
+def forge_tracker(slug: str, cli: str = "gh", host: str = "github.com") -> Tracker:
+    """A tracker reading issues of the GitHub repository `slug` on `host` through the CLI `cli`:
+    the closed time, or None when open."""
     def closed_at(number: int) -> datetime | None:
         try:
-            payload = forge_api.api_get(f"repos/{slug}/issues/{number}", allow=(404, 410))
+            payload = forge_api.api_get(f"repos/{slug}/issues/{number}", allow=(404, 410), cli=cli)
         except forge_api.ForgeError as error:
             raise TrackerError(str(error)) from error
         if not isinstance(payload, dict):
@@ -192,6 +203,12 @@ def forge_tracker(slug: str) -> Tracker:
         if "pull_request" in payload:
             raise IssueUnreadable(f"#{number} is a pull request")
         url = payload.get("repository_url")
+        try:
+            served = (urlsplit(url).hostname or "").casefold() if isinstance(url, str) else ""
+        except ValueError:
+            served = ""
+        if served not in (host, f"api.{host}"):
+            raise IssueUnreadable(f"#{number} answered from host {served!r}, not {host}")
         home = url.split("/repos/", 1)[1] if isinstance(url, str) and "/repos/" in url else None
         if home is None or home.casefold() != slug.casefold():
             raise IssueUnreadable(f"#{number} answered from repository {home!r}, not {slug}")
@@ -208,16 +225,20 @@ def forge_tracker(slug: str) -> Tracker:
 
 
 def tracker_identity(binding: Mapping) -> str:
-    """The identity a run records for the tracker its issue lives in: `github:<repo slug>`, or the kind."""
+    """The identity a run records for the tracker its issue lives in: `github:<repo slug>`, with the
+    host before the slug when `GH_HOST` names one other than github.com, or the kind."""
     kind, slug = binding.get("kind"), binding.get("repo_slug")
-    return f"{kind}:{slug.casefold()}" if isinstance(slug, str) else str(kind)
+    if not isinstance(slug, str):
+        return str(kind)
+    host = forge_host()
+    return f"{kind}:{slug.casefold()}" if host == "github.com" else f"{kind}:{host}/{slug.casefold()}"
 
 
 def default_tracker(binding: Mapping) -> Tracker:
     """The tracker of a project's tracker binding; a kind other than github fails on its first read."""
     kind = binding["kind"]
     if kind == "github":
-        return forge_tracker(binding["repo_slug"])
+        return forge_tracker(binding["repo_slug"], binding["cli"], forge_host())
 
     def unsupported(number: int) -> datetime | None:
         raise TrackerError(f"tracker kind {kind} is not supported")
@@ -276,7 +297,11 @@ def _remove(path: Path) -> bool:
 
 def _candidates(root: Path, entries: list[Path], project: str, tracker_id: str,
                 skip_run: str | None) -> dict[int, list[Path]]:
-    """The runs of `project` the sweep may delete, by issue; every other run is kept."""
+    """The runs of `project` the sweep may delete, by issue; every other run is kept.
+
+    A run made before runs recorded `tracker` is deleted only when the project id names the tracker's
+    own repository (`github:<project id>`): a project is that repository's, so the run is its too."""
+    adopt = tracker_id == f"github:{project.casefold()}"
     found: dict[int, list[Path]] = {}
     for entry in entries:
         match = engine_ledger.RUN_ID_RE.match(entry.name)
@@ -287,7 +312,8 @@ def _candidates(root: Path, entries: list[Path], project: str, tracker_id: str,
         except engine_ledger.LedgerError:
             continue
         issue = document["issue"]
-        if (document["project"] == project and document.get("tracker") == tracker_id
+        if (document["project"] == project
+                and document.get("tracker", tracker_id if adopt else None) == tracker_id
                 and isinstance(issue, int)
                 and not isinstance(issue, bool) and issue >= 1 and issue == int(match.group(1))):
             found.setdefault(issue, []).append(entry)
@@ -301,8 +327,10 @@ def _rotated(issues: list[int], after: object) -> list[int]:
     return ordered
 
 
-def _record_end(run: Path, history: Path) -> None:
-    """Append the history line of a finished `run` the history lacks; the caller holds its locks."""
+def _record_end(run: Path, history: Path, now: datetime) -> None:
+    """Append the history line of a finished `run` the history lacks; the caller holds its locks.
+
+    A run that ended before the history's own cutoff is not recorded: the prune would drop it again."""
     state = engine_ledger.fold(engine_ledger.read_run(run),
                                engine_ledger.replay(run / "events.jsonl"), lambda pid, started: False)
     if not (state.done or state.stop is not None) or _recorded(state.run, history):
@@ -310,10 +338,12 @@ def _record_end(run: Path, history: Path) -> None:
     ends = ("run_done",) if state.done else ("stop_reached",)
     ended = [event["at"] for event in engine_ledger.replay(run / "events.jsonl")
              if event["event"] in ends][-1]
-    append_history(history_line(state, parse_rfc3339_utc(ended)), history)
+    when = parse_rfc3339_utc(ended)
+    if when >= now - timedelta(days=HISTORY_DAYS):
+        append_history(history_line(state, when), history)
 
 
-def _delete(root: Path, issue: int, run: Path, history: Path,
+def _delete(root: Path, issue: int, run: Path, history: Path, now: datetime,
             on_locked: Callable[[Path], None] | None) -> bool:
     """Rename `run` aside while holding its creation and run locks; False when it was kept.
 
@@ -328,11 +358,12 @@ def _delete(root: Path, issue: int, run: Path, history: Path,
             fcntl.flock(creation, fcntl.LOCK_EX | fcntl.LOCK_NB)
             held = os.open(run / "lock", os.O_RDWR | os.O_CREAT, 0o600)
             descriptors.append(held)
-            fcntl.flock(held, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.ftruncate(held, 0)  # no deliver holds it: the old holder document must not read as one
             if on_locked is not None:
                 on_locked(run)
             try:
-                _record_end(run, history)
+                _record_end(run, history, now)
             except Exception as error:
                 sys.stderr.write(f"engine: housekeeping kept {run}, its history line was not "
                                  f"recorded: {_line(error)}\n")
@@ -390,7 +421,7 @@ def sweep_runs(root: Path, *, project: str, tracker: Tracker, tracker_id: str, n
     deleted = []
     for issue in sorted(expired):
         for run in candidates[issue]:
-            if _delete(root, issue, run, history, on_locked) and _remove(root / f".{run.name}.expired"):
+            if _delete(root, issue, run, history, now, on_locked) and _remove(root / f".{run.name}.expired"):
                 deleted.append(run.name)
     return sorted(deleted)
 
