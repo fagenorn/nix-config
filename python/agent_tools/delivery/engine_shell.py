@@ -11,7 +11,8 @@ held run lock answers `EXIT_RUNNING` first; `<procedures_dir>/deliver.json` must
 pass `procedure_check.check_directory` against the platform declarations plus
 every project command, hold only `command`, `agent` and `decide` steps, a `mutates: true`
 step only as a `command` step, and no input but `issue`, and every agent step's role file
-must read (`engine_session.read_role`). The same checks run again on the run's staged copy,
+must read (`engine_session.read_role`), and the host declaration must admit the engine route (else the
+refusal starts with its reason code). The same checks run again on the run's staged copy,
 which is the copy the loop reads (`<run>/procedure/deliver.json`).
 
 An agent step runs as one headless session (`engine_session`) in the project
@@ -50,7 +51,8 @@ from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_commands, engine_core, engine_ledger, engine_session, procedure_check,
+    engine_commands, engine_core, engine_ledger, engine_session, engine_slots, host_admission,
+    procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.project_contract import resolve_project
@@ -137,6 +139,14 @@ def _resolve() -> tuple[dict, CommandTable]:
         return snapshot, CommandTable.from_snapshot(snapshot)
     except procedure_check.DeclarationError as error:
         raise Refused(str(error)) from error
+
+
+def _admitted() -> int:
+    try:
+        return engine_slots.declared_slots()
+    except host_admission.DeclarationError as error:
+        raise Refused(f"{error.reason_code}: the host declaration does not admit the "
+                      f"{host_admission.ENGINE_ROUTE} route, so no run starts") from error
 
 
 def check_declarations() -> dict[str, procedure_check.CommandDeclaration | None]:
@@ -229,6 +239,7 @@ def _running(runs: list[Path], issue: int) -> tuple[int, dict] | None:
 def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
     procedures_dir = Path(procedures_dir)
     snapshot, table = _resolve()
+    _admitted()
     project = snapshot["project"]["id"]
     try:
         running = _running(engine_ledger.find_runs(engine_ledger.runs_root(), issue, project),

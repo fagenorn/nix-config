@@ -60,6 +60,21 @@ class EngineProject:
         self.env = {key: value for key, value in self.world.env.items()
                     if key != "AGENT_PLATFORM_ROOT"}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.world.env['PATH']}"
+        shutil.copy(REPO_ROOT / "home/common/agent-skills/host-declaration.json",
+                    self.declaration_path)
+
+    @property
+    def declaration_path(self) -> Path:
+        return self.world.home / ".agents/share/host-declaration.json"
+
+    def declare(self, value: object) -> None:
+        """Replace the host declaration: `None` removes it, a string is written as is."""
+        if value is None:
+            self.declaration_path.unlink(missing_ok=True)
+        elif isinstance(value, str):
+            self.declaration_path.write_text(value, encoding="utf-8")
+        else:
+            self.declaration_path.write_text(json.dumps(value), encoding="utf-8")
 
     def add_standins(self, contract: dict) -> None:
         def entry(*words: str) -> dict:
