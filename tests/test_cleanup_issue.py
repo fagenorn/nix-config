@@ -457,6 +457,41 @@ class CommandTest(unittest.TestCase):
         commit_all(root)
         self.assertEqual(self.call(listed)[:2], (0, ""))
 
+    def test_a_reasoned_suppression_leaves_its_finding_out_of_the_count(self):
+        root = repo(self.tmp.name)
+        write(root, "a.py", numbered(1500) + "# suppress-standard:B17 generated table\n")
+        commit_all(root)
+
+        self.assertEqual(self.call(["counts", "--repo-root", str(root)])[:2],
+                         (0, "B17 0\n" + "".join(f"PY{n} 0\n" for n in range(6, 14))))
+        listed = ["violations", "--repo-root", str(root), "--rule", "B17"]
+        self.assertEqual(self.call(listed)[:2], (0, ""))
+
+    def test_a_bare_marker_is_counted_beside_the_findings_the_gate_counts(self):
+        root = repo(self.tmp.name)
+        write(root, "a.py", numbered(4) + "# suppress-standard:B17\n" + numbered(1496))
+        commit_all(root)
+
+        listed = ["violations", "--repo-root", str(root), "--rule", "B17"]
+        self.assertEqual(self.call(listed)[:2], (0, "B17 a.py:1501\nB17 a.py:5\n"))
+        self.assertEqual(self.call(["counts", "--repo-root", str(root)])[1].splitlines()[0],
+                         "B17 2")
+
+    def test_an_enforcer_that_cannot_judge_exits_2_and_files_nothing(self):
+        root = repo(self.tmp.name)
+        write(root, "python/pyproject.toml", "[project]\n")
+        write(root, "python/m.py", "import os\n")
+        commit_all(root)
+        for argv in (["counts"], ["violations", "--rule", "PY6"], ["file", "--repo", "octo/widgets"]):
+            with self.subTest(argv[0]), mock.patch.dict(os.environ):
+                os.environ.pop("AGENT_PLATFORM_TOOLS", None)
+
+                code, out, err, _, create_issue = self.call(
+                    [argv[0], "--repo-root", str(root), *argv[1:]])
+
+                self.assertEqual((code, out, err), (2, "", "cleanup-issue: ruff-lint: ruff_unavailable\n"))
+                create_issue.assert_not_called()
+
     def test_open_exits_0_only_for_exactly_one_cleanup_issue(self):
         plain = {"number": 9, "body": "ordinary", **BOT}
         cases = [([[plain]], 1, '{"open": []}\n'),

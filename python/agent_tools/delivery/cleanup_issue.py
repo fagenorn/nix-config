@@ -10,8 +10,9 @@ batch (the most violations one issue lists) and the guidance that tells an
 implementer what to change. A test pins `RULES` to the never-rise enforcers.
 
 Counts. `counts` reads every rule's violations from a `Snapshot` through
-`never_rise.violations`, in the order of the rules, a rule at zero present with
-an empty list. An enforcer that emits another rule's violation raises
+`never_rise.counted`, the number the never-rise gate compares (ADR-project-contract-019):
+the findings a reasoned suppression leaves in place, then the violations of bare markers,
+in the order of the rules, a rule at zero present with an empty list. An enforcer that emits another rule's violation raises
 `ValueError`, which `counts` lets propagate.
 
 Selection. `select` takes the rule with the smallest count above zero; equal
@@ -88,7 +89,8 @@ agent_tools.delivery.cleanup_issue`:
   for none or several.
 
 Every failure exits 2 with one line `cleanup-issue: <reason>` on stderr and
-nothing on stdout: a relative root, a root that is not a directory, a root below
+nothing on stdout: an enforcer that cannot judge (`EnforcerFailed`, such as `ruff-lint:
+ruff_unavailable` when `AGENT_PLATFORM_TOOLS` names no pinned Ruff), a relative root, a root that is not a directory, a root below
 its repository's top level, a revision that does not resolve or a snapshot that
 cannot be read, a `--rule` that is not in `RULES`, a `--repo` that is not
 `<owner>/<name>`, a filer that is not trusted, and any `ForgeError`; after a
@@ -189,7 +191,11 @@ class Outcome(NamedTuple):
 
 
 def counts(snapshot: Snapshot, rules: Sequence[CleanupRule] = RULES) -> dict[str, list[Violation]]:
-    return {rule.enforcer.rule: never_rise.violations(rule.enforcer, snapshot) for rule in rules}
+    found: dict[str, list[Violation]] = {}
+    for rule in rules:
+        kept, marked = never_rise.counted(rule.enforcer, snapshot)
+        found[rule.enforcer.rule] = [*kept, *marked]
+    return found
 
 
 def is_cleanup(body: str) -> bool:
@@ -393,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     except Refusal as refusal:
         print(f"{COMMAND}: {refusal}", file=sys.stderr)
         return 2
-    except forge_api.ForgeError as error:
+    except (forge_api.ForgeError, never_rise.EnforcerFailed) as error:
         print(f"{COMMAND}: {error}", file=sys.stderr)
         return 2
     for line in lines:

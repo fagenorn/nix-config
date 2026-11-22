@@ -6,7 +6,10 @@
 # open cleanup issue. forge_api drops token variables, so the token is stored
 # for gh before the command runs. --branch makes a run for a commit that is no
 # longer the branch tip file nothing, so a delayed run never refiles work a
-# newer merge completed.
+# newer merge completed. The never-rise rules include the pinned Ruff, which the
+# platform package carries (ADR-project-contract-020): Nix builds the tools
+# directory and the command gets it as AGENT_PLATFORM_TOOLS, or it cannot judge
+# a Python file and exits 2.
 name: Cleanup Issue
 
 on:
@@ -31,9 +34,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v4
       - name: Store the workflow token for gh
         env:
           TOKEN: ${{ github.token }}
         run: printf '%s\n' "$TOKEN" | gh auth login --with-token --insecure-storage
       - name: File the next cleanup issue
-        run: PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file --repo-root "$GITHUB_WORKSPACE" --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME"
+        run: |
+          tools="$(nix build --no-link --print-out-paths '.#agent-platform.tools')"
+          test -n "$tools"
+          AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file --repo-root "$GITHUB_WORKSPACE" --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME"

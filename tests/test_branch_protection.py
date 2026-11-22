@@ -1031,8 +1031,13 @@ class CleanupIssueWorkflowTest(unittest.TestCase):
         self.assertEqual({"Cleanup Issue": "cleanup-issue"}, job_names(CLEANUP_WORKFLOW))
         steps = step_blocks("cleanup-issue", CLEANUP_WORKFLOW)
         self.assertEqual(
-            ["Checkout", "Store the workflow token for gh", "File the next cleanup issue"],
+            ["Checkout", "Install Nix", "Store the workflow token for gh",
+             "File the next cleanup issue"],
             list(steps),
+        )
+        self.assertEqual(
+            ["      - name: Install Nix", "        uses: DeterminateSystems/nix-installer-action@v4"],
+            [line for line in steps["Install Nix"] if line.strip()],
         )
         # Each step is exactly its lines: an added `shell:`, `if:`, `working-directory:`
         # or `continue-on-error:` would change what the command does or whether it runs.
@@ -1050,7 +1055,11 @@ class CleanupIssueWorkflowTest(unittest.TestCase):
         self.assertEqual(
             [
                 "      - name: File the next cleanup issue",
-                "        run: PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file"
+                "        run: |",
+                "          tools=\"$(nix build --no-link --print-out-paths '.#agent-platform.tools')\"",
+                "          test -n \"$tools\"",
+                "          AGENT_PLATFORM_TOOLS=\"$tools/bin\" PYTHONPATH=python python3 -m"
+                " agent_tools.delivery.cleanup_issue file"
                 " --repo-root \"$GITHUB_WORKSPACE\" --repo \"$GITHUB_REPOSITORY\""
                 " --branch \"$GITHUB_REF_NAME\"",
             ],
