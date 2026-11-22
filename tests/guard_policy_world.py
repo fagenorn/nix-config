@@ -24,10 +24,31 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
 PUBLICATION_FREE = REPO_ROOT / "tests/fixtures/release/publication-free-profile.json"
+
+
+def install_platform_manifest_in_environ() -> None:
+    """For `setUpModule`: this process and its children find the platform manifest under a temporary `HOME`.
+
+    `resolve-project` refuses a host with no installed manifest, and a runner with no installed
+    platform (CI) is one; the module's subprocesses inherit the environment, and it is restored
+    when the module ends.
+    """
+    home = Path(tempfile.mkdtemp(prefix="platform-home-"))
+    unittest.addModuleCleanup(shutil.rmtree, home, ignore_errors=True)
+    (home / ".agents/share").mkdir(parents=True)
+    shutil.copy(MANIFEST, home / ".agents/share/platform-manifest.json")
+    patch = mock.patch.dict(os.environ, {"HOME": str(home)})
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+    root = mock.patch.dict(os.environ)
+    root.start()
+    unittest.addModuleCleanup(root.stop)
+    os.environ.pop("AGENT_PLATFORM_ROOT", None)
 OWN_SLUG = "fagenorn/nix-config"
 REAL_GIT = shutil.which("git")
 

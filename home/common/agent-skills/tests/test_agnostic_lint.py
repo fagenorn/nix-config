@@ -74,6 +74,89 @@ class AgnosticTest(unittest.TestCase):
         self.assertTrue(self.hits({"home/common/agent-skills/skills/a/NOTES.md": b"nix-config\n"}))
 
 
+    STANDARD = "home/common/agent-skills/standards/s.md"
+    ISSUE = "https://github.com/fagenorn/nix-config/issues"
+
+    def test_a_tracker_issue_link_is_accepted_in_the_standards(self):
+        extra = {self.STANDARD: b"Rule text. ([decision](https://github.com/fagenorn/nix-config/issues/1417))\n"}
+        self.assertEqual(self.hits(extra), [])
+
+    def test_the_tracker_link_allowance_is_narrow(self):
+        link = f"Rule text. ([decision]({self.ISSUE}/1417))\n".encode()
+        for path in ("home/common/agent-skills/skills/a/SKILL.md", "home/common/claude-code/agents/r.md",
+                     "home/common/agent-guidance/AGENTS.md"):
+            with self.subTest(path=path):
+                self.assertTrue(self.hits({path: link}))
+        refused = [
+            "https://github.com/fagenorn/nix-config/pull/12",
+            f"{self.ISSUE}/",
+            f"{self.ISSUE}/12#issuecomment-1",
+            f"{self.ISSUE}/12?x=1",
+            f"{self.ISSUE}/12/timeline",
+            "http://github.com/fagenorn/nix-config/issues/12",
+            "https://www.github.com/fagenorn/nix-config/issues/12",
+            "https://github.com/fagenorn/nix-config/blob/main/x",
+            f"{self.ISSUE}/012",
+            f"([x]({self.ISSUE}/12+notes))",
+            f"{self.ISSUE}/12%20x",
+            f"{self.ISSUE}/12.5",
+            f"{self.ISSUE}/12,notes",
+            f"{self.ISSUE}/1417(extra)",
+            f"([x]({self.ISSUE}/1417(extra)))",
+            *(f"[x]({self.ISSUE}/1417{stop}extra)" for stop in "'\"]<`"),
+            f"[x](<{self.ISSUE}/1417)extra>)",
+            f"[x]({self.ISSUE}/1417>extra)",
+            f"[x](<{self.ISSUE}/1417 extra>)",
+            f"[x](<a {self.ISSUE}/1417>)",
+            f"[x](<{self.ISSUE}/1417.>)",
+            f"<{self.ISSUE}/1417)extra>",
+            f"<{self.ISSUE}/1417(extra>",
+            f"x{self.ISSUE}/1417",
+            f"[x](../{self.ISSUE}/1417)",
+            f"[a](../<{self.ISSUE}/1417>)",
+            f"[a](x<{self.ISSUE}/1417>)",
+            f"[a]: ../<{self.ISSUE}/1417>",
+            f"[a](x(<{self.ISSUE}/1417>))",
+            f"[a](x[<{self.ISSUE}/1417>])",
+            f"[a](x({self.ISSUE}/1417))",
+            f"[a]: x(<{self.ISSUE}/1417>)",
+            f"[a]((<{self.ISSUE}/1417>))",
+            f"[a](x(({self.ISSUE}/1417)))",
+            f"[a](<x ({self.ISSUE}/1417)>)",
+            f"[a](<x {self.ISSUE}/1417 >)",
+            f"[a](<x {self.ISSUE}/1417>)",
+            f"[a](  <x ({self.ISSUE}/1417)>)",
+            f"[a]: <x ({self.ISSUE}/1417)>",
+            f"[a]: <x {self.ISSUE}/1417 >",
+            f"[a]:   <x {self.ISSUE}/1417 (y)>",
+            f"<x ({self.ISSUE}/1417)>",
+            f"  <x {self.ISSUE}/1417 >",
+        ]
+        for line in refused:
+            with self.subTest(line=line):
+                self.assertTrue(self.hits({self.STANDARD: f"{line}\n".encode()}))
+
+    def test_only_the_exact_tracker_link_literal_is_accepted(self):
+        for line in (f"[x]({self.ISSUE}/1417)", f"([x]({self.ISSUE}/1417))",
+                     f"a [x]({self.ISSUE}/1)[y]({self.ISSUE}/2) b"):
+            with self.subTest(line=line):
+                self.assertEqual(self.hits({self.STANDARD: f"{line}\n".encode()}), [])
+
+    def test_every_other_form_is_refused_including_backslash_escapes(self):
+        for line in (f"[x](<{self.ISSUE}/1417>)", f"<{self.ISSUE}/1417>", f"see {self.ISSUE}/1417.",
+                     f"[x]({self.ISSUE}/1417 \"t\")", f"({self.ISSUE}/1417)", f"{self.ISSUE}/1417",
+                     f"[a]: {self.ISSUE}/1417", f"[a]: <{self.ISSUE}/1417>",
+                     f"[a](<x\\< {self.ISSUE}/1417 >)", f"[a](<x\\> {self.ISSUE}/1417 )>)",
+                     f"[a](<x\\> ({self.ISSUE}/1417)>)", f"[a]: <x\\< {self.ISSUE}/1417 >",
+                     f"[a]: <x\\> {self.ISSUE}/1417 >", f"[a](<x\\> {self.ISSUE}/1417)>)"):
+            with self.subTest(line=line):
+                self.assertTrue(self.hits({self.STANDARD: f"{line}\n".encode()}))
+
+    def test_a_bare_mention_beside_an_accepted_link_is_still_refused(self):
+        extra = {self.STANDARD: f"[x]({self.ISSUE}/12) and nix-config\n".encode()}
+        self.assertEqual(self.hits(extra), [f"{self.STANDARD}:1:nix-config"])
+
+
 class LiveTreeTest(unittest.TestCase):
     def test_the_live_global_corpus_names_no_hosting_project_specifics(self):
         self.assertEqual(agnostic_lint.hosting_specifics(skill_lint.working_tree(REPO_ROOT)), [])
