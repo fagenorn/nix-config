@@ -87,6 +87,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.adopt_verify",  # verify_exec
         "agent_tools.project_contract.adopt_apply",  # verify_checks (run_leashed)
         "agent_tools.delivery.agent_gate_bundle",  # verify_checks
+        "agent_tools.delivery.issue_branch",  # verify_checks
     }),
 }
 
