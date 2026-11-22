@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +74,19 @@ PLATFORM_PACKAGE_STEPS = (
 # for the deliver-standard program scenarios (issue 618).
 SUITE_INVOCATION = ("WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just "
                     "nixpkgs#nodejs --command just agent-workflow-tests")
+
+# The one step `if:` a required job may carry (ADR-delivery-015 D8): an upload after the
+# step that runs the evaluation. It runs after the evaluation, so it cannot skip it, and
+# a failed evaluation keeps the job red. EVALUATION_RUNS names, for each required context
+# whose evaluating step is one `run:` line, the line an earlier step must hold.
+UPLOAD_AFTER_EVALUATION_IF = "        if: ${{ !cancelled() }}"
+UPLOAD_ACTION = "        uses: actions/upload-artifact@v4"
+EVALUATION_RUNS = {"Agent Workflow Tests": SUITE_INVOCATION}
+
+# The step that compares a pull request's suite timing report with main's baseline.
+COMPARE = ('PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing compare '
+           '--head suite-timing/head/suite-timing.json --base suite-timing/base/suite-timing.json '
+           '--base-label "$BASE_REF" >> "$GITHUB_STEP_SUMMARY"')
 
 REQUIRED_PAYLOAD_KEYS = {
     "required_status_checks",
@@ -330,6 +343,40 @@ def budget_step(path=BUDGET_WORKFLOW):
     return step_blocks("instruction-budget", path)[BUDGET_STEP]
 
 
+def green_without_work(lines, evaluation_run):
+    """The stripped lines of a job that let it conclude success without its steps running.
+
+    One line is allowed: `UPLOAD_AFTER_EVALUATION_IF` on an upload step that follows a
+    step running `evaluation_run`. Without an `evaluation_run`, nothing is allowed.
+    """
+    steps = [[]]
+    for line in lines:
+        if line.startswith("      - name:"):
+            steps.append([])
+        steps[-1].append(line)
+    offenders = []
+    for index, step in enumerate(steps):
+        runs_before = evaluation_run is not None and any(
+            f"        run: {evaluation_run}" in earlier for earlier in steps[:index]
+        )
+        for line in step:
+            if not GREEN_WITHOUT_WORK_RE.match(line):
+                continue
+            if line == UPLOAD_AFTER_EVALUATION_IF and runs_before and UPLOAD_ACTION in step:
+                continue
+            offenders.append(line.strip())
+    return offenders
+
+
+def with_value(step, key):
+    """The value of the step's single `with:` input `key`."""
+    prefix = f"          {key}: "
+    values = [line[len(prefix):] for line in step if line.startswith(prefix)]
+    if len(values) != 1:
+        raise AssertionError(f"step {step[:1]} has {len(values)} `with:` inputs {key!r}")
+    return values[0]
+
+
 def step_env(step):
     """The stripped `key: value` lines of a step's `env:` mapping, or None without one."""
     if "        env:" not in step:
@@ -404,13 +451,104 @@ class WorkflowShape(unittest.TestCase):
         self.assertIn("timeout-minutes: 45", body)
         self.assertNotIn("continue-on-error", body)
         steps = step_blocks("agent-workflow-tests")
-        self.assertEqual(["Checkout", "Install Nix", "Run agent workflow tests"], list(steps))
+        self.assertEqual(
+            ["Checkout", "Install Nix", "Run agent workflow tests", "Upload suite timing"],
+            list(steps),
+        )
         # Issue 436: suite modules build fixtures from pinned ancestor commits and
         # refuse to skip, so the checkout fetches history.
         self.assertIn("          fetch-depth: 0", steps["Checkout"])
         suite = steps["Run agent workflow tests"]
         self.assertIn(f"        run: {SUITE_INVOCATION}", suite)
-        self.assertEqual(["SUITE_RUNNER_JOBS: \"4\""], step_env(suite))
+        self.assertEqual(
+            ['SUITE_RUNNER_JOBS: "4"', "SUITE_RUNNER_REPORT: suite-timing/suite-timing.json"],
+            step_env(suite),
+        )
+        self.assertEqual([], [line for line in suite if line.startswith("        if:")])
+        upload = steps["Upload suite timing"]
+        self.assertIn(UPLOAD_AFTER_EVALUATION_IF, upload)
+        self.assertIn(UPLOAD_ACTION, upload)
+        self.assertIn("          if-no-files-found: error", upload)
+        self.assertEqual("suite-timing", with_value(upload, "name"))
+        self.assertEqual(
+            step_env(suite)[1].removeprefix("SUITE_RUNNER_REPORT: "),
+            with_value(upload, "path"),
+        )
+
+    def test_only_an_upload_after_the_evaluation_may_run_when_it_failed(self):
+        """ADR-delivery-015 D8: the one step `if:` a required job may carry."""
+        base = [
+            "    name: Job",
+            "      - name: Checkout",
+            "        uses: actions/checkout@v4",
+            "      - name: Suite",
+            "        run: S",
+            "      - name: Upload",
+            UPLOAD_ACTION,
+            UPLOAD_AFTER_EVALUATION_IF,
+        ]
+        moved_onto_suite = [line for line in base if line != UPLOAD_AFTER_EVALUATION_IF]
+        moved_onto_suite.insert(base.index("        run: S"), UPLOAD_AFTER_EVALUATION_IF)
+        upload_first = [base[0], *base[1:3], *base[5:], *base[3:5]]
+        always = [*base[:-1], "        if: always()"]
+        on_echo = [*base, "      - name: Echo", "        run: echo", UPLOAD_AFTER_EVALUATION_IF]
+        failure_ignored = [*base, "        continue-on-error: true"]
+        needing = [*base, "    needs: other"]
+        cases = (
+            ("the upload after the evaluation", base, "S", []),
+            ("the if moved onto the evaluation", moved_onto_suite, "S",
+             ["if: ${{ !cancelled() }}"]),
+            ("the upload before the evaluation", upload_first, "S", ["if: ${{ !cancelled() }}"]),
+            ("a different condition", always, "S", ["if: always()"]),
+            ("an echo step after the evaluation", on_echo, "S", ["if: ${{ !cancelled() }}"]),
+            ("a failure ignored", failure_ignored, "S", ["continue-on-error: true"]),
+            ("no evaluation run", base, None, ["if: ${{ !cancelled() }}"]),
+            ("a needs", needing, "S", ["needs: other"]),
+        )
+        for label, lines, evaluation_run, expected in cases:
+            with self.subTest(case=label):
+                self.assertEqual(expected, green_without_work(lines, evaluation_run))
+
+    def test_suite_timing_jobs_keep_and_compare_the_report(self):
+        """Issue 1385: the report the suite job uploads reaches the baseline and the
+        comparison through the paths the consumers read."""
+        names = job_names()
+        self.assertEqual("suite-timing", names["Suite Timing"])
+        self.assertEqual("suite-timing-baseline", names["Suite Timing Baseline"])
+        for context in ("Suite Timing", "Suite Timing Baseline"):
+            self.assertNotIn(context, required_contexts())
+        self.assertEqual("${{ !cancelled() && github.event_name == 'pull_request' }}",
+                         job_if_expression("suite-timing"))
+        self.assertEqual("github.event_name == 'push'", job_if_expression("suite-timing-baseline"))
+        for key in ("suite-timing", "suite-timing-baseline"):
+            self.assertIn("    needs: agent-workflow-tests", job_body(key))
+        baseline = step_blocks("suite-timing-baseline")
+        self.assertEqual(["Download this run's suite timing", "Keep it as the baseline"],
+                         list(baseline))
+        pull_request = step_blocks("suite-timing")
+        self.assertEqual(["Checkout", "Download this run's suite timing", "Restore the baseline",
+                          "Compare with the baseline"], list(pull_request))
+        upload = step_blocks("agent-workflow-tests")["Upload suite timing"]
+        name = PurePosixPath(with_value(upload, "path")).name
+        self.assertEqual("suite-timing.json", name)
+        base_download = baseline["Download this run's suite timing"]
+        save = baseline["Keep it as the baseline"]
+        self.assertEqual("suite-timing", with_value(base_download, "name"))
+        self.assertEqual(f"{with_value(base_download, 'path')}/{name}", with_value(save, "path"))
+        self.assertIn("          key: suite-timing-${{ github.sha }}", save)
+        head_download = pull_request["Download this run's suite timing"]
+        restore = pull_request["Restore the baseline"]
+        compare = pull_request["Compare with the baseline"]
+        restore_path = with_value(restore, "path")
+        self.assertEqual("suite-timing", with_value(head_download, "name"))
+        self.assertIn(f"--head {with_value(head_download, 'path')}/{name} ", COMPARE)
+        self.assertEqual(with_value(save, "path"), restore_path)
+        self.assertIn(f"--base {restore_path} ", COMPARE)
+        self.assertIn("          key: suite-timing-${{ github.event.pull_request.base.sha }}",
+                      restore)
+        self.assertIn("          restore-keys: suite-timing-", restore)
+        self.assertIn("        run: " + COMPARE, compare)
+        self.assertEqual(["BASE_REF: ${{ github.base_ref }}"], step_env(compare))
 
     def test_agent_workflow_tests_job_has_the_required_triggers_without_schedule(self):
         self.assertIsNotNone(trigger_block("pull_request"))
@@ -568,11 +706,7 @@ class WorkflowShape(unittest.TestCase):
         for context in contexts:
             self.assertIn(context, jobs)
             path, key = jobs[context]
-            offenders = [
-                line.strip()
-                for line in job_blocks(path)[key]
-                if GREEN_WITHOUT_WORK_RE.match(line)
-            ]
+            offenders = green_without_work(job_blocks(path)[key], EVALUATION_RUNS.get(context))
             self.assertEqual(
                 [],
                 offenders,
