@@ -404,6 +404,21 @@ class CallTest(unittest.TestCase):
                           if e["event"] == "step_entered" and e["step"] == "fan"])
 
 
+class PassThroughTest(unittest.TestCase):
+    def test_a_call_without_each_passes_the_parents_item_to_its_child(self):
+        project = EngineProject(self)
+        inner = {"id": "inner", "stage": "landing", "kind": "call", "procedure": "grand",
+                 "on": {"done": "done", "child-stop": "child-stop"}}
+        children = {"fan-child": child([inner]),
+                    "grand": child([step("work", "standin-json", "done", failed="child-stop")])}
+        done = project.deliver(project.procedures(FAN("standin-items", 1), children=children),
+                               issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        by_run = {run.name: run_document(run) for run in children_of(project)}
+        grand = [doc for doc in by_run.values() if doc["procedure"] == "grand"]
+        self.assertEqual([doc["inputs"]["item"] for doc in grand], ["approve"] * 3)
+
+
 class RefusalTest(unittest.TestCase):
     def test_a_call_the_engine_cannot_run_is_refused(self):
         solo = child([step("work", "standin-json", "done", failed="child-stop")],

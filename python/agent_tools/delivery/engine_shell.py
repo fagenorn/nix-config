@@ -473,8 +473,8 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
     held: list[int] = []
     try:
         child = _load(run_dir / "procedure" / f"{action.procedure}.json")
-        inputs = {name: item if name == "item" else run["inputs"][name]
-                  for name in child["inputs"]}
+        inputs = {name: item if name == "item" and action.items is not None
+                  else run["inputs"][name] for name in child["inputs"]}
         creation = _lock_creation(run["issue"])
         try:
             child_dir = engine_ledger.create_run(
