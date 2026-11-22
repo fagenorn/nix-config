@@ -3814,6 +3814,8 @@ class LockEntryTest(unittest.TestCase):
             "not json": b"not json",
             "a list": b"[]",
             "no nodes": b'{"root": "root"}',
+            "no root": b'{"nodes": {"root": {}}}',
+            "root not a string": b'{"nodes": {"root": {}}, "root": 1}',
             "root names no node": b'{"nodes": {}, "root": "root"}',
             "root inputs a list": with_root_inputs(["nixpkgs"]),
             "duplicate keys": b'{"nodes": {}, "nodes": {}, "root": "root"}',
@@ -3848,7 +3850,9 @@ class InputDeclarationTest(unittest.TestCase):
         for name, text in (
                 ("as declared", declared),
                 ("quoted key", declared.replace("  agent-platform:", '  "agent-platform":')),
-                ("swapped body", swapped)):
+                ("swapped body", swapped),
+                ("comment after the key",
+                 declared.replace("  agent-platform:", "  agent-platform: # pinned"))):
             with self.subTest(name):
                 self.assertIsNone(self.declare(text.encode()))
 
@@ -3861,6 +3865,10 @@ class InputDeclarationTest(unittest.TestCase):
             "extra line": DEVENV_YAML_DECLARED + "    follows: nixpkgs\n",
             "inline value": DEVENV_YAML + "  agent-platform: github:fixture/platform\n",
         }
+        body = "    url: github:fixture/platform\n    flake: false\n"
+        for value in ("|", "x", "&a", "{}"):
+            cases[f"inline {value} before a declaration-shaped body"] = (
+                DEVENV_YAML + f"  agent-platform: {value}\n" + body)
         for name, text in cases.items():
             with self.subTest(name):
                 with self.assertRaises(adopt_conformance.Undeclarable) as caught:

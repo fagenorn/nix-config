@@ -20,7 +20,8 @@ is the apply step.
   YAML parser. It handles a plain block-mapping document only (every column-0
   line is a bare `key:` line, a comment or blank), inserts the declaration after
   the last child of an `inputs:` block, or appends the block, and keeps a
-  compatible existing declaration as found. A flow-style document, a document
+  compatible existing declaration as found (an inline value on the
+  `agent-platform` key, whatever follows it, is incompatible). A flow-style document, a document
   marker, an `inputs` carrying an inline value, a duplicated `inputs:` line or a
   tab-indented child is refused rather than edited.
 - `require_in_protection_file` appends the `Conformance` check to the branch
@@ -67,7 +68,8 @@ CONTRACT_REFUSED = "adopt.conformance.contract_refused"
 _KEY_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*:([ \t]+\S.*|[ \t]*(#.*)?)$")
 _INPUTS_OPEN = re.compile(r"^inputs:[ \t]*(#.*)?$")
 _DECLARATION = re.compile(
-    r"""^(?:agent-platform|"agent-platform"|'agent-platform')[ \t]*:(?:[ \t].*)?$""")
+    r"""^(?:agent-platform|"agent-platform"|'agent-platform')[ \t]*:(?P<value>(?:[ \t].*)?)$""")
+_EMPTY_VALUE = re.compile(r"^[ \t]*(#.*)?$")
 
 
 class Undeclarable(Exception):
@@ -100,7 +102,7 @@ def _parse_lock(data: bytes) -> tuple[dict, dict, dict]:
     nodes = document.get("nodes") if isinstance(document, dict) else None
     if not isinstance(nodes, dict):
         raise Undeclarable(LOCK_UNREADABLE)
-    root_name = document["root"]
+    root_name = document.get("root")
     root = nodes.get(root_name) if isinstance(root_name, str) else None
     if not isinstance(root, dict):
         raise Undeclarable(LOCK_UNREADABLE)
@@ -231,8 +233,11 @@ def declare_input(data: bytes | None, owner: str, repo: str) -> bytes | None:
         line = stripped[number]
         if _indent(line) != len(indent):
             continue
-        if not _DECLARATION.match(line[len(indent):]):
+        declaration = _DECLARATION.match(line[len(indent):])
+        if not declaration:
             continue
+        if not _EMPTY_VALUE.match(declaration.group("value")):
+            raise Undeclarable(INPUT_INCOMPATIBLE)
         body = []
         for later in range(number + 1, end):
             if not _is_blank(stripped[later]) and _indent(stripped[later]) <= len(indent):
