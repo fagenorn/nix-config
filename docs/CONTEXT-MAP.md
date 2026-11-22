@@ -147,4 +147,4 @@
 - **Guard → Project contract**: a **Derived row** comes from a resolved **Project contract** and the **Fleet registry**.
 - **Project contract → every area**: each command reads the **ResolvedProject**.
 - **Hosts → Verification, Console**: every host runs **Verification passes** on a schedule, and the **Cache proxy** reports each **Limit reading** to the console.
-- **Console → Project contract, Claims**: the console's projects are the **Fleet registry**'s entries; an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader; an **Inbox item** of a held check is a live **Owner prompt** of Verification, answered through the runner's owner path.
+- **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader; an **Inbox item** of a held check is a live **Owner prompt** of Verification, answered through the runner's owner path. **Console → Project contract**: the console's projects are the **Fleet registry**'s entries.
