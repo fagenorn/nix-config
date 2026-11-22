@@ -16,6 +16,8 @@ from agent_tools.delivery.rule_ids import (
     layer_problems, numbered_items, prefix_table, rule_headings, sections)
 from agent_tools.project_contract.adopt_links import links
 
+TIER = "fast"
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GLOBAL = REPO_ROOT / "home/common/agent-skills/standards"
 BAR = GLOBAL / "the-bar.md"

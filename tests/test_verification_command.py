@@ -530,6 +530,10 @@ BUDGET = (
     "  fi\n"
     "fi\n"
     "PYTHONPATH=python python3 -m agent_tools.instruction_load check \"${args[@]}\"")
+SUITE_TIMING_COMPARE = (
+    'PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing compare '
+    '--head suite-timing/head/suite-timing.json --base suite-timing/base/suite-timing.json '
+    '--base-label "$BASE_REF" >> "$GITHUB_STEP_SUMMARY"')
 CHECKOUT, INSTALL = "actions/checkout@v4", "DeterminateSystems/nix-installer-action@v4"
 SETUP = ("not-lint", "runner setup")
 
@@ -556,6 +560,19 @@ CI_STEP_CLASSES = {
      "WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just nixpkgs#nodejs "
      "--command just agent-workflow-tests"):
         ("not-lint", "the suite, the test member agent-workflow-tests"),
+    ("ci.yaml", "agent-workflow-tests", "actions/upload-artifact@v4"):
+        ("not-lint", "uploads the suite timing report"),
+    ("ci.yaml", "suite-timing-baseline", "actions/download-artifact@v4"):
+        ("not-lint", "downloads the run's suite timing report"),
+    ("ci.yaml", "suite-timing-baseline", "actions/cache/save@v4"):
+        ("not-lint", "keeps main's suite timing report as the baseline"),
+    ("ci.yaml", "suite-timing", CHECKOUT): SETUP,
+    ("ci.yaml", "suite-timing", "actions/download-artifact@v4"):
+        ("not-lint", "downloads the run's suite timing report"),
+    ("ci.yaml", "suite-timing", "actions/cache/restore@v4"):
+        ("not-lint", "restores main's suite timing baseline"),
+    ("ci.yaml", "suite-timing", SUITE_TIMING_COMPARE):
+        ("not-lint", "reports suite time growth over main and never fails a run"),
     ("ci.yaml", "nix-eval", "nix build --no-link '.#checks.x86_64-linux.agnostic-lint'"):
         ("lint", "agnostic-lint"),
     ("instruction-budget.yaml", "instruction-budget", BUDGET): ("lint", "instruction-budget"),
