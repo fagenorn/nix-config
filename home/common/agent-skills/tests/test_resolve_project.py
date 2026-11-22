@@ -40,6 +40,7 @@ from ._inprocess_cli import run_module
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 DECLARATION = Path(__file__).resolve().parents[1] / "host-declaration.json"
+STANDARDS = Path(__file__).resolve().parents[1] / "standards"
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EVAL_FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
 RELEASE_FIXTURES = REPO_ROOT / "tests/fixtures/release"
@@ -63,7 +64,8 @@ CAPABILITY_STATES = ("available", "unsupported", "blocked")
 
 
 def install_home(home: Path, manifest: object = COMMITTED, *,
-                 declaration: object = COMMITTED) -> Path:
+                 declaration: object = COMMITTED,
+                 standards: object = COMMITTED) -> Path:
     """Populate `home` as the platform installation the resolver reads (D23).
 
     Every invocation in this suite runs under a temporary `HOME`, so the
@@ -79,6 +81,10 @@ def install_home(home: Path, manifest: object = COMMITTED, *,
     `$HOME/.agents/share/host-declaration.json` (#150 D24), with `manifest`'s
     semantics: `COMMITTED` copies the repository's own declaration, `None`
     installs none, a `str` is written verbatim and anything else as JSON.
+
+    `standards` is the fourth hook, for the platform standards directory at
+    `$HOME/.agents/standards`: `COMMITTED` copies the repository's own
+    `standards` tree (replacing any existing copy), `None` installs none.
     """
     share = home / ".agents" / "share"
     share.mkdir(parents=True, exist_ok=True)
@@ -102,6 +108,11 @@ def install_home(home: Path, manifest: object = COMMITTED, *,
         declared.write_text(declaration, encoding="utf-8")
     else:
         declared.write_text(json.dumps(declaration), encoding="utf-8")
+    installed = home / ".agents" / "standards"
+    if installed.exists():
+        shutil.rmtree(installed)
+    if standards is COMMITTED:
+        shutil.copytree(STANDARDS, installed)
     return home
 
 

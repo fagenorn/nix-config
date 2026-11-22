@@ -98,6 +98,8 @@ REGISTERED_CHECK_IDS = (
     "repository.residue.root_scratch",
     "verification.commands.no_shell_indirection",
     "verification.conformance_workflow.fresh",
+    "verification.context_map.lint",
+    "verification.standards.lint",
 )
 
 ENTRY_LADDER_IDS = (

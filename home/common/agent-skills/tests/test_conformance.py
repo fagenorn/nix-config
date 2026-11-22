@@ -680,6 +680,39 @@ class ReadOnlyTest(unittest.TestCase):
             self.assertEqual(root.stat().st_mtime_ns, root_mtime)
 
 
+    def test_a_doctor_run_with_a_declared_map_lint_leaves_every_tree_untouched(self):
+        for cwd in (".", ".."):
+            with self.subTest(cwd=cwd), fixture() as tmp:
+                root = make_root(tmp)
+                bin_dir = tmp / "bin"
+                bin_dir.mkdir()
+                script = bin_dir / "map-lint"
+                script.write_text(
+                    f"#!/bin/sh\n: > {root}/inside-marker\n: > {tmp}/outside-marker\n",
+                    encoding="utf-8")
+                script.chmod(0o755)
+                contract = root / ".agents/project.json"
+                authored = json.loads(contract.read_text(encoding="utf-8"))
+                authored["bindings"]["commands"]["context-map-lint"] = {
+                    "argv": ["map-lint"], "cwd": cwd, "env": []}
+                contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+                env = {**HERMETIC_ENV, "PATH": f"{bin_dir}:{HERMETIC_ENV['PATH']}"}
+                self.git(root, "init", "-q")
+                self.git(root, "add", "-A")
+                self.git(root, "commit", "-q", "-m", "fixture")
+                status = self.git(root, "status", "--porcelain")
+                paths, root_mtime = self.snapshot(root), root.stat().st_mtime_ns
+                for extra in ((), ("--offline",)):
+                    code, _, err = run("run", "--purpose", "doctor", "--repo-root",
+                                       str(root), *extra, env=env)
+                    self.assertIn(code, (0, 2), err)
+                    self.assertEqual(self.git(root, "status", "--porcelain"), status)
+                    self.assertEqual(self.snapshot(root), paths)
+                    self.assertEqual(root.stat().st_mtime_ns, root_mtime)
+                    self.assertFalse((root / "inside-marker").exists())
+                    self.assertFalse((tmp / "outside-marker").exists())
+
+
 class PolicyPathSymlinkTest(ReportAssertions, unittest.TestCase):
     """D18: a declared policy path reached through a symlink is a host finding,
     and the walk is bounded at the project root.
