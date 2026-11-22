@@ -399,7 +399,7 @@ _SHELL_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 # strips assignments or splits keyword bodies is unconfirmed, so the permit decides them all.
 _RELEASE_RUN_TEXT = re.compile(
     r"(?:\A|[;&|\n(){`]|\$\()\s*"
-    r"(?:(?:(?:then|do|else|elif|if|while|until|!)|[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S)*)\s+)*"
+    r"(?:(?:(?:then|do|else|elif|if|while|until|!)|[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\\.|\S)*)\s+)*"
     r"(?:(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)(?:\s+-?[\w=.,:-]+)*?\s+)*"
     r"release\s+transaction\s+run(?:\s|\Z)")
 

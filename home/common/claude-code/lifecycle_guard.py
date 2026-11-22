@@ -5426,7 +5426,8 @@ def missing_flags(compiled, words):
     """The flags every form of `compiled` spells at the top level (issue 1592), in the
     first form's order, that `words` lack; a word inside a `Group` is not required.
     A word that is the value of a flag taking one (`--subject "--merge"`) is not an
-    option, so it never counts as the flag it spells."""
+    option, so it never counts as the flag it spells; nor is any word after `--`, which
+    ends the options."""
     required = [
         element.word for element in compiled.forms[0].elements
         if isinstance(element, Literal) and element.word.startswith("-")
@@ -5443,6 +5444,8 @@ def missing_flags(compiled, words):
         if value:
             value = False
             continue
+        if word == "--":
+            break
         options.add(word)
         value = word in valued
     return [flag for flag in required if flag not in options]

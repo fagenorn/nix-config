@@ -399,6 +399,8 @@ class JudgeTest(unittest.TestCase):
                         f"git status\n{plain}", f"(git status; {plain})", f"echo $({plain})",
                         f"timeout 5 {plain}", f"git status && time {plain}",
                         "git status && LANG=C release transaction run --help",
+                        "git status && A=x\\ y release transaction run --help",
+                        "A=x\\ y release transaction run --help",
                         f'git status && LANG="a b" X=1 {plain}',
                         "if true; then release transaction run --help; fi",
                         "while true; do release transaction run --help; done",
