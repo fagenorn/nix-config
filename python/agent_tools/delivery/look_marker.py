@@ -78,11 +78,34 @@ callable (the parsed JSON, None for a 404, an exception for anything else), and
 `judge` takes an optional `Carry`; a refusal lists the `candidates` and the `need` of undecided
 issues, and an `Unreadable` read fails its issue with no need.
 
+Carried approvals (issue 1566). An `approved` approval may carry a `pictures=<digest>` field, the
+sha256 of the sorted, newline-joined console picture ids (`picture_id` is the sha256 of the
+picture bytes, `picture_digest` folds the ids with their roles, `before` or `after`, so swapped
+pictures are another card), and a trusted live `look-carry` line, written by
+`look-approval carry`, may name it:
+`<!-- agent:look-carry v1 issue=<issue> pr=<pr> from=<approved head> to=<head> pictures=<digest> -->`
+then `Carried the owner's look approval of head <from[:7]> of pull request <pr> to head <to[:7]>:
+only merges of the integration branch came in and the re-rendered pictures are unchanged.`
+When overlapping writers leave several lines, `carry_line` names the smallest comment id, the one
+`forge_markers.write` keeps. `carry_candidate` fills `pictures` only for an `approved` latest marker whose field is a 64-hex
+digest, and `line` only when `carry_line` finds a trusted live line naming exactly the issue,
+the pull request, the candidate head, the asked head and that digest. For such a candidate `kept`
+asks `merges_only` first: it reads only `B...A`, `A...H` and `B...H` (never the set file), and keeps
+the approval when `A...H` is `ahead` and every commit after A, walked first-parent from H, is a
+merge with exactly two parents whose second parent is no pull request commit, at most
+`CHAIN_LIMIT` of them. When it decides false and the set file was not yet read, `kept` names the
+set file and the per-commit compares the issue 1211 rule wants in one batch, so the fallback
+decides on the third run; `settle_merges` drives `merges_only` alone. A `fix` answer or an approval
+without pictures is judged by the issue 1211 rule exactly as before. An approval with pictures and
+no line is kept by nothing: the owner looked at pictures, so only a carry line, which attests the
+re-rendered ones, lets a later head stand, whatever the look file sets say.
+
 This module reads no network of its own, runs no subprocess and reads no clock; `settle` and
 `merged_under_look` read only through the `read` callable they are given.
 """
 import base64
 import binascii
+import hashlib
 import json
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -92,10 +115,12 @@ from typing import Any
 from agent_tools.claims import forge_markers
 
 KIND = "look"
+CARRY_KIND = "look-carry"
 # Only the owner's own association counts as the owner: ADR-verification-004.
 TRUSTED: tuple[str, ...] = ("OWNER", "MEMBER")
 ANSWERS: tuple[str, ...] = ("approved", "changes", "fix")
 CARRIED: tuple[str, ...] = ("approved", "fix")
+ROLES: tuple[str, ...] = ("before", "after")
 LOOK_FILES_PATH = ".github/look-files.json"
 COMPARE_FILE_LIMIT = 300
 CHAIN_LIMIT = 10
@@ -107,6 +132,7 @@ FIX_WORDS_LIMIT = 2000
 LINE = re.compile(r"- \[[ xX]\] \[human\] before merge: (?P<what>\S.*?) — measured: (?P<measured>\S.*)")
 FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 HEAD_PATTERN = re.compile(r"[0-9a-f]{40}")
+PICTURES_PATTERN = re.compile(r"[0-9a-f]{64}")
 NEAR = re.compile(r"before[\s_-]*merg", re.IGNORECASE)
 CODE_SPAN = re.compile(r"(`+).*?\1")
 SHAPED = re.compile(r"\s*(?:[-*+]\s*)?(?P<groups>(?:\[[^\]]*\]\s*)+)")
@@ -154,6 +180,8 @@ class Candidate:
     head: str
     answer: str
     comment_id: int
+    pictures: str | None = None
+    line: int | None = None
 
 
 @dataclass(frozen=True)
@@ -226,7 +254,37 @@ def _positive(name: str, value: Any) -> None:
         raise ValueError(f"{name} {value!r} is not a positive integer")
 
 
-def approval_fields(issue: int, pr: int, head: str, answer: str, message: str) -> dict[str, str]:
+def picture_id(data: bytes) -> str:
+    """The console's id of one picture: the sha256 of its bytes."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def picture_digest(pictures: Iterable[str | tuple[str | None, str]]) -> str:
+    """The digest of a card's pictures: sha256 of the sorted entries joined by newlines.
+
+    An entry is a picture id, or a `(role, id)` pair with `role` `before`, `after` or None; the role is
+    part of the entry (`before:<id>`), so two pictures that swap roles are another card. An entry
+    with no role is the bare id.
+    """
+    entries = []
+    for item in pictures:
+        role, ident = (None, item) if isinstance(item, str) else item
+        if not isinstance(ident, str) or not PICTURES_PATTERN.fullmatch(ident) or role not in (None, *ROLES):
+            raise ValueError("a picture digest needs 64-hex picture ids, each with no role, before or after")
+        entries.append(ident if role is None else f"{role}:{ident}")
+    if not entries:
+        raise ValueError("a picture digest needs one or more picture ids")
+    return hashlib.sha256("\n".join(sorted(entries)).encode("ascii")).hexdigest()
+
+
+def _digest(value: Any) -> str:
+    if not isinstance(value, str) or not PICTURES_PATTERN.fullmatch(value):
+        raise ValueError(f"pictures {value!r} is not 64 lowercase hex")
+    return value
+
+
+def approval_fields(issue: int, pr: int, head: str, answer: str, message: str,
+                    pictures: str | None = None) -> dict[str, str]:
     """The marker fields of a look approval, in marker order; ValueError outside the grammar."""
     _positive("issue", issue)
     _positive("pr", pr)
@@ -236,13 +294,18 @@ def approval_fields(issue: int, pr: int, head: str, answer: str, message: str) -
         raise ValueError(f"answer {answer!r} is not one of {ANSWERS}")
     if not isinstance(message, str) or not re.fullmatch(forge_markers.VALUE, message):
         raise ValueError(f"message {message!r} is outside the marker value grammar")
-    return {"issue": str(issue), "pr": str(pr), "head": head, "answer": answer, "message": message}
+    fields = {"issue": str(issue), "pr": str(pr), "head": head, "answer": answer, "message": message}
+    if pictures is not None:
+        if answer != "approved":
+            raise ValueError("pictures go with the answer approved and no other")
+        fields["pictures"] = _digest(pictures)
+    return fields
 
 
 def approval_body(issue: int, pr: int, head: str, answer: str, message: str,
-                  words: str | None = None) -> str:
+                  words: str | None = None, pictures: str | None = None) -> str:
     """The comment body of a look approval; `words` is the owner's fix and goes with `fix` alone."""
-    fields = approval_fields(issue, pr, head, answer, message)
+    fields = approval_fields(issue, pr, head, answer, message, pictures)
     if (answer == "fix") != (words is not None):
         raise ValueError("words go with the answer fix and no other")
     if answer == "fix":
@@ -268,6 +331,47 @@ def look_answer(comments: Iterable[Mapping[str, Any]], issue: int, pr: int,
                 if m.kind == KIND and forge_markers.is_live(m, markers)
                 and all(m.fields.get(key) == value for key, value in wanted.items())]
     return max(matching, key=lambda m: m.comment_id, default=None)
+
+
+def carry_fields(issue: int, pr: int, approved_head: str, head: str, pictures: str) -> dict[str, str]:
+    """The fields of a look-carry line, in marker order; ValueError outside the grammar."""
+    _positive("issue", issue)
+    _positive("pr", pr)
+    for name, value in (("approved head", approved_head), ("head", head)):
+        if not isinstance(value, str) or not HEAD_PATTERN.fullmatch(value):
+            raise ValueError(f"{name} {value!r} is not 40 lowercase hex")
+    if approved_head == head:
+        raise ValueError("a carry names two different heads")
+    return {"issue": str(issue), "pr": str(pr), "from": approved_head, "to": head,
+            "pictures": _digest(pictures)}
+
+
+def carry_sentence(pr: int, approved_head: str, head: str) -> str:
+    return (f"Carried the owner's look approval of head {approved_head[:7]} of pull request {pr} "
+            f"to head {head[:7]}: only merges of the integration branch came in and the "
+            "re-rendered pictures are unchanged.")
+
+
+def carry_body(issue: int, pr: int, approved_head: str, head: str, pictures: str) -> str:
+    """The comment body of a look-carry line."""
+    fields = carry_fields(issue, pr, approved_head, head, pictures)
+    return forge_markers.render(CARRY_KIND, fields, carry_sentence(pr, approved_head, head))
+
+
+def carry_line(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, approved_head: str,
+               head: str, pictures: str) -> int | None:
+    """The comment id of the smallest trusted live carry line naming exactly these, else None.
+
+    The smallest id is the winner `forge_markers.write` elects among overlapping writers, so a read
+    and a write name the same line.
+    """
+    parsed = [forge_markers.parse(c) for c in comments if c.get("author_association") in TRUSTED]
+    markers = [m for m in parsed if m is not None]
+    wanted = {"issue": str(issue), "pr": str(pr), "from": approved_head, "to": head, "pictures": pictures}
+    matching = [m.comment_id for m in markers
+                if m.kind == CARRY_KIND and forge_markers.is_live(m, markers)
+                and all(m.fields.get(key) == value for key, value in wanted.items())]
+    return min(matching, default=None)
 
 
 def marker_line(line: str) -> bool:
@@ -446,13 +550,19 @@ def _look_markers(comments: Iterable[Mapping[str, Any]], issue: int, pr: int) ->
 
 def carry_candidate(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, head: str) -> Candidate | None:
     """The earlier approval that may carry to `head`, or None."""
+    comments = list(comments)
     named = _look_markers(comments, issue, pr)
     if not named or any(m.fields.get("head") == head for m in named):
         return None
     latest = max(named, key=lambda m: m.comment_id)
     if latest.fields.get("answer") not in CARRIED or not _sha(latest.fields.get("head")):
         return None
-    return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id)
+    pictures = latest.fields.get("pictures")
+    if latest.fields["answer"] != "approved" or not isinstance(pictures, str) \
+            or not PICTURES_PATTERN.fullmatch(pictures):
+        return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id)
+    line = carry_line(comments, issue, pr, latest.fields["head"], head, pictures)
+    return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id, pictures, line)
 
 
 def look_prs(comments: Iterable[Mapping[str, Any]], issue: int) -> tuple[int, ...]:
@@ -516,8 +626,107 @@ def _clean_merge(parents: tuple[str, ...], commit: str, reads: Mapping[str, Any]
     return True
 
 
+def _walk(approved_head: str, head: str, own_h: dict[str, tuple[str, ...]],
+          own_a: dict[str, tuple[str, ...]]) -> list[str] | None:
+    """The commits after the approved head, ascending, or None when the chain is not the 1211 shape."""
+    added = set(own_h) - set(own_a) - {approved_head}
+    if len(added) > CHAIN_LIMIT:
+        return None
+    chain: list[str] = []
+    current = head
+    while current != approved_head:
+        parents = own_h.get(current, ())
+        if current not in added or current in chain or not 1 <= len(parents) <= 2 \
+                or (len(parents) == 2 and parents[1] in own_h):
+            return None
+        chain.append(current)
+        current = parents[0]
+    if set(chain) != added:
+        return None
+    chain.reverse()
+    return chain
+
+
+def _wanted(chain: list[str], own_h: dict[str, tuple[str, ...]]) -> list[str]:
+    """The per-commit compares the issue 1211 rule reads for the chain, without repeats."""
+    wanted: list[str] = []
+    for commit in chain:
+        parents = own_h[commit]
+        if len(parents) == 1:
+            paths = [compare_path(parents[0], commit)]
+        else:
+            p1, p2 = parents
+            paths = [compare_path(p1, p2), compare_path(p2, p1), compare_path(p1, commit), compare_path(p2, commit)]
+        wanted.extend(p for p in paths if p not in wanted)
+    return wanted
+
+
+def _chain_reads(approved_head: str, head: str, base: str, reads: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The per-commit compares the issue 1211 rule wants for the chain from `head` to the approved head.
+
+    None when a round-one compare is absent or unreadable or the chain walk refuses.
+    """
+    own_h = compare_commits(reads.get(compare_path(base, head)))
+    own_a = compare_commits(reads.get(compare_path(base, approved_head)))
+    if own_h is None or own_a is None:
+        return None
+    chain = _walk(approved_head, head, own_h, own_a)
+    return None if chain is None else tuple(_wanted(chain, own_h))
+
+
+def merges_only(approved_head: str, head: str, carry: Carry) -> Kept:
+    """Whether only merges of the integration branch came in after the approved head (issue 1566)."""
+    base, reads = carry.base, carry.reads
+    if not (_sha(base) and _sha(approved_head) and _sha(head)) or approved_head == head:
+        return Kept(False)
+    base_a, a_head, base_h = (compare_path(base, approved_head), compare_path(approved_head, head),
+                              compare_path(base, head))
+    three = (base_a, a_head, base_h)
+    missing = tuple(p for p in three if p not in reads)
+    if missing:
+        return Kept(False, missing)
+    if any(reads[p] is None for p in three):
+        return Kept(False)
+    ahead = reads[a_head]
+    if not isinstance(ahead, dict) or not isinstance(ahead.get("status"), str):
+        raise Unreadable(a_head)
+    if ahead["status"] != "ahead":
+        return Kept(False)
+    own_h, own_a = compare_commits(reads[base_h]), compare_commits(reads[base_a])
+    if own_h is None or own_a is None:
+        raise Unreadable(base_h)
+    added = set(own_h) - set(own_a) - {approved_head}
+    if len(added) > CHAIN_LIMIT:
+        return Kept(False)
+    walked: set[str] = set()
+    current = head
+    while current != approved_head:
+        parents = own_h.get(current, ())
+        if current not in added or current in walked or len(parents) != 2 or parents[1] in own_h:
+            return Kept(False)
+        walked.add(current)
+        current = parents[0]
+    return Kept(walked == added)
+
+
 def kept(candidate: Candidate, head: str, carry: Carry) -> Kept:
     """Whether the candidate's approval still holds at `head`, or the reads still needed to say."""
+    if candidate.answer == "approved" and candidate.pictures is not None:
+        if candidate.line is None:
+            return Kept(False)
+        found = merges_only(candidate.head, head, carry)
+        if found.kept or found.need:
+            return found
+        base, reads = carry.base, carry.reads
+        contents = contents_path(base)
+        if contents not in reads and _sha(base) and _sha(candidate.head) and _sha(head):
+            batch = _chain_reads(candidate.head, head, base, reads) or ()
+            return Kept(False, (contents,) + tuple(p for p in batch if p not in reads))
+    return _kept_by_files(candidate, head, carry)
+
+
+def _kept_by_files(candidate: Candidate, head: str, carry: Carry) -> Kept:
+    """The issue 1211 rule: whether no commit after the approved head changed a look file."""
     base, approved_head, reads = carry.base, candidate.head, carry.reads
     if not (_sha(base) and _sha(approved_head) and _sha(head)):
         return Kept(False)
@@ -552,30 +761,10 @@ def kept(candidate: Candidate, head: str, carry: Carry) -> Kept:
     own_h, own_a = compare_commits(reads[base_h]), compare_commits(reads[base_a])
     if own_h is None or own_a is None:
         raise Unreadable(base_h)
-    added = set(own_h) - set(own_a) - {approved_head}
-    if len(added) > CHAIN_LIMIT:
+    chain = _walk(approved_head, head, own_h, own_a)
+    if chain is None:
         return Kept(False)
-    chain: list[str] = []
-    current = head
-    while current != approved_head:
-        parents = own_h.get(current, ())
-        if current not in added or current in chain or not 1 <= len(parents) <= 2 \
-                or (len(parents) == 2 and parents[1] in own_h):
-            return Kept(False)
-        chain.append(current)
-        current = parents[0]
-    if set(chain) != added:
-        return Kept(False)
-    chain.reverse()
-    wanted: list[str] = []
-    for commit in chain:
-        parents = own_h[commit]
-        if len(parents) == 1:
-            paths = [compare_path(parents[0], commit)]
-        else:
-            p1, p2 = parents
-            paths = [compare_path(p1, p2), compare_path(p2, p1), compare_path(p1, commit), compare_path(p2, commit)]
-        wanted.extend(p for p in paths if p not in wanted)
+    wanted = _wanted(chain, own_h)
     missing = tuple(p for p in wanted if p not in reads)
     if missing:
         return Kept(False, missing)
@@ -603,11 +792,11 @@ def kept(candidate: Candidate, head: str, carry: Carry) -> Kept:
     return Kept(False)
 
 
-def settle(candidate: Candidate, head: str, base: str, read: Callable[[str], Any]) -> bool:
-    """Run `kept` to a decision, reading what it names through `read`, within the carry bounds."""
+def _drive(decide: Callable[[Carry], Kept], base: str, read: Callable[[str], Any]) -> bool:
+    """Run `decide` to a decision, reading what it names through `read`, within the carry bounds."""
     reads: dict[str, Any] = {}
     for run in range(1, CARRY_RUNS + 1):
-        found = kept(candidate, head, Carry(base, reads))
+        found = decide(Carry(base, reads))
         if not found.need:
             return found.kept
         if run == CARRY_RUNS or len(reads) + len(found.need) > READ_LIMIT:
@@ -615,6 +804,16 @@ def settle(candidate: Candidate, head: str, base: str, read: Callable[[str], Any
         for path in found.need:
             reads[path] = read(path)
     return False
+
+
+def settle(candidate: Candidate, head: str, base: str, read: Callable[[str], Any]) -> bool:
+    """Run `kept` to a decision, reading what it names through `read`, within the carry bounds."""
+    return _drive(lambda carry: kept(candidate, head, carry), base, read)
+
+
+def settle_merges(approved_head: str, head: str, base: str, read: Callable[[str], Any]) -> bool:
+    """Run `merges_only` to a decision through `read`, within the same bounds as `settle`."""
+    return _drive(lambda carry: merges_only(approved_head, head, carry), base, read)
 
 
 def merged_under_look(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, pull: Any,

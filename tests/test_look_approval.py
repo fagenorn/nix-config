@@ -1,6 +1,7 @@
 """Tests for `agent_tools.delivery.look_approval` (issue 1138): post, status and judge."""
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -9,7 +10,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from agent_tools.claims import forge_markers
 from agent_tools.delivery import look_approval, look_marker as lm
 from .forge_world import ForgeWorld
 
@@ -420,6 +423,280 @@ class StatusCarryTest(unittest.TestCase):
         code, out = run(*STATUS)
         self.assertEqual((code, out["verdict"], out["kept_from"]), (0, "approved", None))
         self.assertNotIn(PULL_ARGV, self.world.argvs("gh"))
+
+
+class StatusMergeCarryTest(unittest.TestCase):
+    """Issue 1566: a carried head is judged from compares alone, the set file never read."""
+    BRANCH_ARGV = ["api", f"repos/{SLUG}/branches/main"]
+    PULL = {"number": 12, "base": {"ref": "main"}, "head": {"sha": HEAD}}
+    DIG = hashlib.sha256(("a" * 64 + "\n" + "c" * 64).encode()).hexdigest()
+    X = "7" * 40
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def pics(self, cid):
+        return comment(cid, lm.approval_body(7, 12, A, "approved", f"m{cid}", pictures=self.DIG))
+
+    def line(self, cid):
+        return comment(cid, lm.carry_body(7, 12, A, HEAD, self.DIG))
+
+    def served(self, base):
+        return {
+            f"compare/{base}...{A}": cmp([PAGE], commits=[(A, [FORK])]),
+            f"compare/{A}...{HEAD}": cmp([TESTF]),
+            f"compare/{base}...{HEAD}": cmp(commits=[(A, [FORK]), (HEAD, [A, self.X])]),
+        }
+
+    def seed(self, comments):
+        self.world.comment_store(SLUG, ISSUE, comments)
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
+        self.world.respond_json("gh", PULL_ARGV, self.PULL)
+        self.world.respond_json("gh", self.BRANCH_ARGV, {"name": "main", "commit": {"sha": B}})
+        serve(self.world, SLUG, self.served(B))
+        self.world.not_found("gh", ["api", f"repos/{SLUG}/contents/.github/look-files.json?ref={B}"])
+
+    def test_status_of_a_carried_head_is_approved(self):
+        self.seed([self.pics(5), self.line(6)])
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                         (0, "approved", "approved", 5, A))
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("contents/" in part for part in argv), argv)
+
+    def test_a_non_merge_edit_outside_the_look_files_does_not_keep_a_pictured_approval(self):
+        # Issue 1566 review: the look file rule alone would approve it and the landing would skip the owner's look.
+        for pictured, verdict in ((True, "needed"), (False, "approved")):
+            with self.subTest(pictured=pictured):
+                self.world = ForgeWorld(self)
+                found = self.pics(5) if pictured else comment(5, lm.approval_body(7, 12, A, "approved", "m5"))
+                self.world.comment_store(SLUG, ISSUE, [found])
+                self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
+                self.world.respond_json("gh", PULL_ARGV, self.PULL)
+                self.world.respond_json("gh", self.BRANCH_ARGV, {"name": "main", "commit": {"sha": B}})
+                serve(self.world, SLUG, reads(B))
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"]), (0, verdict))
+
+    def test_a_clean_integration_merge_is_approved_only_through_its_carry_line(self):
+        for lined, verdict in ((False, "needed"), (True, "approved")):
+            with self.subTest(lined=lined):
+                self.world = ForgeWorld(self)
+                self.seed([self.pics(5), *([self.line(6)] if lined else [])])
+                self.world.respond_json("gh", ["api", f"repos/{SLUG}/contents/.github/look-files.json?ref={B}"], CONSOLE)
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"]), (0, verdict))
+
+    def test_status_without_the_carry_line_is_needed(self):
+        self.seed([self.pics(5)])
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                         (0, "needed", None, None, None))
+
+    def test_tick_ticks_a_carried_merged_head(self):
+        pull = {"number": 12, "merged": True, "head": {"sha": HEAD}, "base": {"ref": "main"},
+                "merge_commit_sha": MC}
+        self.world.comment_store(SLUG, ISSUE, [self.pics(5), self.line(6)])
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": TickTest.TICK_BODY})
+        self.world.respond_json("gh", PULL_ARGV, pull)
+        self.world.respond_json("gh", TickTest.PATCH, {"number": 7})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{MC}"],
+                                {"sha": MC, "parents": [{"sha": BT}, {"sha": HEAD}]})
+        serve(self.world, SLUG, self.served(BT))
+        self.world.not_found("gh", ["api", f"repos/{SLUG}/contents/.github/look-files.json?ref={BT}"])
+        code, out = run("tick", *POST)
+        self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
+
+
+class CarryVerbTest(unittest.TestCase):
+    """Issue 1566: `carry` checks a merges-only head and records one carry line for it."""
+    BRANCH_ARGV = ["api", f"repos/{SLUG}/branches/main"]
+    X = "7" * 40
+    T = "6" * 40
+    DIG = lm.picture_digest([("before", lm.picture_id(b"before")), ("after", lm.picture_id(b"after"))])
+    LINE = lm.carry_body(7, 12, A, HEAD, DIG)
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.before = self.tmp / "before.png"
+        self.after = self.tmp / "after.png"
+        self.before.write_bytes(b"before")
+        self.after.write_bytes(b"after")
+
+    def carry_args(self, *, source=A):
+        return ["carry", *POST, "--from", source, "--before", str(self.before), "--after", str(self.after)]
+
+    def merges(self, tail=None):
+        return {
+            f"compare/{B}...{A}": cmp([PAGE], commits=[(A, [FORK])]),
+            f"compare/{A}...{HEAD}": cmp(["docs/x.md"]),
+            f"compare/{B}...{HEAD}": cmp(commits=tail or [(A, [FORK]), (HEAD, [A, self.X])]),
+        }
+
+    def seed(self, comments, compares=None, *, body=BODY, head=HEAD, state="open", trusted=True):
+        self.world.comment_store(SLUG, ISSUE, comments, **({"labels": []} if trusted else {}))
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
+        self.world.respond_json("gh", PULL_ARGV, {"number": 12, "state": state, "base": {"ref": "main"},
+                                                  "head": {"sha": head}})
+        self.world.respond_json("gh", self.BRANCH_ARGV, {"name": "main", "commit": {"sha": B}})
+        serve(self.world, SLUG, self.merges() if compares is None else compares)
+
+    def pics(self, cid, pictures=None, head=A, answer="approved"):
+        return comment(cid, lm.approval_body(7, 12, head, answer, f"m{cid}", pictures=(pictures or self.DIG) if answer == "approved" else None))
+
+    def posted(self):
+        return [a for a in self.world.argvs("gh") if a[:3] == ["api", "-X", "POST"]]
+
+    def test_carry_posts_one_carry_line_when_only_merges_came_in_and_the_pictures_match(self):
+        self.seed([self.pics(5)])
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["from"], out["reason"], out["pictures"], out["comment_id"]),
+                         (0, "carried", A, None, self.DIG, 100))
+        self.assertEqual(list(out), ["command", "action", "repo", "issue", "pr", "head", "verdict", "from",
+                                     "reason", "pictures", "comment_id"])
+        stored = self.world.stored()
+        self.assertEqual([c["id"] for c in stored], [5, 100])
+        self.assertEqual(stored[1]["body"], self.LINE)
+        self.assertFalse([c for c in stored if c["id"] != 5 and c["body"].startswith("<!-- agent:look v1")])
+
+    def test_a_repeat_carry_posts_nothing_new(self):
+        self.seed([self.pics(5), comment(6, self.LINE)])
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "carried", 6))
+        self.assertEqual(len(self.world.stored()), 2)
+        self.assertEqual(self.posted(), [])
+
+    def assert_needed(self, reason, code=0):
+        got, out = run(*self.carry_args())
+        self.assertEqual((got, out["verdict"], out["reason"], out["comment_id"]), (code, "needed", reason, None))
+        self.assertEqual(self.posted(), [])
+        return out
+
+    def test_a_changed_picture_carries_nothing(self):
+        self.after.write_bytes(b"after, moved")
+        self.seed([self.pics(5)])
+        self.assert_needed("pictures-differ")
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("pulls/" in part or "compare/" in part for part in argv), argv)
+
+    def test_swapped_before_and_after_pictures_carry_nothing(self):
+        # The same two picture ids, each in the other's role, are another card: the approved after picture differs.
+        self.seed([self.pics(5)])
+        argv = ["carry", *POST, "--from", A, "--before", str(self.after), "--after", str(self.before)]
+        code, out = run(*argv)
+        self.assertEqual((code, out["verdict"], out["reason"], out["comment_id"]), (0, "needed", "pictures-differ", None))
+        self.assertEqual(self.posted(), [])
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("pulls/" in part or "compare/" in part for part in argv), argv)
+
+    def test_a_repeat_carry_names_the_line_the_writers_kept_when_two_are_visible(self):
+        # Writers keep the smallest live line and delete the other, so a retry that sees both names the smaller.
+        self.seed([self.pics(5), comment(101, self.LINE), comment(100, self.LINE)])
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "carried", 100))
+        self.assertEqual(self.posted(), [])
+
+    def test_a_non_merge_commit_carries_nothing(self):
+        self.seed([self.pics(5)], self.merges([(A, [FORK]), (HEAD, [A])]))
+        self.assert_needed("not-merges")
+
+    def test_an_approval_without_pictures_carries_nothing(self):
+        self.seed([comment(5, lm.approval_body(7, 12, A, "approved", "m5"))])
+        self.assert_needed("no-pictures")
+
+    def test_no_carried_approval_carries_nothing(self):
+        cases = {
+            "no comments": [],
+            "changes on another head": [self.pics(5, head=OTHER, answer="changes")],
+            "a fix approval": [comment(5, lm.approval_body(7, 12, A, "fix", "m5", words="bold"))],
+        }
+        for name, comments in cases.items():
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed(comments)
+                self.assert_needed("no-approval")
+
+    def test_a_carry_from_another_head_than_the_approval_carries_nothing(self):
+        self.seed([self.pics(5)])
+        got, out = run(*self.carry_args(source=self.T))
+        self.assertEqual((got, out["verdict"], out["reason"], out["from"]), (0, "needed", "source-differs", A))
+        self.assertEqual(self.posted(), [])
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("pulls/" in part or "compare/" in part for part in argv), argv)
+
+    def test_an_exact_approval_needs_no_carry(self):
+        self.seed([comment(5, lm.approval_body(7, 12, HEAD, "approved", "m5"))])
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "approved", None))
+        self.assertEqual(self.posted(), [])
+
+    def test_an_unmarked_issue_is_unmarked(self):
+        self.seed([self.pics(5)], body="no marker here")
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"]), (0, "unmarked"))
+        self.assertEqual(self.world.argvs("gh"), [ISSUE_ARGV])
+
+    def test_a_moved_pull_request_posts_nothing(self):
+        for name, extra in {"head": {"head": OTHER}, "state": {"state": "closed"}}.items():
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed([self.pics(5)], **extra)
+                code, out = run(*self.carry_args())
+                self.assertEqual((code, out["verdict"]), (1, "moved"))
+                self.assertEqual(self.posted(), [])
+
+    def test_an_untrusted_carry_post_is_untrusted(self):
+        self.seed([self.pics(5)], trusted=False)
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"]), (1, "untrusted"))
+
+    def test_an_unreadable_compare_is_an_error(self):
+        compares = self.merges()
+        compares[f"compare/{B}...{HEAD}"] = {}
+        self.seed([self.pics(5)], compares)
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+        self.assertEqual(self.posted(), [])
+
+    def test_overlapping_carries_settle_on_one_trusted_line(self):
+        real = forge_markers._posted
+        for rival, comment_id, deleted in ((99, 99, True), (101, 100, False)):
+            with self.subTest(rival=rival):
+                self.world = ForgeWorld(self)
+                self.seed([self.pics(5)])
+
+                def rival_first(slug, issue, body, rival=rival):
+                    self.world.append_comment({"id": rival, "body": self.LINE, "author_association": "OWNER",
+                                               "created_at": T0, "updated_at": T0})
+                    return real(slug, issue, body)
+
+                with mock.patch.object(forge_markers, "_posted", side_effect=rival_first):
+                    code, out = run(*self.carry_args())
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "carried", comment_id))
+                delete = ["api", "-X", "DELETE", f"repos/{SLUG}/issues/comments/100"]
+                self.assertEqual(delete in self.world.argvs("gh"), deleted)
+                lines = [c["id"] for c in self.world.stored() if c["body"].startswith("<!-- agent:look-carry")]
+                self.assertEqual(lines, [99] if deleted else [100, 101])
+
+    def test_carry_usage_errors_come_before_any_gh_call(self):
+        full = self.carry_args()
+        cases = {
+            "no picture": ["carry", *POST, "--from", A],
+            "unreadable after": ["carry", *POST, "--from", A, "--before", str(self.before),
+                                 "--after", str(self.tmp / "none.png")],
+            "missing file": ["carry", *POST, "--from", A, "--picture", str(self.tmp / "none.png")],
+            "head not hex": ["carry", *POST[:-1], "xyz", "--from", A, "--picture", str(self.before)],
+            "no from": ["carry", *POST, "--picture", str(self.before)],
+            "from is head": ["carry", *POST, "--from", HEAD, "--picture", str(self.before)],
+        }
+        self.assertEqual(full[0], "carry")
+        for name, argv in cases.items():
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                code, out = run(*argv)
+                self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "usage"))
+                self.assertEqual(self.world.argvs("gh"), [])
 
 
 class StatusMergedTest(unittest.TestCase):
