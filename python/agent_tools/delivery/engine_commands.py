@@ -1,24 +1,20 @@
 """Finding, running and grading one command step of an engine procedure (#1512).
 
-A `command` step names an id, looked up in the platform table (`PLATFORM_MODULES`)
-first, then in the snapshot's project commands; an id in neither is an
-`UnknownCommand` that starts no process. A platform id runs as its packaged
-sibling module (`siblings.sibling_argv`, agent-helpers rule 3) in the snapshot's
-project root, with its subcommand then its arguments; a project id runs its
-snapshot argv then its arguments, in the entry's own cwd, with no subcommand.
+A `command` step names an id, looked up in the platform table (`PLATFORM_MODULES`) first, then in the
+snapshot's project commands; an id in neither is an `UnknownCommand` that starts no process. A
+platform id runs as its packaged sibling module (`siblings.sibling_argv`, agent-helpers rule 3) in
+the snapshot's project root, with its subcommand then its arguments; a project id runs its snapshot
+argv then its arguments, in the entry's own cwd, with no subcommand. `PLATFORM_MODULES` mirrors the
+`lib/agent-tools.nix` rows of the commands that have a declaration in `command_verdicts.json`;
+tests/test_engine_commands.py pins the mirror.
 
-`PLATFORM_MODULES` mirrors the `lib/agent-tools.nix` rows of the commands that
-have a declaration in `command_verdicts.json`; tests/test_engine_commands.py
-pins the mirror.
+Grading: stdout is parsed strictly as one JSON document; the outcome is its `verdict` when that is a
+non-empty string, else `ok` for exit 0 and `failed` otherwise. A document that is not an object is no
+result (`{}`).
 
-Grading: stdout is parsed strictly as one JSON document; the outcome is its
-`verdict` when that is a non-empty string, else `ok` for exit 0 and `failed`
-otherwise. A document that is not an object is no result (`{}`).
-
-A command that cannot start (an `OSError` from the spawn) is `failed` with exit
-127 and no pid, and `on_start` is not called. When `on_start` raises, the process
-is killed and reaped before the error propagates. The module runs processes, so
-the pure engine core never imports it.
+A command that cannot start (an `OSError` from the spawn) is `failed` with exit 127 and no pid, and
+`on_start` is not called. When `on_start` raises, the process is killed and reaped before the error
+propagates. The module runs processes, so the pure engine core never imports it.
 """
 
 from __future__ import annotations

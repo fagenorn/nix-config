@@ -1,53 +1,42 @@
 """The engine core: a pure function from a procedure and its events to the next action (#1510).
 
-`replay(procedure, inputs, events)` walks a procedure that passed `engine check`
-and returns a `Replay`: the next `Action` and every `Transition` taken. State is
-never stored; it is derived again from `events` on every call. The core reads
-nothing and writes nothing: the shell performs every side effect and appends
-the events.
+`replay(procedure, inputs, events)` walks a procedure that passed `engine check` and returns a `Replay`: the next
+`Action` and every `Transition` taken. State is never stored; it is derived again from `events` on every call. The
+core reads and writes nothing: the shell performs every side effect.
 
 Inputs
     procedure  the parsed procedure document (never mutated).
-    inputs     the run inputs, one value per name the procedure declares; a
-               `run.<n>` path reads `inputs[n]` (never mutated).
-    events     the ledger so far, oldest first, each a dict of one of two types
-               (`EVENT_TYPES`):
-                 {"type": "entered", "step": <id>}
-                     the shell began the pending step.
-                 {"type": "outcome", "step": <id>, "outcome": <name>,
-                  "result": {...}}
-                     the pending step finished; `result` (default `{}`) is the
-                     step's reply members or command result. An `<X>.<m>` path
-                     reads member `m` of the latest `outcome` result of step X.
-               A `decide` step publishes `{"verdict": <outcome>}` as its result
-               each time it grades, so `<decide step>.verdict` is readable.
-               Shell outcomes such as `no-reply`, `out-of-bounds` and `refused`
-               are ordinary outcomes: they are followed through the step's `on`.
+    inputs     the run inputs, one value per declared name; `run.<n>` reads `inputs[n]` (never mutated).
+    events     the ledger so far, oldest first, each a dict of one of two types (`EVENT_TYPES`):
+                 {"type": "entered", "step": <id>}   the shell began the pending step.
+                 {"type": "outcome", "step": <id>, "outcome": <name>, "result": {...}}
+                     the pending step finished; `result` (default `{}`) is the step's reply members or
+                     command result. An `<X>.<m>` path reads member `m` of the latest `outcome`
+                     result of step X.
+               A `decide` step publishes `{"verdict": <outcome>}` as its result each time it grades,
+               so `<decide step>.verdict` is readable. Shell outcomes such as `no-reply`,
+               `out-of-bounds` and `refused` are ordinary outcomes, followed through the step's `on`.
 
 Actions (`Action`)
     RunCommand    run a `command` step (`visit` is the 1-based entry count).
     StartSession  start an `agent` step's session.
     Stop          the run stopped at a named stop with its `need` and `reenter`.
     Done          the run finished.
-    Both step actions carry `args`: one `(path, value)` pair per entry of the
-    step's `in`, in `in` order, resolved when the walk reaches the step. An `entered` event for the pending step does not
-    change the action.
+    Both step actions carry `args`: one `(path, value)` pair per entry of the step's `in`, in `in`
+    order, resolved when the walk reaches the step.
 
 Visits
-    Every entry of a step counts a visit. Entry `max_visits + 1` (`max_visits`
-    defaults to 1) takes `on["exhausted"]` with no action and records
-    `Transition(step, "exhausted", target)`. A `decide` step grades
-    `{path: value for path in in}` with `engine_graders.GRADERS[step["grader"]]`
-    and follows the returned outcome; no event is involved.
+    Every entry of a step counts a visit. Entry `max_visits + 1` (`max_visits` defaults to 1) takes
+    `on["exhausted"]` with no action and records `Transition(step, "exhausted", target)`. A `decide`
+    step grades `{path: value for path in in}` with `engine_graders.GRADERS[step["grader"]]` and
+    follows the returned outcome; no event is involved.
 
-`CoreError` is raised for: an event that is not a dict or whose type is not in
-`EVENT_TYPES`, at any position; an `entered` naming a step but the pending one,
-or a second `entered` for the same visit; an `outcome` naming a step but the
-pending one, or before its `entered`; any event once the run ended in a stop or
-`done`; an `outcome` reporting `exhausted`; any outcome (reported, graded or
-`exhausted`) the step's `on` does not map; a `result` that is not a dict; an
-`in` path with no value when the walk reaches the step; entry `max_visits + 2` of a step (a loop through
-`exhausted`); entering a `group` or `call` step.
+`CoreError` is raised for: an event that is not a dict or whose type is not in `EVENT_TYPES`, at any position; an `entered` naming a
+step but the pending one, or a second one for the same visit; an `outcome` naming a step but the pending one, or
+before its `entered`; any event once the run ended in a stop or `done`; an `outcome` reporting `exhausted`; any
+outcome (reported, graded or `exhausted`) the step's `on` does not map; a `result` that is not a dict; an `in` path
+with no value when the walk reaches the step; entry `max_visits + 2` of a step (a loop through `exhausted`); entering
+a `group` or `call` step.
 
 Later slices: `group` and `call` steps, waits and continuing a stopped run.
 """

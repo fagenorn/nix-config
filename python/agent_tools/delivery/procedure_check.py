@@ -1,102 +1,66 @@
 """The delivery procedure format and its check (#1508).
 
-A procedure directory holds procedure files `<name>.json` (every `*.json` not
-ending `.reply.json`), prompt files `*.md` and reply schema files
-`*.reply.json`. A procedure's name is its file stem and matches
-`^[a-z][a-z0-9-]*$`. Every file is strict JSON: a duplicate key or a
-non-finite literal makes it unreadable.
+A procedure directory holds procedure files `<name>.json` (every `*.json` not ending `.reply.json`), prompt files `*.md` and
+reply schema files `*.reply.json`. A procedure's name is its file stem and matches `^[a-z][a-z0-9-]*$`. Every file is strict
+JSON: a duplicate key or a non-finite literal makes it unreadable.
 
-Header. A procedure is an object with exactly these members, all required:
-`format` (the integer 1, the only version number), `keep_alive` (an object
-with `command`, a command id, optional `subcommand`, and `in`, a list of
-distinct `run.<input>` paths: the one keep-alive command and where its
-arguments come from), `inputs` (distinct names matching `^[a-z][a-z0-9_]*$`),
-`stops` (stop name -> object with exactly `need`, one of `NEEDS`, and
-`reenter`, a step id) and `steps` (a non-empty list). A stop is never named
-`done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared
-verdict or reply enum value carries it.
+Header. A procedure is an object with exactly these members, all required: `format` (the integer 1, the only version number),
+`keep_alive` (an object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths:
+the one keep-alive command and where its arguments come from), `inputs` (distinct names matching `^[a-z][a-z0-9_]*$`), `stops`
+(stop name -> object with exactly `need`, one of `NEEDS`, and `reenter`, a step id) and `steps` (a non-empty list). A stop is
+never named `done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared verdict or reply enum value carries
+it.
 
-Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`),
-`kind` (one of `KINDS`), `in` (distinct paths, `<step id>.<member>` or
-`run.<input>`), `on` (outcome -> target; required on every step except a group
-member, forbidden on one), `max_visits` (integer >= 1; its presence makes the
-step bounded) and `mutates` (bool). Kind members: `command`: `command` and
-optional `subcommand`, its arguments being its `in` paths; `agent`: `role`,
-`prompt` (a bare `*.md` name), `reply` (a bare `*.reply.json` name) and
-`outcome_from`; `decide`: `grader`; `group`: `members`, a non-empty list of
-objects with exactly `step` and `pass` (distinct strings); `call`: `procedure`,
-optional `each` (one of the step's `in` paths) and `parallel` (an integer >= 1,
-only with `each`). A member a level does not define is `undefined_field`.
+Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`), `kind` (one of `KINDS`), `in` (distinct paths,
+`<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group member, forbidden on
+one), `max_visits` (integer >= 1; its presence makes the step bounded) and `mutates` (bool). Kind members: `command`:
+`command` and optional `subcommand`, its arguments being its `in` paths; `agent`: `role`, `prompt` (a bare `*.md` name),
+`reply` (a bare `*.reply.json` name) and `outcome_from`; `decide`: `grader`; `group`: `members`, a non-empty list of objects
+with exactly `step` and `pass` (distinct strings); `call`: `procedure`, optional `each` (one of the step's `in` paths) and
+`parallel` (an integer >= 1, only with `each`). A member a level does not define is `undefined_field`.
 
-Groups. A group member is a step of the same list, listed by exactly one
-group, not a group, not the first step and never an `on` target or a stop's
-`reenter`. The first step is the entry.
+Groups. A group member is a step of the same list, listed by exactly one group, not a group, not the first step and never an
+`on` target or a stop's `reenter`. The first step is the entry. Command ids and verdicts are declared in
+`command_verdicts.json`: an object keyed by command-table id whose value is `null` (not declared yet), `{"verdicts": [...]}`
+or `{"subcommands": {<subcommand>: [...]}}`.
 
-Command ids and verdicts are declared in `command_verdicts.json`: an object
-keyed by command-table id whose value is `null` (not declared yet),
-`{"verdicts": [...]}` or `{"subcommands": {<subcommand>: [...]}}`.
+Phases. One defect yields one refusal, ordered by procedure name, phase, then step position, and naming the step id, or `None`
+for a header, `keep_alive` or stop defect. Phase A (structure, per file): `unreadable_procedure`, `undefined_field`,
+`invalid_field`, `unknown_stage`, `duplicate_step`. A file with a phase A refusal gets no other phase.
 
-Phases. Phase A (structure, per file): `unreadable_procedure`,
-`undefined_field`, `invalid_field`, `unknown_stage`, `duplicate_step`. A file
-with a phase A refusal gets no other phase, so one defect yields one refusal.
-Refusals are ordered by procedure name, phase, then step position, and name
-the step id, or `None` for a header, `keep_alive` or stop defect.
+Phase B (references, only on a file with no phase A refusal; the header, `keep_alive` and stops first, then the steps in
+order): `unknown_target` (an `on` target that is no step, stop or `done`, a stop `reenter` or a group member `step` that is no
+step), `unknown_command` and `undeclared_verdicts` (a `command` step or `keep_alive` against `command_verdicts.json`: an id
+that is no key, or a `subcommand` on a `verdicts`-form declaration, is the first; a `null` declaration, or a
+`subcommands`-form declaration that lacks the named subcommand, is the second), `unknown_role` (not in `ROLES`),
+`missing_prompt`, `missing_reply` (no such file in the procedure directory, a file that resolves outside it, or for
+`missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema is not a strict-JSON object with a
+`properties` object, a `required` list of strings that contains `outcome_from`, and an `enum` of distinct non-empty strings
+under `properties[outcome_from]`), `unknown_grader` (not in `GRADERS`) and `missing_procedure` (a `call` child file is absent;
+a child that exists but fails phase A gives the parent no refusal).
 
-Phase B (references, only on a file with no phase A refusal; the header,
-`keep_alive` and stops first, then the steps in order, one refusal per failed
-reference): `unknown_target` (an `on` target that is no step, stop or `done`,
-a stop `reenter` or a group member `step` that is no step), `unknown_command`
-and `undeclared_verdicts` (a `command` step or `keep_alive` against
-`command_verdicts.json`: an id that is no key, or a `subcommand` on a
-`verdicts`-form declaration, is the first; a `null` declaration, or a
-`subcommands`-form declaration that lacks the named subcommand, is the
-second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply`
-(no such file in the procedure directory, a file that resolves outside it,
-or for `missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema
-is not a strict-JSON object with a `properties` object, a `required` list of
-strings that contains `outcome_from`, and an `enum` of distinct non-empty
-strings under `properties[outcome_from]`), `unknown_grader` (not in
-`GRADERS`) and `missing_procedure` (a `call` child file is absent; a child
-that exists but fails phase A gives the parent no refusal).
+`Resolved` records what each step's references resolved to: a `StepResolved` per step id (a member is `None` when its
+reference failed or does not apply; `child_stops` is set only when the child loaded with no phase A refusal) and `keep_alive`,
+the keep-alive command's outcomes or `None`.
 
-`Resolved` records, per procedure, what each step's references resolved to,
-for the checks that follow phase B: a `StepResolved` per step id, whose
-member is `None` when that reference failed or does not apply to the kind
-(`outcomes`: a command's verdicts, a reply's outcome enum or a grader's
-outcomes; `reply_properties` and `reply_required`: the reply schema's member
-names and `required` names; `child_stops`: the child's stop names, only when
-the child loaded with no phase A refusal; `prompt`: the prompt file's text), and `keep_alive`, the keep-alive
-command's outcomes or `None`.
+Phase C, graph (only on a file with no phase A refusal and no `unknown_target`; the steps in order, `unreachable_done` first):
+`unreachable_step` (a step the walk of `flow_graph` from the first step does not reach; a group member is reached when its
+group is), `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`),
+`unmapped_outcome` and `unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle of `step_graph` also
+produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the group) and `unbounded_cycle`
+(a cycle among steps with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through
+the `exhausted` entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent;
+refused at its first step). An outcome check whose reference failed phase B is skipped for that step.
 
-Phase C (graph, only on a file with no phase A refusal and no `unknown_target`;
-the steps in order, `unreachable_done` first): `unreachable_step` (a step the
-walk of `flow_graph` from the first step does not reach; a group member is
-reached when its group is), `unreachable_done` (no reachable step has an `on`
-entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
-`unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle
-of `step_graph` also produces `exhausted`, any step may map it, and a group
-member's `pass` entries are checked at the group) and `unbounded_cycle` (a
-cycle among steps with no `max_visits`, refused at its first step, or a step
-on a cycle whose `exhausted` target re-enters the loop, or a loop through the
-`exhausted` entries of steps on a cycle, alone or mixed with ordinary entries,
-which never ends once every bound is spent; refused at its first step). An outcome check whose
-reference failed phase B is skipped for that step.
-
-Phase C, data flow (after the graph checks; in step order, the header's
-`keep_alive` first, one refusal per path or placeholder):
-`unproduced_input` (an `in` path `run.<n>` whose `n` is not a header input, or
-`<X>.<m>` where `X` is not produced on every route to the step: `X` is a
-non-member step, or a member of a group, among the `dominators` of the step
-without itself; a group member is dominated through its group; a step never
-reads its own result; a step the walk does not reach, and a member of a group
-it does not reach, skip this route check and keep the `run.<n>` and member
-checks), `unknown_member` (`X` is an agent step whose reply schema resolved and
-`m` is not in its `properties` or not in its `required` list, because a value
-the reply may leave out cannot be consumed; `X` is a decide step and `m` is
-not `verdict`, the only member its result publishes; the result of any other
-kind declares no schema and is not member-checked) and `unknown_placeholder` (a
-`{{<path>}}` of the step's prompt that is none of its `in` paths; skipped when
-the prompt is missing).
+Phase C, data flow (after the graph checks; in step order, the header's `keep_alive` first): `unproduced_input` (an `in` path
+`run.<n>` whose `n` is not a header input, or `<X>.<m>` where `X` is not produced on every route to the step: `X` is a
+non-member step, or a member of a group, among the `dominators` of the step without itself; a group member is dominated
+through its group; a step never reads its own result; a step the walk does not reach, and a member of a group it does not
+reach, skip this route check and keep the `run.<n>` and member checks), `unknown_member` (`X` is an agent step whose reply
+schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
+consumed; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
+declares no schema and is not member-checked) and `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
+its `in` paths; skipped when the prompt is missing).
 """
 
 from __future__ import annotations
@@ -687,7 +651,6 @@ def check_directory(directory: Path,
     return CheckResult(tuple(p.stem for p in files), tuple(refusals), resolved)
 
 
-
 def outcomes_of(step: dict, resolved: Resolved) -> tuple[str, ...] | None:
     """The outcomes a step can produce but `exhausted`; `None` when unresolved."""
     kind = step["kind"]
@@ -747,12 +710,7 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
 
 
 def dominators(graph: Mapping[str, tuple[str, ...]], entry: str) -> dict[str, frozenset[str]]:
-    """Node -> the nodes on every route from `entry` to it, itself included.
-
-    Defined over the nodes reachable from `entry`: `dom(entry) = {entry}` and
-    `dom(n) = {n} | intersection of dom(p) over reachable predecessors p`,
-    iterated to a fixed point.
-    """
+    """Node -> the nodes on every route from `entry` to it, itself included."""
     nodes = {entry} | _reach(graph, entry)
     predecessors: dict[str, list[str]] = {node: [] for node in nodes}
     for node in nodes:
