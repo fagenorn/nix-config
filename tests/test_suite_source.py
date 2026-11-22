@@ -66,6 +66,10 @@ class LexTest(unittest.TestCase):
         tokens = lex("javascript", "<p>Don't</p>\n}")
 
         self.assertEqual(tokens[-1], Token("}", 2, 0, "op"))
+        self.assertEqual(texts("javascript", "f(<p>Don't</p>) })"), [
+            "f", "(", "<", "p", ">", "Don", "'", "t", "<", "/", "p", ">", ")", "}", ")"])
+        self.assertEqual(texts("javascript", "a 'x' b"), ["a", "'x'", "b"])
+        self.assertEqual(texts("csharp", "a 'x\nb"), ["a", "'x", "b"])
 
     def test_csharp_interpolated_raw_and_char_literals(self):
         source = '$"{a["k"]}" """x " y""" ' + "'\\''"
@@ -143,7 +147,8 @@ class SelectionTest(unittest.TestCase):
         texts_by_path = {
             "tests/test_b.py": b"x = 1\n", "tests/test_a.py": b"y\n", "src/a.py": b"z\n",
             "tests/test_bad.py": b"\xff\xfe", "tests/test_tok.py": b'x = """\n'}
-        snapshot = Snapshot("a" * 40, {path: 1 for path in texts_by_path}, texts_by_path)
+        snapshot = Snapshot("a" * 40, {path: 1 for path in texts_by_path},
+                            texts=texts_by_path)
 
         files = read_test_files(snapshot)
 

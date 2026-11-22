@@ -21,8 +21,12 @@ core. A string without interpolation is one `string` token with its raw text;
 an interpolating string is one `string` token per literal run with the hole's
 contents lexed as ordinary tokens between them. A JavaScript regex literal is
 one token unless the previous token makes `/` a division, or ends right before
-it with `<` (a JSX closing tag). A quote left open ends at its line. C# drops a
-preprocessor line (`#region`, `#if`) through its end.
+it with `<` (a JSX closing tag). A C# quote left open ends at its line; a
+JavaScript quote left open is an operator token of its own and lexing goes on
+right after it, so an apostrophe in JSX text hides no bracket after it. C# drops
+a preprocessor line (`#region`, `#if`) through its end from the tokens and keeps
+it, whitespace collapsed and a trailing `//` comment dropped, in
+`TestFile.directives`.
 
 `test_functions` is the one reader of test declarations: each test's line, body
 tokens, declaration span and the header ranges (token-index ranges) of the
@@ -32,10 +36,16 @@ module level or directly in a class body, read from `ast` with every column
 converted from UTF-8 bytes to characters before it meets a token; a file `ast`
 refuses has none. JavaScript: a call whose callee chain has a test root and only
 test modifiers (a suite root or `test.describe` and only suite modifiers makes a
-suite), whose last function argument is the callback; no callback is a test
-with no body. C#: a method whose run of attribute sections names a test
+suite), whose last function argument is the callback; with no function argument, the last
+argument after the title that is no object literal, string or number (a named
+function, a call) is the body; no callback and no such argument is a test with
+no body. A `skip` or `fixme` call that states a condition, outside every test,
+makes its enclosing suite's header range a scope of every test inside that
+suite, or of every test of the file when it is in no suite. C#: a method whose run of attribute sections names a test
 attribute; `class`, `record` and `struct` declarations are suites, headed from
-their first attribute section.
+their first attribute section. A C# body also holds each directive of
+`TestFile.directives` between its braces, in order, so two bodies guarded by
+different conditions are never the same body.
 """
 
 import ast
@@ -172,6 +182,7 @@ class CLexer:
         self.starts = [0] + [i + 1 for i, c in enumerate(text) if c == "\n"]
         self.previous: Token | None = None
         self.previous_end = -1
+        self.directives: list[Token] = []
 
     def emit(self, start: int, end: int, kind: str) -> None:
         line = bisect.bisect_right(self.starts, start) - 1
@@ -183,6 +194,12 @@ class CLexer:
     def line_end(self, i: int) -> int:
         end = self.text.find("\n", i)
         return len(self.text) if end < 0 else end
+
+    def directive(self, start: int, end: int) -> None:
+        line = bisect.bisect_right(self.starts, start) - 1
+        words = self.text[start:end].split("//", 1)[0].split()
+        self.directives.append(
+            Token(" ".join(words), line + 1, start - self.starts[line], "directive"))
 
     def run(self) -> list[Token]:
         self.scan(0, False)
@@ -202,7 +219,9 @@ class CLexer:
                 i = len(text) if end < 0 else end + 2
             elif self.csharp and char == "#" and not text[
                     self.starts[bisect.bisect_right(self.starts, i) - 1]:i].strip():
-                i = self.line_end(i)
+                end = self.line_end(i)
+                self.directive(i, end)
+                i = end
             elif in_hole and char == "}" and depth == 0:
                 return i
             else:
@@ -279,7 +298,11 @@ class CLexer:
         return self.quoted(i, char) if char in "'\"" else None
 
     def quoted(self, start: int, quote: str) -> int:
-        """A lenient quoted string: it ends at its closing quote or at its line."""
+        """A lenient quoted string: it ends at its closing quote or at its line.
+
+        A JavaScript quote with no closing quote on its line is one operator token
+        (an apostrophe in JSX text), never a string that swallows the line.
+        """
         text, i = self.text, start + 1
         while i < len(text) and text[i] != "\n":
             if text[i] == "\\" and i + 1 < len(text) and text[i + 1] != "\n":
@@ -287,9 +310,13 @@ class CLexer:
                 continue
             i += 1
             if text[i - 1] == quote:
-                break
-        self.emit(start, i, "string")
-        return i
+                self.emit(start, i, "string")
+                return i
+        if self.csharp:
+            self.emit(start, i, "string")
+            return i
+        self.emit(start, start + 1, "op")
+        return start + 1
 
     def csharp_string(self, start: int, quote_at: int) -> int:
         text = self.text
@@ -371,13 +398,21 @@ class CLexer:
         return self.scan(after_opener, True)
 
 
+def lex_file(family: str, text: str) -> tuple[list[Token], list[Token]] | None:
+    """The tokens and the directive lines of `text`; `None` only when Python's tokenizer refuses."""
+    if family == "python":
+        tokens = lex_python(text)
+        return None if tokens is None else (tokens, [])
+    if family in ("csharp", "javascript"):
+        lexer = CLexer(family, text)
+        return lexer.run(), lexer.directives
+    raise ValueError(f"unknown family {family!r}; expected one of {FAMILIES}")
+
+
 def lex(family: str, text: str) -> list[Token] | None:
     """The tokens of `text` in `family`; `None` only when Python's tokenizer refuses."""
-    if family == "python":
-        return lex_python(text)
-    if family in ("csharp", "javascript"):
-        return CLexer(family, text).run()
-    raise ValueError(f"unknown family {family!r}; expected one of {FAMILIES}")
+    lexed = lex_file(family, text)
+    return None if lexed is None else lexed[0]
 
 
 class TestFile(NamedTuple):
@@ -387,6 +422,7 @@ class TestFile(NamedTuple):
     family: str
     text: str
     tokens: tuple[Token, ...]
+    directives: tuple[Token, ...] = ()
 
 
 def read_test_files(snapshot: Snapshot) -> list[TestFile]:
@@ -400,9 +436,9 @@ def read_test_files(snapshot: Snapshot) -> list[TestFile]:
             text = snapshot.texts[path].decode("utf-8-sig")
         except UnicodeDecodeError:
             continue
-        tokens = lex(family, text)
-        if tokens is not None:
-            files.append(TestFile(path, family, text, tuple(tokens)))
+        lexed = lex_file(family, text)
+        if lexed is not None:
+            files.append(TestFile(path, family, text, tuple(lexed[0]), tuple(lexed[1])))
     return files
 
 
@@ -582,19 +618,39 @@ def javascript_function(tokens: Sequence[Token], pairs: dict[int, int], a: int, 
     return j + 1, j + 1, b
 
 
-def javascript_callback(tokens: Sequence[Token], pairs: dict[int, int], open_: int,
-                        close: int) -> tuple[int, int, int] | None:
-    """The last top-level argument of the call that is a function, as `javascript_function`."""
-    found, start, i = None, open_ + 1, open_ + 1
+def top_level_arguments(tokens: Sequence[Token], pairs: dict[int, int], open_: int,
+                        close: int) -> list[tuple[int, int]]:
+    """The half-open token range of each non-empty top-level argument of a call."""
+    found, start, i = [], open_ + 1, open_ + 1
     while i <= close:
         if i < close and i in pairs:
             i = pairs[i] + 1
             continue
         if i == close or tokens[i].text == ",":
             if start < i:
-                found = javascript_function(tokens, pairs, start, i) or found
+                found.append((start, i))
             start = i + 1
         i += 1
+    return found
+
+
+def javascript_callback(tokens: Sequence[Token], pairs: dict[int, int], open_: int,
+                        close: int) -> tuple[int, int, int] | None:
+    """The last top-level argument of the call that is a function, as `javascript_function`."""
+    found = None
+    for start, end in top_level_arguments(tokens, pairs, open_, close):
+        found = javascript_function(tokens, pairs, start, end) or found
+    return found
+
+
+def javascript_reference(tokens: Sequence[Token], pairs: dict[int, int], open_: int,
+                         close: int) -> tuple[int, int, int] | None:
+    """The last argument after the title that names a body: no object literal, string or number."""
+    found = None
+    for start, end in top_level_arguments(tokens, pairs, open_, close)[1:]:
+        literal = end - start == 1 and tokens[start].kind in ("string", "number")
+        if not literal and tokens[start].text != "{":
+            found = (start, start, end)
     return found
 
 
@@ -618,6 +674,7 @@ def javascript_tests(test_file: "TestFile") -> list[TestFunction]:
     tests: list[tuple[int, tuple[str, ...] | None, tuple[int, int]]] = []
     bodies: list[tuple[int, int]] = []
     suites: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    annotations: list[tuple[int, int]] = []
     for i in range(len(tokens)):
         chain = javascript_chain(tokens, pairs, i)
         kind = javascript_kind(chain[0], chain[1]) if chain else None
@@ -627,17 +684,37 @@ def javascript_tests(test_file: "TestFile") -> list[TestFunction]:
         callback = javascript_callback(tokens, pairs, chain[2], close)
         if kind == "suite" and callback:
             suites.append(((i, callback[0]), (callback[1], callback[2])))
-        elif kind == "test" and not javascript_annotation(
-                tokens, pairs, chain[1], chain[2], callback):
+        elif kind == "test" and javascript_annotation(tokens, pairs, chain[1], chain[2], callback):
+            annotations.append((i, close + 1))
+        elif kind == "test":
+            callback = callback or javascript_reference(tokens, pairs, chain[2], close)
             body = texts_between(tokens, callback[1], callback[2]) if callback else None
             tests.append((tokens[i].line, body, (i, close + 1)))
             if callback:
                 bodies.append((callback[1], callback[2]))
     tests = [t for t in tests if not any(a <= t[2][0] and t[2][1] <= b for a, b in bodies)]
+    outside = [a for a in annotations if not any(x <= a[0] and a[1] <= y for x, y in bodies)]
+    insides = [inside for _, inside in suites]
     return [TestFunction(line, body, span, tuple(
         header for header, inside in sorted(suites)
-        if inside[0] <= span[0] and span[1] <= inside[1]))
+        if inside[0] <= span[0] and span[1] <= inside[1]) + conditions(outside, insides, span))
         for line, body, span in tests]
+
+
+def conditions(annotations: list[tuple[int, int]], insides: list[tuple[int, int]],
+               span: tuple[int, int]) -> tuple[tuple[int, int], ...]:
+    """The condition calls outside every test that disable the test at `span`.
+
+    An annotation belongs to the smallest suite body holding it, else to the file; it
+    disables each test inside that suite, each test of the file in the second case.
+    """
+    found = []
+    for annotation in annotations:
+        holding = [b for b in insides if b[0] <= annotation[0] and annotation[1] <= b[1]]
+        owner = min(holding, key=lambda b: b[1] - b[0]) if holding else None
+        if owner is None or (owner[0] <= span[0] and span[1] <= owner[1]):
+            found.append(annotation)
+    return tuple(found)
 
 
 def attribute_sections(tokens: Sequence[Token]) -> list[tuple[int, int]]:
@@ -710,7 +787,7 @@ def csharp_method(tokens: Sequence[Token], pairs: dict[int, int], start: int,
     if j >= count or tokens[j].text == ";":
         return None
     if tokens[j].text == "{":
-        return name, (j + 1, pairs[j]), pairs[j] + 1
+        return (name, (j + 1, pairs[j]), pairs[j] + 1) if j in pairs else None
     k = j + 1
     while k < count and tokens[k].text != ";":
         opens = tokens[k].kind == "op" and tokens[k].text in BRACKETS and k in pairs
@@ -747,6 +824,18 @@ def csharp_suites(tokens: Sequence[Token], pairs: dict[int, int],
     return suites
 
 
+def csharp_body(test_file: "TestFile", body: tuple[int, int]) -> tuple[str, ...]:
+    """The body tokens of a C# method with each directive line between its first and last token."""
+    tokens = test_file.tokens
+    inside = [(token.line, token.column, token.text) for token in tokens[body[0]:body[1]]]
+    if test_file.directives:
+        low = (tokens[body[0] - 1].line, tokens[body[0] - 1].column)
+        high = (tokens[body[1]].line, tokens[body[1]].column) if body[1] < len(tokens) else None
+        inside += [(d.line, d.column, d.text) for d in test_file.directives
+                   if low < (d.line, d.column) and (high is None or (d.line, d.column) < high)]
+    return tuple(text for _, _, text in sorted(inside))
+
+
 def csharp_tests(test_file: "TestFile") -> list[TestFunction]:
     tokens = test_file.tokens
     pairs = bracket_pairs(tokens)
@@ -768,7 +857,7 @@ def csharp_tests(test_file: "TestFile") -> list[TestFunction]:
         name, body, end = method
         span = (run[0][0], end)
         found.append(TestFunction(
-            tokens[name].line, texts_between(tokens, *body), span, tuple(
+            tokens[name].line, csharp_body(test_file, body), span, tuple(
                 header for header, inside in sorted(suites)
                 if inside[0] <= span[0] and span[1] <= inside[1])))
     return found

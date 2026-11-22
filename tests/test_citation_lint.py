@@ -374,7 +374,8 @@ class UsageTest(LintTestCase):
         self.assertEqual((plain.returncode, plain.stdout), (0, ""), plain.stderr)
         self.assertEqual(indexed.returncode, 0, indexed.stderr)
         self.assertEqual(indexed.stdout.splitlines(), [
-            "B1. One", "B2. Two", "PY1. Py", "judged rules: 3", "enforcers citing nothing: 0"])
+            "B1. One", "  reasoned suppressions: 0", "B2. Two", "  reasoned suppressions: 0", "PY1. Py", "  reasoned suppressions: 0", "judged rules: 3",
+            "enforcers citing nothing: 0"])
 
     def test_an_argument_the_old_citation_lint_took_is_refused(self):
         root, platform, project = self.fixture(files={}, members=["tests/test_a.py"])
@@ -400,7 +401,7 @@ class IndexTest(LintTestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
-            "B1. One", "  tests/test_a.py", "B2. Two", "judged rules: 1",
+            "B1. One", "  tests/test_a.py", "  reasoned suppressions: 0", "B2. Two", "  reasoned suppressions: 0", "judged rules: 1",
             "enforcers citing nothing: 1"])
 
     def test_a_decision_record_citation_counts_as_citing(self):
@@ -437,8 +438,9 @@ class IndexTest(LintTestCase):
         self.assertIn("cites B9", result.stdout)
         lines = result.stdout.splitlines()
         self.assertIn("tests/test_a.py:1: cites B9, which is in no applicable layer", lines)
-        self.assertEqual(lines[-5:], [
-            "B1. One", "B2. Two", "B9. Shadow", "judged rules: 3", "enforcers citing nothing: 0"])
+        self.assertEqual(lines[-8:], [
+            "B1. One", "  reasoned suppressions: 0", "B2. Two", "  reasoned suppressions: 0", "B9. Shadow", "  reasoned suppressions: 0", "judged rules: 3",
+            "enforcers citing nothing: 0"])
 
     def test_the_index_still_fails_on_an_unknown_citation(self):
         root, platform, project = self.index_fixture("# " + cite("Z9") + "\n")

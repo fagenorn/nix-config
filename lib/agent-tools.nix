@@ -5,7 +5,8 @@
 # parent D2, D10, D13):
 # `agent_tools.delivery.engine_commands.PLATFORM_MODULES` mirrors the rows of the commands an
 # engine procedure may run, and tests/test_engine_commands.py pins the mirror to these rows.
-{ pkgs }:
+# The revision record is the flake revision a project's lock pins (adoption's lock entry).
+{ pkgs, revision }:
 let
   inherit (pkgs) lib;
   python = pkgs.python3;
@@ -121,6 +122,16 @@ let
       ${pkgs.stdenv.shellDryRun} "$out/bin/${name}"
     '';
 
+  revisionRecord = pkgs.writeText "platform-revision.json" (
+    builtins.toJSON (
+      {
+        schema_version = 1;
+        type = "github";
+      }
+      // revision
+    )
+  );
+
   package =
     pkgs.runCommand "agent-platform"
       {
@@ -132,6 +143,7 @@ let
       ''
         mkdir -p "$out/bin" "$out/share/agent-platform"
         cp ${../home/common/agent-skills/platform-manifest.json} "$out/share/agent-platform/platform-manifest.json"
+        cp ${revisionRecord} "$out/share/agent-platform/platform-revision.json"
         cp -R ${../home/common/agent-skills/standards} "$out/share/agent-platform/standards"
         chmod -R u+w "$out/share/agent-platform"
         ${lib.concatStrings (lib.mapAttrsToList writeLauncher commands)}

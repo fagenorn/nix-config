@@ -50,7 +50,7 @@ ENFORCER = Enforcer(RULE_ID, find)
 
 
 def main(argv: list[str] | None = None) -> int:
-    return never_rise.run_lint(COMMAND, find, argv)
+    return never_rise.run_lint(COMMAND, ENFORCER, argv)
 
 
 if __name__ == "__main__":

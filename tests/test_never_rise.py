@@ -540,7 +540,7 @@ class SizeLintOutputTest(unittest.TestCase):
         def run(argv):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = never_rise.run_lint("fx-lint", BAD.find, argv)
+                code = never_rise.run_lint("fx-lint", BAD, argv)
             return code, out.getvalue(), err.getvalue()
 
         with tempfile.TemporaryDirectory() as tmp:

@@ -37,6 +37,7 @@ from pathlib import Path
 from agent_tools.project_contract import adopt_apply, agent_platform, resolve_project
 
 from ._inprocess_cli import run_module
+from .locked_workflow_fixture import EXPECTED_LOCKED_WORKFLOW
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 DECLARATION = Path(__file__).resolve().parents[1] / "host-declaration.json"
@@ -2109,11 +2110,10 @@ class ConformanceWorkflowProjectionTest(ResolverTestCase):
             self.actions(payload),
             {"codex.entry": "unchanged", "claude.entry": "unchanged",
              "conformance.workflow": "written"})
-        self.assertEqual((root / WORKFLOW_TARGET).read_bytes(),
-                         EXPECTED_WORKFLOW.encode())
+        self.assertEqual((root / WORKFLOW_TARGET).read_bytes(), EXPECTED_LOCKED_WORKFLOW.encode())
 
     def test_the_render_is_the_pinned_text_with_the_branch_and_version(self):
-        render = resolve_project.render_conformance_workflow
+        render = functools.partial(resolve_project.render_conformance_workflow, locked=False)
         self.assertEqual(render("main", 2), EXPECTED_WORKFLOW.encode())
         self.assertEqual(
             render("trunk", 3),
@@ -2154,7 +2154,7 @@ class ConformanceWorkflowProjectionTest(ResolverTestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.actions(payload)["conformance.workflow"],
                          "written")
-        self.assertEqual(target.read_bytes(), EXPECTED_WORKFLOW.encode())
+        self.assertEqual(target.read_bytes(), EXPECTED_LOCKED_WORKFLOW.encode())
         self.assertEqual(self.run_in("check-projections", root)[0], 0)
         target.unlink()
         code, payload, _ = self.run_in("check-projections", root)
@@ -2162,7 +2162,7 @@ class ConformanceWorkflowProjectionTest(ResolverTestCase):
         self.assertEqual(payload["error"]["repair_id"],
                          "projection.conformance.workflow.missing")
         self.assertEqual(self.run_in("write-projections", root)[0], 0)
-        self.assertEqual(target.read_bytes(), EXPECTED_WORKFLOW.encode())
+        self.assertEqual(target.read_bytes(), EXPECTED_LOCKED_WORKFLOW.encode())
 
     def test_a_symlinked_workflow_directory_is_refused_and_nothing_is_written_through_it(self):
         root = self.workflow_root()
@@ -2278,7 +2278,7 @@ class CommittedProjectionTest(ResolverTestCase):
                              home=self.home)
         self.assertEqual(code, 0, err)
         version = json.loads(out)["project"]["project_schema_version"]
-        rendered = resolve_project.render_conformance_workflow(branch, version)
+        rendered = resolve_project.render_conformance_workflow(branch, version, locked=False)
         self.assertEqual(
             rendered,
             (REPO_ROOT / ".github" / "workflows" / "conformance.yaml").read_bytes(),

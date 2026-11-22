@@ -18,8 +18,10 @@ on the merge base through git renames. That check, not this command's exit, is
 the gate.
 
 The command `size-lint --repo-root <absolute directory> [--revision <rev>]`
-prints every over-budget file at the revision (default `HEAD`), one line each on
-stdout, `<rule> <path>:<line>` with the path escaped as
+prints every over-budget file at the revision (default `HEAD`) that no reasoned
+suppression marker of the rule covers, and one line for each bare marker of the rule
+(`agent_tools.delivery.never_rise.counted`, #1459), one line each on stdout,
+`<rule> <path>:<line>` with the path escaped as
 `agent_tools.delivery.never_rise.Violation.text` defines. Its exits (1 when it
 printed any, 0 when none, 2 with `size-lint: <reason>` on stderr when the root
 or revision cannot be read) are those of `agent_tools.delivery.never_rise.run_lint`.
@@ -54,7 +56,7 @@ ENFORCER = Enforcer(RULE_ID, find, per_file=True)
 
 
 def main(argv: list[str] | None = None) -> int:
-    return never_rise.run_lint(COMMAND, find, argv)
+    return never_rise.run_lint(COMMAND, ENFORCER, argv)
 
 
 if __name__ == "__main__":

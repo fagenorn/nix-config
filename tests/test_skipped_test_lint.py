@@ -46,7 +46,8 @@ def source(pairs):
 
 def snapshot(files):
     blobs = {path: text.encode("utf-8") for path, text in files.items()}
-    return Snapshot("fixture", {path: text.count("\n") for path, text in files.items()}, blobs)
+    return Snapshot("fixture", {path: text.count("\n") for path, text in files.items()},
+                    texts=blobs)
 
 
 def found(files):
@@ -298,6 +299,79 @@ class SkippedNeverRiseTest(unittest.TestCase):
             write(root, "tests/test_c.py", source(moved)[0])
             commit_all(root)
             self.assertEqual(self.judge(root), ())
+
+
+class SkipRecognitionTest(unittest.TestCase):
+    def test_a_test_given_a_named_function_is_a_test_with_a_body_and_skips_only_with_a_marker(self):
+        self.assertEqual(found({"web/a.test.js": "it('works', run)\nit('slow', run, 1000)\n"}), [])
+        self.assertEqual(found({"web/a.test.js": "it.skip('works', run)\n"}),
+                         [("web/a.test.js", 1)])
+        self.assertEqual(found({"web/a.test.js": "it('p')\nit('q', { timeout: 1 })\n"}),
+                         [("web/a.test.js", 1), ("web/a.test.js", 2)])
+
+    def test_a_suite_level_or_file_level_playwright_skip_counts_each_test_it_disables(self):
+        suite = [ok("test.describe('suite', () => {"), ok("  test.skip(true, 'maintenance');"),
+                 bad("  test('a', async () => { run(1); });"),
+                 bad("  test('b', async () => { run(2); });"), ok("});"),
+                 ok("test('c', async () => { run(3); });")]
+        file_level = [ok("test.skip(true, 'maintenance');"),
+                      bad("test('a', async () => { run(1); });"),
+                      bad("test('b', async () => { run(2); });")]
+        inside = [ok("test('a', async () => { test.skip(true, 'x'); });")]
+        empty = [ok("test.describe('suite', () => {"), bad("  test.skip(true, 'x');"), ok("});")]
+
+        for name, pairs in (("suite", suite), ("file", file_level), ("empty", empty)):
+            path = f"web/{name}.spec.ts"
+            self.assertEqual(found({path: source(pairs)[0]}),
+                             [(path, n) for n in source(pairs)[1]], name)
+        self.assertEqual(found({"web/inside.spec.ts": source(inside)[0]}),
+                         [("web/inside.spec.ts", 1)])
+
+    def test_a_conditional_python_skip_counts_unless_its_condition_is_the_constant_that_never_skips(self):
+        def count(decorator):
+            text = f"import unittest, pytest\n{decorator}\ndef test_a():\n    assert 1\n"
+            return len(found({"tests/test_a.py": text}))
+
+        self.assertEqual(
+            [count(d) for d in (
+                '@unittest.skipIf(False, "x")', '@unittest.skipUnless(True, "x")',
+                '@pytest.mark.skipif(False, reason="x")', '@pytest.mark.skipif(condition=False)',
+                '@unittest.skipIf(True, "x")', '@unittest.skipUnless(False, "x")',
+                '@pytest.mark.skipif(sys.platform == "win32", reason="x")',
+                '@unittest.skipIf(False or flag, "x")')],
+            [0, 0, 0, 0, 1, 1, 1, 1])
+
+    def test_turning_a_skip_condition_on_raises_the_count(self):
+        def world(condition):
+            return f'import unittest\n@unittest.skipIf({condition}, "x")\ndef test_a():\n    assert 1\n'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "tests/test_a.py", world("False"))
+            commit_all(root)
+            mark_base(root)
+            write(root, "tests/test_a.py", world("True"))
+            commit_all(root)
+            rises = never_rise.judge(root, "main", [skipped_test_lint.ENFORCER], timeout=60).rises
+        self.assertEqual(rises, (Rise("B18", 0, 1, (Violation("B18", "tests/test_a.py", 3),)),))
+
+    def test_an_nunit_ignore_named_argument_of_a_test_case_disables_the_test(self):
+        cases = [ok("public class T {"), ok('[TestCase(1, Ignore = "maintenance")]'),
+                 bad("public void A(int n) { Run(1); }"),
+                 ok('[TestCase(2, IgnoreReason = "later"), TestCase(3)]'),
+                 bad("public void B(int n) { Run(2); }"),
+                 ok("[TestCase(4, Explicit = true)]"), bad("public void C(int n) { Run(3); }"),
+                 ok("[TestCase(5, Explicit = false)]"), ok("public void D(int n) { Run(4); }"),
+                 ok("[TestCase(6, Description = \"Ignore = 1\")]"),
+                 ok("public void E(int n) { Run(5); }"), ok("}")]
+
+        self.assertEqual(found({"src/T.cs": source(cases)[0]}),
+                         [("src/T.cs", n) for n in source(cases)[1]])
+
+    def test_a_csharp_file_with_an_unmatched_bracket_is_read_without_error(self):
+        for text in ("[Fact]\npublic void A() {\n", '[Fact(Skip = "x"]\npublic void A() { }\n',
+                     "[Fact]\npublic void A(\n"):
+            self.assertEqual(found({"src/fixture.cs": text}), [], text)
 
 
 if __name__ == "__main__":

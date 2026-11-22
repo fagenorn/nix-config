@@ -46,7 +46,8 @@ def source(pairs):
 
 def snapshot(files):
     blobs = {path: text.encode("utf-8") for path, text in files.items()}
-    return Snapshot("fixture", {path: text.count("\n") for path, text in files.items()}, blobs)
+    return Snapshot("fixture", {path: text.count("\n") for path, text in files.items()},
+                    texts=blobs)
 
 
 def found(files):
@@ -231,6 +232,30 @@ class CopiedNeverRiseTest(unittest.TestCase):
             write(root, "tests/test_d.py", source(moved)[0])
             commit_all(root)
             self.assertEqual(self.judge(root), ())
+
+
+class CopyRecognitionTest(unittest.TestCase):
+    def test_an_apostrophe_in_jsx_text_hides_no_closing_delimiter_of_a_copied_body(self):
+        view = [ok("it('a', () => { render(<p>Don't</p>) })"),
+                bad("it('b', () => { render(<p>Don't</p>) })"),
+                bad("it('c', () => { render(<p>Don't</p>) })")]
+
+        self.assertEqual(found({"web/view.test.tsx": source(view)[0]}),
+                         [("web/view.test.tsx", n) for n in source(view)[1]])
+
+    def test_bodies_guarded_by_different_preprocessor_conditions_are_no_copies(self):
+        def two(second):
+            return source([
+                ok("public class T {"), ok("    [Fact]"), ok("    public void A() {"),
+                ok("#if WINDOWS"), ok("        Assert.True(Check());"), ok("#endif"), ok("    }"),
+                ok("    [Fact]"), ok("    public void B() {"), ok(f"#if {second}"),
+                ok("        Assert.True(Check());"), ok("#endif"), ok("    }"), ok("}")])[0]
+
+        self.assertEqual(found({"src/T.cs": two("LINUX")}), [])
+        self.assertEqual(found({"src/T.cs": two("WINDOWS")}), [("src/T.cs", 9)])
+
+    def test_a_csharp_file_with_an_unmatched_brace_is_read_without_error(self):
+        self.assertEqual(found({"src/fixture.cs": "[Fact]\npublic void A() {\n"}), [])
 
 
 if __name__ == "__main__":
