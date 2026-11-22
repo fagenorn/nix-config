@@ -11,18 +11,22 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.project_contract import schema_three
+from agent_tools.project_contract import resolve_project, schema_three
+from agent_tools.release import release
 
 from .test_resolve_project import (
     REPO_ROOT,
     ResolverTestCase,
     make_project_root,
     run,
+    source_contract,
 )
 
 TIER = "fast"
@@ -263,6 +267,35 @@ class ProgramReadsTest(SchemaThreeCase):
         self.assertEqual(paths["architecture"], [f"{root}/docs/guides/architecture.md"])
         self.assertEqual(paths["operations"], [f"{root}/docs/operations"])
         self.assertEqual(snap["capabilities"]["knowledge.architecture"]["state"], "blocked")
+
+
+class ReleaseReadsTest(SchemaThreeCase):
+    """The release core reads the filled view, never the authored schema-3 source."""
+
+    def test_the_release_driver_builds_its_router_from_a_schema_three_contract(self):
+        root = self.schema_three_root(schema_three_contract())
+        code, snapshot, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            project = release._project(snapshot, root)
+            driver = release.Driver(project, profile_id=None, approvals=lambda *_: True)
+            driver._router()
+
+    def test_the_view_reader_fills_the_constants_the_release_core_reads(self):
+        root = self.schema_three_root(schema_three_contract())
+        view = resolve_project.load_contract_view(root)
+        bindings = view["bindings"]
+        self.assertEqual(
+            bindings["tracker"]["credential_env"]["unset_before_invocation"],
+            ["GITHUB_TOKEN", "GH_TOKEN"])
+        self.assertEqual(bindings["tracker"]["kind"], "github")
+        self.assertEqual(bindings["vcs"]["default_branch"], "main")
+        self.assertEqual(view["schema_version"], 3)
+
+    def test_the_view_reader_returns_a_schema_two_contract_unchanged(self):
+        root = self.schema_three_root(source_contract())
+        self.assertEqual(resolve_project.load_contract_view(root),
+                         resolve_project.load_contract(root))
 
 
 class SchemaThreeFillTest(unittest.TestCase):

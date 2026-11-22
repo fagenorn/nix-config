@@ -1222,6 +1222,11 @@ def contract_view(source: dict) -> dict:
     return source
 
 
+def load_contract_view(root: Path) -> dict:
+    """The contract at `root` as its readers outside the resolver see it: `contract_view` of `load_contract`."""
+    return contract_view(load_contract(root))
+
+
 def effective_commands(authored: dict | None,
                        platform: dict = agent_platform.PLATFORM_COMMANDS) -> dict | None:
     """The authored commands plus every platform command the contract does not author.
