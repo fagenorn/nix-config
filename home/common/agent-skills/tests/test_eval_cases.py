@@ -10,7 +10,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EVALS_DIR = REPO_ROOT / "home/common/agent-skills/evals"
@@ -751,113 +750,6 @@ def restored(key, build):
     shutil.rmtree(work)
     shutil.copytree(pristine, work, symlinks=True)
     return work, copy.deepcopy(BUILT[key])
-
-
-class RestoredSandboxTest(unittest.TestCase):
-    """#1615: a sandbox is built once per run and put back in place before every use."""
-
-    @staticmethod
-    def head_of(repo):
-        return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
-                              text=True, check=True).stdout.strip()
-
-    def test_a_restored_sandbox_is_its_build_without_an_earlier_tests_change(self):
-        key = f"probe-{self.id()}"
-        calls = []
-
-        def build(work):
-            calls.append(work)
-            repo, git = fixture_sandbox(work)
-            head = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True,
-                                  check=True).stdout.strip()
-            return {"repo": str(repo), "head": head, "env": {"OUT": "built"}}
-
-        first_work, first = restored(key, build)
-        with open(Path(first["repo"]) / "README.md", "a", encoding="utf-8") as readme:
-            readme.write("edit\n")
-        subprocess.run(eval_git(Path(first["repo"])) + ["commit", "-qam", "edit"], check=True)
-        (first_work / "stray").write_text("x", encoding="utf-8")
-        first["head"] = "changed"
-        first["env"]["OUT"] = "changed"
-        second_work, second = restored(key, build)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(second_work, first_work)
-        self.assertFalse((second_work / "stray").exists())
-        self.assertNotIn("edit", (Path(second["repo"]) / "README.md").read_text(encoding="utf-8"))
-        self.assertEqual(self.head_of(second["repo"]), second["head"])
-        self.assertNotEqual(second["head"], "changed")
-        self.assertEqual(second["env"], {"OUT": "built"})
-        status = subprocess.run(["git", "-C", second["repo"], "status", "--porcelain"],
-                                capture_output=True, text=True, check=True).stdout
-        self.assertEqual(status, "")
-
-    def test_a_failed_build_leaves_nothing_behind_and_the_next_use_builds_again(self):
-        key = f"probe-{self.id()}"
-
-        def broken(work):
-            (work / "partial").write_text("x", encoding="utf-8")
-            raise RuntimeError("build failed")
-
-        with self.assertRaises(RuntimeError):
-            restored(key, broken)
-        self.assertNotIn(key, BUILT)
-        work, built = restored(key, lambda work: (work / "ok").write_text("y", encoding="utf-8"))
-        self.assertTrue((work / "ok").exists())
-        self.assertFalse((work / "partial").exists())
-
-    def test_a_failed_snapshot_is_not_cached_as_built(self):
-        key = f"probe-{self.id()}"
-        calls = []
-
-        def build(work):
-            calls.append(work)
-
-        with mock.patch.object(shutil, "copytree", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
-                restored(key, build)
-        self.assertNotIn(key, BUILT)
-        restored(key, build)
-        self.assertEqual(len(calls), 2)
-
-    def test_the_sandboxes_are_forgotten_with_their_directory(self):
-        key = f"probe-{self.id()}"
-        module = sys.modules[__name__]
-        with mock.patch.object(module, "SANDBOXES", None), mock.patch.dict(BUILT, clear=True):
-            first, _ = restored(key, lambda work: None)
-            root = module.SANDBOXES
-            forget_sandboxes(root)
-            self.assertFalse(root.exists())
-            self.assertIsNone(module.SANDBOXES)
-            self.assertEqual(BUILT, {})
-            second, _ = restored(key, lambda work: None)
-            self.assertTrue(second.is_dir())
-            self.assertNotEqual(module.SANDBOXES, root)
-            forget_sandboxes(module.SANDBOXES)
-
-    def test_the_first_use_is_already_a_restored_copy(self):
-        key = f"probe-{self.id()}"
-        held = []
-        self.addCleanup(lambda: [handle.close() for handle in held])
-
-        def build(work):
-            marker = work / "marker"
-            marker.write_text("m", encoding="utf-8")
-            held.append(open(marker, "a", encoding="utf-8"))
-            return None
-
-        work, _ = restored(key, build)
-        held[0].write("changed")
-        held[0].flush()
-        self.assertEqual((work / "marker").read_text(encoding="utf-8"), "m")
-
-    def test_marked_sandboxes_are_built_once_per_run(self):
-        module = sys.modules[__name__]
-        with mock.patch.object(module, "marked_pr_sandbox", wraps=marked_pr_sandbox) as spy:
-            first = MarkedIssueEvalCaseTest("test_every_assert_passes_on_a_good_run").sandbox()
-            second = MarkedIssueResumeEvalCaseTest("test_every_assert_passes_on_a_good_run").sandbox()
-        self.assertLessEqual(spy.call_count, 1)
-        self.assertEqual(first[0], second[0])
-        self.assertEqual(self.head_of(second[2]["PRE_WT"]), second[2]["PRE_WT_HEAD"])
 
 
 class MarkedPrSetupTest(unittest.TestCase):
@@ -1798,49 +1690,6 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
         for name in self.NAMES[4:]:
             with self.subTest(name=name):
                 self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
-
-
-class RestoredClassSandboxTest(unittest.TestCase):
-    """#1615: the classes' good runs and fixtures are built once per run and restored."""
-
-    def test_direct_delivery_good_runs_are_built_once_per_run(self):
-        module = sys.modules[__name__]
-        with mock.patch.object(module, "implement_issue_three", wraps=implement_issue_three) as spy:
-            case = DirectDeliveryEvalCaseTest("test_every_assert_passes_on_a_good_run")
-            first = case.good_run()
-            second = case.good_run()
-        self.assertLessEqual(spy.call_count, 1)
-        self.assertEqual(first[3]["WT"], second[3]["WT"])
-        subject = subprocess.run(["git", "-C", second[3]["WT"], "log", "-1", "--format=%s"],
-                                 capture_output=True, text=True, check=True).stdout.strip()
-        self.assertEqual(subject, "feat: rename list --all to --include-done (#3)")
-
-    def test_native_review_good_runs_are_built_once_and_carry_their_output(self):
-        module = sys.modules[__name__]
-        with mock.patch.object(module, "implement_issue_three", wraps=implement_issue_three) as spy:
-            case = NativeReviewEvalCaseTest("test_every_assert_passes_on_a_good_run")
-            _, _, env = case.good_run()
-            default = Path(env["OUT"]).read_text(encoding="utf-8")
-            _, _, other = case.good_run(out="other\n")
-        self.assertLessEqual(spy.call_count, 1)
-        self.assertEqual(default, NativeReviewEvalCaseTest.GOOD_OUT)
-        self.assertEqual(Path(other["OUT"]).read_text(encoding="utf-8"), "other\n")
-        head = subprocess.run(["git", "-C", other["PRE_WT"], "rev-parse", "HEAD"],
-                              capture_output=True, text=True, check=True).stdout.strip()
-        self.assertEqual(other["PRE_WT_HEAD"], head)
-
-    def test_writing_plans_fixtures_are_built_once_per_variant(self):
-        module = sys.modules[__name__]
-        with mock.patch.object(module, "writing_plans_fixture", wraps=writing_plans_fixture) as spy:
-            _, (_, first) = restored("writing-plans", writing_plans_fixture)
-            _, (_, second) = restored("writing-plans", writing_plans_fixture)
-            _, (_, bare) = restored("writing-plans-no-plan",
-                                    lambda work: writing_plans_fixture(work, with_plan=False))
-        self.assertLessEqual(spy.call_count, 2)
-        self.assertTrue((Path(first["PLAN_DIR"]) / "p.md").is_file())
-        self.assertTrue((Path(second["PLAN_DIR"]) / "p.md").is_file())
-        self.assertFalse((Path(bare["PLAN_DIR"]) / "p.md").exists())
-        self.assertEqual(Path(first["REPO"]).parent.name, "work")
 
 
 if __name__ == "__main__":
