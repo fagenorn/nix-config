@@ -1,41 +1,33 @@
-"""Fail on an enforcer's citation of a rule id that no applicable layer defines (#1442).
+"""The citation half of the standards lint: an enforcer's citation of a rule id, and the rule index (#1442).
 
-Usage: `python -m agent_tools.delivery.citation_lint --root <repo> --platform-standards <dir>
---project-standards <dir> [--index]`
-
-The suite runs this module (it has no command-table row, after
-`agent_tools.delivery.suite_runner`: its enforcer discovery reads this repository's suite
-recipe and `lint` members, so a platform launcher would mis-read every other project;
-ADR-delivery-012 D5). The three arguments are required and absolute directories.
+`agent_tools.delivery.standards_lint` is the one lint and the one command; this module is
+its library and has no entry point and no command-table row. Its contract, the problem lines
+and the `--index` output, is that command's module docstring.
 
 An enforcer names the rule it holds by the citation `standard:<id>` (`agent_tools.delivery.rule_ids`
 owns the form). The enforcers are the files the lint reads, and only those: the members
 of the justfile's `agent-workflow-tests` recipe (`suite_runner.suite_members`) and the source
 file of each module the `lint` verification command runs (`verification_command.members`),
-as repository-relative paths under `python/`. A file outside that set is never read.
+as repository-relative paths under `python/`. A file outside that set is never read. A
+repository whose justfile has no such recipe registers no enforcers, so it has no citation problem.
 
 A rule is a `###` rule-id heading outside a fence and an HTML comment or block
 (`agent_tools.delivery.rule_ids.scan`, the reading the heading test uses), so a rule commented
 out or shown as an example defines nothing. The platform layer is `the-bar.md` and each
-`stacks/*.md` of `--platform-standards`; the project layer is each `*.md` of
-`--project-standards` except `README.md`. A well-formed citation resolves against exactly one
-layer by its prefix: an id with the project prefix (`P`) against the project layer, any other
-id against the platform layer. A project id never resolves against the platform and a
-platform id never against the project.
+`stacks/*.md` of the platform standards directory; the project layer is each `*.md` of the
+repository's `docs/standards` except `README.md`. A well-formed citation resolves against
+exactly one layer by its prefix: an id with the project prefix (`P`) against the project layer,
+any other id against the platform layer. A project id never resolves against the platform and
+a platform id never against the project.
 
-Each problem is one line on stderr, `standards-lint: <problem>`, and the exit status is 1:
+`check` returns the problem lines and, when asked, the index lines:
 
 - `<path>: registered enforcer is missing`
 - `<path>:<line>: malformed citation standard:<token>` (a token that is no rule id)
 - `<path>:<line>: cites <id>, which is in no applicable layer`
 
-With none, stdout is `standards-lint: passed: <n> enforcers, <k> citations` (`k` counts the
-citations found across the enforcers) and the exit status is 0.
-
-With `--index` the problems check still runs (problems on stderr, exit status 1 when there are any)
-and the rule index is printed on stdout either way, in place of the `passed:` line; it is never
-written to a file. The index is, for each rule in order (the bar, then the stacks by filename,
-then the project shards by filename, each in heading order):
+The index is, for each rule in order (the bar, then the stacks by filename, then the project
+shards by filename, each in heading order):
 
 - `<id>. <title>`, then one line `  <path>` per enforcer citing that id with a well-formed
   citation, sorted by path, each path once;
@@ -44,27 +36,22 @@ then the project shards by filename, each in heading order):
   neither a citation (well-formed or not) nor a decision-record id (`ADR-<area>-NNN`); a missing
   enforcer is a problem and is not counted.
 
-Exit status 2, with one `standards-lint: <reason>` line on stderr: an argument path that is not
-absolute or not an existing directory, a project-standards directory outside `--root` (the
-project's rules are its own), a platform directory without `the-bar.md`, a justfile
-without the suite recipe, a lint member run without `-m`; argparse misuse also exits 2.
+A lint member run without `-m` raises `ValueError`.
 """
 
 from __future__ import annotations
 
-import argparse
-import sys
 from pathlib import Path
-from typing import NamedTuple, Sequence
+from typing import NamedTuple
 
 from agent_tools.delivery.context_map_lint import CITATION_RE
 from agent_tools.delivery.rule_ids import (
     CITATION, CITE, PROJECT_PREFIX, RULE_ID_HEADING, citations, prefix_of, scan)
-from agent_tools.delivery.suite_runner import suite_members
+from agent_tools.delivery.suite_runner import SUITE_RECIPE, suite_members
 from agent_tools.delivery.verification_command import members
 
-PREFIX = "standards-lint:"
 PACKAGE_SOURCE = "python"
+PROJECT_STANDARDS = "docs/standards"
 
 
 class Rule(NamedTuple):
@@ -161,50 +148,13 @@ def rule_index(root: Path, paths: list[str], platform: list[Rule], project: list
     return lines + [f"judged rules: {judged}", f"enforcers citing nothing: {nothing}"]
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="standards-lint")
-    parser.add_argument("--root", required=True)
-    parser.add_argument("--platform-standards", required=True)
-    parser.add_argument("--project-standards", required=True)
-    parser.add_argument("--index", action="store_true")
-    return parser
-
-
-def _directory(flag: str, value: str) -> Path:
-    path = Path(value)
-    if not path.is_absolute():
-        raise ValueError(f"{flag} must be absolute: {value}")
-    if not path.is_dir():
-        raise ValueError(f"{flag} is not a directory: {value}")
-    return path
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    try:
-        root = _directory("--root", args.root)
-        platform_directory = _directory("--platform-standards", args.platform_standards)
-        project_directory = _directory("--project-standards", args.project_standards)
-        if not project_directory.resolve().is_relative_to(root.resolve()):
-            raise ValueError(f"--project-standards is not under --root: {args.project_standards}")
-        paths = enforcers(root)
-        platform = platform_rules(platform_directory)
-    except (ValueError, OSError) as error:
-        print(f"{PREFIX} {error}", file=sys.stderr)
-        return 2
-    project = project_rules(project_directory)
-    found = problems(root, paths, platform, project)
-    for problem in found:
-        print(f"{PREFIX} {problem}", file=sys.stderr)
-    if args.index:
-        print("\n".join(rule_index(root, paths, platform, project)))
-        return 1 if found else 0
-    if found:
-        return 1
-    total = sum(len(_citations_of(root, path)) for path in paths)
-    print(f"{PREFIX} passed: {len(paths)} enforcers, {total} citations")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+def check(root: Path, platform_directory: Path, with_index: bool) -> tuple[list[str], list[str]]:
+    """The problem lines and, when `with_index`, the index lines, for the repository at `root`."""
+    justfile = root / "justfile"
+    registered = justfile.is_file() and SUITE_RECIPE in justfile.read_text("utf-8").splitlines()
+    paths = enforcers(root) if registered else []
+    platform = platform_rules(platform_directory)
+    project_directory = root / PROJECT_STANDARDS
+    project = project_rules(project_directory) if project_directory.is_dir() else []
+    return (problems(root, paths, platform, project),
+            rule_index(root, paths, platform, project) if with_index else [])
