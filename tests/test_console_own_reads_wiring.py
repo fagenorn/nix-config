@@ -154,6 +154,14 @@ class PromptTest(Tree):
             with self.subTest(label):
                 self.assertEqual(self.run_prompt(command, cwd, environ), (0, REFUSED, ["ask"]))
 
+    def test_an_own_read_needs_no_reason_and_any_other_prompt_is_asked_for_one(self):
+        env = self.environment()
+        for reason in ({}, {"description": ""}, {"description": "  "}):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.run_prompt("cat README.md", self.root, env, **reason), (0, ALLOW, []))
+                self.assertEqual(self.run_prompt(f"cat {self.secret}", self.root, env, **reason),
+                                 (0, REFUSED, ["ask"]))
+
     def test_an_own_read_that_asks_to_leave_the_sandbox_is_still_refused(self):
         refusal = prompt_card.hook_output("deny", prompt_card.SANDBOX_TEXT) + "\n"
         for flag in (True, "yes", 0):
