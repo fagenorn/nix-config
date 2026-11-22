@@ -11,6 +11,11 @@
       "id": "bindings-deploy.retire",
       "from_schema": 1,
       "to_schema": 2
+    },
+    {
+      "id": "platform-constants.retire",
+      "from_schema": 2,
+      "to_schema": 3
     }
   ],
   "deprecations": [],

@@ -191,7 +191,9 @@ one plan is never mistaken for an earlier adoption of the same project.
 in place (https://github.com/fagenorn/nix-config/issues/579): it rewrites
 `.agents/project.json`, has the resolver child regenerate the projections and
 then judge the result, restores every byte it wrote when either refuses, and
-stages and commits nothing. `adopt_migrate` owns the executors and the
+stages and commits nothing. For a migration that retires tracked files
+(`platform-constants.retire`: everything under `.agents/artifacts/`) it also
+deletes them from the working tree, refusing an unstaged edit to one. `adopt_migrate` owns the executors and the
 transaction.
 
 The resolver is consumed **only** as a child process, never imported (D26):

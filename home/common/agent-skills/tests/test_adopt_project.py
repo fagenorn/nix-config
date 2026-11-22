@@ -1002,7 +1002,7 @@ class OutcomeRoutingTest(AdoptTestCase):
         doc = self.ready_plan(reconcile_repo(self.home))
         self.assertEqual(doc["plan"]["outcome"], "reconcile")
 
-    def test_the_committed_manifest_routes_schema_one_forward_and_schema_two_to_no_change(self):
+    def test_the_committed_manifest_routes_schema_one_forward_and_schema_two_to_no_change_offering_schema_three(self):
         # P3: platform 1.2.0 makes schema 2 the highest supported schema.
         root = adopted_repo(self.home, schema=1)
         code, doc, err = self.plan(root, home=self.home)
@@ -1011,6 +1011,7 @@ class OutcomeRoutingTest(AdoptTestCase):
         self.assertIn("bindings-deploy.retire", doc["handoff"]["next_command"])
         doc = self.ready_plan(adopted_repo(self.home))
         self.assertEqual(doc["plan"]["outcome"], "no_change")
+        self.assertEqual(doc["plan"]["available_migration"], "platform-constants.retire")
 
     # P3: the schema-1 project below is the one a synthetic manifest routes forward.
     def test_rule_3_supported_but_not_highest_schema_is_migration_required(self):
@@ -1060,6 +1061,7 @@ class OutcomeRoutingTest(AdoptTestCase):
         commit(root, "drift a projection")
         doc = self.ready_plan(root)
         self.assertEqual(doc["plan"]["outcome"], "reconcile")
+        self.assertEqual(doc["plan"]["available_migration"], "platform-constants.retire")
         self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
         self.assertEqual(
             [op["targets"][0] for op in doc["changes"]
@@ -1075,6 +1077,7 @@ class OutcomeRoutingTest(AdoptTestCase):
         commit(root, "break the contract")
         doc = self.ready_plan(root)
         self.assertEqual(doc["plan"]["outcome"], "repair_required")
+        self.assertEqual(doc["plan"]["available_migration"], "platform-constants.retire")
         self.assertEqual(doc["plan"]["state"], "not_applicable")
         self.assertEqual(doc["changes"], [])
         self.assertIn("contract.", doc["handoff"]["next_command"])

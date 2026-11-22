@@ -699,7 +699,8 @@ class CommittedManifestTest(ResolverTestCase):
         self.assertEqual(manifest["project_schema_versions"], [2, 3])
         self.assertEqual(manifest["resolved_schema_version"], 2)
         self.assertEqual(manifest["migrations"], [
-            {"id": "bindings-deploy.retire", "from_schema": 1, "to_schema": 2}])
+            {"id": "bindings-deploy.retire", "from_schema": 1, "to_schema": 2},
+            {"id": "platform-constants.retire", "from_schema": 2, "to_schema": 3}])
         self.assertEqual(manifest["deprecations"], [])
 
     def test_it_declares_the_bridge_deprecations_as_removals(self):

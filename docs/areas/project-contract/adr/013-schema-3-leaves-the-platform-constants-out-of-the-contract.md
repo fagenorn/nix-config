@@ -1,6 +1,6 @@
 # ADR-project-contract-013 — Project schema 3 leaves the platform constants out of the contract
 
-- **Status:** accepted; D6 amended by #1469
+- **Status:** accepted; D6 amended by #1469, D8 added by #1469
 - **Decided in:** #1453 (per #1430)
 
 ## Context
@@ -22,6 +22,14 @@ Every registered project's schema-2 contract spells out the same values: the bra
 **D6. Adoption target.** Adoption targets the highest supported schema that a required migration reaches, one whose source schema the platform no longer reads. A migration from a schema the platform still reads is offered: it does not move the target while a required migration exists. A plan on its source schema keeps its outcome and names the step. With no required migration the target is the highest supported schema some migration reaches, else the highest supported schema. Under platform 2.x adoption keeps writing schema 2 and offers the migration to 3. A schema-3 contract or draft is refused until the target moves (amended by #1469).
 
 **D7. Optional homes are always filled.** `paths.architecture` and `paths.operations` are filled even when the file or directory is absent. The authored `knowledge.architecture` capability still gates readiness.
+
+**D8. The migration from schema 2.** `platform-constants.retire` is offered (D6). It refuses rather than drops a value that would change:
+
+- `adopt.migration.constant_differs`: an authored constant, platform command (as schema 2 supplies it), or command `cwd`/`env` that differs in JSON value or type, an absent one included.
+- `adopt.migration.not_derivable`: a value the repository cannot state.
+- `adopt.migration.derived_differs`: a derived value that disagrees with its source. This includes the attempt budget, compared with what the recorded history gives (ADR-project-contract-016). Two exceptions: an authored platform interval agrees when it admits the platform version the repository states, and the derived interval replaces it; and with no declared checks, an absent or null `required_checks` agrees.
+
+It deletes the tracked files under `.agents/artifacts/` (#1418). It refuses when a projection targets that tree or a tracked file there carries an unstaged edit. A second run is not applicable.
 
 ## Consequences
 

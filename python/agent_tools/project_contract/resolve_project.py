@@ -1356,13 +1356,7 @@ def platform_commands(source: object) -> dict:
 def derive_for(root: Path, source: object) -> derived_values.Derived:
     """The values `root` states for a schema-3 `source`, with its attempt budget and basis; nothing, and no file read, for any other schema."""
     if schema_three.declares(source):
-        derived = derived_values.derive(root)
-        budget = attempt_history.read(root, derived.values.get(derived_values.REPO_SLUG))
-        return derived_values.Derived(
-            {**derived.values,
-             schema_three.ATTEMPT_BUDGET: budget.minutes,
-             schema_three.ATTEMPT_BUDGET_BASIS: budget.basis},
-            derived.violations)
+        return attempt_history.derive_schema_three(root)
     return derived_values.Derived({}, [])
 
 
