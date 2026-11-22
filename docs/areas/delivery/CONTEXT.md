@@ -20,11 +20,18 @@ _Avoid_: context file, index
 **Delivery**:
 The work of carrying one issue from claim to merge on its own branch and worktree. A delivery ends when the integration branch holds the change and its evidence criteria are met or handed to a Verify block.
 
+**Enforcer**:
+A test or lint that fails when a standard is broken (issue 1412).
+_Avoid_: check (a check is the Verification area's)
+
 **Engine**:
 The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run. A run is recorded as a directory under `~/.agents/state/engine/runs/` whose append-only `events.jsonl` is the single source of truth, and `engine status <issue>` prints the state one fold derives from it (issue 1511), and `engine deliver <issue>` runs a procedure of command steps to `done` or a stop and prints one result line (issue 1512).
 
 **Grader**:
 A pure function in the engine that turns stored results into an outcome for a `decide` step.
+
+**Judged rule**:
+A standard no enforcer cites, applied by a reviewer (issue 1412).
 
 **Lane**:
 The route an issue takes to merge: the direct lane for a small concrete change, the standard lane for a specced and planned one, the live-fault lane for a declared live fault. A live-fault declaration selects the third.
@@ -48,6 +55,9 @@ The one named result a step's grade produces; the only thing a transition reads.
 
 **Procedure**:
 One JSON file in the platform package that describes a delivery as a finite state machine: a header (its `format`, a keep-alive command, its stops) and a flat list of steps, with no expression and no code. Its prompts are sibling Markdown files.
+
+**Standard**:
+One rule under one heading in a layer file, with a stable id, applied to every change within its layer file's scope: the bar to every change, a stack or project shard to the changes its globs match (issue 1412).
 
 **Step**:
 One entry of a procedure: an id, a stage, a kind (`command`, `agent`, `decide`, `group` or `call`), what it reads, a map from each outcome to the next step, a stop or `done`, a visit bound and whether it changes something.
