@@ -741,9 +741,10 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
 def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     """`flow_graph` with a `(result)` node after each step whose `on` maps `out-of-bounds`.
 
-    The step's node keeps its `out-of-bounds` edge (unless its target is `done`) and goes to `<id>(result)`, which
-    stands for the step having ended by a normal outcome and carries the step's other outcome edges. A route through
-    the step's own node alone is one on which the step ended by a bound and stored none of its members.
+    The step's node keeps its `out-of-bounds` and `exhausted` edges (unless a target is `done`, or `exhausted` is dead)
+    and goes to `<id>(result)`, which stands for the step having ended by a normal outcome and carries the step's other
+    outcome edges. A route through the step's own node alone is one on which the step ended by a bound, or was
+    exhausted on entry without running, and stored no member of this visit.
     """
     members = _members_of(procedure)
     cyclic = on_cycle(step_graph(procedure))
@@ -757,14 +758,14 @@ def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     for item in procedure["steps"]:
         if item["id"] in members or item["kind"] not in ("agent", "command") or OUT_OF_BOUNDS not in item["on"]:
             continue
-        bound_target = item["on"][OUT_OF_BOUNDS]
         result_node = f"{item['id']}(result)"
-        graph[item["id"]] = renewing(
-            (() if bound_target == "done" else (bound_target,)) + (result_node,))
+        graph[item["id"]] = renewing(tuple(
+            target for outcome, target in item["on"].items()
+            if outcome in (OUT_OF_BOUNDS, EXHAUSTED) and target != "done"
+            and (outcome != EXHAUSTED or item["id"] in cyclic)) + (result_node,))
         graph[result_node] = renewing(tuple(
             target for outcome, target in item["on"].items()
-            if outcome != OUT_OF_BOUNDS and target != "done"
-            and (outcome != EXHAUSTED or item["id"] in cyclic)))
+            if outcome not in (OUT_OF_BOUNDS, EXHAUSTED) and target != "done"))
     return graph
 
 

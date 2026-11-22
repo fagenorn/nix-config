@@ -298,6 +298,10 @@ def _bound_route_to_review(toy: dict) -> None:
     step(toy, "draft")["on"]["out-of-bounds"] = "review"
 
 
+def _exhausted_route_to_children(toy: dict) -> None:
+    step(toy, "draft")["on"]["exhausted"] = "children"
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -404,7 +408,8 @@ CASES = [
          [("toy", "draft", "unbounded_cycle")]),
     Case("exhausted_reenters_its_loop",
          editing("toy", _set(lambda toy: step(toy, "draft")["on"], "exhausted", "review")),
-         [("toy", "draft", "unbounded_cycle")]),
+         [("toy", "draft", "unbounded_cycle"), ("toy", "review-a", "unproduced_input"),
+          ("toy", "review-b", "unproduced_input"), ("toy", "children", "unproduced_input")]),
     Case("outcome_the_step_cannot_produce",
          editing("toy", _set(lambda toy: step(toy, "draft")["on"], "maybe", "review")),
          [("toy", "draft", "unknown_outcome")]),
@@ -458,6 +463,8 @@ CASES = [
     Case("bound_route_reaches_a_reply_reader", editing("toy", _bound_route_to_review),
          [("toy", "review-a", "unproduced_input"), ("toy", "review-b", "unproduced_input"),
           ("toy", "children", "unproduced_input")]),
+    Case("exhausted_route_reaches_a_reply_reader", editing("toy", _exhausted_route_to_children),
+         [("toy", "children", "unproduced_input")]),
     Case("step_overrides_a_bound",
          editing("toy", _set(lambda toy: step(toy, "draft"), "max_turns", 5)),
          [("toy", "draft", "undefined_field")]),
