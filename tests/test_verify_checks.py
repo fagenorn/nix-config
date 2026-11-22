@@ -4582,6 +4582,8 @@ class AttemptWorld:
             merged = T_ATTEMPTS - timedelta(days=30) + timedelta(days=i)
             self.deliver(i, 100 + i, merged, merged - timedelta(seconds=i * 3600 + 30))
         self.listing_key = lambda pull: -pull["number"]
+        self.viewed = []
+        self.unreadable = set()
         self.report = self.report_of(self.window())
 
     def comment_id(self):
@@ -4616,10 +4618,14 @@ class AttemptWorld:
         return sorted(self.deliveries, key=lambda d: d[3], reverse=True)[:20]
 
     def report_of(self, deliveries):
+        seconds = sorted(int((merged - claimed).total_seconds()) for _, _, claimed, merged in deliveries)
+        percentile = seconds[(9 * len(seconds) + 9) // 10 - 1] if seconds else 0
         return {
             "command": "report", "repo": ATTEMPT_SLUG, "integration_branch": "main",
             "recorded_at": attempt_stamp(T_ATTEMPTS),
-            "basis": {"source": "history", "delivered": 20, "percentile_90_seconds": 1,
+            "budget_minutes": max(1, -(-3 * percentile // 120)),
+            "percentile_90_minutes": round(percentile / 60, 1),
+            "basis": {"source": "history", "delivered": 20, "percentile_90_seconds": percentile,
                       "recorded_at": attempt_stamp(T_ATTEMPTS)},
             "attempts": [{"issue": issue, "pull": number, "claimed_at": attempt_stamp(claimed),
                           "merged_at": attempt_stamp(merged),
@@ -4634,6 +4640,9 @@ class AttemptWorld:
                 raise AssertionError(argv)
             return [dict(p) for p in sorted(self.pulls, key=self.listing_key)][:limit]
         if argv[:2] == ["issue", "view"] and argv[3:] == ["--repo", ATTEMPT_SLUG, "--json", "comments"]:
+            self.viewed.append(int(argv[2]))
+            if int(argv[2]) in self.unreadable:
+                raise forge_api.ForgeError("gh_failed", f"issue {argv[2]} unreadable")
             return {"comments": [dict(c) for c in self.comments.get(int(argv[2]), [])]}
         raise AssertionError(argv)
 
@@ -4655,6 +4664,74 @@ class AttemptBudgetTrackerTest(unittest.TestCase):
 
     def test_a_report_that_matches_the_tracker_within_a_minute_is_met(self):
         self.assertEqual(AttemptWorld().check(), self.GREEN)
+
+    def test_the_standard_window_has_the_hand_computed_budget(self):
+        report = AttemptWorld().report
+        self.assertEqual(report["basis"]["percentile_90_seconds"], 64830)  # the 18th of 20: 18 h 30 s
+        self.assertEqual((report["budget_minutes"], report["percentile_90_minutes"]), (1621, 1080.5))
+
+    def test_a_wrong_or_absent_budget_or_percentile_is_not_met(self):
+        cases = {
+            "budget_minutes": lambda r: r.__setitem__("budget_minutes", 240),
+            "percentile_90_seconds": lambda r: r["basis"].__setitem__("percentile_90_seconds", 1),
+            "percentile_90_minutes": lambda r: r.__setitem__("percentile_90_minutes", 1.0),
+        }
+        for field, change in cases.items():
+            with self.subTest(field):
+                world = AttemptWorld()
+                change(world.report)
+                code, report = world.check()
+                self.assertEqual((code, report["verdict"]), (1, "red"))
+                self.assertIn({"pull": None, "field": field}, report["mismatches"])
+        with self.subTest("absent budget_minutes"):
+            world = AttemptWorld()
+            del world.report["budget_minutes"]
+            code, report = world.check()
+            self.assertNotEqual(code, 0)
+            self.assertNotEqual(report["verdict"], "green")
+
+    def test_a_budget_one_minute_off_is_still_met(self):
+        world = AttemptWorld()
+        world.report["budget_minutes"] += 1
+        self.assertEqual(world.check(), self.GREEN)
+
+    def test_a_non_finite_duration_or_figure_is_unreadable(self):
+        nan = float("nan")
+        cases = {
+            "duration": lambda r: r["attempts"][2].__setitem__("duration_minutes", nan),
+            "budget": lambda r: r.__setitem__("budget_minutes", nan),
+            "percentile": lambda r: r["basis"].__setitem__("percentile_90_seconds", float("inf")),
+        }
+        for name, change in cases.items():
+            with self.subTest(name):
+                world = AttemptWorld()
+                change(world.report)
+                code, report = world.check()
+                self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+
+    def test_a_tie_on_both_instants_at_the_last_slot_goes_to_the_larger_pull_not_the_larger_claim(self):
+        world = AttemptWorld()
+        first = world.deliveries[0]  # issue 1, pull 101, its claim the earliest of the window
+        world.deliver(21, 50, first[3], first[2])  # same instants, a later claim id, a smaller pull
+        self.assertEqual(world.report["attempts"][-1]["pull"], 101)
+        self.assertEqual(world.check(), self.GREEN)
+        world.report = world.report_of([d for d in world.window() if d[1] != 101] + [first])
+        code, report = world.check()
+        self.assertEqual(code, 0)
+
+    def test_only_the_issues_the_window_needs_are_read(self):
+        world = AttemptWorld()
+        world.deliver(30, 130, T_ATTEMPTS - timedelta(days=100), T_ATTEMPTS - timedelta(days=101))
+        world.unreadable.add(30)
+        self.assertEqual(world.check(), self.GREEN)
+        self.assertNotIn(30, world.viewed)
+        self.assertEqual(sorted(world.viewed), list(range(1, 21)))
+
+    def test_an_unreadable_issue_the_window_needs_is_unreadable(self):
+        world = AttemptWorld()
+        world.unreadable.add(7)
+        code, report = world.check()
+        self.assertEqual((code, report["verdict"]), (2, "unreadable"))
 
     def test_a_claim_sixty_one_seconds_off_is_not_met(self):
         world = AttemptWorld()

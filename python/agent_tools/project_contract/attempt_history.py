@@ -5,7 +5,9 @@ end of that claim. A delivered attempt ended with its change merged into the
 integration branch; its duration runs from the claim's creation to that merge. An
 attempt that stopped or still runs has no merge and is not delivered.
 
-The rule (ADR-project-contract-016): take the `WINDOW` (20) delivered attempts with the latest merge; the
+The rule (ADR-project-contract-016): take the `WINDOW` (20) delivered attempts with the latest merge
+no later than the recording moment (a merge after it is not yet delivered at that moment; ties on the
+merge and the claim go to the larger pull number); the
 budget is 1.5 times the nearest-rank 90th percentile of their durations, in whole
 minutes rounded up and at least 1. With fewer than `WINDOW` delivered attempts the
 budget is `FALLBACK_MINUTES` (240). The nearest rank of `n` durations is the
@@ -24,7 +26,8 @@ sort_keys=True)` and a final newline:
         "merged_at": null}]}
 
 Every timestamp is `%Y-%m-%dT%H:%M:%SZ` in UTC and nothing else. `pull` is null
-exactly when `merged_at` is, and `merged_at` is not before `claimed_at`. Any other
+exactly when `merged_at` is, no two attempts name the same pull, and `merged_at` is not before
+`claimed_at`. Any other
 shape is refused as `invalid`; a well-shaped file of another repository is
 `other_repository`.
 
@@ -118,8 +121,8 @@ def fallback(reason: str, **extra: int) -> dict:
 
 def budget(attempts: Iterable[Attempt], recorded_at: datetime) -> Budget:
     done = sorted(
-        (a for a in attempts if a.merged_at is not None),
-        key=lambda a: (a.merged_at, a.claimed_at),
+        (a for a in attempts if a.merged_at is not None and a.merged_at <= recorded_at),
+        key=lambda a: (a.merged_at, a.claimed_at, a.pull),
         reverse=True,
     )
     used = tuple(done[:WINDOW])
@@ -172,6 +175,9 @@ def parse_history(document: object, slug: str | None) -> tuple[datetime, list[At
         attempts = [parse_attempt(entry) for entry in document["attempts"]]
     except (ValueError, TypeError):
         raise HistoryRefused("invalid") from None
+    pulls = [a.pull for a in attempts if a.pull is not None]
+    if len(set(pulls)) != len(pulls):
+        raise HistoryRefused("invalid")
     if slug is None or document["repo"] != slug:
         raise HistoryRefused("other_repository")
     return recorded_at, attempts

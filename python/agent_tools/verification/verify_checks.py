@@ -34,10 +34,13 @@ by `gh pr list` and `gh issue view` rather than the command's REST reads. The re
 integration branch and the branch pattern come from R's resolved project, never from the report.
 It is met (0, `green`) when the report is built from history, lists the 20 latest delivered
 attempts and names the same pulls as the tracker's own pairing of claims with merges, each claim
-and merge time within 60 s and each duration within a minute; not met (1, `red`, with `mismatches`
+and merge time within 60 s and each duration within a minute, and its `budget_minutes` and
+percentile (`basis.percentile_90_seconds`, `percentile_90_minutes`) are those of the tracker's 20
+deliveries within the same tolerance; not met (1, `red`, with `mismatches`
 of `pull` and `field`) otherwise, a fallback report included; and 2 (`unreadable`) when the
-command, the forge or the contract will not read, or when the merged listing reaches its limit and
-may be truncated. Everything after the report's `recorded_at` is ignored. It only reads.
+command, the forge or the contract will not read, when the report lacks a figure it must carry or
+carries a non-finite one, or when the merged listing reaches its limit and may be truncated. Issues
+are read newest merge first, and reading stops once the 20 latest deliveries cannot be displaced. Everything after the report's `recorded_at` is ignored. It only reads.
 
 `platform-status` runs the installed `resolve-project platform-status` (from `~/.agents/bin`,
 prepended to `PATH`) and passes its output and exit through, so a block judges it with `expect`.
@@ -369,6 +372,7 @@ import functools
 import http.client
 import io
 import json
+import math
 import os
 import pwd
 import re
@@ -2963,6 +2967,7 @@ ATTEMPT_LISTING_LIMIT = 10000
 ATTEMPT_WINDOW = 20
 ATTEMPT_TIME_TOLERANCE = 60  # seconds
 ATTEMPT_DURATION_TOLERANCE = 1  # minutes
+ATTEMPT_BUDGET_TOLERANCE = 2  # minutes: 1.5 times the duration tolerance, rounded up
 _COMMENT_ID = re.compile(r"#issuecomment-(\d+)$")
 
 
@@ -3056,8 +3061,15 @@ def _tracker_claims(slug: str, issue: int, cutoff: datetime) -> list[tuple[datet
 def _tracker_deliveries(slug: str, branch: str, pattern: str, cutoff: datetime) -> list[tuple[int, datetime, datetime, int]]:
     """The window's deliveries as (pull, claimed, merged, claim id), latest merge first."""
     merges = _tracker_merges(slug, branch, pattern, cutoff)
-    paired = []
-    for issue, candidates in merges.items():
+    paired: list[tuple[int, datetime, datetime, int]] = []
+    newest = sorted(merges, key=lambda issue: max(m[2] for m in merges[issue]), reverse=True)
+    for issue in newest:
+        candidates = merges[issue]
+        if len(paired) >= ATTEMPT_WINDOW:
+            paired.sort(key=lambda d: (d[2], d[1], d[0]), reverse=True)
+            if max(m[2] for m in candidates) < paired[ATTEMPT_WINDOW - 1][2]:
+                break  # this issue and every older one merged before the window's earliest merge
+            del paired[ATTEMPT_WINDOW:]
         ordered = sorted(_tracker_claims(slug, issue, cutoff), key=lambda c: (c[0], c[1]))
         by_merge = sorted(candidates, key=lambda m: (m[2], m[0]))
         for index, (created, claim_id, ended, named) in enumerate(ordered):
@@ -3068,12 +3080,25 @@ def _tracker_deliveries(slug: str, branch: str, pattern: str, cutoff: datetime) 
                           and (named is None or m[1] == named)), None)
             if taken is not None:
                 paired.append((taken[0], created, taken[2], claim_id))
-    paired.sort(key=lambda d: (d[2], d[1], d[3]), reverse=True)
+    paired.sort(key=lambda d: (d[2], d[1], d[0]), reverse=True)
     return paired[:ATTEMPT_WINDOW]
 
 
 def _seconds_apart(left: datetime, right: datetime) -> float:
     return abs((left - right).total_seconds())
+
+
+def _finite(value: object, what: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise _invalid(f"{what} is not a finite number")
+    return value
+
+
+def _expected_budget(deliveries: list[tuple[int, datetime, datetime, int]]) -> tuple[int, int]:
+    """The nearest-rank 90th percentile in seconds and 1.5 times it in whole minutes, rounded up, at least 1."""
+    seconds = sorted(int((merged - claimed).total_seconds()) for _, claimed, merged, _ in deliveries)
+    percentile = seconds[(9 * len(seconds) + 9) // 10 - 1]
+    return percentile, max(1, (3 * percentile + 119) // 120)
 
 
 def _compare_attempts(report: dict, deliveries: list[tuple[int, datetime, datetime, int]]) -> list[dict]:
@@ -3099,8 +3124,22 @@ def _compare_attempts(report: dict, deliveries: list[tuple[int, datetime, dateti
             mismatches.append({"pull": pull, "field": "claimed_at"})
         if _seconds_apart(said_merged, merged) > ATTEMPT_TIME_TOLERANCE:
             mismatches.append({"pull": pull, "field": "merged_at"})
-        if abs(row["duration_minutes"] - (merged - claimed).total_seconds() / 60) > ATTEMPT_DURATION_TOLERANCE:
+        if abs(_finite(row["duration_minutes"], "duration_minutes")
+               - (merged - claimed).total_seconds() / 60) > ATTEMPT_DURATION_TOLERANCE:
             mismatches.append({"pull": pull, "field": "duration_minutes"})
+    if report["basis"]["source"] != "history":
+        return mismatches
+    reported_percentile = _finite(report["basis"]["percentile_90_seconds"], "percentile_90_seconds")
+    reported_minutes = _finite(report["percentile_90_minutes"], "percentile_90_minutes")
+    reported_budget = _finite(report["budget_minutes"], "budget_minutes")
+    if len(deliveries) == ATTEMPT_WINDOW:
+        percentile, budget = _expected_budget(deliveries)
+        if abs(reported_percentile - percentile) > ATTEMPT_DURATION_TOLERANCE * 60:
+            mismatches.append({"pull": None, "field": "percentile_90_seconds"})
+        if abs(reported_minutes - percentile / 60) > ATTEMPT_DURATION_TOLERANCE:
+            mismatches.append({"pull": None, "field": "percentile_90_minutes"})
+        if abs(reported_budget - budget) > ATTEMPT_BUDGET_TOLERANCE:
+            mismatches.append({"pull": None, "field": "budget_minutes"})
     return mismatches
 
 

@@ -208,6 +208,23 @@ class CommandTest(AttemptBudgetCase):
         self.assertEqual(result["command"], "record")
         self.assertEqual(result["error"]["code"], "write_failed")
 
+    def test_a_tracker_that_is_not_github_reads_and_writes_nothing(self):
+        resolved = resolve_project.resolve
+
+        def other_tracker(root):
+            snapshot = resolved(root)
+            snapshot["bindings"]["tracker"]["kind"] = "gitlab"
+            return snapshot
+
+        root = self.root
+        world = World(twenty_world())
+        with mock.patch.object(resolve_project, "resolve", other_tracker):
+            code, result = self.command("record", world, root=root)
+        self.assertEqual(code, 2)
+        self.assertEqual(result["error"]["code"], "tracker_unsupported")
+        self.assertEqual(world.paths, [])
+        self.assertFalse(attempt_history.history_path(root).exists())
+
     def test_a_pattern_without_both_placeholders_is_unsupported(self):
         contract = source_contract()
         contract["bindings"]["vcs"]["branch_pattern"] = "issue-<num>"
@@ -268,6 +285,11 @@ class BranchIssueTest(unittest.TestCase):
         head = attempt_budget.branch_issue("fix/<num>.<slug>")
         self.assertIsNotNone(head.fullmatch("fix/7.x"))
         self.assertIsNone(head.fullmatch("fixx7.x"))
+
+    def test_a_repeated_number_must_repeat_the_same_number(self):
+        head = attempt_budget.branch_issue("issue-<num>-<num>-<slug>")
+        self.assertEqual(head.fullmatch("issue-7-7-fix").group(1), "7")
+        self.assertIsNone(head.fullmatch("issue-7-8-fix"))
 
     def test_a_pattern_that_cannot_be_exact_has_no_matcher(self):
         for pattern in ("issue-<num>", "issue-<slug>", "<num><slug>", "<slug><num>", "x"):

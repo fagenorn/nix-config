@@ -36,12 +36,13 @@ from agent_tools.project_contract.attempt_history import (
 TIER = "fast"
 
 T0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
+RECORDED = T0 + timedelta(days=30)  # after every merge of `windowed()`
 PERMUTATION = [7, 3, 19, 1, 12, 20, 5, 16, 9, 2, 14, 18, 6, 11, 4, 17, 8, 13, 10, 15]
 HISTORY_BASIS = {
     "source": "history",
     "delivered": 20,
     "percentile_90_seconds": 64830,
-    "recorded_at": "2026-11-01T00:00:00Z",
+    "recorded_at": "2026-12-01T00:00:00Z",
 }
 
 
@@ -71,7 +72,7 @@ class BudgetRuleTest(unittest.TestCase):
     def test_the_latest_twenty_of_twenty_five_give_one_and_a_half_times_their_nearest_rank_p90(self):
         attempts = scrambled(windowed() + older())
         self.assertEqual(len(attempts), 25)
-        result = budget(attempts, T0)
+        result = budget(attempts, RECORDED)
         self.assertEqual(result.minutes, 1621)
         self.assertEqual(result.basis, HISTORY_BASIS)
         self.assertEqual(len(result.used), 20)
@@ -80,7 +81,7 @@ class BudgetRuleTest(unittest.TestCase):
         self.assertEqual(merges, sorted(merges, reverse=True))
 
     def test_nineteen_delivered_give_the_fallback(self):
-        result = budget(windowed()[:19], T0)
+        result = budget(windowed()[:19], RECORDED)
         self.assertEqual(result.minutes, 240)
         self.assertEqual(result.basis, {"source": "fallback", "reason": "too_few", "delivered": 19})
         self.assertEqual(len(result.used), 19)
@@ -89,14 +90,14 @@ class BudgetRuleTest(unittest.TestCase):
         attempts = windowed()
         first = attempts[0]
         attempts[0] = Attempt(first.issue, None, first.claimed_at, None)
-        result = budget(attempts, T0)
+        result = budget(attempts, RECORDED)
         self.assertEqual(result.minutes, 240)
         self.assertEqual(result.basis, {"source": "fallback", "reason": "too_few", "delivered": 19})
 
     def test_stopped_attempts_beside_twenty_delivered_do_not_change_the_budget(self):
         late = T0 + timedelta(days=30)
         stopped = [Attempt(900 + n, None, late + timedelta(hours=n), None) for n in range(3)]
-        result = budget(windowed() + stopped, T0)
+        result = budget(windowed() + stopped, RECORDED)
         self.assertEqual(result.minutes, 1621)
         self.assertEqual(result.basis["delivered"], 20)
 
@@ -109,7 +110,26 @@ class BudgetRuleTest(unittest.TestCase):
     def test_a_history_of_zero_length_attempts_gives_one_minute(self):
         attempts = [delivered(T0 + timedelta(days=i), 0, i, 10 + i) for i in range(1, 21)]
         self.assertTrue(all(a.seconds() == 0 for a in attempts))
-        self.assertEqual(budget(attempts, T0).minutes, 1)
+        self.assertEqual(budget(attempts, RECORDED).minutes, 1)
+
+    def test_a_merge_after_the_recording_moment_is_not_delivered_yet(self):
+        recorded = T0 + timedelta(days=10)
+        result = budget(windowed(), recorded)
+        self.assertEqual(result.minutes, 240)
+        self.assertEqual(result.basis, {"source": "fallback", "reason": "too_few", "delivered": 10})
+        self.assertTrue(all(a.merged_at <= recorded for a in result.used))
+        exact = budget(windowed(), T0 + timedelta(days=20))
+        self.assertEqual(exact.basis["delivered"], 20)
+
+    def test_a_tie_on_both_instants_at_the_last_slot_goes_to_the_larger_pull(self):
+        tied = T0 + timedelta(days=1)
+        extra = delivered(tied, 3600 * 7 + 30, 500, 150)  # the claim and merge of attempt 1
+        first = windowed()[0]
+        self.assertEqual((first.claimed_at, first.merged_at), (extra.claimed_at, extra.merged_at))
+        for name, attempts in (("forward", windowed() + [extra]), ("reversed", (windowed() + [extra])[::-1])):
+            with self.subTest(name):
+                result = budget(attempts, RECORDED)
+                self.assertEqual(sorted(a.pull for a in result.used if a.merged_at == tied), [201])
 
     def test_an_unmerged_attempt_has_no_seconds(self):
         self.assertIsNone(Attempt(1, None, T0, None).seconds())
@@ -212,6 +232,14 @@ class ReadTest(unittest.TestCase):
                 self.put(root, mutate(change))
                 self.assertFallback(read(root, "o/r"), "invalid")
 
+    def test_nineteen_deliveries_and_a_repeated_pull_are_invalid(self):
+        attempts = windowed()[:19]
+        repeat = attempts[0]
+        attempts.append(Attempt(900, repeat.pull, repeat.claimed_at, repeat.merged_at))
+        root = self.root()
+        self.put(root, render_history("o/r", RECORDED, attempts))
+        self.assertFallback(read(root, "o/r"), "invalid")
+
     def test_another_repositorys_history_is_other_repository(self):
         root = self.root()
         self.put(root, render_history("o/other", T0, []))
@@ -220,7 +248,7 @@ class ReadTest(unittest.TestCase):
 
     def test_a_written_history_reads_back_to_the_same_budget(self):
         root = self.root()
-        path = write_history(root, render_history("o/r", T0, windowed() + older()))
+        path = write_history(root, render_history("o/r", RECORDED, windowed() + older()))
         self.assertEqual(path, history_path(root))
         result = read(root, "o/r")
         self.assertEqual(result.minutes, 1621)
@@ -250,7 +278,7 @@ class ModuleBoundaryTest(unittest.TestCase):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         (root / ".git").mkdir()
-        write_history(root, render_history("o/r", T0, windowed()))
+        write_history(root, render_history("o/r", RECORDED, windowed()))
         expected = read(root, "o/r")
         with mock.patch("subprocess.Popen", side_effect=AssertionError), \
                 mock.patch("socket.socket", side_effect=AssertionError):

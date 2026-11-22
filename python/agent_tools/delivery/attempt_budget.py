@@ -20,7 +20,8 @@ budget used, latest merge first, each `issue`, `pull`, `claimed_at`, `merged_at`
 for `report`). Exit 0 prints it; exit 1 is a forge error or a failed write
 (`{"command", "error": {"code", "detail", "transient"}}`, nothing written on a forge
 error); exit 2 is a resolver refusal (the error document `resolve-project resolve`
-prints), an unsupported branch pattern (`branch_pattern_unsupported`) or a usage error.
+prints), an unsupported branch pattern (`branch_pattern_unsupported`), a tracker that is not
+GitHub (`tracker_unsupported`; nothing is read or written) or a usage error.
 
 The attempt rule. An attempt starts at a claim marker comment's `created_at` (a renewal
 moves only `updated_at`). A claim is delivered by the earliest merged pull request of
@@ -82,9 +83,15 @@ def branch_issue(pattern: str) -> re.Pattern[str] | None:
         return None
     if "<num><slug>" in pattern or "<slug><num>" in pattern:
         return None
-    return re.compile("".join(
-        r"(\d+)" if p == "<num>" else issue_branch.SLUG_CLASS if p == "<slug>" else re.escape(p)
-        for p in issue_branch.PLACEHOLDERS.split(pattern)))
+    seen = False
+    parts = []
+    for part in issue_branch.PLACEHOLDERS.split(pattern):
+        if part == "<num>":
+            parts.append(r"(?P=issue)" if seen else r"(?P<issue>\d+)")
+            seen = True
+        else:
+            parts.append(issue_branch.SLUG_CLASS if part == "<slug>" else re.escape(part))
+    return re.compile("".join(parts))
 
 
 def invalid(detail: str) -> ForgeError:
@@ -226,6 +233,13 @@ def main(argv: list[str] | None = None) -> int:
     except resolve_project.ContractError as error:
         return resolve_project.emit_error(
             error.code, error.repair_id, error.violations, error.reason_code)
+    kind = snapshot["bindings"]["tracker"]["kind"]
+    if kind != "github":
+        resolve_project.emit_json({"command": args.command, "error": {
+            "code": "tracker_unsupported",
+            "detail": f"tracker kind {kind!r} is not github; the history reads GitHub only",
+            "transient": False}})
+        return 2
     slug = snapshot["bindings"]["tracker"]["repo_slug"]
     branch = snapshot["bindings"]["vcs"]["integration_branch"]
     pattern = snapshot["bindings"]["vcs"]["branch_pattern"]
