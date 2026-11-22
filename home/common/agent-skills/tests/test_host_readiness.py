@@ -654,6 +654,29 @@ class RefusalTest(ReadinessCase):
             "production.read_only": {"commands": [], "mcp_tools": []}})
         self.assertEqual(production, refusal(["sh", "-c", "MODE=ci ./probe"], probe))
 
+    def test_a_one_word_production_verb_run_by_a_shell_script_or_eval_is_refused(self):
+        guard = load_guard()
+        rules = {"fagenorn/ready": {
+            "changes": [{"id": "deploy", "argv": ["deploy"]}], "read_only": [],
+            "release_profile": "github-release"}}
+        snap = fake_snapshot(self.root, **{
+            "bindings.commands": {"deploy": {"argv": ["deploy"], "cwd": str(self.root), "env": []}},
+            "production.read_only": {"commands": [], "mcp_tools": []}})
+        production = "would run production command deploy"
+        for argv in (["sh", "-c", "deploy"], ["bash", "-c", "deploy"], ["eval", "deploy"],
+                     ["sh", "-c", "eval deploy"], ["sh", "-c", "\\deploy"],
+                     ["sh", "-c", "'deploy'"], ["sh", "-c", "d\\\neploy"],
+                     ["bash", "-lc", "deploy"], ["bash", "-o", "pipefail", "-c", "deploy"],
+                     ["env", "sh", "-c", "deploy"], ["timeout", "5", "sh", "-c", "deploy"],
+                     ["eval", "'deploy'"], ["sh", "-c", "eval 'deploy'"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
+                self.assertEqual(production, refusal(argv, snap))
+        for argv in (["sh", "-c", "true"], ["sh", "-c", "echo deploy"], ["sh", "deploy"],
+                     ["eval", "echo", "deploy"], ["echo", "sh", "-c", "deploy"]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(refusal(argv, snap))
+
     def test_a_project_root_with_a_quote_or_a_space_is_a_plain_path_argument(self):
         base = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, base, True)

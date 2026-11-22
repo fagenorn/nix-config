@@ -48,7 +48,8 @@ is not run, and its check fails with `<reason>; not run`. A word of shell text
 is split into commands and read the same way; text that cannot be read is
 refused whole. The project root, and an existing absolute path with no operator
 character, is a plain path argument and never shell text. A newline ends a
-command like `;`. A one-word production verb hits only as a command's program,
+command like `;`. The script a shell takes after `-c` and the words `eval` joins are always shell
+text, quotes and backslashes read as the shell reads them, even one word long (`sh -c deploy`). A one-word production verb hits only as a command's program,
 read past its shell keywords (`{`, `!`, `then`) and `NAME=value` assignments, or behind a program that runs a later word (`timeout`, `env`,
 `time`, `devenv`), never as another program's argument.
 
@@ -148,6 +149,9 @@ PASS_THROUGH_PROGRAMS = frozenset({
     "xargs", "timeout", "nice", "ionice", "stdbuf", "watch", "chrt", "taskset", "flock",
     "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
     "devenv", "direnv", "command", "builtin", "exec", "env", "sudo", "time", "nohup", "setsid"})
+# Shells whose `-c` script is shell text whatever it holds (`sh -c deploy`).
+SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "yash", "busybox"})
+SCRIPT_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*$")
 BUDGET_EXIT = 3
 SCRATCH_PREFIX = "host-readiness-"
 READ_DEPTH = 4
@@ -217,6 +221,8 @@ def _basename(word: str) -> str:
 
 def _split_shell_text(text: str) -> list[list[str]] | None:
     """The commands of shell text split at its operators, or None when it cannot be read."""
+    # A backslash-newline joins its lines before anything else reads them.
+    text = text.replace("\\\n", "")
     if "$(" in text or "`" in text:
         return None
     # A newline ends a command like `;`, and a `#` is an ordinary character, so a comment never
@@ -248,12 +254,39 @@ def _is_shell_text(word: str, root: str) -> bool:
     return not (os.path.isabs(word) and not SHELL_CHARACTERS & set(word) and os.path.lexists(word))
 
 
+def _script_texts(argv: Sequence[str]) -> list[str]:
+    """The shell text `argv` runs without any operator character in it: the script a shell
+    takes after its `-c` (`sh -c deploy`) and the words `eval` joins into one command. They are
+    read at the command's program, or at any later word behind a program that runs one."""
+    start = _program_start(argv)
+    if start >= len(argv):
+        return []
+    reach = range(start, len(argv)) if _basename(argv[start]) in PASS_THROUGH_PROGRAMS else (start,)
+    texts: list[str] = []
+    for i in reach:
+        name = _basename(argv[i])
+        if name == "eval":
+            if i + 1 < len(argv):
+                texts.append(" ".join(argv[i + 1:]))
+            break
+        if name not in SHELL_PROGRAMS:
+            continue
+        j = i + 1
+        while j < len(argv) and argv[j][:1] in "-+":
+            if SCRIPT_FLAG.match(argv[j]):
+                if j + 1 < len(argv):
+                    texts.append(argv[j + 1])
+                break
+            j += 2 if argv[j] in ("-o", "+o") else 1
+        break
+    return texts
+
+
 def _commands(argv: Sequence[str], depth: int, root: str) -> list[list[str]] | None:
     """`argv` and the commands of every shell-text word in it, or None when one is unreadable."""
     found = [list(argv)]
-    for word in argv:
-        if not _is_shell_text(word, root):
-            continue
+    texts = [*_script_texts(argv), *(word for word in argv if _is_shell_text(word, root))]
+    for word in dict.fromkeys(texts):
         if depth >= READ_DEPTH:
             return None
         parts = _split_shell_text(word)
