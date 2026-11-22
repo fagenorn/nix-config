@@ -48,12 +48,11 @@ is not run, and its check fails with `<reason>; not run`. A word of shell text
 is split into commands and read the same way; text that cannot be read is
 refused whole. The project root, and an existing absolute path with no operator
 character, is a plain path argument and never shell text. A newline ends a
-command like `;`. Every word a shell is given and the words `eval` joins are always shell
-text, quotes and backslashes read as the shell reads them, even one word long (`sh -c deploy`,
-`sh +c deploy`): no shell option is parsed, so no spelling of one hides the script. A one-word
-production verb hits only as a command's program, read past its shell keywords (`{`, `!`, `then`)
-and `NAME=value` assignments, or behind a program that runs a later word (`timeout`, `env`,
-`time`, `devenv`), never as another program's argument.
+command like `;`. No program is recognised as a shell and no shell option is parsed: a
+declared production verb hits when its first word is the basename of any token and the rest occur
+in order after it, where the tokens are every argv word, and every word of the shell text read,
+split on whitespace and on the shell characters (`sh -c deploy`, `su -c deploy`,
+`sh +c deploy`). A false refusal is accepted; a missed one is not.
 
 The probe commit proves itself: after the commit the clone's HEAD must have the
 old HEAD as its parent, the probe subject and the old HEAD's tree (D6). The
@@ -139,23 +138,6 @@ LEASH_TAG_ENV = "HOST_READINESS_LEASH"
 
 SHELL_CHARACTERS = frozenset(";&|()<>$`")
 OPERATOR_CHARACTERS = frozenset(";&|()\n")
-ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
-# Words that begin a shell command without being its program: they are read past to find it.
-SHELL_PREFIX_WORDS = frozenset({
-    "{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "case",
-    "esac", "for", "select", "function", "coproc"})
-# Programs that run a later word of their own as a command (the lifecycle guard's runners and
-# command wrappers, copied: package code never loads the guard, plus `time`, `nohup` and `setsid`).
-# A one-word production verb hits at a later word only behind one of these.
-PASS_THROUGH_PROGRAMS = frozenset({
-    "xargs", "timeout", "nice", "ionice", "stdbuf", "watch", "chrt", "taskset", "flock",
-    "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
-    "devenv", "direnv", "command", "builtin", "exec", "env", "sudo", "time", "nohup", "setsid"})
-# Shells whose every later word is read as shell text whatever it holds (`sh -c deploy`).
-SHELL_PROGRAMS = frozenset({"busybox", "elvish", "xonsh", "nu"})
-# Any `sh` family name is a shell too (`fish`, `csh`, `tcsh`, `rbash`, `bash5`, `pwsh`), so a
-# shell missing from a list cannot carry a verb past the scan.
-SHELL_NAME = re.compile(r"r?(?:ba|z|da|k|a|mk|ya|c|tc|fi|pw)?sh[0-9.]*")
 BUDGET_EXIT = 3
 SCRATCH_PREFIX = "host-readiness-"
 READ_DEPTH = 4
@@ -258,28 +240,10 @@ def _is_shell_text(word: str, root: str) -> bool:
     return not (os.path.isabs(word) and not SHELL_CHARACTERS & set(word) and os.path.lexists(word))
 
 
-def _shell_words(argv: Sequence[str]) -> list[str]:
-    """The shell text `argv` runs without any operator character in it: every word a shell is
-    given (`sh -c deploy`, `sh +c deploy`: no option is parsed, so no spelling of one hides the
-    script) and the words `eval` joins into one command. They are read at the command's program,
-    or at any later word behind a program that runs one."""
-    start = _program_start(argv)
-    if start >= len(argv):
-        return []
-    reach = range(start, len(argv)) if _basename(argv[start]) in PASS_THROUGH_PROGRAMS else (start,)
-    for i in reach:
-        name = _basename(argv[i])
-        if name == "eval":
-            return [" ".join(argv[i + 1:])] if i + 1 < len(argv) else []
-        if name in SHELL_PROGRAMS or SHELL_NAME.fullmatch(name):
-            return list(argv[i + 1:])
-    return []
-
-
 def _commands(argv: Sequence[str], depth: int, root: str) -> list[list[str]] | None:
     """`argv` and the commands of every shell-text word in it, or None when one is unreadable."""
     found = [list(argv)]
-    texts = [*_shell_words(argv), *(word for word in argv if _is_shell_text(word, root))]
+    texts = [word for word in argv if _is_shell_text(word, root)]
     for word in dict.fromkeys(texts):
         if depth >= READ_DEPTH:
             return None
@@ -292,19 +256,6 @@ def _commands(argv: Sequence[str], depth: int, root: str) -> list[list[str]] | N
                 return None
             found.extend(inner)
     return found
-
-
-def _program_start(words: Sequence[str]) -> int:
-    """The index of the word a command runs as its program: past the shell keywords
-    (`{`, `!`, `then`) and the `NAME=value` assignments that precede it."""
-    i = 0
-    while i < len(words):
-        word = words[i]
-        if word in SHELL_PREFIX_WORDS or ASSIGNMENT.match(word):
-            i += 1
-        else:
-            break
-    return i
 
 
 def _verb(argv: Sequence[str]) -> list[str]:
@@ -328,7 +279,27 @@ def _lifted(run: Sequence[str], verb: Sequence[str], read_only: Sequence[Sequenc
         for each in read_only)
 
 
-def _production_reason(words: Sequence[str], snapshot: Mapping, commands: Sequence[list[str]]) -> str | None:
+TOKEN_SPLIT = re.compile(r"[\s" + re.escape("".join(sorted(SHELL_CHARACTERS))) + r"]+")
+QUOTE_CHARACTERS = re.compile(r"[\\'\"]")
+
+
+def _tokens(words: Sequence[str]) -> list[str]:
+    """Every word split on whitespace and on each shell character. A word that holds a quote or
+    a backslash is also given with them removed, so `'deploy'` and `\\deploy` name `deploy`.
+    No program is recognised as a shell and no option is parsed: a false hit is acceptable."""
+    tokens = []
+    for word in words:
+        for token in TOKEN_SPLIT.split(word.replace("\\\n", "")):
+            if not token:
+                continue
+            tokens.append(token)
+            bare = QUOTE_CHARACTERS.sub("", token)
+            if bare and bare != token:
+                tokens.append(bare)
+    return tokens
+
+
+def _production_reason(snapshot: Mapping, commands: Sequence[list[str]]) -> str | None:
     production = snapshot.get("production") or {}
     if production.get("status") != "declared":
         return None
@@ -340,14 +311,10 @@ def _production_reason(words: Sequence[str], snapshot: Mapping, commands: Sequen
             continue
         verb = _verb(bound[name]["argv"])
         for each in commands:
-            start = _program_start(each)
-            for i in range(start, len(each)):
-                word = each[i]
-                if (len(verb) == 1 and i > start
-                        and _basename(each[start]) not in PASS_THROUGH_PROGRAMS):
-                    break
-                if (_basename(word) == verb[0] and _occurs_in_order(each[i + 1:], verb[1:])
-                        and not _lifted([_basename(each[i]), *each[i + 1:]], verb, read_only)):
+            tokens = _tokens(each)
+            for i, token in enumerate(tokens):
+                if (_basename(token) == verb[0] and _occurs_in_order(tokens[i + 1:], verb[1:])
+                        and not _lifted([_basename(token), *tokens[i + 1:]], verb, read_only)):
                     return f"would run production command {name}"
     return None
 
@@ -377,7 +344,7 @@ def refusal(argv: Sequence[str], snapshot: Mapping) -> str | None:
     commands = _commands(argv, 0, str((snapshot.get("project") or {}).get("root", "")))
     if commands is None:
         return UNREADABLE
-    return _production_reason(commands[0], snapshot, commands) or _release_reason(commands)
+    return _production_reason(snapshot, commands) or _release_reason(commands)
 
 
 def render(checks: Sequence[Check]) -> str:

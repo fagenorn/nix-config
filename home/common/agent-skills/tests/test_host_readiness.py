@@ -158,13 +158,6 @@ class FakeRunner:
         return [call[0] for call in self.calls]
 
 
-def load_guard():
-    spec = importlib.util.spec_from_file_location("lifecycle_guard_source", GUARD_SOURCE)
-    guard = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(guard)
-    return guard
-
-
 def refused_answer(code: str, **shape: Any) -> str:
     return json.dumps({"error": {"code": code, "repair_id": None, **shape}})
 
@@ -612,116 +605,63 @@ class RefusalTest(ReadinessCase):
         none = fake_snapshot(self.root, **{"production.status": "none"})
         self.assertIsNone(refusal(["just", "switch"], none))
 
-    def test_a_one_word_production_verb_is_not_hit_as_another_programs_argument(self):
-        snap = fake_snapshot(self.root, **{
-            "bindings.commands": {"deploy": {"argv": ["./scripts/deploy.sh"], "cwd": str(self.root), "env": []}},
+    def deploy_snapshot(self, argv=("deploy",)):
+        return fake_snapshot(self.root, **{
+            "bindings.commands": {"deploy": {"argv": list(argv), "cwd": str(self.root), "env": []}},
             "production.read_only": {"commands": [], "mcp_tools": []}})
-        for argv in (["shellcheck", "scripts/deploy.sh"], ["git", "add", "scripts/deploy.sh"],
-                     ["sh", "-c", "shellcheck scripts/deploy.sh"]):
+
+    def test_a_one_word_production_verb_is_refused_wherever_any_token_names_it(self):
+        snap = self.deploy_snapshot()
+        production = "would run production command deploy"
+        for argv in (["deploy"], ["time", "deploy"], ["sh", "-c", "deploy"], ["sh", "+c", "deploy"],
+                     ["sh", "deploy"], ["eval", "deploy"], ["sh", "-c", "eval deploy"],
+                     ["bash", "-lc", "deploy"], ["bash", "-o", "pipefail", "-c", "deploy"],
+                     ["bash", "-O", "extglob", "-c", "deploy"], ["bash", "--rcfile", "x", "-c", "deploy"],
+                     ["env", "sh", "-c", "deploy"], ["timeout", "5", "sh", "-c", "deploy"],
+                     ["sh", "-c", "true\ndeploy"], ["sh", "-c", "{ deploy; }"],
+                     ["sh", "-c", "if true; then deploy; fi"], ["sh", "-c", "x=1 deploy"],
+                     ["sh", "-c", "! deploy"], ["sh", "-c", "for x in a; do deploy; done"],
+                     ["sh", "-c", "\\deploy"], ["sh", "-c", "'deploy'"], ["sh", "-c", "d\\\neploy"],
+                     ["eval", "'deploy'"], ["/usr/local/bin/deploy"]):
             with self.subTest(argv=argv):
-                self.assertIsNone(refusal(argv, snap))
-        for argv in (["./scripts/deploy.sh"], ["timeout", "5", "./scripts/deploy.sh"],
-                     ["sh", "-c", "true && ./scripts/deploy.sh"]):
+                self.assertEqual(production, refusal(argv, snap))
+
+    def test_no_shell_name_or_spelling_carries_a_production_verb_past_the_scan(self):
+        snap = self.deploy_snapshot()
+        production = "would run production command deploy"
+        for program in ("oksh", "lksh", "posh", "powershell", "bash-5.2", "su", "script", "fish",
+                        "csh", "tcsh", "rbash", "bash5", "pwsh", "xonsh", "/usr/bin/fish", "nu",
+                        "elvish", "busybox", "anything-at-all"):
+            for flag in ("-c", "+c", "--command"):
+                argv = [program, flag, "deploy"]
+                with self.subTest(argv=argv):
+                    self.assertEqual(production, refusal(argv, snap))
+        for argv in (["env", "tcsh", "-c", "deploy"], ["su", "-c", "deploy", "user"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(production, refusal(argv, snap))
+
+    def test_a_verb_naming_word_is_a_false_refusal_not_a_pass(self):
+        # No program is recognised, so a verb word an argument happens to spell is refused too.
+        snap = self.deploy_snapshot(["./scripts/deploy.sh"])
+        for argv in (["shellcheck", "scripts/deploy.sh"], ["git", "add", "scripts/deploy.sh"]):
             with self.subTest(argv=argv):
                 self.assertEqual("would run production command deploy", refusal(argv, snap))
 
-    def test_a_one_word_production_verb_behind_a_shell_prefix_is_refused(self):
-        guard = load_guard()
-        rules = {"fagenorn/ready": {
-            "changes": [{"id": "deploy", "argv": ["deploy"]}], "read_only": [],
-            "release_profile": "github-release"}}
-        snap = fake_snapshot(self.root, **{
-            "bindings.commands": {"deploy": {"argv": ["deploy"], "cwd": str(self.root), "env": []}},
-            "production.read_only": {"commands": [], "mcp_tools": []}})
-        production = "would run production command deploy"
-        for argv in (["sh", "-c", "true\ndeploy"], ["time", "deploy"],
-                     ["sh", "-c", "{ deploy; }"], ["sh", "-c", "if true; then deploy; fi"],
-                     ["sh", "-c", "x=1 deploy"], ["sh", "-c", "! deploy"]):
-            with self.subTest(argv=argv):
-                self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
-                self.assertEqual(production, refusal(argv, snap))
-        for argv in (["sh", "-c", "true # note\ndeploy"], ["sh", "-c", "A=1 B=2 time deploy"],
-                     ["sh", "-c", "for x in a; do deploy; done"],
-                     ["sh", "-c", "while true; do x=1 deploy; done"]):
-            with self.subTest(argv=argv):
-                self.assertEqual(production, refusal(argv, snap))
-        for argv in (["sh", "-c", "echo deploy"], ["sh", "-c", "true\necho deploy"],
-                     ["sh", "-c", "x=1 echo deploy"], ["sh", "-c", "{ echo deploy; }"]):
-            with self.subTest(argv=argv):
-                self.assertIsNone(refusal(argv, snap))
-        probe = fake_snapshot(self.root, **{
-            "bindings.commands": {"deploy": {"argv": ["./probe"], "cwd": str(self.root), "env": []}},
-            "production.read_only": {"commands": [], "mcp_tools": []}})
-        self.assertEqual(production, refusal(["sh", "-c", "MODE=ci ./probe"], probe))
-
-    def test_a_one_word_production_verb_run_by_a_shell_script_or_eval_is_refused(self):
-        guard = load_guard()
-        rules = {"fagenorn/ready": {
-            "changes": [{"id": "deploy", "argv": ["deploy"]}], "read_only": [],
-            "release_profile": "github-release"}}
-        snap = fake_snapshot(self.root, **{
-            "bindings.commands": {"deploy": {"argv": ["deploy"], "cwd": str(self.root), "env": []}},
-            "production.read_only": {"commands": [], "mcp_tools": []}})
-        production = "would run production command deploy"
-        for argv in (["sh", "-c", "deploy"], ["bash", "-c", "deploy"], ["eval", "deploy"],
-                     ["sh", "-c", "eval deploy"], ["sh", "-c", "\\deploy"],
-                     ["sh", "-c", "'deploy'"], ["sh", "-c", "d\\\neploy"],
-                     ["bash", "-lc", "deploy"], ["bash", "-o", "pipefail", "-c", "deploy"],
-                     ["env", "sh", "-c", "deploy"], ["timeout", "5", "sh", "-c", "deploy"],
-                     ["eval", "'deploy'"], ["sh", "-c", "eval 'deploy'"]):
-            with self.subTest(argv=argv):
-                self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
-                self.assertEqual(production, refusal(argv, snap))
-        for argv in (["sh", "-c", "true"], ["sh", "-c", "echo deploy"],
-                     ["eval", "echo", "deploy"], ["echo", "sh", "-c", "deploy"]):
+    def test_a_command_that_names_no_production_verb_is_not_refused(self):
+        snap = self.deploy_snapshot()
+        for argv in (["sh", "-c", "true"], ["git", "status"], ["sh", "-c", "true && test -f a"],
+                     ["deployer"], ["sh", "-c", "echo deployed"], ["fish", "-c", "true"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
 
-    def test_a_shell_script_is_read_past_options_written_around_its_c_flag(self):
-        guard = load_guard()
-        rules = {"fagenorn/ready": {
-            "changes": [{"id": "deploy", "argv": ["deploy"]}], "read_only": [],
-            "release_profile": "github-release"}}
-        snap = fake_snapshot(self.root, **{
-            "bindings.commands": {"deploy": {"argv": ["deploy"], "cwd": str(self.root), "env": []}},
-            "production.read_only": {"commands": [], "mcp_tools": []}})
-        production = "would run production command deploy"
-        for argv in (["sh", "-c", "--", "deploy"], ["bash", "-c", "-e", "deploy"],
-                     ["bash", "-O", "extglob", "-c", "deploy"], ["bash", "+O", "extglob", "-c", "deploy"],
-                     ["bash", "--rcfile", "x", "-c", "deploy"],
-                     ["bash", "--init-file", "x", "-c", "deploy"],
-                     ["bash", "--norc", "-c", "deploy"],
-                     ["bash", "-c", "-o", "pipefail", "-e", "--", "deploy"],
-                     ["bash", "-co", "pipefail", "deploy"], ["bash", "-e", "-c", "-u", "deploy"],
-                     ["env", "bash", "-O", "extglob", "-c", "--", "deploy"],
-                     ["sh", "-c", "-", "deploy"], ["bash", "-c", "+", "deploy"],
-                     ["dash", "-c", "-e", "-", "deploy"],
-                     ["zsh", "--emulate", "sh", "-c", "deploy"]):
+    def test_a_multi_word_production_verb_needs_its_words_in_order_after_the_program(self):
+        snap = fake_snapshot(self.root)
+        for argv in (["su", "-c", "just switch"], ["oksh", "-c", "just --justfile j switch"],
+                     ["sh", "+c", "just switch"]):
             with self.subTest(argv=argv):
-                self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
-                self.assertEqual(production, refusal(argv, snap))
-        # A `+`-prefixed -c spelling turns the option off in some shells and is no excuse: no
-        # option is parsed, every word a shell is given is read as shell text.
-        for argv in (["sh", "+c", "deploy"], ["zsh", "+c", "deploy"],
-                     ["bash", "-e", "+c", "deploy"], ["dash", "+ec", "deploy"],
-                     ["env", "sh", "+c", "deploy"], ["bash", "--rcfile", "deploy", "-c", "true"],
-                     ["bash", "-O", "deploy", "-c", "true"], ["sh", "deploy"]):
-            with self.subTest(argv=argv):
-                self.assertEqual(production, refusal(argv, snap))
-        for argv in (["bash", "-O", "extglob", "-c", "true"], ["bash", "-c", "--", "echo deploy"],
-                     ["sh", "-c", "-", "echo deploy"], ["sh", "+c", "echo deploy"],
-                     ["echo", "sh", "+c", "deploy"]):
-            with self.subTest(argv=argv):
-                self.assertIsNone(refusal(argv, snap))
-        # A shell outside the common list is still a shell: its script is read whole too.
-        for argv in (["fish", "-c", "deploy"], ["csh", "-c", "deploy"], ["tcsh", "-c", "deploy"],
-                     ["fish", "+c", "deploy"], ["rbash", "+c", "deploy"], ["bash5", "+c", "deploy"],
-                     ["/usr/bin/fish", "-c", "deploy"], ["env", "tcsh", "-c", "deploy"],
-                     ["pwsh", "-c", "deploy"], ["xonsh", "-c", "deploy"]):
-            with self.subTest(argv=argv):
-                self.assertEqual(production, refusal(argv, snap))
-        for argv in (["fish", "-c", "echo deploy"], ["echo", "fish", "-c", "deploy"],
-                     ["git", "push", "deploy"]):
+                self.assertEqual("would run production command deploy", refusal(argv, snap))
+        for argv in (["su", "-c", "just build"], ["sh", "+c", "just switch --dry-run"],
+                     ["switch", "just"]):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
 
