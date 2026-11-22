@@ -3909,7 +3909,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     # ------------------------------------------------------------------
 
     FORM_VALUES = SHAPES["form_values"]
-    PREFIX_CLAUSE = "; optional prefix: unset GITHUB_TOKEN && | env -u GITHUB_TOKEN"
+    PREFIX_CLAUSE = ("; optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | "
+                     "unset GITHUB_TOKEN && | env -u GITHUB_TOKEN")
 
     def refusal_line(self, result):
         """The guard's one refusal line; the call must have exited 2."""
@@ -4148,6 +4149,65 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "; accepted: git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin "
             "<branch>; or git push origin --delete refs/heads/<branch>"
             + self.PREFIX_CLAUSE), line)
+
+    def test_a_merge_behind_the_two_name_env_prefix_passes_and_its_misspelling_names_the_form_flag_and_prefix(self):
+        """Issue 1592: the two-name `env -u` spelling passes, and the refusal of the
+        same merge without `--delete-branch` prints that spelling first."""
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        feature_into_dev = {"FAKE_PR_JSON": json.dumps({
+            "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN",
+            "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []}),
+            "FAKE_PROTECTION_MODE": "nonzero"}
+        prefix = "env -u GITHUB_TOKEN -u GH_TOKEN "
+        merge = f"gh pr merge 2342 --repo {NODO} --merge --match-head-commit {self.HEAD_SHA}"
+        passed = self.run_guard(prefix + merge + " --delete-branch", cwd=nodo,
+                                env=feature_into_dev)
+        self.assertEqual(0, passed.returncode, passed.stderr)
+        line = self.refusal_line(self.run_guard(prefix + merge, cwd=nodo,
+                                                env=feature_into_dev))
+        self.assertEqual(
+            "lifecycle guard: unsafe merge: missing --delete-branch: it may be omitted only "
+            "when merging dev into main; this PR merges issue-2342-topic into dev; accepted: "
+            f'gh pr merge <n> --repo {NODO} --merge [--subject "<subject>"] '
+            "[--match-head-commit <sha>] --delete-branch; optional prefix: "
+            "env -u GITHUB_TOKEN -u GH_TOKEN | unset GITHUB_TOKEN && | env -u GITHUB_TOKEN",
+            line)
+
+    def test_a_merge_text_refusal_keeps_its_first_problem_and_names_the_missing_flag(self):
+        """Issue 1592: a merge's text refusal appends `; missing <flag>` for a flag every
+        merge form requires and the words lack, unless the problem already names it."""
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        feature_into_dev = {"FAKE_PR_JSON": json.dumps({
+            "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN",
+            "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []}),
+            "FAKE_PROTECTION_MODE": "nonzero"}
+        tail = ("; optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | unset GITHUB_TOKEN && "
+                "| env -u GITHUB_TOKEN")
+        head = f"--match-head-commit {self.HEAD_SHA} --delete-branch"
+        for command, start in (
+            (f"env -u GITHUB_TOKEN -u GH_TOKEN gh pr merge 2342 --repo {NODO} --merg {head}",
+             "lifecycle guard: unsafe merge: unknown flag --merg; missing --merge; accepted: "),
+            (f"env  -u GITHUB_TOKEN gh pr merge 2342 --repo {NODO} {head}",
+             "lifecycle guard: unsafe merge: unaccepted credential-scrub prefix "
+             "`env -u GITHUB_TOKEN` (doubled space); missing --merge; accepted: "),
+            (f"env -u PATH gh pr merge 2342 --repo {NODO} {head}",
+             "lifecycle guard: unsafe merge: `env -u PATH` before the verb; missing --merge; "
+             + GRAMMAR),
+            (f"gh pr merge 2342 --repo {NODO} {head}",
+             "lifecycle guard: unsafe merge: missing --merge; accepted: "),
+        ):
+            with self.subTest(command=command):
+                line = self.refusal_line(self.run_guard(command, cwd=nodo,
+                                                        env=feature_into_dev))
+                self.assertTrue(line.startswith(start), line)
+                # The allowlist-grammar refusal builds no repository context.
+                slug = "<slug>" if GRAMMAR in start else NODO
+                self.assertIn("; accepted: gh pr merge <n> --repo " + slug, line)
+                self.assertTrue(line.endswith(tail), line)
+                if command.startswith("gh pr merge"):
+                    self.assertNotIn("missing --merge; missing", line)
 
     def test_refusals_name_the_first_problem(self):
         """Issue 402 D4, D5, D16: one row per named problem class, each followed by the

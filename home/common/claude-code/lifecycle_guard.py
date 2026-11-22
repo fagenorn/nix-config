@@ -559,7 +559,8 @@ over a fixture fleet.
 A refusal that lies in the command's text (each recognition refusal, a form the
 matcher refuses, a slot value, a merge arm while another arm remains) reads
 `lifecycle guard: unsafe <operation>: <problem>; accepted: <form>[; or
-<form>…]; optional prefix: unset GITHUB_TOKEN && | env -u GITHUB_TOKEN`, and
+<form>…]; optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | unset GITHUB_TOKEN && |
+env -u GITHUB_TOKEN`, and
 branch deletion, which takes no prefix, omits the last clause. The forms come
 from `FORM_TABLE` in table order: before any PR lookup the whole table, except
 that the merge's release form, noted `(only <integration> into <default>)`, is
@@ -570,7 +571,11 @@ none when its head is a permanent branch no arm fits. With a repository context
 `<base>` one alternative per authorized base, and the note names both branches
 (`only dev into main`); every other slot stays a placeholder, and a recognition
 refusal, which builds no context, fills nothing and lists the merge's feature
-form alone. The clause's two spellings stand for the whole accepted prefix set
+form alone. A merge's text refusal keeps its first problem and appends `; missing
+<flag>[, <flag>]` for each flag that every merge form requires (`--repo`,
+`--merge`) and the words lack, unless the problem already names it (issue 1592).
+The clause's three spellings (the documented two-name `env -u` spelling first,
+issue 1592) stand for the whole accepted prefix set
 (`unset N && `, `unset N M && `, `env -u N `, `env -u N -u M `, `N` and `M`
 distinct members of `GITHUB_TOKEN`, `GH_TOKEN`). A refusal of the repository or
 the forge state (authorization and row problems, an unresolvable default
@@ -5395,8 +5400,41 @@ def structure_problem(compiled, words):
     return f"{shown_value(found)} is out of place"
 
 
+def missing_flags(compiled, words):
+    """The flags every form of `compiled` spells at the top level (issue 1592), in the
+    first form's order, that `words` lack; a word inside a `Group` is not required."""
+    required = [
+        element.word for element in compiled.forms[0].elements
+        if isinstance(element, Literal) and element.word.startswith("-")
+    ]
+    for form in compiled.forms[1:]:
+        spelled = {element.word for element in form.elements
+                   if isinstance(element, Literal)}
+        required = [flag for flag in required if flag in spelled]
+    return [flag for flag in required if flag not in words]
+
+
+def missing_clause(problem, flags):
+    """`; missing <flag>[, <flag>]` for the flags `problem` does not already name
+    (issue 1592); empty when none is left."""
+    kept = [flag for flag in flags
+            if problem != f"missing {flag}" and not problem.startswith(f"missing {flag}:")]
+    return "; missing " + ", ".join(kept) if kept else ""
+
+
 def form_problem(operation, compiled, text):
-    """The first problem (issue 402 D4) of `text`, which `match_form` refused."""
+    """The first problem (issue 402 D4) of `text`, which `match_form` refused.
+
+    A merge's problem gains `; missing <flag>` for each flag every merge form
+    requires and the words lack (issue 1592)."""
+    problem = first_problem(operation, compiled, text)
+    if operation != "merge":
+        return problem
+    return problem + text_missing_clause(compiled, problem, text)
+
+
+def first_problem(operation, compiled, text):
+    """The first problem (issue 402 D4) of `text`, before any missing-flag clause."""
     label = OPERATION_LABELS[operation]
     try:
         words, quoting = shlex.split(text), None
@@ -5445,13 +5483,28 @@ def form_problem(operation, compiled, text):
     return "does not match an accepted form"
 
 
+def text_missing_clause(compiled, problem, text):
+    """The merge's missing-flag clause (issue 1592) for `problem`, read from the words
+    of `text` from the program onward; empty when `text` does not split or lacks it."""
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        return ""
+    if compiled.program not in words:
+        return ""
+    flags = missing_flags(compiled, words[words.index(compiled.program):])
+    return missing_clause(problem, flags)
+
+
 def prefix_clause():
-    """`optional prefix: …`: the one-name scrub spellings of the first credential
-    name, in SCRUB_PREFIXES order (issue 402 D8)."""
-    name = GH_ENV_TOKEN_NAMES[0]
+    """`optional prefix: …`: the documented two-name `env -u` spelling, the one-name
+    `unset` spelling and the one-name `env -u` spelling of the credential names, in
+    SCRUB_PREFIXES order (issue 402 D8, issue 1592)."""
+    first, second = GH_ENV_TOKEN_NAMES
+    printed = (["env", "-u", first, "-u", second], ["unset", first, "&&"],
+               ["env", "-u", first])
     spellings = [
-        spelling.rstrip() for spelling in SCRUB_PREFIXES
-        if spelling.split() in (["unset", name, "&&"], ["env", "-u", name])
+        spelling.rstrip() for spelling in SCRUB_PREFIXES if spelling.split() in printed
     ]
     return "optional prefix: " + " | ".join(spellings)
 
@@ -6868,7 +6921,10 @@ def main():
     if lifecycle:
         shell_dir, problem = lifecycle_shape(command)
         if problem is not None:
-            return refuse(lifecycle[0], f"{problem}; {LIFECYCLE_GRAMMAR}",
+            clause = ""
+            if lifecycle[0] == "merge":
+                clause = text_missing_clause(table["merge"], problem, command)
+            return refuse(lifecycle[0], f"{problem}{clause}; {LIFECYCLE_GRAMMAR}",
                           accepted_forms(table[lifecycle[0]], None))
         if shell_dir is not None:
             shell_problem = cd_directory_problem(command, shell_dir)
