@@ -76,7 +76,8 @@ Settings file. `claude --bg` hands the session to one supervisor per configurati
 and a supervisor that is already running may start the session with its own environment, not the
 launching client's. So `run_launch` writes the sprint's id and secret as `{"env": {...}}` to a
 per-sprint settings file (mode 0600, replaced on a retry) and passes `--settings <file>`; Claude
-Code applies a settings file's `env` to that session. Only the path is on argv. The file holds
+Code applies a settings file's `env` to that session. The `env` also holds the project root as
+`CONSOLE_SPRINT_ROOT`, which the prompt hook reads (ADR-console-103). Only the path is on argv. The file holds
 three more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}`, because a manager
 writes no code and every delivery makes its own worktree, and `hooks`, which hold three. One `PermissionRequest`
 command hook runs `PROMPT_COMMAND` (`sprint permit --prompt`, `timeout` `PROMPT_TIMEOUT`) and, should it
@@ -198,6 +199,7 @@ TAKEOVER_LEAD = ("You take over one sprint whose manager is gone, started by the
                  + GOAL_MARK)
 ID_ENV = "CONSOLE_SPRINT_ID"
 SECRET_ENV = "CONSOLE_SPRINT_SECRET"
+ROOT_ENV = "CONSOLE_SPRINT_ROOT"
 ACCOUNT_ENV = "CLAUDE_ACCOUNT"
 LAUNCH_TIMEOUT = 60
 STOP_TIMEOUT = 60
@@ -257,7 +259,7 @@ _PLAIN_TABLE = (
 
 # `AGENT_PLATFORM_ROOT` is the console launcher's own package root: a session's commands set it
 # again through their launchers, and a source-run child must read `$HOME`'s manifest (ADR-system-005).
-_DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV, "AGENT_PLATFORM_ROOT")
+_DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV, ROOT_ENV, "AGENT_PLATFORM_ROOT")
 
 
 def plain_reason(reason: str | None) -> str:
@@ -338,7 +340,7 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
         session_name=session_name(project_id, sprint_id),
         prompt=lead + goal,
         settings=settings_path(settings_dir, sprint_id),
-        env={ID_ENV: sprint_id, SECRET_ENV: secret}, takeover=takeover,
+        env={ID_ENV: sprint_id, SECRET_ENV: secret, ROOT_ENV: root}, takeover=takeover,
         seen_after=seen_after, permission=permission, allow=allow)
 
 

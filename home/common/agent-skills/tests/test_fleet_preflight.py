@@ -37,6 +37,7 @@ from .test_resolve_project import (
 )
 from .test_resolve_schema_three import (
     EXPECTED_DERIVED,
+    _next_minor,
     make_schema_three_root,
     schema_three_contract,
     stage_locked_platform,
@@ -86,6 +87,28 @@ class FleetPreflightTest(FleetFixtures, ResolverTestCase):
         beta, beta_root = self.project("fagenorn/beta")
         install_registry(self.home, registry(beta, alpha))
         return alpha_root, beta_root
+
+    def test_a_schema_two_project_is_reported_with_its_deprecated_use(self):
+        entry, root = self.project("fagenorn/alpha")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        install_registry(self.home, registry(entry))
+        manifest = self.candidate()
+        self.addCleanup(shutil.rmtree, manifest.parent, ignore_errors=True)
+        code, out, err = self.preflight("--manifest", str(manifest), "--json")
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["fleet"][0]["deprecated_uses"],
+                         ["platform-constants"])
+        self.assertEqual(payload["refused"], [])
+        code, out, err = self.preflight("--manifest", str(manifest))
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        at = lines.index(f"compatible fagenorn/alpha {root}")
+        self.assertEqual(
+            lines[at + 1],
+            f"deprecated fagenorn/alpha {root} platform-constants")
+        self.assertEqual(self.rows(out),
+                         [["compatible", "fagenorn/alpha", str(root)]])
 
     def test_an_out_of_range_project_refuses_with_its_reason_code(self):
         alpha_root, beta_root = self.two_project_fleet()
@@ -289,7 +312,8 @@ class FleetPreflightTest(FleetFixtures, ResolverTestCase):
             self.assertEqual(code, 0, err)
             payload = json.loads(out)
             self.assertEqual(payload["refused"], [])
-            self.assertEqual(payload["platform_version"], "2.1.0")
+            self.assertEqual(payload["platform_version"],
+                             committed_manifest()["platform_version"])
         with self.subTest("installed is older"):
             self.set_manifest(committed_manifest())
             manifest_file.write_text(json.dumps(committed_manifest()),
@@ -380,7 +404,8 @@ class FleetPreflightCheckTest(FleetFixtures, ResolverTestCase):
 
     def test_a_refused_project_is_not_met(self):
         alpha, _ = self.project("fagenorn/alpha")
-        ahead, _ = self.project("fagenorn/ahead", min_inclusive="2.2.0")
+        ahead, _ = self.project("fagenorn/ahead", min_inclusive=_next_minor(
+                                      committed_manifest()["platform_version"]))
         install_registry(self.home, registry(alpha, ahead))
         code, out, err = self.check()
         self.assertEqual(code, 1, err)

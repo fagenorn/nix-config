@@ -38,8 +38,9 @@ declaration, is the first; a `null` declaration, or a `subcommands`-form declara
 second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply` (no such file in the procedure directory, a file
 that resolves outside it, or for `missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema is not
 a strict-JSON object with a `properties` object, a `required` list of strings that contains `outcome_from`, and an `enum` of
-distinct non-empty strings under `properties[outcome_from]`), `unknown_grader` (not in `GRADERS`) and `missing_procedure` (a
-`call` child file is absent; a child that exists but fails phase A gives the parent no refusal).
+distinct non-empty strings under `properties[outcome_from]` that names neither `exhausted` nor `no-reply`, both reserved), `unsupported_reply` (a reply schema that passes
+`invalid_reply` but uses a construct outside the subset `engine_reply` defines, named in the detail), `unknown_grader`
+(not in `GRADERS`) and `missing_procedure` (a `call` child file is absent; a child that exists but fails phase A gives the parent no refusal).
 
 `Resolved` records what each step's references resolved to: a `StepResolved` per step id (a member is `None` when its
 reference failed or does not apply; `child_stops` is set only when the child loaded with no phase A refusal) and `keep_alive`,
@@ -49,11 +50,12 @@ Phase C, graph (only on a file with no phase A refusal and no `unknown_target`; 
 first): `unreachable_step` (a step the walk of `flow_graph` from the first step does not reach, `flow_graph` carrying the
 renewal failure as an edge to `claim-lost` into a `mutates` step; a group member is reached when its group is),
 `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
-`unknown_outcome` (a step's `on` keys against `outcomes_of`, an agent step also being allowed to map `no-reply`, which it need not (issue 1525 makes it required); a step on a cycle of `step_graph` also produces `exhausted`, any
-step may map it; an agent step outside a group also produces `out-of-bounds`, which its `on` must map, and a command step
-may map it; a group member's `pass` entries are checked at the group; a command step also produces `refused`,
-because the engine calls the lifecycle guard before every command (issue 1515), so its `on` maps it, and no group member
-passes on `refused`) and `unbounded_cycle` (a cycle among steps
+`unknown_outcome` (a step's `on` keys against `outcomes_of`; an `agent` step also produces `no-reply`, the shell's outcome when
+no valid reply came back, so a non-member agent step whose `on` lacks it is `unmapped_outcome`; an agent step outside a group also
+produces `out-of-bounds`, which its `on` must map, and a command step may map it; a command step also produces
+`refused`, because the engine calls the lifecycle guard before every command (issue 1515), so its `on` maps it; a step on a
+cycle of `step_graph` also produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the
+group, where neither `no-reply` nor `refused` passes) and `unbounded_cycle` (a cycle among steps
 with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through the `exhausted`
 entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent; refused at its
 first step). An outcome check whose reference failed phase B is skipped for that step.
@@ -80,6 +82,7 @@ from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery.engine_graders import GRADERS
+from agent_tools.delivery.engine_reply import schema_problem
 
 FORMAT = 1
 STAGES = ("setup", "planning", "plan review", "building", "final review",
@@ -90,16 +93,16 @@ ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
 DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_stage", "duplicate_step", "unknown_target", "unknown_command",
            "undeclared_verdicts", "missing_claim_lost", "unknown_role", "missing_prompt", "missing_reply",
-           "invalid_reply", "unknown_grader", "missing_procedure",
+           "invalid_reply", "unsupported_reply", "unknown_grader", "missing_procedure",
            "unreachable_step", "unreachable_done", "unmapped_outcome",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
 OUT_OF_BOUNDS = "out-of-bounds"
+NO_REPLY = "no-reply"
 REFUSED = "refused"
 CLAIM_LOST = "claim-lost"
 QUOTA_WAIT = "quota-wait"
-NO_REPLY = "no-reply"
 START = "(start)"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -497,30 +500,33 @@ class _Reply:
     outcomes: tuple[str, ...]
 
 
-def _reply_schema(path: Path, outcome_from: str) -> _Reply | str:
-    """The reply schema's facts, or the reason it is invalid."""
+def _reply_schema(path: Path, outcome_from: str, name: str) -> _Reply | tuple[str, str]:
+    """The reply schema's facts, or the defect and its detail."""
     try:
         schema = _strict_load(path)
     except (OSError, ValueError) as error:
-        return " ".join(f"the reply schema cannot be read as strict JSON: {error}".split())
+        return "invalid_reply", " ".join(f"the reply schema cannot be read as strict JSON: {error}".split())
     if not isinstance(schema, dict):
-        return "the reply schema is not a JSON object."
+        return "invalid_reply", "the reply schema is not a JSON object."
     properties = schema.get("properties")
     if not isinstance(properties, dict):
-        return "the reply schema has no properties object."
+        return "invalid_reply", "the reply schema has no properties object."
     required = schema.get("required")
     if not isinstance(required, list) or not all(isinstance(n, str) for n in required):
-        return "the reply schema has no required list of strings."
+        return "invalid_reply", "the reply schema has no required list of strings."
     if outcome_from not in required:
-        return f"the reply schema does not require {outcome_from!r}."
+        return "invalid_reply", f"the reply schema does not require {outcome_from!r}."
     outcome = properties.get(outcome_from)
     enum = outcome.get("enum") if isinstance(outcome, dict) else None
     if (not isinstance(enum, list) or not enum or not all(_is_text(v) for v in enum)
             or len(set(enum)) != len(enum)):
-        return f"properties.{outcome_from} has no enum of distinct non-empty strings."
-    for reserved in (EXHAUSTED, OUT_OF_BOUNDS):
+        return "invalid_reply", f"properties.{outcome_from} has no enum of distinct non-empty strings."
+    for reserved in (EXHAUSTED, OUT_OF_BOUNDS, NO_REPLY):
         if reserved in enum:
-            return f"properties.{outcome_from} enum names {reserved!r}, which is reserved."
+            return "invalid_reply", f"properties.{outcome_from} enum names {reserved!r}, which is reserved."
+    problem = schema_problem(schema)
+    if problem:
+        return "unsupported_reply", f"{name} uses {problem}, outside the reply schema subset."
     return _Reply(frozenset(properties), frozenset(required), tuple(enum))
 
 
@@ -556,7 +562,7 @@ def _inside(directory: Path, name: str) -> Path | None:
     return path
 
 
-def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | str],
+def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | tuple[str, str]],
                       found: _Findings, label: str) -> StepResolved:
     if item["role"] not in ROLES:
         found.add("unknown_role", f"{item['role']!r} is not one of {', '.join(ROLES)}.", label)
@@ -576,10 +582,10 @@ def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | s
         return StepResolved(prompt=prompt)
     key = f"{item['reply']}\0{item['outcome_from']}"
     if key not in replies:
-        replies[key] = _reply_schema(reply_path, item["outcome_from"])
+        replies[key] = _reply_schema(reply_path, item["outcome_from"], item["reply"])
     reply = replies[key]
-    if isinstance(reply, str):
-        found.add("invalid_reply", reply, label)
+    if isinstance(reply, tuple):
+        found.add(reply[0], reply[1], label)
         return StepResolved(prompt=prompt)
     return StepResolved(reply.outcomes, reply.properties, reply.required, prompt=prompt)
 
@@ -601,7 +607,7 @@ def check_references(name: str, doc: dict, directory: Path,
         if stop["reenter"] not in ids:
             found.add("unknown_target", f"stop {stop_name!r} re-enters {stop['reenter']!r}, which is no step.")
     resolved: dict[str, StepResolved] = {}
-    replies: dict[str, _Reply | str] = {}
+    replies: dict[str, _Reply | tuple[str, str]] = {}
     for item in doc["steps"]:
         label, kind = item["id"], item["kind"]
         for outcome, target in item.get("on", {}).items():
@@ -672,13 +678,15 @@ def check_directory(directory: Path,
 
 
 def outcomes_of(step: dict, resolved: Resolved) -> tuple[str, ...] | None:
-    """The outcomes a step can produce but `exhausted`; `None` when unresolved."""
+    """The outcomes a step can produce but `exhausted`; `None` when unresolved. An agent step also produces `no-reply`."""
     kind = step["kind"]
     if kind == "group":
         return ("pass", "blocked")
     known = resolved.steps[step["id"]]
     if kind == "call":
         return None if known.child_stops is None else ("done",) + tuple(known.child_stops)
+    if kind == "agent" and known.outcomes is not None:
+        return known.outcomes + (NO_REPLY,)
     if kind == "command" and known.outcomes is not None:
         return known.outcomes + (REFUSED,)
     return known.outcomes
@@ -901,7 +909,8 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
                     found.add("unknown_outcome",
                               f"member {member['step']!r} passes on 'refused', which never passes a group.",
                               label)
-                stray = [o for o in member["pass"] if o not in member_outcomes and o != REFUSED]
+                stray = [o for o in member["pass"]
+                         if o == NO_REPLY or (o not in member_outcomes and o != REFUSED)]
                 if stray:
                     found.add("unknown_outcome",
                               f"member {member['step']!r} cannot produce {', '.join(map(repr, stray))}.",
@@ -916,8 +925,7 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
             found.add("unmapped_outcome",
                       f"on does not map {', '.join(map(repr, unmapped))}.", label)
         unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED
-                   and not (o == OUT_OF_BOUNDS and item["kind"] in ("agent", "command"))
-                   and not (item["kind"] == "agent" and o == NO_REPLY)]
+                   and not (o == OUT_OF_BOUNDS and item["kind"] in ("agent", "command"))]
         if unknown:
             found.add("unknown_outcome",
                       f"on maps {', '.join(map(repr, unknown))}, which the step cannot produce.", label)

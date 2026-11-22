@@ -484,7 +484,7 @@ class ReferenceTest(unittest.TestCase):
 
 def snapshot(**contents):
     files = {path.replace("__", "."): text.encode() for path, text in contents.items()}
-    return Snapshot("a" * 40, {}, files)
+    return Snapshot("a" * 40, {}, contents=files)
 
 
 def found(rule, snap):
@@ -540,7 +540,7 @@ class RuleTest(unittest.TestCase):
         self.assertEqual((found("B18", snap), found("B20", snap)), ([], []))
 
     def test_an_uncovered_file_is_not_read(self):
-        snap = Snapshot("a" * 40, {}, {"notes.md": b"# TODO #12\n"})
+        snap = Snapshot("a" * 40, {}, contents={"notes.md": b"# TODO #12\n"})
         for rule in ("B18", "B19", "B20"):
             self.assertEqual(found(rule, snap), [], rule)
 

@@ -34,6 +34,13 @@ settings or its permissions. The prompt is never in the argv: the tool options
 are variadic and would swallow a positional prompt, so `launch` writes it on
 stdin.
 
+A session that gave no usable structured answer is asked once more on the same session
+(`resume=True`: `--session-id <id>` becomes `--resume <id>`, never `--fork-session`) with the prompt
+`REASK_PROMPT`. A miss is a reading with no reply that conforms to the schema
+(`engine_reply.reply_problem`) whose stdout is a `result` with a `subtype` in `MISS_SUBTYPES`:
+`success` with `is_error` not set, or the client's own `error_max_structured_output_retries`,
+flagged or not (`is_miss`). Any other reading without a usable reply is never resumed.
+
 The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
 permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
 shell command is denied, so a session cannot write to the worktree through it.
@@ -43,11 +50,6 @@ prefix patterns would preapprove, so `GIT_WRITING` is passed as
 needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
 one that is denied a shell command anyway is a fault (`engine_shell`), never a
 graded reply.
-
-`reply_problem` checks a structured reply against the reply schema's keywords
-`type`, `enum`, `const`, `required`, `properties`, `additionalProperties` and
-`items` (the engine carries no schema library) so an incomplete reply is a
-fault, never a transition.
 
 The launcher tells the engine its choice through an answer file: the launch environment carries
 `CLAUDE_ACCOUNT_ANSWER`, the path of a file the launcher writes, and `read_answer` reads it. It holds
@@ -59,20 +61,27 @@ exactly `{"account": <name>}` (the account the session ran on) or `{"all_out": t
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
-other exception both do. Its `timeout` is the wall bound, counted from the spawn
+other exception, `engine_stop.Stopped` from a polled `stop` included, both do; the
+kill reaps the launcher and closes the pipes without waiting for EOF, so a descendant
+outside the group that holds a pipe cannot hold the engine. Its `timeout` is the wall bound, counted from the spawn
 (so the time `on_start` takes is inside it, and the deadline is armed, as a `Watchdog` thread, before
 `on_start` runs, so a stalled `on_start` cannot keep the group past it): a session past it gets SIGTERM to
 its whole group, then `GRACE_SECONDS` for the group (not only the launcher) to
 be gone, and SIGKILL to the group if any member is still alive; the call returns
-with `timed_out` set within `timeout + GRACE_SECONDS + DRAIN_SECONDS`. A launcher that
+with `timed_out` set within `timeout + GRACE_SECONDS + DRAIN_SECONDS`. A `stop` that is true before
+the launcher starts, or turns true while it runs or by the time it ended, raises `Stopped` (after the
+group is killed, once it started). A launcher that
 cannot start gives exit 127 and the `OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line. A given `env` is
-the launcher's whole environment; without one it inherits the engine's.
+the launcher's whole environment, without one it inherits the engine's; `session_environment` is applied to either.
 
 A session ended by a bound has no reply: its result subtype is `error_max_turns` (the bound
 `turns`) or `error_max_budget_usd` (the bound `spend`), named by `CAP_SUBTYPES`; `WALL_TIME`
 names the bound the engine's own clock fires.
+
+`session_environment` drops `CLAUDE_CONFIG_DIR` and sets `CLAUDE_ACCOUNT_HOST_SETTINGS=required`, so the
+launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked.
 
 This module imports no `engine_core`.
 """
@@ -94,6 +103,7 @@ from typing import Callable, Mapping, Sequence
 from agent_tools.canonical import (
     parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal,
 )
+from agent_tools.delivery import engine_stop
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
 from agent_tools.delivery.procedure_check import PLACEHOLDER_RE, ROLES
@@ -105,10 +115,17 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 )
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
+HOST_SETTINGS_SWITCH = "CLAUDE_ACCOUNT_HOST_SETTINGS"
 WALL_TIME = "wall-time"
 CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
     {"error_max_turns": "turns", "error_max_budget_usd": "spend"})
 NOT_STARTED = 127
+STRUCTURED_OUTPUT_EXHAUSTED = "error_max_structured_output_retries"
+MISS_SUBTYPES: tuple[str, ...] = ("success", STRUCTURED_OUTPUT_EXHAUSTED)
+REASK_PROMPT = (
+    "Your last answer was not a valid structured answer. Reply again with only the structured "
+    "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
+    "other text.")
 ANSWER_ENV = "CLAUDE_ACCOUNT_ANSWER"
 ALL_OUT_EXIT = 75
 USAGE_LIMIT = "usage-limit"
@@ -231,6 +248,8 @@ class Reading:
     turns: int
     tokens: dict[str, int]
     spend_usd: float
+    is_result: bool = False
+    is_error: bool = False
     api_failure: str | None = None
 
 
@@ -239,6 +258,12 @@ class Answer:
     account: str | None
     all_out: bool
     resumes_at: str | None
+
+
+def _number(text: str) -> int | float:
+    """A JSON number written with a fraction or exponent: an int when it is integral, so `2.0` reads as 2."""
+    value = float(text)
+    return int(value) if value.is_integer() else value
 
 
 def _count(value: object) -> int:
@@ -256,7 +281,7 @@ def _amount(value: object) -> float | None:
 
 def _strict_json(text: str) -> object:
     return json.loads(text, object_pairs_hook=reject_duplicate_keys,
-                      parse_constant=reject_nonfinite_literal)
+                      parse_constant=reject_nonfinite_literal, parse_float=_number)
 
 
 def read_answer(path: Path) -> Answer:
@@ -315,7 +340,18 @@ def read_result(stdout: bytes) -> Reading:
         turns=_count(document.get("num_turns")),
         tokens={key: _count(usage.get(_USAGE_KEYS[key])) for key in TOKEN_COUNTS},
         spend_usd=_amount(document.get("total_cost_usd")) or 0,
+        is_result=document.get("type") == "result",
+        is_error=document.get("is_error") is True,
         api_failure=_api_failure(document))
+
+
+def is_miss(reading: Reading) -> bool:
+    """True when a reading with no usable reply is one the session is asked again about: a result whose
+    subtype is in `MISS_SUBTYPES`, a `success` flagging `is_error` being a client error and no miss.
+    """
+    if not reading.is_result or reading.subtype not in MISS_SUBTYPES:
+        return False
+    return not reading.is_error or reading.subtype == STRUCTURED_OUTPUT_EXHAUSTED
 
 
 def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, *,
@@ -332,7 +368,8 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, 
     limits = bounds(role.name)
     argv = [*LAUNCHER, "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
-            "--resume" if resume else "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
+            "--resume" if resume else "--session-id", session, "--strict-mcp-config",
+            "--permission-mode", "dontAsk",
             "--model", role.model, "--effort", role.effort,
             "--max-turns", str(limits.turns), "--max-budget-usd", f"{limits.spend_usd:.2f}"]
     disallowed = list(role.disallowed or ())
@@ -345,50 +382,6 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, 
     if role.disallowed is not None or disallowed:
         argv += ["--disallowedTools", ",".join(disallowed)]
     return (*argv, "--append-system-prompt-file", str(system_prompt))
-
-
-_TYPES: dict[str, Callable[[object], bool]] = {
-    "object": lambda v: isinstance(v, dict),
-    "array": lambda v: isinstance(v, list),
-    "string": lambda v: isinstance(v, str),
-    "boolean": lambda v: isinstance(v, bool),
-    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
-    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
-    "null": lambda v: v is None,
-}
-
-
-def reply_problem(schema: Mapping, value: object, where: str = "reply") -> str | None:
-    """The first way `value` breaks `schema`, or None when it conforms."""
-    kind = schema.get("type")
-    if kind is not None:
-        kinds = kind if isinstance(kind, list) else [kind]
-        if not any(name in _TYPES and _TYPES[name](value) for name in kinds):
-            return f"{where} is not of type {kind}"
-    if "enum" in schema and not any(value == item and type(value) is type(item)
-                                    for item in schema["enum"]):
-        return f"{where} is {value!r}, not one of {schema['enum']}"
-    if "const" in schema and not (value == schema["const"]
-                                  and type(value) is type(schema["const"])):
-        return f"{where} is not {schema['const']!r}"
-    if isinstance(value, dict):
-        for name in schema.get("required", ()):
-            if name not in value:
-                return f"{where} lacks the required {name!r}"
-        properties = schema.get("properties", {})
-        for name, member in value.items():
-            if name in properties:
-                problem = reply_problem(properties[name], member, f"{where}.{name}")
-                if problem:
-                    return problem
-            elif schema.get("additionalProperties") is False:
-                return f"{where} has the member {name!r} the schema does not allow"
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for index, member in enumerate(value):
-            problem = reply_problem(schema["items"], member, f"{where}[{index}]")
-            if problem:
-                return problem
-    return None
 
 
 @dataclass(frozen=True)
@@ -409,6 +402,13 @@ def diagnostic(stderr: bytes) -> str:
 
 def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
+
+
+def session_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """The environment of a session: the caller's, without its config dir, with the host-settings switch."""
+    env = {key: value for key, value in environ.items() if key != "CLAUDE_CONFIG_DIR"}
+    env[HOST_SETTINGS_SWITCH] = "required"
+    return env
 
 
 def _group_alive(pid: int) -> bool:
@@ -466,11 +466,14 @@ def _end_overrun(process: subprocess.Popen) -> tuple[bytes, bytes]:
 
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
            on_start: Callable[[int], None], timeout: float | None = None,
-           env: Mapping[str, str] | None = None) -> Launched:
+           env: Mapping[str, str] | None = None,
+           stop: Callable[[], bool] | None = None) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written.
 
     With a `timeout` the session is ended at `started + timeout` (see the module docstring)
     and the result has `timed_out` set.
+    A `stop` that is true before the launcher starts, or turns true while it runs or by the time
+    it ended, raises `Stopped` (after the group is killed, once it started).
     """
     started = time.monotonic()
     deferred: list[int] = []
@@ -481,11 +484,13 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
     process = None
     timed_out = False
     try:
+        if stop is not None and stop():
+            raise engine_stop.Stopped
         try:
             process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        start_new_session=True,
-                                       env=None if env is None else dict(env))
+                                       env=session_environment(os.environ if env is None else env))
         except OSError as error:
             if deferred:  # no group to end, but the engine was told to stop
                 raise SystemExit(128 + deferred[0])
@@ -504,21 +509,19 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         if overran:
             timed_out = True
             stdout, stderr = _collect(process)
-        elif timeout is None:
-            stdout, stderr = process.communicate(prompt.encode("utf-8"))
         else:
-            remaining = started + timeout - time.monotonic()
+            remaining = None if timeout is None else started + timeout - time.monotonic()
             try:
-                if remaining <= 0:
+                if remaining is not None and remaining <= 0:
                     raise subprocess.TimeoutExpired(list(argv), 0)
-                stdout, stderr = process.communicate(prompt.encode("utf-8"), timeout=remaining)
+                stdout, stderr = engine_stop.communicate(
+                    process, prompt.encode("utf-8"), stop=stop, timeout=remaining)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 stdout, stderr = _end_overrun(process)
     except BaseException:
         if process is not None:
-            _kill_group(process.pid, signal.SIGKILL)
-            process.communicate()
+            engine_stop.end_group(process)
         raise
     finally:
         if previous is not None:
