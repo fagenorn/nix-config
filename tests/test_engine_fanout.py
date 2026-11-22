@@ -206,6 +206,38 @@ class GroupTest(unittest.TestCase):
         self.assertLess(events.index(grades[0]), stop)
         self.assertLess(events.index(transitions[0]), stop)
 
+    def test_a_group_whose_declared_input_has_no_value_starts_no_member(self):
+        project = EngineProject(self)
+        steps = [
+            {"id": "prepare", "stage": "setup", "kind": "command", "command": "standin-json",
+             "in": ["run.issue"], "on": {"ok": "checks", "failed": "needs-owner"}},
+            *GROUP("standin-stamp")]
+        steps[1]["in"] = ["prepare.ticket"]
+        done = project.deliver(project.procedures(steps), issue=1517)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+        self.assertFalse(project.stamps.exists())
+        events = project.events(project.runs()[0])
+        self.assertFalse([e for e in events if e.get("step") in ("a", "b")])
+
+    def test_a_completed_group_keeps_its_grade_when_its_successor_cannot_resolve_its_items(self):
+        project = EngineProject(self)
+        steps = GROUP("standin-stamp")
+        steps[0]["on"] = {"pass": "fan", "blocked": "needs-owner"}
+        steps[1]["command"] = "standin-items-object"
+        steps.append({"id": "fan", "stage": "landing", "kind": "call", "procedure": "fan-child",
+                      "in": ["a.argv"], "each": "a.argv",
+                      "on": {"done": "done", "child-stop": "needs-owner"}})
+        done = project.deliver(project.procedures(steps, children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+        events = project.events(roots(project)[0])
+        self.assertEqual([(e["visit"], e["outcome"]) for e in graded(events, "checks")],
+                         [(1, "pass")])
+        self.assertEqual([(e["outcome"], e["to"]) for e in events
+                          if e["event"] == "transition_taken" and e["step"] == "checks"],
+                         [("pass", "fan")])
+
 
 class CallTest(unittest.TestCase):
     def deliver_in_process(self, project: EngineProject, steps: list[dict], spy: WalkSpy,
@@ -391,6 +423,54 @@ class CallTest(unittest.TestCase):
         self.assertEqual(len(project.runs()), 1)
         self.assertFalse([e for e in project.events(project.runs()[0]) if e["event"] == "call"])
 
+    def test_a_failed_call_event_leaves_no_child_the_parent_does_not_name(self):
+        project = EngineProject(self)
+        real = engine_ledger.append_event
+
+        def append(run_dir, event):
+            if event["event"] == "call" and event["index"] == 2:
+                raise OSError("injected")
+            return real(run_dir, event)
+
+        procedures = project.procedures(FAN("standin-items", 2), children=fan_children())
+        with project.inside(), mock.patch.object(engine_ledger, "append_event", append):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        (root,) = roots(project)
+        named = {e["child"] for e in project.events(root) if e["event"] == "call"}
+        self.assertEqual(len(named), 2)
+        self.assertEqual({kid.name for kid in children_of(project)}, named)
+        with project.inside():
+            for kid in children_of(project):
+                self.assertIsNone(engine_shell.lock_holder(kid))
+
+    def test_a_worker_that_cannot_start_is_a_fault_after_the_started_worker_is_drained(self):
+        project = EngineProject(self)
+        walking = threading.Event()
+        real_start = threading.Thread.start
+        starts: list[str] = []
+
+        def start(thread) -> None:
+            if getattr(thread._target, "__qualname__", "").endswith("worker"):
+                starts.append("worker")
+                if len(starts) == 2:
+                    walking.wait(30)
+                    raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        spy = WalkSpy(REAL_WALK, before=lambda item: walking.set())
+        procedures = project.procedures(FAN("standin-items", 2), children=fan_children())
+        with project.inside(), mock.patch.object(engine_shell, "_walk", spy), \
+                mock.patch.object(threading.Thread, "start", start):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        (kid,) = children_of(project)
+        self.assertEqual(project.events(kid)[-1]["event"], "run_done")
+        (root,) = roots(project)
+        self.assertEqual(len([e for e in project.events(root) if e["event"] == "call"]), 1)
+        with project.inside():
+            self.assertIsNone(engine_shell.lock_holder(kid))
+
     def test_an_item_that_is_no_string_or_integer_faults_before_any_child(self):
         project = EngineProject(self)
         done = project.deliver(project.procedures(FAN("standin-items-object", 2),
@@ -417,6 +497,60 @@ class PassThroughTest(unittest.TestCase):
         by_run = {run.name: run_document(run) for run in children_of(project)}
         grand = [doc for doc in by_run.values() if doc["procedure"] == "grand"]
         self.assertEqual([doc["inputs"]["item"] for doc in grand], ["approve"] * 3)
+
+
+class ChildKeepAliveTest(unittest.TestCase):
+    def test_a_child_renews_the_claim_before_each_of_its_mutating_steps(self):
+        project = EngineProject(self)
+        project.answer({"stdout": '{"verdict":"renewed"}', "exit": 0})
+        steps = FAN("standin-items", 1)
+        steps[1]["on"]["claim-lost"] = "needs-owner"
+        work = {"id": "work", "stage": "building", "kind": "command", "command": "standin-stamp",
+                "in": ["run.item"], "mutates": True, "on": {"ok": "done", "failed": "child-stop"}}
+        document = child([work])
+        document["stops"]["claim-lost"] = {"need": "retry", "reenter": "work"}
+        done = project.deliver(
+            project.procedures(steps, keep_alive={"command": "standin-keep-alive",
+                                                  "in": ["run.issue"]},
+                               children={"fan-child": document}), issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(project.renewal_calls(), [{"argv": ["1517"]}] * 3)
+        for kid in children_of(project):
+            events = project.events(kid)
+            self.assertEqual([e["event"] for e in events if e["event"] in
+                              ("keep_alive_ran", "step_entered")],
+                             ["keep_alive_ran", "step_entered"])
+
+
+class PreflightTest(unittest.TestCase):
+    def test_a_child_reached_by_many_call_paths_is_validated_once_per_supplied_input_set(self):
+        project = EngineProject(self)
+        levels = 20
+
+        def calls(target: str, last: str) -> list[dict]:
+            return [{"id": name, "stage": "landing", "kind": "call", "procedure": target,
+                     "on": {"done": "done", "child-stop": other}}
+                    for name, other in (("first", "second"), ("second", last))]
+
+        steps = calls("level1", "needs-owner")
+        children = {}
+        for level in range(1, levels):
+            target = f"level{level + 1}"
+            body = (calls(target, "child-stop") if level < levels - 1 else
+                    [step("work", "standin-json", "done", failed="child-stop")])
+            children[f"level{level}"] = child(body, inputs=("issue",))
+        procedures = project.procedures(steps, children=children)
+        loads = []
+        real = engine_shell._load
+
+        def load(path):
+            loads.append(path.name)
+            self.assertLess(len(loads), 500, "the preflight reloads a child for every call path")
+            return real(path)
+
+        with project.inside(), mock.patch.object(engine_shell, "_load", load):
+            engine_shell._validate(procedures, engine_shell._resolve()[1])
+        self.assertLessEqual(len(loads), 2 * levels)
 
 
 class RefusalTest(unittest.TestCase):

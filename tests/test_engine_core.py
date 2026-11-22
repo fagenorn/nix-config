@@ -308,6 +308,19 @@ class GroupTest(unittest.TestCase):
         self.assertIn(Transition("checks", "blocked", "checks"), blocked.transitions)
         self.assertEqual(blocked.graded, (Graded("checks", 1, "blocked", "checks"),))
 
+    def test_a_group_with_an_input_that_has_no_value_raises_before_any_member_runs(self) -> None:
+        doc = fan()
+        step(doc, "checks")["in"] = ["draft.ghost"]
+        with self.assertRaises(engine_core.CoreError):
+            replay(doc, INPUTS, D)
+
+    def test_a_walk_that_raises_after_a_group_grade_reports_the_grade(self) -> None:
+        doc = fan()
+        step(doc, "fan")["each"] = "draft.status"
+        with self.assertRaises(engine_core.CoreError) as raised:
+            replay(doc, INPUTS, D + G + MEMBERS_PASS)
+        self.assertEqual(raised.exception.graded, (Graded("checks", 1, "pass", "fan"),))
+
 
 def summarised(summary: str) -> list:
     return pair("draft", "drafted", {"status": "drafted", "summary": summary, "items": ["x", "y", "z"]})

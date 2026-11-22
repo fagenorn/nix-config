@@ -91,7 +91,12 @@ CORE_KINDS = ("command", "agent", "decide", "group", "call")
 
 
 class CoreError(ValueError):
-    """The procedure, inputs and events do not describe a walk of the core."""
+    """The procedure, inputs and events do not describe a walk of the core.
+
+    `graded` holds the group grades the walk reached before it raised, so the shell can still record them.
+    """
+
+    graded: tuple["Graded", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,11 +196,20 @@ def _run_step(step: Mapping, visit: int, args: tuple[tuple[str, object], ...]) -
 
 
 def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping]) -> Replay:
+    graded: list[Graded] = []
+    try:
+        return _replay(procedure, inputs, events, graded)
+    except CoreError as error:
+        error.graded = tuple(graded)
+        raise
+
+
+def _replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping],
+            graded: list[Graded]) -> Replay:
     steps = {item["id"]: item for item in procedure["steps"]}
     visits: dict[str, int] = {}
     results: dict[str, dict] = {}
     transitions: list[Transition] = []
-    graded: list[Graded] = []
 
     def value(path: str) -> object:
         source, _, member = path.partition(".")
@@ -269,6 +283,7 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
             elif step["kind"] in ("command", "agent"):
                 return where, _Pending(step, args_of(step))
             elif step["kind"] == "group":
+                args_of(step)
                 pending = open_group(step)
                 if pending.waiting:
                     return where, pending

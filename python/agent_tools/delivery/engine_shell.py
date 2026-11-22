@@ -28,8 +28,9 @@ recorded too. A `call` step runs its child procedure once per item of `each`
 directory whose `run.json` names the parent, with the procedures copied from the
 parent's staged copy. At most `parallel` child walks run at once; children are
 admitted in list order, and admission stops at the first fault, while the
-children already admitted finish. The parent records a `call` event for each
-child before that child walks, stores `{"items": [{"end", "item", "run"}, ...]}`
+children already admitted finish, and a worker that cannot start stops admission
+the same way. The parent records a `call` event for each child before that child
+walks (a child whose event cannot be recorded is removed unwalked), stores `{"items": [{"end", "item", "run"}, ...]}`
 and takes `engine_core.call_outcome` of the ends. A fault in any child faults
 the parent with no call outcome. `engine status` reads the root run, never a
 child.
@@ -56,6 +57,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import socket
 import threading
 import time
@@ -113,8 +115,15 @@ def _load(path: Path) -> dict:
     return document
 
 
-def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ...] | set[str],
-                       name: str, calling: tuple[str, ...] = ()) -> None:
+def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ...] | frozenset[str],
+                       name: str, calling: tuple[str, ...] = (),
+                       validated: set[tuple[str, frozenset[str]]] | None = None) -> None:
+    """Refuse what the engine cannot run in `procedure` and in every child it calls.
+
+    A child already validated with the same supplied inputs is not validated again, so a procedure
+    reached by many call paths is read once; the cycle check runs before that skip.
+    """
+    validated = set() if validated is None else validated
     for item in procedure["steps"]:
         if item["kind"] not in RUNNABLE_KINDS:
             raise Refused(f"step {item['id']} is a {item['kind']} step, "
@@ -139,13 +148,15 @@ def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ..
         if child in (*calling, name):
             raise Refused(f"procedure {child} calls itself through step {item['id']}, "
                           "which the engine does not run")
+        given = frozenset(procedure["inputs"]) | ({"item"} if "each" in item else frozenset())
+        if (child, given) in validated:
+            continue
         try:
             document = _load(directory / f"{child}.json")
         except (ValueError, OSError) as error:
             raise Refused(str(error)) from error
-        _refuse_unrunnable(document, directory,
-                           set(procedure["inputs"]) | ({"item"} if "each" in item else set()),
-                           child, (*calling, name))
+        _refuse_unrunnable(document, directory, given, child, (*calling, name), validated)
+        validated.add((child, given))
 
 
 def core_events(run_dir: Path, ledger: list[dict],
@@ -382,7 +393,11 @@ def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
     ran = 0
     while True:
         ledger = engine_ledger.replay(run_dir / "events.jsonl")
-        walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger, computed))
+        try:
+            walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger, computed))
+        except engine_core.CoreError as error:
+            _record_grades(run_dir, ledger, error.graded)
+            raise
         _record_grades(run_dir, ledger, walk.graded)
         action = walk.action
         if isinstance(action, engine_core.Done):
@@ -521,9 +536,14 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
                 before_publish=lambda staged: held.append(_take_run_lock(staged, _now())))
         finally:
             os.close(creation)
-        engine_ledger.append_event(run_dir, {
-            "event": "call", "at": _now(), "step": action.step, "visit": action.visit,
-            "child": child_dir.name, "index": index, "items": count})
+        try:
+            engine_ledger.append_event(run_dir, {
+                "event": "call", "at": _now(), "step": action.step, "visit": action.visit,
+                "child": child_dir.name, "index": index, "items": count})
+        except BaseException:
+            # Published but never named by the parent and never walked: leave no unnamed child.
+            shutil.rmtree(child_dir, ignore_errors=True)
+            raise
         _, line = _walk(child_dir, table)
         return {"end": line["end"], "item": item, "run": child_dir.name}
     finally:
@@ -552,10 +572,17 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
                 admission.fail()
 
     threads = [threading.Thread(target=worker) for _ in range(min(action.parallel, len(items)))]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    running: list[threading.Thread] = []
+    try:
+        for thread in threads:
+            thread.start()
+            running.append(thread)
+    except RuntimeError as error:
+        admission.fail()
+        raise Fault(f"step {action.step} could not start a child worker: {error}") from error
+    finally:
+        for thread in running:
+            thread.join()
     if errors:
         raise errors[min(errors)]
     ends = [entries[index] for index in range(len(items))]
