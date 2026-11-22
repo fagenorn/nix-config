@@ -399,10 +399,13 @@ _SHELL_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 # strips assignments or splits keyword bodies is unconfirmed, so the permit decides them all. A value's
 # unquoted character excludes quotes and backslashes, so each value parses one way: with `\S` there it split
 # a quoted value many ways and a failed search backtracked exponentially on every Bash call.
+# Likewise a wrapper's argument is a run of `[\w=.,:-]` that is no wrapper word (a wrapper word starts the
+# next wrapper instead), so each token parses one way here too.
 _RELEASE_RUN_TEXT = re.compile(
     r"(?:\A|[;&|\n(){`]|\$\()\s*"
     r"(?:(?:(?:then|do|else|elif|if|while|until|!)|[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\\.|[^\s\"'\\])*)\s+)*"
-    r"(?:(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)(?:\s+-?[\w=.,:-]+)*?\s+)*"
+    r"(?:(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)"
+    r"(?:\s+(?!(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)\s)[\w=.,:-]+)*?\s+)*"
     r"release\s+transaction\s+run(?:\s|\Z)")
 
 

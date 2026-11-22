@@ -427,6 +427,21 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(permit.RELEASE, permit.verb_of(
             "DATA='{" + pairs + "}' release transaction run x"))
 
+    def test_a_wrapper_with_many_dash_arguments_is_classified_in_bounded_time(self):
+        """Each wrapper argument must parse one way: a dash argument split as `-`+word or word, and a wrapper
+        word as a wrapper or an argument, so a failed search doubled with every one (24 took 3.5 s, about 29
+        pass the hook's timeout, #1592)."""
+        for command in ("timeout" + " -a" * 40 + " x", "timeout " * 40 + "x",
+                        "time nix build" + " --show-trace -L -v" * 12 + " x",
+                        "xargs" + " -I time" * 30 + " x"):
+            with self.subTest(command[:30]):
+                started = time.monotonic()
+                self.assertIsNone(permit.verb_of(command))
+                self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(permit.RELEASE, permit.verb_of(
+            "timeout" + " -a" * 40 + " release transaction run x"))
+        self.assertEqual(permit.RELEASE, permit.verb_of("nice timeout -k 5 time release transaction run x"))
+
     def test_every_other_release_spelling_gets_no_decision(self):
         for command in self.NO_DECISION:
             with self.subTest(command):
