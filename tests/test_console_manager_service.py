@@ -100,6 +100,24 @@ class ManagerPermissionTest(Case):
         self.assertEqual(json.loads(payload)["permission"], {
             "mode": "bypassPermissions", "reason": "production rules in place"})
 
+    def test_a_launch_and_a_wake_write_the_projects_allow_rules(self):
+        support.write_registry(self.registry, support.entries(2))
+        support.sign_in(self.store, "work")
+        launches = support.Launches()
+        binding = [("merge", True)]
+        svc = self.svc = self.start(
+            launcher=launches, session_poll_seconds=3600,
+            profile_dirs=[support.profile_dir(self.store, "work")],
+            slug_of=lambda root: "o/r", merge_binding_of=lambda root: binding[0])
+        svc.state_goal("owner/p01", "make the importer resumable")
+        [launch] = launches.calls
+        self.assertEqual(launch.allow, manager.allow_rules("o/r", "merge", True))
+        binding[0] = ("merge", False)
+        svc._refresh_settings(launch.sprint_id, "/srv/p01")
+        written = json.loads(manager.settings_path(svc._sprint_secrets, launch.sprint_id).read_text())
+        self.assertEqual(written["permissions"]["allow"],
+                         list(manager.allow_rules("o/r", "merge", False)))
+
     def test_a_reader_that_fails_launches_in_auto(self):
         def reader(project_id, root):
             raise RuntimeError("boom")

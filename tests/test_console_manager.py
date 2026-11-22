@@ -3,9 +3,11 @@
 Run: just agent-workflow-tests
 """
 import dataclasses
+import importlib.util
 import inspect
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -19,12 +21,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from agent_tools.console import (
-    capacity, exclusion, manager, permission, pin, revive_check, sessions)
+    capacity, exclusion, manager, permission, permit, pin, revive_check, sessions)
 from agent_tools.console import sprint as sprint_command
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
 from . import console_test_support as support
 from .test_console_capacity import T, reading_of, report, window
+from .test_console_permit import FakeForge, SHA
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -194,7 +197,186 @@ class CommandTest(Case):
         self.assertEqual(manager.launch_tools("win32"), ())
 
 
-DENY = ("Bash(gh pr merge *--admin*)", "Bash(release transaction abandon*)")
+DENY = (
+    "Bash(gh pr merge --admin*)", "Bash(gh pr merge * --admin*)",
+    "Bash(env -u GH_TOKEN -u GITHUB_TOKEN gh pr merge --admin*)",
+    "Bash(env -u GH_TOKEN -u GITHUB_TOKEN gh pr merge * --admin*)",
+    "Bash(env -u GITHUB_TOKEN -u GH_TOKEN gh pr merge --admin*)",
+    "Bash(env -u GITHUB_TOKEN -u GH_TOKEN gh pr merge * --admin*)",
+    "Bash(env -u GITHUB_TOKEN gh pr merge --admin*)",
+    "Bash(env -u GITHUB_TOKEN gh pr merge * --admin*)",
+    "Bash(env -u GH_TOKEN gh pr merge --admin*)",
+    "Bash(env -u GH_TOKEN gh pr merge * --admin*)",
+    "Bash(release transaction abandon*)")
+
+
+class AllowRulesTest(unittest.TestCase):
+    """The settings' allow rules admit the permitted forms and the permit hook decides every text a rule matches (#1592, ADR-console-101)."""
+
+    ENV = manager.ENV_SPELLINGS
+    PREFIXES = ("", *manager.ENV_SPELLINGS)
+    RELEASE = ("release transaction run --repo-root /srv/p01 --commit " + "a" * 40
+               + " --version v1.2.0 --title 'v1.2.0 notes' --notes-file /tmp/n"
+               " --confirm publish:0123456789ab")
+
+    def setUp(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root)
+        self.grant = permit.Grant(
+            slug="o/r", root=root, strategy="merge", delete_branch=True,
+            branch_pattern="issue-<num>-<slug>", issues=frozenset({12}), others=frozenset({13}))
+        self.fake = FakeForge()
+        self.document = manager.settings_document(
+            {}, permission.FALLBACK, manager.allow_rules("o/r", "merge", True))
+
+    @staticmethod
+    def matches(rule, command):
+        body = rule[len("Bash("):-1]
+        pattern = "".join(".*" if char == "*" else re.escape(char) for char in body)
+        return (re.fullmatch(pattern, command, re.S) is not None
+                or (body.endswith(" *") and body.count("*") == 1 and command == body[:-2]))
+
+    def rules(self, document, command):
+        permissions = document["permissions"]
+        if any(self.matches(rule, command) for rule in permissions["deny"]):
+            return "deny"
+        if any(self.matches(rule, command) for rule in permissions.get("allow", [])):
+            return "allow"
+        return None
+
+    def effective(self, document, command):
+        hook = permit.judge(command, self.grant, self.fake.forge())
+        rules = self.rules(document, command)
+        if hook.decision == permit.DENY or rules == "deny":
+            return "deny"
+        return "allow" if rules == "allow" else None
+
+    def merge(self, prefix="", flags="--repo o/r --merge --match-head-commit " + SHA
+              + " --delete-branch"):
+        return f"{prefix}gh pr merge 7 {flags}"
+
+    def test_the_allow_rules_admit_exactly_the_permitted_forms(self):
+        permitted = [command for prefix in self.PREFIXES
+                     for command in (self.merge(prefix),
+                                     f"{prefix}gh run rerun 55 --failed --repo o/r")]
+        for command in (*permitted, self.RELEASE):
+            with self.subTest(permitted=command):
+                self.assertEqual(self.rules(self.document, command), "allow")
+                self.assertEqual(permit.judge(command, self.grant, self.fake.forge()).decision,
+                                 permit.ALLOW)
+                self.assertEqual(self.effective(self.document, command), "allow")
+        for command in (
+                f"gh pr merge 7 --repo x/y --merge --match-head-commit {SHA} --delete-branch",
+                f"gh pr merge 7 --repo o/r --squash --match-head-commit {SHA} --delete-branch",
+                "gh pr merge 7 --repo o/r --merge --delete-branch",
+                f"gh pr merge 7 --repo o/r --merge --match-head-commit {SHA}",
+                "gh run rerun 55 --repo o/r", "gh run rerun 55 --failed --repo x/y",
+                "gh run rerun 55 --failed --repo o/r --debug",
+                "gh api -X PUT repos/o/r/pulls/7/merge", "unset GITHUB_TOKEN",
+                "unset GITHUB_TOKEN GH_TOKEN",
+                "unset GITHUB_TOKEN && gh pr merge 7 --repo o/r --merge --match-head-commit "
+                + SHA + " --delete-branch",
+                f"env -u PATH gh pr merge 7 --repo o/r --merge --match-head-commit {SHA} --delete-branch",
+                f"env -u GITHUB_TOKEN release transaction run --commit {SHA}",
+                "release transaction preview --repo-root r"):
+            with self.subTest(out_of_form=command):
+                self.assertNotEqual(self.rules(self.document, command), "allow")
+        for command in (
+                "gh run rerun 55 --debug --failed --repo o/r",
+                "gh run rerun 0x37 --failed --repo o/r",
+                "gh pr merge 7 --repo o/r --merge --match-head-commit bbbb --delete-branch",
+                f"gh pr merge 7 --auto --repo o/r --merge --match-head-commit {SHA} --delete-branch",
+                f"gh pr merge 7 --repo x/y --repo o/r --merge --match-head-commit {SHA} --delete-branch",
+                "gh pr merge 7 --repo o/r --merge --match-head-commit $(cat head) --delete-branch",
+                "env -u GITHUB_TOKEN -u GH_TOKEN gh pr merge 7 --repo o/r --merge --match-head-commit "
+                + "c" * 40 + " --delete-branch",
+                "release transaction run --repo-root=r --confirm t",
+                f"release transaction run --commit {SHA} --version v1.2.3 --preview",
+                'release transaction run --repo-root r --title "$HOME" --confirm t'):
+            with self.subTest(boundary=command):
+                self.assertEqual(self.rules(self.document, command), "allow")
+                self.assertEqual(permit.judge(command, self.grant, self.fake.forge()).decision,
+                                 permit.DENY)
+                self.assertEqual(self.effective(self.document, command), "deny")
+        openings = ("Bash(gh pr merge ", "Bash(gh run rerun ", "Bash(release transaction run ",
+                    *(f"Bash({spelling}gh " for spelling in self.ENV))
+        for rule in self.document["permissions"]["allow"]:
+            with self.subTest(rule=rule):
+                self.assertTrue(rule.startswith(openings), rule)
+                self.assertFalse(rule.startswith(("Bash(*", "Bash(unset")), rule)
+
+    def test_the_rules_allow_no_close_no_admin_merge_and_no_deploy_rerun(self):
+        for command in ("gh pr close 7 --repo o/r", "gh pr close 7 --repo o/r --delete-branch",
+                        "env -u GITHUB_TOKEN -u GH_TOKEN gh pr close 7 --repo o/r"):
+            with self.subTest(close=command):
+                self.assertNotEqual(self.rules(self.document, command), "allow")
+        tail = f"--repo o/r --merge --match-head-commit {SHA} --delete-branch"
+        for prefix in self.PREFIXES:
+            for command in (f"{prefix}gh pr merge 7 --admin {tail}",
+                            f"{prefix}gh pr merge --admin 7 {tail}",
+                            f"{prefix}gh pr merge 7 --repo o/r --merge --match-head-commit --admin --delete-branch",
+                            f"{prefix}gh pr merge 7 --admin=true {tail}",
+                            f"{prefix}gh pr merge 7 {tail} --admin"):
+                with self.subTest(admin=command):
+                    self.assertEqual(self.rules(self.document, command), "deny")
+        slugged = manager.settings_document(
+            {}, permission.FALLBACK, manager.allow_rules("o/service--admin", "merge", True))
+        for prefix in self.PREFIXES:
+            with self.subTest(boundary=prefix):
+                self.assertEqual(self.rules(slugged, f"{prefix}gh pr merge 7 --repo o/service--admin "
+                                            f"--merge --match-head-commit {SHA} --delete-branch"),
+                                 "allow")
+                self.assertEqual(self.rules(slugged, f"{prefix}gh pr merge 7 --admin --repo "
+                                            f"o/service--admin --merge --match-head-commit {SHA} "
+                                            "--delete-branch"), "deny")
+        for command in ("gh workflow run deploy.yml --repo o/r",
+                        "env -u GITHUB_TOKEN gh workflow run deploy.yml --repo o/r",
+                        "gh run rerun 77 --repo o/r"):
+            with self.subTest(deploy=command):
+                self.assertNotEqual(self.rules(self.document, command), "allow")
+        self.fake.run = {**self.fake.run, "event": "push"}
+        command = "gh run rerun 77 --failed --repo o/r"
+        verdict = permit.judge(command, self.grant, self.fake.forge())
+        self.assertEqual(self.rules(self.document, command), "allow")
+        self.assertEqual((verdict.decision, verdict.reason),
+                         (permit.DENY, permit.DEPLOY_RERUN.format(run=77, event="push")))
+        self.assertEqual(self.effective(self.document, command), "deny")
+        [pre] = self.document["hooks"]["PreToolUse"]
+        self.assertEqual(pre["matcher"], "Bash")
+        self.assertNotIn("if", pre["hooks"][0])
+        self.assertEqual(pre["hooks"][0]["command"], manager.PERMIT_COMMAND)
+
+    def test_each_verb_gets_its_rules_from_the_facts_it_needs(self):
+        release = "Bash(release transaction run *)"
+        rerun = (
+            "Bash(gh run rerun * --failed --repo o/r)",
+            "Bash(env -u GH_TOKEN -u GITHUB_TOKEN gh run rerun * --failed --repo o/r)",
+            "Bash(env -u GITHUB_TOKEN -u GH_TOKEN gh run rerun * --failed --repo o/r)",
+            "Bash(env -u GITHUB_TOKEN gh run rerun * --failed --repo o/r)",
+            "Bash(env -u GH_TOKEN gh run rerun * --failed --repo o/r)")
+        self.assertEqual(manager.allow_rules(None, None, False), (release,))
+        self.assertEqual(manager.allow_rules(None, "merge", True), (release,))
+        self.assertEqual(manager.allow_rules("o/r", None, True), (*rerun, release))
+        self.assertEqual(manager.allow_rules("o/r", "squash", True), (*rerun, release))
+        self.assertEqual(manager.allow_rules("o/r", "merge --admin", True), (*rerun, release))
+        for slug in ("o/r x", "o/r)", "o/*", "o", "", "o/r\n"):
+            with self.subTest(slug=slug):
+                self.assertEqual(manager.allow_rules(slug, "merge", True), (release,))
+        self.assertEqual(
+            manager.allow_rules("o/r", "merge", True)[0],
+            "Bash(gh pr merge * --repo o/r --merge --match-head-commit * --delete-branch)")
+        self.assertEqual(manager.allow_rules("o/r", "merge", False)[0],
+                         "Bash(gh pr merge * --repo o/r --merge --match-head-commit *)")
+        spec = importlib.util.spec_from_file_location(
+            "lifecycle_guard_source", REPO_ROOT / "home/common/claude-code/lifecycle_guard.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for _, template, _ in module.FORM_TABLE["merge"]["forms"]:
+            with self.subTest(template=template):
+                self.assertIn(f" --{manager.MERGE_STRATEGY} ", template)
+        self.assertEqual(
+            set(manager.settings_document({}, permission.FALLBACK)["permissions"]),
+            {"defaultMode", "deny"})
 
 
 class RunTest(Case):
@@ -297,6 +479,13 @@ class RunTest(Case):
         [post] = settings["hooks"]["PostToolUse"]
         self.assertEqual(post, {"matcher": "Bash", "hooks": [{
             "type": "command", "command": "sprint permit --landed", "timeout": 30}]})
+
+    def test_a_launch_writes_its_allow_rules(self):
+        launch = dataclasses.replace(self.launch(root=str(self.root)),
+                                     allow=manager.allow_rules("o/r", "merge", True))
+        manager.run_launch(launch, platform="linux", run=self.fake(), environ=self.ENVIRON)
+        self.assertEqual(json.loads(self.settings.read_text())["permissions"]["allow"],
+                         list(manager.allow_rules("o/r", "merge", True)))
 
     def test_the_settings_carry_the_launchs_permission_mode(self):
         bypass = permission.Permission(permission.BYPASS, permission.RULES_IN_PLACE)

@@ -236,7 +236,8 @@ class ReviveServiceTest(ReviveCase):
         launch = manager.new_launch(
             sid, "owner/p01", GOAL, "/srv/p01", "work", self.secret(sid), svc._sprint_secrets)
         self.assertEqual(len(self.revives()), 1)
-        self.assertEqual(written, [json.dumps(manager.settings_document(launch.env, WAKE_MODE))])
+        self.assertEqual(written, [json.dumps(manager.settings_document(
+            launch.env, WAKE_MODE, manager.allow_rules(None, None, False)))])
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         (woken,) = self.rows("manager.woken")
         self.assertEqual(woken["permission"], {

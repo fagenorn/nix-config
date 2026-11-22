@@ -1,6 +1,6 @@
 # ADR-console-098 — A manager runs the plain release command and the release command judges the approval
 
-- **Status:** accepted; Consequences amended by ADR-console-101
+- **Status:** accepted; D4 and Consequences amended by ADR-console-101
 - **Decided in:** #1401
 
 ## Context

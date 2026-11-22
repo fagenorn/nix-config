@@ -15,9 +15,18 @@ The guidance of a project such as jarbird prefixes `gh` with `env -u GITHUB_TOKE
 
 **D3. A leading release run the permit cannot read is denied.** The release allow rule (D4) matches any text after `release transaction run `, so a spelling that got no decision would run unjudged by both the permit and the classifier. A command whose text begins with `release transaction run` and that is neither the plain run nor an abandon or dispose is denied with `RELEASE_SPELLING` (PD9).
 
+**D4. The settings allow the permitted forms per verb.** `manager.allow_rules(slug, strategy, delete_branch)` writes a merge rule only for a valid slug and the strategy `merge` (the one the guard spells), ending `--delete-branch` as the binding says, a rerun rule only for a valid slug, and always `release transaction run *`. The merge and rerun rules come bare and behind each `env -u` credential spelling. There is no `unset` rule: a compound command needs every subcommand allowed, and the client matches no wrapper `env` (PD6, PD7).
+
+**D5. The admin deny sits at an argument boundary and follows each env spelling.** The deny rules are `gh pr merge --admin*` and `gh pr merge * --admin*`, bare and behind each `env -u` spelling, because a deny rule does not match past `env`, and a slug such as `o/service--admin` must not be denied. This amends ADR-console-098 D4 (PD10).
+
+**D6. The hook decides every text a rule matches.** A rule's `*` admits an extra argument, a short head, another `--repo` and a deploy run by id, and the `PreToolUse` hook, with matcher `Bash` and no `if`, denies each (PD8).
+
 ## Consequences
 
 - The permit and the guard agree on the prefix, and a test holds them equal.
 - `permit.landed` records a prefixed merge too.
 - The spellings ADR-console-098 let fall to the classifier now get `RELEASE_SPELLING`, while those that do not begin with the run (a wrapper, `xargs`, a shell variable) still fall to it.
-- Related: ADR-console-094, ADR-console-098.
+- The auto-mode classifier no longer judges a permitted merge, rerun or release run.
+- A settings file gains the rules at the next launch or wake, read again each time.
+- `unset N && gh ...` spellings still go to the classifier. Closing a pull request, an `--admin` merge, other repositories and deploy workflows match no allow rule.
+- Related: ADR-console-094, ADR-console-098, ADR-console-100.

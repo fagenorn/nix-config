@@ -526,7 +526,8 @@ class NudgeServiceTest(MessageRouteTest):
         launch = manager.new_launch(
             sid, "owner/p01", "g", "/srv/p01", "work", secret, svc._sprint_secrets)
         self.assertEqual(path.read_text(),
-                         json.dumps(manager.settings_document(launch.env, AUTO_MODE)))
+                         json.dumps(manager.settings_document(
+                             launch.env, AUTO_MODE, manager.allow_rules(None, None, False))))
 
     def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):
         svc, sid = self.stopped_with_full_listing(frozenset({"s-1"}))
@@ -619,7 +620,8 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertEqual(free, [True])
         path = manager.settings_path(svc._sprint_secrets, sid)
         self.assertEqual(json.loads(path.read_text())["permissions"],
-                         {"defaultMode": "auto", "deny": list(manager.MANAGER_DENY)})
+                         {"defaultMode": "auto", "deny": list(manager.MANAGER_DENY),
+                          "allow": list(manager.allow_rules(None, None, False))})
         ((_, row),) = self.nudged()
         self.assertEqual(row["route"], "wake")
         self.assertEqual(row["permission"], {
@@ -636,7 +638,8 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertEqual([n.route for n in self.nudges], ["wake"])
         path = manager.settings_path(svc._sprint_secrets, sid)
         self.assertEqual(json.loads(path.read_text())["permissions"],
-                         {"defaultMode": "auto", "deny": list(manager.MANAGER_DENY)})
+                         {"defaultMode": "auto", "deny": list(manager.MANAGER_DENY),
+                          "allow": list(manager.allow_rules(None, None, False))})
         self.assertEqual(self.notice_nudged()[-1]["route"], "wake")
         self.assertEqual(self.notice_nudged()[-1]["permission"], {
             "mode": "auto", "reason": "no production rules declared"})
