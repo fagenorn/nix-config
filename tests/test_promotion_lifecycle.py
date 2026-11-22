@@ -37,6 +37,28 @@ class ClassificationTest(LifecycleFixture, unittest.TestCase):
             "rule": 1, "rule_id": "duplicate_of_platform",
             "declared_layer": "standard_layer", "overridden_by_rule_1": True})
 
+    def test_rule_one_matches_a_heading_that_carries_a_rule_id(self):
+        (self.root / DESTINATION).parent.mkdir(parents=True)
+        (self.root / DESTINATION).write_text(
+            "# The bar\n### B17. Investigate before changing\n", encoding="utf-8")
+        self.assertEqual(self.classification(), {
+            "rule": 1, "rule_id": "duplicate_of_platform",
+            "declared_layer": "standard_layer", "overridden_by_rule_1": True})
+
+    def test_only_one_well_formed_id_is_ignored(self):
+        (self.root / DESTINATION).parent.mkdir(parents=True)
+        lines = ("### b17. Investigate before changing",
+                 "### B017. Investigate before changing",
+                 "### B17 Investigate before changing",
+                 "B17. ### Investigate before changing",
+                 "### B17. B18. Investigate before changing",
+                 "### B17. Investigate before changing code")
+        for i, line in enumerate(lines):
+            with self.subTest(line=line):
+                (self.root / DESTINATION).write_text("# The bar\n" + line + "\n",
+                                                     encoding="utf-8")
+                self.assertEqual(self.classification(name=f"{i}.json")["rule"], 4)
+
     def test_prefix_headings_and_symlinked_components_never_match_rule_one(self):
         real = self.root / "real"
         real.mkdir()

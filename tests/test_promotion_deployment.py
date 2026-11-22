@@ -53,6 +53,17 @@ class DeploymentTest(LifecycleFixture, unittest.TestCase):
         (self.root / DESTINATION).write_text(HEADING + " code\n", encoding="utf-8")
         self.assert_refused(path, "promoted", "destination_missing")
 
+    def test_a_destination_heading_with_a_rule_id_is_deployed(self):
+        path = self.authorized([duplicate("fagenorn/argus", "AGENTS.md"),
+                                duplicate("fagenorn/argus", "CLAUDE.md")],
+                               with_destination=False)
+        (self.root / DESTINATION).parent.mkdir(parents=True)
+        (self.root / DESTINATION).write_text(
+            "# The bar\n### B17. Investigate before changing\n", encoding="utf-8")
+        after = self.step(path, "promoted")
+        self.assertEqual([after["state"], after["deployment"]["deferred_repositories"]],
+                         ["promoted", ["fagenorn/argus"]])
+
     def test_an_unchanged_leftover_is_duplicate_present(self):
         self.put("docs/lesson.md")
         path = self.authorized([duplicate(HERE, "docs/lesson.md",
