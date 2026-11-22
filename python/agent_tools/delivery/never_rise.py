@@ -40,7 +40,13 @@ Every git child is read-only, never fetches and is bounded by the caller's
 under `root` (`SELECTION_VARIABLES`), sets `GIT_NO_LAZY_FETCH=1` so a partial
 clone with a missing blob is no verdict instead of a network fetch, passes
 `--no-color` so forced colour changes no path, and runs only `rev-parse`,
-`merge-base`, `grep` and `diff-tree`.
+`merge-base`, `ls-tree`, `cat-file` and `diff-tree`. An argument git cannot be
+given (a NUL in a branch name) is a failed read, never an error.
+
+A file is text or binary by its committed bytes alone: a NUL among its first
+8,000 bytes makes it binary, as git decides it for `grep -I`, whatever a
+`diff` or `binary` attribute says, so no attribute hides a file from an
+enforcer.
 """
 
 import os
@@ -111,25 +117,17 @@ class Verdict(NamedTuple):
 
 
 def _git(root: Path, args: Sequence[str], timeout: float | None,
-         accept: Sequence[int] = (0,), silent: bool = False) -> bytes | None:
-    """Run one read-only git child; its stdout, or None when it did not succeed.
-
-    An exit in `accept` other than 0 counts only when it left stderr empty; with
-    `silent`, any stderr output is a failure whatever the exit.
-    """
+         stdin: bytes | None = None) -> bytes | None:
+    """Run one read-only git child; its stdout, or None when it did not succeed."""
     env = {k: v for k, v in os.environ.items() if k not in SELECTION_VARIABLES}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
         done = subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True, timeout=timeout, env=env)
-    except (OSError, subprocess.TimeoutExpired):
+            ["git", "-C", str(root), *args], capture_output=True, timeout=timeout, env=env,
+            input=stdin)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
-    if done.returncode not in accept:
-        return None
-    # `git grep` reports an unreadable (missing) blob on stderr and skips it, with an
-    # exit that only says whether another file matched: stderr is the only signal.
-    quiet = not done.stderr.strip()
-    return done.stdout if quiet or (done.returncode == 0 and not silent) else None
+    return done.stdout if done.returncode == 0 else None
 
 
 def _revision(output: bytes | None) -> str | None:
@@ -139,27 +137,66 @@ def _revision(output: bytes | None) -> str | None:
 
 def revisions(root: Path, integration_branch: str, timeout: float | None) -> tuple[str, str] | None:
     """The merge base and the head, both 40-hex, or None."""
-    head = _revision(_git(root, ["rev-parse", "--verify", "HEAD"], timeout))
+    head = resolve_commit(root, "HEAD", timeout)
+    if head is None:
+        return None
     base = _revision(_git(
-        root, ["merge-base", "HEAD", f"refs/remotes/{REMOTE}/{integration_branch}"], timeout))
-    return (base, head) if base is not None and head is not None else None
+        root, ["merge-base", head, f"refs/remotes/{REMOTE}/{integration_branch}"], timeout))
+    return (base, head) if base is not None else None
+
+
+def resolve_commit(root: Path, revision: str, timeout: float | None) -> str | None:
+    """The 40-hex commit a revision names, or None; reads no object from a remote."""
+    return _revision(_git(root, ["rev-parse", "--verify", f"{revision}^{{commit}}"], timeout))
+
+
+def in_subdirectory(root: Path, timeout: float | None) -> bool:
+    """True when `root` is a directory below the top level of its repository."""
+    prefix = _git(root, ["rev-parse", "--show-prefix"], timeout)
+    return prefix is not None and prefix.strip() != b""
+
+
+BINARY_PROBE_BYTES = 8000
 
 
 def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
-    """Every tracked text file's line count at a revision, as `git grep -c` counts."""
-    out = _git(root, ["grep", "--no-color", "-I", "-c", "-z", "-e", "", revision, "--"],
-               timeout, accept=(0, 1), silent=True)
+    """Every text file's line count at a revision.
+
+    Lines are counted as `git grep -c` counts them: the newline-terminated lines
+    plus an unterminated last line, empty files not listed. A file with a NUL in
+    its first `BINARY_PROBE_BYTES` bytes is binary and not listed; a submodule is
+    no file. A blob that cannot be read is no snapshot.
+    """
+    listing = _git(root, ["ls-tree", "-r", "-z", "--full-tree", revision], timeout)
+    if listing is None:
+        return None
+    paths: dict[str, str] = {}
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        meta, _, name = entry.partition(b"\t")
+        _, kind, oid = meta.decode("ascii").split(" ")
+        if kind == "blob":
+            paths[os.fsdecode(name)] = oid
+    if not paths:
+        return Snapshot(revision, {})
+    out = _git(root, ["cat-file", "--batch"], timeout,
+               stdin="".join(f"{oid}\n" for oid in paths.values()).encode("ascii"))
     if out is None:
         return None
-    prefix = f"{revision}:"
     counts: dict[str, int] = {}
     position = 0
-    while position < len(out):
-        split = out.index(b"\0", position)
-        end = out.index(b"\n", split)
-        path = os.fsdecode(out[position:split])
-        counts[path.removeprefix(prefix)] = int(out[split + 1:end])
-        position = end + 1
+    for path in paths:
+        end = out.find(b"\n", position)
+        header = out[position:end].split(b" ") if end >= 0 else []
+        if len(header) != 3 or header[1] != b"blob":
+            return None
+        start = end + 1
+        stop = start + int(header[2])
+        content = out[start:stop]
+        position = stop + 1
+        if content and b"\0" not in content[:BINARY_PROBE_BYTES]:
+            counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
     return Snapshot(revision, counts)
 
 

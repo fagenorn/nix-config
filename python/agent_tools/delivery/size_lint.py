@@ -2,8 +2,8 @@
 
 A file is judged by its line count at a committed revision, counted as
 `git grep -c` counts (`agent_tools.delivery.never_rise.read_snapshot`): the
-newline-terminated lines plus an unterminated last line, binary files and empty
-files not listed. A file is over the budget when it holds more than `BUDGET`
+newline-terminated lines plus an unterminated last line, binary files (a NUL in
+the committed bytes, whatever a gitattribute says) and empty files not listed. A file is over the budget when it holds more than `BUDGET`
 (1,500) lines; its violation is `Violation(RULE_ID, path, line_count)`, the line
 being the file's last line, so a file that grows reports a larger line.
 
@@ -22,12 +22,11 @@ prints every over-budget file at the revision (default `HEAD`), one line each on
 stdout, `<rule> <path>:<line>` with the path escaped as
 `agent_tools.delivery.never_rise.Violation.text` defines. It exits 1 when it
 printed any and 0 when none. It exits 2 with `size-lint: <reason>` on stderr for
-a relative or missing root, an unresolvable revision or a failed git read.
+a relative or missing root, a root below the repository's top level, an
+unresolvable revision or a failed git read.
 """
 
 import argparse
-import os
-import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -58,15 +57,7 @@ ENFORCER = Enforcer(RULE_ID, find, per_file=True)
 
 
 def resolve(root: Path, revision: str) -> str | None:
-    env = {k: v for k, v in os.environ.items() if k not in never_rise.SELECTION_VARIABLES}
-    try:
-        done = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--verify", f"{revision}^{{commit}}"],
-            capture_output=True, text=True, env=env)
-    except OSError:
-        return None
-    sha = done.stdout.strip()
-    return sha if done.returncode == 0 and len(sha) == 40 else None
+    return never_rise.resolve_commit(root, revision, timeout=None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not root.is_dir():
         print(f"{COMMAND}: not a directory: {root}", file=sys.stderr)
+        return 2
+    if never_rise.in_subdirectory(root, timeout=None):
+        print(f"{COMMAND}: --repo-root is not the repository top level: {root}", file=sys.stderr)
         return 2
     sha = resolve(root, args.revision)
     snapshot = never_rise.read_snapshot(root, sha, timeout=None) if sha else None

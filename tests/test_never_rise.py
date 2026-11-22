@@ -386,6 +386,60 @@ class NeverRiseTest(unittest.TestCase):
                 dict(never_rise.read_snapshot(root, head, 60).line_counts),
                 {"x.py": 3, "y.py": 1})
 
+    def test_a_diff_attribute_does_not_change_which_files_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, ".gitattributes", "hidden.py -diff\nbinary.py binary\nforced.dat diff\n")
+            write(root, "hidden.py", lines(5))
+            write(root, "binary.py", lines(4))
+            write(root, "forced.dat", b"a\0b\n")
+            write(root, "plain.py", lines(3))
+            commit_all(root)
+            head = git(root, "rev-parse", "HEAD").strip()
+            self.assertEqual(
+                dict(never_rise.read_snapshot(root, head, 60).line_counts),
+                {".gitattributes": 3, "hidden.py": 5, "binary.py": 4, "plain.py": 3})
+
+    def test_an_integration_branch_git_cannot_be_given_is_no_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            one_more_bad(root)
+            self.assertIsNone(never_rise.judge(root, "ma\0in", [BAD], 60))
+            self.assertIsNone(never_rise.revisions(root, "ma\0in", 60))
+
+    def test_the_merge_base_belongs_to_the_head_that_was_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.txt", "x\n")
+            commit_all(root)
+            fork = git(root, "rev-parse", "HEAD").strip()
+            git(root, "branch", "other")
+            write(root, "b.txt", "x\n")
+            commit_all(root)
+            mark_base(root)
+            git(root, "checkout", "-q", "-b", "feature", fork)
+            write(root, "c.txt", "x\n")
+            commit_all(root)
+            first = git(root, "rev-parse", "HEAD").strip()
+            git(root, "checkout", "-q", "other")
+            git(root, "reset", "-q", "--hard", "main")
+            real_run = subprocess.run
+            moves = []
+
+            def run_then_move_head(command, *args, **kwargs):
+                done = real_run(command, *args, **kwargs)
+                if not moves and "rev-parse" in command and any(
+                        str(arg).startswith("HEAD") for arg in command):
+                    moves.append(real_run(
+                        ["git", "-C", str(root), "checkout", "-q", "other"],
+                        env=fixture_env(), capture_output=True, check=True))
+                return done
+            git(root, "checkout", "-q", "feature")
+            with mock.patch.object(never_rise.subprocess, "run", run_then_move_head):
+                pair = never_rise.revisions(root, "main", 60)
+            self.assertEqual(len(moves), 1)
+            self.assertEqual(pair, (fork, first))
+
     def test_a_violation_prints_rule_path_and_line(self):
         self.assertEqual(Violation("FX1", "a b/c.py", 7).text(), "FX1 a b/c.py:7")
         for path, expected in (
@@ -449,6 +503,17 @@ class SizeRuleTest(unittest.TestCase):
                 rises = self.branch_over({}, lambda root: write(root, path, text))
                 self.assertEqual(rises, (Rise("B17", 0, 1, (Violation("B17", path, 1501),)),))
 
+    def test_a_diff_attribute_does_not_hide_a_new_oversize_file(self):
+        def add(root):
+            write(root, ".gitattributes", "src/*.py -diff\n*.dat binary\n")
+            write(root, "src/new.py", numbered(1501))
+            write(root, "src/new.dat", numbered(1501))
+        rises = self.branch_over({}, add)
+        self.assertEqual(len(rises), 1)
+        self.assertEqual(
+            rises[0].new,
+            (Violation("B17", "src/new.dat", 1501), Violation("B17", "src/new.py", 1501)))
+
     def test_a_long_document_or_data_file_is_not_judged(self):
         for path in ("docs/long.md", "data/table.json", "LICENSE"):
             with self.subTest(path=path):
@@ -496,6 +561,31 @@ class SizeLintOutputTest(unittest.TestCase):
             root = self.committed(tmp, {"x\ny.py": 1501})
             done = self.run_command("--repo-root", str(root))
             self.assertEqual((done.returncode, done.stdout), (1, "B17 x\\ny.py:1501\n"))
+
+    def test_a_subdirectory_root_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, {"a.py": 1501, "docs/standards/s.md": 3})
+            done = self.run_command("--repo-root", str(root / "docs/standards"))
+            self.assertEqual((done.returncode, done.stdout), (2, ""))
+            self.assertTrue(done.stderr.startswith("size-lint: "), done.stderr)
+
+    def test_resolving_a_revision_fetches_nothing_in_a_partial_clone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "x.py", "x\n")
+            commit_all(root)
+            bare = Path(tmp) / "bare.git"
+            partial = Path(tmp) / "partial"
+            git(root, "clone", "-q", "--bare", str(root), str(bare))
+            git(bare, "config", "uploadpack.allowFilter", "true")
+            git(Path(tmp), "clone", "-q", "--no-checkout", "--filter=blob:none",
+                f"file://{bare}", str(partial))
+            blob = git(partial, "rev-parse", "HEAD:x.py").strip()
+            self.assertIsNone(size_lint.resolve(partial, blob))
+            probe = subprocess.run(
+                ["git", "-C", str(partial), "cat-file", "-e", blob],
+                env=fixture_env({"GIT_NO_LAZY_FETCH": "1"}), capture_output=True)
+            self.assertNotEqual(probe.returncode, 0)
 
     def test_a_relative_root_exits_2(self):
         done = self.run_command("--repo-root", "repo")

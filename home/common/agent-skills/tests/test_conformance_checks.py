@@ -487,6 +487,20 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
                  {"integration_branch": "main"}])
             self.assert_validates(report)
 
+    def test_an_integration_branch_git_cannot_be_given_is_a_failed_check(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["bindings"]["vcs"]["integration_branch"] = "ma\x00in"
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID])[:3],
+                ["failed", "history_unavailable", "violations.history.fetch"])
+            self.assert_validates(report)
+
     def test_an_uncommitted_growth_is_not_judged(self):
         with fixture() as tmp:
             root = make_root(tmp)
