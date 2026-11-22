@@ -12,7 +12,7 @@
 | Knowledge | Home |
 |---|---|
 | A term | The owning area's `CONTEXT.md` |
-| A decision | That area's `adr/` (`areas/system/adr/` when it spans areas), under the ADR-FORMAT gate |
+| A decision | That area's `adr/` (`areas/system/adr/` when it spans areas). A decision record is written only in design and grilling, never by a delivery agent, and only when it is hard to reverse, surprising without context, a real trade-off and names its rejected alternative. Else how it works goes to the code, its tests and module docstring; a rule for every change to a standard with an id; a word's meaning to the glossary; a one-off choice or a bug's story to the issue and commit message. |
 | A command's contract | Its module docstring in `python/agent_tools/<area>/<module>.py`, or `python/agent_tools/<module>.py` for a top-level module (the lifecycle guard's in `home/common/claude-code/lifecycle_guard.py`) |
 | A procedure (how-to) | `guides/`, one file per task, named for what it does |
 | The architecture description (flake layout, module layering, helpers, the agent helper package) | [`guides/architecture.md`](./guides/architecture.md) |
