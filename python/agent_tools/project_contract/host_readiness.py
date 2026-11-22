@@ -55,21 +55,56 @@ old HEAD as its parent and the probe subject (D6). The release preview carries
 `--read-only` and no candidate, so it never takes the land lock (D7). A child
 runs leashed, so its whole process tree ends at its limit, with no forge token
 and no Git repository redirect in its environment (D10).
+
+The command
+-----------
+
+Usage: `host-readiness [--budget-seconds N] <project-id>`
+
+`main` looks `<project-id>` up in this host's fleet registry, resolves the
+registered root, makes a scratch directory under the temporary directory
+(`host-readiness-*`, holding an `owner` file with the run's pid), runs
+`run_checks` in it, prints `render` on stdout and removes the scratch on every
+outcome the process lives through. When the scratch cannot be removed, one more
+row, `fail scratch: <path> could not be removed`, is printed. A scratch a killed
+run left behind is removed by the next run: it is stale when its owner pid is
+not alive, or, with no readable owner, when it is over an hour old. A live run's
+scratch, another user's directory and a symlink are never touched. Nothing
+outside the scratch changes: the registered checkout, the registry and the
+origin are only read.
+
+Exit codes: 0 when every check passed, 1 when any failed, 2 when the run is
+refused and 3 when only the budget failed checks. A refusal prints the
+resolver's `{"error": ...}` object on stdout and runs no check. It is an
+unreadable registry (`resolver_failure`), a project not in the registry
+(`project_unregistered`), a registered root whose contract names another project
+(`project_identity_mismatch`), or any refusal of the resolver, including
+`unsupported_schema` with its `reason_code`.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 from agent_tools.project_contract import adopt_apply, adopt_inspection
+from agent_tools.project_contract.resolve_project import (
+    ContractError,
+    emit_error,
+    require_registry,
+    resolve,
+    resolves_on_path,
+)
 from agent_tools.release import codesigned_artifact_adapter, railway_deploy_adapter
 from agent_tools.system.siblings import sibling_argv
 
@@ -98,6 +133,8 @@ PASS_THROUGH_PROGRAMS = frozenset({
     "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
     "devenv", "direnv", "command", "builtin", "exec", "env", "sudo"})
 BUDGET_EXIT = 3
+SCRATCH_PREFIX = "host-readiness-"
+STALE_UNOWNED_SECONDS = 3600
 READ_DEPTH = 4
 UNREADABLE = "would run shell text it cannot read"
 DETAIL_LIMIT = 200
@@ -683,3 +720,120 @@ def run_checks(snapshot: Mapping, scratch: Path, *, run: Runner, on_path: Callab
                budget: float | None = None) -> list[Check]:
     """Every readiness check for the resolved project, in order, whatever fails."""
     return _Run(snapshot, scratch, run, on_path, clock, budget).rows()
+
+
+def remove_scratch(path: Path) -> bool:
+    """Remove `path` even when a part of it is read-only; whether it is gone."""
+
+    def make_writable(function: Callable, failed: str, error: BaseException) -> None:
+        entry = Path(failed)
+        for target in (entry.parent, entry) if entry.is_dir() and not entry.is_symlink() \
+                else (entry.parent,):
+            try:
+                target.chmod(target.stat().st_mode | 0o700)
+            except OSError:
+                pass
+        function(failed)
+
+    shutil.rmtree(path, onexc=make_writable)
+    return not path.exists()
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _is_stale(entry: Path, mtime: float, now: Callable[[], float]) -> bool:
+    try:
+        pid = int((entry / "owner").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return now() - mtime > STALE_UNOWNED_SECONDS
+    return not _pid_alive(pid)
+
+
+def sweep_stale_scratch(parent: Path, *, now: Callable[[], float] = time.time) -> list[Path]:
+    """Remove each scratch directory of this user that no live run owns; the removed paths."""
+    removed = []
+    for entry in sorted(parent.iterdir()):
+        if not entry.name.startswith(SCRATCH_PREFIX):
+            continue
+        try:
+            status = os.lstat(entry)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
+            continue
+        if _is_stale(entry, status.st_mtime, now) and remove_scratch(entry):
+            removed.append(entry)
+    return removed
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="host-readiness",
+        description="Check that a registered project is ready on this host.")
+    parser.add_argument("project_id", help="the project's id in this host's fleet registry")
+    parser.add_argument("--budget-seconds", type=_positive_int, default=None,
+                        help="one shared limit for every check")
+    return parser
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{text!r} is not positive")
+    return value
+
+
+def _resolved(project_id: str) -> dict:
+    entries = require_registry()
+    entry = next((each for each in entries if each["project_id"] == project_id), None)
+    if entry is None:
+        raise ContractError("project_unregistered", "platform.registry.register", [{
+            "pointer": "",
+            "message": f"{project_id} is not in this host's fleet registry"}])
+    snapshot = resolve(entry["root"])
+    if snapshot["project"]["id"] != entry["project_id"]:
+        raise ContractError("project_identity_mismatch", "platform.registry.identity", [{
+            "pointer": "/project/id",
+            "message": (f"the registry names {entry['project_id']} at {entry['root']}, "
+                        f"whose contract is for {snapshot['project']['id']}")}])
+    return snapshot
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    for name in GIT_REDIRECT_ENV:
+        os.environ.pop(name, None)
+    try:
+        snapshot = _resolved(args.project_id)
+    except ContractError as error:
+        return emit_error(error.code, error.repair_id, error.violations, error.reason_code)
+    root = snapshot["project"]["root"]
+    sweep_stale_scratch(Path(tempfile.gettempdir()))
+    scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX)).resolve()
+    removed = False
+    try:
+        (scratch / "owner").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        checks = run_checks(snapshot, scratch, run=leashed_run,
+                            on_path=lambda name: resolves_on_path(name, root),
+                            budget=args.budget_seconds)
+    finally:
+        removed = remove_scratch(scratch)
+    if not removed:
+        checks = [*checks, Check("scratch", False, f"{scratch} could not be removed")]
+    sys.stdout.write(render(checks))
+    return exit_code(checks)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -21,6 +21,8 @@ import os
 import shlex
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -28,9 +30,12 @@ from pathlib import Path
 from typing import Any, Callable
 from unittest import mock
 
+from agent_tools.project_contract import host_readiness
 from agent_tools.project_contract.host_readiness import (
     COMMIT_PROBE_MESSAGE,
     LOGIN_PROBES,
+    remove_scratch,
+    sweep_stale_scratch,
     VERIFICATION_LIMIT_SECONDS,
     Check,
     Completed,
@@ -42,6 +47,16 @@ from agent_tools.project_contract.host_readiness import (
 )
 from agent_tools.release import release_adapter
 from agent_tools.system.siblings import sibling_argv
+
+from .test_fleet_preflight import FleetFixtures
+from .test_resolve_project import (
+    ResolverTestCase,
+    git,
+    install_registry,
+    registry,
+    source_contract,
+    tree_snapshot,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
@@ -631,3 +646,286 @@ class LeashedRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def reaped_pid() -> int:
+    """The pid of a child that has already exited and been waited for."""
+    child = subprocess.Popen(["true"])
+    child.wait()
+    return child.pid
+
+
+def write_executable(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+class HostReadinessCommandTest(FleetFixtures, ResolverTestCase):
+    def world(self, *, edit: Callable[[dict], None] | None = None, release: bool = True,
+              guard_bin: bool = True, seed: Callable[[Path], None] | None = None) -> Path:
+        contract = source_contract()
+        contract["project"]["id"] = "fagenorn/ready"
+        contract["bindings"]["commands"]["lint"] = {
+            "argv": ["sh", "-c", "test -f only-on-main && test ! -f local-only"],
+            "cwd": ".", "env": []}
+        contract["bindings"]["commands"]["test"] = {
+            "argv": ["sh", "-c", "exit 0"], "cwd": ".", "env": []}
+        contract["bindings"]["workflow"]["verification"] = ["lint", "test"]
+        if edit is not None:
+            edit(contract)
+        entry, root = self.project("fagenorn/ready", contract=contract)
+        git(root, "commit", "--allow-empty", "-m", "base")
+        self.registry_path = install_registry(self.home, registry(entry))
+        self.root = root
+        self.bare = Path(tempfile.mkdtemp()).resolve()
+        git(self.bare, "init", "--bare", "--initial-branch=main")
+        seed_dir = Path(tempfile.mkdtemp()).resolve()
+        git(seed_dir, "init", "--initial-branch=main")
+        (seed_dir / "only-on-main").write_text("x\n", encoding="utf-8")
+        if seed is not None:
+            seed(seed_dir)
+        git(seed_dir, "add", "-A")
+        git(seed_dir, "commit", "-m", "seed")
+        git(seed_dir, "push", str(self.bare), "main")
+        git(root, "remote", "add", "origin", str(self.bare))
+        (root / "local-only").write_text("y\n", encoding="utf-8")
+        self.fakebin = Path(tempfile.mkdtemp()).resolve()
+        write_executable(self.fakebin / "gh", "#!/bin/sh\nexit 0\n")
+        if guard_bin:
+            write_executable(self.fakebin / "claude-bash-lifecycle-guard", "#!/bin/sh\nexit 0\n")
+        (self.fakebin / "git").symlink_to(shutil.which("git"))
+        if release:
+            write_executable(self.fakebin / "release", "#!/bin/sh\nexit 0\n")
+        self.tmpdir = Path(tempfile.mkdtemp()).resolve()
+        return root
+
+    def run_command(self, *args: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+        env = {
+            "HOME": str(self.home), "PATH": f"{self.fakebin}:/bin",
+            "PYTHONPATH": str(REPO_ROOT / "python"), "TMPDIR": str(self.tmpdir),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            **(extra_env or {})}
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.host_readiness", *args],
+            env=env, capture_output=True, text=True, timeout=300)
+
+    def scratches(self) -> list[str]:
+        return [name for name in os.listdir(self.tmpdir) if name.startswith("host-readiness-")]
+
+    def test_a_ready_project_passes_every_check(self):
+        self.world()
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual("", done.stderr)
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertEqual([
+            "pass checkout",
+            "pass verification lint",
+            "pass verification test",
+            "pass commit-hook",
+            "pass release-command",
+            "pass release-profile github-release",
+            "pass release-preview github-release",
+            "pass release-login github-release forge-keyring",
+        ], done.stdout.splitlines())
+
+    def test_without_release_on_path_one_line_names_it_and_exit_is_one(self):
+        self.world(release=False)
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual(1, done.returncode, done.stdout)
+        failed = [line for line in done.stdout.splitlines() if line.startswith("fail ")]
+        self.assertEqual(["fail release-command: the release command is not on PATH"], failed)
+
+    def test_the_run_writes_nothing_outside_its_scratch(self):
+        root = self.world()
+
+        def state():
+            return (git(root, "status", "--porcelain"), tree_snapshot(root),
+                    self.registry_path.read_bytes(),
+                    git(self.bare, "for-each-ref"))
+
+        before = state()
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertEqual(before, state())
+        self.assertEqual([], self.scratches())
+
+    def test_an_inherited_repository_redirect_cannot_reach_the_registered_checkout(self):
+        root = self.world()
+        head = git(root, "rev-parse", "HEAD")
+        staged = git(root, "ls-files", "-s")
+        index = (root / ".git/index").read_bytes()
+        done = self.run_command("fagenorn/ready", extra_env={
+            "GIT_DIR": str(root / ".git"), "GIT_WORK_TREE": str(root),
+            "GIT_INDEX_FILE": str(root / ".git/index")})
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("pass commit-hook", done.stdout.splitlines())
+        self.assertEqual(head, git(root, "rev-parse", "HEAD"))
+        self.assertEqual("1", git(root, "rev-list", "--count", "HEAD").strip())
+        self.assertEqual(staged, git(root, "ls-files", "-s"))
+        self.assertEqual(index, (root / ".git/index").read_bytes())
+
+    def test_main_removes_the_git_redirect_from_its_environment_before_it_resolves(self):
+        seen = {}
+
+        def registry_read():
+            seen.update({name: os.environ.get(name) for name in ("GIT_DIR", "GIT_INDEX_FILE")})
+            return []
+
+        redirect = {"GIT_DIR": "/nowhere", "GIT_INDEX_FILE": "/nowhere/index"}
+        with mock.patch.dict(os.environ, redirect), \
+                mock.patch.object(host_readiness, "require_registry", registry_read), \
+                mock.patch("sys.stdout"):
+            self.assertEqual(2, host_readiness.main(["fagenorn/ready"]))
+        self.assertEqual({"GIT_DIR": None, "GIT_INDEX_FILE": None}, seen)
+
+    def test_a_failing_installed_hook_fails_the_commit_hook_line(self):
+        root = self.world()
+        hook = write_executable(root / ".git/hooks/pre-commit",
+                                "#!/bin/sh\necho hook refused >&2\nexit 1\n")
+        text = hook.read_text(encoding="utf-8")
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual(1, done.returncode, done.stdout)
+        self.assertIn("fail commit-hook: the probe commit exited 1: hook refused",
+                      done.stdout.splitlines())
+        self.assertEqual(text, hook.read_text(encoding="utf-8"))
+
+    def test_a_commit_environment_that_never_runs_git_fails(self):
+        def edit(contract):
+            contract["bindings"]["commands"]["commit-environment"] = {
+                "argv": ["sh", "-c", "exit 0", "wrapper"], "cwd": ".", "env": []}
+            contract["bindings"]["vcs"]["commit"]["environment"] = "commit-environment"
+
+        self.world(edit=edit)
+        done = self.run_command("fagenorn/ready")
+        self.assertIn("fail commit-hook: the probe commit exited 0 but made no commit",
+                      done.stdout.splitlines())
+
+    def test_a_verification_directory_that_escapes_through_a_symlink_is_not_run(self):
+        outside = Path(tempfile.mkdtemp()).resolve()
+
+        def edit(contract):
+            contract["bindings"]["commands"]["probe"] = {
+                "argv": ["sh", "-c", "touch escaped"], "cwd": "escape", "env": []}
+            contract["bindings"]["workflow"]["verification"].append("probe")
+
+        def seed(directory):
+            (directory / "escape").symlink_to(outside)
+
+        root = self.world(edit=edit, seed=seed)
+        (root / "escape").mkdir()
+        done = self.run_command("fagenorn/ready")
+        self.assertIn(
+            "fail verification probe: its directory escape is not inside the clean checkout; not run",
+            done.stdout.splitlines())
+        self.assertEqual([], list(outside.iterdir()))
+        self.assertFalse((root / "escape/escaped").exists())
+
+    def test_a_missing_adapter_executable_is_named_even_with_release_on_path(self):
+        self.world(guard_bin=False)
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual(1, done.returncode, done.stdout)
+        lines = done.stdout.splitlines()
+        self.assertIn("fail release: the release capability is blocked: release_adapter_unavailable",
+                      lines)
+        self.assertIn("fail release-profile github-release: adapter forge needs "
+                      "claude-bash-lifecycle-guard, which is not on PATH", lines)
+
+    def test_an_unregistered_project_is_refused(self):
+        self.world()
+        done = self.run_command("fagenorn/absent")
+        self.assertEqual(2, done.returncode)
+        self.assertEqual("project_unregistered", json.loads(done.stdout)["error"]["code"])
+        self.assertEqual([], self.scratches())
+
+    def test_a_project_outside_this_platforms_range_is_refused_with_its_reason(self):
+        def edit(contract):
+            contract["platform"] = {"min_inclusive": "99.0.0", "max_exclusive": "100.0.0"}
+
+        self.world(edit=edit)
+        done = self.run_command("fagenorn/ready")
+        self.assertEqual(2, done.returncode, done.stdout)
+        error = json.loads(done.stdout)["error"]
+        self.assertEqual("unsupported_schema", error["code"])
+        self.assertEqual("platform_too_old", error["reason_code"])
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual([], self.scratches())
+
+    def test_a_stale_scratch_is_swept_and_a_live_one_kept(self):
+        self.world()
+        stale = self.tmpdir / "host-readiness-stale"
+        live = self.tmpdir / "host-readiness-live"
+        for directory, pid in ((stale, reaped_pid()), (live, os.getpid())):
+            directory.mkdir()
+            (directory / "owner").write_text(f"{pid}\n", encoding="utf-8")
+        self.run_command("fagenorn/ready")
+        self.assertFalse(stale.exists())
+        self.assertTrue(live.exists())
+
+    def test_the_command_has_one_table_row(self):
+        row = '    "host-readiness" = "project_contract.host_readiness";'
+        table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
+        self.assertEqual(1, table.splitlines().count(row))
+        verdicts = json.loads((REPO_ROOT / "python/agent_tools/delivery/command_verdicts.json")
+                              .read_text(encoding="utf-8"))
+        self.assertIn("host-readiness", verdicts)
+        self.assertIsNone(verdicts["host-readiness"])
+
+
+class ScratchTest(unittest.TestCase):
+    def test_a_scratch_with_read_only_parts_is_removed(self):
+        directory = Path(tempfile.mkdtemp()).resolve()
+        (directory / "a/b").mkdir(parents=True)
+        (directory / "a/b/file").write_text("x", encoding="utf-8")
+        (directory / "a/b/file").chmod(0o400)
+        (directory / "a/b").chmod(0o500)
+        self.assertTrue(remove_scratch(directory))
+        self.assertFalse(directory.exists())
+
+    def test_only_a_stale_scratch_of_this_user_is_swept(self):
+        parent = Path(tempfile.mkdtemp()).resolve()
+
+        def scratch(name: str, owner: int | None) -> Path:
+            directory = parent / name
+            directory.mkdir()
+            if owner is not None:
+                (directory / "owner").write_text(f"{owner}\n", encoding="utf-8")
+            return directory
+
+        dead = scratch("host-readiness-dead", reaped_pid())
+        live = scratch("host-readiness-live", os.getpid())
+        old = scratch("host-readiness-unowned-old", None)
+        two_hours_ago = time.time() - 7200
+        os.utime(old, (two_hours_ago, two_hours_ago))
+        new = scratch("host-readiness-unowned-new", None)
+        other = scratch("other-dir", reaped_pid())
+        target = Path(tempfile.mkdtemp()).resolve()
+        (target / "owner").write_text(f"{reaped_pid()}\n", encoding="utf-8")
+        (parent / "host-readiness-link").symlink_to(target)
+        removed = sweep_stale_scratch(parent)
+        self.assertEqual({dead, old}, set(removed))
+        self.assertEqual(2, len(removed))
+        for kept in (live, new, other, parent / "host-readiness-link", target):
+            self.assertTrue(kept.exists(), kept)
+
+
+class CheckScriptTest(unittest.TestCase):
+    SCRIPT = REPO_ROOT / "home/common/verify-pending/checks/host-readiness"
+
+    def test_the_check_script_is_executable(self):
+        self.assertTrue(os.access(self.SCRIPT, os.X_OK))
+
+    def test_the_check_script_passes_a_budget_and_reads_a_spent_one_as_not_yet(self):
+        home = Path(tempfile.mkdtemp()).resolve()
+        (home / ".agents/bin").mkdir(parents=True)
+        write_executable(home / ".agents/bin/host-readiness",
+                         '#!/bin/sh\necho "$*" > "$HOME/args"\nexit "$FAKE_EXIT"\n')
+        for fake, expected in ((3, 75), (0, 0), (1, 1), (2, 2)):
+            done = subprocess.run(
+                [str(self.SCRIPT), "fagenorn/x"], capture_output=True, text=True, timeout=60,
+                env={"HOME": str(home), "PATH": "/usr/bin:/bin", "FAKE_EXIT": str(fake)})
+            self.assertEqual(expected, done.returncode, (fake, done.stderr))
+            self.assertEqual("--budget-seconds 600 fagenorn/x\n",
+                             (home / "args").read_text(encoding="utf-8"))
