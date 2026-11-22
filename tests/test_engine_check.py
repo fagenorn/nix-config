@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_graders, procedure_check
+from agent_tools.delivery import engine, engine_graders, engine_reply, procedure_check
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
 from tests.guard_policy_world import install_platform_manifest_in_environ
@@ -129,7 +129,7 @@ def _exhausted_scope_hands_over_to_the_repair_a_stop_enters(toy: dict) -> None:
     toy["steps"].append({"id": "repair", "stage": "setup", "kind": "command",
                          "command": "diff-scope", "holds": "run", "in": ["run.range"],
                          "max_visits": 2,
-                         "on": {"ok": "scope", "failed": "done", "exhausted": "done"}})
+                         "on": {"ok": "scope", "failed": "done", "refused": "done", "exhausted": "done"}})
     step(toy, "scope")["on"]["exhausted"] = "repair"
     step(toy, "children")["on"]["exhausted"] = "done"
 
@@ -160,7 +160,8 @@ def _outcome_not_required(schema: dict) -> None:
 def _add_orphan(toy: dict) -> None:
     toy["steps"].append({"id": "orphan", "stage": "building", "kind": "command",
                          "command": "diff-scope", "holds": "run",
-                         "in": ["draft.summary"], "on": {"ok": "done", "failed": "done"}})
+                         "in": ["draft.summary"],
+                         "on": {"ok": "done", "failed": "done", "refused": "done"}})
 
 
 def _claim_reaches_done_only_through_exhausted(child: dict) -> None:
@@ -177,6 +178,20 @@ def _without(target: Callable[[dict], dict], key: str) -> Callable[[dict], None]
     def change(toy: dict) -> None:
         del target(toy)[key]
     return change
+
+
+def _drop_on(step_id: str, outcome: str) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        step(toy, step_id)["on"].pop(outcome, None)
+    return change
+
+
+def _no_reply_reply_value(schema: dict) -> None:
+    schema["properties"]["status"]["enum"].append("no-reply")
+
+
+def _pass_set_with_no_reply(toy: dict) -> None:
+    step(toy, "review")["members"][0]["pass"].append("no-reply")
 
 
 def _unbound_the_loop(toy: dict) -> None:
@@ -227,14 +242,15 @@ def _two_exhausted_steps_hand_over(child: dict) -> None:
     child["steps"] = [
         {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
          "holds": "run", "in": ["run.item"], "max_visits": 1,
-         "on": {"ok": own, "failed": "done", "exhausted": other}}
+         "on": {"ok": own, "failed": "done", "refused": "done", "exhausted": other}}
         for own, other in (("a", "b"), ("b", "a"))]
-    child["stops"]["child-stop"]["reenter"] = "a"
+    for stop in child["stops"].values():
+        stop["reenter"] = "a"
 
 
 def _exhausted_and_ordinary_edges_loop(child: dict) -> None:
     def make(own: str, ok: str, exhausted: str | None, bound: bool) -> dict:
-        on = {"ok": ok, "failed": "done"}
+        on = {"ok": ok, "failed": "done", "refused": "done"}
         if exhausted is not None:
             on["exhausted"] = exhausted
         item = {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
@@ -243,11 +259,66 @@ def _exhausted_and_ordinary_edges_loop(child: dict) -> None:
             item["max_visits"] = 1
         return item
     child["steps"] = [make("a", "a", "b", True), make("b", "b", "c", True), make("c", "a", None, False)]
-    child["stops"]["child-stop"]["reenter"] = "a"
+    for stop in child["stops"].values():
+        stop["reenter"] = "a"
+
+
+def _no_claim_lost_stop(toy: dict) -> None:
+    del toy["stops"]["claim-lost"]
+    step(toy, "children")["on"]["claim-lost"] = "needs-owner"
+
+
+def _recovery(child: dict) -> None:
+    child["steps"].append(
+        {"id": "recover", "stage": "building", "kind": "command", "command": "diff-scope",
+         "holds": "run", "in": ["run.item"],
+         "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}})
+    child["stops"]["claim-lost"]["reenter"] = "recover"
+
+
+def _recovery_without_a_mutating_step(child: dict) -> None:
+    _recovery(child)
+    del step(child, "claim")["mutates"]
+    del step(child, "claim")["check"]
+
+
+def _recovery_without_a_keep_alive(child: dict) -> None:
+    _recovery(child)
+    del child["keep_alive"]
+
+
+def _recovery_reading(path: str) -> Callable[[dict], None]:
+    """toy-child as a -> b (mutates) -> done, whose `claim-lost` re-enters `r`, a step reading `path`."""
+    def edit(child: dict) -> None:
+        def command(name: str, reads: str, on: dict, **more: object) -> dict:
+            return {"id": name, "stage": "building", "kind": "command", "command": "diff-scope",
+                    "holds": "run", "in": [reads], "on": on, **more}
+        done = {"ok": "done", "failed": "child-stop", "refused": "child-stop"}
+        child["steps"] = [command("a", "run.item", {"ok": "b", "failed": "child-stop", "refused": "child-stop"}),
+                          command("b", "run.item", done, mutates=True,
+                                                  check={"command": "diff-scope"}), command("r", path, done)]
+        child["stops"]["child-stop"]["reenter"] = "a"
+        child["stops"]["claim-lost"]["reenter"] = "r"
+    return edit
+
+
+def _first_step_recovery_reading(path: str) -> Callable[[dict], None]:
+    def edit(child: dict) -> None:
+        _recovery(child)
+        step(child, "recover")["in"] = [path]
+    return edit
+
+
+def _no_reply_to_review(toy: dict) -> None:
+    step(toy, "draft")["on"]["no-reply"] = "review"
 
 
 def _exhausted_stop(toy: dict) -> None:
     toy["stops"]["exhausted"] = {"need": "retry", "reenter": "draft"}
+
+
+def _quota_wait_stop(toy: dict) -> None:
+    toy["stops"]["quota-wait"] = {"need": "retry", "reenter": "draft"}
 
 
 def _entry_id_with_newline(toy: dict) -> None:
@@ -256,6 +327,35 @@ def _entry_id_with_newline(toy: dict) -> None:
 
 def _exhausted_reply_value(schema: dict) -> None:
     schema["properties"]["status"]["enum"].append("exhausted")
+
+
+def _no_reply_reaches_the_reviewers(toy: dict) -> None:
+    step(toy, "draft")["on"]["no-reply"] = "review"
+
+
+def _summary_with_min_length(schema: dict) -> None:
+    schema["properties"]["summary"] = {"type": "string", "minLength": 1}
+
+
+def _out_of_bounds_stop(toy: dict) -> None:
+    toy["stops"]["out-of-bounds"] = {"need": "retry", "reenter": "draft"}
+
+
+def _out_of_bounds_reply_value(schema: dict) -> None:
+    schema["properties"]["status"]["enum"].append("out-of-bounds")
+
+
+def _bound_route_to_review(toy: dict) -> None:
+    step(toy, "draft")["on"]["out-of-bounds"] = "review"
+
+
+def _exhausted_route_to_children(toy: dict) -> None:
+    step(toy, "draft")["on"]["exhausted"] = "children"
+
+
+def _bound_retries_and_exhausted_route_to_children(toy: dict) -> None:
+    _exhausted_route_to_children(toy)
+    step(toy, "draft")["on"]["out-of-bounds"] = "draft"
 
 
 CASES = [
@@ -294,6 +394,20 @@ CASES = [
     Case("unknown_keep_alive",
          editing("toy", _set(lambda toy: toy["keep_alive"], "command", "nope")),
          [("toy", None, "unknown_command")]),
+    Case("keep_alive_without_a_claim_lost_stop", editing("toy", _no_claim_lost_stop),
+         [("toy", None, "missing_claim_lost")]),
+    Case("claim_lost_recovery_without_a_mutating_step",
+         editing("toy-child", _recovery_without_a_mutating_step),
+         [("toy-child", "recover", "unreachable_step")]),
+    Case("claim_lost_recovery_without_a_keep_alive",
+         editing("toy-child", _recovery_without_a_keep_alive),
+         [("toy-child", "recover", "unreachable_step")]),
+    Case("claim_lost_recovery_reads_the_result_of_the_step_it_guards",
+         editing("toy-child", _recovery_reading("b.anything")),
+         [("toy-child", "r", "unproduced_input")]),
+    Case("claim_lost_recovery_reads_the_result_of_the_first_step_it_guards",
+         editing("toy-child", _first_step_recovery_reading("claim.verdict")),
+         [("toy-child", "recover", "unproduced_input")]),
     Case("subcommand_on_a_plain_command",
          editing("toy", _set(lambda toy: step(toy, "scope"), "subcommand", "run")),
          [("toy", "scope", "unknown_command")]),
@@ -399,6 +513,11 @@ CASES = [
          [("toy", "scope\n", "invalid_field")]),
     Case("stop_named_exhausted", editing("toy", _exhausted_stop),
          [("toy", None, "invalid_field")]),
+    Case("stop_named_quota_wait", editing("toy", _quota_wait_stop),
+         [("toy", None, "invalid_field")]),
+    Case("no_reply_to_a_reader_of_the_reply", editing("toy", _no_reply_to_review),
+         [("toy", "children", "unproduced_input"), ("toy", "review-a", "unproduced_input"),
+          ("toy", "review-b", "unproduced_input")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
     Case("step_without_holds",
@@ -425,6 +544,35 @@ CASES = [
     Case("check_with_an_unknown_command",
          editing("toy-child", _set(lambda toy: step(toy, "claim")["check"], "command", "nope")),
          [("toy-child", "claim", "unknown_command")]),
+    Case("agent_step_without_no_reply", editing("toy", _drop_on("draft", "no-reply")),
+         [("toy", "draft", "unmapped_outcome")]),
+    Case("reply_enum_value_named_no_reply", _editing_draft_reply(_no_reply_reply_value),
+         [("toy", "draft", "invalid_reply")]),
+    Case("pass_set_naming_no_reply", editing("toy", _pass_set_with_no_reply),
+         [("toy", "review", "unknown_outcome")]),
+    Case("no_reply_edge_to_steps_reading_the_empty_result",
+         editing("toy", _no_reply_reaches_the_reviewers),
+         [("toy", "review-a", "unproduced_input"), ("toy", "review-b", "unproduced_input"),
+          ("toy", "children", "unproduced_input")]),
+    Case("reply_schema_outside_the_subset",
+         _editing_draft_reply(_summary_with_min_length),
+         [("toy", "draft", "unsupported_reply")]),
+    Case("agent_step_without_out_of_bounds",
+         editing("toy", _without(lambda toy: step(toy, "draft")["on"], "out-of-bounds")),
+         [("toy", "draft", "unmapped_outcome")]),
+    Case("reply_enum_value_named_out_of_bounds", _editing_draft_reply(_out_of_bounds_reply_value),
+         [("toy", "draft", "invalid_reply")]),
+    Case("stop_named_out_of_bounds", editing("toy", _out_of_bounds_stop),
+         [("toy", None, "invalid_field")]),
+    Case("bound_route_reaches_a_reply_reader", editing("toy", _bound_route_to_review),
+         [("toy", "review-a", "unproduced_input"), ("toy", "review-b", "unproduced_input"),
+          ("toy", "children", "unproduced_input")]),
+    Case("exhausted_route_after_a_retried_bound_reaches_a_reply_reader",
+         editing("toy", _bound_retries_and_exhausted_route_to_children),
+         [("toy", "children", "unproduced_input")]),
+    Case("step_overrides_a_bound",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "max_turns", 5)),
+         [("toy", "draft", "undefined_field")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -460,6 +608,46 @@ class ToyProcedureTest(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"}))
 
+    def test_a_command_step_may_map_out_of_bounds(self):
+        def map_bound(toy: dict) -> None:
+            step(toy, "scope")["on"]["out-of-bounds"] = "needs-owner"
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", map_bound))))
+        self.assertEqual((code, out), (0, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_an_exhausted_retry_loop_may_feed_a_reader_of_its_reply(self):
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", _exhausted_route_to_children))))
+        self.assertEqual((code, out), (0, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_decide_step_cannot_map_out_of_bounds(self):
+        def map_bound(toy: dict) -> None:
+            step(toy, "tally")["on"]["out-of-bounds"] = "needs-owner"
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", map_bound))))
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [(r["procedure"], r["step"], r["defect"]) for r in json.loads(out)["refusals"]],
+            [("toy", "tally", "unknown_outcome")])
+
+    def test_a_procedure_with_no_keep_alive_passes_the_check(self):
+        def drop_keep_alive(directory: Path) -> None:
+            for name in ("toy", "toy-child"):
+                doc = load(directory, name)
+                del doc["keep_alive"]
+                save(directory, name, doc)
+        code, out, _ = run_check("--procedures", str(broken_copy(drop_keep_alive)))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_procedure_with_no_keep_alive_needs_no_claim_lost_stop(self):
+        def drop_keep_alive_and_claim_lost(directory: Path) -> None:
+            toy, child = load(directory, "toy"), load(directory, "toy-child")
+            del toy["keep_alive"], child["keep_alive"], child["stops"]["claim-lost"]
+            del step(toy, "children")["on"]["claim-lost"]
+            save(directory, "toy", toy)
+            save(directory, "toy-child", child)
+        code, out, _ = run_check("--procedures", str(broken_copy(drop_keep_alive_and_claim_lost)))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
     def test_the_toy_has_all_five_kinds_a_stop_and_a_bounded_loop(self):
         toy = load(PROCEDURES, "toy")
         self.assertEqual({item["kind"] for item in toy["steps"]},
@@ -473,6 +661,11 @@ class ToyProcedureTest(unittest.TestCase):
             self.assertIs(type(item["max_visits"]), int)
             self.assertGreaterEqual(item["max_visits"], 1)
             self.assertIn(item["on"]["exhausted"], toy["stops"])
+
+    def test_the_toy_maps_no_reply_to_the_retry_stop_step_failed(self):
+        toy = load(PROCEDURES, "toy")
+        self.assertEqual(step(toy, "draft")["on"]["no-reply"], "step-failed")
+        self.assertEqual(toy["stops"]["step-failed"]["need"], "retry")
 
     def test_every_stage_is_accepted(self):
         stages = ("setup", "planning", "plan review", "building", "final review",
@@ -493,6 +686,63 @@ class ToyProcedureTest(unittest.TestCase):
                 code, out, _ = run_check("--procedures", str(directory))
                 self.assertEqual((code, out), (0, compact(
                     {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+
+class NoReplyOutcomeTest(unittest.TestCase):
+    def test_an_agent_step_may_map_no_reply_and_a_command_step_may_not(self):
+        with self.subTest("agent step"):
+            directory = broken_copy(editing(
+                "toy", _set(lambda toy: step(toy, "draft")["on"], "no-reply", "needs-owner")))
+            code, out, _ = run_check("--procedures", str(directory))
+            self.assertEqual((code, out), (0, compact(
+                {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+        with self.subTest("command step"):
+            directory = broken_copy(editing(
+                "toy", _set(lambda toy: step(toy, "scope")["on"], "no-reply", "needs-owner")))
+            code, out, _ = run_check("--procedures", str(directory))
+            document = json.loads(out)
+            self.assertEqual(code, 1)
+            self.assertEqual([(r["procedure"], r["step"], r["defect"])
+                              for r in document["refusals"]],
+                             [("toy", "scope", "unknown_outcome")])
+
+
+class RefusedOutcomeTest(unittest.TestCase):
+    def test_a_command_step_that_does_not_map_refused_is_refused_and_one_that_maps_it_is_accepted(self):
+        missing = broken_copy(editing("toy", lambda doc: step(doc, "scope")["on"].pop("refused", None)))
+        restored = broken_copy(editing(
+            "toy", lambda doc: step(doc, "scope")["on"].update(refused="needs-owner")))
+        code, out, _ = run_check("--procedures", str(missing))
+        code2, out2, _ = run_check("--procedures", str(restored))
+        self.assertEqual(code, 1, out)
+        refusals = json.loads(out)["refusals"]
+        self.assertEqual(len(refusals), 1, out)
+        self.assertEqual((refusals[0]["defect"], refusals[0]["procedure"], refusals[0]["step"]),
+                         ("unmapped_outcome", "toy", "scope"))
+        self.assertIn("'refused'", refusals[0]["detail"])
+        self.assertEqual(code2, 0, out2)
+        self.assertNotIn("unknown_outcome", out2)
+
+    def test_a_group_member_that_passes_on_refused_is_refused(self):
+        def with_probe(passes: list[str]) -> Path:
+            def change(doc: dict) -> None:
+                probe = {key: value for key, value in step(doc, "scope").items() if key != "on"}
+                probe["id"] = "probe"
+                group = next(item for item in doc["steps"] if item["kind"] == "group")
+                doc["steps"].insert(doc["steps"].index(group), probe)
+                group["members"].append({"step": "probe", "pass": passes})
+            return broken_copy(editing("toy", change))
+
+        code, out, _ = run_check("--procedures", str(with_probe(["ok", "refused"])))
+        self.assertEqual(code, 1, out)
+        refusals = json.loads(out)["refusals"]
+        self.assertEqual(len(refusals), 1, out)
+        self.assertEqual((refusals[0]["defect"], refusals[0]["procedure"], refusals[0]["step"]),
+                         ("unknown_outcome", "toy", "review"))
+        self.assertIn("'refused'", refusals[0]["detail"])
+        self.assertIn("'probe'", refusals[0]["detail"])
+        code2, out2, _ = run_check("--procedures", str(with_probe(["ok"])))
+        self.assertEqual(code2, 0, out2)
 
 
 class RefusalTableTest(unittest.TestCase):
@@ -517,7 +767,134 @@ class RefusalTableTest(unittest.TestCase):
                          set(procedure_check.DEFECTS))
 
 
+class RefusalDetailTest(unittest.TestCase):
+    def test_a_schema_outside_the_subset_names_the_schema_and_the_construct(self):
+        directory = broken_copy(_editing_draft_reply(_summary_with_min_length))
+        code, out, _ = run_check("--procedures", str(directory))
+        refusals = json.loads(out)["refusals"]
+        self.assertEqual(code, 1)
+        self.assertEqual(len(refusals), 1)
+        self.assertIn("toy-draft.reply.json", refusals[0]["detail"])
+        self.assertIn("minLength", refusals[0]["detail"])
+
+
+def _object(**properties: object) -> dict:
+    return {"type": "object", "properties": properties, "additionalProperties": False}
+
+
+class ReplySubsetTest(unittest.TestCase):
+    def test_the_subset_schemas_pass(self):
+        for path in sorted(PROCEDURES.glob("*.reply.json")):
+            with self.subTest(path.name):
+                self.assertIsNone(engine_reply.schema_problem(
+                    json.loads(path.read_text(encoding="utf-8"))))
+        schema = {"type": "object",
+                  "properties": {"n": {"type": "integer"}, "ok": {"type": "boolean"},
+                                 "tags": {"type": "array",
+                                          "items": {"enum": ["a", "b"], "type": "string"}},
+                                 "inner": {"type": "object", "properties": {},
+                                           "additionalProperties": False}},
+                  "required": ["n"], "additionalProperties": False}
+        self.assertIsNone(engine_reply.schema_problem(schema))
+
+    def test_each_construct_outside_the_subset_is_named(self):
+        rows = [
+            ({"type": "number"}, "number"),
+            ({"type": ["string", "null"]}, "type"),
+            ({"const": "x"}, "const"),
+            ({"oneOf": [{"type": "string"}]}, "oneOf"),
+            ({"$ref": "#/x"}, "$ref"),
+            ({"type": "string", "description": "d"}, "description"),
+            ({"type": "string", "pattern": "a"}, "pattern"),
+            ({"enum": [1, 2]}, "enum"),
+            ({"enum": []}, "enum"),
+            ({"enum": ["a", "a"]}, "enum"),
+            ({"type": "array"}, "items"),
+            ({"type": "object", "properties": {}}, "additionalProperties"),
+        ]
+        for node, word in rows:
+            with self.subTest(node=node):
+                problem = engine_reply.schema_problem(_object(p=node))
+                self.assertIsNotNone(problem)
+                self.assertIn(word, problem)
+        open_root = {"type": "object", "properties": {}, "additionalProperties": True}
+        self.assertIn("additionalProperties", engine_reply.schema_problem(open_root))
+        absent = {"type": "object", "properties": {}, "required": ["absent"],
+                  "additionalProperties": False}
+        self.assertIn("absent", engine_reply.schema_problem(absent))
+        self.assertIn("not an object", engine_reply.schema_problem([]))
+
+    def test_a_phrase_names_where_the_construct_is(self):
+        self.assertEqual(
+            engine_reply.schema_problem(_object(summary={"type": "string", "minLength": 1})),
+            "the keyword 'minLength' at reply.properties.summary")
+        self.assertEqual(
+            engine_reply.schema_problem(_object(n={"type": "number"})),
+            "the type 'number' at reply.properties.n")
+        self.assertEqual(
+            engine_reply.schema_problem({"type": "object", "properties": {}}),
+            "an object with no additionalProperties false at reply")
+        self.assertEqual(
+            engine_reply.schema_problem(_object(a={"type": "array", "items": {"type": "number"}})),
+            "the type 'number' at reply.properties.a.items")
+
+    def test_the_root_must_be_an_object_node(self):
+        for node in ({"type": "string"}, {"enum": ["a"]},
+                     {"type": "array", "items": {"type": "string"}}):
+            with self.subTest(node=node):
+                problem = engine_reply.schema_problem(node)
+                self.assertIsNotNone(problem)
+                self.assertIn("root", problem)
+                self.assertIsNone(engine_reply.schema_problem(_object(p=node)))
+
+
+class ReplyValidatorTest(unittest.TestCase):
+    def test_a_reply_is_checked_against_exactly_the_subset(self):
+        draft = json.loads((PROCEDURES / "toy-draft.reply.json").read_text(encoding="utf-8"))
+        good = {"status": "drafted", "summary": "s", "items": ["a"]}
+        self.assertIsNone(engine_reply.reply_problem(draft, good))
+        bad = {
+            "extra member": {"status": "drafted", "summary": "s", "items": [], "extra": 1},
+            "outside the enum": {**good, "status": "maybe"},
+            "wrong type": {**good, "summary": 3},
+            "wrong item type": {**good, "items": [1]},
+            "missing member": {"summary": "s", "items": []},
+        }
+        for name, reply in bad.items():
+            with self.subTest(name):
+                self.assertIsNotNone(engine_reply.reply_problem(draft, reply))
+        integer = _object(n={"type": "integer"})
+        self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": True}))
+        self.assertIsNone(engine_reply.reply_problem(integer, {"n": 2}))
+        self.assertIsNone(engine_reply.reply_problem(integer, {"n": 2.0}))
+        self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": 2.5}))
+        self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": float("inf")}))
+        self.assertIsNotNone(engine_reply.reply_problem(integer, {"n": False}))
+        self.assertIsNotNone(engine_reply.reply_problem({"type": "number"}, 1))
+        self.assertIsNotNone(engine_reply.reply_problem({"type": "string"}, "x"))
+        self.assertIsNone(engine_reply.reply_problem(_object(s={"type": "string"}), {"s": "x"}))
+
+
 class GraphTest(unittest.TestCase):
+    def test_a_no_reply_edge_that_runs_the_producer_again_leaves_its_readers_unflagged(self):
+        directory = broken_copy(editing("toy", _set(
+            lambda toy: step(toy, "draft")["on"], "no-reply", "needs-owner")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_step_reached_only_through_claim_lost_is_reachable(self):
+        directory = broken_copy(editing("toy-child", _recovery))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_claim_lost_recovery_may_read_what_ran_before_the_guarded_step(self):
+        directory = broken_copy(editing("toy-child", _recovery_reading("a.anything")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
     def test_exhausted_may_be_mapped_off_a_cycle(self):
         directory = broken_copy(editing(
             "toy-child", _set(lambda child: step(child, "claim")["on"], "exhausted", "child-stop")))
@@ -533,6 +910,79 @@ class DataFlowTest(unittest.TestCase):
         code, out, _ = run_check("--procedures", str(directory))
         self.assertEqual((code, out), (0, compact(
             {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+
+    def test_a_no_reply_route_bypasses_its_step_whatever_order_the_steps_are_listed_in(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        steps = {
+            "a": agent("a", {"ok": "s1"}),
+            "s1": agent("s1", {"ok": "s2", "no-reply": "s2"}),
+            "s2": agent("s2", {"ok": "done", "no-reply": "r"}),
+            "r": agent("r", {"ok": "done"}, ("s1.x",)),
+        }
+        for order in (("a", "s1", "s2", "r"), ("a", "s2", "s1", "r")):
+            with self.subTest(order=order):
+                procedure = {"steps": [steps[name] for name in order], "stops": {}, "inputs": []}
+                graph = procedure_check.result_flow_graph(procedure)
+                dominating = procedure_check.dominators(graph, procedure_check.START)["r"]
+                self.assertNotIn("s1(result)", dominating)
+
+    @staticmethod
+    def _dominating(procedure: dict, reader: str) -> frozenset[str]:
+        graph = procedure_check.result_flow_graph(procedure)
+        return procedure_check.dominators(graph, procedure_check.START)[reader]
+
+    def test_a_no_reply_route_into_a_mutating_step_can_still_lose_its_claim(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        procedure = {
+            "inputs": [], "keep_alive": {"command": "k", "in": []},
+            "stops": {"claim-lost": {"need": "retry", "reenter": "r"}},
+            "steps": [agent("s", {"ok": "m", "no-reply": "m"}),
+                      {"id": "m", "kind": "command", "mutates": True, "on": {"ok": "done"}, "in": []},
+                      agent("r", {"ok": "done"}, ("s.x",))]}
+        graph = procedure_check.result_flow_graph(procedure)
+        self.assertIn(procedure_check.CLAIM_LOST, graph["s"])
+        self.assertNotIn("s(result)", self._dominating(procedure, "r"))
+
+    def test_a_step_that_reaches_no_mutating_step_has_no_claim_lost_edge(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        procedure = {
+            "inputs": [], "keep_alive": {"command": "k", "in": []},
+            "stops": {"claim-lost": {"need": "retry", "reenter": "r"}},
+            "steps": [agent("s", {"ok": "done", "no-reply": "m"}),
+                      {"id": "m", "kind": "command", "mutates": True, "on": {"ok": "done"}, "in": []},
+                      agent("r", {"ok": "done"}, ("s.x",))]}
+        graph = procedure_check.result_flow_graph(procedure)
+        self.assertNotIn(procedure_check.CLAIM_LOST, graph["s(result)"])
+        self.assertIn(procedure_check.CLAIM_LOST, graph["s"])
+
+    def test_an_exhausted_entry_after_a_no_reply_does_not_credit_the_reply(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = (), **more) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads), **more}
+
+        procedure = {
+            "inputs": [], "stops": {},
+            "steps": [agent("a", {"ok": "done", "no-reply": "a", "exhausted": "reader"}, max_visits=1),
+                      agent("reader", {"ok": "done"}, ("a.x",))]}
+        self.assertNotIn("a(result)", self._dominating(procedure, "reader"))
+
+    def test_an_exhausted_target_that_is_itself_a_no_reply_step_is_split_too(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = (), **more) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads), **more}
+
+        procedure = {
+            "inputs": [], "stops": {},
+            "steps": [agent("a", {"ok": "p", "no-reply": "a", "exhausted": "s2"}, max_visits=1),
+                      agent("p", {"ok": "s2"}),
+                      agent("s2", {"ok": "done", "no-reply": "t"}),
+                      agent("t", {"ok": "done"}, ("p.x",))]}
+        self.assertNotIn("p", self._dominating(procedure, "t"))
 
 
 class RoleTest(unittest.TestCase):
@@ -552,7 +1002,8 @@ class NoSideEffectTest(unittest.TestCase):
         self.assertEqual(json.loads(done.stdout), {"called": [], "codes": [0, 1]})
 
     def test_the_check_modules_import_no_process_or_socket_module(self):
-        for name in ("engine.py", "procedure_check.py", "engine_graders.py", "engine_caps.py"):
+        for name in ("engine.py", "procedure_check.py", "engine_graders.py", "engine_caps.py",
+                     "engine_reply.py"):
             tree = ast.parse((DELIVERY / name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -621,6 +1072,8 @@ class DeclarationTest(unittest.TestCase):
                '{"x": {"argv": ["a"]}}',
                '{"x": {"verdicts": ["ok", "exhausted"]}}',
                '{"x": {"subcommands": {"a": ["exhausted"]}}}',
+               '{"x": {"verdicts": ["ok", "out-of-bounds"]}}',
+               '{"x": {"subcommands": {"a": ["out-of-bounds"]}}}',
                '{"X": null}']
         with tempfile.TemporaryDirectory() as tmp:
             for index, text in enumerate(bad):

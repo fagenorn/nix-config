@@ -10,7 +10,7 @@ Project contract is how a repository tells the agent skills everything project-s
 ## Language
 
 **Adoption**:
-Moving a repository onto a platform version by planning and then applying a set of file moves, rewritten links and generated projections. Adoption plans first and edits nothing without an answer.
+Moving a repository onto a platform version by planning and then applying a set of file moves, rewritten links and generated projections, and, for a project with a devenv lock, the platform lock entry, the conformance workflow and the required Conformance check. Adoption plans first and edits nothing without an answer.
 _Avoid_: onboarding
 
 **Deprecation**:
@@ -27,6 +27,10 @@ _Avoid_: project list
 One pure, named executor the platform manifest lists, which rewrites a checkout in place from one contract shape to the next.
 _Avoid_: upgrade script
 
+**Never-rise check**:
+The conformance check that runs each enforcer on the merge base and on the branch head and fails when a rule's violation count rises. The baseline is computed on every run and has no raise path (ADR-project-contract-017).
+_Avoid_: ratchet, baseline file
+
 **Platform manifest**:
 The versioned JSON file the platform ships, listing its deprecations and migrations. A project's contract schema version is checked against it.
 
@@ -35,8 +39,12 @@ The one flake package nix-config publishes for Linux and macOS, holding the agen
 _Avoid_: platform bundle
 
 **Platform command**:
-A command the platform defines once under one id, which every ResolvedProject carries in `bindings.commands`; a contract entry under the same id replaces it (ADR-project-contract-010).
+A command the platform defines once under one id, which every ResolvedProject carries in `bindings.commands`; in project schema 2 a contract entry under the same id replaces it, and in project schema 3 such an entry is refused (ADR-project-contract-010, ADR-project-contract-013).
 _Avoid_: built-in command, default command
+
+**Platform constant**:
+A contract value that is the same in every project, which project schema 3 leaves out of the contract and the resolver fills into the ResolvedProject; a schema-3 contract that authors one is refused (ADR-project-contract-013).
+_Avoid_: default, built-in setting
 
 **Production rules**:
 The optional `production` section of a project contract: the commands, key files and MCP tools that change the project's production, the routes that only read it, and the release profile through which a change is allowed, or the declaration that the project has no production. A contract without the section has no production rules, which is not the same as declaring no production. A rules section may name one of its changing commands as its console activation, the command the console's Activate runs (ADR-system-004).

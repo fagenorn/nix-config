@@ -50,7 +50,9 @@ refuses `candidate_required` naming them, and a notes file that cannot be read a
 also take `--dispose no_recovery_path --reference TEXT` with no candidate, which previews or
 runs the manual disposition of a release parked after an effect (issue 1050; the contract is
 `release_driver`'s Dispose paragraph); `--reference` without `--dispose`, or a candidate beside
-it, refuses `dispose_invalid`. A driver refusal prints
+it, refuses `dispose_invalid`. `preview --read-only` shows the plan without taking the land
+lock and without confirmations, for a caller that must not write (host readiness); it excludes
+`--dispose`. A driver refusal prints
 `{"error": {"code", "repair_id", "detail"}}` (`repair_id` null where none is named) and exits 3;
 a resolver refusal is untouched with exit 2, and any other failure keeps the `release`
 command's `resolver_failure` envelope (D18).
@@ -78,7 +80,7 @@ from agent_tools.release import release_adapter, release_profile, transaction_pl
 from agent_tools.release.release_driver import (
     ApprovalUnreadable, Driver, Project, Refusal, main_checkout, require_cwd)
 from agent_tools.project_contract.resolve_project import (
-    ContractError, add_repo_root, emit_error, emit_json, load_contract,
+    ContractError, add_repo_root, emit_error, emit_json, load_contract_view,
     require_platform_manifest, resolve, resolves_on_path)
 
 SCHEMA_VERSION = 1
@@ -235,7 +237,7 @@ def command_profile_inspect(args: argparse.Namespace) -> int:
     snapshot = resolve(args.repo_root)
     manifest, manifest_path = require_platform_manifest()
     root = Path(snapshot["project"]["root"])
-    source = load_contract(root)
+    source = load_contract_view(root)
     return emit_json(inspect_profile(root, source, args.profile_id, manifest, manifest_path))
 
 
@@ -288,7 +290,7 @@ def _project(snapshot: dict[str, Any], root: Path) -> Project:
     return Project(project_id=snapshot["project"]["id"], root=root, common_dir=main_checkout(root),
                    integration_branch=vcs["integration_branch"],
                    default_branch=vcs["default_branch"],
-                   contract=load_contract(root))
+                   contract=load_contract_view(root))
 
 
 def console_approvals(store_of: Callable[[], Path]) -> Callable[[str, str], bool]:
@@ -328,7 +330,7 @@ def command_transaction(args: argparse.Namespace) -> int:
         return emit_json(driver.preview_dispose(args.dispose, reference))
     if args.action == "run":
         return emit_json(driver.run(candidate, args.confirm))
-    document = driver.preview(candidate)
+    document = driver.preview(candidate, read_only=args.read_only)
     emit_json(document)
     return 0 if document["runnable"] else REFUSAL_EXIT
 
@@ -349,9 +351,14 @@ def _transaction_parser(areas: Any) -> None:
             verb.add_argument("--version", help="the version, which is the tag")
             verb.add_argument("--title", help="the release title")
             verb.add_argument("--notes-file", help="a UTF-8 file holding the release notes")
-            verb.add_argument("--dispose", metavar="GROUND",
-                              help="close the release parked after an effect as failed; the "
-                                   "ground is no_recovery_path")
+            exclusive = verb.add_mutually_exclusive_group()
+            exclusive.add_argument("--dispose", metavar="GROUND",
+                                   help="close the release parked after an effect as failed; "
+                                        "the ground is no_recovery_path")
+            if name == "preview":
+                exclusive.add_argument("--read-only", action="store_true",
+                                       help="show the plan without taking the land lock and "
+                                            "without confirmations")
             verb.add_argument("--reference", help="with --dispose: why it can never finish")
         if name == "run":
             verb.add_argument("--confirm", action="append", default=[], metavar="TOKEN",

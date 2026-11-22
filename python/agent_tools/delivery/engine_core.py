@@ -1,10 +1,8 @@
 """The engine core: a pure function from a procedure and its events to the next action (#1510).
 
-`replay(procedure, inputs, events)` walks a procedure that passed `engine check`
-and returns a `Replay`: the next `Action` and every `Transition` taken. State is
-never stored; it is derived again from `events` on every call. The core reads
-nothing and writes nothing: the shell performs every side effect and appends
-the events.
+`replay(procedure, inputs, events)` walks a procedure that passed `engine check` and returns a `Replay`: the next
+`Action` and every `Transition` taken. State is never stored; it is derived again from `events` on every call. The
+core reads and writes nothing: the shell performs every side effect.
 
 Inputs
     procedure  the parsed procedure document (never mutated).
@@ -33,9 +31,9 @@ Actions (`Action`)
     StartSession  start an `agent` step's session.
     Stop          the run stopped at a named stop with its `need` and `reenter`.
     Done          the run finished.
-    Both step actions carry `args`: one `(path, value)` pair per entry of the
-    step's `in`, in `in` order, resolved when the walk reaches the step. An `entered` event for the pending step does not
-    change the action.
+    Both step actions carry `args`: one `(path, value)` pair per entry of the step's `in`, in `in`
+    order, resolved when the walk reaches the step.
+    An `entered` event for the pending step does not change the action.
 
 Visits
     An arrival is the walk reaching a `command`, `agent` or `decide` step within

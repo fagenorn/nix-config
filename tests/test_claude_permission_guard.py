@@ -3909,7 +3909,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     # ------------------------------------------------------------------
 
     FORM_VALUES = SHAPES["form_values"]
-    PREFIX_CLAUSE = "; optional prefix: unset GITHUB_TOKEN && | env -u GITHUB_TOKEN"
+    PREFIX_CLAUSE = ("; optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | "
+                     "unset GITHUB_TOKEN && | env -u GITHUB_TOKEN")
 
     def refusal_line(self, result):
         """The guard's one refusal line; the call must have exited 2."""
@@ -4148,6 +4149,76 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "; accepted: git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin "
             "<branch>; or git push origin --delete refs/heads/<branch>"
             + self.PREFIX_CLAUSE), line)
+
+    def test_a_merge_behind_the_two_name_env_prefix_passes_and_its_misspelling_names_the_form_flag_and_prefix(self):
+        """Issue 1592: the two-name `env -u` spelling passes, and the refusal of the
+        same merge without `--delete-branch` prints that spelling first."""
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        feature_into_dev = {"FAKE_PR_JSON": json.dumps({
+            "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN",
+            "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []}),
+            "FAKE_PROTECTION_MODE": "nonzero"}
+        prefix = "env -u GITHUB_TOKEN -u GH_TOKEN "
+        merge = f"gh pr merge 2342 --repo {NODO} --merge --match-head-commit {self.HEAD_SHA}"
+        passed = self.run_guard(prefix + merge + " --delete-branch", cwd=nodo,
+                                env=feature_into_dev)
+        self.assertEqual(0, passed.returncode, passed.stderr)
+        line = self.refusal_line(self.run_guard(prefix + merge, cwd=nodo,
+                                                env=feature_into_dev))
+        self.assertEqual(
+            "lifecycle guard: unsafe merge: missing --delete-branch: it may be omitted only "
+            "when merging dev into main; this PR merges issue-2342-topic into dev; accepted: "
+            f'gh pr merge <n> --repo {NODO} --merge [--subject "<subject>"] '
+            "[--match-head-commit <sha>] --delete-branch; optional prefix: "
+            "env -u GITHUB_TOKEN -u GH_TOKEN | unset GITHUB_TOKEN && | env -u GITHUB_TOKEN",
+            line)
+
+    def test_a_merge_text_refusal_keeps_its_first_problem_and_names_the_missing_flag(self):
+        """Issue 1592: a merge's text refusal appends `; missing <flag>` for a flag every
+        merge form requires and the words lack, unless the problem already names it."""
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        feature_into_dev = {"FAKE_PR_JSON": json.dumps({
+            "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN",
+            "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []}),
+            "FAKE_PROTECTION_MODE": "nonzero"}
+        tail = ("; optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | unset GITHUB_TOKEN && "
+                "| env -u GITHUB_TOKEN")
+        head = f"--match-head-commit {self.HEAD_SHA} --delete-branch"
+        for command, start in (
+            (f"env -u GITHUB_TOKEN -u GH_TOKEN gh pr merge 2342 --repo {NODO} --merg {head}",
+             "lifecycle guard: unsafe merge: unknown flag --merg; missing --merge; accepted: "),
+            (f"env  -u GITHUB_TOKEN gh pr merge 2342 --repo {NODO} {head}",
+             "lifecycle guard: unsafe merge: unaccepted credential-scrub prefix "
+             "`env -u GITHUB_TOKEN` (doubled space); missing --merge; accepted: "),
+            (f"env -u PATH gh pr merge 2342 --repo {NODO} {head}",
+             "lifecycle guard: unsafe merge: `env -u PATH` before the verb; missing --merge; "
+             + GRAMMAR),
+            (f"gh pr merge 2342 --repo {NODO} {head}",
+             "lifecycle guard: unsafe merge: missing --merge; accepted: "),
+            # A flag spelled as another flag's value is not the flag.
+            (f'gh pr merge 2342 --repo {NODO} --merg --subject "--merge" {head}',
+             "lifecycle guard: unsafe merge: unknown flag --merg; missing --merge; accepted: "),
+            # Nor is it when the value-taking flag is one the form table does not spell.
+            (f'gh pr merge 2342 --repo {NODO} --body "--merge" {head}',
+             "lifecycle guard: unsafe merge: unknown flag --body; missing --merge; accepted: "),
+            (f'gh pr merge 2342 --repo {NODO} -t "--merge" {head}',
+             "lifecycle guard: unsafe merge: unknown flag -t; missing --merge; accepted: "),
+            # Nor is a word after `--`, which ends the options.
+            (f"gh pr merge 2342 --repo {NODO} -- --merge {head}",
+             "lifecycle guard: unsafe merge: unknown flag --; missing --merge; accepted: "),
+        ):
+            with self.subTest(command=command):
+                line = self.refusal_line(self.run_guard(command, cwd=nodo,
+                                                        env=feature_into_dev))
+                self.assertTrue(line.startswith(start), line)
+                # The allowlist-grammar refusal builds no repository context.
+                slug = "<slug>" if GRAMMAR in start else NODO
+                self.assertIn("; accepted: gh pr merge <n> --repo " + slug, line)
+                self.assertTrue(line.endswith(tail), line)
+                if command.startswith("gh pr merge"):
+                    self.assertNotIn("missing --merge; missing", line)
 
     def test_refusals_name_the_first_problem(self):
         """Issue 402 D4, D5, D16: one row per named problem class, each followed by the
@@ -6598,6 +6669,52 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     self.look_carry_env(comments, self.merges_world(after), look_files={}))
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual("", result.stderr)
+
+    def look_files_line(self, cid, a, h, association="OWNER"):
+        return {"id": cid, "body": look_marker.carry_body(1200, 1300, a, h, None),
+                "updated_at": "2026-11-16T10:00:00Z", "author_association": association}
+
+    def files_carry_world(self, after, b_h_files=(), a_h_files=()):
+        base, a, h = self.LOOK_BASE, self.LOOK_APPROVED, self.LOOK_HEAD
+        return {
+            f"{base}...{a}": self.look_compare([self.DOC], commits=[(a, [self.LOOK_FORK])]),
+            f"{a}...{h}": self.look_compare(a_h_files or [self.DOC]),
+            f"{base}...{h}": self.look_compare(
+                b_h_files or [self.DOC], commits=[(a, [self.LOOK_FORK])] + list(after)),
+        }
+
+    def test_a_look_files_carry_admits_a_pictureless_approval_across_main_merges(self):
+        a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
+        comments = [self.look_comment(10, head=a), self.look_files_line(11, a, h)]
+        result = self.run_guard(
+            self.LOOK_PINNED, self.look_repo(),
+            self.look_carry_env(comments, self.files_carry_world([(h, [a, x])])))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stderr)
+
+    def test_the_look_gate_refuses_each_shape_a_look_files_carry_does_not_cover(self):
+        repo = self.look_repo()
+        a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
+        plain, line = self.look_comment(10, head=a), self.look_files_line(11, a, h)
+        merged = self.files_carry_world([(h, [a, x])])
+        cases = {
+            "no line": ([plain], merged, None),
+            "B...H also listing a look file": (
+                [plain, line], self.files_carry_world([(h, [a, x])], b_h_files=[self.DOC, self.PAGE]), None),
+            "a merge that brought a look file in": (
+                [plain, line], self.files_carry_world([(h, [a, x])], a_h_files=[self.DOC, self.PAGE]), None),
+            "a one-parent commit": ([plain, line], self.files_carry_world([(h, [a])]), None),
+            "a collaborator's line": (
+                [plain, self.look_files_line(11, a, h, association="COLLABORATOR")], merged, None),
+            "a line that was ended": ([plain, line, self.look_end_comment(12, of=11)], merged, None),
+            "an absent set file": ([plain, line], merged, {}),
+        }
+        for name, (comments, compares, look_files) in cases.items():
+            with self.subTest(case=name):
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo,
+                    self.look_carry_env(comments, compares, look_files=look_files))
+                self.assert_look_refusal(result)
 
     def test_a_line_that_does_not_carry_still_admits_a_head_the_look_files_keep(self):
         a, h, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_T

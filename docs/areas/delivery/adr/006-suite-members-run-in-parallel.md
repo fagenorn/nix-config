@@ -5,7 +5,7 @@
 
 ## Context
 
-The agent workflow suite is CPU-bound and its CPU time does not change with the job count, so only wall time can be bought. Running every member serially made a full run too slow to use as the verification gate. The measured effect of the job count is in [the suite-runner job count record](../../../archive/suite-runner-job-count.md).
+The agent workflow suite is CPU-bound and its CPU time does not change with the job count, so only wall time can be bought. Running every member serially made a full run too slow to use as the verification gate. The measured effect of the job count is in [the suite-runner job count record](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/docs/archive/suite-runner-job-count.md).
 
 ## Decision
 

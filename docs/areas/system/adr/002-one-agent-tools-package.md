@@ -1,7 +1,7 @@
 # ADR-system-002 — Agent-workflow Python is one standard-library package with one install route
 
 - **Status:** accepted; amended by ADR-system-005
-- **Decided in:** [the agent-tools package design](../../../../.agents/artifacts/specs/2026-09-24-agent-tools-package-design.md)
+- **Decided in:** [the agent-tools package design](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/.agents/artifacts/specs/2026-09-24-agent-tools-package-design.md)
 
 ## Context
 

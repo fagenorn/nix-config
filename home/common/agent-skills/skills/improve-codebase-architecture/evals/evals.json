@@ -31,16 +31,16 @@
       "id": 2,
       "name": "clear-selection-reaches-a-design-worktree",
       "mode": "pipeline",
-      "prompt": "/improve-codebase-architecture tinytask.store\n\nThe selected candidate is concrete: deepen `tinytask.store`. Nobody is present to answer routine questions. Answer only reversible in-scope recommendations yourself. If a question is scope-redrawing, hard to reverse, involves a credential or spending, or you cannot answer it from the repository, stop. Establish an isolated worktree, complete and commit the design, reach the approved `grill-with-docs` review, then recommend `writing-plans` or `to-issues` and stop. Do not create a plan. Do not refactor or change anything under `tinytask/` or `tests/`. Make your final non-empty output line exactly: `DESIGN_COMPLETE: spec committed and grilled; control returned before planning or implementation.`",
-      "expected_output": "One isolated worktree contains a committed design spec for the concrete tinytask.store selection. The design reaches grill-with-docs, source and tests remain unchanged, no plan exists, and the response recommends writing-plans or to-issues. Its exact final non-empty line is `DESIGN_COMPLETE: spec committed and grilled; control returned before planning or implementation.`",
+      "prompt": "/improve-codebase-architecture tinytask.store\n\nThe selected candidate is concrete: deepen `tinytask.store`. Nobody is present to answer routine questions. Answer only reversible in-scope recommendations yourself. If a question is scope-redrawing, hard to reverse, involves a credential or spending, or you cannot answer it from the repository, stop. Establish an isolated worktree, complete the design, reach the approved `grill-with-docs` review, then recommend `writing-plans` or `to-issues` and stop. Do not create a plan. Do not refactor or change anything under `tinytask/` or `tests/`. Make your final non-empty output line exactly: `DESIGN_COMPLETE: spec drafted and grilled; control returned before planning or implementation.`",
+      "expected_output": "One isolated worktree whose git directory holds the design spec draft for the concrete tinytask.store selection, with no commit on its branch adding a spec or plan. The design reaches grill-with-docs, source and tests remain unchanged, no plan exists, and the response recommends writing-plans or to-issues. Its exact final non-empty line is `DESIGN_COMPLETE: spec drafted and grilled; control returned before planning or implementation.`",
       "asserts": [
         {
           "name": "one isolated design worktree exists",
           "shell": "test \"$WT_COUNT\" -eq 1 || { fail \"expected one worktree, got $WT_COUNT\"; exit 1; }; test -n \"$WT\" || { fail \"worktree path missing\"; exit 1; }"
         },
         {
-          "name": "design spec was committed",
-          "shell": "commits_touch \"$WT\" \"${SPEC_DIR#\"$REPO\"/}\""
+          "name": "the design spec draft is in the worktree's git directory and no commit added a spec or plan",
+          "shell": "g=$(git -C \"$WT\" rev-parse --absolute-git-dir) || { fail \"no git directory for $WT\"; exit 1; }; spec=; for f in \"$g\"/specs/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec draft under $g/specs\"; exit 1; }; no_artifact_commits \"$REPO\" || exit 1"
         },
         {
           "name": "source and tests stayed unchanged",
@@ -48,7 +48,7 @@
         },
         {
           "name": "no plan was created",
-          "shell": "if has_file \"$PLAN_DIR\"/*.md \"$WT/${PLAN_DIR#\"$REPO\"/}\"/*.md; then fail \"plan created before the scope gate\"; fi"
+          "shell": "if has_file \"$(git -C \"$WT\" rev-parse --absolute-git-dir)/plans\"/*.md \"$PLAN_DIR\"/*.md; then fail \"plan created before the scope gate\"; fi"
         },
         {
           "name": "domain review was reached",
@@ -60,7 +60,7 @@
         },
         {
           "name": "design returned control without continuation",
-          "shell": "terminal_line=$(sed '/^[[:space:]]*$/d' \"$OUT\" | tail -n 1); test \"$terminal_line\" = 'DESIGN_COMPLETE: spec committed and grilled; control returned before planning or implementation.' || { fail \"missing exact terminal design status\"; exit 1; }"
+          "shell": "terminal_line=$(sed '/^[[:space:]]*$/d' \"$OUT\" | tail -n 1); test \"$terminal_line\" = 'DESIGN_COMPLETE: spec drafted and grilled; control returned before planning or implementation.' || { fail \"missing exact terminal design status\"; exit 1; }"
         }
       ]
     },

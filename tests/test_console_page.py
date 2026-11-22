@@ -187,7 +187,9 @@ class PageTest(unittest.TestCase):
         # stay focusable while sending (about 150 bytes compressed, over the 2 the cap had left).
         # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
         # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
-        self.assertLess(len(gzip.compress(self.data, 9)), 73728)
+        # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, and merged the
+        # page is 74199 bytes.
+        self.assertLess(len(gzip.compress(self.data, 9)), 74752)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -1368,11 +1370,12 @@ class PageOwnerNoticeTest(unittest.TestCase):
 
 
 def ask(**fields) -> dict:
-    """One project question as the view carries it (thirteen keys, the unset ones null)."""
+    """One project question as the view carries it (seventeen keys, the unset ones null or false)."""
     base = {"id": "q4", "question": "what does production show?", "asked_at": utc(60000),
             "state": "working", "state_text": "Working on it", "answered_at": None, "answer": None,
             "read_text": None, "ran_text": None, "unknown_text": None, "back_text": None,
-            "production_text": None, "back_choices": None}
+            "production_text": None, "back_choices": None, "deep": False, "deep_offer": False,
+            "deep_text": None, "spend_text": None}
     return {**base, **fields}
 
 
@@ -1405,6 +1408,10 @@ ASK_CHOOSE = ask(id="q9", question="and the bill?", asked_at=utc(35000), state="
                  unknown_text="Could not find out: last month's total",
                  back_text="Question for you: Which export should I run?",
                  back_choices=["The free summary", "The paid export", "Neither"])
+ASK_DEEP_OFFER = {**ASK_FULL, "deep_offer": True,
+                  "deep_text": "Dig deeper asks again ... about 1,200 tokens, $0.42 each.",
+                  "spend_text": "Spent 900 tokens, about $0.10"}
+ASK_DEEP_ANSWER = {**ASK_FULL, "id": "q7", "deep": True, "spend_text": "Spent 40,000 tokens, about $3.10"}
 FILLED = ASK_FULL["question"] + "\n\n" + ASK_FULL["answer"]
 
 
@@ -2197,6 +2204,127 @@ class PageAskGoalTest(unittest.TestCase):
         self.assertEqual(goal_picked(snap), ["owner/p00"])
         self.assertEqual(sorted(goal_names(snap)), ["owner/p00", "owner/p01"])
         self.assertEqual(snap["posts"], [])
+
+
+class PageDigDeeperTest(unittest.TestCase):
+    """Dig deeper on an answer that offers it, its estimate and the spend lines (#1274)."""
+
+    T = thread(ASK_DEEP_OFFER)
+
+    def opened(self, *threads: dict) -> list:
+        return [START, {"frame": view([asking(project(0, []), *(threads or (self.T,)))])},
+                {"click": "thread-open"}]
+
+    @staticmethod
+    def found(tree: dict, cls: str) -> list:
+        return [n for n in nodes(tree) if has_class(n, cls)]
+
+    def test_dig_deeper_shows_the_estimate_and_posts_nothing(self) -> None:
+        closed, snap = render([*self.opened(), {"snapshot": True}, {"click": "ask-deep"}, {"snapshot": True}])
+        (offer,) = self.found(closed["reading"], "ask-deep")
+        self.assertEqual((offer["tag"], offer["cls"], full(offer)), ("button", "ask-deep btn-quiet", "Dig deeper"))
+        self.assertEqual(self.found(closed["reading"], "ask-deep-confirm"), [])
+        (spend,) = self.found(snap["reading"], "ask-spend")
+        self.assertEqual(full(spend), ASK_DEEP_OFFER["spend_text"])
+        (estimate,) = self.found(snap["reading"], "ask-deep-estimate")
+        self.assertEqual(full(estimate), ASK_DEEP_OFFER["deep_text"])
+        (confirm,) = self.found(snap["reading"], "ask-deep-confirm")
+        self.assertEqual((confirm["tag"], confirm["label"]), ("div", "Dig deeper"))
+        (start,) = self.found(snap["reading"], "ask-deep-start")
+        (cancel,) = self.found(snap["reading"], "ask-deep-cancel")
+        self.assertEqual((start["cls"], full(start), cancel["cls"], full(cancel)),
+                         ("ask-deep-start btn-quiet", "Start", "ask-deep-cancel btn-quiet", "Cancel"))
+        self.assertEqual(self.found(snap["reading"], "ask-deep-reason")[0]["children"], [])
+        self.assertEqual(snap["posts"], [])
+
+    def test_start_asks_the_same_question_deeper_in_its_thread(self) -> None:
+        (snap,) = render([*self.opened(), {"click": "ask-deep"}, {"click": "ask-deep-start"}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/project-question")
+        self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p00", "question": ASK_FULL["question"],
+                                                    "thread_id": self.T["id"], "deep": True})
+        self.assertIn("X-Console-Token", post["headers"])
+        self.assertEqual(self.found(snap["reading"], "ask-deep-confirm"), [])
+        self.assertEqual(self.found(snap["reading"], "ask-deep"), [])
+
+    def test_an_accepted_start_closes_the_confirm_for_good(self) -> None:
+        same = {"frame": view([asking(project(0, []), self.T)])}
+        (snap,) = render([*self.opened(), {"click": "ask-deep"}, {"click": "ask-deep-start"},
+                          {"stream_break": True}, {"stream_open": True}, same, {"snapshot": True}])
+        self.assertEqual(self.found(snap["reading"], "ask-deep-confirm"), [])
+        self.assertEqual(len(self.found(snap["reading"], "ask-deep")), 1)
+
+    def test_dig_deeper_is_offered_only_on_the_last_question_with_nothing_outstanding(self) -> None:
+        earlier = {**ASK_DEEP_OFFER, "id": "q5"}
+        for name, threads in (("not last", [thread(earlier, {**ASK_FULL, "id": "q8"})]),
+                              ("no follow-up", [thread(ASK_DEEP_OFFER, follow_up=False)])):
+            with self.subTest(name):
+                (snap,) = render([*self.opened(*threads), {"snapshot": True}])
+                self.assertEqual(self.found(snap["reading"], "ask-deep"), [])
+        (sent,) = render([*self.opened(), {"click": "ask-deep"}, {"click": "ask-deep-start"}, {"snapshot": True}])
+        self.assertEqual(self.found(sent["reading"], "ask-deep"), [])
+        self.assertEqual(self.found(sent["reading"], "ask-deep-confirm"), [])
+
+    def test_an_open_confirmation_belongs_to_its_answer_and_not_to_the_thread(self) -> None:
+        later = {**ASK_DEEP_OFFER, "id": "q8", "question": "and then?"}
+        moved = {"frame": view([asking(project(0, []), thread(ASK_DEEP_OFFER, later))])}
+        (snap,) = render([*self.opened(), {"click": "ask-deep"}, moved, {"snapshot": True}])
+        self.assertEqual(self.found(snap["reading"], "ask-deep-confirm"), [])
+        self.assertEqual(self.found(snap["reading"], "ask-deep-start"), [])
+        (offer,) = self.found(snap["reading"], "ask-deep")
+        self.assertEqual(full(offer), "Dig deeper")
+        self.assertEqual(snap["posts"], [])
+
+    def test_cancel_closes_the_confirm(self) -> None:
+        (snap,) = render([*self.opened(), {"click": "ask-deep"}, {"click": "ask-deep-cancel"}, {"snapshot": True}])
+        self.assertEqual(self.found(snap["reading"], "ask-deep-confirm"), [])
+        self.assertEqual(len(self.found(snap["reading"], "ask-deep")), 1)
+        self.assertEqual(snap["posts"], [])
+
+    def test_a_deeper_answer_shows_its_spend_and_ends_with_make_it_a_goal(self) -> None:
+        bare = {**ASK_DEEP_ANSWER, "back_text": None, "production_text": None}
+        for answer, tail in ((bare, 1), (ASK_DEEP_ANSWER, 2)):
+            with self.subTest(callout=tail == 2):
+                (snap,) = render([*self.opened(thread(ASK_FULL, answer)), {"snapshot": True}])
+                row = self.found(snap["reading"], "ask")[-1]
+                (spend,) = self.found(row, "ask-spend")
+                self.assertEqual(full(spend), ASK_DEEP_ANSWER["spend_text"])
+                self.assertEqual(self.found(row, "ask-deep"), [])
+                self.assertEqual(self.found(row, "ask-deep-confirm"), [])
+                self.assertEqual(role(row["children"][-tail]["cls"]), "ask-goal")
+                self.assertEqual(full(row["children"][-tail]), "Make it a goal")
+
+    def test_dig_deeper_keeps_the_gap_other_button_pairs_have_to_make_it_a_goal(self) -> None:
+        # The owner's look at head 0412359: the two buttons sit side by side, so Dig deeper
+        # takes Make it a goal's 10 px top margin and the 8 px gap button pairs use elsewhere.
+        rule = re.search(r"^\.ask > \.ask-deep \{([^}]*)\}", PAGE_TEXT, re.MULTILINE)
+        self.assertIsNotNone(rule)
+        self.assertIn("margin-top: 10px", rule.group(1))
+        self.assertIn("margin-right: 8px", rule.group(1))
+        goal = re.search(r"^\.ask > \.ask-goal \{([^}]*)\}", PAGE_TEXT, re.MULTILINE)
+        self.assertIn("margin-top: 10px", goal.group(1))
+
+    def test_a_choice_follow_up_body_is_unchanged(self) -> None:
+        (snap,) = render([*self.opened(thread(ASK_FIRST, ASK_CHOOSE)), {"click": "ask-choice", "nth": 1},
+                          {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(set(json.loads(post["body"])), {"project_id", "question", "thread_id"})
+
+    def test_a_row_that_did_not_answer_shows_its_spend(self) -> None:
+        timed = {**ASK_TIMED, "deep": True, "spend_text": "Spent 52,000 tokens, about $4.01"}
+        (snap,) = render([*self.opened(thread(timed)), {"snapshot": True}])
+        (row,) = self.found(snap["reading"], "ask")
+        self.assertEqual([(role(c["cls"]), full(c)) for c in row["children"]],
+                         [("ask-state", ASK_TIMED["state_text"]), ("ask-spend", timed["spend_text"])])
+
+    def test_a_refused_start_shows_its_reason(self) -> None:
+        reason = project_question.DEEP_STALE
+        (snap,) = render([*self.opened(), {"click": "ask-deep"},
+                          {"respond": {"status": 409, "text": reason + "\n"}}, {"click": "ask-deep-start"},
+                          {"snapshot": True}])
+        (shown,) = self.found(snap["reading"], "ask-deep-reason")
+        self.assertEqual(full(shown), reason)
+        self.assertEqual(len(self.found(snap["reading"], "ask-deep-confirm")), 1)
 
 
 class PageFollowUpTest(unittest.TestCase):

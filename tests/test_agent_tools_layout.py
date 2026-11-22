@@ -49,6 +49,8 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "delivery": frozenset({
         "agent_tools.console.inbox",  # look_approval
         "agent_tools.claims.forge_markers",  # look_marker, look_approval
+        "agent_tools.project_contract.agent_platform",  # standards_lint
+        "agent_tools.project_contract.attempt_history",  # attempt_budget
         "agent_tools.project_contract.resolve_project",  # issue_branch, engine_shell
     }),
     "guard": frozenset({
@@ -62,7 +64,15 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "project_contract": frozenset({
         "agent_tools.release.release_adapter",  # resolve_project, conformance_checks
         "agent_tools.release.release_profile",  # resolve_project, conformance_checks
+        "agent_tools.delivery.hint_phases",  # adopt_inspection, adopt_planning
         "agent_tools.delivery.host_admission",  # conformance_checks
+        "agent_tools.delivery.context_map_lint",  # conformance_checks
+        "agent_tools.delivery.standards_lint",  # conformance_checks
+        "agent_tools.delivery.never_rise",  # conformance_checks
+        "agent_tools.delivery.size_lint",  # conformance_checks
+        "agent_tools.delivery.ruff_lint",  # conformance_checks
+        "agent_tools.release.railway_deploy_adapter",  # host_readiness
+        "agent_tools.release.codesigned_artifact_adapter",  # host_readiness
     }),
     "release": frozenset({
         "agent_tools.claims.forge_land_lock",  # release_lock
@@ -83,6 +93,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.adopt_verify",  # verify_exec
         "agent_tools.project_contract.adopt_apply",  # verify_checks (run_leashed)
         "agent_tools.delivery.agent_gate_bundle",  # verify_checks
+        "agent_tools.delivery.issue_branch",  # verify_checks
     }),
 }
 
@@ -387,7 +398,8 @@ class LightLaneRetirementTest(unittest.TestCase):
                 continue
             if "light_lane" in text:
                 named.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(sorted(named), ["python/agent_tools/project_contract/resolve_project.py"])
+        self.assertEqual(sorted(named), ["python/agent_tools/project_contract/resolve_project.py",
+                          "python/agent_tools/project_contract/schema_three.py"])
 
 
 if __name__ == "__main__":

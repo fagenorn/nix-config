@@ -5,9 +5,10 @@ reports are the same string held in two files that GitHub will never reconcile f
 us — and once `just protect-main` has been applied, a rename on
 either side raises no error anywhere: it leaves `main` waiting forever on a context
 that never reports, with nothing in the UI pointing at the cause. These tests are
-the only offline place that failure can surface. `ci.yaml` and
-`instruction-budget.yaml` share one indentation convention, so every helper reads
-either through a trailing `path` parameter that defaults to `ci.yaml`.
+the only offline place that failure can surface. `ci.yaml`,
+`instruction-budget.yaml` and the generated `conformance.yaml` share one indentation
+convention, so every helper reads any of them through a trailing `path` parameter that
+defaults to `ci.yaml`.
 """
 
 import json
@@ -17,13 +18,14 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "ci.yaml"
 BUDGET_WORKFLOW = WORKFLOWS / "instruction-budget.yaml"
+CONFORMANCE_WORKFLOW = WORKFLOWS / "conformance.yaml"
 PROTECTION = REPO_ROOT / ".github" / "branch-protection.json"
 
 # The indentation convention that ci.yaml and instruction-budget.yaml share:
@@ -75,6 +77,19 @@ PLATFORM_PACKAGE_STEPS = (
 SUITE_INVOCATION = ("WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just "
                     "nixpkgs#nodejs --command just agent-workflow-tests")
 
+# The one step `if:` a required job may carry (ADR-delivery-015 D8): an upload after the
+# step that runs the evaluation. It runs after the evaluation, so it cannot skip it, and
+# a failed evaluation keeps the job red. EVALUATION_RUNS names, for each required context
+# whose evaluating step is one `run:` line, the line an earlier step must hold.
+UPLOAD_AFTER_EVALUATION_IF = "        if: ${{ !cancelled() }}"
+UPLOAD_ACTION = "        uses: actions/upload-artifact@v4"
+EVALUATION_RUNS = {"Agent Workflow Tests": SUITE_INVOCATION}
+
+# The step that compares a pull request's suite timing report with main's baseline.
+COMPARE = ('PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing compare '
+           '--head suite-timing/head/suite-timing.json --base suite-timing/base/suite-timing.json '
+           '--base-label "$BASE_REF" >> "$GITHUB_STEP_SUMMARY"')
+
 REQUIRED_PAYLOAD_KEYS = {
     "required_status_checks",
     "enforce_admins",
@@ -83,6 +98,13 @@ REQUIRED_PAYLOAD_KEYS = {
 }
 
 EXPECTED_WORKFLOW_PERMISSIONS = {"contents": "read"}
+# The one command the Conformance job exists to run, and the whole of its step: the
+# non-blank lines of the step are exactly these, so no `shell:`, `env:`,
+# `working-directory:` or `if:` can ride on it.
+CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run --purpose ci"
+CONFORMANCE_STEP = ["      - name: Run conformance",
+                    f"        run: {CONFORMANCE_INVOCATION}"]
+CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
 BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")
 BUDGET_INVOCATION = 'PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"'
 EXPECTED_PROTECTION_PAYLOAD = {
@@ -309,6 +331,43 @@ def forwards_budget_args(body):
     return calls == [BUDGET_INVOCATION]
 
 
+def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
+    """Why the Conformance job could report green without running its command, or [].
+
+    Beyond the keys `green_without_work` finds, the job must keep its three steps, the
+    exact command step, the runner's default shell (a `defaults:` block anywhere would
+    swap the interpreter that reads the command line) and its one job name. The
+    never-rise check needs the merge base and the branch head, so the checkout keeps
+    full history and the pull request's head commit.
+    """
+    problems = []
+    if job_names(path) != {"Conformance": "conformance"}:
+        problems.append(f"job names are {job_names(path)}, not Conformance only")
+    steps = step_blocks("conformance", path)
+    if list(steps) != ["Checkout", "Install Nix", "Run conformance"]:
+        problems.append(f"steps are {list(steps)}")
+    elif [line for line in steps["Run conformance"] if line.strip()] != CONFORMANCE_STEP:
+        problems.append(f"the command step is {steps['Run conformance']}")
+    else:
+        if "          fetch-depth: 0" not in steps["Checkout"]:
+            problems.append("the checkout does not fetch the full history")
+        if CONFORMANCE_CHECKOUT_REF not in steps["Checkout"]:
+            problems.append("the checkout does not judge the pull request's head")
+    if any(re.match(r"^defaults:", line) for line in workflow_lines(path)):
+        problems.append("a workflow-level defaults: block")
+    job = job_blocks(path)["conformance"]
+    if any(re.match(r"^    defaults:", line) for line in job):
+        problems.append("a job-level defaults: block")
+    offenders = green_without_work(job, None)
+    if offenders:
+        problems.append(f"green without work: {offenders}")
+    if job_if_expression("conformance", path) is not None:
+        problems.append("a job-level if:")
+    if any(RENAMING_KEY_RE.match(line) for line in job):
+        problems.append("a job-level strategy: or uses:")
+    return problems
+
+
 BUDGET_STEP = "Check the instruction budget"
 # The budget step's whole `env:` mapping: the event name and the payload-derived label.
 BUDGET_ENV = [
@@ -328,6 +387,40 @@ BUDGET_CASES = (
 def budget_step(path=BUDGET_WORKFLOW):
     """The lines of the budget job's checking step."""
     return step_blocks("instruction-budget", path)[BUDGET_STEP]
+
+
+def green_without_work(lines, evaluation_run):
+    """The stripped lines of a job that let it conclude success without its steps running.
+
+    One line is allowed: `UPLOAD_AFTER_EVALUATION_IF` on an upload step that follows a
+    step running `evaluation_run`. Without an `evaluation_run`, nothing is allowed.
+    """
+    steps = [[]]
+    for line in lines:
+        if line.startswith("      - name:"):
+            steps.append([])
+        steps[-1].append(line)
+    offenders = []
+    for index, step in enumerate(steps):
+        runs_before = evaluation_run is not None and any(
+            f"        run: {evaluation_run}" in earlier for earlier in steps[:index]
+        )
+        for line in step:
+            if not GREEN_WITHOUT_WORK_RE.match(line):
+                continue
+            if line == UPLOAD_AFTER_EVALUATION_IF and runs_before and UPLOAD_ACTION in step:
+                continue
+            offenders.append(line.strip())
+    return offenders
+
+
+def with_value(step, key):
+    """The value of the step's single `with:` input `key`."""
+    prefix = f"          {key}: "
+    values = [line[len(prefix):] for line in step if line.startswith(prefix)]
+    if len(values) != 1:
+        raise AssertionError(f"step {step[:1]} has {len(values)} `with:` inputs {key!r}")
+    return values[0]
 
 
 def step_env(step):
@@ -404,13 +497,111 @@ class WorkflowShape(unittest.TestCase):
         self.assertIn("timeout-minutes: 45", body)
         self.assertNotIn("continue-on-error", body)
         steps = step_blocks("agent-workflow-tests")
-        self.assertEqual(["Checkout", "Install Nix", "Run agent workflow tests"], list(steps))
+        self.assertEqual(
+            ["Checkout", "Install Nix", "Run agent workflow tests", "Upload suite timing"],
+            list(steps),
+        )
         # Issue 436: suite modules build fixtures from pinned ancestor commits and
         # refuse to skip, so the checkout fetches history.
         self.assertIn("          fetch-depth: 0", steps["Checkout"])
         suite = steps["Run agent workflow tests"]
         self.assertIn(f"        run: {SUITE_INVOCATION}", suite)
-        self.assertEqual(["SUITE_RUNNER_JOBS: \"4\""], step_env(suite))
+        self.assertEqual(
+            ['SUITE_RUNNER_JOBS: "4"', "SUITE_RUNNER_REPORT: suite-timing/suite-timing.json"],
+            step_env(suite),
+        )
+        self.assertEqual([], [line for line in suite if line.startswith("        if:")])
+        upload = steps["Upload suite timing"]
+        self.assertIn(UPLOAD_AFTER_EVALUATION_IF, upload)
+        self.assertIn(UPLOAD_ACTION, upload)
+        self.assertIn("          if-no-files-found: error", upload)
+        self.assertEqual("suite-timing", with_value(upload, "name"))
+        self.assertEqual(
+            step_env(suite)[1].removeprefix("SUITE_RUNNER_REPORT: "),
+            with_value(upload, "path"),
+        )
+
+    def test_only_an_upload_after_the_evaluation_may_run_when_it_failed(self):
+        """ADR-delivery-015 D8: the one step `if:` a required job may carry."""
+        base = [
+            "    name: Job",
+            "      - name: Checkout",
+            "        uses: actions/checkout@v4",
+            "      - name: Suite",
+            "        run: S",
+            "      - name: Upload",
+            UPLOAD_ACTION,
+            UPLOAD_AFTER_EVALUATION_IF,
+        ]
+        moved_onto_suite = [line for line in base if line != UPLOAD_AFTER_EVALUATION_IF]
+        moved_onto_suite.insert(base.index("        run: S"), UPLOAD_AFTER_EVALUATION_IF)
+        upload_first = [base[0], *base[1:3], *base[5:], *base[3:5]]
+        always = [*base[:-1], "        if: always()"]
+        on_echo = [*base, "      - name: Echo", "        run: echo", UPLOAD_AFTER_EVALUATION_IF]
+        failure_ignored = [*base, "        continue-on-error: true"]
+        needing = [*base, "    needs: other"]
+        cases = (
+            ("the upload after the evaluation", base, "S", []),
+            ("the if moved onto the evaluation", moved_onto_suite, "S",
+             ["if: ${{ !cancelled() }}"]),
+            ("the upload before the evaluation", upload_first, "S", ["if: ${{ !cancelled() }}"]),
+            ("a different condition", always, "S", ["if: always()"]),
+            ("an echo step after the evaluation", on_echo, "S", ["if: ${{ !cancelled() }}"]),
+            ("a failure ignored", failure_ignored, "S", ["continue-on-error: true"]),
+            ("no evaluation run", base, None, ["if: ${{ !cancelled() }}"]),
+            ("a needs", needing, "S", ["needs: other"]),
+        )
+        for label, lines, evaluation_run, expected in cases:
+            with self.subTest(case=label):
+                self.assertEqual(expected, green_without_work(lines, evaluation_run))
+
+    def test_suite_timing_jobs_keep_and_compare_the_report(self):
+        """Issue 1385: the report the suite job uploads reaches the baseline and the
+        comparison through the paths the consumers read."""
+        names = job_names()
+        self.assertEqual("suite-timing", names["Suite Timing"])
+        self.assertEqual("suite-timing-baseline", names["Suite Timing Baseline"])
+        for context in ("Suite Timing", "Suite Timing Baseline"):
+            self.assertNotIn(context, required_contexts())
+        self.assertEqual("${{ !cancelled() && github.event_name == 'pull_request' }}",
+                         job_if_expression("suite-timing"))
+        self.assertEqual("github.event_name == 'push'", job_if_expression("suite-timing-baseline"))
+        for key in ("suite-timing", "suite-timing-baseline"):
+            self.assertIn("    needs: agent-workflow-tests", job_body(key))
+        baseline = step_blocks("suite-timing-baseline")
+        self.assertEqual(["Download this run's suite timing", "Keep it as the baseline"],
+                         list(baseline))
+        pull_request = step_blocks("suite-timing")
+        self.assertEqual(["Checkout", "Download this run's suite timing", "Restore the baseline",
+                          "Compare with the baseline"], list(pull_request))
+        upload = step_blocks("agent-workflow-tests")["Upload suite timing"]
+        name = PurePosixPath(with_value(upload, "path")).name
+        self.assertEqual("suite-timing.json", name)
+        base_download = baseline["Download this run's suite timing"]
+        save = baseline["Keep it as the baseline"]
+        self.assertEqual("suite-timing", with_value(base_download, "name"))
+        self.assertEqual(f"{with_value(base_download, 'path')}/{name}", with_value(save, "path"))
+        self.assertIn("          key: suite-timing-${{ github.sha }}", save)
+        head_download = pull_request["Download this run's suite timing"]
+        restore = pull_request["Restore the baseline"]
+        compare = pull_request["Compare with the baseline"]
+        restore_path = with_value(restore, "path")
+        self.assertEqual("suite-timing", with_value(head_download, "name"))
+        self.assertIn(f"--head {with_value(head_download, 'path')}/{name} ", COMPARE)
+        self.assertEqual(with_value(save, "path"), restore_path)
+        self.assertIn(f"--base {restore_path} ", COMPARE)
+        self.assertIn("          key: suite-timing-${{ github.event.pull_request.base.sha }}",
+                      restore)
+        self.assertIn("          restore-keys: suite-timing-", restore)
+        self.assertIn("        run: " + COMPARE, compare)
+        self.assertEqual(["BASE_REF: ${{ github.base_ref }}"], step_env(compare))
+        # No step carries an `if:` or a `continue-on-error:`, so the comparison runs whenever the
+        # job does, and the job's own condition covers every pull request (checked above). The
+        # job's `needs:` is the one line of `green_without_work` left.
+        for key in ("suite-timing", "suite-timing-baseline"):
+            with self.subTest(job=key):
+                self.assertEqual(["needs: agent-workflow-tests"],
+                                 green_without_work(job_body(key).splitlines(), None))
 
     def test_agent_workflow_tests_job_has_the_required_triggers_without_schedule(self):
         self.assertIsNotNone(trigger_block("pull_request"))
@@ -568,11 +759,7 @@ class WorkflowShape(unittest.TestCase):
         for context in contexts:
             self.assertIn(context, jobs)
             path, key = jobs[context]
-            offenders = [
-                line.strip()
-                for line in job_blocks(path)[key]
-                if GREEN_WITHOUT_WORK_RE.match(line)
-            ]
+            offenders = green_without_work(job_blocks(path)[key], EVALUATION_RUNS.get(context))
             self.assertEqual(
                 [],
                 offenders,
@@ -685,6 +872,53 @@ class BudgetWorkflowShape(unittest.TestCase):
                                         if not line.startswith(("          EVENT_NAME:",
                                                                 "          RAISE_LABEL:")))
                 self.assertNotEqual([], budget_step_problems(mutated.splitlines()))
+
+
+class ConformanceWorkflowShape(unittest.TestCase):
+    def test_the_conformance_job_runs_the_command_and_cannot_report_green_without_it(self):
+        self.assertEqual([], conformance_job_problems())
+
+    def test_a_mutated_job_is_caught(self):
+        lines = workflow_lines(CONFORMANCE_WORKFLOW)
+        name = "    name: Conformance"
+        run = f"        run: {CONFORMANCE_INVOCATION}"
+        step = "      - name: Run conformance"
+        shell = "        shell: python {0}"
+        mutations = {
+            "job if": (name, [name, "    if: false"]),
+            "needs": (name, [name, "    needs: other"]),
+            "continue-on-error": (name, [name, "    continue-on-error: true"]),
+            "step if": (step, [step, "        if: always()"]),
+            "run replaced": (run, ["        run: true"]),
+            "job renamed": (name, ["    name: Conformance check"]),
+            "step shell": (run, [run, shell]),
+            "workflow defaults": ("jobs:", ["defaults:", "  run:", "    shell: python {0}", "jobs:"]),
+            "job defaults": (name, [name, "    defaults:", "      run:", shell]),
+            "shallow checkout": ("          fetch-depth: 0", []),
+            "merge-commit checkout": (CONFORMANCE_CHECKOUT_REF, []),
+        }
+        for label, (anchor, replacement) in mutations.items():
+            with self.subTest(mutation=label):
+                index = lines.index(anchor)
+                mutated = lines[:index] + replacement + lines[index + 1:]
+                with mock.patch(f"{__name__}.workflow_lines", lambda path=None: mutated):
+                    self.assertNotEqual([], conformance_job_problems())
+
+    def test_pull_request_and_push_to_main_are_its_triggers(self):
+        for trigger in ("pull_request", "push"):
+            with self.subTest(trigger=trigger):
+                self.assertEqual(['"main"'], trigger_branches(trigger, CONFORMANCE_WORKFLOW))
+                for line in trigger_block(trigger, CONFORMANCE_WORKFLOW):
+                    self.assertFalse(line.startswith(("    paths", "    branches-ignore",
+                                                      "    types")), line)
+        keys = [line.strip()[:-1] for line in _top_level_block("on", CONFORMANCE_WORKFLOW)
+                if re.match(r"^  \S", line)]
+        self.assertEqual(["pull_request", "push"], keys)
+
+    def test_minimum_permissions_and_no_job_override(self):
+        self.assertEqual(EXPECTED_WORKFLOW_PERMISSIONS, workflow_permissions(CONFORMANCE_WORKFLOW))
+        self.assertEqual(
+            [], job_permission_lines(job_blocks(CONFORMANCE_WORKFLOW)["conformance"]))
 
 
 class RequiredContexts(unittest.TestCase):

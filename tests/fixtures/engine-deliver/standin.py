@@ -24,11 +24,21 @@ prints at most one compact JSON line.
                                  "absent"; exits 0
   parity <log> rest...           n is the line count of <log>; appends {"argv": rest}; prints
                                  {"argv": rest, "n": n % 2}; exits 0 (0, 1, 0, 1 across calls)
+  hold <pidfile> <escape> rest... prints {"argv": rest, "detail": "marker-hold"} to stdout and
+                                 marker-hold-err to stderr, starts a 60 s grandchild holding both
+                                 (in its own session when <escape> is 1), writes its pid to
+                                 <pidfile>, sleeps 60 s, exits 0
+  answers <log> <answers.json> rest... appends {"argv": rest} to <log>; takes answer
+                                 min(lines already in <log>, last) of <answers.json> (a list of
+                                 {"stdout", "stderr"?, "exit", "sleep"?, "pidfile"?}), writes its
+                                 stdout and stderr, flushes, writes its pid to "pidfile" when the
+                                 answer names one, sleeps "sleep" seconds, exits "exit"
 """
 
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -101,6 +111,38 @@ def main(argv: list[str]) -> int:
         append(log, {"argv": rest})
         emit({"argv": rest, "n": count % 2})
         return 0
+    if mode == "hold":
+        pidfile, escape, rest = words[0], words[1], words[2:]
+        emit({"argv": rest, "detail": "marker-hold"})
+        print("marker-hold-err", file=sys.stderr, flush=True)
+        grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                      start_new_session=escape == "1")
+        with open(pidfile, "w", encoding="utf-8") as handle:
+            handle.write(str(grandchild.pid))
+        time.sleep(60)
+        return 0
+    if mode == "answers":
+        log, answers_file, rest = words[0], words[1], words[2:]
+        try:
+            with open(log, encoding="utf-8") as handle:
+                count = len(handle.readlines())
+        except FileNotFoundError:
+            count = 0
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"argv": rest}, separators=(",", ":")) + "\n")
+        with open(answers_file, encoding="utf-8") as handle:
+            answers = json.load(handle)
+        answer = answers[min(count, len(answers) - 1)]
+        sys.stdout.write(answer["stdout"])
+        sys.stdout.flush()
+        if "stderr" in answer:
+            sys.stderr.write(answer["stderr"])
+            sys.stderr.flush()
+        if "pidfile" in answer:
+            with open(answer["pidfile"], "w", encoding="utf-8") as handle:
+                handle.write(str(os.getpid()))
+        time.sleep(answer.get("sleep", 0))
+        return answer["exit"]
     return 2
 
 

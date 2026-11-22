@@ -236,12 +236,29 @@ class ReviveServiceTest(ReviveCase):
         launch = manager.new_launch(
             sid, "owner/p01", GOAL, "/srv/p01", "work", self.secret(sid), svc._sprint_secrets)
         self.assertEqual(len(self.revives()), 1)
-        self.assertEqual(written, [json.dumps(manager.settings_document(launch.env, WAKE_MODE))])
+        self.assertEqual(written, [json.dumps(manager.settings_document(
+            launch.env, WAKE_MODE, manager.allow_rules(None, None, False)))])
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         (woken,) = self.rows("manager.woken")
         self.assertEqual(woken["permission"], {
             "mode": "auto",
             "reason": "production rules declared but not in the guard's policy"})
+
+    def test_a_wake_writes_the_projects_root_into_the_settings(self):
+        written = []
+
+        def nudger(sent):
+            written.append(path.read_text())
+            self.nudger(sent)
+
+        svc = self.begin(full_listing=lambda profile, cwd: frozenset({"other"}), nudger=nudger)
+        sid = self.on_track(svc)
+        path = self.env_only(svc, sid)
+        self.tick(svc, 0)
+        self.gone(svc)
+        self.tick(svc, 120)
+        self.assertEqual(len(self.revives()), 1)
+        self.assertEqual(json.loads(written[0])["env"][manager.ROOT_ENV], "/srv/p01")
 
     def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):
         self.assert_wake_rewrites_settings(frozenset({"s-1"}))

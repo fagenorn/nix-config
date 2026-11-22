@@ -6,8 +6,6 @@
 | [areas/](./areas/) | One directory per area: a budgeted glossary plus that area's decision records |
 | [standards/](./standards/) | The coding bar for this repo |
 | [guides/](./guides/) | Procedures (how to do one task, one file each) and the architecture description |
-| [archive/](./archive/) | Retained evidence and point-in-time records, kept at their paths |
-| [spikes/](./spikes/) | Point-in-time spike reports, kept at their paths |
 
 **Where new knowledge goes**
 
@@ -19,7 +17,8 @@
 | A procedure (how-to) | `guides/`, one file per task, named for what it does |
 | The architecture description (flake layout, module layering, helpers, the agent helper package) | [`guides/architecture.md`](./guides/architecture.md) |
 | The behaviour of a Nix module with no Python home | That module's README (`home/common/claude-code/README.md`, `home/common/agent-skills/README.md`, `home/linux/claude-local/README.md`) |
-| A measurement or other retained evidence | `archive/` |
+| A measurement, spike or other evidence | A comment or attachment on the pull request or issue it proves, never `docs/` |
 | A Layer-2 coding rule | `standards/` |
 | The package overview (layout, running, testing) | `python/README.md` |
-| Specs and plans | `.agents/artifacts/`, never `docs/` |
+| A spec | The body of its parent issue, never the tree |
+| A plan and its task files | The worktree's git directory, never the tree |

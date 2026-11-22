@@ -4,7 +4,7 @@ Why. The console answers an owner's question about a registered project with a C
 run in that project's folder. The session only reads: this hook is the one place that decides, for
 every tool call, whether the call is a read. It is a packaged sibling run by the console's own
 interpreter as `python -m agent_tools.console.project_question_hook '<allowed json>' '<repo>' ['<private dir>'
-'<records file>']`; it has no
+'<records file>' ['<checkout root>']]`; it has no
 command-table row (ADR-console-058) and imports only the standard library.
 
 Input. `argv[1]` is the allowed commands: a JSON list of non-empty lists of non-empty strings, each
@@ -14,7 +14,9 @@ project's GitHub repository as `owner/name`, or the empty string when its contra
 `tool_name` and `tool_input`, and `cwd` when the client gives one. `argv[3]` and `argv[4]`, given
 together or not at all, are the console's private directory and the question's own records file
 (`parse_confinement`, `ValueError` unless both are absolute and the file lies strictly inside the
-directory); they are the confinement of #1271 and ADR-console-089. The confinement also holds the
+directory); they are the confinement of #1271 and ADR-console-089. An optional `argv[5]`, the checkout root
+of a deeper session (#1274), must be absolute and not inside the private directory and is kept as its real
+path (`Confinement.root`); only a deeper session is given one. The confinement also holds the
 transcript stores (`transcript_dirs`: `projects` under `$CLAUDE_CONFIG_DIR`, under `~/.claude` and under
 every profile of `$CLAUDE_ACCOUNTS_DIR`, default `~/.claude-accounts`), read from the hook's own
 environment: the profiles share one transcript store, and a transcript holds every tool result of a
@@ -75,7 +77,9 @@ The confinement (#1271, ADR-console-089 D2). With a confinement the only file un
 directory that any tool may reach is its records file. A path reaches (`_reaches`) when its real path
 (symlinks resolved, `~` expanded, relative to `cwd`) is not the records file and is the private
 directory, the directory holding the records file or a transcript store, lies inside one, or is an ancestor of one, and is not inside the
-session's own `tool-results` directory of a store (`_own_results`); a reach is `RECORDS_DENIED`. It applies to:
+session's own `tool-results` directory of a store (`_own_results`); a reach is `RECORDS_DENIED`. The same
+rule, `session_results`, admits only genuine directories below a real store and is what a manager's prompt
+hook uses for its own saved output (ADR-console-103). It applies to:
 
 - `Read`: `file_path`.
 - `Grep`: `path` (the client's directory when absent), then the traversal rule below on it; a `glob`
@@ -109,9 +113,20 @@ directory or an identity cannot be read (any `OSError` but a path that vanished)
 descendant of a directory that does not reach cannot lie inside the private directory unless it is
 a mount of it, which the identity check names, so only symlinks and directory identities are checked.
 
+The root (#1274, ADR-console-101 D1). With a root, after the checks above, a path is `OUTSIDE_ROOT` when it is
+none of the records file, the session's own `tool-results` and a path inside the root (`_outside`, by real
+path). It denies a `Read` whose `file_path` is outside, a `Grep` whose search root (`path`, else `cwd`) is
+outside, a `Glob` any of whose literal prefixes joined to the search root is outside, and a `Bash` command
+any word target of which is outside (`_word_targets`), a declared command included: a declared read
+that names a path outside the checkout (a database of another checkout) is refused like any other; a denied command with such a target (a `git -C <other>` that
+`reads_denied` would refuse) is given `OUTSIDE_ROOT` in place of that sentence, except a lifecycle verb,
+which keeps `LIFECYCLE_DENIED`. The protected checks run first, so a transcript or another question's
+records keep `RECORDS_DENIED`. A search walk inside the checkout keeps the symlink rule above (protected
+roots only): a symlink the checkout itself holds is part of its declared content.
+
 Output. Stdout is exactly one line, `json.dumps(output(decision, reason))`, the client's PreToolUse
-wire format. Exactly two arguments (`<allowed> <repo>`) or exactly four (`<allowed> <repo> <private dir> <records
-file>`) are required; any other count, a four-argument form `parse_confinement` refuses, an unparseable
+wire format. Exactly two arguments (`<allowed> <repo>`), four (`<allowed> <repo> <private dir> <records
+file>`) or five (those and `<checkout root>`) are required; any other count, a four-argument form `parse_confinement` refuses, an unparseable
 argument, or unreadable stdin (JSON nested deeper than the recursion limit included), prints the
 `MALFORMED` deny.
 The exit status is 0 in every case. A hook process that gives no decision (a timeout, an
@@ -127,6 +142,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -194,6 +210,10 @@ RECORDS_DENIED = (
     "This session reads the console's own records only from its records file, {records}; the "
     "console's other files, other questions' records included, are not read."
 )
+OUTSIDE_ROOT = (
+    "This deeper session reads only its project's checkout {root} and its records file {records}; "
+    "that path is outside both, so it was refused."
+)
 SEARCH_UNCHECKED = (
     "This search is too large to check against the console's own files (over {limit} files and "
     "directories, too slow to list or not fully listable), so it was refused: search a narrower "
@@ -217,6 +237,7 @@ class Confinement:
     records: str
     transcripts: tuple[str, ...] = ()
     session: str | None = None
+    root: str | None = None
 
     @property
     def protected(self) -> tuple[str, ...]:
@@ -270,19 +291,38 @@ SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 RESULTS_DIR = "tool-results"
 
 
-def _own_results(path: str, c: Confinement) -> bool:
-    """Whether `path` is inside the session's own saved tool output, `<store>/<slug>/<session>/tool-results`."""
-    if c.session is None or _inside(path, c.private):
+def session_results(path: str, session: str, stores: Sequence[str]) -> bool:
+    """Whether the resolved `path` is inside `<store>/<slug>/<session>/tool-results` of one of `stores`.
+
+    `stores` are real paths, as `transcript_dirs` returns them. Only genuine directories count: the slug
+    is listed without following links, and the session and `tool-results` components must each be a
+    directory by `os.lstat`, so a link at any of the three admits nothing. A store or component that is
+    missing or unreadable is skipped, so one unreadable store never hides a readable one: each store is
+    verified on its own, and a skipped one grants nothing.
+    """
+    if not SESSION_NAME.fullmatch(session):
         return False
-    for store in c.transcripts:
+    for store in stores:
         try:
             with os.scandir(store) as scan:
-                slugs = [entry.path for entry in scan if entry.is_dir()]
-        except (FileNotFoundError, NotADirectoryError):
+                slugs = [entry.path for entry in scan if entry.is_dir(follow_symlinks=False)]
+        except OSError:
             continue
-        if any(_inside(path, os.path.join(slug, c.session, RESULTS_DIR)) for slug in slugs):
-            return True
+        for slug in slugs:
+            held = os.path.join(slug, session)
+            results = os.path.join(held, RESULTS_DIR)
+            try:
+                genuine = all(stat.S_ISDIR(os.lstat(part).st_mode) for part in (held, results))
+            except OSError:
+                continue
+            if genuine and _inside(path, results):
+                return True
     return False
+
+
+def _own_results(path: str, c: Confinement) -> bool:
+    """Whether `path` is inside the session's own saved tool output, `<store>/<slug>/<session>/tool-results`."""
+    return c.session is not None and not _inside(path, c.private) and session_results(path, c.session, c.transcripts)
 
 
 def transcript_dirs(environ: Mapping[str, str]) -> tuple[str, ...]:
@@ -296,15 +336,26 @@ def transcript_dirs(environ: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(os.path.realpath(path) for path in found if os.path.isabs(path)))
 
 
-def parse_confinement(private: str, records: str, environ: Mapping[str, str] | None = None) -> Confinement:
-    """The confinement of two paths; `ValueError` unless both are absolute and `records` is strictly inside."""
+def parse_confinement(private: str, records: str, environ: Mapping[str, str] | None = None,
+                      root: str | None = None) -> Confinement:
+    """The confinement of two paths; `ValueError` unless both are absolute and `records` is strictly inside.
+
+    A `root`, the checkout a deeper session is confined to, must be absolute and not inside `private`.
+    """
     if not os.path.isabs(private) or not os.path.isabs(records):
         raise ValueError("the confinement paths are not absolute")
     real_private, real_records = os.path.realpath(private), os.path.realpath(records)
     if _same_file(real_records, real_private) or not _inside(real_records, real_private):
         raise ValueError("the records file is not inside the private directory")
+    real_root = None
+    if root is not None:
+        if not os.path.isabs(root):
+            raise ValueError("the checkout root is not absolute")
+        real_root = os.path.realpath(root)
+        if _inside(real_root, real_private):
+            raise ValueError("the checkout root is inside the private directory")
     return Confinement(real_private, real_records,
-                       transcript_dirs(os.environ if environ is None else environ))
+                       transcript_dirs(os.environ if environ is None else environ), root=real_root)
 
 
 def parse_allowed(text: str) -> tuple[tuple[str, ...], ...]:
@@ -466,6 +517,14 @@ def _reaches(text: str, base: str, c: Confinement) -> bool:
     return any(_inside(path, held) or _inside(held, path) for held in c.protected)
 
 
+def _outside(text: str, base: str, c: Confinement) -> bool:
+    """Whether `text`, a path read relative to `base`, lies outside a deeper session's checkout and its reads."""
+    if c.root is None or not text:
+        return False
+    path = _resolve(text, base)
+    return not (_same_file(path, c.records) or _own_results(path, c) or _inside(path, c.root))
+
+
 def _word_targets(word: str) -> list[str]:
     """Every reading of `word` that could name a file: itself, the text after each `=`, a short option's value after any bundled flag."""
     targets = [word]
@@ -590,7 +649,9 @@ def _confined(name: str, tool_input: dict, base: str, c: Confinement) -> str | N
     root = path if isinstance(path, str) else base
     if name == "Read":
         file_path = tool_input.get("file_path")
-        return denied if isinstance(file_path, str) and _reaches(file_path, base, c) else None
+        if isinstance(file_path, str) and _reaches(file_path, base, c):
+            return denied
+        return _outside_root(c) if isinstance(file_path, str) and _outside(file_path, base, c) else None
     if name == "Grep":
         pattern = tool_input.get("glob")
         spellings = _brace_expansions(pattern) if isinstance(pattern, str) else []
@@ -598,7 +659,8 @@ def _confined(name: str, tool_input: dict, base: str, c: Confinement) -> str | N
             return BRACES_UNCHECKED.format(limit=BRACE_LIMIT)
         if any(".." in spelling.split("/") for spelling in spellings):
             return denied
-        return _search_reaches(root, base, c)
+        return _search_reaches(root, base, c) or (
+            _outside_root(c) if _outside(root, base, c) else None)
     pattern = tool_input.get("pattern")
     spellings = _brace_expansions(pattern) if isinstance(pattern, str) else []
     if spellings is None:
@@ -616,11 +678,28 @@ def _confined(name: str, tool_input: dict, base: str, c: Confinement) -> str | N
         found = _search_reaches(os.path.join(root, prefix), base, c)
         if found:
             return found
+    for prefix in dict.fromkeys(prefixes):
+        if _outside(os.path.join(root, prefix), base, c):
+            return _outside_root(c)
     return None
 
 
+def _outside_root(c: Confinement) -> str:
+    return OUTSIDE_ROOT.format(root=c.root, records=c.records)
+
+
+def _command_outside(command: str, base: str, c: Confinement) -> bool:
+    """Whether any word of `command` could name a path outside a deeper session's checkout."""
+    return any(_outside(target, base, c)
+               for word in [word for word in command.split(" ") if word][1:]
+               for target in _word_targets(word))
+
+
 def _confined_command(command: str, base: str, c: Confinement) -> str | None:
-    """The deny sentence of an admitted command whose words reach the console's state, else None."""
+    """The deny sentence of an admitted command whose words reach the console's state, else None.
+
+    Under a root, a declared read included, a command is also denied for a word outside it.
+    """
     for word in [word for word in command.split(" ") if word][1:]:
         for target in _word_targets(word):
             if _reaches(target, base, c):
@@ -629,6 +708,8 @@ def _confined_command(command: str, base: str, c: Confinement) -> str | None:
                 found = _tree_reaches(_resolve(target, base), c)
                 if found:
                     return found
+    if _command_outside(command, base, c):
+        return _outside_root(c)
     return None
 
 
@@ -668,11 +749,19 @@ def decide(
     if not isinstance(tool_input, dict) or not isinstance(tool_input.get("command"), str):
         return "deny", MALFORMED
     decision = _decide_bash(tool_input["command"], allowed, repo)
-    if confinement is None or decision[0] != "allow":
+    if confinement is None:
         return decision
     session = document.get("session_id")
     if isinstance(session, str) and SESSION_NAME.fullmatch(session):
         confinement = replace(confinement, session=session)
+    if decision[0] != "allow":
+        if confinement.root is None or decision[1] == LIFECYCLE_DENIED:
+            return decision
+        try:
+            outside = _command_outside(tool_input["command"], base, confinement)
+        except (OSError, ValueError):
+            return "deny", MALFORMED
+        return ("deny", _outside_root(confinement)) if outside else decision
     try:
         found = _confined_command(tool_input["command"], base, confinement)
     except (OSError, ValueError):
@@ -694,11 +783,12 @@ def output(decision: str, reason: str) -> dict:
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     try:
-        if len(arguments) not in (2, 4):
+        if len(arguments) not in (2, 4, 5):
             raise ValueError("the hook takes the allowed commands, the repository and a confinement")
         allowed = parse_allowed(arguments[0])
         repo = parse_repo(arguments[1])
-        confinement = parse_confinement(*arguments[2:]) if len(arguments) == 4 else None
+        confinement = (parse_confinement(*arguments[2:4], root=arguments[4] if len(arguments) == 5 else None)
+                       if len(arguments) >= 4 else None)
         document = json.loads(sys.stdin.read())
     except (IndexError, ValueError, RecursionError, OSError):
         decision, reason = "deny", MALFORMED

@@ -1,53 +1,61 @@
 """`engine`: run the delivery engine's commands (#1508).
 
-`engine check [--procedures <dir>]` reads the procedure files of a directory
-(default: the package's `procedures` directory) and prints one line of compact
-sorted-key JSON to stdout, starting no process and opening no socket:
+`engine check [--procedures <dir>]` reads the procedure files of a directory (default: the
+package's `procedures` directory) and prints one line of compact sorted-key JSON, starting
+no process and opening no socket:
 
 - exit 0: `{"procedures": [<names>], "verdict": "ok"}`;
-- exit 1: `{"breaches": [{"cap", "size", "thing", "unit"}, ...], "refusals":
-  [{"defect", "detail", "procedure", "step"}, ...], "verdict": "refused"}`,
-  refusals ordered by procedure name, phase, then step position, and both
-  members always present;
-- exit 2, stdout empty and one stderr line: a usage error, `--procedures` not a
-  directory, a directory with no procedure file, or an invalid
-  `command_verdicts.json`.
+- exit 1: `{"breaches": [{"cap", "size", "thing", "unit"}, ...], "refusals": [{"defect",
+  "detail", "procedure", "step"}, ...], "verdict": "refused"}`, refusals ordered by
+  procedure name, phase, then step position, both members always present;
+- exit 2, stdout empty and one stderr line: a usage error, `--procedures` not a directory, a
+  directory with no procedure file, or an invalid `command_verdicts.json`.
 
-The procedure format and every refusal code are `procedure_check`'s contract.
-In a directory an onboarded project owns, the command ids checked are the
-platform's plus the project's, the ones `engine deliver` accepts; elsewhere
-they are the platform's.
-The check also lists in `breaches` each cap of `engine_caps` the core, the
-engine package, a procedure, the graders or a prompt file exceeds; nothing
-changes a cap.
+The procedure format and every refusal code are `procedure_check`'s contract. In a directory
+an onboarded project owns, the command ids checked are the platform's plus the project's,
+the ones `engine deliver` accepts; elsewhere they are the platform's. The check also lists
+in `breaches` each cap of `engine_caps` the core, the engine package, a procedure, the
+graders or a prompt file exceeds; nothing changes a cap.
 
-`engine status <issue> [--project <slug>]` reads the newest run of the issue
-under `~/.agents/state/engine/runs/` (the run directory `engine_ledger`
-describes) and prints one line of compact sorted-key JSON, the state one fold
-derives from the run's `events.jsonl`. It writes nothing and creates no
-directory:
+`engine status <issue> [--project <slug>]` reads the newest run of the issue under
+`~/.agents/state/engine/runs/` and prints one line of compact sorted-key JSON, the state one
+fold of the run's `events.jsonl` derives. It writes nothing and creates no directory:
 
 - exit 0: the folded state (`engine_ledger.RunState.as_json()`);
 - exit 1: `{"issue": <n>, "run": null}`, no run of that issue (and project);
-- exit 2, stdout empty and one stderr line: a usage error, an issue that is not
-  an integer of 1 or more, runs of several projects with no `--project`, an
-  unreadable `run.json`, or an event file the ledger refuses.
+- exit 2, stdout empty and one stderr line: a usage error, an issue that is not an integer
+  of 1 or more, runs of several projects with no `--project`, an unreadable `run.json`, or
+  an event file the ledger refuses.
 
-`engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a
-procedure of `command` and `decide` steps; default: the package's `procedures`
-directory) for the issue, in the project the current directory belongs to, to
-`done` or a stop, or continues the issue's open run on its own procedure copy,
-and prints one line of compact sorted-key JSON when it ends (`engine_shell` is
-the contract):
+`engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a procedure of
+`command`, `agent` and `decide` steps; an agent step runs as one headless session through the
+account launcher, graded by its structured reply unless a bound fires, its files kept under the
+run's `sessions/`; a step with no valid structured answer is asked once more on the same session and
+then ends `no-reply`; every step runs within the platform's bounds, and a fired bound is the
+outcome `out-of-bounds`; default: the package's `procedures` directory) for the issue, in the project the
+current directory belongs to, to `done` or a stop, or continues the issue's open run on its own procedure copy, and prints one line of compact sorted-key
+JSON when it ends (`engine_shell` is the contract):
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
-- exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`;
-- exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"},
-  "run"}`, another deliver of the issue holds its run's lock; nothing is written;
+- exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`; the end may be the
+  engine's own stop `quota-wait` (need `retry`), when every account is out of usage, or
+  `stopped-by-request` (need `retry`), when `engine stop` ended the step in progress;
+- exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"}, "run"}`,
+  another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
-- exit 2, stdout empty and one stderr line: a usage error, or a refusal before
-  any run is created or continued (two open runs of the issue included), which
-  creates no run directory.
+- exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
+  lifecycle guard hook, or a refusal before any run is created or continued (two open runs of the
+  issue included), which creates no run directory.
+
+`engine stop <issue> [--project <slug>]` asks the run of the issue that is running on this host
+to stop: it writes the run's `stop-request` file naming the lock holder, signals no process,
+appends no event, waits for nothing, and prints one line of compact sorted-key JSON. The running
+`engine deliver` ends its current step's process group and exits 3 at `stopped-by-request`:
+
+- exit 0: `{"detail", "issue", "process": {"pid", "started"}, "requested": true, "run"}`;
+- exit 1: `{"detail", "issue", "process": null, "requested": false, "run": <newest run or null>}`,
+  no run of the issue is running; nothing is written;
+- exit 2, stdout empty and one stderr line: a usage error, or the ledger errors `status` gives.
 """
 
 from __future__ import annotations
@@ -103,8 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="print the state a run's recorded events fold to")
     status_parser.add_argument("issue", type=_issue_number)
     status_parser.add_argument("--project")
+    stop_parser = commands.add_parser(
+        "stop", help="ask the run of an issue that is running on this host to stop")
+    stop_parser.add_argument("issue", type=_issue_number)
+    stop_parser.add_argument("--project")
     deliver_parser = commands.add_parser(
-        "deliver", help="run a procedure of command steps to done or a stop")
+        "deliver", help="run a procedure of command, agent and decide steps to done or a stop")
     deliver_parser.add_argument("issue", type=_issue_number)
     deliver_parser.add_argument("--procedures", type=Path, default=PROCEDURES_DIR)
     return parser
@@ -131,6 +143,27 @@ def _status(issue: int, project: str | None) -> int:
     return 0
 
 
+def _stop_run(issue: int, project: str | None) -> int:
+    try:
+        runs = engine_ledger.find_runs(engine_ledger.runs_root(), issue, project)
+        for run_dir in runs:
+            holder = engine_shell.request_stop(run_dir)
+            if holder is not None:
+                sys.stdout.write(compact({
+                    "detail": f"Asked the {engine_shell.ENTRY} procedure of issue {issue} "
+                              "to stop at the end of its current step's process.",
+                    "issue": issue, "process": {"pid": holder["pid"], "started": holder["started"]},
+                    "requested": True, "run": run_dir.name}))
+                return 0
+    except (engine_ledger.LedgerError, OSError, KeyError, ValueError) as error:
+        return _usage(str(error))
+    sys.stdout.write(compact({
+        "detail": f"No run of issue {issue} is running on this host, so nothing was asked.",
+        "issue": issue, "process": None, "requested": False,
+        "run": runs[-1].name if runs else None}))
+    return 1
+
+
 def _deliver(issue: int, procedures: Path) -> int:
     try:
         code, line = engine_shell.deliver(issue, procedures)
@@ -150,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(str(error))
     if args.command == "status":
         return _status(args.issue, args.project)
+    if args.command == "stop":
+        return _stop_run(args.issue, args.project)
     if args.command == "deliver":
         return _deliver(args.issue, args.procedures)
     if not args.procedures.is_dir():

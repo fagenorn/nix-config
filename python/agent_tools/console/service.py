@@ -70,7 +70,7 @@ stream `Content-Length`):
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     GET /api/picture/<id> 200 image/png, the page reads a stored picture (below)
-    GET /api/profile 200 application/json, the profile a new session should use (below)
+    GET /api/profile[?all_out=1] 200 application/json, the profile a new session should use (below)
     GET /api/excluded 200 application/json, the profiles the owner excluded (below)
     GET /api/whoami 200 application/json, what the guest port received (guest port only; 404 on the owner's port)
     anything else   404
@@ -1575,7 +1575,10 @@ answers only a loopback `Host`. The service also keeps that choice in `choice_fi
 the choice differs from the last one written (at construction, what the file holds), and removed when
 nothing can be chosen. A failed write is one stderr line `console: choice_unwritten <Type>:
 <message>` until a write succeeds, and is tried again at the next choice. With `choice_file` None
-no file is read or written.
+no file is read or written. The opt-in query `?all_out=1` answers
+`{"all_out":true,"profile":null,"resumes_at":<UTC time ending in Z, or null>}` when `capacity_view`
+reads every considered profile out (the launcher sends it only for a caller that asked for an answer
+file, ADR-system-006), and the plain body otherwise; the plain route never gains a member.
 
 Exclusion (#1028): `set_exclusion(profile, excluded)` (`POST /api/exclusion`, body `{"profile",
 "excluded"}` with `excluded` a bool, at most `MAX_EXCLUSION_BYTES`; a bad body is 400 `bad
@@ -1928,32 +1931,34 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
-`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062) and an optional
-`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9)
+`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062), an optional
+`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9) and an
+optional boolean `deep` (#1274, ADR-console-101)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
-`project_question.parse_keyed_request` does not accept is 400 `bad question`; `project_question.Refused` is
+`project_question.parse_ask` does not accept (a non-boolean `deep` included) is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
 exception is `console: project_question_failed <Type>: <message>` and 500 `question failed`;
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
-once it is answered. `ask_project_question(project_id, text, thread_id=None, request_key=None)` admits a question under the ingest
+once it is answered. `ask_project_question(project_id, text, thread_id=None, request_key=None, *, deep=False)` admits a question under the ingest
 lock, in this order: a credential-shaped text is `Refused` first (#1272, `project_question.CREDENTIAL`,
 before the lock and every check below, never repeating the text), no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
 question's own checks, with a `thread_id` only the follow-up checks of
-`project_question.follow_up` against the project's folded questions (an unknown thread, a thread
+`project_question.follow_up` (`deep_follow_up` for a `deep` one, which also refuses a thread whose last question is
+already deep or has other text, `DEEP_STALE`) against the project's folded questions (an unknown thread, a thread
 whose last question is not answered, a thread too long to carry), and no account the console would
 start a session under (`_session_choice`); a refusal appends nothing and counts nothing. An
 accepted question appends one `project_question.asked` row (`question_id`, `question`, `profile`,
 `session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
-`thread_id` and `request_key` it was given) and, for a keyed question, one `project_question.keyed` receipt row (`request_key`, `question_id`) in the same append, which retention never removes, so the key finds its question after the asked row is gone; it counts itself open in that same section. A follow-up's session gets
+`thread_id` and `request_key` it was given, and `deep` true for a deeper question) and, for a keyed question, one `project_question.keyed` receipt row (`request_key`, `question_id`) in the same append, which retention never removes, so the key finds its question after the asked row is gone; it counts itself open in that same section. A follow-up's session gets
 the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
 model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's reach (its read-only routes and its GitHub repository,
 `project_question.reach_of`; a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then gathers the project's own
 records (`question_records.project_records`, ADR-console-089, first reading spend when no poll has yet) after the reach and before the
-session, under the ingest lock and only while the project still holds the root the question was asked in; a gathering that raises (a root taken by another project included) is a `failed` answer with one stderr line `console:
+session, under the ingest lock and only while the project still holds the root the question was asked in (a deeper question then reads its project's transcript aggregates outside the lock, `transcript_digest.project_runs`, and after its answer is recorded its job reads spend once, so the session's own spend shows without waiting for the next poll); a gathering that raises (a root taken by another project included) is a `failed` answer with one stderr line `console:
 project_question_records_failed <question_id> <Type>: <message>` and starts no session; then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
 question and a question whose profile is being removed or already removed fails without starting a
@@ -2016,7 +2021,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -2567,12 +2572,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            project_id, question, thread_id, request_key = project_question.parse_keyed_request(body)
+            project_id, question, thread_id, request_key, deep = project_question.parse_ask(body)
         except ValueError:
             self._refuse(400, "bad question")
             return False
         try:
-            console.ask_project_question(project_id, question, thread_id, request_key)
+            console.ask_project_question(project_id, question, thread_id, request_key, deep=deep)
         except project_question.Refused as error:
             print(f"console: project_question_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -3987,7 +3992,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._loopback():
             return
-        route = self.path.split("?", 1)[0]
+        route, _, query = self.path.partition("?")
         if route == PAGE_PATH:
             self._send(200, "text/html; charset=utf-8", self.server.console.page_bytes,
                        ("Content-Security-Policy", CSP))
@@ -4003,7 +4008,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == STATUS_PATH:
             self._status_request()
         elif route == PROFILE_PATH:
-            body = json.dumps({"profile": self.server.console.session_profile()},
+            body = json.dumps(self.server.console.session_answer(query == "all_out=1"),
                               sort_keys=True, separators=(",", ":")).encode()
             self._send(200, "application/json", body)
         elif route == EXCLUDED_PATH:
@@ -5658,7 +5663,8 @@ class ConsoleService:
             self._project_question_workers.append(worker)
 
     def ask_project_question(self, project_id: str, text: str,
-                             thread_id: str | None = None, request_key: str | None = None) -> str:
+                             thread_id: str | None = None, request_key: str | None = None,
+                             *, deep: bool = False) -> str:
         """Accept one question about a registered project and return its id (#1176, ADR-console-058).
 
         Admission, the asked row and the open count are one section under the ingest lock; the
@@ -5669,7 +5675,10 @@ class ConsoleService:
         that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089 D9); the
         check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
         `project_question.Refused` and append and count nothing. A credential-shaped text is
-        refused first, before every other check and before the request-key replay (#1272).
+        refused first, before every other check and before the request-key replay (#1272). A `deep`
+        question (#1274, ADR-console-101) with a `thread_id` is checked by `project_question.deep_follow_up`
+        in this same section, so a stale Dig deeper confirmation appends nothing; one without a thread is a
+        new thread.
         """
         if project_question.credential_shaped(text):
             raise project_question.Refused(project_question.CREDENTIAL)
@@ -5687,8 +5696,9 @@ class ConsoleService:
                      if item.request_key == request_key), None)
                 if known is not None:
                     return known
-            thread = () if thread_id is None else project_question.follow_up(
-                self._project_questions.get(project_id, ()), thread_id, text)
+            thread = () if thread_id is None else (
+                project_question.deep_follow_up if deep else project_question.follow_up)(
+                    self._project_questions.get(project_id, ()), thread_id, text)
             profile = self._session_choice(self._read_profiles())
             if profile is None:
                 raise project_question.Refused(project_question.NO_PROFILE)
@@ -5701,6 +5711,8 @@ class ConsoleService:
                 payload["thread_id"] = thread_id
             if request_key is not None:
                 payload["request_key"] = request_key
+            if deep:
+                payload["deep"] = True
             rows = [(PROJECT_QUESTION_ASKED, project_id, payload)]
             if request_key is not None:
                 rows.append((PROJECT_QUESTION_KEYED, project_id,
@@ -5712,7 +5724,7 @@ class ConsoleService:
         try:
             self._project_question_dispatch(
                 lambda: self._run_project_question(
-                    question_id, project_id, root, text, profile, session_id, thread))
+                    question_id, project_id, root, text, profile, session_id, thread, deep))
         except BaseException as error:
             self._record_project_answer(question_id, project_id, project_question.Outcome(
                 project_question.FAILED, reason=f"{type(error).__name__}: {error}"))
@@ -5740,7 +5752,8 @@ class ConsoleService:
 
     def _run_project_question(self, question_id: str, project_id: str, root: str, text: str,
                               profile: str, session_id: str,
-                              thread: "tuple[project_question.Turn, ...]" = ()) -> None:
+                              thread: "tuple[project_question.Turn, ...]" = (),
+                              deep: bool = False) -> None:
         """The job of one accepted question: stop check, routes, the session, then the one answer."""
         outcome = None
         try:
@@ -5759,7 +5772,7 @@ class ConsoleService:
                             detail=f"{type(error).__name__}: {error}"))
                 else:
                     try:
-                        records = self._question_records(project_id, root)
+                        records = self._question_records(project_id, root, deep)
                     except Exception as error:
                         print(f"console: project_question_records_failed {question_id} "
                               f"{type(error).__name__}: {error}", file=sys.stderr)
@@ -5774,12 +5787,16 @@ class ConsoleService:
                                     outcome = project_question.Outcome(
                                         project_question.FAILED,
                                         reason=project_question.PROFILE_GONE.format(profile=profile))
+                                elif not self._holds_checkout(project_id, root):
+                                    outcome = project_question.Outcome(
+                                        project_question.FAILED,
+                                        reason=project_question.CHECKOUT_MOVED)
                                 else:
                                     ask = project_question.new_ask(
                                         question_id, project_id, root, text, profile, reach.routes,
                                         Path(self._store).with_name(project_question.SETTINGS_DIR),
                                         session_id=session_id, thread=thread, repo=reach.repo,
-                                        unset=reach.unset, records=records)
+                                        unset=reach.unset, records=records, deep=deep)
                                     try:
                                         outcome = self._project_asker(ask, self._stop)
                                     except Exception as error:
@@ -5799,8 +5816,16 @@ class ConsoleService:
                 outcome = project_question.Outcome(
                     project_question.FAILED, reason=project_question.STOPPED_TEXT)
             self._record_project_answer(question_id, project_id, outcome)
+            if deep:
+                self._spend_step()  # the deeper session's own spend shows now, not at the next poll
 
-    def _question_records(self, project_id: str, root: str) -> str:
+    def _holds_checkout(self, project_id: str, root: str) -> bool:
+        """Whether, now and under the ingest lock, `project_id` is registered with `root` as its checkout."""
+        with self._ingest:
+            held = self._states.get(project_id)
+            return held is not None and held.root == root
+
+    def _question_records(self, project_id: str, root: str, deep: bool = False) -> str:
         """The encoded document of the console's own records of one project (ADR-console-089).
 
         The events and the folded state are read in one section under the ingest lock, so a delivery
@@ -5809,23 +5834,46 @@ class ConsoleService:
         project since the question was admitted would put the next owner's activations after the cutoff,
         so the gathering raises and the question is a failed answer. A question asked before the first
         spend poll reads the spend view first through the console's own poll (#1357, ADR-console-090),
-        and spend stays null only when that read failed.
+        and spend stays null only when that read failed. A `deep` question also reads its project's own
+        delivery transcripts, aggregated (`transcript_digest.project_runs`, #1274, ADR-console-101), from the
+        later of the spend window's first day and the day the project began to hold `root`, outside the lock,
+        mapped by a copy of the states taken in the section; a read that raises (every root unreadable
+        included) fails the question like any other gathering. After that read the ownership of every
+        checkout is compared once more under the lock with the copy: a registry that changed meanwhile (a
+        checkout taken by another project included) fails the question, so no later owner's records enter the
+        answer of an earlier one. `_run_project_question` checks once more, just before the session starts,
+        that the project still holds `root` (`project_question.CHECKOUT_MOVED`).
         """
         if self._spend_view is None:
             self._spend_step(only_without_view=True)
         with self._ingest:
             held_state = self._states.get(project_id)
             if held_state is None or held_state.root != root:
-                raise RuntimeError("the project no longer holds the checkout the question was asked in")
+                raise RuntimeError(project_question.CHECKOUT_MOVED)
             events = self.log.events()
             spend_view, sprint_states, inbox = self._spend_view, self._sprints, self._inbox
+            states = dict(self._states) if deep else None
             live_runs = {
                 key for key in self._deliveries
                 if (held := self._sessions.get(key[0])) is not None and held.state != sessions.ENDED
                 and held.repo is not None and project_for(held.repo, self._states) == project_id}
+        runs = None
+        if deep:
+            today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
+            window = (today - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
+            owned = question_records.owner_since(events, project_id, root)
+            runs = transcript_digest.project_runs(
+                self._projects_dirs(), project_id, lambda repo: project_for(repo, states),
+                max(window, owned) if owned else window,
+                question_records.run_issues(events, project_id))
+            with self._ingest:
+                if {pid: state.root for pid, state in self._states.items()} != {
+                        pid: state.root for pid, state in states.items()}:
+                    raise RuntimeError(
+                        "the projects' checkouts changed while the transcripts were read")
         return question_records.encode(question_records.project_records(
             project_id, root=root, events=events, spend=spend_view, live_runs=live_runs,
-            sprint_states=sprint_states, inbox=inbox,
+            sprint_states=sprint_states, inbox=inbox, transcripts=runs,
             written_at=self._now().isoformat(timespec="seconds")))
 
     def _record_project_answer(self, question_id: str, project_id: str,
@@ -7758,7 +7806,8 @@ class ConsoleService:
             if launch is None:
                 return
             launch = dataclasses.replace(
-                launch, permission=self._read_permission(launch.project_id, launch.cwd))
+                launch, permission=self._read_permission(launch.project_id, launch.cwd),
+                allow=self._allow_rules(launch.cwd))
             listed = None
             if isinstance(token, _ListedMoveReservation):
                 try:
@@ -8220,8 +8269,9 @@ class ConsoleService:
     def _refresh_settings(self, sprint_id: str, root: str) -> permission.Permission:
         """Write the sprint's manager settings file again before a wake (ADR-console-021); the mode it wrote.
 
-        The content is what a launch writes, from the sprint's stored secret and the mode the project's
-        production rules choose now (ADR-console-060), read off the lock. The write runs under the ingest lock,
+        The content is what a launch writes, from the sprint's stored secret, the project's root as `CONSOLE_SPRINT_ROOT` (ADR-console-103), the mode the project's
+        production rules choose now (ADR-console-060) and the allow rules its slug and merge binding give now
+        (ADR-console-102), each read off the lock again, never copied from the launch. The write runs under the ingest lock,
         as `withdraw_goal` removes the secret and the file, so a withdrawal can never fall between the read
         and the write and leave a file holding the secret. `NudgeFailed` when the sprint is no longer open,
         when its secret is missing (the wake is not sent without the isolation and permission members) or when
@@ -8233,6 +8283,7 @@ class ConsoleService:
                 raise nudge.NudgeFailed("the sprint is no longer open")
             project_id = sprint.project_id
         chosen = self._read_permission(project_id, root)
+        allow = self._allow_rules(root)
         with self._ingest:
             if sprint_id not in self._sprints:
                 raise nudge.NudgeFailed("the sprint is no longer open")
@@ -8241,8 +8292,8 @@ class ConsoleService:
                 raise nudge.NudgeFailed("the sprint's secret is missing")
             try:
                 manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
-                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret},
-                                       chosen)
+                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret, manager.ROOT_ENV: root},
+                                       chosen, allow)
             except manager.LaunchFailed as error:
                 raise nudge.NudgeFailed(str(error)) from error
         return chosen
@@ -9604,6 +9655,11 @@ class ConsoleService:
         return (read(self._slug_of, None), read(self._branch_pattern_of, None), strategy,
                 delete_branch)
 
+    def _allow_rules(self, root: str | None) -> tuple[str, ...]:
+        """Off the lock: the allow rules the project's slug and merge binding give a manager's settings (ADR-console-102)."""
+        slug, _, strategy, delete_branch = self._permit_reads(root)
+        return manager.allow_rules(slug, strategy, delete_branch)
+
     def _permit_record(self, sprint: sprints.SprintState, session_id: str, tool_use_id: str,
                        slug: str | None, verdict: permit.Verdict) -> permit.Verdict:
         """Under the ingest lock: append the `permit.judged` row of a decided verdict and return it."""
@@ -9985,20 +10041,30 @@ class ConsoleService:
                 self._publish()
         return appended + moved
 
+    def _session_view(self, profiles: frozenset[str], excluded: frozenset[str] | None = None,
+                      pinned: object = _FOLDED) -> dict:
+        """Under the ingest lock: the capacity view a session choice is made over, over `profiles`.
+
+        `excluded` is the set the view is made over, the folded one when None; `pinned` is the
+        pin it is made over, the folded one when left out and no pin when None.
+        """
+        return capacity.capacity_view(profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins,
+                                      excluded=self._excluded if excluded is None else excluded,
+                                      pinned=self._pinned if pinned is _FOLDED else pinned,
+                                      owners=self._owners_now())
+
+    def _choice_over(self, view: dict) -> str | None:
+        """Under the ingest lock: the profile a new session should use, over `view`."""
+        return manager.session_profile(view, self._use.last, None, self._waiting_logins())
+
     def _session_choice(self, profiles: frozenset[str], excluded: frozenset[str] | None = None,
                         pinned: object = _FOLDED) -> str | None:
         """Under the ingest lock: the profile a new session should use, over `profiles`.
 
-        `excluded` is the set the choice is made over, the folded one when None; `pinned` is the
-        pin it is made over, the folded one when left out and no pin when None.
+        `excluded` and `pinned` are as in `_session_view`.
         """
-        return manager.session_profile(
-            capacity.capacity_view(profiles - self._removing, self._capacity, self._clock(),
-                                   self._signins,
-                                   excluded=self._excluded if excluded is None else excluded,
-                                   pinned=self._pinned if pinned is _FOLDED else pinned,
-                                   owners=self._owners_now()),
-            self._use.last, None, self._waiting_logins())
+        return self._choice_over(self._session_view(profiles, excluded, pinned))
 
     def set_exclusion(self, profile: str, excluded: bool) -> list[Event]:
         """Exclude `profile` from the console's choice, or put it back; `exclusion.Refused` when it cannot.
@@ -10075,6 +10141,24 @@ class ConsoleService:
             profile = self._session_choice(self._read_profiles())
             self._note_choice(profile)
             return profile
+
+    def session_answer(self, all_out: bool) -> dict:
+        """The answer to `GET /api/profile`: `{"profile": name}`, or with `all_out` and every profile out
+        `{"all_out": True, "profile": None, "resumes_at": <UTC time ending in Z, or None>}`.
+
+        One capacity view serves both the answer and the choice, which is kept in the choice file as
+        `session_profile` keeps it.
+        """
+        with self._ingest:
+            view = self._session_view(self._read_profiles())
+            profile = self._choice_over(view)
+            self._note_choice(profile)
+            if all_out and view["all_out"]:
+                resumes = view["resumes_at"]
+                return {"all_out": True, "profile": None,
+                        "resumes_at": None if resumes is None else datetime.fromisoformat(resumes)
+                        .astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            return {"profile": profile}
 
     def _note_choice(self, profile: str | None) -> None:
         """Under the ingest lock: write the choice file when `profile` differs from the last value written."""

@@ -1,20 +1,17 @@
 """The delivery procedure format and its check (#1508).
 
-A procedure directory holds procedure files `<name>.json` (every `*.json` not
-ending `.reply.json`), prompt files `*.md` and reply schema files
-`*.reply.json`. A procedure's name is its file stem and matches
-`^[a-z][a-z0-9-]*$`. Every file is strict JSON: a duplicate key or a
-non-finite literal makes it unreadable.
+A procedure directory holds procedure files `<name>.json` (every `*.json` not ending `.reply.json`), prompt files `*.md` and
+reply schema files `*.reply.json`. A procedure's name is its file stem and matches `^[a-z][a-z0-9-]*$`. Every file is strict
+JSON: a duplicate key or a non-finite literal makes it unreadable.
 
-Header. A procedure is an object with exactly these members, all required:
-`format` (the integer 1, the only version number), `keep_alive` (an object
-with `command`, a command id, optional `subcommand`, and `in`, a list of
-distinct `run.<input>` paths: the one keep-alive command and where its
-arguments come from), `inputs` (distinct names matching `^[a-z][a-z0-9_]*$`),
-`stops` (stop name -> object with exactly `need`, one of `NEEDS`, and
-`reenter`, a step id) and `steps` (a non-empty list). A stop is never named
-`done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared
-verdict or reply enum value carries it.
+Header. A procedure is an object with these members: `format` (the integer 1, the only version number), `inputs` (distinct
+names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with exactly `need`, one of `NEEDS`, and `reenter`, a step
+id) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
+object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
+keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
+is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait` or like a step. `exhausted` and `out-of-bounds` are reserved:
+no stop, declared verdict or reply enum value carries either. `quota-wait` is the engine's own stop, taken when every account
+is out of usage (`engine_shell`).
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`),
 `kind` (one of `KINDS`), `holds` (one of `HOLDS`, required: how long the step's
@@ -32,76 +29,56 @@ objects with exactly `step` and `pass` (distinct strings); `call`: `procedure`,
 optional `each` (one of the step's `in` paths) and `parallel` (an integer >= 1,
 only with `each`). A member a level does not define is `undefined_field`.
 
-Groups. A group member is a step of the same list, listed by exactly one
-group, not a group, not the first step and never an `on` target or a stop's
-`reenter`. The first step is the entry.
+Groups. A group member is a step of the same list, listed by exactly one group, not a group, not the first step and never an
+`on` target or a stop's `reenter`. The first step is the entry. Command ids and verdicts are declared in
+`command_verdicts.json`: an object keyed by command-table id whose value is `null` (not declared yet), `{"verdicts": [...]}`
+or `{"subcommands": {<subcommand>: [...]}}`.
 
-Command ids and verdicts are declared in `command_verdicts.json`: an object
-keyed by command-table id whose value is `null` (not declared yet),
-`{"verdicts": [...]}` or `{"subcommands": {<subcommand>: [...]}}`.
+Phases. One defect yields one refusal, ordered by procedure name, phase, then step position, and naming the step id, or `None`
+for a header, `keep_alive` or stop defect. Phase A (structure, per file): `unreadable_procedure`, `undefined_field`,
+`invalid_field`, `unknown_stage`, `duplicate_step`. A file with a phase A refusal gets no other phase.
 
-Phases. Phase A (structure, per file): `unreadable_procedure`,
-`undefined_field`, `invalid_field`, `unknown_stage`, `duplicate_step`. A file
-with a phase A refusal gets no other phase, so one defect yields one refusal.
-Refusals are ordered by procedure name, phase, then step position, and name
-the step id, or `None` for a header, `keep_alive` or stop defect.
+Phase B (references, only on a file with no phase A refusal; the header, `keep_alive` and stops first, then the steps in
+order): `unknown_target` (an `on` target that is no step, stop or `done`, a stop `reenter` or a group member `step` that is
+no step), `missing_claim_lost` (a `keep_alive` and no stop `claim-lost`), `unknown_command` and `undeclared_verdicts` (a
+`command` step, its `check` or `keep_alive` against `command_verdicts.json`: an id that is no key, or a `subcommand` on a `verdicts`-form
+declaration, is the first; a `null` declaration, or a `subcommands`-form declaration that lacks the named subcommand, is the
+second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply` (no such file in the procedure directory, a file
+that resolves outside it, or for `missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema is not
+a strict-JSON object with a `properties` object, a `required` list of strings that contains `outcome_from`, and an `enum` of
+distinct non-empty strings under `properties[outcome_from]` that names neither `exhausted` nor `no-reply`, both reserved), `unsupported_reply` (a reply schema that passes
+`invalid_reply` but uses a construct outside the subset `engine_reply` defines, named in the detail), `unknown_grader`
+(not in `GRADERS`) and `missing_procedure` (a `call` child file is absent; a child that exists but fails phase A gives the parent no refusal).
 
-Phase B (references, only on a file with no phase A refusal; the header,
-`keep_alive` and stops first, then the steps in order, one refusal per failed
-reference): `unknown_target` (an `on` target that is no step, stop or `done`,
-a stop `reenter` or a group member `step` that is no step), `unknown_command`
-and `undeclared_verdicts` (a `command` step, its `check` or `keep_alive` against
-`command_verdicts.json`: an id that is no key, or a `subcommand` on a
-`verdicts`-form declaration, is the first; a `null` declaration, or a
-`subcommands`-form declaration that lacks the named subcommand, is the
-second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply`
-(no such file in the procedure directory, a file that resolves outside it,
-or for `missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema
-is not a strict-JSON object with a `properties` object, a `required` list of
-strings that contains `outcome_from`, and an `enum` of distinct non-empty
-strings under `properties[outcome_from]`), `unknown_grader` (not in
-`GRADERS`) and `missing_procedure` (a `call` child file is absent; a child
-that exists but fails phase A gives the parent no refusal).
+`Resolved` records what each step's references resolved to: a `StepResolved` per step id (a member is `None` when its
+reference failed or does not apply; `child_stops` is set only when the child loaded with no phase A refusal) and `keep_alive`,
+the keep-alive command's outcomes or `None`.
 
-`Resolved` records, per procedure, what each step's references resolved to,
-for the checks that follow phase B: a `StepResolved` per step id, whose
-member is `None` when that reference failed or does not apply to the kind
-(`outcomes`: a command's verdicts, a reply's outcome enum or a grader's
-outcomes; `reply_properties` and `reply_required`: the reply schema's member
-names and `required` names; `child_stops`: the child's stop names, only when
-the child loaded with no phase A refusal; `prompt`: the prompt file's text), and `keep_alive`, the keep-alive
-command's outcomes or `None`.
+Phase C, graph (only on a file with no phase A refusal and no `unknown_target`; the steps in order, `unreachable_done`
+first): `unreachable_step` (a step the walk of `flow_graph` from the first step does not reach, `flow_graph` carrying the
+renewal failure as an edge to `claim-lost` into a `mutates` step; a group member is reached when its group is),
+`unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
+`unknown_outcome` (a step's `on` keys against `outcomes_of`; an `agent` step also produces `no-reply`, the shell's outcome when
+no valid reply came back, so a non-member agent step whose `on` lacks it is `unmapped_outcome`; an agent step outside a group also
+produces `out-of-bounds`, which its `on` must map, and a command step may map it; a command step also produces
+`refused`, because the engine calls the lifecycle guard before every command (issue 1515), so its `on` maps it; a step in
+`exhaustible` also produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the
+group, where neither `no-reply` nor `refused` passes) and `unbounded_cycle` (a cycle among steps
+with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through the `exhausted`
+entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent; refused at its
+first step). An outcome check whose reference failed phase B is skipped for that step.
 
-Phase C (graph, only on a file with no phase A refusal and no `unknown_target`;
-the steps in order, `unreachable_done` first): `unreachable_step` (a step the
-walk of `flow_graph` from the first step does not reach; a group member is
-reached when its group is), `unreachable_done` (no reachable step has an `on`
-entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
-`unknown_outcome` (a step's `on` keys against `outcomes_of`; a step in
-`exhaustible` also produces `exhausted`, any step may map it, and a group
-member's `pass` entries are checked at the group) and `unbounded_cycle` (a
-cycle among steps with no `max_visits`, refused at its first step, or a step
-on a cycle whose `exhausted` target re-enters the loop, or a loop through the
-`exhausted` entries of steps on a cycle, alone or mixed with ordinary entries,
-which never ends once every bound is spent; refused at its first step). An outcome check whose
-reference failed phase B is skipped for that step.
-
-Phase C, data flow (after the graph checks; in step order, the header's
-`keep_alive` first, one refusal per path or placeholder):
-`unproduced_input` (an `in` path `run.<n>` whose `n` is not a header input, or
-`<X>.<m>` where `X` is not produced on every route to the step: `X` is a
-non-member step, or a member of a group, among the `dominators` of the step
-without itself; a group member is dominated through its group; a step never
-reads its own result; a step the walk does not reach, and a member of a group
-it does not reach, skip this route check and keep the `run.<n>` and member
-checks), `unknown_member` (`X` is an agent step whose reply schema resolved and
-`m` is not in its `properties` or not in its `required` list, because a value
-the reply may leave out cannot be consumed; `X` is a decide step and `m` is
-not `verdict`, the only member its result publishes; the result of any other
-kind declares no schema and is not member-checked) and `unknown_placeholder` (a
-`{{<path>}}` of the step's prompt that is none of its `in` paths; skipped when
-the prompt is missing).
-"""
+Phase C, data flow (after the graph checks; in step order, the header's `keep_alive` first): `unproduced_input` (an `in` path
+`run.<n>` whose `n` is not a header input, or `<X>.<m>` where `X` is not produced on every route to the step: `X` is a
+non-member step, or a member of a group, among the `dominators` of the step without itself; a group member is dominated
+through its group; a step never reads its own result; a step the walk does not reach, and a member of a group it does not
+reach, skip this route check and keep the `run.<n>` and member checks; a step's `no-reply` result is `{}`, so the edge
+it maps `no-reply` to produces none of its members, and a reader reached through it is refused), `unknown_member` (`X` is an agent step whose reply
+schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
+consumed; a step ended by a bound (`out-of-bounds`) produces none of its members, so a read of `<X>.<m>` is refused on a
+route where `X` ended by the bound, unless the route reenters `X` and passes a normal outcome before the reader (the `exhausted` entry of a step on a cycle follows an earlier visit and keeps that visit's reply, unless the bound route leads back to the step); `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
+declares no schema and is not member-checked) and `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
+its `in` paths; skipped when the prompt is missing)."""
 
 from __future__ import annotations
 
@@ -113,6 +90,7 @@ from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery.engine_graders import GRADERS
+from agent_tools.delivery.engine_reply import schema_problem
 
 FORMAT = 1
 STAGES = ("setup", "planning", "plan review", "building", "final review",
@@ -122,12 +100,18 @@ NEEDS = ("owner-decision", "owner-look", "retry", "nothing")
 ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
 DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_stage", "duplicate_step", "unknown_target", "unknown_command",
-           "undeclared_verdicts", "unknown_role", "missing_prompt", "missing_reply",
-           "invalid_reply", "unknown_grader", "missing_procedure",
+           "undeclared_verdicts", "missing_claim_lost", "unknown_role", "missing_prompt", "missing_reply",
+           "invalid_reply", "unsupported_reply", "unknown_grader", "missing_procedure",
            "unreachable_step", "unreachable_done", "unmapped_outcome",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
+OUT_OF_BOUNDS = "out-of-bounds"
+NO_REPLY = "no-reply"
+REFUSED = "refused"
+CLAIM_LOST = "claim-lost"
+QUOTA_WAIT = "quota-wait"
+START = "(start)"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -135,7 +119,6 @@ PATH_RE = re.compile(r"^([a-z][a-z0-9-]*)\.([a-z][a-z0-9_]*)$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
-HEADER_MEMBERS = ("format", "keep_alive", "inputs", "stops", "steps")
 HOLDS = ("run", "head", "live")
 COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
@@ -219,8 +202,9 @@ def _verdict_list(value: object, where: str) -> tuple[str, ...]:
     if (not isinstance(value, list) or not all(isinstance(item, str) and item for item in value)
             or len(set(value)) != len(value)):
         raise DeclarationError(f"{where}: verdicts are distinct non-empty strings")
-    if EXHAUSTED in value:
-        raise DeclarationError(f"{where}: {EXHAUSTED!r} is reserved, not a verdict")
+    for reserved in (EXHAUSTED, OUT_OF_BOUNDS):
+        if reserved in value:
+            raise DeclarationError(f"{where}: {reserved!r} is reserved, not a verdict")
     return tuple(value)
 
 
@@ -304,7 +288,7 @@ def _paths(value: object, only_run: bool, found: _Findings, step: str | None,
 
 
 def _header(doc: dict, found: _Findings) -> None:
-    _members(doc, HEADER_MEMBERS, (), found, None, "a procedure")
+    _members(doc, ("format", "inputs", "stops", "steps"), ("keep_alive",), found, None, "a procedure")
     if "format" in doc and not (_is_int(doc["format"]) and doc["format"] == FORMAT):
         found.add("invalid_field", f"format must be the integer {FORMAT}.")
     if "keep_alive" in doc:
@@ -335,8 +319,9 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
     for name, stop in stops.items():
         if not NAME_RE.fullmatch(name):
             found.add("invalid_field", f"stop name {name!r} must match {NAME_RE.pattern}.")
-        elif name in ("done", EXHAUSTED) or name in ids:
-            found.add("invalid_field", f"stop name {name!r} is `done`, `{EXHAUSTED}` or a step id.")
+        elif name in ("done", EXHAUSTED, OUT_OF_BOUNDS, QUOTA_WAIT) or name in ids:
+            found.add("invalid_field",
+                      f"stop name {name!r} is `done`, `{EXHAUSTED}`, `{OUT_OF_BOUNDS}`, `{QUOTA_WAIT}` or a step id.")
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue
@@ -546,29 +531,33 @@ class _Reply:
     outcomes: tuple[str, ...]
 
 
-def _reply_schema(path: Path, outcome_from: str) -> _Reply | str:
-    """The reply schema's facts, or the reason it is invalid."""
+def _reply_schema(path: Path, outcome_from: str, name: str) -> _Reply | tuple[str, str]:
+    """The reply schema's facts, or the defect and its detail."""
     try:
         schema = _strict_load(path)
     except (OSError, ValueError) as error:
-        return " ".join(f"the reply schema cannot be read as strict JSON: {error}".split())
+        return "invalid_reply", " ".join(f"the reply schema cannot be read as strict JSON: {error}".split())
     if not isinstance(schema, dict):
-        return "the reply schema is not a JSON object."
+        return "invalid_reply", "the reply schema is not a JSON object."
     properties = schema.get("properties")
     if not isinstance(properties, dict):
-        return "the reply schema has no properties object."
+        return "invalid_reply", "the reply schema has no properties object."
     required = schema.get("required")
     if not isinstance(required, list) or not all(isinstance(n, str) for n in required):
-        return "the reply schema has no required list of strings."
+        return "invalid_reply", "the reply schema has no required list of strings."
     if outcome_from not in required:
-        return f"the reply schema does not require {outcome_from!r}."
+        return "invalid_reply", f"the reply schema does not require {outcome_from!r}."
     outcome = properties.get(outcome_from)
     enum = outcome.get("enum") if isinstance(outcome, dict) else None
     if (not isinstance(enum, list) or not enum or not all(_is_text(v) for v in enum)
             or len(set(enum)) != len(enum)):
-        return f"properties.{outcome_from} has no enum of distinct non-empty strings."
-    if EXHAUSTED in enum:
-        return f"properties.{outcome_from} enum names {EXHAUSTED!r}, which is reserved."
+        return "invalid_reply", f"properties.{outcome_from} has no enum of distinct non-empty strings."
+    for reserved in (EXHAUSTED, OUT_OF_BOUNDS, NO_REPLY):
+        if reserved in enum:
+            return "invalid_reply", f"properties.{outcome_from} enum names {reserved!r}, which is reserved."
+    problem = schema_problem(schema)
+    if problem:
+        return "unsupported_reply", f"{name} uses {problem}, outside the reply schema subset."
     return _Reply(frozenset(properties), frozenset(required), tuple(enum))
 
 
@@ -604,7 +593,7 @@ def _inside(directory: Path, name: str) -> Path | None:
     return path
 
 
-def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | str],
+def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | tuple[str, str]],
                       found: _Findings, label: str) -> StepResolved:
     if item["role"] not in ROLES:
         found.add("unknown_role", f"{item['role']!r} is not one of {', '.join(ROLES)}.", label)
@@ -624,10 +613,10 @@ def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | s
         return StepResolved(prompt=prompt)
     key = f"{item['reply']}\0{item['outcome_from']}"
     if key not in replies:
-        replies[key] = _reply_schema(reply_path, item["outcome_from"])
+        replies[key] = _reply_schema(reply_path, item["outcome_from"], item["reply"])
     reply = replies[key]
-    if isinstance(reply, str):
-        found.add("invalid_reply", reply, label)
+    if isinstance(reply, tuple):
+        found.add(reply[0], reply[1], label)
         return StepResolved(prompt=prompt)
     return StepResolved(reply.outcomes, reply.properties, reply.required, prompt=prompt)
 
@@ -639,12 +628,17 @@ def check_references(name: str, doc: dict, directory: Path,
     found = _Findings(name)
     ids = {item["id"] for item in doc["steps"]}
     stops = set(doc["stops"])
-    keep_alive = _command_outcomes(doc["keep_alive"], commands, found, None)
+    keep_alive = None
+    if "keep_alive" in doc:
+        keep_alive = _command_outcomes(doc["keep_alive"], commands, found, None)
+        if CLAIM_LOST not in stops:
+            found.add("missing_claim_lost",
+                      f"keep_alive {doc['keep_alive']['command']!r} needs a stop {CLAIM_LOST!r}.")
     for stop_name, stop in doc["stops"].items():
         if stop["reenter"] not in ids:
             found.add("unknown_target", f"stop {stop_name!r} re-enters {stop['reenter']!r}, which is no step.")
     resolved: dict[str, StepResolved] = {}
-    replies: dict[str, _Reply | str] = {}
+    replies: dict[str, _Reply | tuple[str, str]] = {}
     for item in doc["steps"]:
         label, kind = item["id"], item["kind"]
         for outcome, target in item.get("on", {}).items():
@@ -716,15 +710,18 @@ def check_directory(directory: Path,
     return CheckResult(tuple(p.stem for p in files), tuple(refusals), resolved)
 
 
-
 def outcomes_of(step: dict, resolved: Resolved) -> tuple[str, ...] | None:
-    """The outcomes a step can produce but `exhausted`; `None` when unresolved."""
+    """The outcomes a step can produce but `exhausted`; `None` when unresolved. An agent step also produces `no-reply`."""
     kind = step["kind"]
     if kind == "group":
         return ("pass", "blocked")
     known = resolved.steps[step["id"]]
     if kind == "call":
         return None if known.child_stops is None else ("done",) + tuple(known.child_stops)
+    if kind == "agent" and known.outcomes is not None:
+        return known.outcomes + (NO_REPLY,)
+    if kind == "command" and known.outcomes is not None:
+        return known.outcomes + (REFUSED,)
     return known.outcomes
 
 
@@ -791,11 +788,24 @@ def exhaustible(procedure: dict) -> frozenset[str]:
     return on_cycle(stop_closed_graph(procedure))
 
 
+def _changing_steps(procedure: dict) -> set[str]:
+    """The ids of the `mutates` steps and of the groups with a `mutates` member."""
+    changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
+    changing |= {item["id"] for item in procedure["steps"]
+                 if changing.intersection(m["step"] for m in item.get("members", ()))}
+    return changing
+
+
 def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
-    """Steps and stops -> where control can go, `done` and dead `exhausted` left out."""
+    """Steps and stops -> where control can go (`START` to the first step), `done` and dead `exhausted` left out.
+
+    A node entering a `mutates` step of a procedure with a `keep_alive` and a `claim-lost` stop also goes to that stop.
+    """
     members = _members_of(procedure)
     cyclic = exhaustible(procedure)
-    graph: dict[str, tuple[str, ...]] = {}
+    renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
+    changing = _changing_steps(procedure)
+    graph: dict[str, tuple[str, ...]] = {START: (procedure["steps"][0]["id"],)}
     for item in procedure["steps"]:
         if item["id"] in members:
             continue
@@ -804,16 +814,57 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
             if target != "done" and (outcome != EXHAUSTED or item["id"] in cyclic))
     for name, stop in procedure["stops"].items():
         graph[name] = (stop["reenter"],)
+    for node, targets in graph.items():
+        if renews and changing.intersection(targets):
+            graph[node] = targets + (CLAIM_LOST,)
+    return graph
+
+
+def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """`flow_graph` with a `(result)` node after each step whose `on` maps `out-of-bounds` or, for an agent step, `no-reply`.
+
+    The step's node keeps its `out-of-bounds` and `no-reply` edges (unless their target is `done`) and goes to
+    `<id>(result)`, which stands for the step having ended by a normal outcome and carries the step's other outcome
+    edges. A route through the step's own node alone is one on which the step ended by a bound or with no reply and
+    stored no member of this visit (a bound stores `{"bound": ...}`, no reply stores `{}`).
+
+    The `exhausted` edge of a step on a cycle is taken on an entry after a visit ended, and a visit's result is
+    kept until the next one replaces it, so it hangs on `<id>(result)`: the previous visit ended by a normal outcome.
+    It hangs on the step's own node too only when its `out-of-bounds` or `no-reply` target leads back to the step
+    through steps, the one way the previous visit can have ended with no member stored.
+    """
+    members = _members_of(procedure)
+    cyclic = exhaustible(procedure)
+    renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
+    changing = _changing_steps(procedure)
+    graph = flow_graph(procedure)
+    steps_only = step_graph(procedure)
+
+    def renewing(targets: tuple[str, ...]) -> tuple[str, ...]:
+        return targets + (CLAIM_LOST,) if renews and changing.intersection(targets) else targets
+
+    for item in procedure["steps"]:
+        if item["id"] in members or item["kind"] not in ("agent", "command"):
+            continue
+        bare = {OUT_OF_BOUNDS} | ({NO_REPLY} if item["kind"] == "agent" else set())
+        if not bare.intersection(item["on"]):
+            continue
+        name = item["id"]
+        result_node = f"{name}(result)"
+        bare_targets = tuple(dict.fromkeys(
+            target for outcome, target in item["on"].items() if outcome in bare and target != "done"))
+        bare_returns = any(target == name or name in _reach(steps_only, target) for target in bare_targets)
+        exhausted = tuple(target for outcome, target in item["on"].items()
+                          if outcome == EXHAUSTED and target != "done" and name in cyclic)
+        graph[name] = renewing(bare_targets + (exhausted if bare_returns else ()) + (result_node,))
+        graph[result_node] = renewing(tuple(
+            target for outcome, target in item["on"].items()
+            if outcome not in bare | {EXHAUSTED} and target != "done") + exhausted)
     return graph
 
 
 def dominators(graph: Mapping[str, tuple[str, ...]], entry: str) -> dict[str, frozenset[str]]:
-    """Node -> the nodes on every route from `entry` to it, itself included.
-
-    Defined over the nodes reachable from `entry`: `dom(entry) = {entry}` and
-    `dom(n) = {n} | intersection of dom(p) over reachable predecessors p`,
-    iterated to a fixed point.
-    """
+    """Node -> the nodes on every route from `entry` to it, itself included."""
     nodes = {entry} | _reach(graph, entry)
     predecessors: dict[str, list[str]] = {node: [] for node in nodes}
     for node in nodes:
@@ -834,11 +885,11 @@ def dominators(graph: Mapping[str, tuple[str, ...]], entry: str) -> dict[str, fr
 
 
 def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> None:
-    graph = flow_graph(procedure)
+    graph = result_flow_graph(procedure)
     by_id = {item["id"]: item for item in procedure["steps"]}
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
                 if item["kind"] == "group" for member in item["members"]}
-    dom = dominators(graph, procedure["steps"][0]["id"])
+    dom = dominators(graph, START)
     inputs = set(procedure["inputs"])
 
     def check_path(path: str, step: dict | None) -> None:
@@ -852,7 +903,10 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
             owner = group_of.get(label, label)
             if owner in dom:
                 before = dom[owner] - {owner}
-                if producer not in by_id or group_of.get(producer, producer) not in before:
+                node = group_of.get(producer, producer)
+                if f"{node}(result)" in graph:
+                    node = f"{node}(result)"
+                if producer not in by_id or node not in before:
                     found.add("unproduced_input",
                               f"{path!r} is not produced on every route to the step.", label)
         known = resolved.steps.get(producer)
@@ -867,7 +921,7 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                       f"{path!r} is not a member the result of {producer!r} carries; a decide step publishes only 'verdict'.",
                       label)
 
-    for path in procedure["keep_alive"]["in"]:
+    for path in procedure.get("keep_alive", {}).get("in", ()):
         check_path(path, None)
     for item in procedure["steps"]:
         reads = item.get("in", [])
@@ -885,8 +939,7 @@ def _check_reachability(procedure: dict, found: _Findings) -> None:
     members = _members_of(procedure)
     graph = flow_graph(procedure)
     cyclic = exhaustible(procedure)
-    entry = procedure["steps"][0]["id"]
-    reached = {entry} | _reach(graph, entry)
+    reached = {START} | _reach(graph, START)
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
                 if item["kind"] == "group" for member in item["members"]}
     reaches_done = any(
@@ -917,20 +970,27 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
                 member_outcomes = outcomes_of(by_id[member["step"]], resolved)
                 if member_outcomes is None:
                     continue
-                stray = [o for o in member["pass"] if o not in member_outcomes]
+                if REFUSED in member["pass"]:
+                    found.add("unknown_outcome",
+                              f"member {member['step']!r} passes on 'refused', which never passes a group.",
+                              label)
+                stray = [o for o in member["pass"]
+                         if o == NO_REPLY or (o not in member_outcomes and o != REFUSED)]
                 if stray:
                     found.add("unknown_outcome",
                               f"member {member['step']!r} cannot produce {', '.join(map(repr, stray))}.",
                               label)
         if label in members:
             continue
-        producible = set(produced) | ({EXHAUSTED} if label in cyclic else set())
-        unmapped = [o for o in sorted(producible, key=(*produced, EXHAUSTED).index)
+        producible = (set(produced) | ({EXHAUSTED} if label in cyclic else set())
+                      | ({OUT_OF_BOUNDS} if item["kind"] == "agent" else set()))
+        unmapped = [o for o in sorted(producible, key=(*produced, OUT_OF_BOUNDS, EXHAUSTED).index)
                     if o not in item["on"]]
         if unmapped:
             found.add("unmapped_outcome",
                       f"on does not map {', '.join(map(repr, unmapped))}.", label)
-        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED]
+        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED
+                   and not (o == OUT_OF_BOUNDS and item["kind"] in ("agent", "command"))]
         if unknown:
             found.add("unknown_outcome",
                       f"on maps {', '.join(map(repr, unknown))}, which the step cannot produce.", label)
