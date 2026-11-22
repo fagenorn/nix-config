@@ -100,6 +100,7 @@ REGISTERED_CHECK_IDS = (
     "verification.conformance_workflow.fresh",
     "verification.context_map.lint",
     "verification.standards.lint",
+    "verification.violations.never_rise",
 )
 
 ENTRY_LADDER_IDS = (

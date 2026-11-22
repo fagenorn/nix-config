@@ -66,6 +66,8 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.delivery.host_admission",  # conformance_checks
         "agent_tools.delivery.context_map_lint",  # conformance_checks
         "agent_tools.delivery.standards_lint",  # conformance_checks
+        "agent_tools.delivery.never_rise",  # conformance_checks
+        "agent_tools.delivery.size_lint",  # conformance_checks
         "agent_tools.release.railway_deploy_adapter",  # host_readiness
         "agent_tools.release.codesigned_artifact_adapter",  # host_readiness
     }),
