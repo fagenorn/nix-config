@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import socketserver
+import tempfile
 import threading
 import time
 import unittest
@@ -224,6 +225,33 @@ class RegistryFake(Fake):
         return self.report
 
 
+_RECONCILE_TEMPLATES: dict[str, Path] = {}
+
+
+def reconciled(parent: Path, *, contract: bool = False) -> Path:
+    """`reconcile_repository(parent, contract=contract)`, copied from one build per flag per process.
+
+    The repository's only absolute path is its origin URL, so a copy re-points it at its own bare origin;
+    the index is refreshed because the copy's files are new inodes and product code reads that index.
+    """
+    if "root" not in _RECONCILE_TEMPLATES:
+        root = Path(tempfile.mkdtemp(prefix="approve-reconcile-"))
+        unittest.addModuleCleanup(shutil.rmtree, root, True)
+        _RECONCILE_TEMPLATES["root"] = root
+    flag = "contract" if contract else "plain"
+    template = _RECONCILE_TEMPLATES["root"] / flag
+    if flag not in _RECONCILE_TEMPLATES:
+        reconcile_repository(template, contract=contract)
+        _RECONCILE_TEMPLATES[flag] = template
+    parent.mkdir(parents=True, exist_ok=True)
+    copy = parent / "reconcile"
+    shutil.copytree(template / "reconcile", copy, symlinks=True)
+    shutil.copytree(template / "origin.git", parent / "origin.git", symlinks=True)
+    git(copy, "remote", "set-url", "origin", str(parent / "origin.git"))
+    git(copy, "update-index", "-q", "--refresh")
+    return copy.resolve()
+
+
 SERVER_POLL_SECONDS = 0.01
 
 
@@ -257,7 +285,7 @@ class ApproveCase(Case):
     def ready(self, plan=READY, fake_class=Fake, **fake_arguments):
         fake = fake_class(plan=plan, **fake_arguments)
         self.start(fake)
-        self.repo = reconcile_repository(self.parent, contract=True)
+        self.repo = reconciled(self.parent, contract=True)
         self.shown = self.registered(self.repo)
         self.planned = self.settled_row(self.repo)
         return fake
@@ -634,7 +662,7 @@ class ApplyCardTest(ApproveCase):
         later = {**READY, "plan": {**READY["plan"], "plan_id": PID_A}}
         fake = Fake(plan=[READY, later], apply_result=SIGNING)
         self.start(fake, draft_reader=lambda root: READ_NO_BUILD)
-        self.repo = reconcile_repository(self.parent)
+        self.repo = reconciled(self.parent)
         drafting = self.registered(self.repo)
         for field, value in (("commit-signed", "yes"), ("build-command", "none"),
                              ("test-command", "none")):
@@ -796,7 +824,7 @@ class PlanApproveRefusalTest(ApproveCase):
     def test_without_a_forge_the_host_refuses(self):
         fake = Fake(plan=READY, apply_result=APPLIED)
         self.start(fake, forge=None)
-        self.shown = self.registered(reconcile_repository(self.parent, contract=True))
+        self.shown = self.registered(reconciled(self.parent, contract=True))
         self.refused(PID_B, approve.UNAVAILABLE)
         self.assertEqual(approve.UNAVAILABLE,
                          "approving an adoption is not available on this host")
@@ -2917,3 +2945,30 @@ class ReconcileProposalTest(ApproveCase):
             self.assertEqual(self.confirm({"root": str(root), "choice": "register"})[0], 204)
             self.wait_for(lambda r: r["result"] == "registered")
         self.assertEqual(len(reads), 1)
+
+
+class ReconciledCopyTest(ApproveCase):
+    def test_a_reconciled_copy_is_the_reconcile_build_with_its_own_origin(self):
+        with mock.patch(f"{__name__}.reconcile_repository", wraps=reconcile_repository) as spy:
+            first = reconciled(self.parent / "a", contract=True)
+            second = reconciled(self.parent / "b", contract=True)
+        git(first, "diff-index", "--quiet", "HEAD", "--")
+        self.assertLessEqual(spy.call_count, 1)
+        self.assertEqual(first, (self.parent / "a" / "reconcile").resolve())
+        self.assertEqual(git(first, "config", "--get", "remote.origin.url").strip(),
+                         str(self.parent / "a" / "origin.git"))
+        self.assertEqual(git(first, "log", "--format=%s"), "legacy\none\n")
+        self.assertEqual(git(first, "branch", "--show-current").strip(), "main")
+        self.assertTrue((first / ".agents/project.json").is_file())
+        self.assertEqual((first / ".claude/specs/a.md").read_text(), "# spec a\n")
+        self.assertEqual(git(first, "status", "--porcelain"), "")
+        git(first, "commit", "-q", "--allow-empty", "-m", "x")
+        git(first, "push", "-q", "origin", "main")
+        self.assertNotEqual(git(self.parent / "a" / "origin.git", "rev-parse", "main"),
+                            git(self.parent / "b" / "origin.git", "rev-parse", "main"))
+        self.assertEqual(second, (self.parent / "b" / "reconcile").resolve())
+
+    def test_a_reconciled_copy_without_a_contract_has_no_contract_file(self):
+        root = reconciled(self.parent / "c")
+        self.assertFalse((root / ".agents").exists())
+        self.assertEqual(git(root, "log", "--format=%s"), "legacy\none\n")
