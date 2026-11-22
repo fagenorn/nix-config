@@ -181,7 +181,7 @@ while a run is under way, with `plan_id`, `state` and `refusal` None and `questi
 latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
 given `{"plan_id", "text", "id", "subject"}` only when its `plan_id` is the latest's, and `refused`
 its `{"id", "subject"}` under the same match (the question the refused answer was for), and `draft`
-`contract_draft.shown(draft)` when the latest row holds a draft list (None for the running entry and
+`contract_draft.shown(draft)` (an entry is a `fact`, with no Change, for a derived value) when the latest row holds a draft list (None for the running entry and
 for any other row), and `draft_more` `contract_draft.more_line(draft)` under the same condition (the
 counted line for the shown settings outside the main ones; None otherwise, including when no such
 setting is shown); else None (D4). The keys `adoption` and `approve` are None in the `running` entry

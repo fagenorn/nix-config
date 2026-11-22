@@ -19,7 +19,7 @@ The owner's rules for this sprint: everything that needs the owner is a counted 
 
 ## Decision
 
-**D1. The main group is a fixed set.** The three main fields `integration-branch`, `lint-command` and `test-command`, then the five fact lines (the project id and issue tracker, the checks a pull request must pass, the platform versions it runs on, the minutes per delivery attempt, the agent knowledge files it holds), in that order, whatever their source. Every other settled field (`release`, `production`) is in the more group. Each main field keeps its own Change control, so at most three are visible before the fold opens; a fact line is `<label>: <value> (<source>)` and has none.
+**D1. The main group is a fixed set.** The three main fields `integration-branch`, `lint-command` and `test-command`, then the five fact lines (the project id and issue tracker, the checks a pull request must pass, the platform versions it runs on, the minutes per delivery attempt, the agent knowledge files it holds), in that order, whatever their source. Every other settled field (`release`, `production`) is in the more group. Each main field keeps its own Change control, so at most three are visible before the fold opens; a fact line is `<label>: <value> (<source>)`, has no Change control and is never in the fold.
 
 **D2. Plain words.** `contract_draft.py` owns every drafted-value word, and the page shows them verbatim. A draft saved before this wording is read back through `contract_draft.refresh`, which gives it the current labels, option labels and card questions and leaves every value, source and reason as saved.
 

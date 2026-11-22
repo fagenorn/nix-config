@@ -589,7 +589,7 @@ class ContractDraftTest(unittest.TestCase):
                          ["integration-branch", *cd.FACTS])
         for entry in lines:
             self.assertEqual(set(entry),
-                             {"field", "line", "value", "options", "text", "more", "placeholder"})
+                             {"field", "line", "value", "options", "text", "more", "fact", "placeholder"})
         texts = [entry["line"] for entry in lines]
         for line in (
             "branch finished work merges into: trunk (read from its remote)",

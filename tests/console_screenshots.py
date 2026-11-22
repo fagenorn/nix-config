@@ -164,13 +164,13 @@ Contract:
   `SprintState` having no `started_by`) those waits are skipped, so a base run still writes every
   file and the pictures are the before pictures of the actors.
   `register-apply` and `register-draft` are the console's registration of `sample-app`, a
-  repository with no contract whose ready plan proposes the command its adoption commit runs
-  through (`PROPOSAL_LINE`, #1268), served with a stand-in adopter and forge so the plan can be
-  applied: `register-apply` is the ready Apply card, its first line the proposal and then the
-  plan's own lines (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
+  repository with no contract whose ready plan is drafted in schema 3 (`FACT_LINE`, #1485),
+  served with a stand-in adopter and forge so the plan can be
+  applied: `register-apply` is the ready Apply card, its lines the plan's own
+  (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
   and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
   `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
-  the proposal as a main line beside its Change control. `register-reconcile-apply` and
+  the project id as a fact line with no Change control. `register-reconcile-apply` and
   `register-reconcile-draft` are the same two screens for a repository that already has a contract
   and pending adoption work, a `reconcile` plan (#1333): the row seeds the reading the console takes
   of a pre-commit hook whose runner is not on the plain PATH and of a `devenv.nix`, so the plan
@@ -178,7 +178,7 @@ Contract:
   `REGISTER_READING` reads the card's first
   line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
   holds what each state must read on a page that proposes it (`proposes(state)`, which is
-  `proposes_environment()` for the first two and `proposes_reconcile()` for the reconcile pair); on
+  `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on
   a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
   picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
   card opens on the plan's own first line and its draft shows nothing.
@@ -336,12 +336,11 @@ REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
 PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
-REGISTER_SHOWN = {"register-apply": (PROPOSAL_LINE, None, False),
-                  "register-draft": (None, PROPOSAL_LINE, True),
+FACT_LINE = "project id and issue tracker: GitHub, as owner/sample-app (read from its remote)"
+REGISTER_SHOWN = {"register-draft": (None, FACT_LINE, False),
                   "register-reconcile-apply": (PROPOSAL_LINE, None, False),
                   "register-reconcile-draft": (None, PROPOSAL_LINE, True)}
-REGISTER_BASE = {"register-apply": (REGISTER_PLAN_LINES[0], None, False),
-                 "register-draft": (None, None, False),
+REGISTER_BASE = {"register-draft": (None, None, False),
                  "register-reconcile-apply": (REGISTER_PLAN_LINES[0], None, False),
                  "register-reconcile-draft": (None, None, False)}
 # The first line of the Apply card's list, the proposal's draft row and whether that row carries a
@@ -351,7 +350,7 @@ REGISTER_READING = """(() => {
   const first = document.querySelector('.apply-lines li');
   const row = Array.from(document.querySelectorAll('ul.register-draft > li')).find((item) => {
     const line = item.querySelector('.draft-line');
-    return shown(line) && line.textContent.trim().startsWith('commits run in its development shell');
+    return shown(line) && /^(commits run in its development shell|project id and issue tracker)/.test(line.textContent.trim());
   });
   const change = row ? row.querySelector('button.draft-change') : null;
   return [shown(first) ? first.textContent.trim() : null,
@@ -2365,11 +2364,11 @@ class _Seed:
 
 
 def _seed_registration(seed: _Seed, state: str, root: str) -> None:
-    """A ready plan of `root`, a repository with no contract whose draft proposes a commit environment.
+    """A ready plan of `root`, a repository with no contract whose draft is in schema 3 (five fields, then the facts).
 
-    The reading names one GitHub remote, so the draft has no open question; its hook and
-    environment file are what a checkout with a devenv and installed commit hooks reads. The base
-    commit's draft ignores both and proposes nothing (the before picture).
+    The reading names one GitHub remote, so the draft has no open question and its project id is
+    a fact line with no Change. The base commit's draft shows that id as a changeable field
+    (the before picture).
     """
     if state.startswith("register-reconcile"):
         fields = (contract_draft.reconcile_fields(root, {
@@ -2963,9 +2962,9 @@ class _Inert:
     """A stand-in adopter or forge: its presence lets a ready plan be applied, nothing calls it."""
 
 
-def proposes_environment() -> bool:
-    """Whether this page's drafted contract can propose the command the adoption commit runs through."""
-    return hasattr(contract_draft, "proposed_lines")
+def shows_facts() -> bool:
+    """Whether this page's drafted contract shows its derived values as fact lines with no Change."""
+    return hasattr(contract_draft, "FACTS")
 
 
 def proposes_reconcile() -> bool:
@@ -2975,7 +2974,7 @@ def proposes_reconcile() -> bool:
 
 def proposes(state: str) -> bool:
     """Whether this page proposes the commit environment in the register state `state`."""
-    return proposes_reconcile() if state.startswith("register-reconcile") else proposes_environment()
+    return proposes_reconcile() if state.startswith("register-reconcile") else shows_facts()
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):

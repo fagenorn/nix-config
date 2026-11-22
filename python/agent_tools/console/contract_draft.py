@@ -72,7 +72,7 @@ with later answers). `draft(root, reading)` fills each from the remote's default
 (the lint and test commands) or the console's starting value, and follows them with the facts. A field is open
 (`open_fields`) when it has no value and is one of `ASKED` (the integration branch, the lint and test
 commands), or when it has a `reason`; `questions` words each open field as one card; `shown` gives every
-other record as one entry. `MAIN` lists the fields and facts that keep their own line, each one line
+other record as one entry, with `fact` true for a fact (never `more`, no options, no Change control). `MAIN` lists the fields and facts that keep their own line, each one line
 `<label>: <display> (<source>)`; the other two fields have the flag `more` in `shown`, and while their value
 is its start value its line is its start sentence (`REST_WORDS`, plain words with no source), so it reads as a
 settled default; once it is another value it reads `<label>: <value> (<source>)`. `more_line` counts those
@@ -1036,7 +1036,7 @@ def _line(field: Mapping) -> str:
     if field["field"] not in MAIN and _at_start(field):
         return REST_WORDS[field["field"]]
     words = SOURCE_WORDS.get((field["field"], field["source"]), SOURCES.get(field["source"], ""))
-    return f"{field['label']}: {_display(field)} ({words})"
+    return f"{field['label']}: {_display(field)}" + (f" ({words})" if words else "")
 
 
 def shown(fields: Iterable[Mapping]) -> list[dict]:
@@ -1044,7 +1044,8 @@ def shown(fields: Iterable[Mapping]) -> list[dict]:
     still_open = {f["field"] for f in open_fields(fields)}
     return [{"field": f["field"], "line": _line(f), "value": f["value"],
              "options": copy.deepcopy(f["options"]), "text": f["text"],
-             "more": f["field"] not in MAIN, "placeholder": placeholder(f["field"])}
+             "more": f["field"] not in MAIN, "fact": f["field"] in FACTS,
+             "placeholder": placeholder(f["field"])}
             for f in fields if f["field"] not in still_open]
 
 
