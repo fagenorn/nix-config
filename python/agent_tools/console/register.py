@@ -164,7 +164,8 @@ also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEY
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
 `contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
-never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service.
+never shows, ADR-console-033 D2; a row whose draft held a retired field its plan may rest on, or whose last
+card was that field, reads back as a `drafting` row, with the plan id it was saved under, whose project id card plans again, #1445), else `state`: the view's `registration` member, folded by the service.
 `fold(events, state=None)` is the `Fold` `(latest, before, roots)`: `before` the registrations shown
 before the current one, oldest first, one per root (an ended row naming another root pushes the
 current one and drops the new root's older entry), `roots` each registered project's root; a
@@ -173,7 +174,7 @@ with, else it names nothing; while another registered project still holds that r
 nothing, else it drops the root from `before` and, when it is the shown
 registration's, folds back to the last entry of `before`, so a registration whose project left the
 registry gives the page back what it replaced (ADR-console-084 D1); a matching cancel folds to none
-and clears `before`; `latest(events, state)` is `fold(events, Fold(state, (), {})).latest`. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
+and clears `before`; `held` is `(latest, the saved planned row it replaced)` when the latest row was replanned over a stored plan (the retired light-lane field, #1445) and None otherwise, and `shown(fold, adoptions)` is the saved row instead of `latest` when the plan id's adoption is past `plans_again`; `latest(events, state)` is `fold(events, Fold(state, (), {})).latest`. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
 approve=None)` is that member, always the same twenty-two keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
@@ -185,7 +186,8 @@ for any other row), and `draft_more` `contract_draft.more_line(draft)` under the
 counted line for the shown settings outside the main ones; None otherwise, including when no such
 setting is shown); else None (D4). The keys `adoption` and `approve` are None in the `running` entry
 and carry the given values (the `approve.entry` object and the action the page offers, #1054) in the
-`done` entry. `remote` (#1233) is None for the running entry and, for a done entry, the latest row's
+`done` entry; its `questions` are `[]` when `plans_again(adoption["step"], adoption["state"])` is false, so a plan
+with an applied, pushed, open or merged adoption offers no card that would plan it again (#1445). `remote` (#1233) is None for the running entry and, for a done entry, the latest row's
 `remote` when it is a string, else None; a `dismissed` row keeps it. `line` is the entry's state in one line (D6, D7): the running headline while a run is
 under way; the given adoption's headline when there is one (the adoption is then the plan's latest
 state, so a ready plan never says `ready to apply` beside an applied branch); else `line_of(latest)`:
@@ -630,6 +632,7 @@ class Fold(NamedTuple):
     latest: dict | None
     before: tuple[dict, ...]
     roots: Mapping[str, str]
+    held: tuple[tuple[dict, dict], ...] = ()  # (a replanned row, the saved planned row it replaced), #1445
 
 
 def _root_of(payload: object) -> str | None:
@@ -637,28 +640,43 @@ def _root_of(payload: object) -> str | None:
     return root if isinstance(root, str) and root else None
 
 
-def _row_of(event: event_log.Event) -> dict | None:
+def _row_of(event: event_log.Event) -> tuple[dict | None, dict | None]:
+    """The row an ended event folds to and, when it was replanned over a stored plan, that plan's row."""
     try:
         _, _, payload = ended(event.payload)
     except ValueError:
-        return None
+        return None, None
+    kept = None
     found = {**DEFAULTS, **payload, "at": event.at}
     if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
         found["note"] = LEGACY_NOTES[found["note"]]
     if isinstance(found["draft"], list) and isinstance(found["root"], str):
+        stale = contract_draft.retired_in_use(found["draft"])
         refreshed = contract_draft.refresh(found["root"], found["draft"])
-        if found["result"] == "planned" and len(refreshed) != len(found["draft"]):
+        dropped = len(refreshed) != len(found["draft"])
+        found["draft"] = refreshed
+        if stale and (found["result"] != "drafting" or not contract_draft.open_fields(found["draft"])):
+            # The plan stored under the row's id was made from the retired field, and a drafting row
+            # whose last card was that field has none: a drafting row with one card plans again (#1445).
+            # The row keeps its plan id: a cancel, an adoption and a deferral name the registration by it.
+            plan_id = found["plan_id"]
+            if found["result"] != "drafting":
+                kept = dict(found)
+            found.update(drafting(found["root"], contract_draft.replanned(found["draft"]),
+                                  found["answered"]))
+            found["plan_id"] = plan_id
+        elif found["result"] == "planned" and dropped:
             # The plan was made from a draft that held a record no longer drafted (#1449), so its id
             # names a plan the refreshed draft would not make: it is planned again, never applied.
             found["replan"] = True
-        found["draft"] = refreshed
-        if found["result"] == "drafting":
+        elif found["result"] == "drafting":
             found["questions"] = contract_draft.questions(found["draft"])
-    return found
+    return found, kept
 
 
 def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
-    found, before, known = state or Fold(None, (), {})
+    found, before, known, held = state or Fold(None, (), {})
+    held = list(held)
     roots = dict(known)
     for event in events:
         cancelled = event_log.cancelled_registration(event)
@@ -685,13 +703,34 @@ def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
             continue
         if event.kind != ENDED:
             continue
-        row = _row_of(event)
+        row, kept = _row_of(event)
         if row is None:
             continue
         if found is not None and found["root"] != row["root"]:
             before = tuple(e for e in before if e["root"] != row["root"]) + (found,)
         found = row
-    return Fold(found, before, roots)
+        if kept is not None:
+            held.append((row, kept))
+    # a replanned row stays held while it is shown or can be shown again, from `before`
+    held = [pair for pair in held if pair[0] is found or any(pair[0] is entry for entry in before)]
+    return Fold(found, before, roots, tuple(held))
+
+
+def shown(state: Fold, adoptions: Mapping[str, Mapping]) -> dict | None:
+    """The registration the page shows: `state.latest`, or the saved plan an adoption already rests on.
+
+    A planned row saved with the retired light-lane field folds to a drafting row that plans again
+    (#1445). When the plan id's adoption is past the point that plans again (`plans_again` is false:
+    applied, pushed, opened or merged) that replanned row would leave the adoption without a Retry, a
+    cancel or an answer, so the saved row stands in its place and the adoption resumes as for any
+    planned row.
+    """
+    for row, kept in state.held:
+        if row is state.latest:
+            adopted = adoptions.get(kept["plan_id"])
+            if adopted is not None and not plans_again(adopted["step"], adopted["pull_state"]):
+                return kept
+    return state.latest
 
 
 def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict | None:
@@ -813,6 +852,16 @@ def cancellable(latest: Mapping | None, adoption: Mapping | None) -> bool:
             and (adoption is None or adoption["step"] == "apply_failed"))
 
 
+def plans_again(step: str | None, pull_state: str | None) -> bool:
+    """Whether a registration may plan again given its plan id's adoption step and pull state (#1445).
+
+    True with no adoption (`step` None), a failed apply or a pull request closed without merging, the
+    cases the Apply action offers again; False once the adoption is applied, pushed, open, merged or
+    registered, when a new plan would offer a second adoption of a root already adopted.
+    """
+    return step is None or step == "apply_failed" or (step == "opened" and pull_state == "closed")
+
+
 def again_headline(name: str) -> str:
     return f"Planning the adoption of {name} again with your answer…"
 
@@ -856,7 +905,9 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
             "outcome": latest["outcome"], "headline": latest["headline"],
             "lines": lines, "note": latest["note"], "at": latest["at"],
             "plan_id": latest["plan_id"], "state": latest["state"],
-            "questions": latest["questions"], "refusal": refusal["text"] if mine else None,
+            "questions": (latest["questions"] if adoption is None
+                          or plans_again(adoption.get("step"), adoption.get("state")) else []),
+            "refusal": refusal["text"] if mine else None,
             "line": line,
             "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
             "draft": contract_draft.shown(draft) if isinstance(draft, list) else None,
