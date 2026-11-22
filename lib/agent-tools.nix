@@ -73,6 +73,7 @@ let
     "sprint" = "console.sprint";
     "verified-tree" = "verification.verified_tree";
     "verify-pending" = "verification.verify_pending";
+    "verify-slot" = "delivery.verify_slot";
   };
 
   # -I drops every PYTHON* variable, the working directory and the user site.
