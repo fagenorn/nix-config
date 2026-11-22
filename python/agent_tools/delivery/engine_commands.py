@@ -20,7 +20,9 @@ Grading: stdout is parsed strictly as one JSON document. The outcome is its
 any other exit. A document that is not an object is no result (`{}`).
 
 A command that cannot start (an `OSError` from the spawn) is `failed` with exit
-127 and no pid: `on_start` is not called, because there is no process.
+127 and no pid: `on_start` is not called, because there is no process. When
+`on_start` raises, the process is killed and reaped before the error propagates,
+so no child outlives a run that could not record it.
 
 The module runs processes, so the pure engine core never imports it.
 """
@@ -35,7 +37,8 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
+from agent_tools.delivery import procedure_check
+from agent_tools.delivery.procedure_check import CommandDeclaration
 from agent_tools.system.siblings import sibling_argv
 
 PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
@@ -73,15 +76,16 @@ class CommandTable:
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping) -> CommandTable:
-        load_commands()  # a DeclarationError propagates
+        procedure_check.load_commands()  # a DeclarationError propagates
         return cls(PLATFORM_MODULES, snapshot["bindings"]["commands"],
                    snapshot["project"]["root"])
 
     def declarations(self) -> dict[str, CommandDeclaration | None]:
-        """Every runnable id's declaration; the platform's win over a project's."""
-        declared: dict[str, CommandDeclaration | None] = {
-            name: PROJECT_DECLARATION for name in self.project}
-        declared.update(load_commands())
+        """Every runnable id's declaration; `invocation`'s lookup order: the platform table first."""
+        declared: dict[str, CommandDeclaration | None] = dict(procedure_check.load_commands())
+        for name in self.project:
+            if name not in self.platform:
+                declared[name] = PROJECT_DECLARATION
         return declared
 
     def invocation(self, command: str, subcommand: str | None,
@@ -135,7 +139,12 @@ def run(table: CommandTable, command: str, subcommand: str | None,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
     except OSError:
         return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
-    on_start(process.pid)
+    try:
+        on_start(process.pid)
+    except BaseException:
+        process.kill()
+        process.communicate()
+        raise
     stdout, _ = process.communicate()
     outcome, result = grade(stdout, process.returncode)
     return Ran(outcome, result, process.returncode, time.monotonic() - started)

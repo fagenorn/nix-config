@@ -12,6 +12,9 @@ sorted-key JSON to stdout, starting no process and opening no socket:
   `command_verdicts.json`.
 
 The procedure format and every refusal code are `procedure_check`'s contract.
+In a directory an onboarded project owns, the command ids checked are the
+platform's plus the project's, the ones `engine deliver` accepts; elsewhere
+they are the platform's.
 
 `engine status <issue> [--project <slug>]` reads the newest run of the issue
 under `~/.agents/state/engine/runs/` (the run directory `engine_ledger`
@@ -140,9 +143,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.procedures.is_dir():
         return _usage(f"--procedures is not a directory: {args.procedures}")
     try:
-        commands = procedure_check.load_commands()
+        commands = engine_shell.check_declarations()
         result = procedure_check.check_directory(args.procedures, commands)
-    except (procedure_check.DeclarationError, ValueError) as error:
+    except (procedure_check.DeclarationError, engine_shell.Refused, ValueError) as error:
         return _usage(str(error))
     if result.refusals:
         sys.stdout.write(compact({"refusals": [r.as_json() for r in result.refusals],

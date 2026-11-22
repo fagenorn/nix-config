@@ -7,6 +7,7 @@ child process from source.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -18,8 +19,9 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.delivery import engine, engine_ledger
+from agent_tools.delivery import engine, engine_ledger, engine_shell
 from agent_tools.delivery.engine_ledger import RUN_ID_RE
 from agent_tools.delivery.engine_shell import creation_lock_path, lock_holder, platform_revision
 from tests.guard_policy_world import GuardPolicyWorld
@@ -66,6 +68,7 @@ class EngineProject:
             "standin-says-maybe": entry("verdict", "maybe", "0"),
             "standin-says-exhausted": entry("verdict", "exhausted", "0"),
             "standin-block": entry("block", str(self.release)),
+            "release": entry("json", "0"),
         })
 
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None) -> Path:
@@ -88,6 +91,17 @@ class EngineProject:
         argv, options = self.command("deliver", str(issue), "--procedures", str(procedures),
                                      cwd=cwd)
         return subprocess.run(argv, capture_output=True, timeout=120, **options)
+
+    @contextlib.contextmanager
+    def inside(self):
+        """This process as `engine deliver` would find itself: in the project, with its env."""
+        previous = os.getcwd()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            os.chdir(self.root)
+            try:
+                yield
+            finally:
+                os.chdir(previous)
 
     def status(self, issue: int):
         argv, options = self.command("status", str(issue))
@@ -246,6 +260,64 @@ class DeliverTest(unittest.TestCase):
         self.assertEqual(json.loads(stdout)["end"], "done")
 
 
+class FindingsTest(unittest.TestCase):
+    def test_a_project_command_the_platform_declares_without_a_table_row_runs(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures([step("a", "release", "done")]))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_failure_to_take_the_run_lock_publishes_no_run(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-record", "done")])
+        with project.inside(), \
+                mock.patch.object(engine_shell, "_take_run_lock", side_effect=OSError("no lock")):
+            with self.assertRaises(engine_shell.Refused):
+                engine_shell.deliver(1512, procedures)
+        self.assertEqual(project.runs(), [])
+        self.assertFalse(project.record.exists())
+
+    def test_a_new_runs_hierarchy_fsyncs_each_parent_of_a_new_directory(self):
+        project = EngineProject(self)
+        shutil.rmtree(project.world.home / ".agents", ignore_errors=True)
+        synced: list[Path] = []
+        real = engine_ledger._fsync_path
+
+        def spy(path):
+            synced.append(Path(path))
+            real(path)
+
+        with project.inside(), mock.patch.object(engine_ledger, "_fsync_path", side_effect=spy):
+            os.close(engine_shell._lock_creation(1512))
+        root = project.world.home / ".agents/state/engine/runs"
+        for directory in (root, root.parent, root.parent.parent):
+            self.assertIn(directory, synced)
+            self.assertIn(directory.parent, synced)
+
+    def test_a_deeply_nested_entry_is_a_refusal_not_a_traceback(self):
+        project = EngineProject(self)
+        directory = Path(tempfile.mkdtemp(dir=project.tmp))
+        (directory / "deliver.json").write_text(
+            '{"format":1,"inputs":["issue"],"stops":{},"steps":[{"id":"a","in":'
+            + "[" * 100000 + "]" * 100000 + "}]}", encoding="utf-8")
+        done = project.deliver(directory)
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(project.runs(), [])
+
+    def test_engine_check_accepts_the_project_command_ids_deliver_accepts(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        argv, options = project.command("check", "--procedures", str(procedures))
+        inside = subprocess.run(argv, capture_output=True, timeout=120, **options)
+        self.assertEqual(inside.returncode, 0, inside.stdout + inside.stderr)
+        outside = Path(tempfile.mkdtemp(dir=project.tmp))
+        argv, options = project.command("check", "--procedures", str(procedures), cwd=outside)
+        elsewhere = subprocess.run(argv, capture_output=True, timeout=120, **options)
+        self.assertEqual(elsewhere.returncode, 1, elsewhere.stdout + elsewhere.stderr)
+        self.assertIn("unknown_command", elsewhere.stdout)
+
+
 class RefusalTest(unittest.TestCase):
     def assertRefused(self, project: EngineProject, done, word: str) -> None:
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
@@ -351,6 +423,55 @@ class LockTest(unittest.TestCase):
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         self.assertEqual(process.wait(60), 0)
         self.assertEqual(len(project.runs()), 1)
+
+    def test_a_second_deliver_exits_already_running_though_the_source_procedure_is_gone(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-block", "done")])
+        first = self.start(project, procedures)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            runs = project.runs()
+            if runs and any(e["event"] == "process_started" for e in project.events(runs[0])):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the run never started its step process")
+        (procedures / "deliver.json").unlink()
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 4, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["run"], runs[0].name)
+        project.release.write_text("go", encoding="utf-8")
+        self.assertEqual(first.wait(60), 0)
+
+    def test_the_procedure_that_runs_is_the_one_checked_when_the_source_changes_meanwhile(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-record", "done")])
+        root = project.world.home / ".agents/state/engine/runs"
+        root.mkdir(parents=True, mode=0o700)
+        descriptor = os.open(creation_lock_path(root, 1512), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        process = self.start(project, procedures)
+        time.sleep(1.0)
+        self.assertIsNone(process.poll())
+        edited = json.loads((procedures / "deliver.json").read_text())
+        edited["steps"][0]["on"]["ok"] = "b"
+        edited["steps"].append(step("b", "no-such-command", "done"))
+        (procedures / "deliver.json").write_text(json.dumps(edited), encoding="utf-8")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 2, stdout + stderr)
+        self.assertIn("unknown_command", stderr)
+        self.assertFalse(project.record.exists())
+        self.assertEqual(project.runs(), [])
+
+    def test_status_reports_the_later_run_of_a_second_not_the_one_with_the_greater_token(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        later = self.seed_runs(project, procedures, done="zzzz", other="aaaa")
+        status = project.status(1512)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)["run"], later.name)
 
     def test_a_stopped_run_is_not_joined_by_a_new_run(self):
         project = EngineProject(self)

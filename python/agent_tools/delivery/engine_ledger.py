@@ -10,7 +10,10 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
     results/<step>.<visit>.json
                         a step visit's stored result
 
-The run id is `<issue>-<UTC start as %Y%m%dT%H%M%SZ>-<four [a-z0-9]>`.
+The run id is `<issue>-<UTC start as %Y%m%dT%H%M%SZ>-<four [a-z0-9]>`. It orders
+only to the second, so `run.json` also carries `sequence`: an integer one above
+the greatest `sequence` among the issue's earlier runs, the order `find_runs`
+returns. The caller serialises the creation of an issue's runs.
 
 Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS`
 lists, per type, exactly the other members it carries. A run is assembled in
@@ -56,7 +59,7 @@ from agent_tools.delivery.procedure_check import (
 RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 TOKEN_RE = re.compile(r"^[a-z0-9]{4}$")
 RUN_MEMBERS = ("host", "inputs", "issue", "platform_revision", "procedure", "project",
-               "run", "started")
+               "run", "sequence", "started")
 WAITS = ("usage-limit", "host-slot", "lock")
 TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
@@ -134,7 +137,7 @@ def _write_file(path: Path, data: bytes) -> None:
         os.close(descriptor)
 
 
-def _make_root(root: Path) -> None:
+def make_root(root: Path) -> None:
     """Create `root` and every missing ancestor, fsyncing the parent of each new directory."""
     missing = []
     probe = root
@@ -162,8 +165,13 @@ def _check_inputs(inputs: Mapping[str, str | int]) -> None:
 
 def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path,
                platform_revision: str, host: str, inputs: Mapping[str, str | int],
-               now: datetime, token: str | None = None, root: Path | None = None) -> Path:
-    """Create the run directory and return its path."""
+               now: datetime, token: str | None = None, root: Path | None = None,
+               before_publish: Callable[[Path], None] | None = None) -> Path:
+    """Create the run directory and return its path.
+
+    `before_publish(staged)` is called with the assembled, still unpublished run
+    directory; what it raises leaves no run behind.
+    """
     for label, value in (("project", project), ("platform_revision", platform_revision),
                          ("host", host)):
         if not _is_name(value):
@@ -180,17 +188,20 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
     started = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     root = runs_root() if root is None else Path(root)
-    _make_root(root)
+    make_root(root)
     final = root / run_id
     if os.path.lexists(final):
         raise LedgerError(f"run {run_id} already exists")
+    sequence = 1 + max((document["sequence"] for _, document in _issue_runs(root, issue)),
+                       default=0)
     temporary = root / f".{run_id}.tmp"
     os.mkdir(temporary, 0o700)
     try:
         os.chmod(temporary, 0o700)
         document = {"host": host, "inputs": dict(inputs), "issue": issue,
                     "platform_revision": platform_revision, "procedure": procedure,
-                    "project": project, "run": run_id, "started": started}
+                    "project": project, "run": run_id, "sequence": sequence,
+                    "started": started}
         _write_file(temporary / "run.json", _compact(document).encode("utf-8"))
         copied = temporary / "procedure"
         os.mkdir(copied, 0o700)
@@ -206,6 +217,8 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
         _write_file(copied / "SHA256SUMS", "".join(lines).encode("utf-8"))
         _write_file(temporary / "events.jsonl", b"")
         os.mkdir(temporary / "results", 0o700)
+        if before_publish is not None:
+            before_publish(temporary)
         for directory in (copied, temporary / "results", temporary):
             _fsync_path(directory)
         os.rename(temporary, final)
@@ -231,16 +244,15 @@ def read_run(run_dir: Path) -> dict:
         raise LedgerError("run.json does not have exactly the run members")
     if not isinstance(document["project"], str):
         raise LedgerError("run.json project is not a string")
+    if not _is_int(document["sequence"]) or document["sequence"] < 1:
+        raise LedgerError("run.json sequence is not an integer of at least 1")
     if document["run"] != Path(run_dir).name:
         raise LedgerError("run.json run is not the name of its run directory")
     return document
 
 
-def find_runs(root: Path, issue: int, project: str | None) -> list[Path]:
-    """Every run directory of `issue` under `root`, oldest name first; it writes nothing.
-
-    With no `project`, runs of more than one project are a `LedgerError`.
-    """
+def _issue_runs(root: Path, issue: int) -> list[tuple[Path, dict]]:
+    """Every run directory of `issue` under `root` with its `run.json`; it writes nothing."""
     root = Path(root)
     if not root.is_dir():
         return []
@@ -250,24 +262,30 @@ def find_runs(root: Path, issue: int, project: str | None) -> list[Path]:
         if match is None or match.group(1) != str(issue) or not entry.is_dir():
             continue
         document = read_run(entry)
-        if document["issue"] != issue:
-            continue
-        if project is not None and document["project"] != project:
-            continue
-        found.append((entry, document["project"]))
-    projects = sorted({name for _, name in found})
+        if document["issue"] == issue:
+            found.append((entry, document))
+    return found
+
+
+def find_runs(root: Path, issue: int, project: str | None) -> list[Path]:
+    """Every run directory of `issue` under `root`, oldest first; it writes nothing.
+
+    The order is `run.json`'s `sequence`, then the run's name. With no `project`,
+    runs of more than one project are a `LedgerError`.
+    """
+    found = [(entry, document) for entry, document in _issue_runs(root, issue)
+             if project is None or document["project"] == project]
+    projects = sorted({document["project"] for _, document in found})
     if project is None and len(projects) > 1:
         raise LedgerError(f"runs of issue {issue} belong to several projects: "
                           + ", ".join(projects) + "; pass --project")
-    return sorted((entry for entry, _ in found), key=lambda entry: entry.name)
+    found.sort(key=lambda pair: (pair[1]["sequence"], pair[0].name))
+    return [entry for entry, _ in found]
 
 
 def find_run(root: Path, issue: int, project: str | None) -> Path | None:
     """The newest run directory of `issue` under `root`, or None; it writes nothing.
 
-    Run ids carry second-precision instants, so runs started in one second are
-    ordered by their random token, not by start; a caller that must not miss
-    any run reads `find_runs`.
     """
     runs = find_runs(root, issue, project)
     return runs[-1] if runs else None

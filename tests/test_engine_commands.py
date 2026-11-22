@@ -75,6 +75,12 @@ class TableTest(unittest.TestCase):
         self.assertEqual(declarations["forge-claim"], platform["forge-claim"])
         self.assertEqual(declarations["diff-scope"], platform["diff-scope"])
 
+    def test_a_project_id_the_platform_declares_without_a_table_row_is_a_runnable_project_id(self):
+        self.assertIsNone(load_commands()["release"])
+        built = table(release=project("json", "0"))
+        self.assertEqual(built.declarations()["release"].outcomes(None), ("ok", "failed"))
+        self.assertEqual(built.invocation("release", None, ()).argv[-2:], ("json", "0"))
+
     def test_from_snapshot_reads_the_commands_and_the_root(self):
         commands = {"a": {"argv": ["a"], "cwd": "/p", "env": []}}
         built = CommandTable.from_snapshot({
@@ -149,6 +155,20 @@ class GradeTest(unittest.TestCase):
         ran = run(table(missing=entry), "missing", None, (), on_start=on_start)
         self.assertEqual((ran.outcome, ran.result, ran.exit_code), ("failed", {}, 127))
         on_start.assert_not_called()
+
+    def test_a_failed_start_callback_kills_and_reaps_the_command(self):
+        entry = project("block", os.path.join(self.tmp, "never-released"), cwd=self.tmp)
+        pids: list[int] = []
+
+        def refuse(pid: int) -> None:
+            pids.append(pid)
+            raise OSError("the ledger refused the event")
+
+        with self.assertRaises(OSError):
+            run(table(block=entry), "block", None, (), on_start=refuse)
+        self.assertEqual(len(pids), 1)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pids[0], 0)
 
     def test_arguments_are_text_integers_and_compact_json(self):
         self.assertEqual(argument("a b"), "a b")

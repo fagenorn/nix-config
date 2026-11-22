@@ -7,11 +7,14 @@ next action, record what happened, until the walk is `Done` or a `Stop`.
 
 Before a run exists (every refusal raises `Refused`, creates no run directory
 and starts no process): the project contract must resolve from the current
-directory; `<procedures_dir>/deliver.json` must exist; the directory must pass
+directory; a held run lock answers `EXIT_RUNNING` before the procedure is read;
+`<procedures_dir>/deliver.json` must exist; the directory must pass
 `procedure_check.check_directory` against the platform declarations plus every
 project command (outcomes `ok`/`failed`); then `deliver.json` must hold only
 `command` and `decide` steps, no step with `mutates: true`, and no input but
-`issue`.
+`issue`. The same checks run again on the run's own staged copy, and the run is
+published only when they pass and its lock is held, so the procedure that is
+validated is the one that runs.
 
 The loop reads the run's own copy, `<run>/procedure/deliver.json`, never the
 source directory. One command visit appends exactly `step_entered`,
@@ -127,28 +130,46 @@ def core_events(run_dir: Path, ledger: list[dict]) -> list[dict]:
     return events
 
 
-def _prepare(procedures_dir: Path) -> tuple[dict, CommandTable]:
+def _resolve() -> tuple[dict, CommandTable]:
     try:
         snapshot = resolve_project.resolve(None)
     except resolve_project.ContractError as error:
         raise Refused(f"{error.code}: {error.repair_id}") from error
     try:
-        table = CommandTable.from_snapshot(snapshot)
+        return snapshot, CommandTable.from_snapshot(snapshot)
     except procedure_check.DeclarationError as error:
         raise Refused(str(error)) from error
-    if not procedures_dir.is_dir() or not (procedures_dir / f"{ENTRY}.json").is_file():
-        raise Refused(f"no {ENTRY}.json in the procedures directory {procedures_dir}")
+
+
+def check_declarations() -> dict[str, procedure_check.CommandDeclaration | None]:
+    """The declarations `engine check` checks against: `engine deliver`'s inside an onboarded project."""
     try:
-        result = procedure_check.check_directory(procedures_dir, table.declarations())
-        procedure = _load(procedures_dir / f"{ENTRY}.json")
+        snapshot = resolve_project.resolve(None)
+    except resolve_project.ContractError as error:
+        if error.code == "not_onboarded":
+            return procedure_check.load_commands()
+        raise Refused(f"{error.code}: {error.repair_id}") from error
+    return CommandTable.from_snapshot(snapshot).declarations()
+
+
+def _validate(directory: Path, table: CommandTable) -> dict:
+    """The entry procedure of `directory`, checked and runnable, or `Refused`."""
+    if not directory.is_dir() or not (directory / f"{ENTRY}.json").is_file():
+        raise Refused(f"no {ENTRY}.json in the procedures directory {directory}")
+    try:
+        result = procedure_check.check_directory(directory, table.declarations())
     except (ValueError, OSError) as error:
         raise Refused(str(error)) from error
     if result.refusals:
         first = result.refusals[0]
         raise Refused(f"procedure {first.procedure}, step {first.step}: "
                       f"{first.defect}, {first.detail}")
+    try:
+        procedure = _load(directory / f"{ENTRY}.json")
+    except (ValueError, OSError) as error:
+        raise Refused(str(error)) from error
     _refuse_unrunnable(procedure)
-    return snapshot, table
+    return procedure
 
 
 def creation_lock_path(root: Path, issue: int) -> Path:
@@ -190,27 +211,51 @@ def _take_run_lock(run_dir: Path, at: str) -> int:
     return descriptor
 
 
+def _running(runs: list[Path], issue: int) -> tuple[int, dict] | None:
+    """The `EXIT_RUNNING` answer when a lock of any of `runs` is held, else None."""
+    for existing in runs:
+        holder = lock_holder(existing)
+        if holder is not None:
+            return EXIT_RUNNING, {
+                "detail": f"The {ENTRY} procedure of issue {issue} is already running "
+                          f"as process {holder['pid']}.",
+                "end": None, "need": None,
+                "process": {"pid": holder["pid"], "started": holder["started"]},
+                "run": existing.name}
+    return None
+
+
 def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
-    snapshot, table = _prepare(Path(procedures_dir))
-    source = _load(Path(procedures_dir) / f"{ENTRY}.json")
-    inputs = {name: issue for name in source["inputs"]}
+    procedures_dir = Path(procedures_dir)
+    snapshot, table = _resolve()
     project = snapshot["project"]["id"]
+    try:
+        running = _running(engine_ledger.find_runs(engine_ledger.runs_root(), issue, project),
+                           issue)
+    except (engine_ledger.LedgerError, OSError, KeyError) as error:
+        raise Refused(str(error)) from error
+    if running is not None:
+        return running
+    procedure = _validate(procedures_dir, table)
+    inputs = {name: issue for name in procedure["inputs"]}
     held: list[int] = []
+
+    def stage(staged: Path) -> None:
+        # The copy that will run is the copy that is checked; the lock is held
+        # before the run is visible, so no published run is ever unlocked.
+        if _validate(staged / "procedure", table)["inputs"] != procedure["inputs"]:
+            raise Refused(f"the {ENTRY} procedure changed while its run was created")
+        held.append(_take_run_lock(staged, _now()))
+
     try:
         creation = _lock_creation(issue)
         try:
             # Run ids order only to the second, so no one run is the newest: every
             # run of the issue is checked, a held lock before an unfinished run.
             runs = engine_ledger.find_runs(engine_ledger.runs_root(), issue, project)
-            for existing in runs:
-                holder = lock_holder(existing)
-                if holder is not None:
-                    return EXIT_RUNNING, {
-                        "detail": f"The {ENTRY} procedure of issue {issue} is already running "
-                                  f"as process {holder['pid']}.",
-                        "end": None, "need": None,
-                        "process": {"pid": holder["pid"], "started": holder["started"]},
-                        "run": existing.name}
+            running = _running(runs, issue)
+            if running is not None:
+                return running
             for existing in runs:
                 state = engine_ledger.fold(
                     engine_ledger.read_run(existing),
@@ -220,10 +265,10 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
                                   "later slice of the engine")
             run_dir = engine_ledger.create_run(
                 project=project, issue=issue, procedure=ENTRY,
-                procedures_dir=Path(procedures_dir),
+                procedures_dir=procedures_dir,
                 platform_revision=platform_revision(os.environ),
-                host=_host(), inputs=inputs, now=datetime.now(timezone.utc))
-            held.append(_take_run_lock(run_dir, _now()))
+                host=_host(), inputs=inputs, now=datetime.now(timezone.utc),
+                before_publish=stage)
         finally:
             os.close(creation)
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
@@ -243,7 +288,7 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
 
 def _lock_creation(issue: int) -> int:
     root = engine_ledger.runs_root()
-    os.makedirs(root, mode=0o700, exist_ok=True)
+    engine_ledger.make_root(root)
     descriptor = os.open(creation_lock_path(root, issue), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
