@@ -96,7 +96,8 @@ class MembersTest(unittest.TestCase):
     def test_test_members_are_the_build_then_the_suite(self):
         self.assertEqual(members("test", Path("/r")), (
             Member("nix-build", ("just", "build")),
-            Member("agent-workflow-tests", ("just", "agent-workflow-tests")),
+            Member("agent-workflow-tests", ("just", "agent-workflow-tests"),
+                   (("WORKFLOW_POLICY_SURFACE", "source"),)),
         ))
 
     def test_no_lint_member_builds_a_host_configuration(self):
@@ -162,6 +163,78 @@ class TestEntryPointTest(JustCase):
         self.assertTrue(
             [l for l in stderr if l.startswith("test: agent-workflow-tests failed (cannot start")])
         self.assertEqual(stderr[-1], "test: failed: nix-build, agent-workflow-tests")
+
+
+COMPARISON = "test_installed_policy_surface_matches_source_contract"
+CONTRACTS = "home/common/agent-skills/tests/test_workflow_skill_contracts.py"
+
+
+class ActivatedSkillsComparisonTest(JustCase):
+    """The host's activated skills are compared with the source only after activation
+    (issue 1580): `test` runs the suite source-only, the way CI does, and the kept
+    entry point `agent-activated-skill-tests` runs the comparison."""
+
+    def fixture_home(self, differing: bool) -> Path:
+        home = self.tmp()
+        skills = home / ".claude" / "skills"
+        shutil.copytree(REPO_ROOT / "home/common/agent-skills/skills", skills)
+        shutil.copytree(REPO_ROOT / "home/common/claude-code/skills", skills, dirs_exist_ok=True)
+        bin_dir = home / ".agents" / "bin"
+        bin_dir.mkdir(parents=True)
+        for name, source in (("resolve-project", "project_contract/resolve_project.py"),
+                             ("context-map-lint", "delivery/context_map_lint.py")):
+            shutil.copy2(REPO_ROOT / "python/agent_tools" / source, bin_dir / name)
+            (bin_dir / name).chmod(0o755)
+        if differing:
+            entry = skills / "deliver-direct" / "SKILL.md"
+            text = entry.read_text(encoding="utf-8")
+            self.assertIn("`bindings.workflow.verification`", text)
+            entry.write_text(text.replace("`bindings.workflow.verification`", "the verification"),
+                             encoding="utf-8")
+        return home
+
+    def env_for(self, home: Path, **extra: str) -> dict[str, str]:
+        env = child_env(HOME=str(home))
+        env.pop("WORKFLOW_POLICY_SURFACE", None)
+        env.update(extra)
+        return env
+
+    def run_comparison(self, home: Path, **extra: str):
+        return subprocess.run(
+            [sys.executable, "-m", "unittest", "-v", "-k", COMPARISON, CONTRACTS],
+            cwd=REPO_ROOT, env=self.env_for(home, **extra), capture_output=True, text=True,
+            timeout=600)
+
+    def test_the_test_suite_member_sees_no_comparison_failure_on_a_differing_home(self):
+        suite = [m for m in members("test", REPO_ROOT) if m.id == "agent-workflow-tests"][0]
+        home = self.fixture_home(differing=True)
+        # Without the member's environment the comparison fails: the fixture really differs.
+        self.assertNotEqual(self.run_comparison(home).returncode, 0)
+        result = self.run_comparison(home, **dict(suite.env))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("skipped", result.stderr)
+
+    def test_the_kept_entry_point_fails_on_the_same_differing_home(self):
+        home = self.fixture_home(differing=True)
+        result = self.run_just(
+            ["--justfile", str(REPO_ROOT / "justfile"), "agent-activated-skill-tests"],
+            REPO_ROOT, self.env_for(home))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAILED", result.stderr)
+
+    def test_the_kept_entry_point_passes_on_a_matching_home(self):
+        home = self.fixture_home(differing=False)
+        result = self.run_just(
+            ["--justfile", str(REPO_ROOT / "justfile"), "agent-activated-skill-tests"],
+            REPO_ROOT, self.env_for(home))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_kept_entry_point_ignores_the_source_only_switch(self):
+        home = self.fixture_home(differing=True)
+        result = self.run_just(
+            ["--justfile", str(REPO_ROOT / "justfile"), "agent-activated-skill-tests"],
+            REPO_ROOT, self.env_for(home, WORKFLOW_POLICY_SURFACE="source"))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
 
 
 def scratch_checkout() -> Path:

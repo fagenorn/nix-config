@@ -391,6 +391,10 @@ agent-installed-skill-tests: build
       tests/test_impeccable_installed.py \
       tests/test_claude_code_installed.py
 
+# Compare the skills activated on this host (~/.claude/skills) with the skill source; run it after a switch, since `test` checks the skills from source only (issue 1580).
+agent-activated-skill-tests:
+  env -u WORKFLOW_POLICY_SURFACE PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v -k test_installed_policy_surface_matches_source_contract home/common/agent-skills/tests/test_workflow_skill_contracts.py
+
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
 show-claude-settings: build
