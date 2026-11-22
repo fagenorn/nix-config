@@ -9,6 +9,7 @@ from unittest import mock
 from agent_tools.delivery import hint_phases, procedure_check, standards_lint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+TIER = "fast"
 
 PLATFORM_FILES = {
     "README.md": (
