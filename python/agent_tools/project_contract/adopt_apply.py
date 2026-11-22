@@ -995,11 +995,18 @@ def discard_retained(root: Path, digest: str) -> None:
     `adopt-<digest[:12]>` and the failure record, and nothing else. There is
     no `git worktree prune` on purpose (see the module docstring). With
     nothing retained it changes nothing. A step that fails is refused as
-    `adopt.discard.failed`.
+    `adopt.discard.failed`; a plan whose pending required-check record exists
+    is refused as `adopt.required_check.pending` before any step.
     """
     home = agent_platform.state_root() / "adopt" / "worktrees"
     worktree = home / digest
     branch = f"adopt-{digest[:12]}"
+    if adopt_conformance.pending_path(digest).exists():
+        # The branch is the commit the pending required-check record names (P6):
+        # removing one without the other leaves a plan that can never be applied.
+        raise refuse("adopt_failure", adopt_conformance.REQUIRED_PENDING, "",
+                     "the required check of this plan is still to settle; apply "
+                     "the plan again to settle it before discarding anything")
     failed = refuse("adopt_failure", "adopt.discard.failed", "",
                     "the retained worktree of this plan could not be removed")
     code, listing = run_git(root, "worktree", "list", "--porcelain")

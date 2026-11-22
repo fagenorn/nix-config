@@ -2778,6 +2778,31 @@ class ConformanceAdoptionApplyTest(ApplyTestCase):
         self.assertEqual(len(posts(log)), 1)
         self.assertFalse(self.pending(plan_id).exists())
 
+    def test_discard_keeps_the_branch_and_the_record_together_while_an_outcome_is_unknown(self):
+        """P6: a `discard` (the console's Cancel calls it) must not delete the branch
+        and leave the pending record, or the plan could never be applied again."""
+        root = locked_apply_repo(self.home)
+        log, state = self.forge(post="lost", post_lands=True, read_fails_after_post=True)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(payload["error"]["repair_id"], "adopt.required_check.unknown")
+        branch = self.adopt_branch(plan_id)
+        code, out, err = run("discard", "--plan-id", plan_id, home=self.home)
+        self.assertEqual(code, 2, err or out)
+        self.assertEqual(json.loads(out)["error"]["repair_id"],
+                         "adopt.required_check.pending")
+        self.assertIn(branch, git(root, "branch", "--list"))
+        self.assertTrue(self.pending(plan_id).is_file())
+        code, payload, err = self.apply(plan_id, "--discard-retained")
+        self.assertEqual(payload["error"]["repair_id"], "adopt.required_check.unreadable")
+        self.assertIn(branch, git(root, "branch", "--list"))
+        self.assertTrue(self.pending(plan_id).is_file())
+        rewrite_state(state, read_fails_after_post=False)
+        result = self.succeed(root, plan_id)
+        self.assertEqual(result["required_check"]["state"], "added")
+        self.assertEqual(len(posts(log)), 1)
+        self.assertFalse(self.pending(plan_id).exists())
+
     def test_an_unknown_outcome_that_did_not_land_is_requested_again(self):
         root = locked_apply_repo(self.home)
         log, state = self.forge(post="lost", post_lands=False, read_fails_after_post=True)

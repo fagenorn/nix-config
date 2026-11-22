@@ -60,7 +60,10 @@ The order of an apply is:
    the worktree and the commit: the branch must still be the recorded commit
    (`adopt.required_check.pending_mismatch`), and the same origin check, read and
    settlement run, so a POST that landed is never repeated. The record is removed
-   once the result is emitted.
+   once the result is emitted. While the record exists, `discard` refuses
+   `adopt.required_check.pending` and changes nothing, and `--discard-retained`
+   is never reached (apply reconciles first), so the branch and the record are
+   only ever kept or removed together.
 
 A refusal is `Undeclarable` carrying one of the `adopt.conformance.*` repair ids
 below; the plan's ready gate reports it.
@@ -139,6 +142,7 @@ REQUIRED_REFUSED = "adopt.required_check.refused"
 REQUIRED_ROLLBACK_FAILED = "adopt.required_check.rollback_failed"
 REQUIRED_UNKNOWN = "adopt.required_check.unknown"
 REQUIRED_PENDING_MISMATCH = "adopt.required_check.pending_mismatch"
+REQUIRED_PENDING = "adopt.required_check.pending"
 REQUIRED_POINTER = "/plan/conformance/required_check"
 PENDING_MEMBERS = ("plan_id", "branch", "commit", "repo", "integration_branch", "result")
 
