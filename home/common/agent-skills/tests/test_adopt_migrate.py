@@ -600,6 +600,48 @@ class RetirePlatformConstantsTest(AdoptTestCase):
                     root, "adopt.migration.projection_in_retired_tree", [pointer])
                 self.assertEqual(target.read_bytes(), kept)
 
+    def test_a_projection_target_in_another_case_is_refused_on_a_case_insensitive_checkout(self):
+        def upper(c):
+            for entry in c["projections"]:
+                if entry["kind"] == "generated_file":
+                    entry["target"] = ".agents/ARTIFACTS/AGENTS.md"
+
+        def tracked(root):
+            (root / ".agents/artifacts").mkdir(parents=True)
+            (root / "AGENTS.md").rename(root / ".agents/artifacts/AGENTS.md")
+
+        root = self.root(upper, before=tracked)
+        if not (root / ".agents/ARTIFACTS/AGENTS.md").exists():
+            self.skipTest("the checkout's filesystem is case sensitive")
+        target = root / ".agents/artifacts/AGENTS.md"
+        kept = target.read_bytes()
+        self.assert_refused(root, "adopt.migration.projection_in_retired_tree",
+                            ["/.agents/ARTIFACTS/AGENTS.md"])
+        self.assertEqual(target.read_bytes(), kept)
+
+    def test_a_retired_file_the_resolver_recreates_is_refused_and_restored(self):
+        def tracked(root):
+            (root / ARTIFACT).parent.mkdir(parents=True)
+            (root / ARTIFACT).write_text("original\n", encoding="utf-8")
+
+        root = self.root(before=tracked)
+        before = tree_snapshot(root)
+        source = json.loads(self.contract_bytes(root))
+
+        def recreating(repo, command):
+            (repo / ARTIFACT).write_text("recreated\n", encoding="utf-8")
+            return 0, {}
+
+        with self.assertRaises(adopt_migrate.adopt_inspection.AdoptError) as caught:
+            adopt_migrate.migrate(root, MIGRATION_THREE, committed_manifest(),
+                                  source, recreating)
+        self.assertEqual(caught.exception.repair_id,
+                         "adopt.migration.retired_file_recreated")
+        self.assertEqual([v["pointer"] for v in caught.exception.violations],
+                         [f"/{ARTIFACT}"])
+        self.assertEqual(tree_snapshot(root), before)
+        self.assertEqual((root / ARTIFACT).read_text("utf-8"), "original\n")
+
     def test_an_edit_git_cannot_see_is_refused_and_kept(self):
         def tracked(root):
             (root / ARTIFACT).parent.mkdir(parents=True)

@@ -34,6 +34,7 @@ It deletes the tracked files under `.agents/artifacts/` (#1418). It refuses when
 ## Consequences
 
 - No repository is on schema 3 until the migration slice.
+- The migration deletes the tracked adoption evidence record under `.agents/artifacts/`, and `adopt-project verify` still reads it from there until #1456 retires that reader. A repository that commits the migration before #1456 lands is reported not conformant by `verify`, and `verify --register` refuses it. Run the migration on a repository only after #1456 is merged; #1482 (this repository) waits for it too.
 - Adoption writes schema 2 and offers the migration to 3. It refuses a schema-3 contract or draft until a required migration reaches 3.
 - The four values of #1458 are derived from the repository (ADR-project-contract-014); the attempt budget of #1466 stays as decided here until that issue.
 - Rejected: a manifest member for the constants, for the reason ADR-010 rejected one for the commands: the values are code the resolver and its tests must agree on, and a manifest is data a host can leave stale.

@@ -50,7 +50,11 @@ or one marked assume-unchanged or skip-worktree, whose edit git cannot see (a
 staged change is recoverable from the index), and
 `adopt.migration.pinned_platform_too_old` when the platform the repository pins
 is older than the installed one that reads schema 3. A projection target counts
-as inside the retired tree by normalised and by resolved path. Only descendants
+as inside the retired tree by normalised path, by resolved path and by file
+identity of the target or a directory above it (another letter case on a
+case-insensitive volume), and a retired file that exists again after the
+resolver children ran is refused `adopt.migration.retired_file_recreated` and
+restored. Only descendants
 of `.agents/artifacts` are retired, never a file named exactly like it. It then removes every
 retired, constant and derived member and each command's `cwd` and `env`, prunes
 the objects those removals emptied, and sets `schema_version` 3. It deletes
@@ -339,7 +343,30 @@ def _within(root: Path, target: str, tree: str) -> bool:
     if normal == tree or normal.startswith(tree + "/"):
         return True
     resolved, base = os.path.realpath(root / target), os.path.realpath(root / tree)
-    return resolved == base or resolved.startswith(base + os.sep)
+    if resolved == base or resolved.startswith(base + os.sep):
+        return True
+    return _same_directory_above(root, target, root / tree)
+
+
+def _same_directory_above(root: Path, target: str, tree: Path) -> bool:
+    """Whether `target` or a directory above it is `tree` by file identity.
+
+    A string comparison cannot see a spelling the filesystem folds to the same
+    entry (another letter case on a case-insensitive volume), so the identity
+    of each existing ancestor, the target included, is compared instead.
+    """
+    if not tree.exists():
+        return False
+    path = root / target
+    for candidate in (path, *path.parents):
+        if candidate == root or root not in candidate.parents:
+            break
+        try:
+            if candidate.exists() and os.path.samefile(candidate, tree):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def touched_paths(source: dict) -> tuple[str, ...]:
@@ -516,6 +543,15 @@ def migrate(root: Path, migration_id: str, manifest: dict,
             refusal = _child_refusal(exit_code, payload)
             if refusal is not None:
                 raise refusal
+        recreated = [f"/{name}" for name in retired
+                     if os.path.lexists(root / name)]
+        if recreated:
+            raise _refuse_all("adopt.migration.retired_file_recreated", [
+                {"pointer": pointer,
+                 "message": "a retired file exists again after the resolver "
+                            "wrote the projections, so the migration did not "
+                            "retire it"}
+                for pointer in recreated])
     except BaseException:
         _restore(root, kept, created)
         raise
