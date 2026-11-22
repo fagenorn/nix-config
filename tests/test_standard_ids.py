@@ -77,6 +77,10 @@ def sections(text: str) -> dict[str, str]:
     return {key: "".join(f"{line}\n" for line in lines) for key, lines in bodies.items()}
 
 
+def link_destinations(body: str) -> list[str]:
+    return re.findall(r"\]\(([^)\s]+)\)", body)
+
+
 def numbered_items(text: str) -> list[int]:
     return [number for number, line in unfenced(text) if NUMBERED_ITEM.match(line)]
 
@@ -167,6 +171,11 @@ class RuleHeadingTest(unittest.TestCase):
         self.assertEqual(sections("# T\n### B1. a\none\n### B2. b\ntwo\n"),
                          {"B1": "one\n", "B2": "two\n"})
 
+    def test_link_destinations_are_parsed(self):
+        self.assertEqual(
+            link_destinations("a ([d](https://x/issues/14170)) and [e](https://x/y)"),
+            ["https://x/issues/14170", "https://x/y"])
+
     def test_a_duplicate_id_in_a_layer_is_a_problem(self):
         problems = layer_problems([("a", "P", "# A\n### P1. x\nbody\n"),
                                    ("b", "P", "# B\n### P1. y\nbody\n")])
@@ -229,6 +238,19 @@ class LiveStandardsTest(unittest.TestCase):
         guard = "home/common/claude-code/lifecycle_guard.py"
         self.assertIn(guard, helpers["P8"])
         self.assertEqual([name for name, body in helpers.items() if guard in body], ["P8"])
+
+    def test_the_bar_holds_the_test_run_isolation_rule(self):
+        link = "https://github.com/fagenorn/nix-config/issues/1417"
+        found = {name: body for name, body in sections(BAR.read_text()).items()
+                 if link in link_destinations(body)}
+        self.assertEqual(list(found), ["B16"])
+        self.assertEqual(link_destinations(found["B16"]), [link])
+        for clause in ("creates what it uses", "removes it when it ends",
+                       "takes no fixed port", "leaves nothing behind"):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, found["B16"])
+        prose = re.sub(r"\(?\[[^\]]*\]\([^)]*\)\)?", "", found["B16"])
+        self.assertIn(len(re.findall(r"[.!?](?:\s|$)", prose)), (1, 2))
 
 
 if __name__ == "__main__":

@@ -61,3 +61,7 @@ A test earns its place by failing for exactly one reason. Assert observable beha
 ### B15. Verify before claiming done
 
 Run it and show the behaviour. Absence of an error is not evidence of success, and neither is a plausible diff. State what you ran and what it printed, or say plainly that you did not verify.
+
+### B16. Test runs leave nothing behind
+
+A test run creates what it uses and removes it when it ends, takes no fixed port, and leaves nothing behind. ([decision](https://github.com/fagenorn/nix-config/issues/1417))
