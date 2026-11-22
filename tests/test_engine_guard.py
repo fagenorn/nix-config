@@ -124,6 +124,53 @@ class JudgeTest(unittest.TestCase):
         self.assertIn("did not answer within", verdict.reason)
         gone(self, self.pids()[0], "guard")
 
+    def test_a_timed_out_guard_takes_a_descendant_in_another_session_with_it(self):
+        hook = self.hook("sleep-away", str(self.d / "pids"), timeout=0.5)
+
+        def kill_both():
+            try:
+                for pid in self.pids():
+                    kill_quietly(pid)
+            except (FileNotFoundError, ValueError):
+                pass
+
+        self.addCleanup(kill_both)
+        verdict = judge(hook, "true", str(self.d))
+        self.assertFalse(verdict.allowed)
+        self.assertIn("did not answer within", verdict.reason)
+        self.assertEqual(len(self.pids()), 2)
+        for pid in self.pids():
+            gone(self, pid, "process")
+
+    def test_a_sigterm_while_waiting_kills_the_guard_and_its_group(self):
+        hook = self.hook("sleep-away", str(self.d / "pids"), timeout=60)
+        code = ("from agent_tools.delivery.engine_guard import Hook, judge\n"
+                f"judge(Hook({hook.command!r}, 60), 'true', {str(self.d)!r})\n")
+        engine = subprocess.Popen([sys.executable, "-c", code], cwd=REPO_ROOT,
+                                  env={**os.environ, "PYTHONPATH": "python"},
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def kill_all():
+            kill_quietly(engine.pid)
+            try:
+                for pid in self.pids():
+                    kill_quietly(pid)
+            except (FileNotFoundError, ValueError):
+                pass
+            engine.wait()
+
+        self.addCleanup(kill_all)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if (self.d / "pids").exists() and len(self.pids()) == 2:
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(self.pids()), 2)
+        engine.send_signal(signal.SIGTERM)
+        self.assertEqual(engine.wait(timeout=20), 128 + signal.SIGTERM)
+        for pid in self.pids():
+            gone(self, pid, "process")
+
     def test_an_interrupted_guard_is_killed_with_its_group_before_the_interrupt_propagates(self):
         hook = self.hook("sleep", str(self.d / "pids"), timeout=60)
         interrupt = threading.Timer(1.5, _thread.interrupt_main)
@@ -246,6 +293,20 @@ class LocateTest(unittest.TestCase):
 
     def test_settings_path_is_under_home(self):
         self.assertEqual(settings_path({"HOME": "/h"}), Path("/h/.claude/settings.json"))
+
+    def test_a_home_that_is_not_an_absolute_path_names_no_settings_and_reads_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_settings(Path(tmp), GUARD, 12)
+            previous = os.getcwd()
+            os.chdir(tmp)
+            self.addCleanup(os.chdir, previous)
+            for name, environ in {"empty": {"HOME": ""}, "relative": {"HOME": "."},
+                                  "named": {"HOME": "sub/dir"}, "unset": {}}.items():
+                with self.subTest(name):
+                    path = settings_path(environ)
+                    self.assertIsInstance(path, Unavailable)
+                    self.assertIn("HOME", path.reason)
+                    self.assertEqual(locate(path), path)
 
 
 class SettingsHelperTest(unittest.TestCase):

@@ -328,6 +328,12 @@ def unguarded_launches(source: str) -> list[int]:
     return lines
 
 
+def unguarded_in(sources: dict[str, str]) -> dict[str, list[int]]:
+    """The unguarded `engine_session.launch` lines of every module, by module."""
+    return {name: lines for name, source in sources.items()
+            if (lines := unguarded_launches(source))}
+
+
 class SpawnSiteTest(unittest.TestCase):
     def sources(self) -> dict[str, str]:
         package = Path(engine_commands.__file__).parent
@@ -337,10 +343,11 @@ class SpawnSiteTest(unittest.TestCase):
     def test_only_the_command_guard_and_session_modules_start_processes(self):
         sources = self.sources()
         expected = [("engine_commands.py", "run", "subprocess.Popen"),
+                    ("engine_guard.py", "_descendants", "subprocess.run"),
                     ("engine_guard.py", "judge", "subprocess.Popen"),
                     ("engine_session.py", "launch", "subprocess.Popen")]
         self.assertEqual(spawn_sites(sources), expected)
-        self.assertEqual(unguarded_launches(sources["engine_shell.py"]), [])
+        self.assertEqual(unguarded_in(sources), {})
         plants = {
             "a second Popen in run": ("engine_commands.py", lambda text: text.replace(
                 "    text = command_text(invocation.argv)\n",
@@ -355,11 +362,12 @@ class SpawnSiteTest(unittest.TestCase):
                 planted = {**sources, module: change(sources[module])}
                 self.assertNotEqual(planted[module], sources[module])
                 self.assertNotEqual(spawn_sites(planted), expected)
-        with self.subTest("a launch with a literal argv"):
-            planted = sources["engine_shell.py"] + (
-                '\n\ndef extra(root, prompt, started):\n'
-                '    engine_session.launch(["x"], root, prompt, on_start=started)\n')
-            self.assertNotEqual(unguarded_launches(planted), [])
+        for module in ("engine_shell.py", "engine_commands.py", "engine_core.py"):
+            with self.subTest(f"a launch with a literal argv in {module}"):
+                planted = {**sources, module: sources[module] + (
+                    '\n\ndef extra(root, prompt, started):\n'
+                    '    engine_session.launch(["x"], root, prompt, on_start=started)\n')}
+                self.assertEqual(list(unguarded_in(planted)), [module])
 
 
 class GradeTest(unittest.TestCase):

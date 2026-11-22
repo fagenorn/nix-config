@@ -11,6 +11,8 @@ mode except `sleep` appends one compact JSON line
   sleep <pidfile>             starts a 120 s grandchild, writes its own pid and the
                               grandchild's pid to <pidfile> (one per line), sleeps
                               120 s, exits 0
+  sleep-away <pidfile>        as `sleep`, but the grandchild runs in a session of its own,
+                              as the real guard's policy row check does
   tee <log> <guard>           runs <guard> with the same stdin bytes, forwards its
                               stderr, exits with its code
   only <needle> <mode> <mode words...>
@@ -38,8 +40,9 @@ def log_line(log: str, data: bytes) -> None:
 
 
 def behave(mode: str, words: list[str], data: bytes) -> int:
-    if mode == "sleep":
-        grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    if mode in ("sleep", "sleep-away"):
+        grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                                      start_new_session=mode == "sleep-away")
         with open(words[0], "w", encoding="utf-8") as handle:
             handle.write(f"{os.getpid()}\n{grandchild.pid}\n")
         time.sleep(120)

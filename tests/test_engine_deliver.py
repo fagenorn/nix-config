@@ -617,9 +617,7 @@ class GuardDeliverTest(unittest.TestCase):
         self.assertFalse(bad.allowed)
         self.assertTrue("does not match an accepted form" in bad.reason
                         or "exactly as the accepted form" in bad.reason, bad.reason)
-        if not good.allowed:
-            self.assertNotIn("does not match an accepted form", good.reason)
-            self.assertNotIn("exactly as the accepted form", good.reason)
+        self.assertTrue(good.allowed, good.reason)
 
 
 class RefusalTest(unittest.TestCase):

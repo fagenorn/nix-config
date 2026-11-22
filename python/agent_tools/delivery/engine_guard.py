@@ -10,8 +10,9 @@ command the guard refuses in a Claude Code session is refused here too.
   D5  `judge` runs that hook as a subprocess with the Bash PreToolUse payload on
       stdin and `directory` as its working directory. Only exit 0 allows; exit 2
       refuses with the guard's stderr minus one line ending; any other exit, a
-      timeout or a spawn failure refuses with a sentence. The guard's group is
-      killed and its child reaped on a timeout and on any interrupt.
+      timeout or a spawn failure refuses with a sentence. The guard's group and
+      every descendant it has, whatever session each runs in, are killed and its
+      child reaped on a timeout, on any interrupt and on SIGTERM.
   D6  `judge` never raises on the guard's account and never writes to the
       caller's stdout or stderr: both guard pipes are captured and stdout is
       never read.
@@ -53,8 +54,16 @@ class Verdict:
     reason: str | None
 
 
-def settings_path(environ: Mapping[str, str]) -> Path:
-    return Path(environ["HOME"]) / SETTINGS
+def settings_path(environ: Mapping[str, str]) -> Path | Unavailable:
+    """`$HOME/.claude/settings.json`, or `Unavailable` unless HOME is an absolute path.
+
+    A relative or empty HOME would resolve against the invocation directory, so the
+    checkout could supply the settings that select its own authorizing executable.
+    """
+    home = environ.get("HOME", "")
+    if not home or not os.path.isabs(home):
+        return Unavailable("The settings cannot be located: HOME is not an absolute path.")
+    return Path(home) / SETTINGS
 
 
 def _timeout_defect(timeout: object) -> str | None:
@@ -99,7 +108,9 @@ def _defect(document: object) -> tuple[Hook | None, str]:
     return Hook(command, float(hook["timeout"])), ""
 
 
-def locate(settings: Path) -> Hook | Unavailable:
+def locate(settings: Path | Unavailable) -> Hook | Unavailable:
+    if isinstance(settings, Unavailable):
+        return settings
     try:
         document = json.loads(settings.read_text(encoding="utf-8"),
                               object_pairs_hook=reject_duplicate_keys,
@@ -118,7 +129,40 @@ def payload(text: str, directory: str) -> bytes:
                       sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _descendants(root: int) -> list[int]:
+    """Every process below `root` in the process tree, whatever session it runs in."""
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
+                                 text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in listing.splitlines():
+        words = line.split()
+        if len(words) == 2 and all(word.isdigit() for word in words):
+            children.setdefault(int(words[1]), []).append(int(words[0]))
+    found, pending = [], [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            if child not in found:
+                found.append(child)
+                pending.append(child)
+    return found
+
+
 def _reap(process: subprocess.Popen) -> None:
+    # The guard runs its policy row check in a session of its own, so the group kill
+    # below misses it. Stop the guard first so it starts nothing more, take its
+    # descendants while it still parents them, then kill them all.
+    try:
+        os.kill(process.pid, signal.SIGSTOP)
+    except (ProcessLookupError, PermissionError):
+        pass
+    for pid in _descendants(process.pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
@@ -133,24 +177,36 @@ def _reap(process: subprocess.Popen) -> None:
             pipe.close()
 
 
+def _terminate(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
 def judge(guard: Hook | Unavailable, text: str, directory: str) -> Verdict:
     if isinstance(guard, Unavailable):
         return Verdict(False, guard.reason)
     try:
-        process = subprocess.Popen([guard.command], cwd=directory, stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=True)
-    except (OSError, ValueError) as error:
-        return Verdict(False, f"The lifecycle guard {guard.command} cannot be run: {error}.")
+        previous = signal.signal(signal.SIGTERM, _terminate)
+    except ValueError:  # not the main thread: no handler can be installed
+        previous = None
     try:
-        _, stderr = process.communicate(payload(text, directory), timeout=guard.timeout)
-    except subprocess.TimeoutExpired:
-        _reap(process)
-        return Verdict(False, f"The lifecycle guard {guard.command} did not answer within "
-                              f"{guard.timeout:g} seconds.")
-    except BaseException:
-        _reap(process)
-        raise
+        try:
+            process = subprocess.Popen([guard.command], cwd=directory, stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       start_new_session=True)
+        except (OSError, ValueError) as error:
+            return Verdict(False, f"The lifecycle guard {guard.command} cannot be run: {error}.")
+        try:
+            _, stderr = process.communicate(payload(text, directory), timeout=guard.timeout)
+        except subprocess.TimeoutExpired:
+            _reap(process)
+            return Verdict(False, f"The lifecycle guard {guard.command} did not answer within "
+                                  f"{guard.timeout:g} seconds.")
+        except BaseException:
+            _reap(process)
+            raise
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
     code = process.returncode
     if code == 0:
         return Verdict(True, None)
