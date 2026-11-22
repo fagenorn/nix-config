@@ -1,7 +1,8 @@
 """Contract tests for the engine's session reading (`agent_tools.delivery.engine_session`, #1514).
 
 Covers reading a role file, rendering a prompt, reading a session result, building the
-launcher argv and starting one session.
+launcher argv, starting one session and `engine deliver` running agent steps against a
+stand-in launcher (tests/fixtures/engine-session/claude_stub.py).
 """
 
 from __future__ import annotations
@@ -15,17 +16,23 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
+from unittest import mock
 
+from agent_tools.delivery import engine, engine_ledger, engine_session, engine_shell
 from agent_tools.delivery.engine_session import (
     NOT_STARTED, Reading, Role, RoleError, diagnostic, launch, launch_argv, read_result,
     read_role, render_prompt,
 )
+from tests.test_engine_deliver import EngineProject, shape
 
 TIER = "integration"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
+STUB = REPO_ROOT / "tests/fixtures/engine-session/claude_stub.py"
+RESULT_NORMAL = REPO_ROOT / "tests/fixtures/engine-session/result-normal.json"
 ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 DENIAL = {"tool_name": "Write", "tool_use_id": "toolu_01",
           "tool_input": {"file_path": "/etc/hosts"}}
@@ -314,3 +321,349 @@ class LaunchTest(unittest.TestCase):
                         os.kill(seen["child"], signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+
+
+DRAFT_REPLY = {"type": "object",
+               "properties": {"status": {"enum": ["drafted", "stuck"]},
+                              "summary": {"type": "string"},
+                              "items": {"type": "array", "items": {"type": "string"}}},
+               "required": ["status", "summary", "items"]}
+REVIEW_REPLY = {"type": "object",
+                "properties": {"verdict": {"enum": ["approve", "revise"]},
+                               "status": {"type": "string"}},
+                "required": ["verdict", "status"]}
+ROLE_NAMES = ("planner", "implementer", "reviewer", "reviewer-lite")
+
+
+def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
+                 diagnostic: str | None = None) -> Path:
+    """Put the stand-in launcher first on the project's PATH; return the log it appends to."""
+    log = project.tmp / "claude.log"
+    if not isinstance(canned, Path):
+        data, canned = canned, project.tmp / "canned.json"
+        canned.write_bytes(data)
+    diagnostic_path = "-"
+    if diagnostic is not None:
+        diagnostic_path = str(project.tmp / "diagnostic.txt")
+        Path(diagnostic_path).write_text(diagnostic, encoding="utf-8")
+    launcher = project.bin / "claude-account"
+    launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {log} {canned} {exit} "
+                        f"{diagnostic_path} \"$@\"\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    return log
+
+
+def copy_roles(project: EngineProject, *names: str) -> None:
+    directory = project.world.home / ".claude/agents"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        shutil.copy(AGENTS / f"{name}.md", directory / f"{name}.md")
+
+
+def agent_step(id: str, role: str, on: dict, **members) -> dict:
+    document = {"id": id, "stage": "building", "kind": "agent", "role": role,
+                "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
+                "in": ["run.issue"], "on": on}
+    document.update(members)
+    return document
+
+
+def write_procedures(project: EngineProject, steps: list[dict], files: dict | None = None) -> Path:
+    directory = project.procedures(steps)
+    for name, text in (files or {"draft.md": "Draft issue {{run.issue}}.\n",
+                                 "draft.reply.json": json.dumps(DRAFT_REPLY)}).items():
+        (directory / name).write_text(text, encoding="utf-8")
+    return directory
+
+
+def one_step(project: EngineProject, **members) -> Path:
+    on = members.pop("on", {"drafted": "done", "stuck": "needs-owner"})
+    return write_procedures(project, [agent_step("draft", "implementer", on, **members)])
+
+
+def canned_result(**overrides) -> bytes:
+    document = json.loads(RESULT_NORMAL.read_text(encoding="utf-8"))
+    document.update(overrides)
+    return json.dumps({key: value for key, value in document.items()
+                       if value is not ...}).encode()
+
+
+def after(argv: list[str], flag: str) -> str:
+    return argv[argv.index(flag) + 1]
+
+
+def frontmatter(text: str, field: str) -> str | None:
+    found = re.search(rf"^{field}: (.+)$", text, re.M)
+    return found.group(1) if found else None
+
+
+def names(value: str) -> str:
+    return ",".join(part.strip() for part in value.split(","))
+
+
+class DeliverSessionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, *ROLE_NAMES)
+
+    def log(self, log: Path) -> list[dict]:
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def run_dir(self) -> Path:
+        (run,) = self.project.runs()
+        return run
+
+    def starting(self, step: str = "draft") -> dict:
+        (event,) = [e for e in self.project.events(self.run_dir())
+                    if e["event"] == "session_starting" and e["step"] == step]
+        return event
+
+    def test_each_role_file_reaches_the_stub_by_flags_and_never_as_agent_bare_or_bypass(self):
+        project = self.project
+        log = install_stub(project, RESULT_NORMAL)
+        roles = ROLE_NAMES
+        steps = [agent_step(name[0] if name != "reviewer-lite" else "l", name,
+                            {"drafted": nxt, "stuck": "needs-owner"})
+                 for name, nxt in zip(roles, ("i", "r", "l", "done"))]
+        procedures = write_procedures(project, steps)
+        nested = project.root / "nested"
+        nested.mkdir()
+        done = project.deliver(procedures, issue=1514, cwd=nested)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["detail"],
+                         "The deliver procedure reached done after 4 step visits.")
+        lines = self.log(log)
+        self.assertEqual(len(lines), 4)
+        starting = [e for e in project.events(self.run_dir()) if e["event"] == "session_starting"]
+        self.assertEqual([e["role"] for e in starting], list(roles))
+        ids = []
+        for line, event, role in zip(lines, starting, roles):
+            argv = line["argv"]
+            text = (AGENTS / f"{role}.md").read_text(encoding="utf-8")
+            self.assertEqual(argv[:3], ["run", "-p", "--output-format"])
+            self.assertEqual(argv[3], "json")
+            self.assertEqual(json.loads(after(argv, "--json-schema")), DRAFT_REPLY)
+            session = after(argv, "--session-id")
+            self.assertEqual(uuid.UUID(session).version, 4)
+            self.assertEqual(session, event["session"])
+            ids.append(session)
+            self.assertEqual(after(argv, "--permission-mode"), "dontAsk")
+            self.assertIn("--strict-mcp-config", argv)
+            self.assertEqual(line["cwd"], os.path.realpath(project.root))
+            self.assertEqual(line["stdin"], "Draft issue 1514.\n")
+            self.assertEqual(after(argv, "--model"), frontmatter(text, "model"))
+            self.assertEqual(after(argv, "--effort"), frontmatter(text, "effort"))
+            tools = frontmatter(text, "tools")
+            if role == "implementer":
+                self.assertNotIn("--tools", argv)
+                self.assertNotIn("--allowedTools", argv)
+                self.assertEqual(after(argv, "--disallowedTools"),
+                                 names(frontmatter(text, "disallowedTools")))
+            else:
+                self.assertEqual(after(argv, "--tools"), names(tools))
+                self.assertEqual(after(argv, "--allowedTools"), names(tools))
+                self.assertNotIn("--disallowedTools", argv)
+            self.assertEqual(Path(after(argv, "--append-system-prompt-file")).read_text(
+                encoding="utf-8"), text.partition("\n---\n")[2])
+            for word in ("--agent", "--bare", "--setting-sources",
+                         "--dangerously-skip-permissions", "bypassPermissions"):
+                self.assertNotIn(word, argv)
+            self.assertEqual(event["account"], "console")
+        self.assertEqual(len(set(ids)), 4)
+
+    def test_the_session_is_recorded_before_its_process_starts(self):
+        log = install_stub(self.project, RESULT_NORMAL)
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        run = self.run_dir()
+        self.assertEqual(shape(self.project.events(run)), [
+            ("step_entered", "draft", 1), ("session_starting", "draft", 1),
+            ("process_started", "draft", 1), ("result_stored", "draft", 1),
+            ("outcome_graded", "draft", 1), ("transition_taken", "draft", 1),
+            ("run_done", None, None)])
+        (line,) = self.log(log)
+        self.assertTrue(line["announced"])
+        self.assertEqual((run / "sessions/draft.1.prompt.md").read_text(encoding="utf-8"),
+                         line["stdin"])
+
+    def test_the_session_is_on_disk_before_launch_is_called(self):
+        project = self.project
+        install_stub(project, RESULT_NORMAL)
+        procedures = one_step(project)
+        real = engine_session.launch
+        seen: list[tuple] = []
+
+        def checking(argv, cwd, prompt, *, on_start):
+            (run,) = project.runs()
+            events = engine_ledger.replay(run / "events.jsonl")
+            seen.append((events[-1]["event"], events[-1].get("session"),
+                         [e["event"] for e in events], after(list(argv), "--session-id")))
+            return real(argv, cwd, prompt, on_start=on_start)
+
+        with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
+            code, line = engine_shell.deliver(1514, procedures)
+        self.assertEqual(code, 0, line)
+        (last, session, events, asked) = seen[0]
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(last, "session_starting")
+        self.assertEqual(session, asked)
+        self.assertNotIn("process_started", events)
+
+    def test_the_outcome_is_the_member_outcome_from_names_and_prose_or_exit_change_nothing(self):
+        with self.subTest("outcome_from status"):
+            project = EngineProject(self)
+            project.env.pop("CLAUDE_ACCOUNT", None)
+            copy_roles(project, "implementer")
+            install_stub(project, RESULT_NORMAL)
+            done = project.deliver(one_step(project), issue=1514)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(json.loads(done.stdout)["end"], "done")
+            (run,) = project.runs()
+            events = project.events(run)
+            graded = [e for e in events if e["event"] == "outcome_graded"]
+            taken = [e for e in events if e["event"] == "transition_taken"]
+            self.assertEqual(graded[0]["outcome"], "drafted")
+            self.assertEqual(taken[0]["to"], "done")
+            self.assertEqual(json.loads((run / "results/draft.1.json").read_text()),
+                             {"status": "drafted", "summary": "a short draft", "items": ["a"]})
+        with self.subTest("outcome_from verdict"):
+            project = EngineProject(self)
+            project.env.pop("CLAUDE_ACCOUNT", None)
+            copy_roles(project, "reviewer")
+            install_stub(project, canned_result(
+                structured_output={"verdict": "revise", "status": "approve"},
+                result="Verdict: approve."), exit=1)
+            steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
+                                prompt="review.md", reply="review.reply.json",
+                                outcome_from="verdict")]
+            procedures = write_procedures(project, steps, {
+                "review.md": "Review {{run.issue}}.\n",
+                "review.reply.json": json.dumps(REVIEW_REPLY)})
+            done = project.deliver(procedures, issue=1514)
+            self.assertEqual(done.returncode, 3, done.stderr)
+            self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+            events = project.events(project.runs()[0])
+            self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                             ["revise"])
+            self.assertEqual([e["to"] for e in events if e["event"] == "transition_taken"],
+                             ["needs-owner"])
+
+    def test_prose_with_no_structured_output_gives_no_outcome_and_no_transition(self):
+        install_stub(self.project, canned_result(
+            structured_output=..., result="Status: drafted. Done."),
+            diagnostic="claude-stub: the model answered in prose only\n")
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        self.assertIn("draft", done.stderr)
+        self.assertIn("claude-stub: the model answered in prose only", done.stderr)
+        run = self.run_dir()
+        kinds = [e["event"] for e in self.project.events(run)]
+        for kind in ("session_starting", "process_started"):
+            self.assertIn(kind, kinds)
+        for kind in ("result_stored", "outcome_graded", "transition_taken", "run_done",
+                     "stop_reached"):
+            self.assertNotIn(kind, kinds)
+        self.assertFalse((run / "results/draft.1.json").exists())
+        record = json.loads((run / "sessions/draft.1.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["prose"], "Status: drafted. Done.")
+
+    def test_the_result_event_carries_the_canned_measurements_and_the_step_its_denials(self):
+        install_stub(self.project, RESULT_NORMAL)
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        run = self.run_dir()
+        (stored,) = [e for e in self.project.events(run) if e["event"] == "result_stored"]
+        self.assertEqual(stored["wall_seconds"], 12.345)
+        self.assertEqual(stored["turns"], 7)
+        self.assertEqual(stored["tokens"],
+                         {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44})
+        self.assertEqual(stored["spend_usd"], 0.4321)
+        self.assertEqual(json.loads((run / "sessions/draft.1.json").read_text(encoding="utf-8")), {
+            "denials": [{"tool_name": "Write", "tool_use_id": "toolu_01",
+                         "tool_input": {"file_path": "/etc/hosts"}}],
+            "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
+            "session": self.starting()["session"], "subtype": "success"})
+
+    def test_a_result_without_its_duration_records_the_engines_measure(self):
+        install_stub(self.project, canned_result(duration_ms=...))
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        (stored,) = [e for e in self.project.events(self.run_dir())
+                     if e["event"] == "result_stored"]
+        self.assertIsInstance(stored["wall_seconds"], float)
+        self.assertTrue(0 < stored["wall_seconds"] < 120, stored["wall_seconds"])
+
+    def test_an_account_override_is_the_account_asked(self):
+        self.project.env["CLAUDE_ACCOUNT"] = "work"
+        install_stub(self.project, RESULT_NORMAL)
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.starting()["account"], "work")
+
+    def test_an_unknown_account_is_one_fault_line_with_the_launchers_reason(self):
+        self.project.env["CLAUDE_ACCOUNT"] = "work"
+        install_stub(self.project, b"", exit=1, diagnostic=(
+            "claude-account: no account 'work' (create it: /account add work, "
+            "or claude-account add work)\n"))
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        for word in ("draft", "exit 1", "no account 'work'"):
+            self.assertIn(word, done.stderr)
+
+    def test_an_outcome_the_step_cannot_map_is_a_fault_after_its_result_is_stored(self):
+        cases = {
+            "maybe": ("maybe", {}),
+            "not a string": (["drafted"], {}),
+            "exhausted": ("exhausted", {
+                "on": {"drafted": "done", "stuck": "needs-owner", "exhausted": "needs-owner"},
+                "max_visits": 2}),
+        }
+        for name, (status, members) in cases.items():
+            with self.subTest(name):
+                project = EngineProject(self)
+                project.env.pop("CLAUDE_ACCOUNT", None)
+                copy_roles(project, "implementer")
+                reply = {"status": status, "summary": "s", "items": []}
+                install_stub(project, canned_result(structured_output=reply))
+                done = project.deliver(one_step(project, **members), issue=1514)
+                self.assertEqual(done.returncode, 1)
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                self.assertIn("draft", done.stderr)
+                (run,) = project.runs()
+                events = project.events(run)
+                self.assertEqual(json.loads((run / "results/draft.1.json").read_text()), reply)
+                self.assertEqual((events[-1]["event"], events[-1]["step"]),
+                                 ("result_stored", "draft"))
+                kinds = [e["event"] for e in events]
+                self.assertNotIn("outcome_graded", kinds)
+                self.assertNotIn("transition_taken", kinds)
+
+    def test_a_role_file_that_does_not_read_refuses_the_run_before_any_session(self):
+        for name in ("no file", "a model that is an option"):
+            with self.subTest(name):
+                project = EngineProject(self)
+                project.env.pop("CLAUDE_ACCOUNT", None)
+                if name != "no file":
+                    copy_roles(project, "implementer")
+                    path = project.world.home / ".claude/agents/implementer.md"
+                    path.write_text(re.sub(r"^model: .*$", "model: --dangerously-skip-permissions",
+                                           path.read_text(encoding="utf-8"), flags=re.M),
+                                    encoding="utf-8")
+                log = install_stub(project, RESULT_NORMAL)
+                done = project.deliver(one_step(project), issue=1514)
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                self.assertIn("implementer", done.stderr)
+                self.assertEqual(project.runs(), [])
+                self.assertFalse(log.exists())
+
+    def test_the_deliver_help_names_agent_steps(self):
+        text = " ".join(engine.build_parser().format_help().split())
+        self.assertIn("run a procedure of command, agent and decide steps to done or a stop", text)

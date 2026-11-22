@@ -353,7 +353,7 @@ class RefusalTest(unittest.TestCase):
                 "repo", lambda p: p.procedures([step("a", "standin-record", "done")],
                                                inputs=("issue", "repo"))),
             "a mutating step": ("mutates", with_mutation),
-            "an agent step": ("agent", shipped),
+            "a group step": ("group", shipped),
             "no deliver.json": ("deliver.json", empty),
         }
         for name, (word, build) in cases.items():
