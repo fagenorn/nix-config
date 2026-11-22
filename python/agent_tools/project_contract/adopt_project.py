@@ -183,7 +183,7 @@ integration_branch}`, the last read from the resolver's view of the worktree
 
 A plan with `plan.conformance` also requires `Conformance` on the forge, all
 three writes or none (#1454; `adopt_conformance` states the contract). Before
-anything is created `apply` checks that `origin` is the plan's repository and
+anything is created `apply` checks that both URLs of `origin` are the plan's repository and
 reads the integration branch's required checks: no protection, or none
 requiring a status check, is `adopt.required_check.unprotected` and an
 unreadable answer `adopt.required_check.unreadable`, both leaving nothing
@@ -196,7 +196,8 @@ deletes the adoption branch and refuses `adopt.required_check.refused`; an
 unknown outcome keeps the branch and the pending record and refuses
 `adopt.required_check.unknown`, and applying the same plan id again settles it
 from the record without a second request (`--discard-retained` never removes
-it). Adoption never removes or narrows a protection, so once apply has
+it). A record whose branch was deleted by hand is stale: apply and `discard`
+drop it. Apply and `discard` of one plan are serialized by a per-plan lock. Adoption never removes or narrows a protection, so once apply has
 succeeded the requirement outlives the adoption: until the adoption pull request
 merges every other pull request to the integration branch is blocked, and a
 failed push, a closed or abandoned pull request, or a failing Conformance run
@@ -783,6 +784,8 @@ def emit_human(document: dict) -> int:
             f"platform lock: {member['lock']['input']} at "
             f"{member['revision']['rev']} ({member['lock']['path']})"))
         lines.insert(lines.index(f"changes:  {len(document['changes'])} operations") + 2, (
+            f"workflow: {member['workflow']}"))
+        lines.insert(lines.index(f"changes:  {len(document['changes'])} operations") + 3, (
             f"required check: {check['context']} on {check['branch']} of {check['repo']}"))
     for row in document["reference_policies"]:
         lines.append(
@@ -864,20 +867,31 @@ def command_discard(args: argparse.Namespace) -> int:
     digest = adopt_apply.plan_digest(args.plan_id)
     document = adopt_apply.load_stored_plan(digest)
     root = adopt_inspection.require_repository(document["handoff"]["repo_root"])
-    adopt_apply.discard_retained(root, digest)
+    with adopt_conformance.plan_lock(digest):
+        adopt_apply.discard_retained(root, digest)
     return emit_json({"plan_id": args.plan_id, "discarded": True})
 
 
-def prove_conformance_projections(worktree: Path) -> None:
-    """The clean worktree, which holds the commit's bytes, has fresh projections (P16)."""
+def prove_conformance_projections(worktree: Path, commit: str) -> None:
+    """The commit's projections are fresh (P16).
+
+    The resolver judges the worktree, which a commit environment may leave with
+    files the commit does not carry, so the workflow the worktree renders must
+    also be the blob the commit holds.
+    """
     code, _ = run_resolver(worktree, "check-projections")
-    if code != 0:
+    committed = adopt_inspection.blob_at(worktree, commit, adopt_conformance.WORKFLOW_TARGET)
+    try:
+        rendered = (worktree / adopt_conformance.WORKFLOW_TARGET).read_bytes()
+    except OSError:
+        rendered = None
+    if code != 0 or committed is None or committed != rendered:
         raise adopt_inspection.refuse(
             "verification_failed", adopt_apply.CONFORMANCE_UNPROVED, "",
             "the adoption commit's generated projections are not those the resolver renders")
 
 
-def reconcile_required_check(root: Path, digest: str) -> int:
+def reconcile_required_check(root: Path, digest: str, document: dict) -> int:
     """Settle the required check of an adoption whose forge step is still pending.
 
     Planning, the worktree and the commit are skipped: the branch must still be
@@ -885,6 +899,7 @@ def reconcile_required_check(root: Path, digest: str) -> int:
     are those of a first apply, so a request that landed is never repeated.
     """
     record = adopt_conformance.read_pending(digest)
+    adopt_conformance.bind_pending(root, digest, record, document)
     code, out = adopt_inspection.run_git(
         root, "rev-parse", "--verify", f"refs/heads/{record['branch']}")
     if code != 0 or out.decode("ascii", "replace").strip() != record["commit"]:
@@ -907,6 +922,12 @@ def command_apply(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     digest = adopt_apply.plan_digest(args.plan_id)
     document = adopt_apply.load_stored_plan(digest)
+    with adopt_conformance.plan_lock(digest):
+        return apply_stored_plan(args, manifest, digest, document)
+
+
+def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
+                      document: dict) -> int:
     answers = adopt_apply.stored_answers(document)
     draft = adopt_apply.stored_draft(document)
     environment = adopt_apply.stored_environment(document)
@@ -930,8 +951,9 @@ def command_apply(args: argparse.Namespace) -> int:
 
     # An adoption whose required check is still to settle has its commit and
     # branch already: only the forge step is left (P6).
+    adopt_conformance.drop_stale_pending(root, digest)
     if adopt_conformance.pending_path(digest).exists():
-        return reconcile_required_check(root, digest)
+        return reconcile_required_check(root, digest, document)
 
     # Before the repository is re-inspected, because a retained worktree is
     # registered in the target and therefore *changes* what the inspection
@@ -1086,9 +1108,9 @@ def command_apply(args: argparse.Namespace) -> int:
     try:
         adopt_apply.prove_commit_content(worktree, commit, changes)
         adopt_apply.prove_commit_links(worktree, commit, changes)
-        adopt_apply.prove_conformance_bytes(worktree, commit, changes)
+        adopt_apply.prove_conformance_bytes(worktree, commit, changes, member)
         if member is not None:
-            prove_conformance_projections(worktree)
+            prove_conformance_projections(worktree, commit)
     except adopt_inspection.AdoptError as error:
         adopt_apply.retain_failure(digest, document, worktree, branch, gates,
                                    error.repair_id)

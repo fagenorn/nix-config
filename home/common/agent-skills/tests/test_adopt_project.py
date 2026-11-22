@@ -3890,6 +3890,9 @@ class InputDeclarationTest(unittest.TestCase):
             "tab-indented child": b"inputs:\n\tnixpkgs:\n\t\turl: github:a/b\n",
             "two inputs lines": b"inputs:\n  a:\n    url: github:a/b\ninputs:\n",
             "a sequence": b"- a\n",
+            "an indented flow mapping under inputs": b"inputs:\n  {}\n",
+            "an indented sequence under inputs": b"inputs:\n  - a\n",
+            "a child outdented from the first": b"inputs:\n    a:\n      url: x\n  b:\n",
             "invalid utf-8": b"inputs:\n  \xff:\n",
             "no file": None,
         }
@@ -4055,6 +4058,7 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
         code, human, err = run("plan", "--repo-root", str(root), "--format", "human", home=self.home)
         self.assertEqual(code, 0, err)
         self.assertIn("platform lock: agent-platform at " + "0f" * 20 + " (devenv.lock)", human)
+        self.assertIn("workflow: .github/workflows/conformance.yaml", human)
         self.assertIn("required check: Conformance on main of fixture/target", human)
 
     def test_a_repository_without_a_devenv_lock_plans_none_of_the_three_writes(self):

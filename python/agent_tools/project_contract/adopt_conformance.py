@@ -23,7 +23,8 @@ is the apply step and is the last section of this module.
   compatible existing declaration as found (an inline value on the
   `agent-platform` key, whatever follows it, is incompatible). A flow-style document, a document
   marker, an `inputs` carrying an inline value, a duplicated `inputs:` line or a
-  tab-indented child is refused rather than edited.
+  tab-indented child, or a child of `inputs:` that is not a mapping key (an indented
+  `{}` or a sequence item) is refused rather than edited.
 - `require_in_protection_file` appends the `Conformance` check to the branch
   protection file in the shape the resolver reads (`required_status_checks.checks`
   of objects with a unique `context`), keeping every existing entry, its
@@ -40,18 +41,21 @@ and `POST .../required_status_checks/contexts` with `contexts[]=Conformance`.
 The order of an apply is:
 
 1. Before anything is mutated, and after the dirty-overlap refusal, `preflight`
-   requires `remote_slug(root)` to equal the plan's `required_check.repo`
+   requires both effective URLs of `origin` (fetch and push, as git reports them)
+   to name the plan's `required_check.repo` on `github.com`
    (`adopt.required_check.origin_mismatch`, no `gh` call) and reads the state.
    A 404, or a readable answer that lists no context, is
    `adopt.required_check.unprotected` (the owner turns on required status checks
    and adopts again; adoption never creates or widens a protection); an
    unreadable or malformed answer is `adopt.required_check.unreadable`. `Conformance`
-   already listed is `already_required`: no request is made.
+   already listed is `already_required`: no request is made, unless a listed
+   `Conformance` check is bound to a GitHub App other than Actions
+   (`adopt.required_check.app_mismatch`), which the generated job cannot satisfy.
 2. After the commit's bytes are proved and the worktree is removed, a state of
    `missing` writes the pending record (`pending_path`) and `settle_required_check`
    makes the one POST. `added` is success. A refused or lost POST is followed by
-   one re-read: present is success; a readable answer without the context is a
-   confirmed absence, so the adoption branch is deleted by a compare-and-delete
+   one re-read: present is success; a readable answer without the context (an
+   empty list or a 404 included) is a confirmed absence, so the adoption branch is deleted by a compare-and-delete
    whose result is read back and apply refuses `adopt.required_check.refused`
    (`adopt.required_check.rollback_failed` when the branch could not be deleted);
    a re-read that raises is an unknown outcome, so the branch and the record are
@@ -63,7 +67,15 @@ The order of an apply is:
    once the result is emitted. While the record exists, `discard` refuses
    `adopt.required_check.pending` and changes nothing, and `--discard-retained`
    is never reached (apply reconciles first), so the branch and the record are
-   only ever kept or removed together.
+   only ever kept or removed together. The record is bound to the plan first: its
+   plan id, branch name (`adopt-<digest[:12]>`), repository and integration branch
+   must be the plan's and its commit must carry the plan's evidence record, else
+   `adopt.required_check.pending_mismatch`, so a misplaced record can never name
+   another branch for the rollback to delete. A record whose branch no longer
+   exists (deleted by hand after `adopt.required_check.rollback_failed`) is stale:
+   apply and `discard` drop it and go on.
+4. Apply and `discard` of one plan hold one per-plan lock (`plan_lock`); a second
+   holder is refused `adopt.required_check.pending` and changes nothing.
 
 A refusal is `Undeclarable` carrying one of the `adopt.conformance.*` repair ids
 below; the plan's ready gate reports it.
@@ -100,9 +112,12 @@ revision), so those causes never block it behind a repair it does not need.
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
+import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -110,6 +125,7 @@ from agent_tools.canonical import reject_duplicate_keys
 from agent_tools.project_contract import adopt_inspection, agent_platform, derived_values
 from agent_tools.project_contract.agent_platform import valid_revision
 from agent_tools.system import forge_api
+from agent_tools.system.github_remote import github_slug
 
 CONTEXT = "Conformance"
 LOCK_FILE = "devenv.lock"
@@ -143,6 +159,8 @@ REQUIRED_ROLLBACK_FAILED = "adopt.required_check.rollback_failed"
 REQUIRED_UNKNOWN = "adopt.required_check.unknown"
 REQUIRED_PENDING_MISMATCH = "adopt.required_check.pending_mismatch"
 REQUIRED_PENDING = "adopt.required_check.pending"
+REQUIRED_APP_MISMATCH = "adopt.required_check.app_mismatch"
+ACTIONS_APP_ID = 15368
 REQUIRED_POINTER = "/plan/conformance/required_check"
 PENDING_MEMBERS = ("plan_id", "branch", "commit", "repo", "integration_branch", "result")
 
@@ -150,6 +168,8 @@ _KEY_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*:([ \t]+\S.*|[ \t]*(#.*)?)$")
 _INPUTS_OPEN = re.compile(r"^inputs:[ \t]*(#.*)?$")
 _DECLARATION = re.compile(
     r"""^(?:agent-platform|"agent-platform"|'agent-platform')[ \t]*:(?P<value>(?:[ \t].*)?)$""")
+_CHILD_KEY = re.compile(
+    r"""^(?:[A-Za-z_][A-Za-z0-9_.-]*|"[^"]*"|'[^']*')[ \t]*:(?:[ \t].*)?$""")
 _EMPTY_VALUE = re.compile(r"^[ \t]*(#.*)?$")
 
 
@@ -316,6 +336,13 @@ def declare_input(data: bytes | None, owner: str, repo: str) -> bytes | None:
         if indent.strip(" "):
             raise Undeclarable(INPUT_UNDECLARABLE)
         last = children[-1]
+    for number in children:
+        # Every child at or left of the first child's column must be a mapping key:
+        # a flow value (`{}`) or a sequence item there cannot take a sibling key.
+        level = _indent(stripped[number])
+        if level < len(indent) or (
+                level == len(indent) and not _CHILD_KEY.match(stripped[number].lstrip(" "))):
+            raise Undeclarable(INPUT_UNDECLARABLE)
     for number in children:
         line = stripped[number]
         if _indent(line) != len(indent):
@@ -609,12 +636,21 @@ def _answer_contexts(answer: object, branch: str) -> list[str]:
     return found
 
 
+def _bound_elsewhere(answer: dict) -> bool:
+    """Whether a listed `Conformance` check is bound to an app other than Actions."""
+    checks = answer.get("checks")
+    return isinstance(checks, list) and any(
+        isinstance(item, dict) and item.get("context") == CONTEXT
+        and item.get("app_id") not in (None, ACTIONS_APP_ID) for item in checks)
+
+
 def required_check_state(repo: str, branch: str) -> str:
     """`required` when `Conformance` is a required check of `branch`, else `missing`.
 
     A branch with no protection, or whose protection requires no status check, is
     the refusal `adopt.required_check.unprotected`; a forge failure or an answer of
-    another shape is `adopt.required_check.unreadable`.
+    another shape is `adopt.required_check.unreadable`; a `Conformance` check bound
+    to a GitHub App other than Actions is `adopt.required_check.app_mismatch`.
     """
     path = f"repos/{repo}/branches/{branch}/protection/required_status_checks"
     try:
@@ -632,7 +668,15 @@ def required_check_state(repo: str, branch: str) -> str:
     contexts = _answer_contexts(answer, branch)
     if not contexts:
         raise unprotected
-    return "required" if CONTEXT in contexts else "missing"
+    if CONTEXT not in contexts:
+        return "missing"
+    if _bound_elsewhere(answer):
+        raise _required_failure(
+            REQUIRED_APP_MISMATCH,
+            f"{CONTEXT} is required on {branch} by another GitHub App than Actions, which the "
+            "generated workflow cannot satisfy; require it from any source or from Actions and "
+            "adopt again")
+    return "required"
 
 
 def add_required_check(repo: str, branch: str) -> str:
@@ -673,12 +717,15 @@ def read_pending(digest: str) -> dict:
 
 
 def preflight(root: Path, repo: str, branch: str) -> str:
-    """The origin check, then the state read, before anything is mutated or requested."""
-    try:
-        origin = derived_values.remote_slug(root)
-    except derived_values.Underivable:
-        origin = None
-    if origin != repo:
+    """The origin check, then the state read, before anything is mutated or requested.
+
+    Both effective URLs of `origin` (fetch and push) must name `repo` on `github.com`.
+    """
+    slugs = []
+    for arguments in (("get-url", "origin"), ("get-url", "--push", "origin")):
+        code, out = adopt_inspection.run_git(root, "remote", *arguments, local_only=True)
+        slugs.append(github_slug(out.decode("utf-8", "replace")) if code == 0 else None)
+    if any(slug != repo for slug in slugs):
         raise _required_failure(
             REQUIRED_ORIGIN_MISMATCH,
             f"the remote origin is not {repo}, the repository the required check is requested on",
@@ -703,11 +750,15 @@ def settle_required_check(root: Path, digest: str, record: dict) -> dict:
     adopt_branch, commit = record["branch"], record["commit"]
     try:
         state = required_check_state(repo, branch)
-    except adopt_inspection.AdoptError:
-        raise _required_failure(
-            REQUIRED_UNKNOWN,
-            f"the forge's answer to adding {CONTEXT} to {branch} is unknown; the adoption branch "
-            f"{adopt_branch} at {commit} is kept, and applying this plan again settles it") from None
+    except adopt_inspection.AdoptError as error:
+        # A readable answer with no context (an empty list, a 404) is a confirmed absence.
+        if error.repair_id != REQUIRED_UNPROTECTED:
+            raise _required_failure(
+                REQUIRED_UNKNOWN,
+                f"the forge's answer to adding {CONTEXT} to {branch} is unknown; the adoption "
+                f"branch {adopt_branch} at {commit} is kept, and applying this plan again "
+                "settles it") from None
+        state = "missing"
     if state == "required":
         return member
     ref = f"refs/heads/{adopt_branch}"
@@ -723,3 +774,69 @@ def settle_required_check(root: Path, digest: str, record: dict) -> dict:
         REQUIRED_ROLLBACK_FAILED,
         f"the forge did not add {CONTEXT} to {branch} and the adoption branch {adopt_branch} at "
         f"{commit} could not be deleted; delete it by hand")
+
+
+def bind_pending(root: Path, digest: str, record: dict, document: dict) -> None:
+    """The pending record belongs to this plan, or the refusal `pending_mismatch`.
+
+    Its plan id, branch name, repository and integration branch are the stored
+    plan's, and the commit it names carries the plan's evidence record with the
+    plan's conformance member, so a misplaced or edited record can never make
+    the settlement delete a branch that is not this adoption's.
+    """
+    plan = document["plan"]
+    member = plan.get("conformance")
+    target = member.get("required_check") if isinstance(member, dict) else None
+    evidence = document["handoff"]["evidence_record"]
+    result = record["result"]
+    branch = f"adopt-{digest[:12]}"
+    bound = (isinstance(target, dict) and record["plan_id"] == plan["plan_id"]
+             and record["branch"] == branch and record["repo"] == target["repo"]
+             and record["integration_branch"] == target["branch"]
+             and result.get("plan_id") == plan["plan_id"] and result.get("branch") == branch
+             and result.get("commit") == record["commit"]
+             and result.get("evidence_record") == evidence)
+    if bound:
+        data = adopt_inspection.blob_at(root, record["commit"], evidence)
+        try:
+            committed = json.loads(data.decode("utf-8")) if data is not None else None
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            committed = None
+        bound = isinstance(committed, dict) and committed.get("conformance") == member
+    if not bound:
+        raise _required_failure(
+            REQUIRED_PENDING_MISMATCH,
+            "the pending required-check record does not belong to this plan's adoption", "")
+
+
+def drop_stale_pending(root: Path, digest: str) -> None:
+    """Remove the pending record of a plan whose adoption branch no longer exists.
+
+    The branch is `adopt-<digest[:12]>`, the only branch a record of this plan may
+    name. Deleted by hand after `adopt.required_check.rollback_failed`, it leaves a
+    record that nothing can settle; a git failure other than an absent ref keeps it.
+    """
+    if not pending_path(digest).exists():
+        return
+    code, _ = adopt_inspection.run_git(
+        root, "rev-parse", "--verify", "--quiet", f"refs/heads/adopt-{digest[:12]}")
+    if code == 1:
+        pending_path(digest).unlink(missing_ok=True)
+
+
+@contextmanager
+def plan_lock(digest: str) -> Iterator[None]:
+    """Hold the plan's one lock, or refuse when another apply or discard holds it."""
+    path = agent_platform.state_root() / "adopt" / "locks" / f"{digest}.lock"
+    agent_platform.ensure_directory(path.parent)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise _required_failure(
+                REQUIRED_PENDING,
+                "another apply or discard of this plan is running; wait for it to finish", "") from None
+        yield
+    finally:
+        os.close(descriptor)
