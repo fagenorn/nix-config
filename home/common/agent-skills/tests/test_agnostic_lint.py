@@ -116,6 +116,12 @@ class AgnosticTest(unittest.TestCase):
             f"[a](../<{self.ISSUE}/1417>)",
             f"[a](x<{self.ISSUE}/1417>)",
             f"[a]: ../<{self.ISSUE}/1417>",
+            f"[a](x(<{self.ISSUE}/1417>))",
+            f"[a](x[<{self.ISSUE}/1417>])",
+            f"[a](x({self.ISSUE}/1417))",
+            f"[a]: x(<{self.ISSUE}/1417>)",
+            f"[a]((<{self.ISSUE}/1417>))",
+            f"[a](x(({self.ISSUE}/1417)))",
         ]
         for line in refused:
             with self.subTest(line=line):

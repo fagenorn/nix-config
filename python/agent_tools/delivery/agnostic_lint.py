@@ -40,30 +40,40 @@ AGNOSTIC_ALLOW = {
 }
 
 
+def opens_token(line: str, start: int) -> bool:
+    """Whether a token at `start` begins on its own: at the line start, after whitespace or after `(`/`[`.
+
+    A run of `(`/`[` is looked through, but a run that follows anything but whitespace is inside a
+    longer destination, bar the single `(` that opens a link destination straight after `]`.
+    """
+    first = start
+    while first and line[first - 1] in "([":
+        first -= 1
+    before = line[first - 1:first]
+    return not before or before.isspace() or (line[first:start] == "(" and before == "]")
+
+
 def without_tracker_links(line: str) -> str:
     """The line with each tracker issue link blanked out, the whole destination being that link.
 
     A link destination is read as CommonMark reads it: `](<...>)` and `<...>` hold everything up to
     the closing `>`, so each is blanked only when that is exactly the issue link; a `<...>` that
-    follows anything but whitespace, `(`, `[` or the start of the line is part of a longer
-    destination and stays. Any other URL is a
-    bare destination or prose: it is blanked (bar trailing punctuation) when it follows whitespace,
-    `(`, `[` or the start of the line and is followed by whitespace, `)` or the end of the line.
-    Anything else continues the destination, and the span stays.
+    does not open a token (`opens_token`) is part of a longer destination and stays. Any other URL
+    is a bare destination or prose: it is blanked (bar trailing punctuation) when it opens a token
+    and is followed by whitespace, `)` or the end of the line. Anything else continues the
+    destination, and the span stays.
     """
     def exact(match):
         return " " * len(match.group(0)) if TRACKER_ISSUE_LINK.fullmatch(match.group("url")) else match.group(0)
 
     def autolink(match):
-        before = match.string[match.start() - 1:match.start()]
-        return match.group(0) if before and not (before.isspace() or before in "([") else exact(match)
+        return exact(match) if opens_token(match.string, match.start()) else match.group(0)
 
     def blank(match):
         span = match.group(0)
         url = span.rstrip(".,;:!?")
-        before = match.string[match.start() - 1:match.start()]
         after = match.string[match.end():match.end() + 1]
-        if (before and not (before.isspace() or before in "([")) or (after and not (after.isspace() or after == ")")):
+        if not opens_token(match.string, match.start()) or (after and not (after.isspace() or after == ")")):
             return span
         return " " + span[len(url):] if TRACKER_ISSUE_LINK.fullmatch(url) else span
     line = ANGLE_DESTINATION.sub(exact, line)

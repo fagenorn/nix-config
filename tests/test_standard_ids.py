@@ -65,8 +65,8 @@ def scan(text: str):
     for number, raw in enumerate(text.removesuffix("\n").split("\n"), 1):
         line = raw.rstrip()
         indent = len(line) - len(line.lstrip(" "))
+        popped = False
         if line:
-            popped = False
             while columns and indent < columns[-1]:
                 columns.pop()
                 popped = True
@@ -94,6 +94,9 @@ def scan(text: str):
             item = LIST_MARKER.match(rest)
             if not item or THEMATIC_BREAK.fullmatch(rest):
                 break
+            if paragraph and not popped and not opens_item and (
+                    item.end() == len(rest) or (item[2][-1] in ".)" and int(item[2][:-1]) != 1)):
+                break  # an empty item or an ordered one not starting at 1 cannot interrupt a paragraph
             spaces = len(item[3])
             columns.append((columns[-1] if columns else 0) + len(item[1]) + len(item[2])
                            + (spaces if 0 < spaces < 5 else 1))
@@ -318,6 +321,16 @@ class RuleHeadingTest(unittest.TestCase):
                 self.assertEqual(rule_headings(text), ([], []))
         text = "# T\n- ```\n  ### P1. x\n  ```\n\n### P2. y\nbody\n"
         self.assertEqual(rule_headings(text)[0], [("P", 2, 6)])
+
+    def test_a_marker_that_cannot_interrupt_a_paragraph_opens_nothing(self):
+        for text in ("# T\ntext\n2. ```\n   ### Missing\n", "# T\ntext\n2. <div>\n   ### Missing\n",
+                     "# T\n- a\n  text\n  2. ```\n     ### Missing\n"):
+            with self.subTest(text=text):
+                self.assertEqual(len(rule_headings(text)[1]), 1)
+        for text in ("# T\ntext\n1. ```\n   ### P1. x\n   ```\n", "# T\n1. a\n2. ```\n   ### P1. x\n   ```\n",
+                     "# T\n\n2. ```\n   ### P1. x\n   ```\n"):
+            with self.subTest(text=text):
+                self.assertEqual(rule_headings(text), ([], []))
 
     def test_a_list_item_ends_over_an_open_fence_or_html_block(self):
         for text in ("# T\n- a\n  ```\nfoo\n### Missing\n", "# T\n- a\n  <!--\nfoo\n### Missing\n",
