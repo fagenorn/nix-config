@@ -1,4 +1,4 @@
-# ADR-delivery-018 — The comment lint reads each stack's comments and counts three rules
+# ADR-delivery-019 — The comment lint reads each stack's comments and counts three rules
 
 - **Status:** accepted
 - **Decided in:** #1461 (per #1420, #1414, #1412)
