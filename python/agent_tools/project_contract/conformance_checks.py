@@ -633,8 +633,9 @@ def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
 
 def check_conformance_workflow_fresh(context: "Context") -> "Outcome":
     """Contract: failed when the committed conformance workflow differs from
-    the renderer's bytes for the contract's integration branch and schema
-    version, or when that branch cannot be rendered; passed when the file is
+    the renderer's bytes for the contract's integration branch, schema version
+    and form (the platform's own tree's, or the locked one every other tree
+    gets), or when that branch cannot be rendered; passed when the file is
     absent or exact.
 
     Interim: it judges the file whether or not the contract declares a
@@ -660,7 +661,8 @@ def check_conformance_workflow_fresh(context: "Context") -> "Outcome":
     try:
         expected = resolver.render_conformance_workflow(
             context.contract["bindings"]["vcs"]["integration_branch"],
-            context.contract["schema_version"])
+            context.contract["schema_version"],
+            locked=resolver.conformance_workflow_locked(context.root))
     except ValueError:
         return Outcome("failed", "conformance_workflow_stale",
                        "conformance.workflow.regenerate",

@@ -124,6 +124,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_resolve_platform.py \
     home/common/agent-skills/tests/test_resolve_schema_three.py \
+    home/common/agent-skills/tests/test_resolve_conformance_workflow.py \
     home/common/agent-skills/tests/test_schema_three_derivation.py \
     home/common/agent-skills/tests/test_attempt_history.py \
     home/common/agent-skills/tests/test_attempt_budget.py \
@@ -137,6 +138,8 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
+    home/common/agent-skills/tests/test_adopt_conformance.py \
+    home/common/agent-skills/tests/test_adopt_conformance_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
     home/common/agent-skills/tests/test_adopt_links.py \
     home/common/agent-skills/tests/test_adopt_references.py \
@@ -152,6 +155,7 @@ agent-workflow-tests *args:
     tests/test_engine_guard.py \
     tests/test_engine_deliver.py \
     tests/test_engine_session.py \
+    tests/test_engine_session_limits.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_caps.py \
     tests/test_plan_amend.py \

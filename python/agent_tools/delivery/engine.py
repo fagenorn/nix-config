@@ -30,7 +30,8 @@ fold of the run's `events.jsonl` derives. It writes nothing and creates no direc
 `engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a procedure of
 `command`, `agent` and `decide` steps; an agent step runs as one headless session through the
 account launcher, graded by its structured reply unless a bound fires, its files kept under the
-run's `sessions/`; every step runs within the platform's bounds, and a fired bound is the
+run's `sessions/`; a step with no valid structured answer is asked once more on the same session and
+then ends `no-reply`; every step runs within the platform's bounds, and a fired bound is the
 outcome `out-of-bounds`; default: the package's `procedures` directory) for the issue, in the project the
 current directory belongs to, to `done` or a stop, and prints one line of compact sorted-key
 JSON when it ends (`engine_shell` is the contract):
@@ -41,8 +42,8 @@ JSON when it ends (`engine_shell` is the contract):
 - exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"}, "run"}`,
   another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
-- exit 2, stdout empty and one stderr line: a usage error, or a refusal before any run
-  exists, which creates no run directory.
+- exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
+  lifecycle guard hook, or a refusal before any run exists, which creates no run directory.
 """
 
 from __future__ import annotations
