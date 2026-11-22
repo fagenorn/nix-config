@@ -180,8 +180,9 @@ Contract:
   holds what each state must read on a page that proposes it (`proposes(state)`, which is
   `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on
   a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
-  picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
-  card opens on the plan's own first line and its draft shows nothing.
+  picture, and any other reading fails. The base commit's register-draft has no facts and drafts the
+  commit environment as a main row with a Change button, so that row is its reading; its reconcile
+  row has no draft, so its Apply card opens on the plan's own first line and shows nothing.
   `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 114 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
@@ -340,7 +341,7 @@ FACT_LINE = "project id and issue tracker: GitHub, as owner/sample-app (read fro
 REGISTER_SHOWN = {"register-draft": (None, FACT_LINE, False),
                   "register-reconcile-apply": (PROPOSAL_LINE, None, False),
                   "register-reconcile-draft": (None, PROPOSAL_LINE, True)}
-REGISTER_BASE = {"register-draft": (None, None, False),
+REGISTER_BASE = {"register-draft": (None, PROPOSAL_LINE, True),
                  "register-reconcile-apply": (REGISTER_PLAN_LINES[0], None, False),
                  "register-reconcile-draft": (None, None, False)}
 # The first line of the Apply card's list, the proposal's draft row and whether that row carries a
@@ -2367,8 +2368,8 @@ def _seed_registration(seed: _Seed, state: str, root: str) -> None:
     """A ready plan of `root`, a repository with no contract whose draft is in schema 3 (five fields, then the facts).
 
     The reading names one GitHub remote, so the draft has no open question and its project id is
-    a fact line with no Change. The base commit's draft shows that id as a changeable field
-    (the before picture).
+    a fact line with no Change. The base commit's draft has no such row; it drafts the commit
+    environment as a changeable main-group row instead (the before picture).
     """
     if state.startswith("register-reconcile"):
         fields = (contract_draft.reconcile_fields(root, {

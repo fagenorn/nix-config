@@ -1570,9 +1570,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.REGISTER_SHOWN, {"register-draft": (None, shots.FACT_LINE, False),
                                                 "register-reconcile-apply": (line, None, False),
                                                 "register-reconcile-draft": (None, line, True)})
+        self.assertEqual(shots.REGISTER_BASE["register-draft"], (None, line, True))  # as the base drafts it
         phrase = "does not show the proposed commit environment"
-        self.assertIs(shots.shows_facts(), True)
-        self.assertIs(shots.proposes_reconcile(), True)
+        self.assertEqual((shots.shows_facts(), shots.proposes_reconcile()), (True, True))
         counterpart = {"register-draft": "register-reconcile-draft",
                        "register-reconcile-apply": "register-reconcile-draft",
                        "register-reconcile-draft": "register-reconcile-apply"}
