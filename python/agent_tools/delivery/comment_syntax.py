@@ -129,7 +129,8 @@ def _assemble(raws: list[_Raw], first_code: int | None) -> tuple[Block, ...]:
         else:
             merged.append(raw)
     return tuple(
-        Block(r.first, r.last, r.texts, first_code is None or r.last < first_code)
+        Block(r.first, r.last, r.texts, first_code is None or r.last < first_code
+              or (r.kind == "module" and r.last == first_code))
         for r in merged)
 
 
@@ -182,8 +183,10 @@ def _docstrings(tree: ast.AST, lines: list[str]) -> tuple[list[_Raw], tuple[int,
                  head.col_offset if row == head.lineno else 0,
                  head.end_col_offset if row == head.end_lineno else None)
             for row in range(head.lineno, head.end_lineno + 1))
-        raws.append(_Raw(head.lineno, head.end_lineno, texts, True, "block"))
-        if isinstance(node, ast.Module):
+        is_module = isinstance(node, ast.Module)
+        raws.append(_Raw(head.lineno, head.end_lineno, texts, True,
+                         "module" if is_module else "block"))
+        if is_module:
             module_doc = (head.lineno, head.col_offset)
     return raws, module_doc
 
@@ -203,6 +206,8 @@ def _python_fallback(lines: list[str]) -> tuple[list[_Raw], int | None]:
 
 
 _WORD_STOPS = " \t\n;&|()<>"
+_COMMAND_KEYWORDS = frozenset(
+    {"if", "then", "elif", "else", "while", "until", "do", "for", "time", "!", "{"})
 
 
 class _Shell:
@@ -284,11 +289,21 @@ class _Shell:
             self.code()
             self.i += 1
             self.cmd_start = True
+        elif self.cmd_start and (end := self.keyword_end()):
+            self.code()
+            self.i = end
         else:
             self.code()
             self.i += 1
             self.cmd_start = False
         return "normal", 0
+
+    def keyword_end(self) -> int:
+        """The end of a reserved word that leaves the next word at a command start, else 0."""
+        end = self.i
+        while end < self.n and self.text[end] not in _WORD_STOPS:
+            end += 1
+        return end if self.text[self.i:end] in _COMMAND_KEYWORDS else 0
 
     def enter(self, state: str, width: int, depth: int = 0) -> tuple[str, int]:
         self.code()
@@ -463,10 +478,14 @@ def _yaml(text: str, lines: list[str]) -> tuple[list[_Raw], int | None]:
     first_code = None
     quote = None
     block_base = None
+    block_indent = None
     for row, line in enumerate(lines, 1):
         blank = not line.strip()
         if block_base is not None:
-            if blank or len(line) - len(line.lstrip(" ")) > block_base:
+            indent = len(line) - len(line.lstrip(" "))
+            if block_indent is None and not blank and indent > block_base:
+                block_indent = indent
+            if blank or (indent > block_base and indent >= (block_indent or 0)):
                 if not blank and first_code is None:
                     first_code = row
                 continue
@@ -479,8 +498,11 @@ def _yaml(text: str, lines: list[str]) -> tuple[list[_Raw], int | None]:
         if scan.comment_at is not None:
             raws.append(_Raw(row, row, (line[scan.comment_at:],), not scan.has_code, "line"))
         body = line if scan.comment_at is None else line[:scan.comment_at]
-        if quote is None and _BLOCK_SCALAR.search(body.rstrip()):
+        indicator = _BLOCK_SCALAR.search(body.rstrip()) if quote is None else None
+        if indicator:
             block_base = _block_base(line)
+            digit = re.search(r"[1-9]", indicator.group())
+            block_indent = block_base + int(digit.group()) if digit else None
     return raws, first_code
 
 
@@ -631,6 +653,10 @@ class _JavaScript(_Scan):
             self.push(_Frame("tpl"), 1)
         elif c == "/" and self.regex_allowed():
             self.regex()
+        elif c in "+-" and self.text.startswith(c * 2, self.i):
+            postfix = not self.regex_allowed()
+            self.adv(2)
+            self.prev = "str" if postfix else c
         elif match := _WORD.match(self.text, self.i):
             self.adv(match.end() - self.i)
             self.prev = match.group()

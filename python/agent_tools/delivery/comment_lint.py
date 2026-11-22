@@ -11,7 +11,7 @@ unresolvable revision, a failed git read or a `--repository` that is not `<owner
 `enforcers(repository)` gives the three rules as count enforcers for the never-rise check,
 which, not this command's exit, is the gate.
 
-A file is judged by its committed bytes, decoded as UTF-8 with replacement. A line is a line
+A file is judged by its committed bytes, decoded as UTF-8 with replacement and without a leading byte order mark. A line is a line
 of a block in the sense of `comment_syntax`, so text in a string, a heredoc or a block
 scalar is never counted, and a file of no known stack is not read.
 
@@ -54,6 +54,7 @@ MAX_LINE_CHARS = 120
 REPOSITORY_FORM = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 URL = re.compile(r"(?i)(?:https?://|www\.|(?<![\w.-])github\.com/)[^\s<>\"')\]`]*")
 URL_TRAILING = ".,;:"
+SLASH_DELIMITER = re.compile(r"\A\s*(?:/{2,}|/\*+)")
 SHORTHANDS = (
     re.compile(r"(?<![\w&#/])#[1-9][0-9]*\b"),
     re.compile(r"(?i:\b(?:issues?|pull[ -]requests?)\b)[ \t]*#?[1-9][0-9]*\b"),
@@ -76,6 +77,7 @@ def _own_patterns(repository: str | None) -> tuple[re.Pattern[str], re.Pattern[s
 def references(text: str, repository: str | None) -> bool:
     """True when the comment text names an issue or pull request."""
     own = _own_patterns(repository)
+    text = SLASH_DELIMITER.sub("", text)
     for url in URL.finditer(text):
         if own is not None and own[0].match(url.group().rstrip(URL_TRAILING)):
             return True
@@ -86,7 +88,7 @@ def references(text: str, repository: str | None) -> bool:
 
 def _lines(path: str, data: bytes):
     """Each block of a file with the file's physical lines."""
-    text = data.decode("utf-8", errors="replace")
+    text = data.decode("utf-8-sig", errors="replace")
     physical = [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
     return comment_syntax.blocks(path, text), physical
 

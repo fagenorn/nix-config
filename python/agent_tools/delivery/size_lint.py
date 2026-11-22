@@ -55,10 +55,6 @@ def find(snapshot: Snapshot) -> list[Violation]:
 ENFORCER = Enforcer(RULE_ID, find, per_file=True)
 
 
-def resolve(root: Path, revision: str) -> str | None:
-    return never_rise.resolve_commit(root, revision, timeout=None)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=COMMAND)
     parser.add_argument("--repo-root", required=True)

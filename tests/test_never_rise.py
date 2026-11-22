@@ -593,7 +593,9 @@ class SizeLintOutputTest(unittest.TestCase):
             git(Path(tmp), "clone", "-q", "--no-checkout", "--filter=blob:none",
                 f"file://{bare}", str(partial))
             blob = git(partial, "rev-parse", "HEAD:x.py").strip()
-            self.assertIsNone(size_lint.resolve(partial, blob))
+            done = self.run_command("--repo-root", str(partial), "--revision", blob)
+            self.assertEqual((done.returncode, done.stdout), (2, ""))
+            self.assertTrue(done.stderr.startswith("size-lint: "), done.stderr)
             probe = subprocess.run(
                 ["git", "-C", str(partial), "cat-file", "-e", blob],
                 env=fixture_env({"GIT_NO_LAZY_FETCH": "1"}), capture_output=True)

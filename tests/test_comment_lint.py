@@ -151,6 +151,13 @@ class CommentSyntaxTest(unittest.TestCase):
             Block(4, 4, ("# b",), False),
         ))
 
+    def test_a_shift_after_a_reserved_word_is_not_a_heredoc(self):
+        for first in ("if (( mask << 1 )); then", "while (( mask << 1 )); do", "! (( mask << 1 ))"):
+            with self.subTest(first=first):
+                text = first + "\n# TODO\nfi\n"
+                self.assertEqual(
+                    comment_syntax.blocks("a.sh", text), (Block(2, 2, ("# TODO",), False),))
+
     def test_a_here_string_queues_no_heredoc(self):
         for first in ('read -r a <<< "$x"', "cat <<<EOF", 'jq . <<<"$EVAL"'):
             with self.subTest(first=first):
@@ -168,16 +175,20 @@ class CommentSyntaxTest(unittest.TestCase):
     def test_a_docstring_s_text_stops_at_its_closing_quotes(self):
         text = '"""doc"""; value = "TODO #12"\n' + "".join(f"# c{n}\n" for n in range(6))
         self.assertEqual(comment_syntax.blocks("a.py", text), (
-            Block(1, 1, ('"""doc"""',), False),
+            Block(1, 1, ('"""doc"""',), True),
             Block(2, 7, tuple(f"# c{n}" for n in range(6)), False),
         ))
         self.assertEqual(
             comment_syntax.blocks("a.py", '"""é"""; x = 1\n'),
-            (Block(1, 1, ('"""é"""',), False),))
+            (Block(1, 1, ('"""é"""',), True),))
 
     def test_a_block_scalar_with_chomping_keeps_its_indicator_comment(self):
         text = "key: |- # c\n  # content\nnext: 1\n"
         self.assertEqual(comment_syntax.blocks("a.yaml", text), (Block(1, 1, ("# c",), False),))
+
+    def test_a_block_scalar_ends_where_the_indentation_falls_below_its_content(self):
+        text = "run: |\n    echo hi\n\n    # inside\n  # TODO\nnext: 1\n"
+        self.assertEqual(comment_syntax.blocks("a.yaml", text), (Block(5, 5, ("# TODO",), False),))
 
     def test_a_file_with_no_code_is_all_header(self):
         self.assertEqual(comment_syntax.blocks("a.yaml", "# a\n\n# b\n"), (
@@ -274,6 +285,12 @@ class CommentSyntaxTest(unittest.TestCase):
         self.assertEqual(
             comment_syntax.blocks("a.js", "const x = a / b; // yes\n"),
             (Block(1, 1, ("// yes",), False),))
+
+    def test_a_postfix_increment_before_a_division_is_not_a_regex(self):
+        for text in ("const half = i++ / 2; // TODO\n", "const half = i-- / 2; // TODO\n"):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    comment_syntax.blocks("a.js", text), (Block(1, 1, ("// TODO",), False),))
 
     def test_a_jsx_closing_tag_is_not_a_regex(self):
         self.assertEqual(
@@ -415,6 +432,11 @@ class BarRuleTest(unittest.TestCase):
 
 
 class ReferenceTest(unittest.TestCase):
+    def test_a_slash_comment_delimiter_does_not_hide_a_shorthand(self):
+        for text in ("//#12", "///#12", "/*#12*/", "// #12"):
+            with self.subTest(text=text):
+                self.assertTrue(comment_lint.references(text, REPOSITORY))
+
     def test_each_issue_or_pull_request_form_is_a_reference(self):
         forms = (
             "# see #12", "# (issue 608)", "# issues 1412 and 1414", "# Issue #3", "# PR 1618",
@@ -468,6 +490,15 @@ class RuleTest(unittest.TestCase):
         self.assertEqual(found("B18", snap), [Violation("B18", "a.py", 3)])
         self.assertEqual(found("B19", snap), [])
         self.assertEqual(found("B20", snap), [Violation("B20", "a.py", 5)])
+
+    def test_a_module_docstring_sharing_its_closing_line_with_code_is_header(self):
+        doc = '"""one\ntwo\nthree\nfour\nfive\nsix"""; import os\n'
+        self.assertTrue(comment_syntax.blocks("a.py", doc)[0].header)
+        self.assertEqual(found("B19", snapshot(a__py=doc)), [])
+
+    def test_a_byte_order_mark_does_not_hide_a_python_trailing_comment(self):
+        snap = snapshot(a__py="\ufeffx = 1  # TODO\n")
+        self.assertEqual(found("B20", snap), [Violation("B20", "a.py", 1)])
 
     def test_five_lines_and_120_characters_pass_and_six_and_121_fail(self):
         text = hash_lines(
