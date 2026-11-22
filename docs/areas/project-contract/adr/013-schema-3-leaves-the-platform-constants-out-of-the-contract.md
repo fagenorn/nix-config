@@ -27,6 +27,6 @@ Every registered project's schema-2 contract spells out the same values: the bra
 
 - No repository is on schema 3 until the migration slice.
 - Adoption refuses a schema-3 contract until a migration reaches 3.
-- The four values of #1458 and the attempt budget of #1466 stay as decided here until those issues.
+- The four values of #1458 are derived from the repository (ADR-project-contract-014); the attempt budget of #1466 stays as decided here until that issue.
 - Rejected: a manifest member for the constants, for the reason ADR-010 rejected one for the commands: the values are code the resolver and its tests must agree on, and a manifest is data a host can leave stale.
 - Rejected: refusing an authored platform id in schema 2, because the registered projects' schema-2 contracts author these ids today and would stop resolving.

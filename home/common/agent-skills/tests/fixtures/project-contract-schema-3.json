@@ -1,20 +1,8 @@
 {
   "schema_version": 3,
-  "project": {
-    "id": "fagenorn/nix-config"
-  },
   "bindings": {
     "vcs": {
-      "integration_branch": "main",
-      "merge": {
-        "required_checks": [
-          "Nix Eval",
-          "Agent Workflow Tests"
-        ]
-      }
-    },
-    "tracker": {
-      "repo_slug": "fagenorn/nix-config"
+      "integration_branch": "main"
     },
     "commands": {
       "lint": {
@@ -89,10 +77,6 @@
       "source": ".agents/instructions/bootstrap.md"
     }
   ],
-  "platform": {
-    "min_inclusive": "2.1.0",
-    "max_exclusive": "3.0.0"
-  },
   "release": {
     "profiles": {
       "github-release": {

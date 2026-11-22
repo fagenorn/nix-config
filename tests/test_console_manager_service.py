@@ -100,6 +100,24 @@ class ManagerPermissionTest(Case):
         self.assertEqual(json.loads(payload)["permission"], {
             "mode": "bypassPermissions", "reason": "production rules in place"})
 
+    def test_a_launch_and_a_wake_write_the_projects_allow_rules(self):
+        support.write_registry(self.registry, support.entries(2))
+        support.sign_in(self.store, "work")
+        launches = support.Launches()
+        binding = [("merge", True)]
+        svc = self.svc = self.start(
+            launcher=launches, session_poll_seconds=3600,
+            profile_dirs=[support.profile_dir(self.store, "work")],
+            slug_of=lambda root: "o/r", merge_binding_of=lambda root: binding[0])
+        svc.state_goal("owner/p01", "make the importer resumable")
+        [launch] = launches.calls
+        self.assertEqual(launch.allow, manager.allow_rules("o/r", "merge", True))
+        binding[0] = ("merge", False)
+        svc._refresh_settings(launch.sprint_id, "/srv/p01")
+        written = json.loads(manager.settings_path(svc._sprint_secrets, launch.sprint_id).read_text())
+        self.assertEqual(written["permissions"]["allow"],
+                         list(manager.allow_rules("o/r", "merge", False)))
+
     def test_a_reader_that_fails_launches_in_auto(self):
         def reader(project_id, root):
             raise RuntimeError("boom")
@@ -1706,6 +1724,15 @@ class PermitServiceTest(PermitCase):
         self.assertEqual(row, {"sprint_id": sid, "session_id": "s-1", "tool_use_id": "t-1", "repo": SLUG,
                                "verb": "merge", "decision": "allow", "reason": "",
                                "target": {"pr": 7, "head": SHA}})
+
+    def test_a_merge_behind_the_documented_prefix_is_allowed_and_lands(self):
+        svc, sid = self.boot()
+        command = "env -u GITHUB_TOKEN -u GH_TOKEN " + MERGE
+        verdict = self.judge(svc, sid, command)
+        self.assertEqual(verdict.decision, permit.ALLOW)
+        self.assertIs(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", command), True)
+        (landed,) = self.rows("permit.landed")
+        self.assertEqual(landed["target"], {"pr": 7, "head": SHA})
 
     def test_a_reported_issue_no_manager_delivery_carries_is_refused(self):
         svc, sid = self.boot()

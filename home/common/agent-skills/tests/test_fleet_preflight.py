@@ -17,10 +17,14 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
+
+from agent_tools.project_contract import derived_values, fleet_preflight
 
 from .test_resolve_platform_status import FLEET_ROW_MEMBERS
 from .test_resolve_project import (
     REPO_ROOT,
+    InProcessTestCase,
     ResolverTestCase,
     committed_manifest,
     git,
@@ -30,6 +34,12 @@ from .test_resolve_project import (
     registry,
     source_contract,
     tree_snapshot,
+)
+from .test_resolve_schema_three import (
+    EXPECTED_DERIVED,
+    make_schema_three_root,
+    schema_three_contract,
+    stage_locked_platform,
 )
 
 
@@ -432,3 +442,75 @@ class FleetPreflightCheckTest(FleetFixtures, ResolverTestCase):
         self.assertEqual(sorted(str(p.relative_to(root))
                                 for p in root.rglob("__pycache__")), [])
         self.assertEqual(tree_snapshot(root), before)
+
+
+class SchemaThreeFleetTest(InProcessTestCase):
+    """A schema-3 fleet member is judged against its derived range and identity (ADR-project-contract-014)."""
+
+    def candidate(self, version: str) -> Path:
+        directory = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = directory / "platform-manifest.json"
+        path.write_text(json.dumps(mutated_manifest(platform_version=version)),
+                        encoding="utf-8")
+        return path
+
+    def register(self, root: Path) -> None:
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(root)}))
+
+    def test_a_schema_three_project_is_judged_against_its_locked_range(self):
+        store = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, store, ignore_errors=True)
+        root = make_schema_three_root(schema_three_contract(), tree_manifest=False)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        stage_locked_platform(root, store, "2.0.0")
+        self.register(root)
+        patch = mock.patch.object(derived_values, "STORE_DIR", str(store))
+        patch.start()
+        self.addCleanup(patch.stop)
+        with self.subTest("3.0.0"):
+            report = fleet_preflight.preflight(self.candidate("3.0.0"))
+            self.assertEqual(report["refused"], ["fagenorn/nix-config"])
+            row = report["fleet"][0]
+            self.assertEqual(row["reason_code"], "platform_too_new")
+            self.assertEqual(row["platform_interval"],
+                             {"min_inclusive": "2.0.0", "max_exclusive": "3.0.0"})
+            self.assertEqual(row["project_schema_version"], 3)
+        with self.subTest("2.5.0"):
+            report = fleet_preflight.preflight(self.candidate("2.5.0"))
+            self.assertEqual(report["refused"], [])
+            self.assertTrue(report["fleet"][0]["compatible"])
+
+    def preflight_subprocess(self, manifest: Path) -> tuple[int, str, str]:
+        proc = subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.fleet_preflight",
+             "--manifest", str(manifest), "--json"],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "HOME": str(self.home)})
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def test_the_platforms_own_tree_is_compatible_with_a_candidate_from_that_tree(self):
+        root = make_schema_three_root(schema_three_contract())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self.register(root)
+        manifest = Path(tempfile.mkdtemp()).resolve() / "platform-manifest.json"
+        self.addCleanup(shutil.rmtree, manifest.parent, ignore_errors=True)
+        manifest.write_text(json.dumps(committed_manifest()), encoding="utf-8")
+        code, out, err = self.preflight_subprocess(manifest)
+        self.assertEqual(code, 0, err)
+        row = json.loads(out)["fleet"][0]
+        self.assertTrue(row["compatible"])
+        self.assertEqual(row["platform_interval"], EXPECTED_DERIVED["/platform"])
+
+    def test_an_underivable_schema_three_row_is_refused_not_crashed(self):
+        root = make_schema_three_root(schema_three_contract(), remote=None)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self.register(root)
+        manifest = Path(tempfile.mkdtemp()).resolve() / "platform-manifest.json"
+        self.addCleanup(shutil.rmtree, manifest.parent, ignore_errors=True)
+        manifest.write_text(json.dumps(committed_manifest()), encoding="utf-8")
+        code, out, err = self.preflight_subprocess(manifest)
+        self.assertEqual(code, 1, err)
+        row = json.loads(out)["fleet"][0]
+        self.assertEqual(row["reason_code"], "project_schema_unsupported")

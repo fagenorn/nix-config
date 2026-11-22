@@ -758,6 +758,30 @@ def has_remote(root: Path) -> bool:
         "utf-8", "surrogateescape").split()
 
 
+def seed_origin(root: Path, destination: Path) -> None:
+    """Give the scratch export at `destination` the `origin` url of the checkout at `root`.
+
+    A resolver run on an export of a pinned commit finds no git config, and a
+    schema-3 contract's project id and tracker slug are the `owner/repo` of that
+    remote (ADR-project-contract-014). The export gets a minimal `.git/config`
+    holding the checkout's `origin` fetch url, so it derives the identity the
+    checkout has. An export that already carries a `.git`, a missing remote, a
+    url that cannot be written as one plain config value and a write that fails
+    leave the export as it is: the derivation then refuses, never guesses.
+    """
+    code, out = run_git(root, "remote", "get-url", REMOTE)
+    url = out.decode("utf-8", "replace").strip()
+    if code != 0 or not url or any(char in url for char in "\"\\#;\r\n\t"):
+        return
+    git_dir = destination / ".git"
+    try:
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            f'[remote "{REMOTE}"]\n\turl = {url}\n', encoding="utf-8")
+    except OSError:
+        return
+
+
 @dataclass(frozen=True)
 class RemoteHeads:
     """What `origin` advertises: its default branch, every branch name and the

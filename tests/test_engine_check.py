@@ -295,6 +295,27 @@ def _exhausted_reply_value(schema: dict) -> None:
     schema["properties"]["status"]["enum"].append("exhausted")
 
 
+def _out_of_bounds_stop(toy: dict) -> None:
+    toy["stops"]["out-of-bounds"] = {"need": "retry", "reenter": "draft"}
+
+
+def _out_of_bounds_reply_value(schema: dict) -> None:
+    schema["properties"]["status"]["enum"].append("out-of-bounds")
+
+
+def _bound_route_to_review(toy: dict) -> None:
+    step(toy, "draft")["on"]["out-of-bounds"] = "review"
+
+
+def _exhausted_route_to_children(toy: dict) -> None:
+    step(toy, "draft")["on"]["exhausted"] = "children"
+
+
+def _bound_retries_and_exhausted_route_to_children(toy: dict) -> None:
+    _exhausted_route_to_children(toy)
+    step(toy, "draft")["on"]["out-of-bounds"] = "draft"
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -450,6 +471,22 @@ CASES = [
           ("toy", "review-b", "unproduced_input")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
+    Case("agent_step_without_out_of_bounds",
+         editing("toy", _without(lambda toy: step(toy, "draft")["on"], "out-of-bounds")),
+         [("toy", "draft", "unmapped_outcome")]),
+    Case("reply_enum_value_named_out_of_bounds", _editing_draft_reply(_out_of_bounds_reply_value),
+         [("toy", "draft", "invalid_reply")]),
+    Case("stop_named_out_of_bounds", editing("toy", _out_of_bounds_stop),
+         [("toy", None, "invalid_field")]),
+    Case("bound_route_reaches_a_reply_reader", editing("toy", _bound_route_to_review),
+         [("toy", "review-a", "unproduced_input"), ("toy", "review-b", "unproduced_input"),
+          ("toy", "children", "unproduced_input")]),
+    Case("exhausted_route_after_a_retried_bound_reaches_a_reply_reader",
+         editing("toy", _bound_retries_and_exhausted_route_to_children),
+         [("toy", "children", "unproduced_input")]),
+    Case("step_overrides_a_bound",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "max_turns", 5)),
+         [("toy", "draft", "undefined_field")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -484,6 +521,25 @@ class ToyProcedureTest(unittest.TestCase):
         code, out, err = run_check()
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"}))
+
+    def test_a_command_step_may_map_out_of_bounds(self):
+        def map_bound(toy: dict) -> None:
+            step(toy, "scope")["on"]["out-of-bounds"] = "needs-owner"
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", map_bound))))
+        self.assertEqual((code, out), (0, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_an_exhausted_retry_loop_may_feed_a_reader_of_its_reply(self):
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", _exhausted_route_to_children))))
+        self.assertEqual((code, out), (0, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_decide_step_cannot_map_out_of_bounds(self):
+        def map_bound(toy: dict) -> None:
+            step(toy, "tally")["on"]["out-of-bounds"] = "needs-owner"
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", map_bound))))
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [(r["procedure"], r["step"], r["defect"]) for r in json.loads(out)["refusals"]],
+            [("toy", "tally", "unknown_outcome")])
 
     def test_a_procedure_with_no_keep_alive_passes_the_check(self):
         def drop_keep_alive(directory: Path) -> None:
@@ -654,13 +710,13 @@ class DataFlowTest(unittest.TestCase):
         for order in (("a", "s1", "s2", "r"), ("a", "s2", "s1", "r")):
             with self.subTest(order=order):
                 procedure = {"steps": [steps[name] for name in order], "stops": {}, "inputs": []}
-                graph = procedure_check._data_flow_graph(procedure)
+                graph = procedure_check.result_flow_graph(procedure)
                 dominating = procedure_check.dominators(graph, procedure_check.START)["r"]
-                self.assertNotIn("s1", dominating)
+                self.assertNotIn("s1(result)", dominating)
 
     @staticmethod
     def _dominating(procedure: dict, reader: str) -> frozenset[str]:
-        graph = procedure_check._data_flow_graph(procedure)
+        graph = procedure_check.result_flow_graph(procedure)
         return procedure_check.dominators(graph, procedure_check.START)[reader]
 
     def test_a_no_reply_route_into_a_mutating_step_can_still_lose_its_claim(self):
@@ -673,9 +729,9 @@ class DataFlowTest(unittest.TestCase):
             "steps": [agent("s", {"ok": "m", "no-reply": "m"}),
                       {"id": "m", "kind": "command", "mutates": True, "on": {"ok": "done"}, "in": []},
                       agent("r", {"ok": "done"}, ("s.x",))]}
-        graph = procedure_check._data_flow_graph(procedure)
-        self.assertIn(procedure_check.CLAIM_LOST, graph["s#no-reply"])
-        self.assertNotIn("s", self._dominating(procedure, "r"))
+        graph = procedure_check.result_flow_graph(procedure)
+        self.assertIn(procedure_check.CLAIM_LOST, graph["s"])
+        self.assertNotIn("s(result)", self._dominating(procedure, "r"))
 
     def test_a_step_that_reaches_no_mutating_step_has_no_claim_lost_edge(self):
         def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
@@ -687,9 +743,9 @@ class DataFlowTest(unittest.TestCase):
             "steps": [agent("s", {"ok": "done", "no-reply": "m"}),
                       {"id": "m", "kind": "command", "mutates": True, "on": {"ok": "done"}, "in": []},
                       agent("r", {"ok": "done"}, ("s.x",))]}
-        graph = procedure_check._data_flow_graph(procedure)
-        self.assertNotIn(procedure_check.CLAIM_LOST, graph["s"])
-        self.assertIn(procedure_check.CLAIM_LOST, graph["s#no-reply"])
+        graph = procedure_check.result_flow_graph(procedure)
+        self.assertNotIn(procedure_check.CLAIM_LOST, graph["s(result)"])
+        self.assertIn(procedure_check.CLAIM_LOST, graph["s"])
 
     def test_an_exhausted_entry_after_a_no_reply_does_not_credit_the_reply(self):
         def agent(step_id: str, on: dict, reads: tuple[str, ...] = (), **more) -> dict:
@@ -699,7 +755,7 @@ class DataFlowTest(unittest.TestCase):
             "inputs": [], "stops": {},
             "steps": [agent("a", {"ok": "done", "no-reply": "a", "exhausted": "reader"}, max_visits=1),
                       agent("reader", {"ok": "done"}, ("a.x",))]}
-        self.assertNotIn("a", self._dominating(procedure, "reader"))
+        self.assertNotIn("a(result)", self._dominating(procedure, "reader"))
 
     def test_an_exhausted_target_that_is_itself_a_no_reply_step_is_split_too(self):
         def agent(step_id: str, on: dict, reads: tuple[str, ...] = (), **more) -> dict:
@@ -800,6 +856,8 @@ class DeclarationTest(unittest.TestCase):
                '{"x": {"argv": ["a"]}}',
                '{"x": {"verdicts": ["ok", "exhausted"]}}',
                '{"x": {"subcommands": {"a": ["exhausted"]}}}',
+               '{"x": {"verdicts": ["ok", "out-of-bounds"]}}',
+               '{"x": {"subcommands": {"a": ["out-of-bounds"]}}}',
                '{"X": null}']
         with tempfile.TemporaryDirectory() as tmp:
             for index, text in enumerate(bad):

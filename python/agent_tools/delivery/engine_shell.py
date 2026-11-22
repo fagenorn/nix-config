@@ -17,10 +17,19 @@ which is the copy the loop reads (`<run>/procedure/deliver.json`).
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
 run's `sessions/`, `session_starting` is on disk before the process is spawned,
-and only the `outcome_from` member of the session's structured reply grades the
-step. A session with no structured reply is a `Fault`, so neither the prose nor
+and a session that ends normally is graded only by the `outcome_from` member of its
+structured reply. A session with no structured reply is a `Fault`, so neither the prose nor
 the exit code selects an outcome, and so is a session denied a shell command,
-whose reply may rest on a check it never ran.
+whose reply may rest on a check it never ran. A session ended by a bound is graded
+`out-of-bounds` before either fault is considered: the bounds are a turn cap or a spend cap
+(`engine_session.CAP_SUBTYPES`) and the wall bound, the engine's own clock per role
+(`engine_session.bounds`), past which `engine_session.launch` ends the session's group. Its stored result names the bound (`wall-time` for the wall bound), its
+measurements are recorded, and the engine never resumes or retries the step.
+
+A command step runs within its command's wall bound (`CommandTable.wall_seconds`), counted from the
+spawn: past it the step's group is killed, its stored result is `{"bound": "wall-time"}` and it is
+graded `out-of-bounds`. A command's stderr is forwarded to the engine's own. A command that prints
+the verdict `out-of-bounds` is a `Fault`: only the engine grades a fired bound.
 
 A session that hit a usage limit does not end the visit: the shell opens a `usage-limit` wait, then
 launches the same session again (`--resume`, the same prompt, `session_resuming`) in the same visit, so
@@ -45,7 +54,7 @@ step, its detail carrying the verdict and what the call printed on stdout and st
 Before every command it runs, keep-alive included, the shell has the lifecycle guard judge it, and a
 refusal is the outcome `refused` (issue 1515).
 
-An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done` or `stop_reached`.
+An outcome the step's `on` does not map is a `Fault` (a fired bound is graded first). A run ends with `run_done` or `stop_reached`.
 
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
 until `deliver` returns. A run whose lock is held makes the call exit `EXIT_RUNNING`; a run not done and
@@ -60,6 +69,7 @@ import fcntl
 import json
 import os
 import socket
+import sys
 import tempfile
 import time
 import uuid
@@ -397,6 +407,27 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
                  f"answered {verdict}: {text}.")
 
 
+def _graded(run_dir: Path, step: dict, visit: int, outcome: str, *, bound: bool = False) -> None:
+    """Record the grade of a visit and the transition it takes.
+
+    A reply or a printed verdict (`bound=False`) must be mapped by the step's `on`, else it is a
+    `Fault` before any event. The engine's own grade of a fired bound (`bound=True`) is always
+    recorded, because `core_events` reads it from `outcome_graded`, and then faults when `on`
+    does not map it, with no `transition_taken`.
+    """
+    name = step["id"]
+    unmapped = outcome == engine_core.EXHAUSTED or outcome not in step["on"]
+    if unmapped and not bound:
+        raise Fault(f"step {name} has no mapping for the outcome {outcome}")
+    engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
+                                         "visit": visit, "outcome": outcome})
+    if unmapped:
+        raise Fault(f"step {name} has no mapping for the outcome {outcome}")
+    engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
+                                         "step": name, "visit": visit, "outcome": outcome,
+                                         "to": step["on"][outcome]})
+
+
 def _visit(run_dir: Path, table: CommandTable, step: dict,
            action: engine_core.RunCommand) -> None:
     name, visit = action.step, action.visit
@@ -409,17 +440,37 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
                                              "started": _now()})
 
     ran = engine_commands.run(table, action.command, action.subcommand, action.args,
-                              guard=_guard(), on_start=started)
+                              guard=_guard(), on_start=started,
+                              timeout=table.wall_seconds(action.command))
+    try:
+        _grade_command(run_dir, step, name, visit, ran)
+    finally:  # forwarding a diagnostic never decides whether the step is graded
+        _forward(ran.stderr)
+
+
+def _forward(diagnostic: bytes) -> None:
+    """Pass a command's stderr on to the engine's; a closed stream loses it, nothing more."""
+    try:
+        sys.stderr.buffer.write(diagnostic)
+        sys.stderr.buffer.flush()
+    except OSError:
+        pass
+
+
+def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
+                   ran: engine_commands.Ran) -> None:
+    if ran.timed_out:
+        engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": "wall-time"},
+                                   at=_now(), wall_seconds=ran.wall_seconds, turns=0,
+                                   tokens=dict(NO_TOKENS), spend_usd=0)
+        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True)
+        return
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
                                spend_usd=0)
-    if ran.outcome == engine_core.EXHAUSTED or ran.outcome not in step["on"]:
+    if ran.outcome == procedure_check.OUT_OF_BOUNDS:  # only the engine grades a fired bound
         raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
-    engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
-                                         "visit": visit, "outcome": ran.outcome})
-    engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
-                                         "step": name, "visit": visit, "outcome": ran.outcome,
-                                         "to": step["on"][ran.outcome]})
+    _graded(run_dir, step, visit, ran.outcome)
 
 
 def _visit_session(run_dir: Path, root: str, step: dict,
@@ -445,6 +496,16 @@ def _visit_session(run_dir: Path, root: str, step: dict,
         run_dir, root, (name, visit, session), prompt, (role, schema, system))
     if stopped is not None:
         return stopped
+    bound = (engine_session.WALL_TIME if launched.timed_out
+             else engine_session.CAP_SUBTYPES.get(reading.subtype))
+    if bound is not None:
+        wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None
+                else reading.wall_seconds)
+        engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": bound},
+                                   at=_now(), wall_seconds=wall, turns=reading.turns,
+                                   tokens=reading.tokens, spend_usd=reading.spend_usd)
+        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True)
+        return None
     if no_reply:
         wall = reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds
         engine_ledger.store_result(run_dir, step=name, visit=visit, result={}, at=_now(),
@@ -471,14 +532,9 @@ def _visit_session(run_dir: Path, root: str, step: dict,
     if problem is not None:
         raise Fault(f"step {name} gave a reply that breaks its schema: {problem}")
     outcome = reply.get(step["outcome_from"])
-    if (not isinstance(outcome, str) or outcome == engine_core.EXHAUSTED
-            or outcome not in step["on"]):
+    if not isinstance(outcome, str):
         raise Fault(f"step {name} has no mapping for the outcome {outcome}")
-    engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
-                                         "visit": visit, "outcome": outcome})
-    engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
-                                         "step": name, "visit": visit, "outcome": outcome,
-                                         "to": step["on"][outcome]})
+    _graded(run_dir, step, visit, outcome)
     return None
 
 
@@ -527,7 +583,8 @@ def _launch_until_answered(
                 env.pop("CLAUDE_ACCOUNT", None)
             launched = engine_session.launch(
                 engine_session.launch_argv(role, schema, session, system, resume=attempt > 1),
-                root, prompt, on_start=on_start, env=env)
+                root, prompt, on_start=on_start, env=env,
+                timeout=engine_session.bounds(role.name).wall_seconds)
             answer = engine_session.read_answer(answer_path)
         reading = engine_session.read_result(launched.stdout)
         if answer.all_out and launched.exit_code == engine_session.ALL_OUT_EXIT:
@@ -539,6 +596,8 @@ def _launch_until_answered(
         if started:
             event("session_answered", step=name, visit=visit, session=session, attempt=attempt,
                   account=account)
+        if launched.timed_out or reading.subtype in engine_session.CAP_SUBTYPES:
+            break  # a bound ended the session: graded by the visit, before any fault below
         denied = next((d for d in reading.denials
                        if isinstance(d, dict) and d.get("tool_name") == "Bash"), None)
         if denied is not None:
