@@ -838,7 +838,7 @@ class ErrorOutputTest(ResolverTestCase):
 
     def test_other_integer_schema_version_is_unsupported_schema(self):
         contract = source_contract()
-        # P3: schema 2 is supported since platform 1.2.0. Platform 2.1.0 reads
+        # P3: schema 2 is supported since platform 1.2.0. Platform 2.2.0 reads
         # schemas 2 and 3; 4 is an unsupported integer.
         contract["schema_version"] = 4
         code, payload, _ = self.resolve(self.make_root(contract))
@@ -1049,7 +1049,7 @@ class OnePassCollectionTest(ResolverTestCase):
 
     def test_an_unsupported_integer_version_short_circuits(self):
         source = source_contract()
-        # Platform 2.1.0 reads schemas 2 and 3; 4 is an unsupported integer.
+        # Platform 2.2.0 reads schemas 2 and 3; 4 is an unsupported integer.
         source["schema_version"] = 4
         del source["bindings"]["paths"]
         root = self.make_root(source)

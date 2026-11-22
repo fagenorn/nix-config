@@ -436,7 +436,7 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
         cases = (
             ("platform_too_old", "0.9.0", 2, "/platform"),
             ("platform_too_new", "2.0.0", 2, "/platform"),
-            # Platform 2.1.0 reads project schemas 2 and 3: 1 is retired, 4 does not exist.
+            # Platform 2.2.0 reads project schemas 2 and 3: 1 is retired, 4 does not exist.
             ("project_schema_unsupported", "1.4.2", 1, "/schema_version"),
             ("project_schema_unsupported", "1.4.2", 4, "/schema_version"),
         )
