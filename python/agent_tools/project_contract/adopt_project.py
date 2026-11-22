@@ -91,6 +91,12 @@ cannot resolve, or whose cwd leaves the worktree, is refused
 `adopt.commit.unresolved_environment`. Untracked files the environment leaves do
 not fail the branch proof, and the proved worktree is removed with `--force`.
 
+Tracked `.claude/hints/` files move to `.agents/knowledge/hints/`, and a
+`paths.hints` binding follows them; point-in-time records keep their citations.
+`plan.open_items` appears only when non-empty, listing `hint-without-reader` for
+a moved hint no delivery phase reads; it never blocks the plan and is outside
+the plan id.
+
 `plan --contract-draft FILE` plans the adoption of a checkout that has no
 project contract by carrying one drafted outside it (#1067). The file holds one
 JSON object, the contract as the draft's author wants it, and must lie outside
@@ -233,6 +239,17 @@ and only with `--register`) refuses `not_integrated` before any write when no
 evidence record on the pinned commit carries that plan id, so the adoption of
 one plan is never mistaken for an earlier adoption of the same project.
 
+`plan` converts hand-written root entry files (`adopt_entries`, ADR-021): with
+a contract or draft, their authored text joins `.agents/instructions/bootstrap.md`
+(evidence `convert-to-source`), `CLAUDE.md` becomes the managed line, `AGENTS.md`
+is regenerated and both entry projections are declared. A relative link or
+`@path` import in the moved text keeps the plan `draft`. A nested `AGENTS.md` or
+`CLAUDE.md` joins the source and is deleted (`delete-file`, so `apply` needs
+`--acknowledge-deletions`), unless an agent, secret or `product-source` path or a
+projection's target or source. Refusals:
+`adopt.entry.undecodable`, `adopt.entry.projection_conflict`, `dirty_worktree`
+(a staged entry file) and, at `apply`, `adopt.commit.conversion_unproved`.
+
 `migrate --migration ID` executes one manifest migration on the checkout
 in place (https://github.com/fagenorn/nix-config/issues/579): it rewrites
 `.agents/project.json`, has the resolver child regenerate the projections and
@@ -265,9 +282,10 @@ import subprocess
 import sys
 import tempfile
 
-from agent_tools.project_contract import (adopt_apply, adopt_conformance, adopt_inspection,
-                                          adopt_links, adopt_migrate, adopt_planning,
-                                          adopt_references, adopt_verify, agent_platform)
+from agent_tools.project_contract import (adopt_apply, adopt_conformance, adopt_entries,
+                                          adopt_inspection, adopt_links, adopt_migrate,
+                                          adopt_planning, adopt_references, adopt_verify,
+                                          agent_platform)
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.system.siblings import sibling_argv
 
@@ -430,6 +448,10 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     found = adopt_inspection.classify_inventory(root, inventory)
     contract_source = (draft if draft is not None
                        else load_contract_source(root))
+    conversion = adopt_entries.plan_entry_conversion(
+        root, found, inventory, contract_source)
+    if conversion.paths:
+        adopt_entries.check_entry_projections(contract_source)
     answered, references = adopt_planning.apply_answers(
         root, found, inventory, answered,
         adopt_planning.reference_excluded(contract_source),
@@ -456,17 +478,40 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
 
     links = adopt_links.derive_link_rewrites(
         root, inventory.base_revision, found.moves,
-        [path for path, _ in adopt_planning.evidence_record_members(found)],
-        adopt_planning.generated_targets(contract_source))
+        [path for path, _ in adopt_planning.evidence_record_members(found)]
+        + list(conversion.nested),
+        adopt_planning.generated_targets(contract_source)
+        | set(conversion.paths))
+    base_text = adopt_entries.entry_base_text(conversion, links)
+    source = adopt_entries.entry_source(conversion, links)
+    rows = adopt_entries.entry_unrewritable(conversion, base_text)
+    rows += adopt_links.history_losses(links, (
+        old for old, _ in found.moves
+        if adopt_inspection.matches_group(old, ".claude/hints", "prefix")))
+    if rows:
+        unrewritable = {(row["path"], row["target"])
+                        for row in links.summary["unrewritable"] + rows}
+        links = adopt_links.LinkRewrites(
+            {**links.summary, "unrewritable": [
+                {"path": path, "target": target}
+                for path, target in sorted(unrewritable)]}, links.files)
+    extra = {adopt_inspection.BOOTSTRAP_SOURCE: source} if source is not None else None
     if draft is not None:
         written = adopt_inspection.authored_bytes(
             adopt_planning.final_contract(
-                draft, manifest, found, None, conformance=False))
+                draft, manifest, found, None, conformance=False,
+                entries=conversion))
         projections_drift = resolve_draft(root, inventory.base_revision,
-                                          written)
+                                          written, extra)
         contract_resolves, repair_id, payload = True, None, None
     else:
         exit_code, payload = run_resolver(root, "resolve")
+        if (exit_code != 0 and source is not None
+                and adopt_inspection.BOOTSTRAP_SOURCE not in conversion.before):
+            # The conversion creates the source the contract declares, so the
+            # contract is judged with the file the plan writes in its place.
+            exit_code, payload = resolve_scratch(
+                root, inventory.base_revision, None, extra)
         contract_resolves = exit_code == 0
         repair_id = (None if contract_resolves
                      else adopt_inspection.resolver_repair_id(payload))
@@ -538,7 +583,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
             resolve_draft(root, inventory.base_revision,
                           adopt_inspection.authored_bytes(adopt_planning.final_contract(
                               contract_source, manifest, found, amendment,
-                              conformance=True)))
+                              conformance=True, entries=conversion)), extra)
         except adopt_inspection.AdoptError:
             conformance = conformance._replace(
                 repair_id=adopt_conformance.CONTRACT_REFUSED, member=None,
@@ -565,7 +610,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     head, tail, contents = adopt_planning.build_operations(
         root, found, manifest, contract_source, plan_id, links,
         reference_files, drafted=draft is not None, environment=amendment,
-        conformance=conformance)
+        conformance=conformance, entries=conversion, entry_source=source)
 
     agent_surface = any(
         entry["lifecycle_class"] != "runtime-residue"
@@ -599,11 +644,15 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
             reference_policies, reference_formatting, conformance)
         contents.update(written)
         changes = head + bookkeeping + tail
-        adopt_planning.check_markdown_writes(changes, set(links.files))
+        adopt_planning.check_markdown_writes(
+            changes, adopt_entries.markdown_write_targets(links, conversion, source),
+            frozenset(conversion.nested))
         adopt_planning.check_reference_writes(changes, set(reference_files))
         evidence_record = records["evidence_record"]
         migration_map = records["migration_map"]
+        items = adopt_planning.open_items(found)
     else:
+        items = []
         state = "not_applicable"
         blockers = []
         changes = []
@@ -666,6 +715,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         document["plan"]["commit_environment"] = amendment[1]
     if conformance.member is not None:
         document["plan"]["conformance"] = conformance.member
+    if items:
+        document["plan"]["open_items"] = items
 
     overlap = adopt_inspection.dirty_targets(found)
     if conformance.planned:
@@ -718,21 +769,34 @@ def load_contract_draft(path: str, root: Path) -> dict:
     return draft
 
 
-def resolve_draft(root: Path, base_revision: str, written: bytes) -> bool:
-    """Run the resolver on the bytes a drafted plan would write.
-
-    The checkout is never written: the base revision's tree is exported into a
-    scratch directory and the contract placed there. Returns whether only the
-    projections are out of date, which the plan's own regeneration operations
-    repair; any other refusal is the draft's.
-    """
+def resolve_scratch(root: Path, base_revision: str, written: bytes | None,
+                    extra: dict[str, bytes] | None) -> tuple[int, object]:
+    """The resolver's verdict on the base revision's tree with `written` as its
+    contract (kept as it is when None) and each `extra` file placed in it."""
     with tempfile.TemporaryDirectory() as scratch:
         tree = Path(scratch) / "tree"
         adopt_inspection.export_commit(root, base_revision, tree)
-        contract = tree / adopt_inspection.CONTRACT_FILENAME
-        contract.parent.mkdir(parents=True, exist_ok=True)
-        contract.write_bytes(written)
-        exit_code, payload = run_resolver(tree, "resolve")
+        if written is not None:
+            contract = tree / adopt_inspection.CONTRACT_FILENAME
+            contract.parent.mkdir(parents=True, exist_ok=True)
+            contract.write_bytes(written)
+        for relative, data in (extra or {}).items():
+            (tree / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tree / relative).write_bytes(data)
+        return run_resolver(tree, "resolve")
+
+
+def resolve_draft(root: Path, base_revision: str, written: bytes,
+                   extra: dict[str, bytes] | None = None) -> bool:
+    """Run the resolver on the bytes a drafted plan would write.
+
+    The checkout is never written: the base revision's tree is exported into a
+    scratch directory and the contract placed there, with each `extra` file the
+    plan also writes (the converted bootstrap source). Returns whether only the
+    projections are out of date, which the plan's own regeneration operations
+    repair; any other refusal is the draft's.
+    """
+    exit_code, payload = resolve_scratch(root, base_revision, written, extra)
     if exit_code == 0:
         return False
     if adopt_inspection.resolver_error_code(payload) == "invalid_projection":
@@ -828,6 +892,8 @@ def emit_human(document: dict) -> int:
                          f"{entry['recommendation']}")
         else:
             lines.append(f"open {entry['id']}: {entry['recommendation']}")
+    for item in plan.get("open_items", []):
+        lines.append(f"open item {item['id']}: {item['path']}")
     for blocker in plan["blockers"]:
         lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
     if plan["available_migration"] is not None:
@@ -900,6 +966,41 @@ def prove_conformance_projections(worktree: Path, commit: str) -> None:
         raise adopt_inspection.refuse(
             "verification_failed", adopt_apply.CONFORMANCE_UNPROVED, "",
             "the adoption commit's generated projections are not those the resolver renders")
+
+
+def prove_entry_conversion(worktree: Path, commit: str, operations: list[dict],
+                           evidence: list[dict]) -> None:
+    """The commit holds the bytes the entry conversion plans (D11).
+
+    `prove_commit_content` compares path names only, so a hook that edits the
+    source after the gates passed leaves it satisfied. The committed source and
+    `CLAUDE.md` must hash to their operations' `after`, every planned deletion
+    must be absent from the commit, and the resolver must find every projection
+    of an export of the commit unchanged."""
+    if not any(entry["action"] == "convert-to-source" for entry in evidence):
+        return
+    proved = adopt_inspection.BOOTSTRAP_SOURCE, "CLAUDE.md"
+    ok = all(
+        adopt_inspection.sha256_hash(
+            adopt_inspection.blob_at(worktree, commit, target) or b"")
+        == operation["after"]
+        for operation in operations if operation["op"] == "write-file"
+        for target in operation["targets"] if target in proved) and all(
+        adopt_inspection.blob_at(worktree, commit, path) is None
+        for operation in operations if operation["op"] == "delete-file"
+        for path in operation["sources"])
+    if ok:
+        with tempfile.TemporaryDirectory() as scratch:
+            tree = Path(scratch) / "tree"
+            adopt_inspection.export_commit(worktree, commit, tree)
+            code, payload = run_resolver(tree, "check-projections")
+        ok = code == 0 and all(
+            row["action"] == "unchanged" for row in payload["projections"])
+    if not ok:
+        raise adopt_inspection.refuse(
+            "verification_failed", adopt_apply.CONVERSION_UNPROVED, "",
+            "the adoption commit's bootstrap source or entry projections are "
+            "not those the plan converts to")
 
 
 def reconcile_required_check(root: Path, digest: str, document: dict) -> int:
@@ -1120,6 +1221,8 @@ def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
         adopt_apply.prove_commit_content(worktree, commit, changes)
         adopt_apply.prove_commit_links(worktree, commit, changes)
         adopt_apply.prove_conformance_bytes(worktree, commit, changes, member)
+        prove_entry_conversion(worktree, commit, changes,
+                               composed.document["evidence"])
         if member is not None:
             prove_conformance_projections(worktree, commit)
     except adopt_inspection.AdoptError as error:

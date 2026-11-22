@@ -140,6 +140,8 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
+    home/common/agent-skills/tests/test_adopt_apply_formatting.py \
+    home/common/agent-skills/tests/test_adopt_entries.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
     home/common/agent-skills/tests/test_adopt_conformance_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
@@ -159,6 +161,7 @@ agent-workflow-tests *args:
     tests/test_engine_session.py \
     tests/test_engine_session_limits.py \
     tests/test_engine_keep_alive.py \
+    tests/test_engine_stop.py \
     tests/test_engine_caps.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
