@@ -226,6 +226,7 @@ agent-workflow-tests *args:
     tests/test_devenv_cache_ignored.py \
     tests/test_suite_runner.py \
     tests/test_suite_tiers.py \
+    tests/test_suite_timing.py \
     tests/test_verify_slot.py \
     tests/test_verification_command.py \
     tests/test_console_event_log.py \
