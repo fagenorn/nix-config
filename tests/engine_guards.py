@@ -56,6 +56,16 @@ def real_guard(directory: Path, *, owners: tuple[str, ...] = ("example",)) -> Pa
                   "--derive-bin", str(derive))
 
 
+def real_pre_push_hooks(directory: Path, *, owners: tuple[str, ...] = ("example",)) -> Path:
+    """A hooks directory whose `pre-push` execs the real guard as the generated hook does."""
+    real_guard(directory, owners=owners)
+    script(directory / "hooks" / "pre-push", sys.executable, "-I", str(GUARD_SOURCE),
+           "--base-policy", str(directory / "base-policy.json"),
+           "--policy", str(directory / "compiled-policy.json"),
+           "--derive-bin", str(directory / "derive-stub"), "--mode", "pre-push", "--")
+    return directory / "hooks"
+
+
 def write_settings(home: Path, command: str, timeout: object = 30, *,
                    extra: dict | None = None) -> Path:
     path = home / ".claude" / "settings.json"

@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 from agent_tools.delivery import engine_shell
+from tests.engine_guards import standin_guard
 from tests.test_engine_deliver import ANY_SENTENCE, EngineProject, step
 
 TIER = "integration"  # every case runs `engine deliver` against the stand-in command
@@ -186,6 +187,37 @@ class KeepAliveTest(unittest.TestCase):
                 kept = [e for e in events if e["event"] == "keep_alive_ran"]
                 self.assertEqual(len(kept), 1)
                 self.assertEqual(kept[0]["verdict"], "error" if "string" in name else "not_held")
+
+    def test_a_refused_renewal_stops_at_claim_lost_with_the_guard_reason_and_the_step_never_starts(self):
+        project = EngineProject(self)
+        project.answer(RENEWED)
+        log = project.tmp / "refuse.log"
+        project.use_guard(standin_guard(project.tmp, "g", "only", str(project.answers), "refuse",
+                                        str(log), "lifecycle guard: refused by the stand-in."))
+        procedures = project.procedures(
+            [step("a", "standin-record", "done", mutates=True)], keep_alive=KEEP_ALIVE)
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "claim-lost")
+        ANY_SENTENCE(self, line["detail"])
+        self.assertIn("lifecycle guard: refused by the stand-in.", line["detail"])
+        self.assertEqual(project.renewal_calls(), [])
+        self.assertFalse(project.record.exists())
+        events = project.events(project.runs()[0])
+        self.assertEqual([e for e in events if e["event"] in
+                          ("step_entered", "process_started", "result_stored")], [])
+
+    def test_a_renewal_that_itself_answers_refused_stops_at_claim_lost_with_its_output(self):
+        project = EngineProject(self)
+        project.answer({"stdout": '{"verdict":"refused"}', "exit": 0})
+        line, events = self.stopped(project, project.procedures(
+            [step("a", "standin-record", "done", mutates=True)], keep_alive=KEEP_ALIVE))
+        self.assertIn('{"verdict":"refused"}', line["detail"])
+        kept = [e for e in events if e["event"] == "keep_alive_ran"]
+        self.assertEqual([e["verdict"] for e in kept], ["refused"])
+        self.assertFalse(project.record.exists())
+        self.assertEqual([e for e in events if e["event"] == "step_entered"], [])
 
 
 class ShapeTest(unittest.TestCase):
