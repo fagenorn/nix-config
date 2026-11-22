@@ -128,7 +128,7 @@ def end_group(process: subprocess.Popen) -> None:
     """
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):  # gone, or a leader left unreaped as a zombie (macOS)
         pass
     process.wait()
     for pipe in (process.stdin, process.stdout, process.stderr):

@@ -259,6 +259,26 @@ class StopPollTest(unittest.TestCase):
         self.assertLess(time.monotonic() - began, 8, "the child held the callback failure open")
         gone(self, int(self.pidfile.read_text()))
 
+    def test_ending_a_group_whose_unreaped_leader_refuses_the_signal_still_reaps_it(self):
+        # macOS answers EPERM to killpg on a group whose only member is an unreaped zombie
+        process = subprocess.Popen(["true"], start_new_session=True, stdout=subprocess.PIPE)
+        self.addCleanup(process.wait)
+        with mock.patch.object(engine_stop.os, "killpg", side_effect=PermissionError):
+            engine_stop.end_group(process)
+        self.assertEqual(process.returncode, 0)
+        self.assertTrue(process.stdout.closed)
+
+    def test_a_failing_on_start_still_surfaces_when_the_exited_leader_refuses_the_signal(self):
+        entry = project("true", cwd=self.tmp.name)
+
+        def refuse(pid: int) -> None:
+            raise RuntimeError("the ledger refused the event")
+
+        with mock.patch.object(engine_stop.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(RuntimeError):
+                engine_commands.run(table(quick=entry), "quick", None, (), guard=self.allow,
+                                    on_start=refuse)
+
     def test_a_sigterm_to_the_engine_ends_a_running_commands_whole_group(self):
         entry = project("hold", str(self.pidfile), "0", cwd=self.tmp.name)
 
