@@ -12,7 +12,7 @@ The correctness review of a delivery range; the calling controller runs its own 
 
 ## Caller input
 
-A diff range (`<left>...<right>` or `<left>..<right>`) and the worktree, and when the caller gives them, the spec's issue, the plan path under `<git-dir>/plans/` (routing context only) and the acceptance criteria. In the worktree, resolve `<head-sha>` with `git rev-parse <right>` and `<base-sha>` with `git merge-base <left> <right>` for a three-dot range or `git rev-parse <left>` for a two-dot one; an unresolvable range stops before packet construction.
+A diff range (`<left>...<right>` or `<left>..<right>`) and the worktree, and when the caller gives them, the spec's issue, the plan path (routing context only) and the acceptance criteria. In the worktree, resolve `<head-sha>` with `git rev-parse <right>` and `<base-sha>` with `git merge-base <left> <right>` for a three-dot range or `git rev-parse <left>` for a two-dot one; an unresolvable range stops before packet construction.
 
 Further ranges the caller names as `git -C <worktree> diff <base>...<branch>` (a plan's declared branches) are each resolved in their own worktree the same way and reviewed with the delivery range, each with its own size pre-flight and slices.
 

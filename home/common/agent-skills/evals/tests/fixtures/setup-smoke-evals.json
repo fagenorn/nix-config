@@ -11,7 +11,8 @@
         { "name": "one clean commit", "shell": "[ \"$(git -C \"$PRE_WT\" rev-list --count main..HEAD)\" -eq 1 ] && [ -z \"$(git -C \"$PRE_WT\" status --porcelain)\" ]" },
         { "name": "spec draft and plan package in the worktree's git directory", "shell": "g=$(git -C \"$PRE_WT\" rev-parse --absolute-git-dir); has_file \"$g/specs/2026-10-07-issue-3-rename-flag-design.md\" && has_file \"$g/plans/2026-10-07-issue-3-rename-flag.md\" && has_file \"$g/plans/2026-10-07-issue-3-rename-flag.tasks/task-1.md\"" },
         { "name": "implementation applied and tests pass", "shell": "cd \"$PRE_WT\" && TMPDIR=\"$WORK\" python3 -m unittest discover -q 2>/dev/null && python3 -m tinytask --file \"$WORK/probe.json\" list --include-done >/dev/null && ! python3 -m tinytask --file \"$WORK/probe.json\" list --all 2>/dev/null" },
-        { "name": "main unchanged and named by BASE_MAIN", "shell": "[ \"$BASE_MAIN\" = \"$(git -C \"$REPO\" rev-parse main)\" ] && [ \"$BASE_MAIN\" = \"$(git -C \"$ORIGIN\" rev-parse main)\" ] && [ \"$(git -C \"$REPO\" rev-list --count main)\" -eq 1 ]" }
+        { "name": "main unchanged and named by BASE_MAIN", "shell": "[ \"$BASE_MAIN\" = \"$(git -C \"$REPO\" rev-parse main)\" ] && [ \"$BASE_MAIN\" = \"$(git -C \"$ORIGIN\" rev-parse main)\" ] && [ \"$(git -C \"$REPO\" rev-list --count main)\" -eq 1 ]" },
+        { "name": "the plan's spec reference resolves in the git directory", "shell": "g=$(git -C \"$PRE_WT\" rev-parse --absolute-git-dir); ref=$(sed -n 's/.*Spec: `\\([^`]*\\)`.*/\\1/p' \"$g/plans/2026-10-07-issue-3-rename-flag.md\"); [ -n \"$ref\" ] && [ -f \"$g/plans/$ref\" ]" }
       ]
     },
     {
@@ -24,7 +25,8 @@
         { "name": "no commit and a clean tree", "shell": "[ \"$(git -C \"$PRE_WT\" rev-list --count main..HEAD)\" -eq 0 ] && [ -z \"$(git -C \"$PRE_WT\" status --porcelain)\" ]" },
         { "name": "spec draft and plan package in the worktree's git directory", "shell": "g=$(git -C \"$PRE_WT\" rev-parse --absolute-git-dir); has_file \"$g/specs/2026-10-07-issue-3-rename-flag-design.md\" && has_file \"$g/plans/2026-10-07-issue-3-rename-flag.tasks/task-1.md\"" },
         { "name": "implementation not applied", "shell": "grep -q -- 'add_argument(.--all' \"$PRE_WT/tinytask/cli.py\"" },
-        { "name": "main unchanged and named by BASE_MAIN", "shell": "[ \"$BASE_MAIN\" = \"$(git -C \"$REPO\" rev-parse main)\" ] && [ \"$BASE_MAIN\" = \"$(git -C \"$ORIGIN\" rev-parse main)\" ] && [ \"$(git -C \"$REPO\" rev-list --count main)\" -eq 1 ]" }
+        { "name": "main unchanged and named by BASE_MAIN", "shell": "[ \"$BASE_MAIN\" = \"$(git -C \"$REPO\" rev-parse main)\" ] && [ \"$BASE_MAIN\" = \"$(git -C \"$ORIGIN\" rev-parse main)\" ] && [ \"$(git -C \"$REPO\" rev-list --count main)\" -eq 1 ]" },
+        { "name": "the plan's spec reference resolves in the git directory", "shell": "g=$(git -C \"$PRE_WT\" rev-parse --absolute-git-dir); ref=$(sed -n 's/.*Spec: `\\([^`]*\\)`.*/\\1/p' \"$g/plans/2026-10-07-issue-3-rename-flag.md\"); [ -n \"$ref\" ] && [ -f \"$g/plans/$ref\" ]" }
       ]
     },
     {

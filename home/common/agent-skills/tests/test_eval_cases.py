@@ -488,6 +488,27 @@ class PlanningLedgerWriteBackAssertsTest(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("which the issue body lacks", done.stdout)
 
+    def test_a_row_under_another_heading_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.good(tmp)
+            subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
+            with (repo / self.ISSUE).open("a", encoding="utf-8") as issue:
+                issue.write("\n## Notes\n\n| P1 | One task | the task-size rule | Two tasks |\n")
+            done = self.grade(self.CITED, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("which the issue body lacks", done.stdout)
+
+    def test_a_ledger_row_with_an_empty_cell_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.good(tmp)
+            subprocess.run(["git", "-C", str(repo), "checkout", "--", self.ISSUE], check=True)
+            with (repo / self.ISSUE).open("a", encoding="utf-8") as issue:
+                issue.write("\n## Decision ledger\n\n| ID | Choice | Grounding | Rejected alternative |\n"
+                            "|----|----|----|----|\n| P1 | One task |  |  |\n")
+            done = self.grade(self.CITED, repo, env)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("which the issue body lacks", done.stdout)
+
     def test_a_committed_ledger_row_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = self.good(tmp)
@@ -517,6 +538,102 @@ class PlanningLedgerWriteBackAssertsTest(unittest.TestCase):
             done = self.grade(self.ONLY_ISSUE, repo, env)
         self.assertNotEqual(done.returncode, 0, done.stdout)
         self.assertIn("more than the issue's new body", done.stdout)
+
+
+class CommitBoundaryAssertsTest(unittest.TestCase):
+    """#1441: what a no-setup design run may commit, and the check that no commit goes unseen."""
+
+    DRAFT = ("the design spec draft is in the worktree's git directory "
+             "and no commit added a spec or plan")
+    DRAFT_FILE = "specs/2026-10-11-store-design.md"
+
+    def design_worktree(self, tmp, *, draft=True):
+        repo, git, env = published_sandbox(tmp)
+        worktree = repo / ".worktrees/design"
+        subprocess.run(git + ["worktree", "add", "-q", "-b", "design", str(worktree), "main"],
+                       check=True)
+        wgit = eval_git(worktree)
+        if draft:
+            gitdir = Path(subprocess.run(wgit + ["rev-parse", "--absolute-git-dir"], check=True,
+                                         capture_output=True, text=True).stdout.strip())
+            (gitdir / "specs").mkdir()
+            (gitdir / self.DRAFT_FILE).write_text("# Design\n", encoding="utf-8")
+        env.update(WT=str(worktree), WT_COUNT="1")
+        return repo, wgit, worktree, env
+
+    def grade(self, repo, env):
+        return run_assert(case_assert("improve-codebase-architecture", 2, self.DRAFT), repo, **env)
+
+    def commit_file(self, wgit, worktree, name):
+        path = worktree / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Doc\n", encoding="utf-8")
+        subprocess.run(wgit + ["add", name], check=True)
+        subprocess.run(wgit + ["commit", "-q", "-m", f"docs: {name}"], check=True,
+                       env={**os.environ, **QUIET_GIT})
+
+    def test_a_draft_with_no_commit_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, _, env = self.design_worktree(Path(tmp).resolve())
+            done = self.grade(repo, env)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_domain_doc_committed_on_the_design_branch_passes(self):
+        for name in ("docs/areas/store/CONTEXT.md", "docs/areas/store/adr/0001-store-seam.md",
+                     "docs/CONTEXT-MAP.md"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                repo, wgit, worktree, env = self.design_worktree(Path(tmp).resolve())
+                self.commit_file(wgit, worktree, name)
+                done = self.grade(repo, env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_missing_draft_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, _, env = self.design_worktree(Path(tmp).resolve(), draft=False)
+            done = self.grade(repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("no spec draft", done.stdout)
+
+    def test_a_committed_spec_or_plan_fails(self):
+        for name in ("specs/2026-10-11-store.md", "docs/plans/p.md", "docs/2026-10-11-store-design.md"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                repo, wgit, worktree, env = self.design_worktree(Path(tmp).resolve())
+                self.commit_file(wgit, worktree, name)
+                done = self.grade(repo, env)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("a commit added a spec or plan", done.stdout)
+
+    def test_a_pushed_branch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, worktree, env = self.design_worktree(Path(tmp).resolve())
+            self.commit_file(wgit, worktree, "docs/CONTEXT-MAP.md")
+            subprocess.run(wgit + ["push", "-q", "origin", "design"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            done = self.grade(repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("the origin's refs changed", done.stdout)
+
+    def test_a_commit_in_a_removed_detached_worktree_still_counts(self):
+        """#1441: a detached worktree's HEAD log goes with the worktree, the commit object stays."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git, env = published_sandbox(Path(tmp).resolve())
+            side = Path(tmp).resolve() / "side"
+            subprocess.run(git + ["worktree", "add", "-q", "--detach", str(side), "main"], check=True)
+            (side / "note.md").write_text("x\n", encoding="utf-8")
+            sgit = eval_git(side)
+            subprocess.run(sgit + ["add", "note.md"], check=True)
+            subprocess.run(sgit + ["commit", "-q", "-m", "docs: note"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            subprocess.run(git + ["worktree", "remove", "--force", str(side)], check=True)
+            done = run_assert('no_new_commits "$REPO"', repo, **env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("a commit was made", done.stdout)
+
+    def test_a_clean_sandbox_has_no_new_commits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = published_sandbox(Path(tmp).resolve())
+            done = run_assert('no_new_commits "$REPO"', repo, **env)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
 def fixture_sandbox(tmp):
@@ -985,6 +1102,23 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
                 with self.subTest(name=name):
                     done = self.grade(name, repo, env)
                     self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    NO_SPEC = "no spec or plan was written"
+
+    def test_a_spec_written_over_the_issue_file_fails(self):
+        """#1441: the issue is the spec's home, so a rewritten issue file is a spec written."""
+        for where in ("worktree", "checkout"):
+            with self.subTest(where=where), tempfile.TemporaryDirectory() as tmp:
+                repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+                base = Path(env["WT"]) if where == "worktree" else repo
+                path = base / "issues/003-mechanical.md"
+                path.write_text("# Design\n\n## Problem\n\nA spec.\n", encoding="utf-8")
+                if where == "worktree":
+                    subprocess.run(wgit + ["commit", "-qam", "feat: also the spec"], check=True,
+                                   env={**os.environ, **QUIET_GIT})
+                done = self.grade(self.NO_SPEC, repo, env)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("issues/003-mechanical.md", done.stdout)
 
     def test_the_old_flag_left_in_the_implementation_or_readme_fails(self):
         for name, old, new in (("tinytask/cli.py", "--include-done", "--all"),

@@ -76,7 +76,7 @@
         },
         {
           "name": "the issue body carries every ledger row the plan cites",
-          "shell": "issue=\"$REPO/issues/001-well-specified.md\"; plan=$(first_file \"$PLAN_DIR\"/*.md) || exit 1; ids=$(cat \"$plan\" \"${plan%.md}\".tasks/*.md 2>/dev/null | grep -oE '[Pp]er [A-Z][0-9]+' | awk '{print $2}' | sort -u); [ -n \"$ids\" ] || { fail \"the plan cites no ledger row\"; exit 1; }; for id in $ids; do grep -qE \"^\\| *$id *\\|\" \"$issue\" || { fail \"the plan cites $id, which the issue body lacks\"; exit 1; }; done"
+          "shell": "issue=\"$REPO/issues/001-well-specified.md\"; plan=$(first_file \"$PLAN_DIR\"/*.md) || exit 1; ids=$(cat \"$plan\" \"${plan%.md}\".tasks/*.md 2>/dev/null | grep -oE '[Pp]er [A-Z][0-9]+' | awk '{print $2}' | sort -u); [ -n \"$ids\" ] || { fail \"the plan cites no ledger row\"; exit 1; }; rows=$(awk -F'|' '/^## /{p=($0==\"## Decision ledger\")} p && $2 ~ /^ *[A-Z][0-9]+ *$/ && $3 ~ /[^ ]/ && $4 ~ /[^ ]/ && $5 ~ /[^ ]/ {gsub(/ /,\"\",$2); print $2}' \"$issue\"); for id in $ids; do printf '%s\\n' \"$rows\" | grep -qx \"$id\" || { fail \"the plan cites $id, which the issue body lacks as a complete row of its Decision ledger\"; exit 1; }; done"
         },
         {
           "name": "the issue file is the only working-tree change and its acceptance criteria are unchanged",

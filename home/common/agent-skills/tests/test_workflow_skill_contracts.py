@@ -1144,7 +1144,7 @@ path_unchanged_since() { return 0; }
         self.assertEqual({i: (c["name"], c["mode"]) for i, c in cases.items()}, {1: ("scan-only-renders-a-temporary-report", "pipeline"), 2: ("clear-selection-reaches-a-design-worktree", "pipeline"), 3: ("foggy-selection-routes-to-wayfind", "pipeline")})
         required_shells = {
             1: {"temporary report exists outside repository": ('architecture-review-', '"$OUT"', '[ -f "$report" ]', '$REPO'), "report is evidence-backed or truthful": ('"$OUT"', 'python3 - "$report"', "HTMLParser", "data-architecture-candidate", 'data-evidence', "module-callers", "caller-interface-knowledge", "locality-leverage", "deletion-test", "dependency-adapters", "tests-interface-surface", "context-decision-conflict", "data-diagram-text", "before", "after", "no-candidates", "top-recommendation", "expected_candidate_ids", "zero_text !=", "1 <= candidate_count <= 5"), "history miss widened the scan": ("out_matches", "widen"), "repository and branches stayed unchanged": ('test "$WT_COUNT" -eq 0', 'status=$(git -C "$REPO" status --porcelain)', 'test -z "$status"', 'test "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse origin/main)"', "branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads)", 'test "$branches" = "main"')},
-            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "the design spec draft is in the worktree's git directory and nothing was committed": ('git -C "$WT" rev-parse --absolute-git-dir', '/specs', 'no_new_commits "$REPO"'), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$(git -C "$WT" rev-parse --absolute-git-dir)/plans"/*.md "$PLAN_DIR"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended": ("out_matches", "recommend", "&&", "writing-plans|to-issues"), "design returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', DESIGN_COMPLETE)},
+            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "the design spec draft is in the worktree's git directory and no commit added a spec or plan": ('git -C "$WT" rev-parse --absolute-git-dir', '/specs', 'no_artifact_commits "$REPO"'), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$(git -C "$WT" rev-parse --absolute-git-dir)/plans"/*.md "$PLAN_DIR"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended": ("out_matches", "recommend", "&&", "writing-plans|to-issues"), "design returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', DESIGN_COMPLETE)},
             3: {"new wayfind map exists and prior map stayed unchanged": ('new_map_count=0', 'for map in "$REPO"/.claude/wayfind/*/map.md; do', "*/concurrent-shells/map.md) continue", '[ -f "$map" ] || continue', 'relative_map=${map#"$REPO"/}', 'if git -C "$REPO" cat-file -e "origin/main:$relative_map" 2>/dev/null; then', 'new_map_count=$((new_map_count + 1))', 'test "$new_map_count" -eq 1', 'path_unchanged_since "$REPO" origin/main .claude/wayfind/concurrent-shells'), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$SPEC_DIR"/*.md "$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', "WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.")},
         }
         for case_id, case in cases.items():
@@ -2194,9 +2194,12 @@ NOT_AFTER = r"(?<!not )(?<!never )(?<!n't )(?<!no )"
 COMMIT_STEP_RE = re.compile(
     r"\bgit\b[^`|;&]{0,60}?\bcommit\b[^`|;&]{0,20}?\s-[a-zA-Z]*m\s*[\\\"']{0,2}"
     r"(?:docs\((?:spec|plan)s?\)|[^\"'`]{0,60}?\b(?:spec|specs|plan|plans|findings)\b)"
+    r"|\bgit\b[^`|;&]{0,60}?\bcommit\b[^`|;&]{0,60}?"
+    r"(?:\s--\s+\S*\b(?:spec|specs|plan|plans|findings)\b|\s\S*(?:spec|plan|findings|-design)\S*\.md\b)"
     r"|" + NOT_AFTER + r"\bcommit(?:ted|ting|s)?\s+(?:(?:the|a|an|its|of|design|implementation)\s+){0,3}"
     r"(?:spec|specs|plan|plans|findings|design)\b"
-    r"|\b(?:spec|specs|plan|plans|findings)\b(?:\s+\S+){0,6}?\s+" + NOT_AFTER + r"committed\b"
+    r"|\b(?:spec|specs|plan|plans|findings)\b(?:\s+(?!(?:never|not|no|cannot)\b|\S*n't)\S+){0,6}?\s+"
+    + NOT_AFTER + r"committed\b"
     r"|committed in your worktree|\*\*committed\*\*", re.I)
 
 
@@ -2232,6 +2235,9 @@ class WorkingArtifactHomesTest(unittest.TestCase):
             'git -C "$PRE_WT" add -A && git -C "$PRE_WT" commit -qm "docs(plan): issue 3 rename-flag plan"',
             'git -C \\"$PRE_WT\\" commit -qm \\"docs(plan): issue 3 rename-flag plan\\"',
             'git commit -m "add the plan"',
+            "git commit -- plan.md",
+            'git -C "$WT" commit -- specs/2026-10-11-store-design.md',
+            "the plan will be committed",
         )
         negatives = (
             "Commit none of it.",
@@ -2243,6 +2249,9 @@ class WorkingArtifactHomesTest(unittest.TestCase):
             "never commit the spec or a plan",
             "Don't commit the design",
             "the spec is not committed",
+            "the spec must never be committed",
+            "a plan must not be committed",
+            "the findings should never get committed",
             "leave it uncommitted",
             'git -C "$PRE_WT" commit -qm "feat: rename list --all to --include-done (#3)"',
         )
@@ -2267,10 +2276,19 @@ class WorkingArtifactHomesTest(unittest.TestCase):
         for text in (design, research):
             self.assertIn("git rev-parse --absolute-git-dir", text)
 
+    def test_design_rereads_the_issue_body_before_replacing_it(self):
+        text = normalized(DESIGN.read_text())
+        self.assertIn("reread the issue body, merge any change since the draft was built into it and recheck the budget", text)
+
+    def test_architecture_announces_completion_only_after_a_complete_design_and_grill(self):
+        text = normalized((IMPROVE_DIR / "SKILL.md").read_text())
+        self.assertIn("only if `design` and `grill-with-docs` both returned `complete`", text)
+
     def test_diff_review_takes_no_artifact_path_and_reads_the_plan_from_the_git_directory(self):
         text = normalized(DIFF_REVIEW.read_text())
         self.assertNotIn("--artifact-path", text)
-        self.assertIn("<git-dir>/plans/", text)
+        self.assertNotIn("<git-dir>/plans/", text)
+        self.assertIn("the plan path (routing context only)", text)
 
 
 PLANNING_DOCUMENTS = (WRITING_PLANS,)

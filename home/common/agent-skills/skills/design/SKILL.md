@@ -22,7 +22,7 @@ Model the design as a tree of decisions. The **frontier** is every question whos
 
 **Ground before round 1**: invoke `doc-grounded-questions`, or read this phase's `GROUNDING.md` cache when the caller built one.
 
-**Facts are your job; decisions are the user's.** Answer a trivial repository fact inline. When a fact needs a bounded read-only exploration pass, dispatch the explorer; when it needs cited primary sources, invoke `research`, which owns its own background launch.
+**Facts are your job; decisions are the user's.** Answer a trivial repository fact inline. When a fact needs a bounded read-only exploration pass, dispatch the explorer; when it needs cited primary sources, invoke `research`.
 
 <!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
@@ -31,7 +31,7 @@ An in-flight lookup blocks only the questions downstream of it; ask the rest now
 
 ## Authorized autonomous decisions
 
-When the caller has authorized autonomous decisions within a stated scope (a delivery program's `decisions` among others), **the `➡️` recommendation is the answer**: post no round and wait for nothing. Record each non-obvious decision in the spec's `## Decision ledger`; a decision that expands the approved scope returns to the caller.
+When the caller has authorized autonomous decisions within a stated scope, **the `➡️` recommendation is the answer**: post no round and wait for nothing. Record each non-obvious decision in the spec's `## Decision ledger`; a decision that expands the approved scope returns to the caller.
 
 ## Guards
 
@@ -42,7 +42,7 @@ When the caller has authorized autonomous decisions within a stated scope (a del
 
 ## Output
 
-Draft the spec at `<git-dir>/specs/<YYYY-MM-DD>-<topic>-design.md` (`<git-dir>`: `git rev-parse --absolute-git-dir` in the checkout you were called in, never the working tree). The draft is the new body of the parent issue (the issue you were called on unless the caller names its parent): the spec's sections, then each section of the current body whose heading the spec does not use, verbatim, criteria and links included.
+Draft the spec at `<git-dir>/specs/<YYYY-MM-DD>-<topic>-design.md` (`<git-dir>`: `git rev-parse --absolute-git-dir` in the checkout you were called in). The draft is the new body of the parent issue (the issue you were called on unless the caller names its parent): the spec's sections, then each other section of the current body verbatim, criteria and links included.
 
 Sections: **Problem** (from the user's perspective) · **Solution** · **Decisions** (modules, interfaces, schema and API contracts, behavior; no file paths or line numbers) · **Test seams** (the agreed seams and the prior art they follow) · **Out of scope** (mandatory and real) · **Decision ledger**, the issue's single decision store, cited later by row ID ("per D3"), never restated:
 
@@ -52,7 +52,7 @@ Sections: **Problem** (from the user's perspective) · **Solution** · **Decisio
 | D1 | <what was decided, one line> | <doc/standard/user statement it rests on> | <the alternative and why not, one line> |
 ```
 
-Only non-obvious decisions earn a row (scope, interface, behavioral, test-seam, irreversible, user-preference); skip routine choices and merge related decisions into one row.
+Only non-obvious decisions earn a row (scope, interface, behavioral, test-seam, irreversible, user-preference); merge related ones into one row.
 
 Then reread the spec once and fix placeholders, contradictions, ambiguity and scope that needs decomposing. No reviewer dispatch.
 
@@ -64,7 +64,7 @@ Run `artifact-budget check --kind design-spec --root <spec-root> --format json`.
 - Exit 2: `failed`.
 - First exit 3: compact repetition, examples and evidence references without weakening a required section or the ledger's meaning, then check again. Still over: keep the draft and return `decompose_required` with the checker's `violations`, its `notes` proposing the independently deliverable parts. A second-check exit 2 is `failed`.
 
-The design is complete only in this order: final mutation, a `within_budget` check, the draft written as the parent issue's body, then `complete`. Commit nothing. Write the body with `bindings.tracker.cli` on `bindings.tracker.repo_slug` (GitHub: `gh issue edit <n> --repo <slug> --body-file <draft>`), unsetting `tracker.credential_env.unset_before_invocation` first, and read it back: a body other than the draft (trailing whitespace aside) or a failed write is `failed`. With an unsupported tracker or `kind: none`, write the draft over the issue file the caller named, uncommitted; with no issue the draft is the spec and `notes` say so.
+The design is complete only in this order: final mutation, a `within_budget` check, the draft written as the parent issue's body, then `complete`. Commit nothing. Before the write, reread the issue body, merge any change since the draft was built into it and recheck the budget. Write the body with `bindings.tracker.cli` on `bindings.tracker.repo_slug` (GitHub: `gh issue edit <n> --repo <slug> --body-file <draft>`), unsetting `tracker.credential_env.unset_before_invocation` first, and read it back: a body other than the draft (trailing whitespace aside) or a failed write is `failed`. With an unsupported tracker or `kind: none`, write the draft over the issue file the caller named; with no issue the draft is the spec and `notes` say so.
 
 ## Code map
 
