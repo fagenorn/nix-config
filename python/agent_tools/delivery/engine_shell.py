@@ -20,10 +20,11 @@ run's `sessions/`, `session_starting` is on disk before the process is spawned,
 and only the `outcome_from` member of the session's structured reply grades the
 step. A session with no structured reply is a `Fault`, so neither the prose nor
 the exit code selects an outcome, and so is a session denied a shell command,
-whose reply may rest on a check it never ran. A session ended by a bound (a turn cap or a spend
-cap, `engine_session.CAP_SUBTYPES`) is graded `out-of-bounds` before either fault is considered:
-its stored result names the bound, its measurements are recorded, and the engine never resumes
-or retries the step.
+whose reply may rest on a check it never ran. A session ended by a bound is graded
+`out-of-bounds` before either fault is considered: the bounds are a turn cap or a spend cap
+(`engine_session.CAP_SUBTYPES`) and the wall bound, the engine's own clock per role
+(`engine_session.bounds`), past which `engine_session.launch` ends the session's group. Its stored result names the bound (`wall-time` for the wall bound), its
+measurements are recorded, and the engine never resumes or retries the step.
 
 Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
@@ -434,16 +435,19 @@ def _visit_session(run_dir: Path, root: str, step: dict,
                                              "started": _now()})
 
     launched = engine_session.launch(
-        engine_session.launch_argv(role, schema, session, system), root, prompt, on_start=started)
+        engine_session.launch_argv(role, schema, session, system), root, prompt, on_start=started,
+        timeout=engine_session.bounds(role.name).wall_seconds)
     reading = engine_session.read_result(launched.stdout)
     record = {"denials": reading.denials, "exit_code": launched.exit_code,
               "prose": reading.prose, "session": session, "subtype": reading.subtype}
     engine_ledger.store_session_file(
         run_dir, f"{name}.{visit}.json",
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    bound = engine_session.CAP_SUBTYPES.get(reading.subtype)
+    bound = (engine_session.WALL_TIME if launched.timed_out
+             else engine_session.CAP_SUBTYPES.get(reading.subtype))
     if bound is not None:
-        wall = reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds
+        wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None
+                else reading.wall_seconds)
         engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": bound},
                                    at=_now(), wall_seconds=wall, turns=reading.turns,
                                    tokens=reading.tokens, spend_usd=reading.spend_usd)

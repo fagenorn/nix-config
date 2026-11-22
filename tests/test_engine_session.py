@@ -416,6 +416,38 @@ class LaunchTest(unittest.TestCase):
                         pass
 
 
+    def test_a_launcher_past_its_timeout_gets_sigterm_and_its_grace_before_sigkill(self):
+        code = ("import signal, sys, time; "
+                "signal.signal(signal.SIGTERM, lambda s, f: open(sys.argv[1], 'w').write('term')); "
+                "print('ready', flush=True); time.sleep(60)")
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "marker"
+            seen: list[int] = []
+            began = time.monotonic()
+            with mock.patch.object(engine_session, "GRACE_SECONDS", 2):
+                launched = launch([sys.executable, "-c", code, str(marker)], directory, "p",
+                                  on_start=seen.append, timeout=1)
+            elapsed = time.monotonic() - began
+            self.assertTrue(launched.timed_out)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "term")
+            self.assertGreaterEqual(elapsed, 1 + 2 - 0.25)
+            self.assertLess(elapsed, 1 + 2 + engine_session.DRAIN_SECONDS + 5)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(seen[0], 0)
+
+    def test_time_spent_recording_the_start_counts_against_the_wall_bound(self):
+        launched = launch([sys.executable, "-c", "import time; time.sleep(1.5); print('{}')"],
+                          tempfile.gettempdir(), "p", on_start=lambda pid: time.sleep(1.2),
+                          timeout=1)
+        self.assertIs(launched.timed_out, True)
+
+    def test_an_untimed_launch_is_not_timed_out(self):
+        launched = launch([sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+                          tempfile.gettempdir(), "word", on_start=lambda pid: None)
+        self.assertIs(launched.timed_out, False)
+        self.assertEqual(launched.stdout, b"word\n")
+
+
 DRAFT_REPLY = {"type": "object",
                "properties": {"status": {"enum": ["drafted", "stuck"]},
                               "summary": {"type": "string"},
@@ -429,7 +461,7 @@ ROLE_NAMES = ("planner", "implementer", "reviewer", "reviewer-lite")
 
 
 def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
-                 diagnostic: str | None = None) -> Path:
+                 diagnostic: str | None = None, hold: Path | None = None) -> Path:
     """Put the stand-in launcher first on the project's PATH; return the log it appends to."""
     log = project.tmp / "claude.log"
     if not isinstance(canned, Path):
@@ -441,7 +473,7 @@ def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
         Path(diagnostic_path).write_text(diagnostic, encoding="utf-8")
     launcher = project.bin / "claude-account"
     launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {log} {canned} {exit} "
-                        f"{diagnostic_path} \"$@\"\n", encoding="utf-8")
+                        f"{diagnostic_path} {hold if hold else '-'} \"$@\"\n", encoding="utf-8")
     launcher.chmod(0o755)
     return log
 
@@ -612,12 +644,13 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         seen: list[tuple] = []
 
-        def checking(argv, cwd, prompt, *, on_start):
+        def checking(argv, cwd, prompt, *, on_start, **options):
+            self.assertEqual(options["timeout"], 3600)
             (run,) = project.runs()
             events = engine_ledger.replay(run / "events.jsonl")
             seen.append((events[-1]["event"], events[-1].get("session"),
                          [e["event"] for e in events], after(list(argv), "--session-id")))
-            return real(argv, cwd, prompt, on_start=on_start)
+            return real(argv, cwd, prompt, on_start=on_start, **options)
 
         with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
             code, line = engine_shell.deliver(1514, procedures)
@@ -739,6 +772,56 @@ class DeliverSessionTest(unittest.TestCase):
                 (line,) = log.read_text(encoding="utf-8").splitlines()
                 self.assertNotIn("--resume", line)
                 self.assertNotIn("--continue", line)
+
+    def test_a_session_past_a_shortened_wall_bound_ends_with_its_child_as_out_of_bounds(self):
+        project = self.project
+        hold = project.tmp / "hold.pids"
+        log = install_stub(project, RESULT_NORMAL, hold=hold)
+        procedures = self.capped_procedures()
+        bounds = {**engine_session.ROLE_BOUNDS, "implementer": engine_session.Bounds(3, 300, 20.0)}
+        began = time.monotonic()
+        with project.inside(), mock.patch.object(engine_session, "ROLE_BOUNDS", bounds):
+            code, line = engine_shell.deliver(1520, procedures)
+        elapsed = time.monotonic() - began
+        pids: list[int] = []
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not pids:
+            pids = [int(word) for word in hold.read_text(encoding="utf-8").split()] \
+                if hold.exists() else []
+            time.sleep(0.05)
+        self.assertEqual(len(pids), 2)
+        for pid in pids:
+            self.addCleanup(self.kill_quietly, pid)
+        self.assertEqual((code, line["end"]), (3, "step-failed"), line)
+        self.assertLess(elapsed, 30)
+        run = self.run_dir()
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+            encoding="utf-8")), {"bound": "wall-time"})
+        events = project.events(run)
+        (stored,) = [e for e in events if e["event"] == "result_stored"]
+        self.assertGreaterEqual(stored["wall_seconds"], 3)
+        self.assertLess(stored["wall_seconds"], 30)
+        self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                         ["out-of-bounds"])
+        self.assertEqual(len([e for e in events if e["event"] == "process_started"]), 1)
+        self.assertLessEqual(len(self.log(log)), 1)
+        deadline = time.monotonic() + 5
+        for pid in pids:
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() > deadline:
+                    self.fail(f"process {pid} outlived the wall-time ending")
+                time.sleep(0.05)
+
+    @staticmethod
+    def kill_quietly(pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
     def test_a_capped_session_denied_a_shell_command_is_still_out_of_bounds(self):
         document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))

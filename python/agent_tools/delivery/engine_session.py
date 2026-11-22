@@ -48,8 +48,12 @@ fault, never a transition.
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
-other exception both do. A launcher that cannot start gives exit 127 and the
-`OSError` text as its stderr. Its stderr is
+other exception both do. Its `timeout` is the wall bound, counted from the spawn
+(so the time `on_start` takes is inside it): a session past it gets SIGTERM to
+its whole group, then `GRACE_SECONDS` for the group (not only the launcher) to
+be gone, and SIGKILL to the group if any member is still alive; the call returns
+with `timed_out` set within `timeout + GRACE_SECONDS + DRAIN_SECONDS`. A launcher that
+cannot start gives exit 127 and the `OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line.
 
@@ -90,6 +94,8 @@ WALL_TIME = "wall-time"
 CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
     {"error_max_turns": "turns", "error_max_budget_usd": "spend"})
 NOT_STARTED = 127
+GRACE_SECONDS = 5
+DRAIN_SECONDS = 5
 READ_ONLY_BASH: tuple[str, ...] = tuple(
     f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
                                       "blame", "merge-base"))
@@ -322,6 +328,7 @@ class Launched:
     stdout: bytes
     stderr: bytes
     wall_seconds: float
+    timed_out: bool = False
 
 
 def diagnostic(stderr: bytes) -> str:
@@ -335,15 +342,56 @@ def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+def _group_alive(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _kill_group(pid: int, signum: int) -> None:
+    try:
+        os.killpg(pid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def _end_overrun(process: subprocess.Popen) -> tuple[bytes, bytes]:
+    """End a session past its wall bound: TERM to its group, the grace, then KILL to the group."""
+    pid = process.pid
+    _kill_group(pid, signal.SIGTERM)
+    grace_end = time.monotonic() + GRACE_SECONDS
+    try:
+        stdout, stderr = process.communicate(timeout=max(0.0, grace_end - time.monotonic()))
+    except subprocess.TimeoutExpired:  # the launcher ignores TERM, or a member holds a pipe
+        _kill_group(pid, signal.SIGKILL)
+        try:
+            return process.communicate(timeout=DRAIN_SECONDS)
+        except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
+            stdout, stderr = late.output or b"", late.stderr or b""
+            process.stdout.close(), process.stderr.close(), process.wait()
+            return stdout, stderr
+    while _group_alive(pid) and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    _kill_group(pid, signal.SIGKILL)  # a member that outlived the launcher and the grace
+    return stdout, stderr
+
+
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
-           on_start: Callable[[int], None]) -> Launched:
-    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
+           on_start: Callable[[int], None], timeout: float | None = None) -> Launched:
+    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written.
+
+    With a `timeout` the session is ended at `started + timeout` (see the module docstring)
+    and the result has `timed_out` set.
+    """
     started = time.monotonic()
     try:
         previous = signal.signal(signal.SIGTERM, _terminate)
     except ValueError:  # not the main thread: no handler can be installed
         previous = None
     process = None
+    timed_out = False
     try:
         try:
             process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
@@ -353,16 +401,23 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)
         on_start(process.pid)
-        stdout, stderr = process.communicate(prompt.encode("utf-8"))
+        if timeout is None:
+            stdout, stderr = process.communicate(prompt.encode("utf-8"))
+        else:
+            remaining = started + timeout - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(list(argv), 0)
+                stdout, stderr = process.communicate(prompt.encode("utf-8"), timeout=remaining)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                stdout, stderr = _end_overrun(process)
     except BaseException:
         if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _kill_group(process.pid, signal.SIGKILL)
             process.communicate()
         raise
     finally:
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
-    return Launched(process.returncode, stdout, stderr, time.monotonic() - started)
+    return Launched(process.returncode, stdout, stderr, time.monotonic() - started, timed_out)
