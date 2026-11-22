@@ -6,15 +6,17 @@ standards README names one prefix per layer file) and criterion 2 (every
 project rule is a heading with a `P` id, none a numbered list item).
 """
 
+import collections
 import re
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery.context_map_lint import (
-    CODE_RE, MAP_BUDGET, TERM_DEF_RE, section, table_rows)
-from agent_tools.delivery.markdown_scan import HEADING_LINE, scan
-from agent_tools.delivery.rule_ids import RULE_ID_HEADING
+from agent_tools.delivery.context_map_lint import MAP_BUDGET, TERM_DEF_RE, section, table_rows
+from agent_tools.delivery.rule_ids import (
+    layer_problems, numbered_items, prefix_table, rule_headings, sections)
 from agent_tools.project_contract.adopt_links import links
+
+TIER = "fast"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GLOBAL = REPO_ROOT / "home/common/agent-skills/standards"
@@ -22,94 +24,8 @@ BAR = GLOBAL / "the-bar.md"
 README = GLOBAL / "README.md"
 PROJECT = REPO_ROOT / "docs/standards"
 
-SECOND_ID = re.compile(r"(?<![A-Za-z0-9])[A-Z]+[0-9]+\.(?=\s|$)")
-NUMBERED_ITEM = re.compile(r"^[0-9]+\. ")
-
-
-def unfenced(text: str):
-    """`(line number, line)` of every line `scan` keeps."""
-    for number, line, _ in scan(text):
-        yield number, line
-
-
-def rule_match(line: str):
-    """The id match of a well-formed rule heading, else None."""
-    found = RULE_ID_HEADING.match(line)
-    if found and found["hashes"] == "###" and not SECOND_ID.search(found["title"]):
-        return found
-    return None
-
-
-def rule_headings(text: str) -> tuple[list[tuple[str, int, int]], list[str]]:
-    ids: list[tuple[str, int, int]] = []
-    problems: list[str] = []
-    seen_heading = False
-    for number, _, line in scan(text):
-        if not HEADING_LINE.match(line):
-            continue
-        first, seen_heading = not seen_heading, True
-        if first and line.startswith("# "):
-            continue
-        found = rule_match(line)
-        if found:
-            ids.append((found["prefix"], int(found["number"]), number))
-        else:
-            reason = "not a rule heading with one well-formed id"
-            problems.append(f"line {number}: {reason}: {line}")
-    return ids, problems
-
-
-def sections(text: str) -> dict[str, str]:
-    """Rule id to the body between its heading and the next heading of any level."""
-    bodies: dict[str, list[str]] = {}
-    current = None
-    for _, raw, line in scan(text):
-        if HEADING_LINE.match(line):
-            found = rule_match(line)
-            current = f"{found['prefix']}{found['number']}" if found else None
-            if current:
-                bodies[current] = []
-        elif current:
-            bodies[current].append(raw)
-    return {key: "".join(f"{line}\n" for line in lines) for key, lines in bodies.items()}
-
-
 def link_destinations(body: str) -> list[str]:
     return [link.target for link in links(body)]
-
-
-def numbered_items(text: str) -> list[int]:
-    return [number for number, line in unfenced(text) if NUMBERED_ITEM.match(line)]
-
-
-def layer_problems(files: list[tuple[str, str, str]]) -> list[str]:
-    problems: list[str] = []
-    seen: dict[tuple[str, int], str] = {}
-    for label, expected, text in files:
-        ids, bad = rule_headings(text)
-        problems += [f"{label}: {problem}" for problem in bad]
-        if not ids and not bad:
-            problems.append(f"{label}: no rule heading")
-        for prefix, number, line in ids:
-            name = f"{prefix}{number}"
-            if prefix != expected:
-                problems.append(f"{label}: line {line}: {name} should carry the prefix {expected}")
-            if (prefix, number) in seen:
-                problems.append(f"{label}: line {line}: {name} repeats the id in {seen[(prefix, number)]}")
-            seen.setdefault((prefix, number), label)
-        for name, body in sections(text).items():
-            if not body.strip():
-                problems.append(f"{label}: {name} has no body")
-    return problems
-
-
-def prefix_table(readme_text: str) -> dict[str, str]:
-    table: dict[str, str] = {}
-    for cells in table_rows(section(readme_text, "Rule ids")):
-        keys, values = CODE_RE.findall(cells[0]), CODE_RE.findall(cells[1])
-        if keys and values:
-            table[keys[0]] = values[0]
-    return table
 
 
 def layer_files() -> tuple[list, list, list]:
@@ -159,6 +75,13 @@ class RuleHeadingTest(unittest.TestCase):
         for heading in ("## B1. x", "#### B1. x", "# Second title"):
             with self.subTest(heading=heading):
                 self.assertEqual(len(rule_headings(f"# T\n{heading}\n")[1]), 1)
+
+    def test_two_ids_no_id_and_a_wrong_level_have_their_own_reasons(self):
+        texts = ("# T\n### B1. B2. x\n", "# T\n### Defense in depth\n", "# T\n## B1. x\n")
+        self.assertEqual([rule_headings(text)[1] for text in texts], [
+            ["line 2: more than one id: ### B1. B2. x"],
+            ["line 2: no well-formed id: ### Defense in depth"],
+            ["line 2: a rule heading is ###: ## B1. x"]])
 
     def test_a_malformed_id_is_a_problem(self):
         for heading in ("### B01. x", "### b1. x", "### B1 x", "### B1. B2. x",
@@ -315,11 +238,29 @@ class LiveStandardsTest(unittest.TestCase):
             set(table),
             {"the-bar.md", "docs/standards/"}
             | {f"stacks/{path.name}" for path in (GLOBAL / "stacks").glob("*.md")})
-        self.assertEqual(len(set(table.values())), len(table))
+        counts = collections.Counter(table.values())
+        self.assertEqual(counts["NET"], 3)
+        self.assertEqual({prefix for prefix, n in counts.items() if n > 1}, {"NET"})
         self.assertEqual(table["the-bar.md"], "B")
         self.assertEqual(table["docs/standards/"], "P")
         self.assertEqual(table["stacks/python.md"], "PY")
         self.assertEqual(table["stacks/dotnet.md"], "NET")
+        self.assertEqual(table["stacks/dotnet-data.md"], "NET")
+        self.assertEqual(table["stacks/dotnet-ai.md"], "NET")
+
+    def test_the_dotnet_shards_keep_every_net_id(self):
+        paths = [GLOBAL / "stacks" / name
+                 for name in ("dotnet.md", "dotnet-data.md", "dotnet-ai.md")]
+        counts = collections.Counter()
+        for path in paths:
+            ids, problems = rule_headings(path.read_text())
+            self.assertEqual(problems, [], path.name)
+            counts.update(f"{p}{n}" for p, n, _ in ids)
+            self.assertLessEqual(len(path.read_bytes()), 8192, path.name)
+        for n in range(1, 12):
+            with self.subTest(id=f"NET{n}"):
+                self.assertEqual(counts[f"NET{n}"], 1)
+        self.assertEqual(max(counts.values()), 1)
 
     def test_every_rule_heading_in_the_three_layers_carries_one_id(self):
         bar, stacks, project = layer_files()

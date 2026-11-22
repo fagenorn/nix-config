@@ -95,6 +95,67 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run agent workflow tests
         # The hosted runner has 4 vCPUs: keep the job count the CI run has always used.
+        # The runner also writes the run's suite time and every member's time, slowest
+        # first, for the next step to upload (issue 1385, ADR-delivery-015).
         env:
           SUITE_RUNNER_JOBS: "4"
+          SUITE_RUNNER_REPORT: suite-timing/suite-timing.json
         run: WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just nixpkgs#nodejs --command just agent-workflow-tests
+      # The one step `if:` a required job may carry (ADR-delivery-015 D8): it runs after
+      # the suite, so it cannot skip it, and a failed suite keeps the job red. A completed
+      # red suite still uploads its times. A suite that never wrote a report fails here.
+      - name: Upload suite timing
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-timing
+          path: suite-timing/suite-timing.json
+          if-no-files-found: error
+
+  # Not required contexts (issue 1385, ADR-delivery-015). They read the report the
+  # Agent Workflow Tests job uploaded. A green push to main keeps it in the Actions
+  # cache as the baseline. A pull request compares its own report, from a green or a
+  # red suite, with the baseline of its base commit, or else the newest one, and adds
+  # one line to the run's summary. Neither job fails a run for a slower suite, and the
+  # cache needs no token permission. The save and restore `path` must stay identical,
+  # since the cache version is derived from it.
+  suite-timing-baseline:
+    name: Suite Timing Baseline
+    needs: agent-workflow-tests
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download this run's suite timing
+        uses: actions/download-artifact@v4
+        with:
+          name: suite-timing
+          path: suite-timing/base
+      - name: Keep it as the baseline
+        uses: actions/cache/save@v4
+        with:
+          path: suite-timing/base/suite-timing.json
+          key: suite-timing-${{ github.sha }}
+
+  suite-timing:
+    name: Suite Timing
+    needs: agent-workflow-tests
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download this run's suite timing
+        uses: actions/download-artifact@v4
+        with:
+          name: suite-timing
+          path: suite-timing/head
+      - name: Restore the baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: suite-timing/base/suite-timing.json
+          key: suite-timing-${{ github.event.pull_request.base.sha }}
+          restore-keys: suite-timing-
+      - name: Compare with the baseline
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing compare --head suite-timing/head/suite-timing.json --base suite-timing/base/suite-timing.json --base-label "$BASE_REF" >> "$GITHUB_STEP_SUMMARY"

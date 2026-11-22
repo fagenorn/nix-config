@@ -124,6 +124,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_resolve_platform.py \
     home/common/agent-skills/tests/test_resolve_platform_status.py \
     home/common/agent-skills/tests/test_fleet_preflight.py \
+    home/common/agent-skills/tests/test_host_readiness.py \
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
@@ -221,6 +222,7 @@ agent-workflow-tests *args:
     tests/test_docs_tree.py \
     tests/test_standard_ids.py \
     tests/test_standards_lint.py \
+    tests/test_citation_lint.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \
@@ -229,6 +231,8 @@ agent-workflow-tests *args:
     tests/test_branch_protection.py \
     tests/test_devenv_cache_ignored.py \
     tests/test_suite_runner.py \
+    tests/test_suite_tiers.py \
+    tests/test_suite_timing.py \
     tests/test_verify_slot.py \
     tests/test_verification_command.py \
     tests/test_console_event_log.py \

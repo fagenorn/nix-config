@@ -524,3 +524,43 @@ class ShapeTest(Case):
                 self.assertEqual(node.module, "agent_tools.canonical")
             if isinstance(node, ast.Import):
                 self.assertFalse([a.name for a in node.names if a.name.startswith("agent_tools")])
+
+
+class IdentityChoiceTest(unittest.TestCase):
+    ME = ("A" * 40, "Apple Development: Me (TEAM)")
+    SOMEONE = ("B" * 40, "Developer ID Application: Other (Z)")
+    PREFIXED = {"source": "Notifier.app", "identity_prefix": "Apple Development: Me",
+                "adhoc_fallback": False}
+
+    @staticmethod
+    def listing(*pairs):
+        return ("".join(f'  {i}) {d} "{n}"\n' for i, (d, n) in enumerate(pairs, 1))
+                + f"     {len(pairs)} valid identities found\n")
+
+    def test_the_prefix_picks_the_first_matching_identity(self):
+        self.assertEqual(adapter.identity_choice(self.listing(self.SOMEONE, self.ME),
+                                                 self.PREFIXED, {}), ("A" * 40, None))
+
+    def test_a_wrong_signer_is_a_problem_however_many_are_listed(self):
+        listing = self.listing(*([self.SOMEONE] * 10))
+        self.assertTrue(listing.endswith("10 valid identities found\n"))
+        self.assertEqual(adapter.identity_choice(listing, self.PREFIXED, {}),
+                         (None, "no_signing_identity: none starts with Apple Development: Me"))
+
+    def test_an_allowed_fallback_signs_ad_hoc_with_no_identity(self):
+        self.assertEqual(adapter.identity_choice(self.listing(),
+                                                 {**self.PREFIXED, "adhoc_fallback": True}, {}),
+                         ("-", None))
+
+    def test_the_named_variable_wins_and_must_be_listed(self):
+        config = {**self.PREFIXED, "identity_env": "SIGNER"}
+        both = self.listing(self.ME, self.SOMEONE)
+        self.assertEqual(adapter.identity_choice(both, config, {"SIGNER": self.SOMEONE[1]}),
+                         ("B" * 40, None))
+        self.assertEqual(adapter.identity_choice(both, config, {"SIGNER": "b" * 40}),
+                         ("B" * 40, None))
+        self.assertEqual(adapter.identity_choice(self.listing(self.ME), config,
+                                                 {"SIGNER": "nobody"}),
+                         (None, "no_signing_identity: SIGNER names no listed identity"))
+        self.assertEqual(adapter.identity_choice(self.listing(self.ME), config, {"SIGNER": ""}),
+                         ("A" * 40, None))

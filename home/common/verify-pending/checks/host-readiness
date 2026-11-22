@@ -1,0 +1,14 @@
+#!/bin/sh
+# Verify check for issue 1382: runs the installed host-readiness command for the project its argument
+# names. It passes a 600 s budget so the run ends, and removes its clone, inside verify-pending's
+# 660 s run limit. It maps a spent budget (exit 3) to 75, "not yet", so a slow pass is retried, and
+# keeps 0 (met), 1 (not met) and 2 (refusal).
+# verify-pending runs it from the repository root.
+PATH="$HOME/.agents/bin:$PATH"
+export PATH
+host-readiness --budget-seconds 600 "$@"
+code=$?
+if [ "$code" -eq 3 ]; then
+  exit 75
+fi
+exit "$code"

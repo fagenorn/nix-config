@@ -75,6 +75,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from collections.abc import Mapping
 from typing import Any
 
 INSPECT_BUDGET_SECONDS = 30
@@ -470,25 +471,37 @@ def _source(root: str, source: str) -> str:
     return bundle
 
 
-def _identity(config: dict[str, Any], deadline: float) -> str:
-    """The `codesign --sign` argument: a listed hash, or `-` when ad-hoc signing is allowed."""
-    listing = _read(["security", "find-identity", "-v", "-p", "codesigning"], "identity", deadline)
+def identity_choice(listing: str, config: Mapping[str, Any],
+                    environ: Mapping[str, str]) -> tuple[str | None, str | None]:
+    """The `codesign --sign` choice and its problem from the text of `security find-identity -v -p
+    codesigning`: the `identity_env` value (a listed name, or a digest in any case) when it is
+    set, else the first name with `identity_prefix`, else `-` when `adhoc_fallback`, else a
+    `no_signing_identity` problem. The count line is never read. `invoke` and `host-readiness`
+    both apply this one rule."""
     pairs = [match.groups() for match in map(IDENTITY_LINE.match, listing.splitlines()) if match]
     variable = config.get("identity_env")
-    value = os.environ.get(variable, "") if variable else ""
+    value = environ.get(variable, "") if variable else ""
     if value:
         for digest, name in pairs:
             if value == name or value.lower() == digest.lower():
-                return digest
-        raise _rejected("precondition_failed", "identity",
-                        f"no_signing_identity: {variable} names no listed identity")
+                return digest, None
+        return None, f"no_signing_identity: {variable} names no listed identity"
     for digest, name in pairs:
         if name.startswith(config["identity_prefix"]):
-            return digest
+            return digest, None
     if config["adhoc_fallback"]:
-        return "-"
-    raise _rejected("precondition_failed", "identity",
-                    f"no_signing_identity: none starts with {config['identity_prefix']}")
+        return "-", None
+    return None, f"no_signing_identity: none starts with {config['identity_prefix']}"
+
+
+def _identity(config: dict[str, Any], deadline: float) -> str:
+    """The `codesign --sign` argument: a listed hash, or `-` when ad-hoc signing is allowed."""
+    listing = _read(["security", "find-identity", "-v", "-p", "codesigning"], "identity", deadline)
+    choice, problem = identity_choice(listing, config, os.environ)
+    if problem is not None:
+        raise _rejected("precondition_failed", "identity", problem)
+    assert choice is not None
+    return choice
 
 
 def _install_state(parameters: dict[str, Any], path: str) -> bool:

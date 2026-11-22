@@ -1,476 +1,356 @@
-"""The citation form an enforcer uses to name a standard's rule (#1442).
-
-Measures the form itself: `citations` finds each citation with its line and
-whether its token is a well-formed rule id, a form glued to a word is no
-citation, `prefix_of` reads the id's capital letters, and the standards README
-states the form and gives the project shards the project prefix.
-
-The lint itself (`agent_tools.delivery.standards_lint`) is measured through its
-command line: it reads only the registered enforcers (the suite recipe's members
-and the `lint` command's sources), fails on a citation of an id in no applicable
-layer, a malformed citation or a missing enforcer, resolves a project id only
-against the project's shards and any other id only against the platform
-directory, refuses bad arguments, has no command-table row and passes on this
-checkout. With `--index` it prints each rule with the enforcers citing it and the
-two counts, still fails on a problem, and writes nothing.
-"""
-
 import os
-import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.delivery.context_map_lint import CODE_RE, section, table_rows
-from agent_tools.delivery.rule_ids import (
-    CITATION, PROJECT_PREFIX, RULE_ID_HEADING, Citation, citations, prefix_of)
-from agent_tools.delivery.standards_lint import enforcers
-from agent_tools.delivery.suite_runner import suite_members
-from agent_tools.delivery.verification_command import members
+from agent_tools.delivery import hint_phases, procedure_check, standards_lint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-README = REPO_ROOT / "home/common/agent-skills/standards/README.md"
-BAR = REPO_ROOT / "home/common/agent-skills/standards/the-bar.md"
-
-
-MALFORMED_TOKENS = (
-    "b7", "B07", "B7a", "B", "7", "_B7", "B7_x", "-B7", ".B7", "B7-x", "B7.x", "/B7", "#B7", ".",
-    "`", "B7/x", "B7:x", "B7+x", "B7#x", "B7=x", "<id>", "B7`x", "..", "-", "_", "/", "B7/")
-
-
-def cite(token: str) -> str:
-    """One citation of `token`, assembled so this file holds no literal citation."""
-    return "standard" + ":" + token
-
-
-class CitationFormTest(unittest.TestCase):
-    def test_a_citation_is_found_with_its_line_and_token(self):
-        text = "one\n# " + cite("B7") + " and " + cite("PY3") + "\n"
-
-        found = citations(text)
-
-        self.assertEqual(found, [Citation(2, "B7", True), Citation(2, "PY3", True)])
-
-    def test_a_form_glued_to_a_word_is_no_citation(self):
-        for text in ("non" + cite("B7"), "x_" + cite("B7"), "x-" + cite("B7"), "x1" + cite("B7")):
-            with self.subTest(text=text):
-                self.assertEqual(citations(text), [])
-
-    def test_a_token_that_is_no_rule_id_is_malformed(self):
-        for token in MALFORMED_TOKENS:
-            with self.subTest(token=token):
-                self.assertEqual(citations(cite(token)), [Citation(1, token, False)])
-
-    def test_a_malformed_token_is_reported_whole_when_text_follows_it(self):
-        for token in MALFORMED_TOKENS:
-            if not token.strip(".`"):
-                continue
-            with self.subTest(token=token):
-                self.assertEqual(citations(cite(token) + " tail"), [Citation(1, token, False)])
-                self.assertEqual(citations("`" + cite(token) + "`"), [Citation(1, token, False)])
-
-    def test_a_form_followed_by_a_space_or_the_end_is_prose_not_a_citation(self):
-        for text in (cite(""), cite("") + " no worktree", cite("") + "\nB7"):
-            with self.subTest(text=text):
-                self.assertEqual(citations(text), [])
-
-    def test_trailing_punctuation_ends_the_token(self):
-        self.assertEqual(citations(cite("B7") + "."), [Citation(1, "B7", True)])
-        self.assertEqual(citations("(" + cite("NET10") + ")"), [Citation(1, "NET10", True)])
-        for tail in (",", ";", ":", "!", "?", ")", "`", "'", '"', "`.", ").", "...", "*"):
-            with self.subTest(tail=tail):
-                self.assertEqual(citations(cite("B7") + tail), [Citation(1, "B7", True)])
-
-    def test_prefix_of_reads_the_capital_letters(self):
-        self.assertEqual([prefix_of(i) for i in ("P4", "PY3", "NET10", "B1")], ["P", "PY", "NET", "B"])
-
-
-class ReadmeFormTest(unittest.TestCase):
-    def test_the_readme_states_the_citation_form(self):
-        block = section(README.read_text("utf-8"), "Rule ids")
-        bar_ids = set()
-        for line in BAR.read_text("utf-8").splitlines():
-            match = RULE_ID_HEADING.match(line)
-            if match and match["hashes"] == "###":
-                bar_ids.add(match["prefix"] + match["number"])
-
-        spans = [span for span in CODE_RE.findall(block)
-                 if CITATION.fullmatch(span) and citations(span)[0].well_formed]
-
-        self.assertTrue(spans)
-        for span in spans:
-            self.assertIn(citations(span)[0].token, bar_ids)
-
-    def test_the_readme_gives_project_shards_the_project_prefix(self):
-        rows = table_rows(section(README.read_text("utf-8"), "Rule ids"))
-
-        row = next(r for r in rows if "docs/standards/" in CODE_RE.findall(r[0]))
-
-        self.assertEqual(CODE_RE.findall(row[1])[0], PROJECT_PREFIX)
-
-
-LINT_SOURCE_TEXT = '"""Fixture lint (ADR-delivery-012)."""\n'
-
-
-class LintTestCase(unittest.TestCase):
-    def fixture(self, *, files: dict[str, str], members: list[str],
-                project_shards: dict[str, str] | None = None) -> tuple[Path, Path, Path]:
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        base = Path(scratch.name)
-        root, platform = base / "root", base / "platform"
-        project = root / "docs" / "standards"
-        (platform / "stacks").mkdir(parents=True)
-        project.mkdir(parents=True)
-        (platform / "the-bar.md").write_text(
-            "# The bar\n\n### B1. One\n\nBody.\n\n### B2. Two\n\nBody.\n", "utf-8")
-        (platform / "stacks" / "python.md").write_text("# Python\n\n### PY1. Py\n\nBody.\n", "utf-8")
-        for name, text in (project_shards or {}).items():
-            (project / name).write_text(text, "utf-8")
-        justfile = "agent-workflow-tests *args:\n  PYTHONPATH=x python3 -m agent_tools.delivery.suite_runner {{args}} \\\n"
-        justfile += " \\\n".join(f"    {m}" for m in members) + "\n"
-        (root / "justfile").write_text(justfile, "utf-8")
-        written = dict(files)
-        for member in members_of_lint(root):
-            written.setdefault(member, LINT_SOURCE_TEXT)
-        for relative, text in written.items():
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, "utf-8")
-        return root, platform, project
-
-    def run_lint(self, root, platform, project, *extra):
-        return subprocess.run(
-            [sys.executable, "-m", "agent_tools.delivery.standards_lint", "--root", str(root),
-             "--platform-standards", str(platform), "--project-standards", str(project), *extra],
-            capture_output=True, text=True, timeout=120,
-            env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")})
-
-
-def members_of_lint(root: Path) -> list[str]:
-    """The repository-relative lint sources, as `enforcers` derives them."""
-    return [
-        "python/" + m.argv[m.argv.index("-m") + 1].replace(".", "/") + ".py"
-        for m in members("lint", root)]
-
-
-class DiscoveryTest(LintTestCase):
-    def test_suite_members_are_the_recipe_lines_after_the_runner_line(self):
-        text = "x:\n  a\nagent-workflow-tests *args:\n  RUN \\\n    t/a.py \\\n    t/b.sh\nnext:\n  c\n"
-
-        self.assertEqual(suite_members(text), ["t/a.py", "t/b.sh"])
-
-    def test_a_justfile_without_the_suite_recipe_is_refused(self):
-        with self.assertRaises(ValueError):
-            suite_members("lint:\n  x\n")
-
-    def test_enforcers_are_the_suite_members_and_the_lint_sources(self):
-        root, _, _ = self.fixture(
-            files={"tests/test_a.py": "x = 1\n", "tests/test_b.py": "x = 1\n"},
-            members=["tests/test_b.py", "tests/test_a.py"])
-
-        self.assertEqual(enforcers(root), sorted([
-            "tests/test_a.py", "tests/test_b.py",
-            "python/agent_tools/delivery/agnostic_lint.py",
-            "python/agent_tools/delivery/context_map_lint.py",
-            "python/agent_tools/instruction_load.py"]))
-
-    def test_an_unregistered_file_is_never_read(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": "x = 1\n", "tests/test_c.py": cite("Z9") + "\n"},
-            members=["tests/test_a.py"])
-
-        result = self.run_lint(root, platform, project)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-
-class CheckTest(LintTestCase):
-    def test_a_citation_of_an_id_in_no_layer_fails_naming_file_and_id(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": "x = 1\n# " + cite("Z9") + "\n"}, members=["tests/test_a.py"])
-
-        failed = self.run_lint(root, platform, project)
-        (root / "tests/test_a.py").write_text("x = 1\n", "utf-8")
-        passed = self.run_lint(root, platform, project)
-
-        self.assertEqual(failed.returncode, 1)
-        self.assertIn("standards-lint: tests/test_a.py:2: cites Z9, which is in no applicable layer",
-                      failed.stderr.splitlines())
-        self.assertEqual(passed.returncode, 0, passed.stderr)
-        self.assertTrue(passed.stdout.splitlines()[-1].startswith("standards-lint: passed: "))
-
-    def test_a_citation_in_a_lint_source_is_checked(self):
-        root, platform, project = self.fixture(
-            files={"python/agent_tools/delivery/agnostic_lint.py": cite("Z8") + "\n"},
-            members=["tests/test_a.py"])
-
-        result = self.run_lint(root, platform, project)
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("python/agent_tools/delivery/agnostic_lint.py:1: cites Z8", result.stderr)
-
-    def test_a_malformed_citation_fails(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": cite("b7") + "\n"}, members=["tests/test_a.py"])
-
-        result = self.run_lint(root, platform, project)
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("standards-lint: tests/test_a.py:1: malformed citation " + cite("b7"),
-                      result.stderr.splitlines())
-
-    def test_a_missing_registered_enforcer_fails(self):
-        root, platform, project = self.fixture(files={}, members=["tests/test_gone.py"])
-
-        result = self.run_lint(root, platform, project)
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("standards-lint: tests/test_gone.py: registered enforcer is missing",
-                      result.stderr.splitlines())
-
-    def test_a_deleted_rule_fails_its_citation(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": cite("B2") + "\n"}, members=["tests/test_a.py"])
-
-        before = self.run_lint(root, platform, project)
-        (platform / "the-bar.md").write_text("# The bar\n\n### B1. One\n\nBody.\n", "utf-8")
-        after = self.run_lint(root, platform, project)
-
-        self.assertEqual(before.returncode, 0, before.stderr)
-        self.assertEqual(after.returncode, 1)
-        self.assertIn("cites B2", after.stderr)
-
-
-    def test_a_citation_led_or_continued_by_a_separator_is_malformed_in_an_enforcer(self):
-        for token in MALFORMED_TOKENS:
-            with self.subTest(token=token):
-                root, platform, project = self.fixture(
-                    files={"tests/test_a.py": "# " + cite(token) + "\n"}, members=["tests/test_a.py"])
-
-                result = self.run_lint(root, platform, project)
-
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("standards-lint: tests/test_a.py:1: malformed citation " + cite(token),
-                              result.stderr.splitlines())
-
-    def test_a_commented_out_or_fenced_rule_heading_is_no_rule(self):
-        hidden = {
-            "comment.md": "# C\n\n<!--\n### P1. Retired\n\nBody.\n-->\n",
-            "one_line.md": "# O\n\n<!-- ### P2. Retired -->\n",
-            "fence.md": "# F\n\n```md\n### P3. Example\n```\n",
-            "tilde.md": "# T\n\n~~~md\n### P4. Example\n~~~\n"}
-        for token in ("P1", "P2", "P3", "P4"):
-            with self.subTest(token=token):
-                root, platform, project = self.fixture(
-                    files={"tests/test_a.py": cite(token) + "\n"}, members=["tests/test_a.py"],
-                    project_shards=hidden)
-
-                result = self.run_lint(root, platform, project)
-
-                self.assertEqual(result.returncode, 1)
-                self.assertIn(f"cites {token}, which is in no applicable layer", result.stderr)
-
-    def test_a_commented_out_bar_heading_is_no_rule(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": cite("B3") + "\n"}, members=["tests/test_a.py"])
-        bar = platform / "the-bar.md"
-        bar.write_text(bar.read_text("utf-8") + "\n<!--\n### B3. Retired\n\nBody.\n-->\n", "utf-8")
-
-        result = self.run_lint(root, platform, project)
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("cites B3", result.stderr)
-
-
-class LayerTest(LintTestCase):
-    def test_a_project_id_resolves_only_against_its_own_shards(self):
-        files = {"tests/test_a.py": cite("P1") + "\n"}
-        root_a, platform_a, project_a = self.fixture(
-            files=files, members=["tests/test_a.py"],
-            project_shards={"a.md": "# A\n\n### P1. A rule\n\nBody.\n"})
-        root_b, platform_b, project_b = self.fixture(
-            files=files, members=["tests/test_a.py"],
-            project_shards={"b.md": "# B\n\n### P2. B rule\n\nBody.\n"})
-
-        a = self.run_lint(root_a, platform_a, project_a)
-        b = self.run_lint(root_b, platform_b, project_b)
-
-        self.assertEqual(a.returncode, 0, a.stderr)
-        self.assertEqual(b.returncode, 1)
-        self.assertIn("standards-lint: tests/test_a.py:1: cites P1, which is in no applicable layer",
-                      b.stderr.splitlines())
-
-    def test_a_bar_id_resolves_only_against_the_platform_directory(self):
-        shadow = {"x.md": "# X\n\n### B9. Shadow\n\nBody.\n"}
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": cite("B9") + "\n"}, members=["tests/test_a.py"],
-            project_shards=shadow)
-        known_root, known_platform, known_project = self.fixture(
-            files={"tests/test_a.py": cite("B1") + "\n"}, members=["tests/test_a.py"],
-            project_shards=shadow)
-
-        shadowed = self.run_lint(root, platform, project)
-        known = self.run_lint(known_root, known_platform, known_project)
-
-        self.assertEqual(shadowed.returncode, 1)
-        self.assertIn("cites B9", shadowed.stderr)
-        self.assertEqual(known.returncode, 0, known.stderr)
-
-    def test_a_stack_id_resolves_against_the_stack_shards(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": cite("PY1") + "\n"}, members=["tests/test_a.py"])
-        other_root, other_platform, other_project = self.fixture(
-            files={"tests/test_a.py": cite("PY2") + "\n"}, members=["tests/test_a.py"])
-
-        known = self.run_lint(root, platform, project)
-        unknown = self.run_lint(other_root, other_platform, other_project)
-
-        self.assertEqual(known.returncode, 0, known.stderr)
-        self.assertEqual(unknown.returncode, 1)
-        self.assertIn("cites PY2", unknown.stderr)
-
-
-class UsageTest(LintTestCase):
-    def test_project_standards_of_another_project_are_a_usage_error(self):
-        files = {"tests/test_a.py": cite("P1") + "\n"}
-        root_a, platform_a, project_a = self.fixture(
-            files=files, members=["tests/test_a.py"],
-            project_shards={"a.md": "# A\n\n### P1. A rule\n\nBody.\n"})
-        root_b, platform_b, project_b = self.fixture(files=files, members=["tests/test_a.py"])
-
-        result = self.run_lint(root_b, platform_b, project_a)
-
-        self.assertEqual(self.run_lint(root_a, platform_a, project_a).returncode, 0)
+TIER = "fast"
+
+PLATFORM_FILES = {
+    "README.md": (
+        "# Standards\n\n## Rule ids\n\n| Layer file | Prefix |\n|---|---|\n"
+        "| `the-bar.md` | `B` |\n| `stacks/python.md` | `PY` |\n"
+        "| the repo's `docs/standards/` shards | `P` |\n"),
+    "the-bar.md": "# The bar\n\n### B1. Fail loud\n\nbody\n",
+    "stacks/python.md": "# Python\n\n### PY1. Use pathlib\n\nbody\n",
+    "acceptance-planning.md": (
+        "# Planning\n\n## Rules\n\n- **R1. First rule.** body\n- **R2. Second rule.** body\n"),
+}
+REPO_FILES = {
+    "docs/standards/README.md": (
+        "# Project standards\n\n| Shard | governs | Gist |\n|---|---|---|\n"
+        "| [helpers.md](helpers.md) | `python/**`, `scripts/*.py` | Helpers. |\n"),
+    "docs/standards/helpers.md": "# Helpers\n\n### P1. Helpers live in the package\n\nbody\n",
+}
+HELPERS_ROW = "| [helpers.md](helpers.md) | `python/**`, `scripts/*.py` | Helpers. |\n"
+DASH = "—"
+
+
+def run_lint(*args, env=None):
+    return subprocess.run(
+        [sys.executable, "-m", "agent_tools.delivery.standards_lint", *args],
+        text=True, capture_output=True, stdin=subprocess.DEVNULL, env=env)
+
+
+def write_files(base: Path, files: dict[str, str]) -> None:
+    for name, text in files.items():
+        path = base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def make_tree(tmp: Path) -> tuple[Path, Path]:
+    repo, platform = tmp / "repo", tmp / "platform"
+    write_files(platform, PLATFORM_FILES)
+    write_files(repo, REPO_FILES)
+    return repo, platform
+
+
+def lint_fixture(repo: Path, platform: Path):
+    return run_lint("--repo-root", str(repo), "--platform-standards", str(platform))
+
+
+class StructureTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.tmp = Path(temp.name)
+        self.repo, self.platform = make_tree(self.tmp)
+        self.index = self.repo / "docs/standards/README.md"
+        self.helpers = self.repo / "docs/standards/helpers.md"
+        self.bar = self.platform / "the-bar.md"
+        self.python = self.platform / "stacks/python.md"
+        self.planning = self.platform / "acceptance-planning.md"
+
+    def edit(self, path: Path, old: str, new: str) -> None:
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+    def pad_index(self, lines: int) -> None:
+        text = self.index.read_text(encoding="utf-8")
+        text += "\n" * (lines - len(text.splitlines()))
+        self.assertEqual(len(text.splitlines()), lines)
+        self.index.write_text(text, encoding="utf-8")
+
+    def assert_fails_with(self, line: str) -> None:
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout), (1, line + "\n"))
+
+    def assert_fails_with_all(self, *lines: str) -> None:
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout), (1, "".join(f"{line}\n" for line in lines)))
+
+    def assert_passes(self) -> None:
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_the_clean_fixture_passes(self):
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_a_41_line_index_fails(self):
+        self.pad_index(41)
+        self.assert_fails_with("docs/standards/README.md: index is 41 lines, over 40")
+
+    def test_a_40_line_index_passes(self):
+        self.pad_index(40)
+        self.assert_passes()
+
+    def test_an_unindexed_shard_fails(self):
+        write_files(self.repo, {"docs/standards/extra.md": "# Extra\n\n### P2. Extra rule\n\nbody\n"})
+        self.assert_fails_with("docs/standards/extra.md: has no row in docs/standards/README.md")
+
+    def test_a_row_naming_a_missing_shard_fails(self):
+        with self.index.open("a", encoding="utf-8") as handle:
+            handle.write("| [gone.md](gone.md) | `x/**` | Gone. |\n")
+        self.assert_fails_with("docs/standards/README.md: row names a missing shard gone.md")
+
+    def test_a_repeated_index_row_fails(self):
+        with self.index.open("a", encoding="utf-8") as handle:
+            handle.write(HELPERS_ROW)
+        self.assert_fails_with("docs/standards/README.md: row 2 repeats the shard helpers.md")
+
+    def test_a_numbered_rule_beside_a_valid_heading_fails(self):
+        self.helpers.write_text(
+            "# Helpers\n\n### P1. Helpers live in the package\n\nbody\n\n1. Another rule\n",
+            encoding="utf-8")
+        self.assert_fails_with("docs/standards/helpers.md: line 7: no well-formed id: 1. Another rule")
+
+    def test_an_index_table_that_is_not_rendered_indexes_nothing(self):
+        table = REPO_FILES["docs/standards/README.md"].split("\n\n", 1)[1]
+        for name, opener, closer in (("comment", "<!--", "-->"), ("fence", "```markdown", "```")):
+            with self.subTest(name=name):
+                self.index.write_text(f"# Project standards\n\n{opener}\n{table}{closer}\n", encoding="utf-8")
+                result = lint_fixture(self.repo, self.platform)
+                self.assertEqual((result.returncode, result.stdout), (1, (
+                    "docs/standards/README.md: index has no governs column\n"
+                    "docs/standards/helpers.md: has no row in docs/standards/README.md\n")))
+
+    def test_an_index_table_in_indented_code_indexes_nothing(self):
+        table = REPO_FILES["docs/standards/README.md"].split("\n\n", 1)[1]
+        indented = "".join(f"    {line}\n" for line in table.splitlines())
+        self.index.write_text(f"# Project standards\n\nExample:\n\n{indented}", encoding="utf-8")
+        self.assert_fails_with_all(
+            "docs/standards/README.md: index has no governs column",
+            "docs/standards/helpers.md: has no row in docs/standards/README.md")
+
+    def test_a_prefix_row_that_is_not_rendered_is_no_prefix_row(self):
+        write_files(self.platform, {"stacks/node.md": "# Node\n\n### NODE1. x\n\nbody\n"})
+        for name, opener, closer in (("comment", "<!--", "-->"), ("fence", "```", "```")):
+            with self.subTest(name=name):
+                write_files(self.platform, {"README.md": PLATFORM_FILES["README.md"]})
+                with (self.platform / "README.md").open("a", encoding="utf-8") as handle:
+                    handle.write(f"\n{opener}\n| `stacks/node.md` | `NODE` |\n{closer}\n")
+                self.assert_fails_with("stacks/node.md: has no prefix row in README.md")
+
+    def test_a_numbered_rule_with_either_delimiter_and_no_id_fails(self):
+        for line in ("1. Another rule", "1) Another rule"):
+            with self.subTest(line=line):
+                self.helpers.write_text(
+                    f"# Helpers\n\n### P1. Helpers live in the package\n\nbody\n\n{line}\n",
+                    encoding="utf-8")
+                self.assert_fails_with(f"docs/standards/helpers.md: line 7: no well-formed id: {line}")
+
+    def test_a_same_directory_link_names_its_shard(self):
+        self.edit(self.index, "(helpers.md)", "(./helpers.md)")
+        self.assert_passes()
+
+    def test_a_row_linking_the_index_itself_names_a_missing_shard(self):
+        with self.index.open("a", encoding="utf-8") as handle:
+            handle.write("| [README.md](README.md) | `x/**` | Index. |\n")
+        self.assert_fails_with("docs/standards/README.md: row names a missing shard README.md")
+
+    def test_a_prefix_row_missing_its_second_cell_is_skipped(self):
+        write_files(self.platform, {"stacks/node.md": "# Node\n\n### NODE1. x\n\nbody\n"})
+        with (self.platform / "README.md").open("a", encoding="utf-8") as handle:
+            handle.write("| `stacks/node.md` |\n")
+        self.assert_fails_with("stacks/node.md: has no prefix row in README.md")
+
+    def test_a_glob_with_ordinary_filename_characters_passes(self):
+        self.edit(self.index, "`python/**`, `scripts/*.py`", "`packages/@scope/**`, `src/C++/**`")
+        self.assert_passes()
+
+    def test_a_brace_or_parenthesis_glob_passes(self):
+        self.edit(self.index, "`python/**`, `scripts/*.py`", "`src/**/*.{ts,tsx}`, `app/(group)/**`")
+        self.assert_passes()
+
+    def test_a_bare_star_governs_fails(self):
+        for value in ("*", "**", "**/*"):
+            with self.subTest(value=value):
+                index = REPO_FILES["docs/standards/README.md"].replace(
+                    "`python/**`, `scripts/*.py`", f"`{value}`")
+                self.index.write_text(index, encoding="utf-8")
+                self.assert_fails_with(
+                    f"docs/standards/README.md: helpers.md governs `{value}`, which matches every path")
+
+    def test_a_prose_governs_fails(self):
+        self.edit(self.index, "`python/**`, `scripts/*.py`", "all helper code")
+        self.assert_fails_with(
+            "docs/standards/README.md: helpers.md governs prose, not path globs: all helper code")
+
+    def test_a_code_span_with_a_space_is_no_glob(self):
+        self.edit(self.index, "`python/**`, `scripts/*.py`", "`every python file`")
+        self.assert_fails_with(
+            "docs/standards/README.md: helpers.md governs `every python file`, which is not a path glob")
+
+    def test_a_heading_with_two_ids_fails(self):
+        self.edit(self.helpers, "### P1. Helpers live in the package", "### P1. P2. Helpers")
+        self.assert_fails_with("docs/standards/helpers.md: line 3: more than one id: ### P1. P2. Helpers")
+
+    def test_a_rule_with_no_id_fails(self):
+        self.edit(self.helpers, "### P1. Helpers live in the package", "### Helpers live in the package")
+        self.assert_fails_with(
+            "docs/standards/helpers.md: line 3: no well-formed id: ### Helpers live in the package")
+
+    def test_a_heading_over_100_characters_fails(self):
+        heading = "### P1. " + "x" * 93
+        self.assertEqual(len(heading), 101)
+        self.edit(self.helpers, "### P1. Helpers live in the package", heading)
+        self.assert_fails_with(
+            "docs/standards/helpers.md: line 3: heading is 101 characters, over 100")
+
+    def test_a_100_character_heading_passes(self):
+        heading = "### P1. " + "x" * 92
+        self.assertEqual(len(heading), 100)
+        self.edit(self.helpers, "### P1. Helpers live in the package", heading)
+        self.assert_passes()
+
+    def sized(self, path: Path, filler: str, size: int) -> None:
+        self.edit(path, "body", filler)
+        self.assertEqual(len(path.read_bytes()), size)
+        if size == 8193:  # more bytes than characters, so a size read as len(text) passes
+            self.assertEqual(len(path.read_text(encoding="utf-8")), 2793)
+
+    def test_a_shard_over_8_kb_fails(self):
+        self.sized(self.helpers, DASH * 2700 + "x" * 44, 8193)
+        self.assert_fails_with("docs/standards/helpers.md: is 8193 bytes, over 8192")
+
+    def test_an_8192_byte_shard_passes(self):
+        self.sized(self.helpers, DASH * 2700 + "x" * 43, 8192)
+        self.assert_passes()
+
+    def test_a_stack_shard_over_8_kb_fails(self):
+        self.sized(self.python, DASH * 2700 + "x" * 60, 8193)
+        self.assert_fails_with("stacks/python.md: is 8193 bytes, over 8192")
+
+    def test_a_stack_shard_with_no_prefix_row_fails(self):
+        write_files(self.platform, {"stacks/node.md": "# Node\n\n### NODE1. x\n\nbody\n"})
+        self.assert_fails_with("stacks/node.md: has no prefix row in README.md")
+
+    def test_a_planning_rule_with_two_ids_fails(self):
+        self.edit(self.planning, "- **R1. First rule.** body", "- **R1. R2. First rule.** body")
+        self.assert_fails_with(
+            "acceptance-planning.md: line 5: more than one id: - **R1. R2. First rule.** body")
+
+    def test_a_planning_rule_with_no_id_fails(self):
+        for line in ("- **First rule.** body", "- **r1. First rule.** body"):
+            with self.subTest(line=line):
+                text = PLATFORM_FILES["acceptance-planning.md"].replace("- **R1. First rule.** body", line)
+                self.planning.write_text(text, encoding="utf-8")
+                self.assert_fails_with(f"acceptance-planning.md: line 5: no well-formed id: {line}")
+
+    def test_a_planning_rule_title_over_the_cap_fails(self):
+        line = "- **R1. " + "x" * 90 + ".**"
+        self.assertEqual(len(line), 101)
+        self.edit(self.planning, "- **R1. First rule.** body", line)
+        self.assert_fails_with("acceptance-planning.md: line 5: rule title is 101 characters, over 100")
+
+    def test_the_platform_root_names_the_default_standards(self):
+        standards = self.tmp / "root/standards"
+        write_files(standards, PLATFORM_FILES)
+        (standards / "the-bar.md").write_text("# The bar\n\n### B1. B2. Fail loud\n\nbody\n", encoding="utf-8")
+        env = {**os.environ, "AGENT_PLATFORM_ROOT": str(self.tmp / "root")}
+        result = run_lint("--repo-root", str(self.repo), env=env)
+        self.assertEqual(
+            (result.returncode, result.stdout),
+            (1, "the-bar.md: line 3: more than one id: ### B1. B2. Fail loud\n"))
+        (standards / "the-bar.md").write_text(PLATFORM_FILES["the-bar.md"], encoding="utf-8")
+        result = run_lint("--repo-root", str(self.repo), env=env)
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_a_relative_root_is_misuse(self):
+        result = run_lint("--repo-root", "repo", "--platform-standards", str(self.platform))
         self.assertEqual(result.returncode, 2)
-        self.assertIn("--project-standards", result.stderr)
         self.assertEqual(result.stdout, "")
-
-    def test_a_relative_path_is_a_usage_error(self):
-        root, platform, project = self.fixture(files={}, members=["tests/test_a.py"])
-
-        result = self.run_lint(".", platform, project)
-
-        self.assertEqual(result.returncode, 2)
-
-    def test_a_platform_directory_without_the_bar_is_a_usage_error(self):
-        root, platform, project = self.fixture(files={}, members=["tests/test_a.py"])
-        (platform / "the-bar.md").unlink()
-
-        result = self.run_lint(root, platform, project)
-
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("the-bar.md", result.stderr)
-
-    def test_a_justfile_without_the_suite_recipe_is_a_usage_error(self):
-        root, platform, project = self.fixture(files={}, members=["tests/test_a.py"])
-        (root / "justfile").write_text("lint:\n  x\n", "utf-8")
-
-        result = self.run_lint(root, platform, project)
-
-        self.assertEqual(result.returncode, 2)
+        self.assertTrue(result.stderr.startswith("standards-lint: "))
 
 
-class IndexTest(LintTestCase):
-    def index_fixture(self, other: str, *, project_shards=None):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": "# " + cite("B1") + "\n# " + cite("B1") + "\n",
-                   "tests/test_b.py": other},
-            members=["tests/test_a.py", "tests/test_b.py"], project_shards=project_shards)
-        (platform / "stacks" / "python.md").unlink()
-        return root, platform, project
+class HintTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.repo, self.platform = make_tree(Path(temp.name))
+        self.hints = self.repo / ".agents/knowledge/hints"
 
-    def test_the_index_lists_the_citing_enforcer_and_both_counts(self):
-        root, platform, project = self.index_fixture("x = 1\n")
+    def assert_fails_with(self, line: str) -> None:
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout), (1, line + "\n"))
 
-        result = self.run_lint(root, platform, project, "--index")
+    def assert_passes(self) -> None:
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), [
-            "B1. One", "  tests/test_a.py", "B2. Two", "judged rules: 1",
-            "enforcers citing nothing: 1"])
+    def test_a_hint_named_for_no_reading_phase_fails(self):
+        for name in ("deploy.md", "verifying.md"):
+            with self.subTest(name=name):
+                temp = tempfile.TemporaryDirectory()
+                self.addCleanup(temp.cleanup)
+                self.repo, self.platform = make_tree(Path(temp.name))
+                write_files(self.repo, {f".agents/knowledge/hints/{name}": "Deploy carefully.\n"})
+                self.assert_fails_with(
+                    f".agents/knowledge/hints/{name}: named for no delivery phase that reads hints")
 
-    def test_a_decision_record_citation_counts_as_citing(self):
-        root, platform, project = self.index_fixture("# ADR-delivery-012\n")
+    def test_a_directory_under_hints_fails(self):
+        (self.hints / "planning").mkdir(parents=True)
+        self.assert_fails_with(
+            ".agents/knowledge/hints/planning: named for no delivery phase that reads hints")
 
-        result = self.run_lint(root, platform, project, "--index")
+    def test_a_hint_over_the_line_budget_fails(self):
+        write_files(self.repo, {".agents/knowledge/hints/planning.md": "step\n" * 61})
+        self.assert_fails_with(".agents/knowledge/hints/planning.md: is 61 lines, over 60")
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines()[-1], "enforcers citing nothing: 0")
+    def test_a_60_line_hint_passes(self):
+        write_files(self.repo, {".agents/knowledge/hints/planning.md": "step\n" * 60})
+        self.assert_passes()
 
-    def test_rules_are_listed_bar_then_stacks_then_project(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": "x = 1\n"}, members=["tests/test_a.py"],
-            project_shards={"b.md": "# B\n\n### P2. Two\n\nBody.\n",
-                            "a.md": "# A\n\n### P1. One\n\nBody.\n"})
+    def test_a_hint_for_each_reading_phase_passes(self):
+        write_files(self.repo, {
+            f".agents/knowledge/hints/{name}": "x\n"
+            for name in ("planning.md", "plan-review.md", "building.md", "final-review.md")})
+        self.assert_passes()
 
-        result = self.run_lint(root, platform, project, "--index")
+    def test_the_hint_names_come_from_the_one_home(self):
+        write_files(self.repo, {".agents/knowledge/hints/x.md": "x\n"})
+        self.assertEqual(
+            standards_lint.hint_problems(self.repo),
+            [".agents/knowledge/hints/x.md: named for no delivery phase that reads hints"])
+        with mock.patch.object(hint_phases, "HINT_FILES", ("x.md",)):
+            self.assertEqual(standards_lint.hint_problems(self.repo), [])
 
-        lines = result.stdout.splitlines()
-        rule_lines = [line for line in lines if not line.startswith("  ")][:-2]
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(rule_lines, ["B1. One", "B2. Two", "PY1. Py", "P1. One", "P2. Two"])
-        self.assertIn("judged rules: 5", lines)
-
-    def test_a_bar_id_shadowed_by_a_project_rule_is_not_credited_in_the_index(self):
-        root, platform, project = self.fixture(
-            files={"tests/test_a.py": cite("B9") + "\n"}, members=["tests/test_a.py"],
-            project_shards={"x.md": "# X\n\n### B9. Shadow\n\nBody.\n"})
-        (platform / "stacks" / "python.md").unlink()
-
-        result = self.run_lint(root, platform, project, "--index")
-
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("cites B9", result.stderr)
-        self.assertEqual(result.stdout.splitlines(), [
-            "B1. One", "B2. Two", "B9. Shadow", "judged rules: 3", "enforcers citing nothing: 0"])
-
-    def test_the_index_still_fails_on_an_unknown_citation(self):
-        root, platform, project = self.index_fixture("# " + cite("Z9") + "\n")
-
-        result = self.run_lint(root, platform, project, "--index")
-
-        lines = result.stdout.splitlines()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("cites Z9", result.stderr)
-        self.assertTrue(lines[-2].startswith("judged rules: "))
-        self.assertTrue(lines[-1].startswith("enforcers citing nothing: "))
-        self.assertFalse(any(line.startswith("standards-lint: passed:") for line in lines))
+    def test_the_hint_stages_are_briefed_procedure_stages(self):
+        self.assertLessEqual(set(hint_phases.HINT_STAGES), set(procedure_check.STAGES))
+        self.assertEqual(
+            hint_phases.HINT_FILES, ("planning.md", "plan-review.md", "building.md", "final-review.md"))
 
 
-class PackagingTest(unittest.TestCase):
-    def test_the_lint_has_no_command_table_row(self):
-        table = (REPO_ROOT / "lib/agent-tools.nix").read_text("utf-8")
+class LiveTreeTest(unittest.TestCase):
+    def test_the_lint_passes_on_this_repository(self):
+        result = run_lint(
+            "--repo-root", str(REPO_ROOT),
+            "--platform-standards", str(REPO_ROOT / "home/common/agent-skills/standards"))
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
 
-        self.assertIsNone(re.search(r'^\s*"standards-lint"\s*=', table, re.M))
-        self.assertNotIn("delivery.standards_lint", table)
-
-
-class CheckoutTest(LintTestCase):
-    def test_the_lint_passes_on_this_checkout(self):
-        result = self.run_lint(
-            REPO_ROOT, REPO_ROOT / "home/common/agent-skills/standards", REPO_ROOT / "docs/standards")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(result.stdout.splitlines()[-1].startswith("standards-lint: passed: "))
-
-    def test_the_index_is_printed_on_this_checkout_and_writes_nothing(self):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        status = ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--untracked-files=all"]
-        before = subprocess.run(status, capture_output=True, text=True, env=env, timeout=120).stdout
-
-        result = self.run_lint(
-            REPO_ROOT, REPO_ROOT / "home/common/agent-skills/standards",
-            REPO_ROOT / "docs/standards", "--index")
-
-        after = subprocess.run(status, capture_output=True, text=True, env=env, timeout=120).stdout
-        lines = result.stdout.splitlines()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(lines[-2], r"judged rules: [0-9]+")
-        self.assertRegex(lines[-1], r"enforcers citing nothing: [0-9]+")
-        self.assertEqual(before, after)
+    def test_the_standards_readme_sends_hints_to_the_knowledge_directory(self):
+        text = (REPO_ROOT / "home/common/agent-skills/standards/README.md").read_text(encoding="utf-8")
+        self.assertIn(".agents/knowledge/hints/", text)
+        self.assertNotIn(".claude/hints/", text)
+        self.assertNotIn("REVIEW-CONTRACT.md", text)
 
 
 if __name__ == "__main__":

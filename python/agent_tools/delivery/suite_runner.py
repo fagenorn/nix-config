@@ -82,6 +82,17 @@ host's CPUs. Near it, every slot was computing and the CPUs were saturated; well
 the members were waiting on something else. A module whose CPU grows from a `--jobs 1` run to
 a parallel one ran on slower, shared CPUs.
 
+Timing report (issue 1385, ADR-delivery-015). When `SUITE_RUNNER_REPORT` names a path,
+relative to the working directory, every completed run also writes the report there as JSON
+after the timing table, whether it passed or failed. The keys are `version` (1), `members`,
+`passed`, `failed`, `jobs`, `wall_seconds`, `member_seconds`, `cpu_seconds` and `timings`, one
+`{member, seconds, cpu_seconds, passed}` per member, slowest first by unrounded `seconds`,
+which a tie leaves in list order. The `wall_seconds` and `cpu_seconds` figures are the
+summary's, rounded to 0.1 s; `member_seconds` and each member's `seconds` keep full precision,
+so a comparison of two reports sees growth the table's rounding hides. The file is written whole through a temporary
+file in its directory, and the parent directories are created. Members do not inherit the
+variable. An unwritable path raises, and an empty or unset value writes nothing.
+
 Exits. 0 means every member passed and 1 that one failed. 2 is a usage error, raised before
 anything starts: a bad `--jobs`, no members, a duplicate, a member that is missing, is not a
 file or lies outside the working directory, or a suffix other than `.py` or `.sh`. 130 is an
@@ -112,6 +123,9 @@ JOBS_ENV = "SUITE_RUNNER_JOBS"
 MAX_DEFAULT_JOBS = 8
 # CPUs left to the host and to other agents' work when the default is derived.
 RESERVED_CPUS = 2
+# The path of the JSON timing report, relative to the working directory (issue 1385).
+REPORT_ENV = "SUITE_RUNNER_REPORT"
+REPORT_VERSION = 1
 TIMINGS_FILE = Path(__file__).with_name("suite_timings.json")
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
@@ -236,11 +250,13 @@ def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
     with the copy writes its bytecode under `cache` and reads what an earlier
     one wrote there. An inherited `AGENT_PLATFORM_ROOT` is dropped: the suite
     runs from source, so a member never inherits a platform package's root
-    (ADR-system-005). `parent` is not modified, and every other variable is
+    (ADR-system-005). An inherited `REPORT_ENV` is dropped too, so a runner nested in a
+    member never writes to the outer run's report path (issue 1385). `parent` is not modified, and every other variable is
     copied unchanged.
     """
     environment = dict(parent)
     environment.pop("AGENT_PLATFORM_ROOT", None)
+    environment.pop(REPORT_ENV, None)
     inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
     environment["GIT_CONFIG_PARAMETERS"] = (
         f"{inherited} {SUITE_GIT_CONFIG}" if inherited else SUITE_GIT_CONFIG)
@@ -548,6 +564,44 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
     return results
 
 
+def timing_report(results: Sequence[MemberResult], *, jobs: int,
+                  wall_seconds: float) -> dict:
+    """The JSON-ready report of a completed run: the summary's figures of `report_lines`, but
+    member times unrounded and rows slowest first by those times."""
+    ordered = sorted(results, key=lambda result: result.index)
+    failed = sum(1 for result in ordered if not result.passed)
+    rows = sorted(ordered, key=lambda r: (-r.seconds, r.index))
+    return {
+        "version": REPORT_VERSION,
+        "members": len(ordered),
+        "passed": len(ordered) - failed,
+        "failed": failed,
+        "jobs": jobs,
+        "wall_seconds": round(wall_seconds, 1),
+        "member_seconds": sum(result.seconds for result in ordered),
+        "cpu_seconds": round(sum(result.cpu_seconds for result in ordered), 1),
+        "timings": [{"member": result.member, "seconds": result.seconds,
+                     "cpu_seconds": round(result.cpu_seconds, 1), "passed": result.passed}
+                    for result in rows],
+    }
+
+
+def write_report(path: Path, report: dict) -> None:
+    """Write `report` to `path` whole: the parent directories are created and the JSON goes
+    to a temporary file beside `path`, which replaces it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(report, indent=2) + "\n")
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
 def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
               timings: Mapping[str, float] | None = None) -> int:
     """Run every member and write the report; 0 when all passed, else 1.
@@ -563,8 +617,13 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
     removal error propagating (issue 499). When `scratch_root(os.environ)` names a
     directory, every member's `TMPDIR` is a `suite-runner-tmp-*` directory created there
     for the run and removed the same way (issue 1283); otherwise `TMPDIR` is inherited.
+    When `REPORT_ENV` is non-empty, its value is resolved against the working directory
+    before the first member starts, and after the report lines `write_report` writes the
+    timing report there; an `OSError` propagates (issue 1385).
     """
     output = _Output(out)
+    report_value = os.environ.get(REPORT_ENV, "")
+    report_path = Path.cwd() / report_value if report_value else None
     root = scratch_root(os.environ)
     with tempfile.TemporaryDirectory(prefix="suite-runner-pycache-") as cache, \
             contextlib.ExitStack() as stack:
@@ -582,8 +641,11 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
         missing = [member for member, result in zip(members, results) if result is None]
         if missing:
             raise RuntimeError(f"members left without a result: {', '.join(missing)}")
-        report = report_lines(results, jobs=jobs, wall_seconds=time.monotonic() - started)
+        wall = time.monotonic() - started
+        report = report_lines(results, jobs=jobs, wall_seconds=wall)
         output.write(b"".join(_line(line) for line in report))
+        if report_path is not None:
+            write_report(report_path, timing_report(results, jobs=jobs, wall_seconds=wall))
         return 0 if all(result.passed for result in results) else 1
 
 

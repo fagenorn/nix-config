@@ -21,6 +21,8 @@ from agent_tools.delivery.engine_commands import (
 from agent_tools.delivery.procedure_check import load_commands
 from agent_tools.system.siblings import sibling_argv
 
+TIER = "fast"
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDIN = REPO_ROOT / "tests/fixtures/engine-deliver/standin.py"
 

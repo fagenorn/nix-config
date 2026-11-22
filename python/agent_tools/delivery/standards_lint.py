@@ -1,210 +1,294 @@
-"""Fail on an enforcer's citation of a rule id that no applicable layer defines (#1442).
+"""Lint the structure of the three standards layers: the index, the globs, the ids and the caps.
 
-Usage: `python -m agent_tools.delivery.standards_lint --root <repo> --platform-standards <dir>
---project-standards <dir> [--index]`
+Layer 0 (`the-bar.md`) and Layer 1 (`stacks/*.md`) live in the platform standards
+directory; Layer 2 is the repository's `docs/standards/` directory, a README index
+plus one shard per file. The lint checks shapes only: whether a rule restates a
+higher layer, or is process filed as a standard, stays with the reviewer.
 
-The suite runs this module (it has no command-table row, after
-`agent_tools.delivery.suite_runner`: its enforcer discovery reads this repository's suite
-recipe and `lint` members, so a platform launcher would mis-read every other project;
-ADR-delivery-012 D5). The three arguments are required and absolute directories.
+Usage: standards-lint --repo-root <absolute dir> [--platform-standards <absolute dir>]
+The platform directory defaults to the installed platform's standards directory
+(`AGENT_PLATFORM_ROOT/standards`, else `$HOME/.agents/standards`).
 
-An enforcer names the rule it holds by the citation `standard:<id>` (`agent_tools.delivery.rule_ids`
-owns the form). The enforcers are the files the lint reads, and only those: the members
-of the justfile's `agent-workflow-tests` recipe (`suite_runner.suite_members`) and the source
-file of each module the `lint` verification command runs (`verification_command.members`),
-as repository-relative paths under `python/`. A file outside that set is never read.
+Exits 0 with empty stdout and stderr when clean. Exits 1 with one problem per
+stdout line, in this order, each `<label>: <reason>`. A platform file's label is
+its path under the platform directory (`the-bar.md`, `stacks/python.md`,
+`acceptance-planning.md`); a repository file's label is its path under the
+repository root (`docs/standards/README.md`). Exits 2 with one stderr line
+`standards-lint: <reason>` and empty stdout for a relative path, a missing
+directory or a platform directory with no `the-bar.md`; an argparse usage error
+exits 2 too. The lint reads no project policy.
 
-A rule is a `###` rule-id heading outside a fence and an HTML comment or block
-(`agent_tools.delivery.markdown_scan`, the reading the heading test uses), so a rule commented
-out or shown as an example defines nothing. The platform layer is `the-bar.md` and each
-`stacks/*.md` of `--platform-standards`; the project layer is each `*.md` of
-`--project-standards` except `README.md`. A well-formed citation resolves against exactly one
-layer by its prefix: an id with the project prefix (`P`) against the project layer, any other
-id against the platform layer. A project id never resolves against the platform and a
-platform id never against the project.
+Checks, in output order:
+1. The platform. For `the-bar.md`, then each `stacks/*.md` by name: the size cap
+   and the heading cap; then the rule-id problems of the bar and of the stacks
+   together, where a stack file with no row in the README's `## Rule ids` table
+   reports `has no prefix row in README.md`; then `acceptance-planning.md`.
+2. The Layer 2 index, when `docs/standards` is a directory: a missing README
+   beside shards, an index over 40 lines, a header with no `governs` column, a
+   row naming no shard, a missing shard, or a shard an earlier row names, a
+   `governs` cell that is prose, holds no code-span glob, holds a span that is no
+   path glob, or one made only of `*` and `/`, and a shard with no row.
+3. The Layer 2 shards: the size cap, the heading cap, a numbered item written
+   without its `### P<n>.` heading (`line <n>: no well-formed id: <line>`), and
+   the rule-id problems of the shards together.
+4. The hint files, when `.agents/knowledge/hints` is a directory: each entry by
+   name that is not a regular file named in `hint_phases.HINT_FILES`, then a hint
+   file over the 60-line budget.
 
-Each problem is one line on stderr, `standards-lint: <problem>`, and the exit status is 1:
+Reason formats: `is <n> bytes, over 8192`; `line <n>: heading is <n> characters,
+over 100`; `index is <n> lines, over 40`; `row <k> names no shard`; `row names a
+missing shard <target>`; `row <k> repeats the shard <target>`; `<shard> governs
+prose, not path globs: <cell>`; `<shard> governs no path glob`; `<shard> governs
+`<glob>`, which is not a path glob` or `which matches every path`; `has no row in
+docs/standards/README.md`; `.agents/knowledge/hints/<name>: named for no delivery
+phase that reads hints` and `.agents/knowledge/hints/<name>: is <n> lines, over
+60`. A planning rule is a top-level `- ` item of the
+`## Rules` section of `acceptance-planning.md`, found by its place and never by
+the id it should carry: `line <n>: no well-formed id: <line>`, `more than one
+id`, `<id> should carry the prefix R`, `<id> repeats the id`, `rule title is <n>
+characters, over 100`, and `no planning rule` when the section holds none.
 
-- `<path>: registered enforcer is missing`
-- `<path>:<line>: malformed citation standard:<token>` (a token that is no rule id)
-- `<path>:<line>: cites <id>, which is in no applicable layer`
-
-With none, stdout is `standards-lint: passed: <n> enforcers, <k> citations` (`k` counts the
-citations found across the enforcers) and the exit status is 0.
-
-With `--index` the problems check still runs (problems on stderr, exit status 1 when there are any)
-and the rule index is printed on stdout either way, in place of the `passed:` line; it is never
-written to a file. The index is, for each rule in order (the bar, then the stacks by filename,
-then the project shards by filename, each in heading order):
-
-- `<id>. <title>`, then one line `  <path>` per enforcer citing that id with a well-formed
-  citation, sorted by path, each path once;
-- then `judged rules: <n>`, the rules no enforcer cites;
-- then `enforcers citing nothing: <m>`, the existing registered enforcers whose text holds
-  neither a citation (well-formed or not) nor a decision-record id (`ADR-<area>-NNN`); a missing
-  enforcer is a problem and is not counted.
-
-Exit status 2, with one `standards-lint: <reason>` line on stderr: an argument path that is not
-absolute or not an existing directory, a project-standards directory outside `--root` (the
-project's rules are its own), a platform directory without `the-bar.md`, a justfile
-without the suite recipe, a lint member run without `-m`; argparse misuse also exits 2.
+Caps: a shard is at most 8192 bytes, a heading line at most 100 characters, the
+Layer 2 index at most 40 lines, a hint file at most 60 lines.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
-from typing import NamedTuple, Sequence
 
-from agent_tools.delivery.context_map_lint import CITATION_RE
-from agent_tools.delivery.markdown_scan import scan
+from agent_tools.delivery import hint_phases
+from agent_tools.delivery.context_map_lint import CODE_RE, LINK_RE
 from agent_tools.delivery.rule_ids import (
-    CITATION, CITE, PROJECT_PREFIX, RULE_ID_HEADING, citations, prefix_of)
-from agent_tools.delivery.suite_runner import suite_members
-from agent_tools.delivery.verification_command import members
+    HEADING_LINE, REASON_NO_ID, REASON_TWO_IDS, SECOND_ID, layer_problems, numbered_items,
+    prefix_table, scan)
+from agent_tools.project_contract import agent_platform
 
-PREFIX = "standards-lint:"
-PACKAGE_SOURCE = "python"
-
-
-class Rule(NamedTuple):
-    id: str
-    title: str
-
-
-def _headings(path: Path) -> list[Rule]:
-    rules = []
-    for _, _, line in scan(path.read_text("utf-8")):
-        match = RULE_ID_HEADING.match(line)
-        if match and match["hashes"] == "###":
-            rules.append(Rule(match["prefix"] + match["number"], match["title"]))
-    return rules
+COMMAND = "standards-lint"
+INDEX_MAX_LINES = 40
+SHARD_MAX_BYTES = 8192
+HEADING_MAX_CHARS = 100
+HINT_MAX_LINES = 60
+LAYER2_DIR = "docs/standards"
+PLANNING_RULES = "acceptance-planning.md"
+NOT_GLOB_RE = re.compile(r"\s")
+PLANNING_RULE = re.compile(
+    r"^- \*\*(?P<prefix>[A-Z]+)(?P<number>[1-9][0-9]*)\. (?P<title>[^*]*?)\*\*")
+PLANNING_SECTION = "## Rules"
+INDEX_LABEL = f"{LAYER2_DIR}/README.md"
+TOP_HEADING = re.compile(r"^#{1,2} ")
 
 
-def platform_rules(directory: Path) -> list[Rule]:
-    """The rules of `the-bar.md`, then of each `stacks/*.md` by name, in file order."""
-    bar = directory / "the-bar.md"
-    if not bar.is_file():
-        raise ValueError(f"{directory} has no the-bar.md")
-    rules = _headings(bar)
-    for shard in sorted((directory / "stacks").glob("*.md")):
-        rules += _headings(shard)
-    return rules
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
-def project_rules(directory: Path) -> list[Rule]:
-    """The rules of each `*.md` of `directory` but `README.md`, by name, in file order."""
-    rules: list[Rule] = []
-    for shard in sorted(directory.glob("*.md")):
-        if shard.name != "README.md":
-            rules += _headings(shard)
-    return rules
+def size_problems(label: str, path: Path) -> list[str]:
+    size = len(path.read_bytes())
+    return [f"{label}: is {size} bytes, over {SHARD_MAX_BYTES}"] if size > SHARD_MAX_BYTES else []
 
 
-def enforcers(root: Path) -> list[str]:
-    """The registered enforcers: the suite's members and the `lint` command's module sources."""
-    paths = set(suite_members((root / "justfile").read_text("utf-8")))
-    for member in members("lint", root):
-        if "-m" not in member.argv:
-            raise ValueError(f"lint member {member.id} runs no module")
-        module = member.argv[member.argv.index("-m") + 1]
-        paths.add(PACKAGE_SOURCE + "/" + module.replace(".", "/") + ".py")
-    return sorted(paths)
+def heading_length_problems(label: str, text: str) -> list[str]:
+    return [f"{label}: line {number}: heading is {len(line)} characters, over {HEADING_MAX_CHARS}"
+            for number, line, content in scan(text)
+            if HEADING_LINE.match(content) and len(line) > HEADING_MAX_CHARS]
 
 
-def _citations_of(root: Path, path: str):
-    return citations((root / path).read_text("utf-8"))
-
-
-def problems(root: Path, paths: list[str], platform: list[Rule], project: list[Rule]) -> list[str]:
-    """One line per missing enforcer, malformed citation and citation of an id in no applicable layer."""
-    layers = {True: {rule.id for rule in project}, False: {rule.id for rule in platform}}
-    found: list[str] = []
-    for path in paths:
-        if not (root / path).is_file():
-            found.append(f"{path}: registered enforcer is missing")
+def planning_rule_problems(text: str) -> list[str]:
+    problems: list[str] = []
+    seen: set[str] = set()
+    candidates = 0
+    in_section = False
+    for number, line, _ in scan(text):
+        if in_section and TOP_HEADING.match(line):
+            in_section = False
+        if line == PLANNING_SECTION:
+            in_section = True
             continue
-        for citation in _citations_of(root, path):
-            if not citation.well_formed:
-                found.append(f"{path}:{citation.line}: malformed citation {CITE}{citation.token}")
-            elif citation.token not in layers[prefix_of(citation.token) == PROJECT_PREFIX]:
-                found.append(f"{path}:{citation.line}: cites {citation.token}, "
-                             "which is in no applicable layer")
-    return found
+        if not in_section or not line.startswith("- "):
+            continue
+        candidates += 1
+        found = PLANNING_RULE.match(line)
+        if not found:
+            problems.append(f"line {number}: {REASON_NO_ID}: {line}")
+            continue
+        name = f"{found['prefix']}{found['number']}"
+        if SECOND_ID.search(found["title"]):
+            problems.append(f"line {number}: {REASON_TWO_IDS}: {line}")
+        elif found["prefix"] != "R":
+            problems.append(f"line {number}: {name} should carry the prefix R")
+        elif name in seen:
+            problems.append(f"line {number}: {name} repeats the id")
+        elif len(found.group(0)) > HEADING_MAX_CHARS:
+            problems.append(
+                f"line {number}: rule title is {len(found.group(0))} characters, over {HEADING_MAX_CHARS}")
+        seen.add(name)
+    return problems or ([] if candidates else ["no planning rule"])
 
 
-def rule_index(root: Path, paths: list[str], platform: list[Rule], project: list[Rule]) -> list[str]:
-    """The index lines: each rule with the enforcers citing it, then the two counts.
+def platform_problems(platform: Path) -> list[str]:
+    readme = platform / "README.md"
+    table = prefix_table(read(readme)) if readme.is_file() else {}
+    problems: list[str] = []
+    bar = platform / "the-bar.md"
+    stacks = sorted((platform / "stacks").glob("*.md"))
+    files = ([bar] if bar.is_file() else []) + stacks
+    for path in files:
+        label = path.relative_to(platform).as_posix()
+        problems += size_problems(label, path) + heading_length_problems(label, read(path))
+    if bar.is_file():
+        problems += layer_problems([("the-bar.md", table.get("the-bar.md", ""), read(bar))])
+    rows: list[tuple[str, str, str]] = []
+    for path in stacks:
+        label = path.relative_to(platform).as_posix()
+        if label in table:
+            rows.append((label, table[label], read(path)))
+        else:
+            problems.append(f"{label}: has no prefix row in README.md")
+    problems += layer_problems(rows)
+    planning = platform / PLANNING_RULES
+    if planning.is_file():
+        problems += [f"{PLANNING_RULES}: {problem}" for problem in planning_rule_problems(read(planning))]
+    return problems
 
-    A citation credits a rule of the layer it resolves to, as `problems` resolves it.
+
+def governs_problems(shard: str, cell: str) -> list[str]:
+    prefix = f"{INDEX_LABEL}: {shard} governs"
+    spans = CODE_RE.findall(cell)
+    leftover = re.sub(r"[,\s]", "", CODE_RE.sub("", cell))
+    if leftover:
+        return [f"{prefix} prose, not path globs: {cell.strip()}"]
+    if not spans:
+        return [f"{prefix} no path glob"]
+    problems = []
+    for glob in spans:
+        if NOT_GLOB_RE.search(glob) or glob.startswith("/") or ".." in glob.split("/"):
+            problems.append(f"{prefix} `{glob}`, which is not a path glob")
+        elif set(glob) <= {"*", "/"}:
+            problems.append(f"{prefix} `{glob}`, which matches every path")
+    return problems
+
+
+def index_table(text: str) -> list[list[str]]:
+    """The rows of the first run of rendered `|` lines, separator rows dropped, the header first.
+
+    A line inside a fence or an HTML block (a comment included) is not rendered and breaks the run.
     """
-    citing: dict[tuple[bool, str], set[str]] = {}
-    nothing = 0
-    for path in paths:
-        if not (root / path).is_file():
+    rows: list[list[str]] = []
+    previous = None
+    for number, line, _ in scan(text):
+        line = line.strip()
+        if not line.startswith("|") or (previous is not None and number != previous + 1):
+            if rows:
+                break
             continue
-        text = (root / path).read_text("utf-8")
-        for citation in citations(text):
-            if citation.well_formed:
-                layer = prefix_of(citation.token) == PROJECT_PREFIX
-                citing.setdefault((layer, citation.token), set()).add(path)
-        if not CITATION.search(text) and not CITATION_RE.search(text):
-            nothing += 1
-    lines: list[str] = []
-    judged = 0
-    for layer, rules in ((False, platform), (True, project)):
-        for rule in rules:
-            lines.append(f"{rule.id}. {rule.title}")
-            cited = sorted(citing.get((layer, rule.id), ()))
-            lines += [f"  {path}" for path in cited]
-            judged += not cited
-    return lines + [f"judged rules: {judged}", f"enforcers citing nothing: {nothing}"]
+        previous = number
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if not all(set(cell) <= set("-: ") for cell in cells):
+            rows.append(cells)
+    return rows
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="standards-lint")
-    parser.add_argument("--root", required=True)
-    parser.add_argument("--platform-standards", required=True)
-    parser.add_argument("--project-standards", required=True)
-    parser.add_argument("--index", action="store_true")
-    return parser
+def index_problems(repo: Path) -> list[str]:
+    directory = repo / LAYER2_DIR
+    if not directory.is_dir():
+        return []
+    shards = sorted(path.name for path in directory.glob("*.md") if path.is_file() and path.name != "README.md")
+    readme = directory / "README.md"
+    if not readme.is_file():
+        return [f"{INDEX_LABEL}: missing, but the directory holds shards"] if shards else []
+    text = read(readme)
+    problems: list[str] = []
+    count = len(text.splitlines())
+    if count > INDEX_MAX_LINES:
+        problems.append(f"{INDEX_LABEL}: index is {count} lines, over {INDEX_MAX_LINES}")
+    table = index_table(text)
+    header, body = (table[0], table[1:]) if table else ([], [])
+    governs = header.index("governs") if "governs" in header else None
+    if governs is None:
+        problems.append(f"{INDEX_LABEL}: index has no governs column")
+    named: set[str] = set()
+    for k, cells in enumerate(body, 1):
+        link = LINK_RE.search(cells[0])
+        if not link:
+            problems.append(f"{INDEX_LABEL}: row {k} names no shard")
+            continue
+        target = link.group(1)
+        while target.startswith("./"):
+            target = target[2:]
+        if target not in shards:
+            problems.append(f"{INDEX_LABEL}: row names a missing shard {target}")
+        if target in named:
+            problems.append(f"{INDEX_LABEL}: row {k} repeats the shard {target}")
+        named.add(target)
+        if governs is not None:
+            problems += governs_problems(target, cells[governs] if governs < len(cells) else "")
+    problems += [f"{LAYER2_DIR}/{name}: has no row in {INDEX_LABEL}" for name in shards if name not in named]
+    return problems
 
 
-def _directory(flag: str, value: str) -> Path:
-    path = Path(value)
-    if not path.is_absolute():
-        raise ValueError(f"{flag} must be absolute: {value}")
-    if not path.is_dir():
-        raise ValueError(f"{flag} is not a directory: {value}")
-    return path
+def shard_problems(repo: Path, table: dict[str, str]) -> list[str]:
+    directory = repo / LAYER2_DIR
+    if not directory.is_dir():
+        return []
+    problems: list[str] = []
+    files: list[tuple[str, str, str]] = []
+    paths = sorted(path for path in directory.glob("*.md") if path.is_file() and path.name != "README.md")
+    for path in paths:
+        label = f"{LAYER2_DIR}/{path.name}"
+        text = read(path)
+        problems += size_problems(label, path) + heading_length_problems(label, text)
+        lines = text.splitlines()
+        problems += [f"{label}: line {n}: {REASON_NO_ID}: {lines[n - 1]}" for n in numbered_items(text)]
+        files.append((label, table.get(f"{LAYER2_DIR}/", "P"), text))
+    return problems + layer_problems(files)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    try:
-        root = _directory("--root", args.root)
-        platform_directory = _directory("--platform-standards", args.platform_standards)
-        project_directory = _directory("--project-standards", args.project_standards)
-        if not project_directory.resolve().is_relative_to(root.resolve()):
-            raise ValueError(f"--project-standards is not under --root: {args.project_standards}")
-        paths = enforcers(root)
-        platform = platform_rules(platform_directory)
-    except (ValueError, OSError) as error:
-        print(f"{PREFIX} {error}", file=sys.stderr)
+def hint_problems(repo: Path) -> list[str]:
+    directory = repo / hint_phases.HINT_DIR
+    if not directory.is_dir():
+        return []
+    problems: list[str] = []
+    for path in sorted(directory.iterdir(), key=lambda entry: entry.name):
+        label = f"{hint_phases.HINT_DIR}/{path.name}"
+        if not path.is_file() or path.name not in hint_phases.HINT_FILES:
+            problems.append(f"{label}: named for no delivery phase that reads hints")
+            continue
+        count = len(read(path).splitlines())
+        if count > HINT_MAX_LINES:
+            problems.append(f"{label}: is {count} lines, over {HINT_MAX_LINES}")
+    return problems
+
+
+def lint(repo: Path, platform: Path) -> list[str]:
+    readme = platform / "README.md"
+    table = prefix_table(read(readme)) if readme.is_file() else {}
+    return platform_problems(platform) + index_problems(repo) + shard_problems(repo, table) + hint_problems(repo)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog=COMMAND)
+    parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--platform-standards")
+    args = parser.parse_args(argv)
+    repo = Path(args.repo_root)
+    platform = Path(args.platform_standards) if args.platform_standards else agent_platform.standards_dir()
+    for name, path in (("--repo-root", repo), ("--platform-standards", platform)):
+        if not path.is_absolute():
+            print(f"{COMMAND}: {name} must be absolute: {path}", file=sys.stderr)
+            return 2
+        if not path.is_dir():
+            print(f"{COMMAND}: not a directory: {path}", file=sys.stderr)
+            return 2
+    if not (platform / "the-bar.md").is_file():
+        print(f"{COMMAND}: no the-bar.md in {platform}", file=sys.stderr)
         return 2
-    project = project_rules(project_directory)
-    found = problems(root, paths, platform, project)
-    for problem in found:
-        print(f"{PREFIX} {problem}", file=sys.stderr)
-    if args.index:
-        print("\n".join(rule_index(root, paths, platform, project)))
-        return 1 if found else 0
-    if found:
-        return 1
-    total = sum(len(_citations_of(root, path)) for path in paths)
-    print(f"{PREFIX} passed: {len(paths)} enforcers, {total} citations")
-    return 0
+    problems = lint(repo, platform)
+    for problem in problems:
+        print(problem)
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":
