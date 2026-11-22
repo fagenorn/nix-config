@@ -6,10 +6,10 @@ letters then a number with no leading zero), a full stop, then the title.
 the one id from a matching `###` rule heading, leaving every other line (a
 heading of another level included) unchanged.
 
-`scan` reads a Markdown file the way CommonMark renders it, skipping fences and
-HTML blocks. `rule_headings` and `layer_problems` report each bad rule heading
+`scan` reads a Markdown file the way CommonMark renders it, skipping fences, indented
+code and HTML blocks. `rule_headings` and `layer_problems` report each bad rule heading
 with one of three reasons (two ids, no well-formed id, a level other than
-`###`). `prefix_table` reads a README's `## Rule ids` table.
+`###`). `prefix_table` reads a README's `## Rule ids` table through `scan`.
 """
 
 import re
@@ -59,9 +59,9 @@ THEMATIC_BREAK = re.compile(r" *([-*_])(?: *\1){2,} *")
 
 
 def scan(text: str):
-    """`(line number, line, content)` of every line outside a ``` or ~~~ fence and an HTML block.
+    """`(line number, line, content)` of every line outside a ``` or ~~~ fence, indented code and an HTML block.
 
-    The fence and HTML lines are excluded. `content` is the line with the content column of the
+    The fence, indented-code and HTML lines are excluded. `content` is the line with the content column of the
     list item it continues removed, which is how it reads when rendered; `line` is as written.
     An HTML block opens at CommonMark's seven start conditions and ends at its end condition.
     """
@@ -97,6 +97,8 @@ def scan(text: str):
         if not line:
             paragraph = False
             continue
+        if not paragraph and len(content) - len(content.lstrip(" ")) >= 4:
+            continue   # indented code: four columns past the content column, not a paragraph continuation
         rest, opens_item = content, False   # `rest` is what follows the list markers of the line
         while True:
             item = LIST_MARKER.match(rest)
@@ -208,7 +210,8 @@ def layer_problems(files: list[tuple[str, str, str]]) -> list[str]:
 
 def prefix_table(readme_text: str) -> dict[str, str]:
     table: dict[str, str] = {}
-    for cells in table_rows(section(readme_text, "Rule ids")):
+    rendered = "".join(f"{line}\n" for _, line, _ in scan(readme_text))
+    for cells in table_rows(section(rendered, "Rule ids")):
         if len(cells) < 2:
             continue
         keys, values = CODE_RE.findall(cells[0]), CODE_RE.findall(cells[1])

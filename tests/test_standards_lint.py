@@ -81,6 +81,10 @@ class StructureTest(unittest.TestCase):
         result = lint_fixture(self.repo, self.platform)
         self.assertEqual((result.returncode, result.stdout), (1, line + "\n"))
 
+    def assert_fails_with_all(self, *lines: str) -> None:
+        result = lint_fixture(self.repo, self.platform)
+        self.assertEqual((result.returncode, result.stdout), (1, "".join(f"{line}\n" for line in lines)))
+
     def assert_passes(self) -> None:
         result = lint_fixture(self.repo, self.platform)
         self.assertEqual((result.returncode, result.stdout), (0, ""))
@@ -127,6 +131,23 @@ class StructureTest(unittest.TestCase):
                     "docs/standards/README.md: index has no governs column\n"
                     "docs/standards/helpers.md: has no row in docs/standards/README.md\n")))
 
+    def test_an_index_table_in_indented_code_indexes_nothing(self):
+        table = REPO_FILES["docs/standards/README.md"].split("\n\n", 1)[1]
+        indented = "".join(f"    {line}\n" for line in table.splitlines())
+        self.index.write_text(f"# Project standards\n\nExample:\n\n{indented}", encoding="utf-8")
+        self.assert_fails_with_all(
+            "docs/standards/README.md: index has no governs column",
+            "docs/standards/helpers.md: has no row in docs/standards/README.md")
+
+    def test_a_prefix_row_that_is_not_rendered_is_no_prefix_row(self):
+        write_files(self.platform, {"stacks/node.md": "# Node\n\n### NODE1. x\n\nbody\n"})
+        for name, opener, closer in (("comment", "<!--", "-->"), ("fence", "```", "```")):
+            with self.subTest(name=name):
+                write_files(self.platform, {"README.md": PLATFORM_FILES["README.md"]})
+                with (self.platform / "README.md").open("a", encoding="utf-8") as handle:
+                    handle.write(f"\n{opener}\n| `stacks/node.md` | `NODE` |\n{closer}\n")
+                self.assert_fails_with("stacks/node.md: has no prefix row in README.md")
+
     def test_a_numbered_rule_with_either_delimiter_and_no_id_fails(self):
         for line in ("1. Another rule", "1) Another rule"):
             with self.subTest(line=line):
@@ -152,6 +173,10 @@ class StructureTest(unittest.TestCase):
 
     def test_a_glob_with_ordinary_filename_characters_passes(self):
         self.edit(self.index, "`python/**`, `scripts/*.py`", "`packages/@scope/**`, `src/C++/**`")
+        self.assert_passes()
+
+    def test_a_brace_or_parenthesis_glob_passes(self):
+        self.edit(self.index, "`python/**`, `scripts/*.py`", "`src/**/*.{ts,tsx}`, `app/(group)/**`")
         self.assert_passes()
 
     def test_a_bare_star_governs_fails(self):

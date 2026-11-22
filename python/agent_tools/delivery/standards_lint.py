@@ -73,7 +73,7 @@ HEADING_MAX_CHARS = 100
 HINT_MAX_LINES = 60
 LAYER2_DIR = "docs/standards"
 PLANNING_RULES = "acceptance-planning.md"
-GLOB_RE = re.compile(r"^[A-Za-z0-9._/*?\[\]{}!@+~%=-]+$")
+NOT_GLOB_RE = re.compile(r"\s")
 PLANNING_RULE = re.compile(
     r"^- \*\*(?P<prefix>[A-Z]+)(?P<number>[1-9][0-9]*)\. (?P<title>[^*]*?)\*\*")
 PLANNING_SECTION = "## Rules"
@@ -164,7 +164,7 @@ def governs_problems(shard: str, cell: str) -> list[str]:
         return [f"{prefix} no path glob"]
     problems = []
     for glob in spans:
-        if not GLOB_RE.match(glob) or glob.startswith("/") or ".." in glob.split("/"):
+        if NOT_GLOB_RE.search(glob) or glob.startswith("/") or ".." in glob.split("/"):
             problems.append(f"{prefix} `{glob}`, which is not a path glob")
         elif set(glob) <= {"*", "/"}:
             problems.append(f"{prefix} `{glob}`, which matches every path")
