@@ -280,6 +280,7 @@ agent-workflow-tests *args:
     tests/test_console_register_service.py \
     tests/test_console_register_draft_service.py \
     tests/test_console_register_check.py \
+    tests/test_console_draft_register_check.py \
     tests/test_console_approve.py \
     tests/test_console_approve_service.py \
     tests/test_console_commit_failure.py \
