@@ -215,6 +215,8 @@ class PlatformTest(DerivationCase):
             ("bad json", "{"),
             ("no input", {"nodes": {"root": {"inputs": {}}}, "root": "root"}),
             ("follows", {"nodes": {"root": {"inputs": {"agent-platform": ["x"]}}}, "root": "root"}),
+            ("list nodes", {"nodes": [], "root": 0}),
+            ("string nodes", {"nodes": "", "root": 0}),
         )
         for name, lock in cases:
             with self.subTest(name):

@@ -283,7 +283,7 @@ def _locked_nar_hash(root: Path) -> str:
     try:
         key = lock["nodes"][lock["root"]]["inputs"][LOCK_INPUT]
         nar = lock["nodes"][key]["locked"]["narHash"]
-    except (KeyError, TypeError):
+    except (LookupError, TypeError):
         raise Underivable(NO_NAR_HASH) from None
     if not isinstance(key, str) or not isinstance(nar, str):
         raise Underivable(NO_NAR_HASH)
