@@ -13,8 +13,10 @@ import json
 import os
 import re
 import shutil
+import socketserver
 import threading
 import time
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -222,9 +224,20 @@ class RegistryFake(Fake):
         return self.report
 
 
+SERVER_POLL_SECONDS = 0.01
+
+
+def quick_serve_forever(server, poll_interval=SERVER_POLL_SECONDS):
+    "The stdlib serve loop with a short selector poll, so a console's shutdown returns at once."
+    return socketserver.BaseServer.serve_forever(server, poll_interval)
+
+
 class ApproveCase(Case):
     def setUp(self):
         super().setUp()
+        patch = mock.patch.object(service.ConsoleServer, "serve_forever", quick_serve_forever)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.forge = StandInForge()
         self.pusher = Pusher()
         self.fake = None
@@ -419,6 +432,62 @@ class ApproveCase(Case):
                 return found
             time.sleep(0.05)
         self.fail("the registration never settled")
+
+
+class QuickShutdownTest(ApproveCase):
+    def watch_polls(self):
+        seen = []
+        changed = threading.Condition()
+
+        class Recording(socketserver._ServerSelector):
+            def select(self, timeout=None):
+                with changed:
+                    seen.append((next(iter(self.get_map().values())).fileobj, timeout))
+                    changed.notify_all()
+                return super().select(timeout)
+
+        patcher = mock.patch.object(socketserver, "_ServerSelector", Recording)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        def served(server):
+            with changed:
+                changed.wait_for(lambda: any(obj is server for obj, _ in seen), 5)
+                return [timeout for obj, timeout in seen if obj is server]
+        return served
+
+    def test_a_case_console_serves_with_the_quick_shutdown_poll(self):
+        served = self.watch_polls()
+        self.start(Fake(plan=READY))
+        server = self.svc._server
+        timeouts = served(server)
+        self.svc.close()
+        self.assertTrue(timeouts)
+        self.assertEqual(set(timeouts), {SERVER_POLL_SECONDS})
+        self.assertLess(SERVER_POLL_SECONDS, 0.5)
+
+    def test_a_restarted_console_serves_with_the_quick_shutdown_poll(self):
+        served = self.watch_polls()
+        self.start(Fake(plan=READY))
+        self.restart()
+        server = self.svc._server
+        timeouts = served(server)
+        self.svc.close()
+        self.assertTrue(timeouts)
+        self.assertEqual(set(timeouts), {SERVER_POLL_SECONDS})
+
+
+class QuickShutdownPatchTest(unittest.TestCase):
+    def test_the_quick_poll_patch_ends_with_the_test(self):
+        class Probe(ApproveCase):
+            def test_probe(self):
+                self.start(Fake(plan=READY))
+                self.assertIs(service.ConsoleServer.serve_forever, quick_serve_forever)
+
+        result = unittest.TestResult()
+        Probe("test_probe").run(result)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertIs(service.ConsoleServer.serve_forever, socketserver.BaseServer.serve_forever)
 
 
 class ApplyCardTest(ApproveCase):
