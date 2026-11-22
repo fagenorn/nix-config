@@ -1,6 +1,6 @@
 # ADR-project-contract-010 — The platform defines the review commands
 
-- **Status:** accepted
+- **Status:** accepted; D2 and D4 amended for project schema 3 by ADR-project-contract-013
 - **Decided in:** #1450 (per #1430)
 
 ## Context
