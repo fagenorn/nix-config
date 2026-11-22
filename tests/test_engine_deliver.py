@@ -357,6 +357,59 @@ class ContinueTest(unittest.TestCase):
                 self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
                 self.assertEqual([e["step"] for e in run_continued(project.events(run))], ["b"])
 
+    def test_a_run_killed_between_its_grading_and_its_transition_records_the_transition_once(self):
+        project = EngineProject(self)
+        procedures = project.procedures([
+            step("a", "standin-gate", "c", failed="b"), step("b", "count-b", "done"),
+            step("c", "count-c", "done")])
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        run = project.runs()[0]
+        lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
+        cut = next(i for i, line in enumerate(lines)
+                   if json.loads(line)["event"] == "outcome_graded") + 1
+        (run / "events.jsonl").write_text("".join(lines[:cut]), encoding="utf-8")
+        (run / "results/b.1.json").unlink()
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        after = project.events(run)[cut:]
+        self.assertEqual(shape(after), [
+            ("transition_taken", "a", 1),
+            ("run_continued", "b", 1), ("step_entered", "b", 1), ("process_started", "b", 1),
+            ("result_stored", "b", 1), ("outcome_graded", "b", 1),
+            ("transition_taken", "b", 1), ("run_done", None, None)])
+        self.assertEqual((after[0]["outcome"], after[0]["to"]), ("failed", "b"))
+
+    def test_a_stop_reached_by_the_opening_decision_is_reported_after_a_kill_left_no_event(self):
+        project = EngineProject(self)
+        decision = {"id": "d", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+                    "holds": "run", "in": ["run.issue"],
+                    "on": {"accept": "done", "revise": "needs-owner"}}
+        procedures = project.procedures([decision])
+        run = self.first_stop(project, procedures)
+        (run / "events.jsonl").write_text("", encoding="utf-8")
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+        self.assertEqual(second.stderr, "")
+        self.assertEqual(json.loads(second.stdout)["end"], "needs-owner")
+        self.assertEqual([e["event"] for e in project.events(run)], ["stop_reached"])
+
+    def test_the_head_is_read_from_the_project_though_git_dir_names_another_checkout(self):
+        project = EngineProject(self)
+        other = Path(tempfile.mkdtemp(dir=project.tmp))
+        project.world.git(other, "init", "--quiet")
+        project.world.git(other, "commit", "--quiet", "--allow-empty", "-m", "elsewhere")
+        elsewhere = project.world.git(other, "rev-parse", "HEAD").strip()
+        before = head(project)
+        self.assertNotEqual(elsewhere, before)
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git")}):
+            self.assertEqual(engine_shell.read_head(str(project.root)), before)
+        project.world.git(project.root, "commit", "--quiet", "--allow-empty", "-m", "moved")
+        after = head(project)
+        self.assertNotEqual(after, before)
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git")}):
+            self.assertEqual(engine_shell.read_head(str(project.root)), after)
+
     def test_a_head_that_moves_while_its_step_runs_leaves_the_result_stale(self):
         project = EngineProject(self)
         procedures = project.procedures(
@@ -500,6 +553,19 @@ class MutatingContinueTest(unittest.TestCase):
         self.assertEqual(json.loads((run / "results/m.4.json").read_text()),
                          {"argv": ["1"], "verdict": "ok"})
         self.assertEqual((project.calls("a"), project.calls("b")), (2, 1))
+
+    def test_a_kill_after_the_first_iteration_effect_repeats_no_effect_when_the_replay_visits_other_arguments_first(self):
+        project = EngineProject(self)
+        procedures = looped(project)
+        (project.tmp / "kill-after").write_text("0", encoding="utf-8")
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, -signal.SIGKILL, first.stdout + first.stderr)
+        self.assertEqual(project.argvs("effect"), [["0"]])
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        self.assertEqual(project.argvs("effect"), [["0"], ["1"]])
+        self.assertEqual(project.argvs("checks"), [["0"]])
 
     def test_a_mutating_command_whose_check_finds_no_effect_runs_after_the_check(self):
         project = EngineProject(self)

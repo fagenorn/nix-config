@@ -27,8 +27,8 @@ whose lock is held makes the call exit `EXIT_RUNNING`.
 Continuing: the issue's runs that are not done are found under the creation lock.
 Two or more are refused, naming them. One is continued on its own procedure copy
 (`procedures_dir` is not read) with the inputs of its `run.json`: a visit whose
-result is stored with its outcome but not graded is first graded from the stored
-outcome; unless the walk is already `Done`, `engine_core.reentry` (given the
+result is stored with its outcome but lacks its grading or its transition (either may
+be the one a kill left) is first completed from the stored outcome; unless the walk is already `Done`, `engine_core.reentry` (given the
 current repository head) names the step to re-enter and a `run_continued` event
 records it; the loop then runs as for a new run. A mutating command step's `check`
 runs first on every visit that replays one a continue discarded (`RunCommand.recheck`):
@@ -68,6 +68,9 @@ ENTRY = "deliver"
 SUPPLIED_INPUTS = ("issue",)
 RUNNABLE_KINDS = ("command", "decide")
 ABSENT = "absent"
+REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+                  "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE")
 NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 
@@ -134,9 +137,13 @@ def core_events(run_dir: Path, ledger: list[dict]) -> list[dict]:
 
 
 def read_head(root: str) -> str | None:
-    """The full commit id `HEAD` names in `root`, or None when it cannot be read."""
+    """The full commit id `HEAD` names in `root`, or None when it cannot be read.
+
+    The repository is the one `root` is in: a variable that selects another is not passed on.
+    """
+    environ = {key: value for key, value in os.environ.items() if key not in REPOSITORY_ENV}
     try:
-        done = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=root,
+        done = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=root, env=environ,
                               stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
@@ -314,16 +321,19 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
         name, visit = entered[-1]["step"], entered[-1]["visit"]
         stored = [e for e in ledger if e["event"] == "result_stored"
                   and (e["step"], e["visit"]) == (name, visit) and "outcome" in e]
-        graded = any(e["event"] == "outcome_graded" and (e["step"], e["visit"]) == (name, visit)
-                     for e in ledger)
-        if stored and not graded:
-            _grade(run_dir, steps[name], visit, stored[0]["outcome"])
+        here = [e for e in ledger if e["event"] in ("outcome_graded", "transition_taken")
+                and (e["step"], e["visit"]) == (name, visit)]
+        graded = any(e["event"] == "outcome_graded" for e in here)
+        moved = any(e["event"] == "transition_taken" for e in here)
+        if (stored or graded) and not (graded and moved):
+            outcome = next(e["outcome"] for e in here) if graded else stored[0]["outcome"]
+            _grade(run_dir, steps[name], visit, outcome, graded=graded, moved=moved)
             ledger = engine_ledger.replay(run_dir / "events.jsonl")
     events = core_events(run_dir, ledger)
     action = engine_core.replay(procedure, inputs, events).action
     if isinstance(action, engine_core.Done):
         return
-    if isinstance(action, engine_core.Stop) and ledger[-1]["event"] != "stop_reached":
+    if isinstance(action, engine_core.Stop) and (not ledger or ledger[-1]["event"] != "stop_reached"):
         return  # the owner never saw this stop: the walk reports it before anything is re-entered
     point = engine_core.reentry(procedure, inputs, events, read_head(table.root))
     event = {"event": "run_continued", "at": _now(), "step": point.step}
@@ -409,12 +419,16 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
     _grade(run_dir, step, visit, ran.outcome)
 
 
-def _grade(run_dir: Path, step: dict, visit: int, outcome: str) -> None:
+def _grade(run_dir: Path, step: dict, visit: int, outcome: str, *,
+           graded: bool = False, moved: bool = False) -> None:
+    """Record the grading and the transition of a visit; `graded` and `moved` name the one a kill left."""
     name = step["id"]
     if outcome == engine_core.EXHAUSTED or outcome not in step["on"]:
         raise Fault(f"step {name} has no mapping for the outcome {outcome}")
-    engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
-                                         "visit": visit, "outcome": outcome})
-    engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
-                                         "step": name, "visit": visit, "outcome": outcome,
-                                         "to": step["on"][outcome]})
+    if not graded:
+        engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
+                                             "visit": visit, "outcome": outcome})
+    if not moved:
+        engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
+                                             "step": name, "visit": visit, "outcome": outcome,
+                                             "to": step["on"][outcome]})

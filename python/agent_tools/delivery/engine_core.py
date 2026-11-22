@@ -56,10 +56,11 @@ Continuing
     target). Rewinding to the pending arrival that has no `entered` event
     changes nothing. `continued(X, None)` enters X fresh and is valid only at a
     stop. A rewind owes a check for every entered arrival it discards:
-    `owed[step]` grows by those arrivals, shrinks by one at each later `entered`
-    event of the step and is never restored by a snapshot; `RunCommand.recheck`
-    is true exactly for a pending `command` step with `mutates` true whose
-    `owed` is above zero.
+    `owed[step, args]` grows by those arrivals (keyed by the step and the
+    arguments resolved at the arrival), shrinks by one at each later `entered`
+    event of the same step and arguments and is never restored by a snapshot;
+    `RunCommand.recheck` is true exactly for a pending `command` step with
+    `mutates` true whose `owed` for its step and arguments is above zero.
     `reentry(procedure, inputs, events, head)` answers where a continue should
     re-enter: the earliest stale result by arrival order (`live` is always
     stale, `head` is stale when the recorded head is absent, `head` is None or
@@ -157,6 +158,7 @@ class _Arrival:
     step: str
     visit: int
     snapshot: tuple[dict, dict, dict, int]
+    args: tuple[tuple[str, object], ...] = ()
     entered: bool = False
 
 
@@ -168,7 +170,11 @@ class _Walk:
     transitions: list[Transition]
     arrivals: list[_Arrival]
     produced: dict[str, tuple[int, int, object]]
-    owed: dict[str, int] = field(default_factory=dict)
+    owed: dict[tuple[str, str], int] = field(default_factory=dict)
+
+
+def _owed_key(step: str, args: tuple[tuple[str, object], ...]) -> tuple[str, str]:
+    return step, repr(args)
 
 
 def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping]) -> _Walk:
@@ -177,7 +183,7 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
     total: dict[str, int] = {}
     results: dict[str, dict] = {}
     produced: dict[str, tuple[int, int, object]] = {}
-    owed: dict[str, int] = {}
+    owed: dict[tuple[str, str], int] = {}
     transitions: list[Transition] = []
     arrivals: list[_Arrival] = []
 
@@ -209,21 +215,24 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
                 raise CoreError(f"step {where!r} is a {step['kind']!r} step, which the core does not run yet")
             total[where] = total.get(where, 0) + 1
             snapshot = (dict(visits), dict(results), dict(produced), len(transitions))
-            arrivals.append(_Arrival(where, total[where], snapshot))
             if step["kind"] == "decide":
+                arrivals.append(_Arrival(where, total[where], snapshot))
                 grader = engine_graders.GRADERS[step["grader"]]
                 graded = grader.grade({path: value(path) for path in step.get("in", [])})
                 results[where] = {"verdict": graded}
                 where = follow(step, graded)
             else:
-                return where, step, tuple((path, value(path)) for path in step.get("in", []))
+                args = tuple((path, value(path)) for path in step.get("in", []))
+                arrivals.append(_Arrival(where, total[where], snapshot, args))
+                return where, step, args
         return where, None, ()
 
     def rewind(arrival: _Arrival) -> tuple[str, dict | None, tuple[tuple[str, object], ...]]:
         index = arrivals.index(arrival)
         for later in arrivals[index:]:
             if later.entered:
-                owed[later.step] = owed.get(later.step, 0) + 1
+                key = _owed_key(later.step, later.args)
+                owed[key] = owed.get(key, 0) + 1
         seen, kept, made, length = arrival.snapshot
         visits.clear()
         visits.update(seen)
@@ -272,8 +281,9 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
             if current.entered:
                 raise CoreError(f"step {pending['id']!r} entered twice in one visit")
             current.entered = True
-            if owed.get(current.step, 0) > 0:
-                owed[current.step] -= 1
+            key = _owed_key(current.step, current.args)
+            if owed.get(key, 0) > 0:
+                owed[key] -= 1
             continue
         if not current.entered:
             raise CoreError(f"outcome for {pending['id']!r} before its entered event")
@@ -296,7 +306,7 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
     if pending is not None:
         visit = walk.arrivals[-1].visit
         if pending["kind"] == "command":
-            recheck = pending.get("mutates") is True and walk.owed.get(pending["id"], 0) > 0
+            recheck = pending.get("mutates") is True and walk.owed.get(_owed_key(pending["id"], walk.args), 0) > 0
             return Replay(
                 RunCommand(pending["id"], visit, pending["command"], pending.get("subcommand"), walk.args, recheck),
                 transitions,

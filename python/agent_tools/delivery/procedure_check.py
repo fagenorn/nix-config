@@ -77,8 +77,8 @@ the steps in order, `unreachable_done` first): `unreachable_step` (a step the
 walk of `flow_graph` from the first step does not reach; a group member is
 reached when its group is), `unreachable_done` (no reachable step has an `on`
 entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
-`unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle
-of `step_graph` also produces `exhausted`, any step may map it, and a group
+`unknown_outcome` (a step's `on` keys against `outcomes_of`; a step in
+`exhaustible` also produces `exhausted`, any step may map it, and a group
 member's `pass` entries are checked at the group) and `unbounded_cycle` (a
 cycle among steps with no `max_visits`, refused at its first step, or a step
 on a cycle whose `exhausted` target re-enters the loop, or a loop through the
@@ -759,10 +759,37 @@ def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
     return frozenset(node for node in graph if node in _reach(graph, node))
 
 
+def exhaustible(procedure: dict) -> frozenset[str]:
+    """The steps that can be entered past their bound: on a cycle of `step_graph`, or on one
+    that a stop closes. A stop's re-entry step that does not dominate a step with an `on`
+    entry to the stop may never have been reached, so continuing enters it fresh and keeps
+    every visit already spent; that step then leads to it (an over-approximation: the
+    re-entry step itself may never run past its bound)."""
+    graph = step_graph(procedure)
+    members = _members_of(procedure)
+    group_of = {member["step"]: item["id"] for item in procedure["steps"]
+                if item["kind"] == "group" for member in item["members"]}
+    stops = procedure["stops"]
+    routes = {item["id"]: tuple(t for t in item["on"].values() if t != "done")
+              for item in procedure["steps"] if item["id"] not in members}
+    routes.update({name: (stop["reenter"],) for name, stop in stops.items()})
+    dom = dominators(routes, procedure["steps"][0]["id"])
+    closed = {node: set(targets) for node, targets in graph.items()}
+    for item in procedure["steps"]:
+        for outcome, stop in item.get("on", {}).items():
+            if item["id"] not in dom or outcome == EXHAUSTED or stop not in stops:
+                continue
+            reenter = stops[stop]["reenter"]
+            fresh = group_of.get(reenter, reenter)
+            if fresh in graph and reenter not in dom[item["id"]]:
+                closed[item["id"]].add(fresh)
+    return on_cycle({node: tuple(targets) for node, targets in closed.items()})
+
+
 def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     """Steps and stops -> where control can go, `done` and dead `exhausted` left out."""
     members = _members_of(procedure)
-    cyclic = on_cycle(step_graph(procedure))
+    cyclic = exhaustible(procedure)
     graph: dict[str, tuple[str, ...]] = {}
     for item in procedure["steps"]:
         if item["id"] in members:
@@ -852,7 +879,7 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
 def _check_reachability(procedure: dict, found: _Findings) -> None:
     members = _members_of(procedure)
     graph = flow_graph(procedure)
-    cyclic = on_cycle(step_graph(procedure))
+    cyclic = exhaustible(procedure)
     entry = procedure["steps"][0]["id"]
     reached = {entry} | _reach(graph, entry)
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
@@ -872,7 +899,7 @@ def _check_reachability(procedure: dict, found: _Findings) -> None:
 
 
 def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> None:
-    cyclic = on_cycle(step_graph(procedure))
+    cyclic = exhaustible(procedure)
     by_id = {item["id"]: item for item in procedure["steps"]}
     members = _members_of(procedure)
     for item in procedure["steps"]:

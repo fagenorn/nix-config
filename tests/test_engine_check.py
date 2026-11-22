@@ -117,6 +117,13 @@ def _reenter_nowhere(toy: dict) -> None:
     toy["stops"]["needs-owner"]["reenter"] = "nope"
 
 
+def _stop_reenters_a_repair_step_that_returns_to_scope(toy: dict) -> None:
+    toy["stops"]["needs-owner"]["reenter"] = "repair"
+    toy["steps"].append({"id": "repair", "stage": "setup", "kind": "command",
+                         "command": "diff-scope", "holds": "run", "in": ["run.range"],
+                         "on": {"ok": "scope", "failed": "done"}})
+
+
 def _undeclared_command(toy: dict) -> None:
     step(toy, "scope")["command"] = next(
         key for key, declaration in sorted(procedure_check.load_commands().items())
@@ -323,6 +330,10 @@ CASES = [
     Case("exhausted_unmapped_on_a_cycle",
          editing("toy", _without(lambda toy: step(toy, "review")["on"], "exhausted")),
          [("toy", "review", "unmapped_outcome")]),
+    Case("exhausted_unmapped_on_a_cycle_a_stop_closes",
+         editing("toy", _stop_reenters_a_repair_step_that_returns_to_scope),
+         [("toy", "scope", "unmapped_outcome"), ("toy", "repair", "unmapped_outcome"),
+          ("toy", "children", "unmapped_outcome")]),
     Case("group_blocked_unmapped",
          editing("toy", _without(lambda toy: step(toy, "review")["on"], "blocked")),
          [("toy", "review", "unmapped_outcome")]),
@@ -341,7 +352,7 @@ CASES = [
          [("toy", "review", "unknown_outcome")]),
     Case("input_not_produced_on_every_route",
          editing("toy", _set(lambda toy: step(toy, "scope")["on"], "failed", "children")),
-         [("toy", "children", "unproduced_input")]),
+         [("toy", "children", "unmapped_outcome"), ("toy", "children", "unproduced_input")]),
     Case("input_produced_only_later",
          editing("toy", _set(lambda toy: step(toy, "scope"), "in", ["run.range", "draft.summary"])),
          [("toy", "scope", "unproduced_input")]),
