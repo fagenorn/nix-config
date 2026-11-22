@@ -70,6 +70,7 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
     "wait_started": frozenset(("wait", "until")),
     "wait_ended": frozenset(("wait",)),
     "stop_reached": frozenset(("step", "stop", "need")),
+    "keep_alive_ran": frozenset(("step", "visit", "attempt", "verdict")),
     "run_continued": frozenset(),
     "run_done": frozenset(),
 }
@@ -297,7 +298,7 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
     elif key == "step":
         if not isinstance(value, str) or not NAME_RE.fullmatch(value):
             raise LedgerError("step is not a step id")
-    elif key in ("visit", "pid"):
+    elif key in ("visit", "attempt", "pid"):
         if not _is_int(value) or value < 1:  # type: ignore[operator]
             raise LedgerError(f"{key} must be an integer of at least 1")
     elif key == "turns":
