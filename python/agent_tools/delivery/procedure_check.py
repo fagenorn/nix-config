@@ -9,8 +9,8 @@ names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with exactly `
 id) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
 object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
 keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
-is never named `done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared verdict or reply enum value
-carries it.
+is never named `done`, `exhausted`, `out-of-bounds` or like a step. `exhausted` and `out-of-bounds` are reserved: no stop,
+declared verdict or reply enum value carries either.
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`), `kind` (one of `KINDS`), `in` (distinct paths,
 `<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group member, forbidden on
@@ -49,7 +49,8 @@ first): `unreachable_step` (a step the walk of `flow_graph` from the first step 
 renewal failure as an edge to `claim-lost` into a `mutates` step; a group member is reached when its group is),
 `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
 `unknown_outcome` (a step's `on` keys against `outcomes_of`; a step on a cycle of `step_graph` also produces `exhausted`, any
-step may map it, and a group member's `pass` entries are checked at the group) and `unbounded_cycle` (a cycle among steps
+step may map it; an agent step outside a group also produces `out-of-bounds`, which its `on` must map, and a command step
+may map it; and a group member's `pass` entries are checked at the group) and `unbounded_cycle` (a cycle among steps
 with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through the `exhausted`
 entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent; refused at its
 first step). An outcome check whose reference failed phase B is skipped for that step.
@@ -60,7 +61,8 @@ non-member step, or a member of a group, among the `dominators` of the step with
 through its group; a step never reads its own result; a step the walk does not reach, and a member of a group it does not
 reach, skip this route check and keep the `run.<n>` and member checks), `unknown_member` (`X` is an agent step whose reply
 schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
-consumed; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
+consumed; a step ended by a bound (`out-of-bounds`) produces none of its members, so a read of `<X>.<m>` is refused on a
+route where `X` ended by the bound, unless the route reenters `X` and passes a normal outcome before the reader; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
 declares no schema and is not member-checked) and `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
 its `in` paths; skipped when the prompt is missing)."""
 
@@ -89,6 +91,7 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
+OUT_OF_BOUNDS = "out-of-bounds"
 CLAIM_LOST = "claim-lost"
 START = "(start)"
 
@@ -180,8 +183,9 @@ def _verdict_list(value: object, where: str) -> tuple[str, ...]:
     if (not isinstance(value, list) or not all(isinstance(item, str) and item for item in value)
             or len(set(value)) != len(value)):
         raise DeclarationError(f"{where}: verdicts are distinct non-empty strings")
-    if EXHAUSTED in value:
-        raise DeclarationError(f"{where}: {EXHAUSTED!r} is reserved, not a verdict")
+    for reserved in (EXHAUSTED, OUT_OF_BOUNDS):
+        if reserved in value:
+            raise DeclarationError(f"{where}: {reserved!r} is reserved, not a verdict")
     return tuple(value)
 
 
@@ -296,8 +300,9 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
     for name, stop in stops.items():
         if not NAME_RE.fullmatch(name):
             found.add("invalid_field", f"stop name {name!r} must match {NAME_RE.pattern}.")
-        elif name in ("done", EXHAUSTED) or name in ids:
-            found.add("invalid_field", f"stop name {name!r} is `done`, `{EXHAUSTED}` or a step id.")
+        elif name in ("done", EXHAUSTED, OUT_OF_BOUNDS) or name in ids:
+            found.add("invalid_field",
+                      f"stop name {name!r} is `done`, `{EXHAUSTED}`, `{OUT_OF_BOUNDS}` or a step id.")
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue
@@ -506,8 +511,9 @@ def _reply_schema(path: Path, outcome_from: str) -> _Reply | str:
     if (not isinstance(enum, list) or not enum or not all(_is_text(v) for v in enum)
             or len(set(enum)) != len(enum)):
         return f"properties.{outcome_from} has no enum of distinct non-empty strings."
-    if EXHAUSTED in enum:
-        return f"properties.{outcome_from} enum names {EXHAUSTED!r}, which is reserved."
+    for reserved in (EXHAUSTED, OUT_OF_BOUNDS):
+        if reserved in enum:
+            return f"properties.{outcome_from} enum names {reserved!r}, which is reserved."
     return _Reply(frozenset(properties), frozenset(required), tuple(enum))
 
 
@@ -700,6 +706,14 @@ def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
     return frozenset(node for node in graph if node in _reach(graph, node))
 
 
+def _changing_steps(procedure: dict) -> set[str]:
+    """The ids of the `mutates` steps and of the groups with a `mutates` member."""
+    changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
+    changing |= {item["id"] for item in procedure["steps"]
+                 if changing.intersection(m["step"] for m in item.get("members", ()))}
+    return changing
+
+
 def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     """Steps and stops -> where control can go (`START` to the first step), `done` and dead `exhausted` left out.
 
@@ -708,9 +722,7 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     members = _members_of(procedure)
     cyclic = on_cycle(step_graph(procedure))
     renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
-    changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
-    changing |= {item["id"] for item in procedure["steps"]
-                 if changing.intersection(m["step"] for m in item.get("members", ()))}
+    changing = _changing_steps(procedure)
     graph: dict[str, tuple[str, ...]] = {START: (procedure["steps"][0]["id"],)}
     for item in procedure["steps"]:
         if item["id"] in members:
@@ -723,6 +735,36 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     for node, targets in graph.items():
         if renews and changing.intersection(targets):
             graph[node] = targets + (CLAIM_LOST,)
+    return graph
+
+
+def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """`flow_graph` with a `(result)` node after each step whose `on` maps `out-of-bounds`.
+
+    The step's node keeps its `out-of-bounds` edge (unless its target is `done`) and goes to `<id>(result)`, which
+    stands for the step having ended by a normal outcome and carries the step's other outcome edges. A route through
+    the step's own node alone is one on which the step ended by a bound and stored none of its members.
+    """
+    members = _members_of(procedure)
+    cyclic = on_cycle(step_graph(procedure))
+    renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
+    changing = _changing_steps(procedure)
+    graph = flow_graph(procedure)
+
+    def renewing(targets: tuple[str, ...]) -> tuple[str, ...]:
+        return targets + (CLAIM_LOST,) if renews and changing.intersection(targets) else targets
+
+    for item in procedure["steps"]:
+        if item["id"] in members or item["kind"] not in ("agent", "command") or OUT_OF_BOUNDS not in item["on"]:
+            continue
+        bound_target = item["on"][OUT_OF_BOUNDS]
+        result_node = f"{item['id']}(result)"
+        graph[item["id"]] = renewing(
+            (() if bound_target == "done" else (bound_target,)) + (result_node,))
+        graph[result_node] = renewing(tuple(
+            target for outcome, target in item["on"].items()
+            if outcome != OUT_OF_BOUNDS and target != "done"
+            and (outcome != EXHAUSTED or item["id"] in cyclic)))
     return graph
 
 
@@ -748,7 +790,7 @@ def dominators(graph: Mapping[str, tuple[str, ...]], entry: str) -> dict[str, fr
 
 
 def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> None:
-    graph = flow_graph(procedure)
+    graph = result_flow_graph(procedure)
     by_id = {item["id"]: item for item in procedure["steps"]}
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
                 if item["kind"] == "group" for member in item["members"]}
@@ -766,7 +808,10 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
             owner = group_of.get(label, label)
             if owner in dom:
                 before = dom[owner] - {owner}
-                if producer not in by_id or group_of.get(producer, producer) not in before:
+                node = group_of.get(producer, producer)
+                if f"{node}(result)" in graph:
+                    node = f"{node}(result)"
+                if producer not in by_id or node not in before:
                     found.add("unproduced_input",
                               f"{path!r} is not produced on every route to the step.", label)
         known = resolved.steps.get(producer)
@@ -837,13 +882,15 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
                               label)
         if label in members:
             continue
-        producible = set(produced) | ({EXHAUSTED} if label in cyclic else set())
-        unmapped = [o for o in sorted(producible, key=(*produced, EXHAUSTED).index)
+        producible = (set(produced) | ({EXHAUSTED} if label in cyclic else set())
+                      | ({OUT_OF_BOUNDS} if item["kind"] == "agent" else set()))
+        unmapped = [o for o in sorted(producible, key=(*produced, OUT_OF_BOUNDS, EXHAUSTED).index)
                     if o not in item["on"]]
         if unmapped:
             found.add("unmapped_outcome",
                       f"on does not map {', '.join(map(repr, unmapped))}.", label)
-        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED]
+        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED
+                   and not (o == OUT_OF_BOUNDS and item["kind"] in ("agent", "command"))]
         if unknown:
             found.add("unknown_outcome",
                       f"on maps {', '.join(map(repr, unknown))}, which the step cannot produce.", label)

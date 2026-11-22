@@ -286,6 +286,18 @@ def _exhausted_reply_value(schema: dict) -> None:
     schema["properties"]["status"]["enum"].append("exhausted")
 
 
+def _out_of_bounds_stop(toy: dict) -> None:
+    toy["stops"]["out-of-bounds"] = {"need": "retry", "reenter": "draft"}
+
+
+def _out_of_bounds_reply_value(schema: dict) -> None:
+    schema["properties"]["status"]["enum"].append("out-of-bounds")
+
+
+def _bound_route_to_review(toy: dict) -> None:
+    step(toy, "draft")["on"]["out-of-bounds"] = "review"
+
+
 CASES = [
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
@@ -436,6 +448,19 @@ CASES = [
          [("toy", None, "invalid_field")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
+    Case("agent_step_without_out_of_bounds",
+         editing("toy", _without(lambda toy: step(toy, "draft")["on"], "out-of-bounds")),
+         [("toy", "draft", "unmapped_outcome")]),
+    Case("reply_enum_value_named_out_of_bounds", _editing_draft_reply(_out_of_bounds_reply_value),
+         [("toy", "draft", "invalid_reply")]),
+    Case("stop_named_out_of_bounds", editing("toy", _out_of_bounds_stop),
+         [("toy", None, "invalid_field")]),
+    Case("bound_route_reaches_a_reply_reader", editing("toy", _bound_route_to_review),
+         [("toy", "review-a", "unproduced_input"), ("toy", "review-b", "unproduced_input"),
+          ("toy", "children", "unproduced_input")]),
+    Case("step_overrides_a_bound",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "max_turns", 5)),
+         [("toy", "draft", "undefined_field")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -470,6 +495,21 @@ class ToyProcedureTest(unittest.TestCase):
         code, out, err = run_check()
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"}))
+
+    def test_a_command_step_may_map_out_of_bounds(self):
+        def map_bound(toy: dict) -> None:
+            step(toy, "scope")["on"]["out-of-bounds"] = "needs-owner"
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", map_bound))))
+        self.assertEqual((code, out), (0, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_a_decide_step_cannot_map_out_of_bounds(self):
+        def map_bound(toy: dict) -> None:
+            step(toy, "tally")["on"]["out-of-bounds"] = "needs-owner"
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", map_bound))))
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [(r["procedure"], r["step"], r["defect"]) for r in json.loads(out)["refusals"]],
+            [("toy", "tally", "unknown_outcome")])
 
     def test_a_procedure_with_no_keep_alive_passes_the_check(self):
         def drop_keep_alive(directory: Path) -> None:
@@ -656,6 +696,8 @@ class DeclarationTest(unittest.TestCase):
                '{"x": {"argv": ["a"]}}',
                '{"x": {"verdicts": ["ok", "exhausted"]}}',
                '{"x": {"subcommands": {"a": ["exhausted"]}}}',
+               '{"x": {"verdicts": ["ok", "out-of-bounds"]}}',
+               '{"x": {"subcommands": {"a": ["out-of-bounds"]}}}',
                '{"X": null}']
         with tempfile.TemporaryDirectory() as tmp:
             for index, text in enumerate(bad):

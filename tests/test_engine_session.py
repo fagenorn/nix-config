@@ -439,6 +439,8 @@ def copy_roles(project: EngineProject, *names: str) -> None:
 
 
 def agent_step(id: str, role: str, on: dict, **members) -> dict:
+    on = {**on}
+    on.setdefault("out-of-bounds", "needs-owner")
     document = {"id": id, "stage": "building", "kind": "agent", "role": role,
                 "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
                 "in": ["run.issue"], "on": on}
