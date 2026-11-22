@@ -15,6 +15,8 @@ from .conformance_test_support import (
 )
 from .test_conformance_checks import write_file
 
+TIER = "integration"  # every case commits a real git repository and runs the conformance engine
+
 
 def suppression(token: str, reason: str = "") -> str:
     """A suppression marker, assembled so this file holds no literal marker."""
