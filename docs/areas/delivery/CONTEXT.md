@@ -17,6 +17,9 @@ _Avoid_: run (a run is the engine's)
 The stage a delivery of a marked issue stops at after verify, with its branch up to date with the integration branch, pushed, its pull request open and every required check at that head green (a red one fixed first, within the delivery's one red-check fix; issue 1373), holding no land lock and merging nothing; the owner's approve or changes answer resumes it (issue 1139).
 _Avoid_: hold (a hold is the post-merge verification hold)
 
+**Cleanup issue**:
+An issue the `cleanup-issue` command files from the integration branch's never-rise counts: one open per project, the rule with the smallest count above zero first, listing the whole files one delivery clears. Its body carries the marker `<!-- agent:cleanup v1 rule=<id> -->`, which alone identifies it when a trusted author wrote it (ADR-delivery-017).
+
 **Code map**:
 A navigation hint a design or planning agent leaves for the next agent: the modules, seams and contracts a task touches, each with its code and tests. It is a lead to check against the tree, never an authority, and it lives outside the working tree so it is never committed.
 _Avoid_: context file, index
