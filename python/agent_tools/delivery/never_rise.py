@@ -14,8 +14,9 @@ failed git read is no verdict (`None`), never a pass.
 Both sides are judged by the enforcers passed in, so a rule introduced by the
 branch itself is measured on the base by the same code and passes while its
 violations only persist. Each enforcer is a `rule` id and a `find` function
-over a `Snapshot` (the revision and every tracked text file's line count); it
-may emit only its own rule id, else the comparison raises `ValueError`.
+over a `Snapshot` (the revision, every tracked text file's line count and every
+committed blob's bytes); it may emit only its own rule id, else the comparison
+raises `ValueError`.
 
 The comparison, per enforcer in the order given. A count rule (the default)
 compares the project total: it rises when the branch has more violations than
@@ -25,8 +26,16 @@ multiset difference of `(path, line)` keys, branch minus base, in branch order.
 A per-file rule (`per_file=True`) compares each branch violation with the
 violation of the same file on the base, matched through git renames
 (`diff-tree -M`): it rises for a violation whose matched base path has no
-violation of that rule, or one with a smaller `line`. A move git does not pair
-is a new file.
+violation of that rule, or one whose measure is smaller: a violation's `measure`
+when it carries one, else its `line`. A rename git pairs carries the source's
+violation to the target unless the enforcer has a `carries` function and it
+refuses the pair's bytes (old, new); a refused target is judged as if the base
+held no violation for it. A move git does not pair is a new file.
+
+A `Verdict` also lists the blob paths the head adds over the base (`added`, a
+rename target included), the renames git pairs (`renamed`, new path to old
+path) and each pair's committed bytes (`rename_blobs`, base bytes of the source
+and head bytes of the target).
 
 Output line, one per violation: `Violation.text()` is the rule id, one space,
 the repository-relative path escaped, a colon and the 1-based line. The escape
@@ -54,6 +63,7 @@ import subprocess
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from pathlib import Path
 from typing import NamedTuple
 
@@ -86,6 +96,10 @@ class Violation(NamedTuple):
     rule: str
     path: str
     line: int
+    measure: int | None = None
+
+    def magnitude(self) -> int:
+        return self.line if self.measure is None else self.measure
 
     def text(self) -> str:
         return f"{self.rule} {escape_path(self.path)}:{self.line}"
@@ -94,6 +108,7 @@ class Violation(NamedTuple):
 class Snapshot(NamedTuple):
     revision: str
     line_counts: Mapping[str, int]
+    blobs: Mapping[str, bytes] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -101,6 +116,7 @@ class Enforcer:
     rule: str
     find: Callable[[Snapshot], list[Violation]]
     per_file: bool = False
+    carries: Callable[[bytes, bytes], bool] | None = None
 
 
 class Rise(NamedTuple):
@@ -114,6 +130,9 @@ class Verdict(NamedTuple):
     merge_base: str
     head: str
     rises: tuple[Rise, ...]
+    added: tuple[str, ...] = ()
+    renamed: Mapping[str, str] = MappingProxyType({})
+    rename_blobs: Mapping[str, tuple[bytes, bytes]] = MappingProxyType({})
 
 
 def _git(root: Path, args: Sequence[str], timeout: float | None,
@@ -160,12 +179,12 @@ BINARY_PROBE_BYTES = 8000
 
 
 def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
-    """Every text file's line count at a revision.
+    """Every text file's line count and every blob's bytes at a revision.
 
     Lines are counted as `git grep -c` counts them: the newline-terminated lines
     plus an unterminated last line, empty files not listed. A file with a NUL in
-    its first `BINARY_PROBE_BYTES` bytes is binary and not listed; a submodule is
-    no file. A blob that cannot be read is no snapshot.
+    its first `BINARY_PROBE_BYTES` bytes is binary and not counted; `blobs` holds
+    every blob's bytes, empty and binary ones included; a submodule is no file. A blob that cannot be read is no snapshot.
     """
     listing = _git(root, ["ls-tree", "-r", "-z", "--full-tree", revision], timeout)
     if listing is None:
@@ -185,6 +204,7 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
     if out is None:
         return None
     counts: dict[str, int] = {}
+    blobs: dict[str, bytes] = {}
     position = 0
     for path in paths:
         end = out.find(b"\n", position)
@@ -195,9 +215,10 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
         stop = start + int(header[2])
         content = out[start:stop]
         position = stop + 1
+        blobs[path] = content
         if content and b"\0" not in content[:BINARY_PROBE_BYTES]:
             counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
-    return Snapshot(revision, counts)
+    return Snapshot(revision, counts, blobs)
 
 
 def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str, str] | None:
@@ -219,6 +240,18 @@ def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     return found
 
 
+def _base_measure(enforcer: Enforcer, base: Snapshot, branch: Snapshot,
+                  renamed: Mapping[str, str], base_measure: Mapping[str, int],
+                  violation: Violation) -> int:
+    source = renamed.get(violation.path)
+    if source is None:
+        return base_measure.get(violation.path, 0)
+    if enforcer.carries is not None and not enforcer.carries(
+            base.blobs.get(source, b""), branch.blobs.get(violation.path, b"")):
+        return 0
+    return base_measure.get(source, 0)
+
+
 def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
             enforcers: Sequence[Enforcer]) -> tuple[Rise, ...]:
     """The rules whose branch violations rose over the base; pure."""
@@ -227,9 +260,10 @@ def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
         before = _found(enforcer, base)
         after = _found(enforcer, branch)
         if enforcer.per_file:
-            base_lines = {v.path: v.line for v in before}
+            base_measure = {v.path: v.magnitude() for v in before}
             new = [v for v in after
-                   if base_lines.get(renamed.get(v.path, v.path), 0) < v.line]
+                   if _base_measure(enforcer, base, branch, renamed, base_measure, v)
+                   < v.magnitude()]
         elif len(after) > len(before):
             remaining = Counter((v.path, v.line) for v in before)
             new = []
@@ -258,4 +292,9 @@ def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
     renamed = renames(root, base, head, timeout)
     if base_snapshot is None or branch_snapshot is None or renamed is None:
         return None
-    return Verdict(base, head, compare(base_snapshot, branch_snapshot, renamed, enforcers))
+    added = tuple(sorted(set(branch_snapshot.blobs) - set(base_snapshot.blobs)))
+    rename_blobs = {new: (base_snapshot.blobs.get(old, b""), branch_snapshot.blobs.get(new, b""))
+                    for new, old in renamed.items()}
+    return Verdict(base, head,
+                   compare(base_snapshot, branch_snapshot, renamed, enforcers),
+                   added, renamed, rename_blobs)

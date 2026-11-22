@@ -36,6 +36,10 @@ WORSE = Enforcer("FX3", lambda snap: [
 LONG = Enforcer("FX2", lambda snap: [
     Violation("FX2", p, n) for p, n in sorted(snap.line_counts.items()) if n > 3],
     per_file=True)
+MEASURED = Enforcer("FX4", lambda snap: [
+    Violation("FX4", p, 1, len(snap.blobs[p]))
+    for p in sorted(snap.blobs) if p.endswith(".rec") and len(snap.blobs[p]) > 3],
+    per_file=True)
 
 
 def fixture_env(extra=None):
@@ -257,6 +261,84 @@ class NeverRiseTest(unittest.TestCase):
             self.assertEqual(
                 self.judge(root, [LONG]).rises,
                 (Rise("FX2", 1, 1, (Violation("FX2", "other.txt", 40),)),))
+
+    def test_a_per_file_rule_compares_the_measure_when_a_violation_carries_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.rec", "abcdef\n")
+            commit_all(root)
+            mark_base(root)
+            write(root, "a.rec", "abcdefg\n")
+            commit_all(root)
+            verdict = self.judge(root, [MEASURED])
+            self.assertEqual(
+                verdict.rises, (Rise("FX4", 1, 1, (Violation("FX4", "a.rec", 1, 8),)),))
+
+    def test_a_measured_violation_that_holds_or_shrinks_passes(self):
+        for name, branch in (("holds", {"a.rec": "abcdef\n", "other.txt": "x\n"}),
+                             ("shrinks", {"a.rec": "abcde\n"})):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                root = repo(tmp)
+                write(root, "a.rec", "abcdef\n")
+                commit_all(root)
+                mark_base(root)
+                for relative, text in branch.items():
+                    write(root, relative, text)
+                commit_all(root)
+                self.assertEqual(self.judge(root, [MEASURED]).rises, ())
+
+    def test_the_snapshot_holds_every_committed_blobs_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.txt", b"x\ny")
+            write(root, "bin.dat", b"a\0b")
+            write(root, "empty.txt", b"")
+            commit_all(root)
+            head = git(root, "rev-parse", "HEAD").strip()
+            write(root, "a.txt", b"changed\n")
+            snapshot = never_rise.read_snapshot(root, head, timeout=60)
+            self.assertEqual(
+                dict(snapshot.blobs),
+                {"a.txt": b"x\ny", "bin.dat": b"a\0b", "empty.txt": b""})
+            self.assertEqual(snapshot.line_counts, {"a.txt": 2})
+
+    def test_the_verdict_lists_the_added_paths_and_the_renames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "keep.txt", lines(5))
+            write(root, "old.txt", lines(40))
+            commit_all(root)
+            mark_base(root)
+            write(root, "new.txt", "x\n")
+            write(root, "empty.txt", b"")
+            git(root, "mv", "old.txt", "moved.txt")
+            write(root, "keep.txt", lines(5) + "one more\n")
+            commit_all(root)
+            verdict = self.judge(root, [BAD])
+            self.assertEqual(verdict.added, ("empty.txt", "moved.txt", "new.txt"))
+            self.assertEqual(dict(verdict.renamed), {"moved.txt": "old.txt"})
+            self.assertEqual(
+                dict(verdict.rename_blobs),
+                {"moved.txt": (lines(40).encode(), lines(40).encode())})
+
+    def test_a_rename_carries_a_violation_only_when_the_enforcer_allows_it(self):
+        base = Snapshot("a" * 40, {}, {"a.rec": b"abcdef\n"})
+        branch = Snapshot("b" * 40, {}, {"b.rec": b"abcdef\n"})
+        renamed = {"b.rec": "a.rec"}
+        rows = (
+            ("no carries", MEASURED, ()),
+            ("carries the pair", Enforcer(
+                "FX4", MEASURED.find, per_file=True,
+                carries=lambda old, new: old == new), ()),
+            ("refuses the pair", Enforcer(
+                "FX4", MEASURED.find, per_file=True,
+                carries=lambda old, new: False),
+             (Rise("FX4", 1, 1, (Violation("FX4", "b.rec", 1, 7),)),)),
+        )
+        for name, enforcer, expected in rows:
+            with self.subTest(name):
+                self.assertEqual(
+                    never_rise.compare(base, branch, renamed, [enforcer]), expected)
 
     def test_an_enforcer_emitting_another_rule_is_refused(self):
         snapshot = Snapshot("a" * 40, {"a": 1})
