@@ -54,6 +54,7 @@ from agent_tools.project_contract.adopt_links import (
     Tree,
     broken_count,
     index_records,
+    is_point_in_time_record,
     markdown_texts,
     tree_records,
 )
@@ -660,7 +661,8 @@ def new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]],
     base's tracked paths, the result's against the result's. A moved file is
     compared with the file it came from, through the plan's `git-mv`
     operations, and a result file with no base counterpart is compared with
-    zero. Sorted, so the gate and the post-commit proof — which both call this
+    zero. A point-in-time record no `git-mv` moved keeps its citations and is
+    not judged. Sorted, so the gate and the post-commit proof — which both call this
     — name the same files from the same records (D9).
     """
     origin = {operation["targets"][0]: operation["sources"][0]
@@ -670,7 +672,8 @@ def new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]],
     base_texts = markdown_texts(worktree, base)
     return sorted(
         path for path, text in markdown_texts(worktree, result).items()
-        if broken_count(path, text, result_tree) > (
+        if not (is_point_in_time_record(path) and path not in origin)
+        and broken_count(path, text, result_tree) > (
             broken_count(origin.get(path, path),
                          base_texts[origin.get(path, path)], base_tree)
             if origin.get(path, path) in base_texts else 0))
@@ -1308,6 +1311,7 @@ def prove_commit_content(worktree: Path, commit: str,
 
 
 CONFORMANCE_UNPROVED = "adopt.commit.conformance_unproved"
+CONVERSION_UNPROVED = "adopt.commit.conversion_unproved"
 
 
 def prove_conformance_bytes(worktree: Path, commit: str,

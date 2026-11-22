@@ -45,8 +45,8 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 COMMITTED = object()
 
-ACTIONS = ("move-canonical", "generate-projection", "retain-product",
-           "archive-history", "delete-exact-duplicate", "needs-decision")
+ACTIONS = ("move-canonical", "generate-projection", "retain-product", "archive-history",
+           "delete-exact-duplicate", "needs-decision", "convert-to-source")
 OUTCOMES = ("bootstrap", "reconcile", "no_change", "migration_required",
             "repair_required")
 PLAN_STATES = ("draft", "ready", "not_applicable")
@@ -970,7 +970,7 @@ class OutcomeRoutingTest(AdoptTestCase):
 
     def test_a_drifted_schema_two_checkout_reconciles_and_names_the_offered_step(self):
         home, root = self.offered_home_and_root()
-        write(root, "AGENTS.md", "hand-edited\n")
+        write(root, "AGENTS.md", (root / "AGENTS.md").read_text() + "hand-edited\n")
         commit(root, "drift a projection")
         code, doc, err = self.plan(root, home=home)
         self.assertEqual(code, 0, err)
@@ -1055,7 +1055,7 @@ class OutcomeRoutingTest(AdoptTestCase):
 
     def test_a_drifted_projection_is_reconcilable_rather_than_a_blocker(self):
         root = adopted_repo(self.home)
-        write(root, "AGENTS.md", "hand-edited\n")
+        write(root, "AGENTS.md", (root / "AGENTS.md").read_text() + "hand-edited\n")
         commit(root, "drift a projection")
         doc = self.ready_plan(root)
         self.assertEqual(doc["plan"]["outcome"], "reconcile")
@@ -1866,7 +1866,7 @@ class CommitEnvironmentPlanTest(AdoptTestCase):
 
         root = self.authored(own)
         # a drifted projection gives the plan work to do
-        write(root, "AGENTS.md", "hand-edited\n")
+        write(root, "AGENTS.md", (root / "AGENTS.md").read_text() + "hand-edited\n")
         commit(root, "drift a projection")
         _, doc, _ = self.plan(root)
         self.assertEqual(doc["plan"]["state"], "ready")
