@@ -7803,7 +7803,8 @@ class ConsoleService:
             if launch is None:
                 return
             launch = dataclasses.replace(
-                launch, permission=self._read_permission(launch.project_id, launch.cwd))
+                launch, permission=self._read_permission(launch.project_id, launch.cwd),
+                allow=self._allow_rules(launch.cwd))
             listed = None
             if isinstance(token, _ListedMoveReservation):
                 try:
@@ -8265,8 +8266,9 @@ class ConsoleService:
     def _refresh_settings(self, sprint_id: str, root: str) -> permission.Permission:
         """Write the sprint's manager settings file again before a wake (ADR-console-021); the mode it wrote.
 
-        The content is what a launch writes, from the sprint's stored secret and the mode the project's
-        production rules choose now (ADR-console-060), read off the lock. The write runs under the ingest lock,
+        The content is what a launch writes, from the sprint's stored secret, the mode the project's
+        production rules choose now (ADR-console-060) and the allow rules its slug and merge binding give now
+        (ADR-console-102), each read off the lock again, never copied from the launch. The write runs under the ingest lock,
         as `withdraw_goal` removes the secret and the file, so a withdrawal can never fall between the read
         and the write and leave a file holding the secret. `NudgeFailed` when the sprint is no longer open,
         when its secret is missing (the wake is not sent without the isolation and permission members) or when
@@ -8278,6 +8280,7 @@ class ConsoleService:
                 raise nudge.NudgeFailed("the sprint is no longer open")
             project_id = sprint.project_id
         chosen = self._read_permission(project_id, root)
+        allow = self._allow_rules(root)
         with self._ingest:
             if sprint_id not in self._sprints:
                 raise nudge.NudgeFailed("the sprint is no longer open")
@@ -8287,7 +8290,7 @@ class ConsoleService:
             try:
                 manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
                                        {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret},
-                                       chosen)
+                                       chosen, allow)
             except manager.LaunchFailed as error:
                 raise nudge.NudgeFailed(str(error)) from error
         return chosen
@@ -9648,6 +9651,11 @@ class ConsoleService:
         strategy, delete_branch = read(self._merge_binding_of, (None, False))
         return (read(self._slug_of, None), read(self._branch_pattern_of, None), strategy,
                 delete_branch)
+
+    def _allow_rules(self, root: str | None) -> tuple[str, ...]:
+        """Off the lock: the allow rules the project's slug and merge binding give a manager's settings (ADR-console-102)."""
+        slug, _, strategy, delete_branch = self._permit_reads(root)
+        return manager.allow_rules(slug, strategy, delete_branch)
 
     def _permit_record(self, sprint: sprints.SprintState, session_id: str, tool_use_id: str,
                        slug: str | None, verdict: permit.Verdict) -> permit.Verdict:
