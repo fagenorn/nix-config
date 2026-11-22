@@ -1,6 +1,6 @@
 """`verify-slot`: run one command while holding one of this host's verify slots (issue 1383).
 
-    verify-slot run [--wait-limit SECONDS] -- ARGV...
+    verify-slot run [--wait-limit SECONDS] [--live] -- ARGV...
 
 A verify run is heavy, and several runs may start on one host at once. `run` admits at most
 the host's declared count of them at a time: it takes one slot, runs `ARGV` with this
@@ -17,8 +17,30 @@ passed to the command (the descriptor is not inheritable and the child starts wi
 `close_fds`). The kernel drops the lock when this process ends, whatever the cause, so a
 holder killed by SIGKILL gives its slot back even while its command survives (D3); nothing is
 recorded in the files and nothing goes stale. A live holder is never preempted: a waiter
-takes a slot only once its holder has ended. Waiters poll every `POLL_SECONDS` and no order
-among them is promised (no FIFO).
+takes a slot only once its holder has ended. Waiters poll every `POLL_SECONDS`. There is no
+FIFO: no order among live waiters and none among ordinary waiters is promised, but every live
+waiter goes before every ordinary one (see `--live`).
+
+`--live` (issue 1434) marks a live-fault run, which waits ahead of every ordinary run and
+never stops one in progress. While it waits it holds a shared `flock` on the marker file
+`LIVE_MARKER` (`live-waiting.lock`) in the slot directory, created with mode 0666 like a slot
+file so every account can lock it; it is not a slot and no slot count includes it. The live
+run registers with a non-blocking lock retried every `REGISTER_RETRY_SECONDS` inside its
+timed, signal-aware wait, so a process that stalls while probing the marker delays neither
+`--wait-limit` nor a signal. The run drops the marker once it holds a slot or ends for any
+other reason, and the kernel drops it when the waiter dies, so a SIGKILLed live waiter frees
+the ordinary runs at once. An ordinary run that took a slot checks the marker last and, while
+any live waiter holds it, gives the slot back and waits: it prints `DEFERRING_LINE` once
+instead of `WAITING_LINE`. A slot that a live run did not yet hold is thereby left to the live
+waiter, and a run in progress is never preempted.
+
+The check is an exclusive non-blocking probe of the marker, which another ordinary run's
+probe would also fail, so ordinary probes take turns: each holds an exclusive `flock` on the
+guard file `LIVE_PROBE` (`live-probe.lock`, also mode 0666) around its probe, and a live run
+never takes it. A probe that finds the guard taken retries for up to `PROBE_SECONDS`; a probe
+that still cannot take it gives its slot back and waits one poll without deferring. A marker
+or guard that cannot be opened, for example a directory in its place, is a setup error (exit
+2) and the slot just taken is closed.
 
 Admission counts every live holder, in whichever slot file. A run that took a slot checks
 that the holders of all `slot-*.lock` files, itself included, number at most the declared
@@ -36,7 +58,8 @@ has no limit. The limit is checked before each further try, so a slot freed afte
 taken.
 
 stderr lines of its own (stdout is the command's alone). A run that finds every slot taken
-prints `WAITING_LINE` once when it starts to wait. A run that waited and then took a slot
+prints `WAITING_LINE` once when it starts to wait; an ordinary run that gave a slot back to a
+live waiter prints `DEFERRING_LINE` once. A run that waited and then took a slot
 prints `WAITED_LINE` once, before the command starts. A run that took a slot at once prints
 nothing of its own. A run that reaches `--wait-limit` prints `NO_SLOT_LINE` and runs
 nothing. A command that cannot start prints `verify-slot: cannot start <argv0>: <error>`.
@@ -70,8 +93,14 @@ from agent_tools.delivery import host_admission
 NO_SLOT_LINE = "verify-slot: no verify slot came free within {limit}s; nothing ran"
 WAITING_LINE = "verify-slot: all {count} verify slots of this host are taken; waiting"
 WAITED_LINE = "verify-slot: waited {seconds:.1f}s for a verify slot"
+DEFERRING_LINE = "verify-slot: a live-fault verify run is waiting for a slot; this run waits behind it"
+LIVE_MARKER = "live-waiting.lock"
+LIVE_PROBE = "live-probe.lock"
 NO_SLOT_EXIT = 75
 POLL_SECONDS = 0.2
+REGISTER_RETRY_SECONDS = 0.005
+PROBE_RETRY_SECONDS = 0.005
+PROBE_SECONDS = 1.0
 DEFAULT_SLOT_DIR = "/tmp/agent-verify-slots"
 SLOT_DIR_ENV = "VERIFY_SLOT_DIR"
 USAGE_EXIT = 2
@@ -174,16 +203,64 @@ def _held(path: Path) -> bool:
     return False
 
 
+def _live_waiting(directory: Path) -> bool | None:
+    """Whether a live waiter holds the marker; `None` when another ordinary probe kept the guard.
+
+    Ordinary probes take turns on the guard, so a probe never mistakes another probe's
+    exclusive lock for a live waiter. An unopenable marker or guard raises `OSError`.
+    """
+    guard = _open_slot(directory / LIVE_PROBE)
+    try:
+        give_up = time.monotonic() + PROBE_SECONDS
+        while True:
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= give_up:
+                    return None
+                time.sleep(PROBE_RETRY_SECONDS)
+        try:
+            marker = os.open(directory / LIVE_MARKER, os.O_RDWR)
+        except FileNotFoundError:
+            return False
+        try:
+            fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(marker)
+        return False
+    finally:
+        os.close(guard)
+
+
+def _register_live(directory: Path) -> int | None:
+    """The marker descriptor holding a shared lock, `None` while a probe holds it exclusively."""
+    marker = _open_slot(directory / LIVE_MARKER)
+    try:
+        fcntl.flock(marker, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(marker)
+        return None
+    except BaseException:
+        os.close(marker)
+        raise
+    return marker
+
+
 def _holders_beside(directory: Path, own: Path) -> int:
     """The live holders of every slot file but `own`, whatever their index."""
     return sum(1 for path in sorted(directory.glob("slot-*.lock")) if path != own and _held(path))
 
 
-def _try_slots(directory: Path, count: int) -> int | None:
-    """The descriptor of the first slot lock taken, or `None` when every slot is held.
+def _try_slots(directory: Path, count: int, live: bool) -> tuple[int | None, bool]:
+    """`(descriptor, False)` on a slot kept, else `(None, deferred)` with nothing taken.
 
     A taken slot is kept only while the holders of all slot files, this one included, number at
-    most `count`: a count lowered beneath a still-held higher slot is honoured.
+    most `count`: a count lowered beneath a still-held higher slot is honoured. An ordinary run
+    also gives it back while a live waiter holds the marker (`deferred` is then true); a live
+    run skips that check.
     """
     for index in range(count):
         path = directory / f"slot-{index}.lock"
@@ -198,33 +275,65 @@ def _try_slots(directory: Path, count: int) -> int | None:
             raise
         if 1 + _holders_beside(directory, path) > count:
             os.close(descriptor)
-            return None
-        return descriptor
-    return None
+            return None, False
+        if not live:
+            try:
+                waiting = _live_waiting(directory)
+            except BaseException:
+                os.close(descriptor)
+                raise
+            if waiting is not False:
+                os.close(descriptor)
+                return None, waiting is True
+        return descriptor, False
+    return None, False
 
 
-def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run) -> tuple[int | None, int | None]:
-    """`(descriptor, None)` on a taken slot, else `(None, exit code)` with nothing to run."""
-    start = time.monotonic()
-    waiting = False
-    while True:
-        if run.received is not None:
-            return None, 128 + run.received
-        if waiting and wait_limit is not None and time.monotonic() - start >= wait_limit:
-            _say(NO_SLOT_LINE.format(limit=wait_limit))
-            return None, NO_SLOT_EXIT
-        descriptor = _try_slots(directory, count)
-        if descriptor is not None:
-            if waiting:
-                _say(WAITED_LINE.format(seconds=time.monotonic() - start))
-            return descriptor, None
-        if not waiting:
+def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run,
+             live: bool) -> tuple[int | None, int | None]:
+    """`(descriptor, None)` on a taken slot, else `(None, exit code)` with nothing to run.
+
+    A live run holds the marker for as long as it waits and drops it on every exit.
+    """
+    marker = None
+    try:
+        start = time.monotonic()
+        waiting = said_waiting = said_deferring = False
+        while True:
+            if run.received is not None:
+                return None, 128 + run.received
+            registering = live and marker is None
+            if ((waiting or registering) and wait_limit is not None
+                    and time.monotonic() - start >= wait_limit):
+                _say(NO_SLOT_LINE.format(limit=wait_limit))
+                return None, NO_SLOT_EXIT
+            if registering:
+                marker = _register_live(directory)
+                if marker is None:
+                    pause = REGISTER_RETRY_SECONDS
+                    if wait_limit is not None:
+                        pause = max(0.0, min(pause, start + wait_limit - time.monotonic()))
+                    time.sleep(pause)
+                    continue
+            descriptor, deferred = _try_slots(directory, count, live)
+            if descriptor is not None:
+                if waiting:
+                    _say(WAITED_LINE.format(seconds=time.monotonic() - start))
+                return descriptor, None
             waiting = True
-            _say(WAITING_LINE.format(count=count))
-        pause = POLL_SECONDS
-        if wait_limit is not None:
-            pause = max(0.0, min(pause, start + wait_limit - time.monotonic()))
-        time.sleep(pause)
+            if deferred and not said_deferring:
+                said_deferring = True
+                _say(DEFERRING_LINE)
+            elif not deferred and not said_waiting:
+                said_waiting = True
+                _say(WAITING_LINE.format(count=count))
+            pause = POLL_SECONDS
+            if wait_limit is not None:
+                pause = max(0.0, min(pause, start + wait_limit - time.monotonic()))
+            time.sleep(pause)
+    finally:
+        if marker is not None:
+            os.close(marker)
 
 
 def _run_child(argv: list[str], run: _Run) -> int:
@@ -245,7 +354,7 @@ def _run_child(argv: list[str], run: _Run) -> int:
     return 128 - code if code < 0 else code
 
 
-def run_command(argv: list[str], wait_limit: int | None) -> int:
+def run_command(argv: list[str], wait_limit: int | None, live: bool = False) -> int:
     home = os.environ.get("HOME")
     if not home:
         raise SlotError("HOME is unset or empty")
@@ -260,7 +369,7 @@ def run_command(argv: list[str], wait_limit: int | None) -> int:
     descriptor = None
     try:
         try:
-            descriptor, code = _acquire(directory, count, wait_limit, run)
+            descriptor, code = _acquire(directory, count, wait_limit, run, live)
         except OSError as error:
             raise SlotError(f"cannot take a slot in {directory}: {error}") from None
         if descriptor is None:
@@ -278,9 +387,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="verify-slot", description="Run a command while holding one of this host's verify slots.")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="run ARGV in a verify slot (use `--` before ARGV)",
-                              usage="verify-slot run [--wait-limit SECONDS] -- ARGV...")
+                              usage="verify-slot run [--wait-limit SECONDS] [--live] -- ARGV...")
     run.add_argument("--wait-limit", type=int, default=None, metavar="SECONDS",
                      help="give up with exit 75 when no slot comes free within this many seconds")
+    run.add_argument("--live", action="store_true",
+                     help="wait ahead of every ordinary run, never stopping a run in progress")
     return parser
 
 
@@ -300,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
     if not found_separator or not command:
         parser.error("run needs `--` followed by the command to run")
     try:
-        return run_command(command, args.wait_limit)
+        return run_command(command, args.wait_limit, args.live)
     except SlotError as error:
         _say(f"verify-slot: {error}")
         return USAGE_EXIT

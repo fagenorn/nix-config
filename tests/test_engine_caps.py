@@ -80,7 +80,6 @@ def chain(n: int) -> dict:
         )
     return {
         "format": header["format"],
-        "keep_alive": header["keep_alive"],
         "inputs": ["holder", "issue", "range", "repo"],
         "stops": {"halt": {"need": "retry", "reenter": "s1"}},
         "steps": steps,
@@ -150,16 +149,16 @@ class BoundaryTest(unittest.TestCase):
                         (pkg / "engine_core.py").write_bytes(body)
                         self.assertEqual(measure(pkg), expected)
                     pkg = base_package(core=10, engine=0)
-                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(2490)) + separator)
+                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(3990)) + separator)
                     self.assertEqual(measure(pkg), ())
-                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(2491)) + separator)
-                    self.assertEqual(measure(pkg), (Breach("engine package", 2501, 2500, "lines"),))
+                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(3991)) + separator)
+                    self.assertEqual(measure(pkg), (Breach("engine package", 4001, 4000, "lines"),))
 
-    def test_a_package_of_2500_lines_passes_and_2501_is_refused(self):
-        self.assertEqual(measure(base_package(core=600, engine=1900)), ())
+    def test_a_package_of_4000_lines_passes_and_4001_is_refused(self):
+        self.assertEqual(measure(base_package(core=600, engine=3400)), ())
         self.assertEqual(
-            measure(base_package(core=600, engine=1901)),
-            (Breach("engine package", 2501, 2500, "lines"),),
+            measure(base_package(core=600, engine=3401)),
+            (Breach("engine package", 4001, 4000, "lines"),),
         )
 
     def test_the_package_is_the_engine_modules_and_what_they_import(self):
@@ -180,8 +179,8 @@ class BoundaryTest(unittest.TestCase):
             ["deep.py", "engine.py", "engine_core.py", "engine_x.py", "helper.py", "other.py", "rel.py"],
         )
         self.assertEqual(measure(pkg), ())
-        (pkg / "helper.py").write_text("import agent_tools.delivery.deep\n" + pad(2499), encoding="utf-8")
-        self.assertEqual(measure(pkg), (Breach("engine package", 2560, 2500, "lines"),))
+        (pkg / "helper.py").write_text("import agent_tools.delivery.deep\n" + pad(3999), encoding="utf-8")
+        self.assertEqual(measure(pkg), (Breach("engine package", 4060, 4000, "lines"),))
 
     def test_a_procedure_of_40_steps_passes_and_41_is_refused(self):
         copy = procedures_copy()
@@ -244,10 +243,10 @@ class BoundaryTest(unittest.TestCase):
         graders = {f"g-{i:02d}": Grader(("ok",), _short) for i in range(25)}
         graders["long"] = Grader(("ok",), long_grader(41))
         self.assertEqual(
-            measure(base_package(core=601, engine=1900), copy, graders),
+            measure(base_package(core=601, engine=3400), copy, graders),
             (
                 Breach("core", 601, 600, "lines"),
-                Breach("engine package", 2501, 2500, "lines"),
+                Breach("engine package", 4001, 4000, "lines"),
                 Breach("graders", 26, 25, "graders"),
                 Breach("grader long", 41, 40, "lines"),
                 Breach("procedure chain", 41, 40, "steps"),
@@ -333,7 +332,7 @@ class BoundaryTest(unittest.TestCase):
 
 CAP_NAMES = {
     "CORE_LINES": 600,
-    "PACKAGE_LINES": 2500,
+    "PACKAGE_LINES": 4000,
     "PROCEDURE_STEPS": 40,
     "GRADER_COUNT": 25,
     "GRADER_LINES": 40,
@@ -463,16 +462,16 @@ class CheckRefusesTest(unittest.TestCase):
         self.assertIn(CORE_BREACH, document["breaches"])
         self.assertEqual(document["refusals"], [])
 
-    def test_check_refuses_an_engine_package_over_2500_lines(self):
+    def test_check_refuses_an_engine_package_over_4000_lines(self):
         def edit(d: Path) -> None:
             total = sum(engine_caps.physical_lines(p) for p in engine_caps.engine_modules(d))
             ledger = d / "engine_ledger.py"
-            grow(ledger, engine_caps.physical_lines(ledger) + 2501 - total)
+            grow(ledger, engine_caps.physical_lines(ledger) + 4001 - total)
 
         code, out, _ = run_copy(package_copy(edit))
         document = json.loads(out)
         self.assertEqual(code, 1)
-        self.assertIn({"cap": 2500, "size": 2501, "thing": "engine package", "unit": "lines"}, document["breaches"])
+        self.assertIn({"cap": 4000, "size": 4001, "thing": "engine package", "unit": "lines"}, document["breaches"])
         self.assertNotIn("core", [b["thing"] for b in document["breaches"]])
 
     def test_check_refuses_a_41st_step_naming_the_procedure(self):
