@@ -16,7 +16,7 @@ The three shapes (D3), judged only over the literal-word grammar of `words`:
    approval (ADR-console-098).
 
 Each of the three shapes may follow one credential-scrub prefix, exactly a spelling of
-`SCRUB_PREFIXES`, which equals the lifecycle guard's (#1592, ADR-console-101); `strip_scrub` removes it
+`SCRUB_PREFIXES`, which equals the lifecycle guard's (#1592, ADR-console-102); `strip_scrub` removes it
 once, and only the merge and the rerun are read through it: the release run takes none (ADR-console-098).
 
 `words(command)` is a small scanner, not `shlex` (which accepts expansions and comments the shell
@@ -45,7 +45,7 @@ a wrapper the client strips before it matches rules), and that is neither the pl
 dispose (a preview flag, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a
 repeated flag, a value beginning with `-`, a chain, an expansion), is `DENY` with `RELEASE_SPELLING`, so
 every text the manager's release allow rule matches, which the client matches for each subcommand of a
-chain on its own, is decided (#1592, ADR-console-101). Every other release
+chain on its own, is decided (#1592, ADR-console-102). Every other release
 spelling (a preview, text built at run time and piped to a shell) gets no decision
 and falls to the session's classifier, as a merge spelling does; the release command's own approval
 check is what makes that safe, and the residual is that an abandon or dispose spelling the scan cannot

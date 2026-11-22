@@ -8268,7 +8268,7 @@ class ConsoleService:
 
         The content is what a launch writes, from the sprint's stored secret, the mode the project's
         production rules choose now (ADR-console-060) and the allow rules its slug and merge binding give now
-        (ADR-console-101), each read off the lock again, never copied from the launch. The write runs under the ingest lock,
+        (ADR-console-102), each read off the lock again, never copied from the launch. The write runs under the ingest lock,
         as `withdraw_goal` removes the secret and the file, so a withdrawal can never fall between the read
         and the write and leave a file holding the secret. `NudgeFailed` when the sprint is no longer open,
         when its secret is missing (the wake is not sent without the isolation and permission members) or when
@@ -9653,7 +9653,7 @@ class ConsoleService:
                 delete_branch)
 
     def _allow_rules(self, root: str | None) -> tuple[str, ...]:
-        """Off the lock: the allow rules the project's slug and merge binding give a manager's settings (ADR-console-101)."""
+        """Off the lock: the allow rules the project's slug and merge binding give a manager's settings (ADR-console-102)."""
         slug, _, strategy, delete_branch = self._permit_reads(root)
         return manager.allow_rules(slug, strategy, delete_branch)
 

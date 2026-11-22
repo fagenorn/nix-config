@@ -1,4 +1,4 @@
-# ADR-console-101 — A manager's merge takes the guard's credential prefix and its settings allow the permitted forms
+# ADR-console-102 — A manager's merge takes the guard's credential prefix and its settings allow the permitted forms
 
 - **Status:** accepted
 - **Decided in:** #1592

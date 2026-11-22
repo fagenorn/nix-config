@@ -211,7 +211,7 @@ DENY = (
 
 
 class AllowRulesTest(unittest.TestCase):
-    """The settings' allow rules admit the permitted forms and the permit hook decides every text a rule matches (#1592, ADR-console-101)."""
+    """The settings' allow rules admit the permitted forms and the permit hook decides every text a rule matches (#1592, ADR-console-102)."""
 
     ENV = manager.ENV_SPELLINGS
     PREFIXES = ("", *manager.ENV_SPELLINGS)

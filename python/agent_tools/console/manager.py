@@ -97,7 +97,7 @@ facts: the merge (a valid slug and the strategy `merge`, `--delete-branch` per t
 rerun (a valid slug), each bare and behind each `env -u` credential spelling, and always `release
 transaction run *`; there is no `unset` rule. A rule's `*` matches more than the grant, and the permit
 hook decides every text a rule matches, so auto mode resolves the permitted forms without the classifier
-while the hooks still judge each call (ADR-console-101). No rule names a `--dispose`, which the permit
+while the hooks still judge each call (ADR-console-102). No rule names a `--dispose`, which the permit
 judges from the parsed words (ADR-console-098). There is no ask rule, no `autoMode` and no
 `disableAllHooks`. A launch built without a permission carries `permission.FALLBACK`,
 so `auto`. `settings_document(env, permission, allow)` is that content and `write_settings(path, env,
@@ -535,7 +535,7 @@ def launcher_for(platform: str) -> Callable[[Launch], None] | None:
 
 
 def allow_rules(slug: str | None, strategy: str | None, delete_branch: bool) -> tuple[str, ...]:
-    """The allow rules a manager's settings carry, from the project's facts (#1592, ADR-console-101).
+    """The allow rules a manager's settings carry, from the project's facts (#1592, ADR-console-102).
 
     The merge rule needs a valid slug and the strategy `merge`, and ends `--delete-branch` when the binding
     deletes the branch; the rerun rule needs a valid slug; the release run needs neither. The merge and
