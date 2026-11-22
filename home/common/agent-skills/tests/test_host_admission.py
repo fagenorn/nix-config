@@ -26,9 +26,36 @@ class HostAdmissionTest(unittest.TestCase):
         committed = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
         self.assertEqual(committed, declaration(**{
             "claude-code": {"support": "supported", "agent_slots": 7},
+            "engine": {"support": "supported", "agent_slots": 8},
             "codex": {"support": "unsupported"}}))
         self.assertEqual(host_admission.validate_declaration(committed), committed)
         self.assertEqual(host_admission.verify_slots(committed), 1)
+        self.assertEqual(host_admission.route_slots(committed, host_admission.ENGINE_ROUTE), 8)
+
+    def test_the_engine_route_counts_one_slot_per_live_session(self):
+        one = declaration(engine={"support": "supported", "agent_slots": 1})
+        self.assertEqual(host_admission.validate_declaration(one), one)
+        self.assertEqual(host_admission.route_slots(one, "engine"), 1)
+        self.assertEqual(host_admission.minimum_slots("engine"),
+                         host_admission.ENGINE_SESSION_SLOTS)
+        self.assertEqual(host_admission.ENGINE_SESSION_SLOTS, 1)
+        self.assertEqual(host_admission.minimum_slots("claude-code"),
+                         host_admission.MINIMUM_SUPPORTED_SLOTS)
+        self.assertEqual(host_admission.MINIMUM_SUPPORTED_SLOTS, 4)
+        for bad in (0, True):
+            value = declaration(engine={"support": "supported", "agent_slots": bad})
+            with self.subTest(bad), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration(value)
+            self.assertEqual(raised.exception.reason_code, "declaration_invalid")
+
+    def test_route_slots_names_why_a_route_is_not_admitted(self):
+        value = declaration(**{"claude-code": {"support": "supported", "agent_slots": 7},
+                               "codex": {"support": "unsupported"}})
+        self.assertEqual(host_admission.route_slots(value, "claude-code"), 7)
+        for route, code in (("engine", "route_undeclared"), ("codex", "declared_unsupported")):
+            with self.subTest(route), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.route_slots(value, route)
+            self.assertEqual(raised.exception.reason_code, code)
 
     def test_verify_slots_is_an_optional_top_level_count(self):
         supported = {"support": "supported", "agent_slots": 7}

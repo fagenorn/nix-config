@@ -12,6 +12,8 @@ session may hold at once. It also states, optionally, the host's verify slot
 count (`verify_slots`), which `agent_tools.delivery.verify_slot` reads. Nothing
 else is declared: admission reasons over declared `agent_slots` only, never CPU,
 memory or load.
+The `engine` route has no role sets: it counts one slot per live engine
+session, so a supported engine route is valid with one slot or more.
 """
 from __future__ import annotations
 
@@ -38,6 +40,15 @@ ROLE_NAMES = ("controller", "owner", "worker", "reviewer")
 # A supported route must host the controller plus one full owner role set, so
 # no declaration can admit an owner without its reviewer.
 MINIMUM_SUPPORTED_SLOTS = sum(CONTROLLER_ROLES.values()) + sum(OWNER_ROLE_SET.values())
+# The engine route has no role sets: it counts one slot per live engine session.
+ENGINE_ROUTE = "engine"
+ENGINE_SESSION_SLOTS = 1
+
+
+def minimum_slots(route: str) -> int:
+    """The fewest agent slots a supported `route` may declare."""
+    return ENGINE_SESSION_SLOTS if route == ENGINE_ROUTE else MINIMUM_SUPPORTED_SLOTS
+
 
 REASON_CODES = (
     "declared_unsupported",
@@ -58,7 +69,7 @@ _UNSUPPORTED_MEMBERS = frozenset({"support"})
 class DeclarationError(Exception):
     """The declaration cannot be used; `reason_code` names why.
 
-    `reason_code` is `declaration_missing` or `declaration_invalid`.
+    `reason_code` is a member of `REASON_CODES`.
     """
 
     def __init__(self, reason_code: str, detail: str | None = None) -> None:
@@ -127,7 +138,7 @@ def validate_declaration(value: object) -> dict:
         if support == "supported":
             slots = route.get("agent_slots")
             if (set(route) != _SUPPORTED_MEMBERS or type(slots) is not int
-                    or slots < MINIMUM_SUPPORTED_SLOTS):
+                    or slots < minimum_slots(name)):
                 raise _invalid(f"route {name}")
         elif support == "unsupported":
             if set(route) != _UNSUPPORTED_MEMBERS:
@@ -175,3 +186,17 @@ def verify_slots(declaration: dict) -> int:
     `declaration` is one `validate_declaration` already accepted.
     """
     return declaration.get("verify_slots", DEFAULT_VERIFY_SLOTS)
+
+
+def route_slots(declaration: dict, route: str) -> int:
+    """The agent slots `route` declares; raise `DeclarationError` when it admits none.
+
+    `declaration` is one `validate_declaration` already accepted. An absent
+    route is `route_undeclared`; an `unsupported` one is `declared_unsupported`.
+    """
+    entry = declaration["routes"].get(route)
+    if entry is None:
+        raise DeclarationError("route_undeclared", route)
+    if entry["support"] == "unsupported":
+        raise DeclarationError("declared_unsupported", route)
+    return entry["agent_slots"]
