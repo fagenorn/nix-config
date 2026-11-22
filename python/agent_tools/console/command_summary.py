@@ -27,7 +27,9 @@ quote or here-document, a redirection without a target, a here-document body tha
 expanded program word, and the programs `if then else elif fi for while until do done case esac select
 function eval source . { } [[ ]]`.
 
-Standard input that reaches a shell, an interpreter (`python`, `node`, `perl`, `ruby`) or `ssh` from a
+Standard input that reaches a shell (`sh bash zsh dash ksh fish tcsh csh ash mksh` and kin, `busybox ash`
+included through its wrapper), an interpreter (`python`, `node`, `perl`, `ruby`, `php`, `lua`, `bun`, `irb`
+and the like, with a version or debug suffix) or `ssh` from a
 here-document, a here-string or a pipe is a script it runs, whatever options it is given (a shell with `-c`
 code and no `s` in its short options is the one exception); a pipe showing no text, or a file redirection,
 into one is refused. Every here-document and here-string body is scanned for outside paths, whoever reads it.
@@ -61,9 +63,13 @@ _CLUSTER_SIGNED = re.compile(r"[-+][A-Za-z]+")
 _COMMA_COLON = re.compile(r"[,:]")
 _GLUE = re.compile(r"[^A-Za-z0-9_.+-]")
 _EXTENSION = re.compile(r"[A-Za-z0-9]{1,8}")
-_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
-_CODE_FLAG = {"python": "c", "pypy": "c", "node": "e", "nodejs": "e", "perl": "e", "ruby": "e", "php": "r"}
-_INTERPRETER_NAME = re.compile(r"(python|pypy|node|nodejs|perl|ruby|php)(?:[0-9]+(?:\.[0-9]+)*)?")
+_SHELLS = frozenset("sh bash zsh dash ksh fish tcsh csh ash mksh pdksh lksh rbash rksh rzsh yash posh elvish "
+                    "xonsh nu nushell".split())
+_CODE_FLAG = {"python": "c", "pypy": "c", "node": "e", "nodejs": "e", "perl": "e", "ruby": "e", "php": "r",
+              "lua": "e", "luajit": "e", "bun": "e", "irb": "e", "julia": "e", "rscript": "e", "tclsh": "",
+              "deno": "", "osascript": "e"}
+_INTERPRETERS = frozenset(_CODE_FLAG)
+_VERSIONED_NAME = re.compile(r"([A-Za-z]+)(?:[-_]?[0-9][0-9._]*(?:-?dbg|[dmtu])?|-dbg)")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
 _COPIERS = frozenset({"cp", "mv", "ln", "install"})
 _READING_REDIRECTS = frozenset({"<", "<>", "<&"})
@@ -334,14 +340,22 @@ def _is_interpreter(word):
     return _program_kind(word)[0] == "interpreter" or posixpath.basename(word) == "ssh"
 
 
+def _interpreter_name(program):
+    """The table name of a shell or interpreter program (a version or debug suffix removed), else None."""
+    name = posixpath.basename(program).lower()
+    if name not in _SHELLS and name not in _INTERPRETERS:
+        versioned = _VERSIONED_NAME.fullmatch(name)
+        name = versioned.group(1) if versioned else name
+    return name if name in _SHELLS or name in _INTERPRETERS else None
+
+
 def _program_kind(program):
-    name = posixpath.basename(program)
+    name = _interpreter_name(program)
     if name in _SHELLS:
         return "interpreter", "c"
-    named = _INTERPRETER_NAME.fullmatch(name)
-    if named:
-        return "interpreter", _CODE_FLAG[named.group(1)]
-    return name, ""
+    if name is not None:
+        return "interpreter", _CODE_FLAG[name]
+    return posixpath.basename(program), ""
 
 
 class _Reader:
@@ -446,7 +460,7 @@ class _Reader:
     def code_only(name, rest):
         """True for a shell given a `-c` code argument and no `s` in any of its short option words: the
         only interpreter whose standard input is not a script it runs (rule 1 of ADR-console-105 D6)."""
-        if posixpath.basename(name) not in _SHELLS:
+        if _interpreter_name(name) not in _SHELLS:
             return False
         options = [item.word.value for item in rest if _CLUSTER_SIGNED.fullmatch(item.word.value)]
         return (any(_Reader.code_flag(name, "c", value) for value in options)
@@ -532,9 +546,11 @@ class _Reader:
 
     @staticmethod
     def code_flag(program, flag, value):
+        if not flag:
+            return False
         if value == f"-{flag}" or (_CLUSTER.fullmatch(value) and flag in value[1:]):
             return True
-        return posixpath.basename(program) == "node" and value == "--eval"
+        return _interpreter_name(program) in ("node", "nodejs", "bun") and value == "--eval"
 
     @staticmethod
     def classify_sed(arguments):
