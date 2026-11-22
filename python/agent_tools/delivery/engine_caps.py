@@ -1,11 +1,10 @@
 """Size caps on the engine, measured from the files it is given (#1513).
 
-Caps: core 600 lines; engine package 4000 lines (the core and every module
-that `engine.py`, `engine_*.py` or what they import reach, tests excluded);
-25 graders of at most 40 source lines each; 40 steps per procedure (group
+Caps: core 600 lines; engine package 4000 lines (raised by the owner's
+amendment on issue 1496; the core and every module that `engine.py`,
+`engine_*.py` or what they import reach, tests excluded); 25 graders of at most 40 source lines each; 40 steps per procedure (group
 members included); 8192 bytes per prompt file. Lines are physical lines, blank
-and comment lines included. Raising a cap is a reviewed change of its number; the package cap rose from
-2500 to 4000 by the owner amendment on issue 1496.
+and comment lines included. Raising a cap is a reviewed change of its number.
 """
 
 from __future__ import annotations

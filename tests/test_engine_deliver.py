@@ -439,7 +439,7 @@ class RefusalTest(unittest.TestCase):
                                                inputs=("issue", "repo"))),
             "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
             "a mutating decide step": ("marked mutates", mutating_decide),
-            "an agent step": ("agent", shipped),
+            "a group step": ("group", shipped),
             "no deliver.json": ("deliver.json", empty),
         }
         for name, (word, build) in cases.items():
