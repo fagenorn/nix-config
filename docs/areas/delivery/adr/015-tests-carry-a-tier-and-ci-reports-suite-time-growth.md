@@ -5,7 +5,7 @@
 
 ## Context
 
-Test tiers were implicit: every test sat in one recipe or another with no name for why. The suite's times were kept only to order starts, and CI recorded no times, so a pull request that added a minute to the suite said nothing about it. The suite's parallel wall time moves from 7.9 to 11.6 minutes between runners with the same members ([the measurements](../../../archive/agent-workflow-tests-time-2026-11-17.md)), so the wall alone cannot show growth.
+Test tiers were implicit: every test sat in one recipe or another with no name for why. The suite's times were kept only to order starts, and CI recorded no times, so a pull request that added a minute to the suite said nothing about it. The suite's parallel wall time moves from 7.9 to 11.6 minutes between runners with the same members ([the measurements](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/docs/archive/agent-workflow-tests-time-2026-11-17.md)), so the wall alone cannot show growth.
 
 ## Decision
 

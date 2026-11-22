@@ -1,7 +1,7 @@
 # ADR-release-001 — Attempts are the transaction core's first consumer, ship-release second
 
 - **Status:** superseded by ADR-release-002
-- **Decided in:** #117 (the [attempt-lifecycle design](../../../../.agents/artifacts/specs/2026-09-20-issue-117-attempt-lifecycle-first-consumer-design.md)), #123, #125
+- **Decided in:** #117 (the [attempt-lifecycle design](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/.agents/artifacts/specs/2026-09-20-issue-117-attempt-lifecycle-first-consumer-design.md)), #123, #125
 
 ## Context
 

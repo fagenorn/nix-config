@@ -29,7 +29,7 @@ Transport: the `gh api` calls, `ForgeError` and its transport class (issue 740),
 server-time read (D5) are in `agent_tools.system.forge_api`; this module only calls them.
 """
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -204,7 +204,8 @@ def end(slug: str, issue: int, of: int, reason: str) -> int:
 
 def write(slug: str, issue: int, kind: str, fields: Mapping[str, str], sentence: str,
           match: Mapping[str, str], extra: str = "",
-          associations: Collection[str] | None = None) -> WriteResult:
+          associations: Collection[str] | None = None,
+          accept: Callable[[Marker], bool] | None = None) -> WriteResult:
     """Post a marker and settle contention for it (D2).
 
     `match` must be contained in `fields` (ValueError otherwise, before anything is posted).
@@ -212,11 +213,15 @@ def write(slug: str, issue: int, kind: str, fields: Mapping[str, str], sentence:
     of `kind` matching `match` in the re-read plus this write's own comment. A loser deletes
     its own comment and reports the smallest other contested marker. One post, at most one
     delete, no retry. With `associations` the re-read is `list_markers(slug, issue,
-    associations)`; the own comment counts whatever its association.
+    associations)`; the own comment counts whatever its association. With `accept`, only the
+    markers it admits are contested, so a line the caller's reader would reject never wins; this
+    write's own marker must satisfy it (ValueError otherwise, before anything is posted).
     """
     if any(fields.get(k) != v for k, v in match.items()):
         raise ValueError("match pairs must be contained in the marker's fields")
     body = render(kind, fields, sentence, extra)
+    if accept is not None and not accept(parse({"id": 0, "body": body, "updated_at": "1970-01-01T00:00:00Z"})):
+        raise ValueError("the marker to write is not one `accept` admits")
     posted = _posted(slug, issue, body)
     own_id = posted["id"]
     reread = list_markers(slug, issue, associations)
@@ -224,7 +229,7 @@ def write(slug: str, issue: int, kind: str, fields: Mapping[str, str], sentence:
         own = parse({"id": own_id, "body": body,
                      "updated_at": posted.get("updated_at") or "1970-01-01T00:00:00Z"})
         reread = sorted([*reread, own], key=lambda m: m.comment_id)
-    contested = contest(reread, kind, match)
+    contested = [m for m in contest(reread, kind, match) if accept is None or accept(m)]
     if contested and contested[0].comment_id == own_id:
         return WriteResult(True, own_id, contested[0])
     delete(slug, own_id)
