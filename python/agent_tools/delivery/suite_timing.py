@@ -81,8 +81,12 @@ class Comparison:
 
 
 def _is_number(value: object) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value) and value >= 0)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except OverflowError:  # an integer too large to be a float is not a finite number
+        return False
 
 
 def load_report(path: Path) -> dict:

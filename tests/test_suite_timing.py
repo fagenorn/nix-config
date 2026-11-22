@@ -214,6 +214,35 @@ class CommandTest(unittest.TestCase):
                 if not extra:
                     self.assertTrue(result.stderr.startswith("suite-timing: "), result.stderr)
 
+    def test_an_integer_too_large_for_a_float_is_a_bad_report_not_a_crash(self):
+        huge = "1" + "0" * 400
+        text = (f'{{"version": 1, "member_seconds": {huge}, "timings": '
+                '[{"member": "tests/test_a.py", "seconds": 30.0}]}')
+        slow = (f'{{"version": 1, "member_seconds": 30.0, "timings": '
+                f'[{{"member": "tests/test_a.py", "seconds": {huge}}}]}}')
+        good = self.write("good.json", report(BASE))
+        for label, content in {"member_seconds": text, "seconds": slow}.items():
+            with self.subTest(label):
+                bad = self.write("bad.json", content)
+                as_base = self.run_compare(good, bad)
+                self.assertEqual(as_base.returncode, 0, as_base.stderr)
+                self.assertEqual(as_base.stdout.splitlines()[0], NO_BASELINE)
+                self.assertTrue(as_base.stderr.startswith("suite-timing: base: "), as_base.stderr)
+                self.assertNotIn("Traceback", as_base.stderr)
+                as_head = self.run_compare(bad, good)
+                self.assertEqual(as_head.returncode, 2, as_head.stderr)
+                self.assertEqual(as_head.stdout, "")
+                self.assertTrue(as_head.stderr.startswith("suite-timing: "), as_head.stderr)
+                self.assertNotIn("Traceback", as_head.stderr)
+
+    def test_a_large_integer_that_fits_a_float_compares_without_overflow(self):
+        big = 10 ** 300
+        make = lambda: {"version": 1, "member_seconds": big, "timings": [
+            {"member": "tests/test_a.py", "seconds": big}]}
+        comparison = compare(make(), make())
+        self.assertEqual(comparison.factor, 1.0)
+        self.assertEqual(comparison.growth, 0.0)
+
 
 class CompatibilityTest(unittest.TestCase):
     def test_the_runners_report_is_a_valid_head(self):
