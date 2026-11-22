@@ -46,6 +46,7 @@
   "resolve-project": null,
   "skill-lint": null,
   "sprint": null,
+  "standards-lint": null,
   "verified-tree": null,
   "verify-pending": null,
   "verify-slot": null
