@@ -64,6 +64,15 @@ class ReadResultTest(unittest.TestCase):
             with self.subTest(stdout=stdout):
                 self.assertEqual(read_result(stdout), nothing)
 
+    def test_nesting_too_deep_to_parse_reads_as_nothing(self):
+        nothing = Reading(None, None, [], None, None, 0, dict(ZERO_TOKENS), 0)
+        self.assertEqual(read_result(b"[" * 100000), nothing)
+
+    def test_an_integer_too_large_for_a_float_reads_as_an_invalid_measurement(self):
+        huge = b"1" + b"0" * 400
+        reading = read_result(b'{"duration_ms": ' + huge + b', "total_cost_usd": ' + huge + b"}")
+        self.assertEqual((reading.wall_seconds, reading.spend_usd), (None, 0))
+
     def test_invalid_measurements_read_as_zero(self):
         reading = read_result(raw(num_turns=True, total_cost_usd=-1, duration_ms=-5,
                                   usage={"input_tokens": "3"}))

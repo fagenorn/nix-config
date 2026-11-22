@@ -136,7 +136,10 @@ def _count(value: object) -> int:
 def _amount(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return value if math.isfinite(value) and value >= 0 else None
+    try:
+        return value if math.isfinite(value) and value >= 0 else None
+    except OverflowError:
+        return None
 
 
 def read_result(stdout: bytes) -> Reading:
@@ -144,7 +147,7 @@ def read_result(stdout: bytes) -> Reading:
     try:
         document = json.loads(stdout.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
                               parse_constant=reject_nonfinite_literal)
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         document = None
     if not isinstance(document, dict):
         return Reading(None, None, [], None, None, 0, dict.fromkeys(TOKEN_COUNTS, 0), 0)
