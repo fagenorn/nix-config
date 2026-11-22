@@ -34,9 +34,10 @@ import os
 import re
 import secrets
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import (
     parse_rfc3339_utc,
@@ -322,3 +323,103 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
     _write_result(path, result)
     append_event(run_dir, event)
     return path
+
+
+def replay(events_path: Path) -> list[dict]:
+    """The validated events of an event file, in order.
+
+    Every segment ended by a newline is a line; a last segment with no newline
+    is a write cut short and is dropped whatever it holds. A kept line that is
+    not strict JSON or not a valid event is a `LedgerError` naming its line.
+    """
+    events_path = Path(events_path)
+    try:
+        data = events_path.read_bytes()
+    except OSError as error:
+        raise LedgerError(f"cannot read {events_path.name}: {error}") from error
+    events = []
+    for number, part in enumerate(data.split(b"\n")[:-1], start=1):
+        try:
+            loaded = json.loads(part.decode("utf-8"),
+                                object_pairs_hook=reject_duplicate_keys,
+                                parse_constant=reject_nonfinite_literal)
+            events.append(validate_event(loaded))
+        except (ValueError, LedgerError) as error:
+            raise LedgerError(f"{events_path.name} line {number}: {error}") from error
+    return events
+
+
+@dataclass(frozen=True)
+class RunState:
+    """What a run's recorded events say it is doing; the console reads it too."""
+
+    run: str
+    project: str
+    issue: int
+    stage: str | None
+    step: str | None
+    wait: dict | None
+    stop: dict | None
+    done: bool
+    last_event: str | None
+    process: dict | None
+    alive: bool
+
+    def as_json(self) -> dict:
+        return {"run": self.run, "project": self.project, "issue": self.issue,
+                "stage": self.stage, "step": self.step, "wait": self.wait,
+                "stop": self.stop, "done": self.done, "last_event": self.last_event,
+                "process": self.process, "alive": self.alive}
+
+
+def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
+         alive: Callable[[int, str], bool]) -> RunState:
+    """Derive a run's state from its events in one pass; no file, clock or process.
+
+    `process` is the last recorded process whose step visit has no stored
+    result, and `alive` is the probe's answer for it, whatever the stop or done
+    state: reading those first is the caller's concern.
+    """
+    stage = step = last_event = None
+    wait = stop = process = None
+    done = False
+    for event in events:
+        kind = event["event"]
+        last_event = event["at"]
+        if kind == "step_entered":
+            stage, step = event["stage"], event["step"]
+        elif kind == "wait_started":
+            wait = {"wait": event["wait"], "since": event["at"], "until": event["until"]}
+        elif kind == "wait_ended":
+            if wait is not None and wait["wait"] == event["wait"]:
+                wait = None
+        elif kind == "stop_reached":
+            stop = {"name": event["stop"], "need": event["need"]}
+        elif kind == "run_continued":
+            wait = stop = None
+        elif kind == "run_done":
+            done = True
+        elif kind == "process_started":
+            process = {"pid": event["pid"], "started": event["started"],
+                       "step": event["step"], "visit": event["visit"]}
+        elif kind == "result_stored":
+            if process is not None and process["step"] == event["step"] \
+                    and process["visit"] == event["visit"]:
+                process = None
+    running = alive(process["pid"], process["started"]) if process is not None else False
+    return RunState(run=run["run"], project=run["project"], issue=run["issue"],  # type: ignore[arg-type]
+                    stage=stage, step=step, wait=wait, stop=stop, done=done,
+                    last_event=last_event, process=process, alive=running)
+
+
+def process_alive(pid: int, started: str) -> bool:
+    """Whether `pid` names a live process (`started` is kept for a later check)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True

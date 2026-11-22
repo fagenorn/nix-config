@@ -232,5 +232,172 @@ class ResultOrderTest(unittest.TestCase):
                 self.assertNotIn(module.split(".")[0], ("subprocess", "socket"))
 
 
+FIXTURES = REPO_ROOT / "tests/fixtures/engine"
+RUN = {"run": "1511-20261121T160231Z-a1b2", "project": "example/project", "issue": 1511}
+ORPHAN_PROCESS = {"pid": 4343, "started": "2026-11-21T16:03:01Z", "step": "draft", "visit": 1}
+STOP = {"name": "needs-owner", "need": "owner-decision"}
+
+
+def live(pid, started):
+    return True
+
+
+def dead(pid, started):
+    return False
+
+
+def never(pid, started):
+    raise AssertionError("probe called")
+
+
+def fixture_lines(name: str) -> list[bytes]:
+    return (FIXTURES / name).read_bytes().splitlines(keepends=True)
+
+
+def state(name: str, probe, *, extra: bytes = b"", lines: list[bytes] | None = None):
+    data = b"".join(lines) if lines is not None else (FIXTURES / name).read_bytes()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "events.jsonl"
+        path.write_bytes(data + extra)
+        return engine_ledger.fold(RUN, engine_ledger.replay(path), probe)
+
+
+def expected(**members) -> dict:
+    return {"run": RUN["run"], "project": RUN["project"], "issue": RUN["issue"], **members}
+
+
+class FoldTableTest(unittest.TestCase):
+    def test_each_recorded_run_folds_to_its_expected_state(self):
+        rows = [
+            ("running.jsonl", live, expected(
+                stage="setup", step="scope", wait=None, stop=None, done=False,
+                last_event="2026-11-21T16:02:36Z",
+                process={"pid": 4242, "started": "2026-11-21T16:02:36Z", "step": "scope",
+                         "visit": 1}, alive=True)),
+            ("running.jsonl", dead, expected(
+                stage="setup", step="scope", wait=None, stop=None, done=False,
+                last_event="2026-11-21T16:02:36Z",
+                process={"pid": 4242, "started": "2026-11-21T16:02:36Z", "step": "scope",
+                         "visit": 1}, alive=False)),
+            ("waiting.jsonl", never, expected(
+                stage="building", step="draft",
+                wait={"since": "2026-11-21T16:03:02Z", "until": "2026-11-21T18:00:00Z",
+                      "wait": "usage-limit"},
+                stop=None, done=False, last_event="2026-11-21T16:03:02Z", process=None,
+                alive=False)),
+            ("stopped.jsonl", never, expected(
+                stage="setup", step="scope", wait=None, stop=STOP, done=False,
+                last_event="2026-11-21T16:02:41Z", process=None, alive=False)),
+            ("continued.jsonl", never, expected(
+                stage="building", step="draft", wait=None, stop=None, done=False,
+                last_event="2026-11-21T16:09:01Z", process=None, alive=False)),
+            ("done.jsonl", never, expected(
+                stage="landing", step="children", wait=None, stop=None, done=True,
+                last_event="2026-11-21T16:21:00Z", process=None, alive=False)),
+            ("orphan.jsonl", live, expected(
+                stage="building", step="draft", wait=None, stop=STOP, done=False,
+                last_event="2026-11-21T16:05:00Z", process=ORPHAN_PROCESS, alive=True)),
+            ("orphan.jsonl", dead, expected(
+                stage="building", step="draft", wait=None, stop=STOP, done=False,
+                last_event="2026-11-21T16:05:00Z", process=ORPHAN_PROCESS, alive=False)),
+        ]
+        for fixture, probe, want in rows:
+            with self.subTest(fixture=fixture, probe=probe.__name__):
+                got = engine_ledger.fold(RUN, engine_ledger.replay(FIXTURES / fixture), probe)
+                self.assertEqual(got.as_json(), want)
+
+    def test_an_open_process_stays_reported_after_done_and_after_another_steps_result(self):
+        orphan = fixture_lines("orphan.jsonl")
+        done_state = state("", live, lines=orphan,
+                           extra=b'{"at":"2026-11-21T16:06:00Z","event":"run_done"}\n')
+        self.assertIs(done_state.done, True)
+        self.assertEqual(done_state.process, ORPHAN_PROCESS)
+        self.assertIs(done_state.alive, True)
+        other_result = fixture_lines("stopped.jsonl")[2]
+        other = state("", live, lines=orphan[:2] + [other_result] + orphan[2:])
+        self.assertEqual(other.process, ORPHAN_PROCESS)
+        self.assertIs(other.alive, True)
+
+    def test_a_continued_run_closes_its_open_wait(self):
+        folded = state("waiting.jsonl", never,
+                       extra=b'{"at":"2026-11-21T16:30:00Z","event":"run_continued"}\n')
+        self.assertIsNone(folded.wait)
+        self.assertEqual(folded.last_event, "2026-11-21T16:30:00Z")
+
+    def test_no_events_fold_to_an_empty_state(self):
+        folded = engine_ledger.fold(RUN, [], never)
+        for member in ("stage", "step", "wait", "stop", "last_event", "process"):
+            self.assertIsNone(getattr(folded, member), member)
+        self.assertIs(folded.done, False)
+        self.assertIs(folded.alive, False)
+
+    def test_the_fold_reads_no_file_and_no_clock(self):
+        events = engine_ledger.replay(FIXTURES / "orphan.jsonl")
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the fold touched a file, process or clock")
+
+        with mock.patch("builtins.open", refuse), mock.patch("os.open", refuse), \
+                mock.patch("os.kill", refuse), mock.patch("time.time", refuse):
+            folded = engine_ledger.fold(RUN, events, live)
+        self.assertEqual(folded.as_json(), expected(
+            stage="building", step="draft", wait=None, stop=STOP, done=False,
+            last_event="2026-11-21T16:05:00Z", process=ORPHAN_PROCESS, alive=True))
+
+
+class ReplayTest(unittest.TestCase):
+    def test_a_file_cut_mid_line_folds_like_the_file_without_that_line(self):
+        stopped = (FIXTURES / "stopped.jsonl").read_bytes()
+        torn = (FIXTURES / "torn.jsonl").read_bytes()
+        self.assertTrue(torn.startswith(stopped))
+        self.assertFalse(torn.endswith(b"\n"))
+        self.assertEqual(engine_ledger.replay(FIXTURES / "torn.jsonl"),
+                         engine_ledger.replay(FIXTURES / "stopped.jsonl"))
+        self.assertEqual(
+            engine_ledger.fold(RUN, engine_ledger.replay(FIXTURES / "torn.jsonl"), live),
+            engine_ledger.fold(RUN, engine_ledger.replay(FIXTURES / "stopped.jsonl"), live))
+
+    def test_a_complete_last_line_without_a_newline_is_dropped(self):
+        folded = state("stopped.jsonl", never,
+                       extra=b'{"at":"2026-11-21T16:09:00Z","event":"run_continued"}')
+        self.assertEqual(folded.stop, STOP)
+
+    def test_a_malformed_middle_line_is_refused(self):
+        first, second = fixture_lines("stopped.jsonl")[:2]
+        bad_lines = [
+            b"not json\n",
+            b'{"at":"2026-11-21T16:02:31Z","event":"bogus"}\n',
+            b'{"at":"2026-11-21T16:02:31Z","event":"step_entered","stage":"setup",'
+            b'"step":"scope","step":"scope","visit":1}\n',
+        ]
+        for bad in bad_lines:
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "events.jsonl"
+                path.write_bytes(first + bad + second)
+                with self.assertRaises(LedgerError) as caught:
+                    engine_ledger.replay(path)
+                self.assertIn("line 2", str(caught.exception))
+
+    def test_an_empty_file_is_no_events_and_an_absent_file_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            with self.assertRaises(LedgerError):
+                engine_ledger.replay(path)
+            path.write_bytes(b"")
+            self.assertEqual(engine_ledger.replay(path), [])
+
+
+class ProbeTest(unittest.TestCase):
+    def test_process_alive_reads_os_kill(self):
+        self.assertIs(engine_ledger.process_alive(os.getpid(), ""), True)
+        self.assertIs(engine_ledger.process_alive(0, ""), False)
+        self.assertIs(engine_ledger.process_alive(-1, ""), False)
+        for error, answer in ((ProcessLookupError, False), (PermissionError, True),
+                              (OverflowError, False)):
+            with self.subTest(error=error.__name__):
+                with mock.patch("os.kill", side_effect=error):
+                    self.assertIs(engine_ledger.process_alive(4242, ""), answer)
+
+
 if __name__ == "__main__":
     unittest.main()
