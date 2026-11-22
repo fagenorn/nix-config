@@ -504,6 +504,17 @@ class StatusTest(unittest.TestCase):
             self.assertEqual((code, err), (0, ""))
             self.assertEqual(json.loads(out)["run"], RUN_ID)
 
+    def test_a_run_json_project_of_the_wrong_type_is_a_refusal_not_a_traceback(self):
+        for project in (["x"], {"a": 1}, 1):
+            for extra in ((), ("--project", "example/project")):
+                with self.subTest(project=project, extra=extra), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    odd = sibling_run(tmp, "1511-20261122T090000Z-zzzz", project=project)
+                    home_with(tmp, RUN_FIXTURE, odd)
+                    result = run_status(tmp, "1511", *extra)
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+                    self.assertEqual(len(result.stderr.splitlines()), 1)
+
     def test_a_bad_status_argument_is_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
             home_with(tmp, RUN_FIXTURE)

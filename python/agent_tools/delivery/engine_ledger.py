@@ -205,6 +205,8 @@ def read_run(run_dir: Path) -> dict:
     document = _strict_load(Path(run_dir) / "run.json")
     if not isinstance(document, dict) or set(document) != set(RUN_MEMBERS):
         raise LedgerError("run.json does not have exactly the run members")
+    if not isinstance(document["project"], str):
+        raise LedgerError("run.json project is not a string")
     return document
 
 
