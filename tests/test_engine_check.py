@@ -619,6 +619,49 @@ class DataFlowTest(unittest.TestCase):
                 dominating = procedure_check.dominators(graph, procedure_check.START)["r"]
                 self.assertNotIn("s1", dominating)
 
+    @staticmethod
+    def _dominating(procedure: dict, reader: str) -> frozenset[str]:
+        graph = procedure_check._data_flow_graph(procedure)
+        return procedure_check.dominators(graph, procedure_check.START)[reader]
+
+    def test_a_no_reply_route_into_a_mutating_step_can_still_lose_its_claim(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        procedure = {
+            "inputs": [], "keep_alive": {"command": "k", "in": []},
+            "stops": {"claim-lost": {"need": "retry", "reenter": "r"}},
+            "steps": [agent("s", {"ok": "m", "no-reply": "m"}),
+                      {"id": "m", "kind": "command", "mutates": True, "on": {"ok": "done"}, "in": []},
+                      agent("r", {"ok": "done"}, ("s.x",))]}
+        graph = procedure_check._data_flow_graph(procedure)
+        self.assertIn(procedure_check.CLAIM_LOST, graph["s#no-reply"])
+        self.assertNotIn("s", self._dominating(procedure, "r"))
+
+    def test_a_step_that_reaches_no_mutating_step_has_no_claim_lost_edge(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        procedure = {
+            "inputs": [], "keep_alive": {"command": "k", "in": []},
+            "stops": {"claim-lost": {"need": "retry", "reenter": "r"}},
+            "steps": [agent("s", {"ok": "done", "no-reply": "m"}),
+                      {"id": "m", "kind": "command", "mutates": True, "on": {"ok": "done"}, "in": []},
+                      agent("r", {"ok": "done"}, ("s.x",))]}
+        graph = procedure_check._data_flow_graph(procedure)
+        self.assertNotIn(procedure_check.CLAIM_LOST, graph["s"])
+        self.assertIn(procedure_check.CLAIM_LOST, graph["s#no-reply"])
+
+    def test_an_exhausted_entry_after_a_no_reply_does_not_credit_the_reply(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = (), **more) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads), **more}
+
+        procedure = {
+            "inputs": [], "stops": {},
+            "steps": [agent("a", {"ok": "done", "no-reply": "a", "exhausted": "reader"}, max_visits=1),
+                      agent("reader", {"ok": "done"}, ("a.x",))]}
+        self.assertNotIn("a", self._dominating(procedure, "reader"))
+
 
 class RoleTest(unittest.TestCase):
     def test_each_role_has_its_agent_file(self):

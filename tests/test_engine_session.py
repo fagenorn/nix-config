@@ -923,6 +923,9 @@ class DeliverLimitTest(unittest.TestCase):
             ("run_done", None, None)])
         (started,) = [e for e in events if e["event"] == "wait_started"]
         self.assertEqual((started["wait"], started["until"]), ("usage-limit", None))
+        (ended,) = [e for e in events if e["event"] == "wait_ended"]
+        self.assertEqual(ended["wait"], "usage-limit")
+        self.assertIsNone(json.loads(self.project.status(1521).stdout)["wait"])
         answered = [e for e in events if e["event"] == "session_answered"]
         self.assertEqual([e["account"] for e in answered], ["p1", "p2"])
         self.assertEqual([e["attempt"] for e in answered], [1, 2])

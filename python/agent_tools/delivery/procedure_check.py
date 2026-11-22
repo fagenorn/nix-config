@@ -704,17 +704,22 @@ def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
     return frozenset(node for node in graph if node in _reach(graph, node))
 
 
-def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
-    """Steps and stops -> where control can go (`START` to the first step), `done` and dead `exhausted` left out.
-
-    A node entering a `mutates` step of a procedure with a `keep_alive` and a `claim-lost` stop also goes to that stop.
-    """
-    members = _members_of(procedure)
-    cyclic = on_cycle(step_graph(procedure))
-    renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
+def _renewal_edges(procedure: dict, graph: dict[str, tuple[str, ...]]) -> None:
+    """Add the `claim-lost` edge to every node of `graph` that enters a `mutates` step, in a procedure that renews."""
+    if "keep_alive" not in procedure or CLAIM_LOST not in procedure["stops"]:
+        return
     changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
     changing |= {item["id"] for item in procedure["steps"]
                  if changing.intersection(m["step"] for m in item.get("members", ()))}
+    for node, targets in graph.items():
+        if changing.intersection(targets) and CLAIM_LOST not in targets:
+            graph[node] = targets + (CLAIM_LOST,)
+
+
+def _control_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """`flow_graph` before the `claim-lost` edges."""
+    members = _members_of(procedure)
+    cyclic = on_cycle(step_graph(procedure))
     graph: dict[str, tuple[str, ...]] = {START: (procedure["steps"][0]["id"],)}
     for item in procedure["steps"]:
         if item["id"] in members:
@@ -724,9 +729,16 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
             if target != "done" and (outcome != EXHAUSTED or item["id"] in cyclic))
     for name, stop in procedure["stops"].items():
         graph[name] = (stop["reenter"],)
-    for node, targets in graph.items():
-        if renews and changing.intersection(targets):
-            graph[node] = targets + (CLAIM_LOST,)
+    return graph
+
+
+def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """Steps and stops -> where control can go (`START` to the first step), `done` and dead `exhausted` left out.
+
+    A node entering a `mutates` step of a procedure with a `keep_alive` and a `claim-lost` stop also goes to that stop.
+    """
+    graph = _control_graph(procedure)
+    _renewal_edges(procedure, graph)
     return graph
 
 
@@ -759,10 +771,15 @@ def _data_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     successor, `s` itself drops the target unless another outcome of `s` maps to it, and every node that
     goes to `s` also goes to `s#no-reply`, `s#no-reply` nodes of other steps included. Those edges are added
     until nothing changes, so the graph does not depend on the order the steps are listed in.
+
+    An `exhausted` entry to such an `s` produces nothing either, and keeps `s`'s earlier result, so the
+    `exhausted` target is reached from the nodes that re-enter `s`, not from `s` itself. The `claim-lost`
+    edges come last, so every node of the finished graph that enters a `mutates` step has one.
     """
-    graph = flow_graph(procedure)
+    graph = _control_graph(procedure)
     cyclic = on_cycle(step_graph(procedure))
     split: dict[str, str] = {}
+    exhausted: dict[str, str] = {}
     for item in procedure["steps"]:
         name, target = item["id"], item.get("on", {}).get(NO_REPLY)
         if item["kind"] != "agent" or name not in graph or target is None or target == "done":
@@ -774,6 +791,11 @@ def _data_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
         graph[node] = (target,)
         if target not in others:
             graph[name] = tuple(t for t in graph[name] if t != target)
+        limit = item["on"].get(EXHAUSTED)
+        if name in cyclic and limit is not None and limit != "done":
+            exhausted[name] = limit
+            if limit not in {t for o, t in item["on"].items() if o not in (NO_REPLY, EXHAUSTED)}:
+                graph[name] = tuple(t for t in graph[name] if t != limit)
     changed = True
     while changed:
         changed = False
@@ -783,6 +805,12 @@ def _data_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
                     targets += (node,)
                     graph[before] = targets
                     changed = True
+    for name, limit in exhausted.items():
+        again = {name, split[name]} | _reach(graph, name) | _reach(graph, split[name])
+        for before in [b for b, targets in graph.items() if name in targets and b in again]:
+            if limit not in graph[before]:
+                graph[before] += (limit,)
+    _renewal_edges(procedure, graph)
     return graph
 
 

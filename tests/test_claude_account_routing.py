@@ -152,11 +152,12 @@ class LauncherCase(unittest.TestCase):
         return "http://127.0.0.1:%d" % listener.getsockname()[1]
 
     def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None,
-                     client=None):
+                     client=None, prelude=None):
         """`claude-account run` from a fresh copy of the mod, as a finished process.
 
         `without_curl_and_jq` points the copy's CURL and JQ at paths that do not exist; `client` is the
-        program started as claude (default: `env`, which prints its environment)."""
+        program started as claude (default: `env`, which prints its environment); `prelude` is shell text run
+        first by the process that then becomes the launcher, so its `$$` is the launcher's pid."""
         copy = Path(tempfile.mkdtemp(dir=self.root)) / "accounts"
         shutil.copytree(ACCOUNTS, copy)
         script = copy / "bin" / "claude-account"
@@ -178,13 +179,16 @@ class LauncherCase(unittest.TestCase):
         child = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
         child.update(HOME=str(home), CLAUDE_ACCOUNTS_DIR=str(self.root / "accounts-state"),
                      CLAUDE_BIN=client or shutil.which("env"), **{**self.switch, **(env or {})})
-        return subprocess.run([shutil.which("bash"), str(script), "run"], cwd=work, env=child,
+        argv = [shutil.which("bash"), str(script), "run"]
+        if prelude is not None:
+            argv = [argv[0], "-c", prelude + '; exec "$0" "$1" run', argv[0], str(script)]
+        return subprocess.run(argv, cwd=work, env=child,
                               capture_output=True, text=True, timeout=TIMEOUT, check=False)
 
     def launch(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None,
-               client=None):
+               client=None, prelude=None):
         """The environment the stand-in claude printed; the launch must succeed silently."""
-        completed = self.run_launcher(proxy_url, env, substitute, without_curl_and_jq, console_url, client)
+        completed = self.run_launcher(proxy_url, env, substitute, without_curl_and_jq, console_url, client, prelude)
         self.assertEqual((completed.returncode, completed.stderr), (0, ""))
         return dict(line.split("=", 1) for line in completed.stdout.splitlines() if "=" in line)
 
@@ -605,6 +609,33 @@ class ProfileChoiceTest(LauncherCase):
         self.assertFalse(self.answer.exists())
         self.assertEqual(self.console_requests, [])
 
+    def test_a_valid_leap_day_all_out_time_is_answered(self):
+        self.profile("a", True, self.now)
+        url = self.console(b'{"all_out":true,"profile":null,"resumes_at":"2032-02-29T23:59:59Z"}')
+        done = self.run_launcher(self.closed(), env=self.answer_env(), console_url=url)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (75, "", ""))
+        self.assertEqual(self.answer.read_text(), '{"all_out":true,"resumes_at":"2032-02-29T23:59:59Z"}\n')
+
+    def test_a_symlink_at_the_temporary_answer_name_is_never_followed(self):
+        self.profile("a", True, self.now)
+        victim = self.root / "victim"
+        victim.write_text("kept\n")
+        url = self.console(b'{"profile":"a"}')
+        self.answer = self.root / "answer.json"
+        plant = f'ln -s "{victim}" "{self.answer}.tmp.$$"'
+        environment = self.launch(self.closed(), {"CLAUDE_ACCOUNT_ANSWER": str(self.answer)}, console_url=url,
+                                  prelude=plant)
+        self.assertEqual(self.chosen(environment), self.path("a"))
+        self.assertEqual(victim.read_text(), "kept\n")
+        self.assertEqual(self.answer.read_text(), '{"account":"a"}\n')
+
+    def test_a_caller_exported_answer_file_variable_is_left_alone(self):
+        self.profile("a", True, self.now)
+        url = self.console(b'{"profile":"a"}')
+        environment = self.launch(self.closed(), self.answer_env(ANSWER_FILE="/caller/value"), console_url=url)
+        self.assertEqual(environment.get("ANSWER_FILE"), "/caller/value")
+        self.assertEqual(self.answer.read_text(), '{"account":"a"}\n')
+
     def test_the_client_never_inherits_the_answer_path(self):
         self.profile("a", True, self.now)
         with self.subTest("loop"):
@@ -633,7 +664,12 @@ class ProfileChoiceTest(LauncherCase):
     def test_a_malformed_all_out_body_falls_back(self):
         self.profile("a", True, self.now)
         self.profile("b", True, self.now - 100)
-        bodies = (b'{"all_out":true,"profile":null,"resumes_at":"soon"}', b'{"all_out":true}')
+        bodies = (b'{"all_out":true,"profile":null,"resumes_at":"soon"}', b'{"all_out":true}',
+                  *(b'{"all_out":true,"profile":null,"resumes_at":"%s"}' % at.encode() for at in (
+                      "2030-02-31T12:00:00Z", "2030-02-29T12:00:00Z", "2030-04-31T12:00:00Z",
+                      "2030-13-01T12:00:00Z", "2030-00-10T12:00:00Z", "2030-01-00T12:00:00Z",
+                      "2030-01-01T24:00:00Z", "2030-01-01T12:60:00Z", "2030-01-01T12:00:60Z",
+                      "0000-01-01T12:00:00Z")))
         for body in bodies:
             with self.subTest(body=body):
                 url = self.console(body, b'{"excluded":[]}')
