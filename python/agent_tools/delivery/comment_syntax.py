@@ -657,6 +657,9 @@ class _JavaScript(_Scan):
             postfix = not self.regex_allowed()
             self.adv(2)
             self.prev = "str" if postfix else c
+        elif c == "!" and not self.regex_allowed() and self.text[self.i + 1:self.i + 2] != "=":
+            self.adv(1)
+            self.prev = "str"
         elif match := _WORD.match(self.text, self.i):
             self.adv(match.end() - self.i)
             self.prev = match.group()

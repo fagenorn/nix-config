@@ -292,6 +292,21 @@ class CommentSyntaxTest(unittest.TestCase):
                 self.assertEqual(
                     comment_syntax.blocks("a.js", text), (Block(1, 1, ("// TODO",), False),))
 
+    def test_a_typescript_non_null_assertion_before_a_division_is_not_a_regex(self):
+        for text in (
+            "const half = value! / 2; // TODO\n",
+            "const half = (a + b)! / 2; // TODO\n",
+            "const half = xs[0]! / 2; // TODO\n",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    comment_syntax.blocks("a.ts", text), (Block(1, 1, ("// TODO",), False),))
+
+    def test_a_logical_not_before_a_regex_literal_is_still_a_regex(self):
+        self.assertEqual(
+            comment_syntax.blocks("a.js", "const no = !/a\\/\\/b/.test(s); // TODO\n"),
+            (Block(1, 1, ("// TODO",), False),))
+
     def test_a_jsx_closing_tag_is_not_a_regex(self):
         self.assertEqual(
             comment_syntax.blocks("a.jsx", "const el = <p>ok</p>; // TODO\n"),
