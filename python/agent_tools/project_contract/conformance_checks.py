@@ -787,7 +787,7 @@ def check_never_rise(context: "Context") -> "Outcome":
     history and never the working tree; the authored contract supplies the
     branch. No readable merge base is a failed check, never a pass. A reasoned
     suppression the branch adds is listed in the facts, passed or failed, and
-    never fails the check (ADR-project-contract-018). Each listed line holds its
+    never fails the check (ADR-project-contract-019). Each listed line holds its
     rule, path, line and reason within the fact string bound (`Suppression.text`).
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]

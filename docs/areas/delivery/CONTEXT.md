@@ -74,4 +74,4 @@ One test file or script named in the project's declared agent-workflow test reci
 _Avoid_: test target
 
 **Suppression**:
-The marker that names a rule id and a reason and leaves its line's finding out of that rule's count; without either it is itself a violation (ADR-project-contract-018).
+The marker that names a rule id and a reason and leaves its line's finding out of that rule's count; without either it is itself a violation (ADR-project-contract-019).

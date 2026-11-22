@@ -1,4 +1,4 @@
-# ADR-project-contract-018 — A suppression names its rule and a reason
+# ADR-project-contract-019 — A suppression names its rule and a reason
 
 - **Status:** accepted
 - **Decided in:** #1459 (per #1414, #1412)
