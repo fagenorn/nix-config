@@ -71,3 +71,11 @@ A test run creates what it uses and removes it when it ends, takes no fixed port
 ### B17. Files stay under 1,500 lines
 
 No source or test file is over 1,500 lines. A file already over it may not grow and a file under it may grow up to it, judged against the change's merge base, so a file over the limit stops growing without a hand-set exception. ([decision](https://github.com/fagenorn/nix-config/issues/1422))
+
+### B18. Decision records stay under 1,500 bytes
+
+A decision record is at most 1,500 bytes. A record already over it may not grow, judged against the change's merge base, so a carried record stops growing without a hand-set exception. ([decision](https://github.com/fagenorn/nix-config/issues/1428))
+
+### B19. A decision record is a title and one paragraph
+
+After its title header a decision record holds one paragraph and nothing else: no section heading, no status line, no list, no second paragraph or numbered sub-decision. Each record's breaches are judged against the change's merge base, which carries the records written before the rule; an added record has none to carry. ([decision](https://github.com/fagenorn/nix-config/issues/1428))

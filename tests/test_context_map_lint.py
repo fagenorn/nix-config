@@ -1,12 +1,36 @@
+"""The decision-record rules of `agent_tools.delivery.context_map_lint`.
+
+The suite holds `standard:B18` and `standard:B19` by judging the record
+enforcers of `agent_tools.delivery.context_map_lint` on records built in memory
+and on real git worlds, so the rule index lists this file; the command's own
+findings are pinned beside them.
+"""
+
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery import context_map_lint, never_rise, rule_ids
+from agent_tools.delivery.context_map_lint import (
+    RECORD_ENFORCERS, RECORD_FORM_RULE, RECORD_SIZE_RULE, find_record_form,
+    find_record_size, is_record_migration, is_record_path, record_violations)
+
 
 REPO_ROOT = Path(__file__).parents[1]
 LINTER = REPO_ROOT / "python/agent_tools/delivery/context_map_lint.py"
+BAR = REPO_ROOT / "home/common/agent-skills/standards/the-bar.md"
+
+P = "docs/areas/a/adr/001-a.md"
+H = "# ADR-a-001 — T\n".encode()
+V = never_rise.Violation
+
+MAP = (
+    "## Areas\n| Area | Context file | Gist | governs |\n|---|---|---|---|\n"
+    "| A | [area](areas/a/CONTEXT.md) | x | `docs/CONTEXT-MAP.md` |\n\n"
+    "## Terms\n| Term | Area |\n|---|---|\n| Thing | A |\n")
+AREA = "---\narea: a\nbudget: 200\n---\n\n**Thing**: a term\n"
 
 
 class ContextMapLintTest(unittest.TestCase):
@@ -138,10 +162,153 @@ class ContextMapLintTest(unittest.TestCase):
             stray = self.run_lint(root, context_map, "--other", "true")
             self.assertEqual(stray.returncode, 2)
 
+    def record_tree(self, root, records):
+        """A docs tree whose map and area are clean, holding `records` (path to bytes)."""
+        for relative, content in {
+                "docs/CONTEXT-MAP.md": MAP.encode(),
+                "docs/areas/a/CONTEXT.md": AREA.encode(), **records}.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        return root / "docs/CONTEXT-MAP.md"
+
+    def test_the_command_neither_prints_nor_fails_on_a_form_breach(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            breaching = H + b"\n- **Status:** accepted\n\n## Context\n\n" + b"x" * 2000 + b"\n"
+            context_map = self.record_tree(root, {P: breaching})
+            result = self.run_lint(root, context_map)
+            self.assertEqual(
+                (result.returncode, result.stdout, result.stderr),
+                (0, f"context-map-lint: {root} OK\n", ""))
+
+    def test_a_duplicate_record_number_stays_a_plain_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.record_tree(root, {
+                "docs/areas/a/adr/001-a.md": "# ADR-a-001 — A\n\nOne paragraph.\n".encode(),
+                "docs/areas/a/adr/001-b.md": "# ADR-a-001 — B\n\nOne paragraph.\n".encode()})
+            result = self.run_lint(root, context_map)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("number 001 is already", result.stderr)
+
     def test_source_has_no_policy_discovery(self):
         source = LINTER.read_text(encoding="utf-8")
         for token in ("resolve-project", ".agents/project.json", "find_map(", "docs/CONTEXT-MAP.md"):
             self.assertNotIn(token, source)
+
+
+class RecordFormTest(unittest.TestCase):
+    def test_each_form_breach_yields_a_violation_and_one_paragraph_yields_none(self):
+        rows = {
+            "one paragraph": (H + b"\nOne paragraph.\n", []),
+            "over the cap": (H + b"\n" + b"x" * 1600 + b"\n", [V("B18", P, 3, 1620)]),
+            "heading": (H + b"\n## Context\nPara.\n", [V("B19", P, 3, 1)]),
+            "status line": (H + b"\n- **Status:** accepted\nPara.\n", [V("B19", P, 3, 1)]),
+            "bare status line": (H + b"\n**Status:** accepted\nPara.\n", [V("B19", P, 3, 1)]),
+            "heading under carriage returns": (H + b"\n##\r\nPara.\r\n", [V("B19", P, 3, 1)]),
+            "second paragraph": (H + b"\nOne.\n\nTwo.\n", [V("B19", P, 5, 1)]),
+            "numbered sub-decisions": (
+                H + b"\n1. First choice\n2. Second choice\n", [V("B19", P, 3, 2)]),
+            "setext heading": (H + b"\nContext\n-------\nPara.\n", [V("B19", P, 4, 1)]),
+            "fence": (H + b"\nPara.\n```\ncode\n```\n", [V("B19", P, 4, 2)]),
+            "quote": (H + b"\n> Quoted.\n", [V("B19", P, 3, 1)]),
+            "Formerly in prose": (
+                H + b"\nOne.\n\nSee **Formerly:** ADR-b-001 here.\n", [V("B19", P, 5, 1)]),
+            "Formerly after the paragraph": (
+                H + b"\nOne.\n\n**Formerly:** ADR-b-001\n", [V("B19", P, 5, 1)]),
+        }
+        for name, (content, expected) in rows.items():
+            with self.subTest(name):
+                self.assertEqual(record_violations(P, content), expected)
+
+    def test_the_cap_is_1500_bytes(self):
+        self.assertEqual(record_violations(P, H + b"\n" + b"x" * 1480 + b"\n"), [])
+        self.assertEqual(
+            record_violations(P, H + b"\n" + b"x" * 1481 + b"\n"), [V("B18", P, 3, 1501)])
+
+    def test_a_record_with_no_paragraph_breaches_the_form(self):
+        for name, content in {"header alone": H, "empty": b""}.items():
+            with self.subTest(name):
+                self.assertEqual(record_violations(P, content), [V("B19", P, 1, 1)])
+
+    def test_a_formerly_line_is_not_a_second_paragraph(self):
+        self.assertEqual(
+            record_violations(P, H + b"\n**Formerly:** ADR-b-001\n\nPara.\n"), [])
+
+    def test_only_records_are_judged(self):
+        two_paragraphs = H + b"\n## Context\nOne.\n\nTwo.\n" + b"x" * 2000 + b"\n"
+        others = ["docs/areas/a/CONTEXT.md", "docs/areas/a/adr/README.md", "docs/guides/x.md"]
+        blobs = {path: two_paragraphs for path in others}
+        blobs[P] = H + b"\n- **Status:** accepted\n"
+        snapshot = never_rise.Snapshot("a" * 40, {}, blobs)
+        self.assertEqual(find_record_size(snapshot), [])
+        self.assertEqual(find_record_form(snapshot), [V("B19", P, 3, 1)])
+        self.assertTrue(is_record_path(P))
+        for path in [*others, "docs/areas/a/adr/sub/001-a.md", P + "/x"]:
+            with self.subTest(path):
+                self.assertFalse(is_record_path(path))
+
+    def test_an_over_cap_record_may_shrink_or_hold_but_not_grow(self):
+        def snapshot(size):
+            return never_rise.Snapshot("a" * 40, {}, {P: H + b"\n" + b"x" * size + b"\n"})
+        base = snapshot(1580)
+        for size, expected in ((1580, ()), (1530, ()), (1581, (
+                never_rise.Rise("B18", 1, 1, (V("B18", P, 3, 1601),)),))):
+            with self.subTest(size=size):
+                self.assertEqual(
+                    never_rise.compare(base, snapshot(size), {}, RECORD_ENFORCERS), expected)
+
+    def test_an_added_breach_rises_even_when_another_records_breaches_go(self):
+        b = "docs/areas/a/adr/002-b.md"
+        moved = "docs/areas/b/adr/001-a.md"
+        p_body = b"\n- **Status:** accepted\n\n## Context\n\nPara.\n"
+        p_bytes = H + p_body
+        base = never_rise.Snapshot("a" * 40, {}, {P: p_bytes})
+        b_header = "# ADR-a-002 \u2014 B\n".encode()
+        rise = lambda path, line, count: (never_rise.Rise(  # noqa: E731
+            "B19", 1, 1, (V("B19", path, line, count),)),)
+        rows = {
+            "unchanged": ({P: p_bytes}, {}, ()),
+            "moved": ({moved: p_bytes}, {moved: P}, ()),
+            "migration": ({moved: "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-a-001\n".encode()
+                           + p_body}, {moved: P}, ()),
+            "supersession paired as a rename": (
+                {b: b_header + b"\n- **Status:** accepted\n\n## Context\n\nPara. Superseded.\n"},
+                {b: P}, rise(b, 3, 3)),
+            "a second status line": (
+                {P: H + b"\n- **Status:** accepted\n- **Status:** again\n\n## Context\n\nPara.\n"},
+                {}, rise(P, 3, 4)),
+            "fixed and another added": (
+                {P: H + b"\nOne paragraph.\n", b: b_header + b"\n- **Status:** accepted\nPara.\n"},
+                {}, rise(b, 3, 1)),
+            "deleted and another added": (
+                {b: b_header + b"\n- **Status:** accepted\nPara.\n"}, {}, rise(b, 3, 1)),
+        }
+        for name, (blobs, renamed, expected) in rows.items():
+            with self.subTest(name):
+                branch = never_rise.Snapshot("b" * 40, {}, blobs)
+                self.assertEqual(
+                    never_rise.compare(base, branch, renamed, RECORD_ENFORCERS), expected)
+
+    def test_the_record_rules_are_rules_of_the_bar(self):
+        rules = rule_ids.sections(BAR.read_text(encoding="utf-8"))
+        self.assertIn(RECORD_SIZE_RULE, rules)
+        self.assertIn(RECORD_FORM_RULE, rules)
+
+    def test_a_record_migration_is_an_unchanged_body(self):
+        old = H + b"\nOne paragraph.\n"
+        rows = {
+            "renumbered with a Formerly line": (
+                "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-a-001\n".encode() + b"\nOne paragraph.\n",
+                True),
+            "a blank line added": (old + b"\n", True),
+            "the paragraph amended": (H + b"\nOne paragraph, amended.\n", False),
+            "a line added": (H + b"\nOne paragraph.\nMore.\n", False),
+        }
+        for name, (new, expected) in rows.items():
+            with self.subTest(name):
+                self.assertEqual(is_record_migration(old, new), expected)
 
 
 if __name__ == "__main__":

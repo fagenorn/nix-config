@@ -9,7 +9,8 @@ repository selection or forced colour; and a failed git read is no verdict.
 
 The suite holds `standard:B17`, the 1,500-line size rule, by judging its enforcer
 `agent_tools.delivery.size_lint` against real git worlds, so the rule index lists
-this enforcer.
+this enforcer. `RecordHistoryTest` judges the record enforcers of
+`agent_tools.delivery.context_map_lint` against real git worlds.
 """
 
 import os
@@ -20,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import never_rise, rule_ids, size_lint
+from agent_tools.delivery import context_map_lint, never_rise, rule_ids, size_lint
 from agent_tools.delivery.never_rise import (
     Enforcer, Rise, Snapshot, Violation)
 
@@ -686,6 +687,61 @@ class SizeLintOutputTest(unittest.TestCase):
     def test_the_command_is_a_row_of_the_command_table(self):
         table = (REPO_ROOT / "lib/agent-tools.nix").read_text("utf-8")
         self.assertIn('"size-lint" = "delivery.size_lint";', table)
+
+
+class RecordHistoryTest(unittest.TestCase):
+    P = "docs/areas/a/adr/001-a.md"
+
+    def judge(self, root):
+        return never_rise.judge(root, "main", context_map_lint.RECORD_ENFORCERS, timeout=60)
+
+    def test_an_added_empty_record_breaches_the_form_and_is_listed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "README.md", "x\n")
+            commit_all(root)
+            mark_base(root)
+            write(root, self.P, b"")
+            commit_all(root)
+            verdict = self.judge(root)
+            self.assertEqual(
+                verdict.rises, (Rise("B19", 0, 1, (Violation("B19", self.P, 1, 1),)),))
+            self.assertEqual(context_map_lint.added_records(verdict), [self.P])
+
+    def test_a_guide_moved_into_a_record_is_listed_and_a_moved_record_is_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "docs/guides/old.md",
+                  "# Old guide\n\n- **Status:** draft\nHow the cache warms up after a restart.\n")
+            write(root, self.P, "# ADR-a-001 \u2014 T\n\nOne paragraph about the queue backend choice.\n")
+            commit_all(root)
+            mark_base(root)
+            git(root, "mv", "docs/guides/old.md", "docs/areas/a/adr/002-b.md")
+            (root / "docs/areas/b/adr").mkdir(parents=True)
+            git(root, "mv", self.P, "docs/areas/b/adr/001-a.md")
+            commit_all(root)
+            verdict = self.judge(root)
+            self.assertEqual(
+                context_map_lint.added_records(verdict), ["docs/areas/a/adr/002-b.md"])
+            self.assertEqual(verdict.rises, (Rise("B19", 0, 1, (
+                Violation("B19", "docs/areas/a/adr/002-b.md", 3, 1),)),))
+
+    def test_a_similar_superseding_record_is_judged_and_listed_as_added(self):
+        prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(8))
+        new = "docs/areas/a/adr/002-new.md"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, self.P, "# ADR-a-001 \u2014 Old\n\n- **Status:** accepted\n\n## Context\n\n" + prose)
+            commit_all(root)
+            mark_base(root)
+            git(root, "rm", "-q", self.P)
+            write(root, new, "# ADR-a-002 \u2014 New\n\n- **Status:** accepted\n\n" + prose
+                  + "Superseded by the new backend.\n")
+            commit_all(root)
+            verdict = self.judge(root)
+            self.assertEqual(dict(verdict.renamed), {new: self.P})
+            self.assertEqual(context_map_lint.added_records(verdict), [new])
+            self.assertEqual(verdict.rises, (Rise("B19", 1, 1, (Violation("B19", new, 3, 2),)),))
 
 
 if __name__ == "__main__":

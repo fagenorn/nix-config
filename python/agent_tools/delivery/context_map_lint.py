@@ -11,6 +11,17 @@ unique in their directory, every ADR citation under docs/ resolves, no retired
 four-digit id survives, and the docs root stays clean. Repos on a legacy layout
 have no docs/areas/, so none of that applies to them.
 
+A decision record is a header, an optional `**Formerly:**` line and one
+paragraph of at most 1,500 bytes: no section heading, list, quote, fence,
+status line or second paragraph. B18 (the size) and B19 (the form) are
+per-file violations for the never-rise check, `RECORD_ENFORCERS`, not findings
+of this command, so a run neither prints nor fails on them: the records written
+before the form are carried by the change's merge base, and only a record that
+grows past its base, or that is added, rises. A rename git pairs carries a
+record's violations only as a migration, its body unchanged; a superseding
+record that reuses the old text is judged as a new record. `added_records`
+lists the records a change adds, a migration excluded.
+
 A repository that owns its context-map lint, with its own rules and budgets,
 declares it as the `context-map-lint` entry of its project contract's
 `commands`. The caller that resolved the contract passes that entry's argv
@@ -37,6 +48,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agent_tools.delivery.never_rise import Enforcer, Snapshot, Verdict, Violation
+
 MAP_BUDGET = 150
 AREA_BUDGET_DEFAULT = 200
 
@@ -52,6 +65,18 @@ ADR_FILE_RE = re.compile(r"\A(\d{3})-[a-z0-9][a-z0-9-]*\.md\Z")
 ADR_HEADER_RE = re.compile(r"\A#\s+ADR-([a-z0-9][a-z0-9-]*)-(\d{3})\s+—\s+\S")
 CITATION_RE = re.compile(r"\bADR-([a-z0-9][a-z0-9-]*)-(\d{3})\b")
 RETIRED_ID_RE = re.compile(r"\bADR-\d{4}\b")
+
+RECORD_BYTES_CAP = 1500
+RECORD_SIZE_RULE = "B18"
+RECORD_FORM_RULE = "B19"
+FORMERLY_LINE_RE = re.compile(r"^\*\*Formerly:\*\* ADR-[a-z0-9][a-z0-9-]*-\d{3}\s*$")
+FORM_BREACH_RES = tuple(re.compile(pattern, flags) for pattern, flags in (
+    (r"^ {0,3}#{1,6}(?:[ \t]|$)", 0),
+    (r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?status(?:\*\*|__)?\s*:", re.I),
+    (r"^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)", 0),
+    (r"^ {0,3}(?:=+|-+|(?:[*_][ \t]*){3,})[ \t]*$", 0),
+    (r"^ {0,3}(?:```|~~~)", 0),
+    (r"^ {0,3}>", 0)))
 
 
 def section(text: str, heading: str) -> str | None:
@@ -121,6 +146,103 @@ def area_dirs_agree(areas_dir: Path, areas: dict, rel_map: str, rel, root: Path)
         elif area_dir.name not in claimed:
             errors.append(f"{rel(area_dir)}: area directory has no row in {rel_map}'s Areas table")
     return errors
+
+
+def is_record_path(path: str) -> bool:
+    """True for a repository-relative POSIX path docs/areas/<slug>/adr/<record>.md."""
+    parts = path.split("/")
+    return (len(parts) == 5 and parts[0] == "docs" and parts[1] == "areas"
+            and bool(parts[2]) and parts[3] == "adr" and bool(ADR_FILE_RE.match(parts[4])))
+
+
+def record_lines(content: bytes) -> list[str]:
+    """The record's decoded lines, a trailing carriage return stripped from each."""
+    text = content.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
+def record_body(content: bytes) -> tuple[str, ...]:
+    """The lines from line 2 on that are neither blank nor a Formerly line."""
+    return tuple(line for line in record_lines(content)[1:]
+                 if line.strip() and not FORMERLY_LINE_RE.match(line))
+
+
+def is_record_migration(old: bytes, new: bytes) -> bool:
+    """True when a move left the body alone: only the header, a Formerly line or blanks changed."""
+    return record_body(old) == record_body(new)
+
+
+def form_breaches(content: bytes) -> list[int]:
+    """The 1-based line of each breach of the record form, in line order."""
+    lines = record_lines(content)
+    breaches = {number for number, line in enumerate(lines[1:], 2)
+                if any(pattern.match(line) for pattern in FORM_BREACH_RES)}
+    blocks: list[list[int]] = []
+    previous_blank = True
+    for number, line in enumerate(lines[1:], 2):
+        if not line.strip():
+            previous_blank = True
+            continue
+        if previous_blank:
+            blocks.append([])
+        blocks[-1].append(number)
+        previous_blank = False
+    if blocks and all(FORMERLY_LINE_RE.match(lines[n - 1]) for n in blocks[0]):
+        blocks = blocks[1:]
+    if not blocks:
+        return [1]
+    breaches.update(block[0] for block in blocks[1:])
+    return sorted(breaches)
+
+
+def record_violations(path: str, content: bytes) -> list[Violation]:
+    """The B18 violation, then the B19 violation, of one record; at most one of each."""
+    found = []
+    if len(content) > RECORD_BYTES_CAP:
+        line = content[:RECORD_BYTES_CAP].count(b"\n") + 1
+        found.append(Violation(RECORD_SIZE_RULE, path, line, len(content)))
+    breaches = form_breaches(content)
+    if breaches:
+        found.append(Violation(RECORD_FORM_RULE, path, breaches[0], len(breaches)))
+    return found
+
+
+def _record_violations_of(snapshot: Snapshot, rule: str) -> list[Violation]:
+    return [violation for path in sorted(snapshot.blobs) if is_record_path(path)
+            for violation in record_violations(path, snapshot.blobs[path])
+            if violation.rule == rule]
+
+
+def find_record_size(snapshot: Snapshot) -> list[Violation]:
+    return _record_violations_of(snapshot, RECORD_SIZE_RULE)
+
+
+def find_record_form(snapshot: Snapshot) -> list[Violation]:
+    return _record_violations_of(snapshot, RECORD_FORM_RULE)
+
+
+RECORD_SIZE_ENFORCER = Enforcer(
+    RECORD_SIZE_RULE, find_record_size, per_file=True, carries=is_record_migration)
+RECORD_FORM_ENFORCER = Enforcer(
+    RECORD_FORM_RULE, find_record_form, per_file=True, carries=is_record_migration)
+RECORD_ENFORCERS = (RECORD_SIZE_ENFORCER, RECORD_FORM_ENFORCER)
+
+
+def added_records(verdict: Verdict) -> list[str]:
+    """The records a change adds, a migration (a record moved, its body unchanged) excluded."""
+    listed = []
+    for path in sorted(verdict.added):
+        if not is_record_path(path):
+            continue
+        source = verdict.renamed.get(path)
+        if (source is not None and is_record_path(source)
+                and is_record_migration(*verdict.rename_blobs[path])):
+            continue
+        listed.append(path)
+    return listed
 
 
 def index_records(areas_dir: Path, rel, root: Path) -> tuple[dict[tuple[str, str], Path], list[str]]:
