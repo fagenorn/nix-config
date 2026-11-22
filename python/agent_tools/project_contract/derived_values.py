@@ -19,7 +19,8 @@ already states each of them (ADR-project-contract-014):
   computes from the locked `narHash`.
 
 The module reads files and nothing else: it starts no child process and opens
-no connection. Every helper raises `Underivable` carrying a message that names
+no connection, and it reads each through a nonblocking regular-file open, so a
+FIFO at a source path is refused instead of waited on. Every helper raises `Underivable` carrying a message that names
 its source (`git remote origin`, `git config`, `.github/branch-protection.json`,
 `devenv.lock`, `Nix store`, `platform manifest`) and never an absolute path;
 `derive` is the only function that turns them into violations and it never
@@ -33,9 +34,11 @@ import binascii
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import NamedTuple
 
+from agent_tools.project_contract.agent_platform import read_regular_file
 from agent_tools.system.semver import parse_semver
 
 STORE_DIR = "/nix/store"
@@ -51,7 +54,20 @@ REQUIRED_CHECKS = "/bindings/vcs/merge/required_checks"
 PLATFORM = "/platform"
 POINTERS = (PROJECT_ID, REPO_SLUG, REQUIRED_CHECKS, PLATFORM)
 
+# The files of a tree `derive` reads besides the git config, which only a checkout holds.
+# A scratch export of a pinned commit carries these (`contract_export`) and is given the
+# checkout's origin remote (`adopt_inspection.seed_origin`).
+INPUT_PATHS = (PROTECTION_SOURCE, LOCK_SOURCE, TREE_MANIFEST)
+
 NIX_BASE32 = "0123456789abcdfghijklmnpqrsvwxyz"
+
+
+COMMENT_MARKER = re.compile(r"[ \t][#;]")
+
+
+def read_text(path: Path) -> str:
+    """The text of the regular file at `path`; a FIFO or other kind raises `OSError`, never blocks."""
+    return read_regular_file(path).decode("utf-8")
 
 
 class Derived(NamedTuple):
@@ -110,12 +126,12 @@ def git_config_path(root: Path) -> Path:
         if dot_git.is_dir():
             return dot_git / "config"
         if dot_git.is_file():
-            first = dot_git.read_text(encoding="utf-8").split("\n", 1)[0]
+            first = read_text(dot_git).split("\n", 1)[0]
             if first.startswith("gitdir: "):
                 gitdir = root / first[len("gitdir: "):].strip()
                 commondir = gitdir / "commondir"
                 if commondir.is_file():
-                    common = gitdir / commondir.read_text(encoding="utf-8").strip()
+                    common = gitdir / read_text(commondir).strip()
                     return common / "config"
                 return gitdir / "config"
     except (OSError, UnicodeDecodeError):
@@ -137,12 +153,8 @@ def _value(raw: str) -> str:
     text = raw.strip()
     if text.startswith('"'):
         return text[1:].split('"', 1)[0]
-    cut = len(text)
-    for marker in (" #", " ;"):
-        position = text.find(marker)
-        if position != -1:
-            cut = min(cut, position)
-    return text[:cut].rstrip()
+    marker = COMMENT_MARKER.search(text)
+    return (text[:marker.start()] if marker else text).rstrip()
 
 
 def origin_url(config_text: str) -> str | None:
@@ -168,7 +180,7 @@ def remote_slug(root: Path) -> str:
     """The `owner/repo` of the remote `origin`."""
     path = git_config_path(root)
     try:
-        text = path.read_text(encoding="utf-8")
+        text = read_text(path)
     except (OSError, UnicodeDecodeError):
         raise Underivable(GIT_CONFIG_UNREADABLE) from None
     url = origin_url(text)
@@ -189,14 +201,14 @@ def remote_slug(root: Path) -> str:
 def required_checks(root: Path) -> list[str]:
     """The contexts of the branch protection's required checks, in file order."""
     try:
-        text = (root / PROTECTION_SOURCE).read_text(encoding="utf-8")
+        text = read_text(root / PROTECTION_SOURCE)
     except OSError:
         raise Underivable(f"cannot be derived: {PROTECTION_SOURCE} could not be read") from None
     except UnicodeDecodeError:
         raise Underivable(f"cannot be derived: {PROTECTION_SOURCE} is not valid JSON") from None
     try:
         document = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise Underivable(f"cannot be derived: {PROTECTION_SOURCE} is not valid JSON") from None
     refusal = Underivable(
         f"cannot be derived: {PROTECTION_SOURCE} does not list "
@@ -260,8 +272,8 @@ def platform_range(version: str) -> dict:
 def _manifest_version(tree: Path, where: str) -> str:
     refusal = Underivable(f"cannot be derived: the platform manifest of {where} could not be read")
     try:
-        document = json.loads((tree / TREE_MANIFEST).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        document = json.loads(read_text(tree / TREE_MANIFEST))
+    except (OSError, ValueError, RecursionError):
         raise refusal from None
     version = document.get("platform_version") if isinstance(document, dict) else None
     if parse_semver(version) is None:
@@ -271,14 +283,14 @@ def _manifest_version(tree: Path, where: str) -> str:
 
 def _locked_nar_hash(root: Path) -> str:
     try:
-        text = (root / LOCK_SOURCE).read_text(encoding="utf-8")
+        text = read_text(root / LOCK_SOURCE)
     except OSError:
         raise Underivable(f"cannot be derived: {LOCK_SOURCE} could not be read") from None
     except UnicodeDecodeError:
         raise Underivable(f"cannot be derived: {LOCK_SOURCE} is not valid JSON") from None
     try:
         lock = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise Underivable(f"cannot be derived: {LOCK_SOURCE} is not valid JSON") from None
     try:
         key = lock["nodes"][lock["root"]]["inputs"][LOCK_INPUT]

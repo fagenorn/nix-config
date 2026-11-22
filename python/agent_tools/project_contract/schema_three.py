@@ -148,13 +148,16 @@ def _delete(view: dict, pointer: str) -> None:
 def fill(source: dict, derived: Mapping[str, object]) -> dict:
     """A new dict: `source` with the constants and `derived` values filled and the retired members removed.
 
-    The input is never mutated. Only `project` and `platform` may be created at
+    The input is never mutated. An authored member of `DERIVED` is removed, and written back
+    only from `derived`. Only `project` and `platform` may be created at
     the top level, and only from `derived`; the project id and the platform are
     written even when `bindings` is not an object, the rest of the filling is
     skipped then. The keys of `derived` are members of `DERIVED`.
     """
     view = copy.deepcopy(source)
-    for pointer in RETIRED:
+    # An authored derived value is refused by `refusals`; it is never read as the value, so a
+    # value the repository cannot state stays absent instead of falling back to the authored one.
+    for pointer in RETIRED + DERIVED:
         _delete(view, pointer)
     for pointer in ("/project/id", "/platform"):
         if pointer in derived:

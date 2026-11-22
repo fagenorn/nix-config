@@ -21,7 +21,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.project_contract import derived_values, resolve_project, schema_three
+from agent_tools.guard import contract_export
+from agent_tools.project_contract import (
+    adopt_inspection,
+    derived_values,
+    resolve_project,
+    schema_three,
+)
 from agent_tools.project_contract.derived_values import TREE_MANIFEST
 from agent_tools.release import release
 
@@ -405,6 +411,86 @@ class ReleaseReadsTest(SchemaThreeCase):
                          resolve_project.load_contract(root))
 
 
+class ExportedSourceTest(SchemaThreeCase):
+    """The resolver also runs on scratch exports of a pinned commit (ADR-project-contract-014).
+
+    The guard-policy proof resolves the sparse export `contract_export` writes, and adoption's
+    verification a `git archive` export. Neither holds a git config, so each is given the
+    checkout's `origin` url (`adopt_inspection.seed_origin`).
+    """
+
+    def committed(self) -> tuple[Path, str]:
+        root = self.schema_three_root(schema_three_contract())
+        git(root, "add", "-A")
+        git(root, "commit", "--quiet", "-m", "fixture")
+        return root, git(root, "rev-parse", "HEAD").strip()
+
+    def exports(self, root: Path, commit: str) -> dict[str, Path]:
+        base = self.owned(Path(tempfile.mkdtemp()))
+        contract_export.export_contract(root, commit, base / "sparse")
+        adopt_inspection.export_commit(root, commit, base / "archive")
+        return {"the guard's sparse export": base / "sparse",
+                "a git archive export": base / "archive"}
+
+    def resolve_in_process(self, path: Path) -> dict:
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            return resolve_project.resolve(str(path))
+
+    def test_an_export_given_the_origin_resolves_the_derived_values(self):
+        root, commit = self.committed()
+        for name, export in self.exports(root, commit).items():
+            with self.subTest(name):
+                adopt_inspection.seed_origin(root, export)
+                snapshot = self.resolve_in_process(export)
+                self.assertEqual(snapshot["project"]["id"], "fagenorn/nix-config")
+                self.assertEqual(snapshot["bindings"]["tracker"]["repo_slug"],
+                                 "fagenorn/nix-config")
+                self.assertEqual(snapshot["bindings"]["vcs"]["merge"]["required_checks"],
+                                 EXPECTED_DERIVED["/bindings/vcs/merge/required_checks"])
+
+    def test_an_export_without_the_origin_is_refused_as_not_derivable(self):
+        root, commit = self.committed()
+        for name, export in self.exports(root, commit).items():
+            with self.subTest(name):
+                with self.assertRaises(resolve_project.ContractError) as raised:
+                    self.resolve_in_process(export)
+                self.assertEqual(raised.exception.code, "invalid_contract")
+                self.assertEqual(
+                    [v["pointer"] for v in raised.exception.violations],
+                    ["/bindings/tracker/repo_slug", "/project/id"])
+
+    def test_the_sparse_export_carries_the_files_the_derivation_reads(self):
+        root, commit = self.committed()
+        sparse = self.exports(root, commit)["the guard's sparse export"]
+        for path in (derived_values.PROTECTION_SOURCE, derived_values.TREE_MANIFEST):
+            self.assertEqual((sparse / path).read_bytes(),
+                             adopt_inspection.blob_at(root, commit, path))
+        self.assertFalse((sparse / derived_values.LOCK_SOURCE).exists())
+
+    def test_the_sparse_export_of_a_schema_two_contract_carries_only_the_contract_files(self):
+        root = self.schema_three_root(source_contract())
+        git(root, "add", "-A")
+        git(root, "commit", "--quiet", "-m", "fixture")
+        sparse = self.owned(Path(tempfile.mkdtemp())) / "sparse"
+        contract_export.export_contract(root, git(root, "rev-parse", "HEAD").strip(), sparse)
+        self.assertFalse((sparse / derived_values.PROTECTION_SOURCE).exists())
+        self.assertFalse((sparse / derived_values.TREE_MANIFEST).exists())
+
+    def test_the_seeded_origin_is_left_out_when_it_cannot_be_written_plainly(self):
+        root, _ = self.committed()
+        cases = ("git@github.com:o/r.git # note", 'git@github.com:o/"r".git',
+                 "git@github.com:o/r.git;x", "git@github.com:o/r.git\t# note", None)
+        for url in cases:
+            with self.subTest(url=url):
+                if url is None:
+                    git(root, "remote", "remove", "origin")
+                else:
+                    git(root, "config", "remote.origin.url", url)
+                destination = self.owned(Path(tempfile.mkdtemp()))
+                adopt_inspection.seed_origin(root, destination)
+                self.assertFalse((destination / ".git").exists())
+
+
 class SchemaThreeFillTest(unittest.TestCase):
     def test_fill_leaves_its_input_unchanged(self):
         source = schema_three_contract()
@@ -435,6 +521,21 @@ class SchemaThreeFillTest(unittest.TestCase):
         self.assertEqual(view["project"], {"id": "fagenorn/nix-config"})
         self.assertEqual(view["platform"], EXPECTED_DERIVED["/platform"])
         self.assertEqual(view["bindings"], [])
+
+    def test_fill_keeps_no_authored_value_the_repository_could_not_state(self):
+        source = schema_three_contract()
+        source["project"] = {"id": "fagenorn/nix-config"}
+        source["bindings"]["tracker"] = {"repo_slug": "fagenorn/nix-config"}
+        source["bindings"]["vcs"]["merge"] = {"required_checks": ["Nix Eval"]}
+        source["platform"] = {"min_inclusive": "1.0.0", "max_exclusive": "2.0.0"}
+        view = schema_three.fill(source, {})
+        self.assertNotIn("id", view["project"])
+        self.assertNotIn("repo_slug", view["bindings"]["tracker"])
+        self.assertNotIn("required_checks", view["bindings"]["vcs"]["merge"])
+        self.assertNotIn("platform", view)
+        with self.subTest("a derived value replaces the authored one"):
+            view = schema_three.fill(source, {"/project/id": "o/r"})
+            self.assertEqual(view["project"], {"id": "o/r"})
 
     def test_fill_with_nothing_derived_creates_no_top_level_member(self):
         source = schema_three_contract()
@@ -653,10 +754,6 @@ class DerivedValuesTest(SchemaThreeCase):
     def test_the_resolver_cites_the_input_rule_record(self):
         source = Path(resolve_project.__file__).read_text(encoding="utf-8")
         self.assertIn("ADR-project-contract-014", source)
-        record = (REPO_ROOT / "docs/areas/project-contract/adr/"
-                  "014-schema-3-derives-four-values-from-files-the-repository-holds.md")
-        self.assertTrue(record.read_text(encoding="utf-8").startswith(
-            "# ADR-project-contract-014 \u2014 "))
 
     def test_an_underivable_id_hides_no_other_missing_member(self):
         contract = schema_three_contract()

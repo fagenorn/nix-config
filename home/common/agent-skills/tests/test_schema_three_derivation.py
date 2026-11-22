@@ -9,7 +9,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import shutil
+import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,6 +42,19 @@ class DerivationCase(unittest.TestCase):
         path = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, path, ignore_errors=True)
         return path
+
+    def fifo(self, path: Path) -> None:
+        """A FIFO with no writer at `path`; a blocking read of it would never return."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        previous = signal.signal(signal.SIGALRM, self.hung)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.alarm(20)
+        self.addCleanup(signal.alarm, 0)
+
+    @staticmethod
+    def hung(signum, frame):
+        raise AssertionError("a derivation source read blocked on a FIFO")
 
     def write(self, path: Path, text: str) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,6 +159,21 @@ class RemoteTest(DerivationCase):
                 self.slug('[remote "origin"]\n\turl = gh:o/r\n')
             self.assertIn("recognised", raised.exception.message)
 
+    def test_a_comment_after_a_tab_is_not_part_of_the_url(self):
+        for gap in ("\t", " \t", "\t ", "  "):
+            for marker in ("#", ";"):
+                with self.subTest(gap=gap, marker=marker):
+                    self.assertEqual(self.slug(
+                        f'[remote "origin"]\n\turl = git@github.com:o/r.git{gap}{marker} note\n'),
+                        "o/r")
+
+    def test_a_config_that_is_a_fifo_is_refused_without_blocking(self):
+        root = self.root()
+        self.fifo(root / ".git" / "config")
+        with self.assertRaises(Underivable) as raised:
+            remote_slug(root)
+        self.assertIn("git config", raised.exception.message)
+
     def test_a_linked_worktree_reads_the_common_config(self):
         base = self.root()
         self.git_config(base / "main", ORIGIN)
@@ -181,6 +211,21 @@ class ProtectionTest(DerivationCase):
             with self.assertRaises(Underivable) as raised:
                 required_checks(self.root())
             self.assertIn(".github/branch-protection.json", raised.exception.message)
+
+
+    def test_a_protection_source_nested_past_the_recursion_limit_is_refused(self):
+        root = self.root()
+        self.protection(root, "[" * 200000)
+        with self.assertRaises(Underivable) as raised:
+            required_checks(root)
+        self.assertIn(".github/branch-protection.json", raised.exception.message)
+
+    def test_a_protection_source_that_is_a_fifo_is_refused_without_blocking(self):
+        root = self.root()
+        self.fifo(root / ".github" / "branch-protection.json")
+        with self.assertRaises(Underivable) as raised:
+            required_checks(root)
+        self.assertIn(".github/branch-protection.json", raised.exception.message)
 
 
 class PlatformTest(DerivationCase):
@@ -237,6 +282,36 @@ class PlatformTest(DerivationCase):
             other = self.root()
             with self.assertRaises(Underivable) as raised:
                 self.interval(self.locked_root(other, version="2.1"), other)
+            self.assertIn("platform manifest", raised.exception.message)
+
+    def test_a_lock_or_manifest_nested_past_the_recursion_limit_is_refused(self):
+        store = self.root()
+        with self.subTest("lock"):
+            root = self.root()
+            self.lock(root, "[" * 200000)
+            with self.assertRaises(Underivable) as raised:
+                self.interval(root, store)
+            self.assertIn("devenv.lock", raised.exception.message)
+        with self.subTest("manifest"):
+            root = self.root()
+            self.write(root / TREE_MANIFEST, "[" * 200000)
+            with self.assertRaises(Underivable) as raised:
+                platform_interval(root)
+            self.assertIn("platform manifest", raised.exception.message)
+
+    def test_a_lock_or_manifest_that_is_a_fifo_is_refused_without_blocking(self):
+        store = self.root()
+        with self.subTest("lock"):
+            root = self.root()
+            self.fifo(root / "devenv.lock")
+            with self.assertRaises(Underivable) as raised:
+                self.interval(root, store)
+            self.assertIn("devenv.lock", raised.exception.message)
+        with self.subTest("manifest"):
+            root = self.root()
+            self.fifo(root / TREE_MANIFEST)
+            with self.assertRaises(Underivable) as raised:
+                platform_interval(root)
             self.assertIn("platform manifest", raised.exception.message)
 
     def test_the_platforms_own_tree_never_opens_the_lock(self):

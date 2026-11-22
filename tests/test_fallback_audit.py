@@ -137,6 +137,16 @@ class LaddersTest(unittest.TestCase):
                 if not exempt:
                     self.assertEqual(self.stale(report["findings"]), [])
 
+    def test_a_schema_three_contract_authoring_the_id_with_no_origin_gets_no_exemption(self):
+        root = self.make_repo({
+            ".agents/project.json": json.dumps(
+                {"schema_version": 3, "project": {"id": "fagenorn/nix-config"}}),
+            "python/agent_tools/project_contract/adopt_inspection.py":
+            'X = (".claude/skills.config.json",)\n'})
+        report = self.ladders(root)[1]
+        self.assertEqual(report["exempt"], [])
+        self.assertIn("legacy-skills-config", [f["marker_id"] for f in report["findings"]])
+
     def test_the_same_marker_elsewhere_is_not_exempt(self):
         root = self.make_repo({"python/agent_tools/other.py": 'X = ".claude/skills.config.json"\n'})
         self.assertIn("legacy-skills-config",

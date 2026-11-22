@@ -20,5 +20,8 @@ Until now the contract was the resolver's only input. Schema 3 still made a proj
 ## Consequences
 
 - A project moving to schema 3 needs an origin remote, a `.github/branch-protection.json` and, unless it is the platform's own repository, a realised `agent-platform` lock entry; adoption (#1454) writes the lock entry under that name and keeps the protection file in step with the forge.
+- The resolver also runs on scratch exports of a pinned commit: the guard-policy compile and proof, adoption's verification and the verification executor. Those exports are given what the derivation reads: the checkout's `origin` url as a minimal git config (`adopt_inspection.seed_origin`), and, for the guard's sparse export, the protection file, the lock and the platform manifest of a schema-3 contract (`derived_values.INPUT_PATHS`). An export missing one refuses `not_derivable` as any other tree does.
+- An authored value of the four never stands in for one the repository cannot state: the filled view omits it, so a reader that skips validation sees no id rather than the authored one.
+- A source file is read through a nonblocking regular-file open and a JSON document nested past the interpreter's limit is unreadable, so one malformed repository is refused alone and never stalls or aborts a fleet's verdicts.
 - `platform-status` and the fleet preflight report and judge the derived id and range.
 - Rejected: asking `git`, `gh` or `nix` as child processes. Every skill entry resolves, so each resolve would need the network and a credential; GitHub's branch-protection endpoint needs admin rights a CI token lacks; and the answer would follow the forge rather than the reviewed tree.
