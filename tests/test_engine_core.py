@@ -428,6 +428,24 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(next_action(LOOP, INPUTS, second + pair("m", "ok")), M(5, True))
         self.assertEqual(next_action(toy(), INPUTS, [{"type": "entered", "step": "scope"}, C("scope", 1)]), SCOPE(2))
 
+    def test_a_rewound_upstream_that_changes_the_arguments_still_owes_the_check(self) -> None:
+        doc = inline(
+            [
+                {"id": "s", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "in": ["run.range"], "on": {"ok": "m", "failed": "needs-owner"}},
+                {"id": "m", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "mutates": True, "check": {"command": "diff-scope"}, "in": ["s.title"],
+                 "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "s",
+        )
+        first = pair("s", "ok", {"title": "t1"})
+        events = first + [{"type": "entered", "step": "m"}, C("s", 1)] + pair("s", "ok", {"title": "t2"})
+        action = next_action(doc, INPUTS, events)
+        self.assertEqual((action.step, action.args, action.recheck), ("m", (("s.title", "t2"),), True))
+        self.assertEqual(next_action(doc, INPUTS, first), RunCommand(
+            "m", 1, "diff-scope", None, (("s.title", "t1"),), False))
+
     def test_a_done_run_has_no_reentry(self) -> None:
         with self.assertRaises(engine_core.CoreError):
             reentry(toy(), INPUTS, DONE_EVENTS, "h1")

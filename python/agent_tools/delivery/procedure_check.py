@@ -759,12 +759,12 @@ def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
     return frozenset(node for node in graph if node in _reach(graph, node))
 
 
-def exhaustible(procedure: dict) -> frozenset[str]:
-    """The steps that can be entered past their bound: on a cycle of `step_graph`, or on one
-    that a stop closes. A stop's re-entry step that does not dominate a step with an `on`
-    entry to the stop may never have been reached, so continuing enters it fresh and keeps
-    every visit already spent; that step then leads to it (an over-approximation: the
-    re-entry step itself may never run past its bound)."""
+def stop_closed_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """`step_graph` plus, for each step with an `on` entry to a stop, an edge to the stop's
+    re-entry step when that step does not dominate it. Such a step may never have been
+    reached, so continuing enters it fresh and keeps every visit already spent; that step
+    then leads to it (an over-approximation: the re-entry step itself may never run past
+    its bound)."""
     graph = step_graph(procedure)
     members = _members_of(procedure)
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
@@ -783,7 +783,12 @@ def exhaustible(procedure: dict) -> frozenset[str]:
             fresh = group_of.get(reenter, reenter)
             if fresh in graph and reenter not in dom[item["id"]]:
                 closed[item["id"]].add(fresh)
-    return on_cycle({node: tuple(targets) for node, targets in closed.items()})
+    return {node: tuple(targets) for node, targets in closed.items()}
+
+
+def exhaustible(procedure: dict) -> frozenset[str]:
+    """The steps that can be entered past their bound: on a cycle of `stop_closed_graph`."""
+    return on_cycle(stop_closed_graph(procedure))
 
 
 def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
@@ -944,10 +949,10 @@ def _loop_heads(graph: Mapping[str, tuple[str, ...]], order: list[str]) -> list[
 
 
 def _check_cycles(procedure: dict, found: _Findings) -> None:
-    graph = step_graph(procedure)
+    graph = stop_closed_graph(procedure)
     bounded = {item["id"] for item in procedure["steps"] if "max_visits" in item}
     unbounded = {node: tuple(t for t in targets if t not in bounded)
-                 for node, targets in graph.items() if node not in bounded}
+                 for node, targets in step_graph(procedure).items() if node not in bounded}
     refused: dict[str, str] = {}
     order = [item["id"] for item in procedure["steps"]]
     by_id = {item["id"]: item for item in procedure["steps"]}

@@ -565,7 +565,8 @@ class MutatingContinueTest(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(json.loads(second.stdout)["end"], "done")
         self.assertEqual(project.argvs("effect"), [["0"], ["1"]])
-        self.assertEqual(project.argvs("checks"), [["0"]])
+        # the check is owed to the step, so the other arguments are checked too: harmless, they ran nothing yet
+        self.assertEqual(project.argvs("checks"), [["1"], ["0"]])
 
     def test_a_mutating_command_whose_check_finds_no_effect_runs_after_the_check(self):
         project = EngineProject(self)

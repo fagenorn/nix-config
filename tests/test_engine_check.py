@@ -124,6 +124,16 @@ def _stop_reenters_a_repair_step_that_returns_to_scope(toy: dict) -> None:
                          "on": {"ok": "scope", "failed": "done"}})
 
 
+def _exhausted_scope_hands_over_to_the_repair_a_stop_enters(toy: dict) -> None:
+    toy["stops"]["needs-owner"]["reenter"] = "repair"
+    toy["steps"].append({"id": "repair", "stage": "setup", "kind": "command",
+                         "command": "diff-scope", "holds": "run", "in": ["run.range"],
+                         "max_visits": 2,
+                         "on": {"ok": "scope", "failed": "done", "exhausted": "done"}})
+    step(toy, "scope")["on"]["exhausted"] = "repair"
+    step(toy, "children")["on"]["exhausted"] = "done"
+
+
 def _undeclared_command(toy: dict) -> None:
     step(toy, "scope")["command"] = next(
         key for key, declaration in sorted(procedure_check.load_commands().items())
@@ -334,6 +344,9 @@ CASES = [
          editing("toy", _stop_reenters_a_repair_step_that_returns_to_scope),
          [("toy", "scope", "unmapped_outcome"), ("toy", "repair", "unmapped_outcome"),
           ("toy", "children", "unmapped_outcome")]),
+    Case("exhausted_target_reenters_a_loop_a_stop_closes",
+         editing("toy", _exhausted_scope_hands_over_to_the_repair_a_stop_enters),
+         [("toy", "scope", "unbounded_cycle")]),
     Case("group_blocked_unmapped",
          editing("toy", _without(lambda toy: step(toy, "review")["on"], "blocked")),
          [("toy", "review", "unmapped_outcome")]),

@@ -306,7 +306,8 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
     if pending is not None:
         visit = walk.arrivals[-1].visit
         if pending["kind"] == "command":
-            recheck = pending.get("mutates") is True and walk.owed.get(_owed_key(pending["id"], walk.args), 0) > 0
+            recheck = pending.get("mutates") is True and any(
+                count > 0 and name == pending["id"] for (name, _), count in walk.owed.items())
             return Replay(
                 RunCommand(pending["id"], visit, pending["command"], pending.get("subcommand"), walk.args, recheck),
                 transitions,
