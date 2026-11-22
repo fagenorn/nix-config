@@ -44,13 +44,19 @@ def without_tracker_links(line: str) -> str:
     """The line with each tracker issue link blanked out, the whole destination being that link.
 
     A link destination is read as CommonMark reads it: `](<...>)` and `<...>` hold everything up to
-    the closing `>`, so each is blanked only when that is exactly the issue link. Any other URL is a
+    the closing `>`, so each is blanked only when that is exactly the issue link; a `<...>` that
+    follows anything but whitespace, `(`, `[` or the start of the line is part of a longer
+    destination and stays. Any other URL is a
     bare destination or prose: it is blanked (bar trailing punctuation) when it follows whitespace,
     `(`, `[` or the start of the line and is followed by whitespace, `)` or the end of the line.
     Anything else continues the destination, and the span stays.
     """
     def exact(match):
         return " " * len(match.group(0)) if TRACKER_ISSUE_LINK.fullmatch(match.group("url")) else match.group(0)
+
+    def autolink(match):
+        before = match.string[match.start() - 1:match.start()]
+        return match.group(0) if before and not (before.isspace() or before in "([") else exact(match)
 
     def blank(match):
         span = match.group(0)
@@ -61,7 +67,7 @@ def without_tracker_links(line: str) -> str:
             return span
         return " " + span[len(url):] if TRACKER_ISSUE_LINK.fullmatch(url) else span
     line = ANGLE_DESTINATION.sub(exact, line)
-    line = AUTOLINK.sub(exact, line)
+    line = AUTOLINK.sub(autolink, line)
     return URL_SPAN.sub(blank, line)
 
 

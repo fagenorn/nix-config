@@ -65,10 +65,13 @@ def scan(text: str):
     for number, raw in enumerate(text.removesuffix("\n").split("\n"), 1):
         line = raw.rstrip()
         indent = len(line) - len(line.lstrip(" "))
-        inside = fence is not None or html is not None or until_blank
-        if line and not inside:
+        if line:
+            popped = False
             while columns and indent < columns[-1]:
                 columns.pop()
+                popped = True
+            if popped:  # the list item ends, and with it any fence or HTML block it holds
+                fence, html, until_blank = None, None, False
         content = line[min(columns[-1] if columns else 0, indent):]
         if fence is not None:
             char, size = fence
@@ -86,24 +89,29 @@ def scan(text: str):
         if not line:
             paragraph = False
             continue
-        opened = FENCE_OPEN.match(content)
+        rest, opens_item = content, False   # `rest` is what follows the list markers of the line
+        while True:
+            item = LIST_MARKER.match(rest)
+            if not item or THEMATIC_BREAK.fullmatch(rest):
+                break
+            spaces = len(item[3])
+            columns.append((columns[-1] if columns else 0) + len(item[1]) + len(item[2])
+                           + (spaces if 0 < spaces < 5 else 1))
+            rest = rest[len(item[1]) + len(item[2]) + (spaces if 0 < spaces < 5 else min(spaces, 1)):]
+            opens_item = True
+        opened = FENCE_OPEN.match(rest)
         if opened:
             fence, paragraph = (opened.group(1)[0], len(opened.group(1))), False
             continue
-        marked = next((end for start, end in HTML_MARKED if start.match(content)), None)
+        marked = next((end for start, end in HTML_MARKED if start.match(rest)), None)
         if marked:
             paragraph = False
-            if not marked.search(content):
+            if not marked.search(rest):
                 html = marked
             continue
-        if HTML_BLANK_END.match(content) or (not paragraph and HTML_LONE_TAG.match(content)):
+        if HTML_BLANK_END.match(rest) or ((opens_item or not paragraph) and HTML_LONE_TAG.match(rest)):
             until_blank, paragraph = True, False
             continue
-        item = LIST_MARKER.match(content)
-        if item and not THEMATIC_BREAK.fullmatch(content):
-            base = columns[-1] if columns else 0
-            width = len(item[1]) + len(item[2]) + (len(item[3]) if 0 < len(item[3]) < 5 else 1)
-            columns.append(base + width)
         paragraph = not HEADING_LINE.match(content)
         yield number, line, content
 
@@ -302,6 +310,21 @@ class RuleHeadingTest(unittest.TestCase):
         self.assertEqual(rule_headings("# T\n- a\n\n  ### P1. x\n  body\n")[0], [("P", 1, 4)])
         self.assertEqual(rule_headings("# T\n- a\n  ```\n  ### x\n  ```\n")[1], [])
         self.assertEqual(rule_headings("# T\n* * *\n\n    ### code\n"), ([], []))
+
+    def test_a_fence_or_html_block_on_a_list_marker_line_hides_its_lines(self):
+        for text in ("# T\n- ```\n  ### P1. x\n  body\n  ```\n", "# T\n1. ```\n   ### P1. x\n   body\n   ```\n",
+                     "# T\n- <div>\n  ### P1. x\n  body\n", "# T\n- - ```\n    ### P1. x\n    ```\n"):
+            with self.subTest(text=text):
+                self.assertEqual(rule_headings(text), ([], []))
+        text = "# T\n- ```\n  ### P1. x\n  ```\n\n### P2. y\nbody\n"
+        self.assertEqual(rule_headings(text)[0], [("P", 2, 6)])
+
+    def test_a_list_item_ends_over_an_open_fence_or_html_block(self):
+        for text in ("# T\n- a\n  ```\nfoo\n### Missing\n", "# T\n- a\n  <!--\nfoo\n### Missing\n",
+                     "# T\n- a\n  <div>\nfoo\n### Missing\n"):
+            with self.subTest(text=text):
+                self.assertEqual(len(rule_headings(text)[1]), 1)
+        self.assertEqual(rule_headings("# T\n- a\n  ```\n  ### x\n\n  ```\n"), ([], []))
 
     def test_an_html_block_hides_its_lines(self):
         for opener, closer in (("<div>", "</div>"), ("<details>", "</details>"), ("<pre>", "</pre>"),
