@@ -71,6 +71,7 @@ let
     "release" = "release.release";
     "release-card" = "console.release_card";
     "resolve-project" = "project_contract.resolve_project";
+    "size-lint" = "delivery.size_lint";
     "skill-lint" = "skill_lint";
     "sprint" = "console.sprint";
     "standards-lint" = "delivery.standards_lint";

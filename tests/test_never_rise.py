@@ -6,20 +6,28 @@ exceeds the base count; a per-file rule rises for a file whose violation grew or
 is new, following git renames; a new enforcer over existing violations passes;
 only commits are read; no git child writes, fetches or follows an inherited
 repository selection or forced colour; and a failed git read is no verdict.
+
+The suite holds `standard:B17`, the 1,500-line size rule, by judging its enforcer
+`agent_tools.delivery.size_lint` against real git worlds, so the rule index lists
+this enforcer.
 """
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import never_rise
+from agent_tools.delivery import never_rise, rule_ids, size_lint
 from agent_tools.delivery.never_rise import (
     Enforcer, Rise, Snapshot, Violation)
 
 TIER = "integration"
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BAR = REPO_ROOT / "home/common/agent-skills/standards/the-bar.md"
 
 BAD = Enforcer("FX1", lambda snap: [
     Violation("FX1", p, 1) for p in sorted(snap.line_counts) if p.endswith(".bad")])
@@ -388,6 +396,124 @@ class NeverRiseTest(unittest.TestCase):
                 text = Violation("FX1", path, 7).text()
                 self.assertEqual(text, expected)
                 self.assertEqual(len(text.splitlines()), 1)
+
+
+def numbered(count):
+    return "".join(f"{i}\n" for i in range(count))
+
+
+class SizeRuleTest(unittest.TestCase):
+    def judge(self, root):
+        return never_rise.judge(root, "main", [size_lint.ENFORCER], timeout=60)
+
+    def branch_over(self, base_files, change):
+        """Commit `base_files` as the base, apply `change(root)` on the branch, judge."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            for path, count in base_files.items():
+                write(root, path, numbered(count))
+            write(root, "README", "x\n")
+            commit_all(root)
+            mark_base(root)
+            change(root)
+            commit_all(root)
+            return self.judge(root).rises
+
+    def test_an_over_budget_file_that_grows_fails(self):
+        rises = self.branch_over(
+            {"src/big.py": 1600}, lambda root: write(root, "src/big.py", numbered(1601)))
+        self.assertEqual(rises, (Rise("B17", 1, 1, (Violation("B17", "src/big.py", 1601),)),))
+
+    def test_an_over_budget_file_that_shrinks_passes(self):
+        self.assertEqual(self.branch_over(
+            {"src/big.py": 1600}, lambda root: write(root, "src/big.py", numbered(1599))), ())
+
+    def test_an_over_budget_file_that_is_unchanged_passes(self):
+        self.assertEqual(self.branch_over(
+            {"src/big.py": 1600}, lambda root: write(root, "src/other.py", "x\n")), ())
+
+    def test_growing_from_1400_to_1500_passes(self):
+        self.assertEqual(self.branch_over(
+            {"src/big.py": 1400}, lambda root: write(root, "src/big.py", numbered(1500))), ())
+
+    def test_a_new_1501_line_file_fails(self):
+        rises = self.branch_over(
+            {}, lambda root: write(root, "src/new.py", numbered(1501)))
+        self.assertEqual(rises, (Rise("B17", 0, 1, (Violation("B17", "src/new.py", 1501),)),))
+
+    def test_an_extensionless_script_is_judged(self):
+        for path, text in (
+                ("bin/tool", "#!/bin/sh\n" + numbered(1500)),
+                ("data/zshrc/common/50-fragment", numbered(1501))):
+            with self.subTest(path=path):
+                rises = self.branch_over({}, lambda root: write(root, path, text))
+                self.assertEqual(rises, (Rise("B17", 0, 1, (Violation("B17", path, 1501),)),))
+
+    def test_a_long_document_or_data_file_is_not_judged(self):
+        for path in ("docs/long.md", "data/table.json", "LICENSE"):
+            with self.subTest(path=path):
+                self.assertEqual(self.branch_over(
+                    {}, lambda root: write(root, path, numbered(2000))), ())
+
+    def test_a_moved_over_budget_file_that_holds_passes(self):
+        self.assertEqual(self.branch_over(
+            {"src/big.py": 1600}, lambda root: git(root, "mv", "src/big.py", "src/moved.py")), ())
+
+    def test_a_moved_over_budget_file_that_grows_fails(self):
+        def move_and_grow(root):
+            git(root, "mv", "src/big.py", "src/moved.py")
+            write(root, "src/moved.py", numbered(1601))
+        rises = self.branch_over({"src/big.py": 1600}, move_and_grow)
+        self.assertEqual(len(rises), 1)
+        self.assertEqual(rises[0].new, (Violation("B17", "src/moved.py", 1601),))
+
+
+class SizeLintOutputTest(unittest.TestCase):
+    def run_command(self, *arguments):
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.size_lint", *arguments],
+            capture_output=True, text=True, timeout=60, env=fixture_env())
+
+    def committed(self, tmp, files):
+        root = repo(tmp)
+        for path, count in files.items():
+            write(root, path, numbered(count))
+        commit_all(root)
+        return root
+
+    def test_each_violation_prints_rule_path_and_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, {"a.py": 1501, "b/c.py": 1502, "d.py": 10, "e.md": 2000})
+            done = self.run_command("--repo-root", str(root))
+            self.assertEqual((done.returncode, done.stdout), (1, "B17 a.py:1501\nB17 b/c.py:1502\n"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, {"d.py": 10})
+            done = self.run_command("--repo-root", str(root))
+            self.assertEqual((done.returncode, done.stdout), (0, ""))
+
+    def test_a_path_with_a_line_break_prints_one_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, {"x\ny.py": 1501})
+            done = self.run_command("--repo-root", str(root))
+            self.assertEqual((done.returncode, done.stdout), (1, "B17 x\\ny.py:1501\n"))
+
+    def test_a_relative_root_exits_2(self):
+        done = self.run_command("--repo-root", "repo")
+        self.assertEqual(done.returncode, 2)
+        self.assertTrue(done.stderr.startswith("size-lint: "))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, {"a.py": 1501})
+            done = subprocess.run(
+                [sys.executable, "-m", "agent_tools.delivery.size_lint", "--repo-root", "."],
+                capture_output=True, text=True, timeout=60, env=fixture_env(), cwd=root)
+            self.assertEqual((done.returncode, done.stdout), (2, ""))
+
+    def test_the_rule_id_is_a_rule_of_the_bar(self):
+        self.assertIn(size_lint.RULE_ID, rule_ids.sections(BAR.read_text(encoding="utf-8")))
+
+    def test_the_command_is_a_row_of_the_command_table(self):
+        table = (REPO_ROOT / "lib/agent-tools.nix").read_text("utf-8")
+        self.assertIn('"size-lint" = "delivery.size_lint";', table)
 
 
 if __name__ == "__main__":
