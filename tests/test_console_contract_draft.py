@@ -20,6 +20,7 @@ from pathlib import Path
 
 from agent_tools import canonical
 from agent_tools.console import contract_draft as cd
+from agent_tools.project_contract import resolve_project
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .console_test_support import PREK_HOOK
@@ -119,10 +120,50 @@ class ContractDraftTest(unittest.TestCase):
             self.assertIsNone(error)
         return fields
 
+    def test_the_draft_asks_nothing_about_co_author_lines(self):
+        root, fields = self.remote_fields()
+        for table in (cd.FIELDS, cd.LABELS, cd.POINTERS, cd.OPTIONS, cd.TEXT, cd.STARTS, cd.REST_WORDS):
+            self.assertNotIn("co-authored-by", table)
+        self.assertEqual(len(cd.FIELDS), 27)
+        self.assertNotIn("co-authored-by", [f["field"] for f in fields])
+        self.assertNotIn("co-authored-by", [q["subject"] for q in cd.questions(fields)])
+        shown = cd.shown(fields)
+        words = [e["line"] for e in shown] + [o["label"] for e in shown for o in e["options"]]
+        words.append(cd.more_line(fields))
+        for word in words:
+            self.assertNotIn("co-author", word.lower())
+        self.assertEqual(cd.set_value(fields, "co-authored-by", "yes", entries=[], root=root),
+                         (None, cd.UNKNOWN_FIELD))
+
+    def test_the_written_contract_fixes_the_co_author_member_false(self):
+        root, fields = self.remote_fields()
+        fields = self.settled(fields, root, build_command="none", test_command="none",
+                              commit_signed="yes")
+        commit = cd.contract(fields)["bindings"]["vcs"]["commit"]
+        self.assertEqual(commit, {**resolve_project.RETIRED_COMMIT_MEMBERS, "signed": True})
+        self.assertEqual(commit, {"co_authored_by": False, "signed": True})
+
+    def test_a_saved_draft_with_a_co_author_record_reads_back_without_it(self):
+        root, fields = self.remote_fields()
+        saved = list(fields)
+        record = {"field": "co-authored-by", "label": "co-author lines in commits", "value": "yes",
+                  "source": "owner",
+                  "options": [{"value": "yes", "label": "yes"}, {"value": "no", "label": "no"}],
+                  "text": False, "reason": None, "ask": "Should its commits carry co-author lines?"}
+        self.assertEqual(set(record), set(cd.FIELD_KEYS))
+        saved.insert(8, record)
+        refreshed = cd.refresh(root, saved)
+        self.assertEqual([f["field"] for f in refreshed], list(cd.FIELDS))
+        self.assertNotIn("co-authored-by", [e["field"] for e in cd.shown(refreshed)])
+        settled = self.settled(refreshed, root, build_command="none", test_command="none")
+        self.assertIs(cd.contract(settled)["bindings"]["vcs"]["commit"]["co_authored_by"], False)
+        self.assertEqual(cd.set_value(refreshed, "co-authored-by", "no", entries=[], root=root),
+                         (None, cd.UNKNOWN_FIELD))
+
     def test_a_github_remote_is_read_for_id_name_branch_and_tracker(self):
         root, fields = self.remote_fields()
         self.assertEqual([f["field"] for f in fields], list(cd.FIELDS))
-        self.assertEqual(len(cd.FIELDS), 28)
+        self.assertEqual(len(cd.FIELDS), 27)
         for record in fields:
             self.assertEqual(set(record), cd.FIELD_KEYS)
         self.assertEqual(pair(fields, "project-id"), (ID, "remote"))
@@ -315,7 +356,7 @@ class ContractDraftTest(unittest.TestCase):
             by_field(fields)["commit-environment"]["ask"],
             f"Which command opens the development shell the commits of {root.name} run in?\n"
             "Its commit hooks need its development shell: type the command, or say they need none.")
-        self.assertEqual(cd.more_line(fields), "and 21 more settings at their usual values")
+        self.assertEqual(cd.more_line(fields), "and 20 more settings at their usual values")
         fields = self.settled(fields, str(root), build_command="none", test_command="none")
         drafted = cd.contract(fields)
         self.assertEqual(drafted["bindings"]["commands"]["commit-environment"],
@@ -742,7 +783,7 @@ class ContractDraftTest(unittest.TestCase):
     def test_every_settled_value_is_shown_with_its_source(self):
         root, fields = self.remote_fields()
         lines = cd.shown(fields)
-        self.assertEqual(len(lines), 26)
+        self.assertEqual(len(lines), 25)
         self.assertTrue(all(entry["field"] for entry in lines))
         order = [entry["field"] for entry in lines]
         self.assertEqual(order, [f for f in cd.FIELDS if f not in ("build-command", "test-command")])
@@ -779,7 +820,7 @@ class ContractDraftTest(unittest.TestCase):
     def test_the_counted_line_says_how_many_and_whether_you_changed_any(self):
         root, fields = self.remote_fields()
         count = len([f for f in cd.FIELDS if f not in cd.MAIN])
-        self.assertEqual(count, 21)
+        self.assertEqual(count, 20)
         self.assertEqual(cd.more_line(fields), f"and {count} more settings at their usual values")
         new, _ = cd.set_value(fields, "max-parallel", "2", entries=[], root=root)
         self.assertEqual(cd.more_line(new), f"and {count} more settings, 1 of them set by you")
@@ -794,7 +835,7 @@ class ContractDraftTest(unittest.TestCase):
             else:
                 self.assertIsNone(cd.placeholder(field))
         self.assertEqual([f for f in cd.FIELDS if cd.placeholder(f) is None],
-                         ["commit-signed", "co-authored-by", "delete-branch", "tracker"])
+                         ["commit-signed", "delete-branch", "tracker"])
         self.assertEqual(cd.placeholder("project-id"), "owner/name")
         self.assertEqual(cd.placeholder("build-command"), "the build command")
         self.assertEqual(cd.placeholder("test-command"), "the test command")

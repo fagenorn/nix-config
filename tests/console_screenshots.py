@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-two screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-five screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -15,6 +15,10 @@ Contract:
   which is the before picture (#1347);
   `notice-post-open` is that fold with the owner's post control opened, and shot against a page
   that has no such control it is the same fold, which is how the before pictures are made;
+  `live-fault` is one running sprint with a live fault its manager declared on issue 12 (its
+  `fault.declared` row is seeded as a literal kind, so the module needs nothing the base commit
+  lacks): the sprint line carries the declaration and the owner's Withdraw, and on a base console
+  that ignores the row the same sprint shows neither, which is the before picture (#1432);
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
   lock, served through a stand-in forge reader, with a live delivery run of issue 12 in its `pr`
   step (a run that is not live is no holder of the sprint's), whose run line reads
@@ -22,7 +26,18 @@ Contract:
   `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
   has a transcript whose last peer-message record is one the client held and did not deliver
   (#1229), read once through the movement poll, so its line reads that the manager cannot hear
-  the console; `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
+  the console; `permission-stale` is a running sprint whose manager session (listed, named for
+  the sprint) folded working, then a `PermissionRequest` hook row for a Bash prompt, then a
+  transcript whose `user` record is stamped after that hook (the 21 Nov reading: the manager's own
+  hook refused the prompt at once and it went on working); on the branch's console the heading reads
+  "Nothing needs you" and the session reads working after the first session poll, on the base
+  commit's the same seed reads "1 thing needs you" with the terminal sentence, the before picture
+  (#1424); `permission-card` is that sprint with its manager's held Bash prompt, `git worktree add
+  ../.worktrees/issue-12` with the words "Create the delivery's worktree", posted to
+  `/api/permission-prompt` by its literal path with the sprint's secret and kept held while shooting
+  (a phase `wait` right before each width's shot), so the branch's console shows the card with Allow
+  once and Refuse under "1 thing needs you"; on a console that does not know the route (the base answers 405) the seed
+  is the `PermissionRequest` hook row only, which is the before picture; `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
   ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
   report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console
   ignores both and reads the stage phrase, which is the before picture); `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
@@ -152,7 +167,7 @@ Contract:
   picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
   card opens on the plan's own first line and its draft shows nothing.
   `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 104 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 106 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -230,6 +245,7 @@ import http.client
 import inspect
 import json
 import os
+import secrets
 import socket
 import struct
 import sys
@@ -237,27 +253,28 @@ import tempfile
 import threading
 import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin, view
+from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, prompt_card, sessions, signin, view
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret, read_secret
 from agent_tools.system.forge_api import ForgeError
 
 from .console_test_support import hook_body, write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running", "waiting-its-turn", "manager-cannot-hear", "waiting-until", "paused",
+          "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
+          "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
+          "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
@@ -290,6 +307,7 @@ REGISTER_STATES = ("register-apply", "register-draft", "register-reconcile-apply
                    "register-reconcile-draft")
 ADOPTION_STATES = ("adoption-merge", "adoption-moved", "adoption-failed")
 CLICKED_STATES = ("adoption-failed",)
+PERMISSION_STATES = ("permission-stale", "permission-card")
 ADOPTION_BRANCH = "adopt-" + "5" * 12
 ADOPTION_COMMIT = "a" * 40
 ADOPTION_MOVED_HEAD = "d" * 40
@@ -351,6 +369,10 @@ OPEN_THREAD = (True, FOLLOW_READ_LINE, True)
 BASE_THREAD = (False, FOLLOW_READ_LINE, False)
 DESK_OUTSIDE = "outside-1136"
 DEAF_MANAGER = "manager-1229"
+PERMISSION_MANAGER = "manager-1424"
+PERMISSION_PROMPT = "/api/permission-prompt"
+PERMISSION_COMMAND = "git worktree add ../.worktrees/issue-12"
+PERMISSION_WORDS = "Create the delivery's worktree"
 READING_PANEL = "section#reading"
 ACTIVATION_COMMIT = "1258" * 10
 ACTIVATION_PATHS = {
@@ -498,6 +520,7 @@ class Fixture:
     registering: bool = False
     adopting: bool = False
     refusing: bool = False
+    prompting: str = ""
 
 
 @dataclass(frozen=True)
@@ -2252,6 +2275,16 @@ def overlap_card() -> bool:
     return not hasattr(view, "OVERLAP_UNSETTLED_TEXT")
 
 
+LIVE_FAULT_OBSERVED = "saving the settings form drops the billing address"
+LIVE_FAULT_WHEN = "12:10 UTC today"
+LIVE_FAULT_PROVEN = "a saved form read back from the production database"
+
+
+def declares_live_faults() -> bool:
+    """Whether this service lets the owner withdraw a manager's live-fault declaration (a base commit's has no such method)."""
+    return hasattr(ConsoleService, "withdraw_live_fault")
+
+
 def offers_account_changes() -> bool:
     """Whether this service lets an account be signed out alone (a base commit's service has no such method)."""
     return hasattr(ConsoleService, "sign_out_account")
@@ -2310,6 +2343,17 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.put(MINUTE, sessions.SEEN, web, {
             "session_id": DEAF_MANAGER, "cwd": web_root, "repo": web_root, "state": "working",
             "name": manager.session_name(web, sid)})
+    elif state in PERMISSION_STATES:
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
+                             report=45 * MINUTE)
+        seed.put(20 * MINUTE, sessions.SEEN, web, {
+            "session_id": PERMISSION_MANAGER, "cwd": web_root, "repo": web_root,
+            "state": "working", "name": manager.session_name(web, sid)})
+        if state == "permission-stale":
+            seed.put(10 * MINUTE, sessions.HOOK, web, {
+                "event": "PermissionRequest", "session_id": PERMISSION_MANAGER, "cwd": web_root,
+                "repo": web_root, "tool_name": "Bash"})
+        return (sid,)
     elif state == "waiting-until":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE,
                     report_extra={"wait_until": _iso(seed.now_s + 2 * 3600)})
@@ -2405,6 +2449,12 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
                     "recommended": "Add resumable uploads lands first", "owner_only": True}]})
         seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
             "kind": "heads-up", "text": "routes are frozen until Friday"}})
+    elif state == "live-fault":
+        sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE,
+                                report=6 * MINUTE)
+        seed.put(4 * MINUTE, "fault.declared", web, {"sprint_id": sid, "goal": goal, "fault": {
+            "issue": 12, "observed": LIVE_FAULT_OBSERVED, "when": LIVE_FAULT_WHEN,
+            "proven": LIVE_FAULT_PROVEN}})
     elif state in ("ask-box", "ask-goal"):
         seed.put(3 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
             "question_id": "1177a1", "question": ASK_ANSWERED_QUESTION,
@@ -2557,6 +2607,59 @@ def _write_held_manager(fixture: Fixture, now_s: float) -> None:
                                       "you approve it at this terminal"}]))
 
 
+def _write_permission_manager(fixture: Fixture, now_s: float) -> None:
+    """The stale-wait manager's transcript: a `user` record stamped after the seeded `PermissionRequest` hook."""
+    slug = fixture.config / "projects" / "-web"
+    slug.mkdir(parents=True, exist_ok=True)
+    (slug / f"{PERMISSION_MANAGER}.jsonl").write_bytes(_transcript([
+        {"type": "user", "timestamp": _iso(now_s - 5 * MINUTE), "message": {"content": "carry on"}}]))
+
+
+def _permission_post(service: ConsoleService, fixture: Fixture, body: Mapping) -> tuple[int, dict]:
+    """One POST of `body`, signed as the manager's hook signs it (a fresh nonce, the sprint's secret never sent), to the permission route by its literal path: its status and JSON."""
+    sprint_id = fixture.prompting
+    body = {**body, "sprint_id": sprint_id, "nonce": secrets.token_hex(16)}
+    body["auth"] = prompt_card.request_auth(read_secret(fixture.secrets, sprint_id),
+                                            prompt_card.signed_bytes(body))
+    connection = http.client.HTTPConnection(*service.address, timeout=10)
+    try:
+        connection.request("POST", PERMISSION_PROMPT, body=json.dumps(body),
+                           headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        raw = response.read()
+        return response.status, json.loads(raw) if response.status == 200 else {}
+    finally:
+        connection.close()
+
+
+def hold_permission(service: ConsoleService, fixture: Fixture) -> int | None:
+    """The manager's held Bash prompt of `permission-card`: its id, or None on a console without the route.
+
+    A console that does not know the route (the base commit answers 405, another 404) gets the `PermissionRequest` hook row
+    alone, which is what its manager's hook produces there.
+    """
+    status, answer = _permission_post(service, fixture, {
+        "phase": "ask", "session_id": PERMISSION_MANAGER, "command": PERMISSION_COMMAND,
+        "description": PERMISSION_WORDS})
+    if status in (404, 405):
+        service.ingest_hook(hook_body("permission prompt", session_id=PERMISSION_MANAGER,
+                                      cwd=str(fixture.projects[0])))
+        return None
+    if status != 200 or not isinstance(answer.get("prompt"), int):
+        raise RuntimeError(f"the permission prompt was not held ({status})")
+    return answer["prompt"]
+
+
+def keep_permission(service: ConsoleService, fixture: Fixture, prompt: int | None) -> None:
+    """Renew the held prompt's contact right before a shot, as its hook's wait does."""
+    if prompt is None:
+        return
+    status, answer = _permission_post(service, fixture, {
+        "phase": "wait", "session_id": PERMISSION_MANAGER, "prompt": prompt})
+    if status != 200 or answer.get("state") != "open":
+        raise RuntimeError(f"the permission prompt is not held open ({status})")
+
+
 def build_fixture(root: Path, state: str, now_s: float, *,
                   read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> Fixture:
     root = Path(root)
@@ -2595,6 +2698,11 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         log.close()
     if state == "manager-cannot-hear":
         _write_held_manager(fixture, now_s)
+    if state == "permission-stale":
+        _write_permission_manager(fixture, now_s)
+    if state == "permission-card":
+        create_secret(fixture.secrets, sprint_ids[0])
+        fixture = replace(fixture, prompting=sprint_ids[0])
     if state == "spend-page":
         _write_spend(fixture, now_s, sprint_ids[0])
     elif state == "desk-spend":
@@ -2897,19 +3005,24 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                     with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
                             tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
                         now_s = datetime.now(timezone.utc).timestamp()
+                        fixture = build_fixture(Path(tmp).resolve(), state, now_s, read=read)
                         service = start_service(
-                            build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
+                            fixture, now_s,
                             guest_dir=Path(door) if state in SHARING_STATES else None,
                             tailnet_readable=state != "sharing-unreadable")
                         serve = None
                         try:
                             host, port = service.address
+                            if state == "permission-card":
+                                held = hold_permission(service, fixture)
                             if state in SHARING_PANELS:
                                 guest_requests(state, guest_door(service))
                             elif state in ("guest-page", "guest-steer"):
                                 serve = _Serve(guest_door(service))
                                 host, port = serve.address
                             for width in group:
+                                if state == "permission-card":
+                                    keep_permission(service, fixture, held)
                                 path = "spend" if state == "spend-page" else ""
                                 taken.append(
                                     _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
@@ -3049,7 +3162,8 @@ JARGON_COUNT = r"""(() => {
   }).length;
   const phrases = document.body.innerText.match(
     /\bon track\b|\bstated (just now|\d)|\bwithdraw|\bnudge|\bstop or\b|would do differently/gi);
-  const owners = Array.from(document.querySelectorAll('#projects button.notice-withdraw')).filter(
+  const owners = Array.from(document.querySelectorAll(
+    '#projects button.notice-withdraw, #projects button.live-fault-withdraw')).filter(
     (button) => button.innerText.trim() === 'Withdraw').length;
   return folds + rows + Math.max(0, (phrases ? phrases.length : 0) - owners);
 })()"""
@@ -3164,6 +3278,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.click('details[data-key^="notices:"] > summary')
             if state == "notice-post-open" and page.query_selector("button.notice-open"):
                 page.click("button.notice-open")
+        if state == "live-fault" and declares_live_faults():
+            for selector in (".sprint-checks .live-fault", ".live-fault-withdraw"):
+                page.wait_for_selector(selector)
         if state in ("goal-open", "goal-near", "goal-over"):
             page.focus("textarea.goal-text")
             page.wait_for_selector(".goal-box")

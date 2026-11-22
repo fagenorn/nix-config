@@ -7,6 +7,13 @@ through one loader and writes through one atomic writer (D37) — `adopt-project
 must not import `agent_tools.project_contract.resolve_project` (D26), and a second copy of either helper
 is the duplication the plan forbids.
 
+The platform also defines the commands every project's ResolvedProject carries:
+the two second-model review commands (`PLATFORM_COMMANDS`, issue 1450). The
+resolver adds each one the contract does not author under its id, an authored
+entry under the same id wins whole, and a caller deep-copies the table before
+mutating it. The review argv names the companion's `--reviewer` flag once, in
+`_REVIEW_ARGV`.
+
 A `deprecations` entry of `platform-manifest.json` is closed on exactly `id`,
 `kind`, `subject`, `since`, `successor` and `migration` (issue 580). `id`,
 `subject`, `successor` and `migration` are non-empty strings and `id` is
@@ -27,22 +34,33 @@ removal `id` that is also a deprecation `id` is
 `platform.manifest.removals.still_deprecated` at `/removals/<n>/id`. A manifest
 that removes nothing keeps `removals: []`.
 
-The manifest is authored data installed at exactly `$HOME/.agents/share/
-platform-manifest.json` (R1.1, D1). There is no default, no fallback path and
-no discovery ladder: a missing, unreadable, malformed or schema-invalid
-manifest is a platform installation defect and is refused loudly, never
-replaced by an assumed version (R1.3).
+The manifest is authored data the platform package carries at
+`<root>/platform-manifest.json`, where the root is `AGENT_PLATFORM_ROOT`, which
+every launcher of the package sets to its own `share/agent-platform`. With no
+root (a run from source) it is `$HOME/.agents/share/platform-manifest.json`,
+which on a host links to the same store file (R1.1, D1, ADR-system-005). A
+non-empty root never falls back to `HOME`: a manifest missing under it is
+refused even when `HOME` holds a valid one, and a root that is not absolute is
+refused as a missing manifest before any read. An empty root is an unset one.
+An explicit manifest path ignores the root. The package's standards directory
+is `<root>/standards`, else `$HOME/.agents/standards`. There is no default, no
+other fallback path and no discovery ladder: a missing, unreadable, malformed
+or schema-invalid manifest is a platform installation defect and is refused
+loudly, never replaced by an assumed version (R1.3).
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import math
 import os
+from os import open as open_fd
 from pathlib import Path
 import re
+import stat
 import tempfile
 from typing import Iterator
 
@@ -88,6 +106,16 @@ REGISTRY_ENTRY_OPTIONAL_MEMBERS = ("branch_override",)
 BRANCH_OVERRIDE_MEMBERS = ("branch", "default_branch", "reason")
 BRANCH_OVERRIDE_REASONS = ("default_contract_unresolved",)
 REGISTRY_SCHEMA_VERSION = 1
+
+# Issue 1450, ADR-project-contract-010: the two review commands every
+# ResolvedProject carries, defined once here and merged in by the resolver
+# beneath whatever the contract authors under the same id. `cwd` is relative to
+# the project root, as an authored command's is.
+_REVIEW_ARGV = ("codex-companion", "task", "--fresh", "--reviewer")
+PLATFORM_COMMANDS = {
+    "codex-plan-review": {"argv": [*_REVIEW_ARGV, "plan-review"], "cwd": ".", "env": []},
+    "codex-diff-review": {"argv": [*_REVIEW_ARGV, "diff-review"], "cwd": ".", "env": []},
+}
 
 # The closed set of compatibility reasons, kept separate from the resolver's
 # capability `REASON_CODES` (D7). `interval_verdict` names the first two;
@@ -421,9 +449,36 @@ def validate_manifest(source: object) -> list[dict]:
     return violations
 
 
+PLATFORM_ROOT_ENV = "AGENT_PLATFORM_ROOT"
+
+
+def platform_root() -> Path | None:
+    """The directory a launcher named as its package's `share/agent-platform`.
+
+    `AGENT_PLATFORM_ROOT` when it is non-empty, else None. It reads nothing on
+    disk and does not check that the value is absolute (ADR-system-005).
+    """
+    value = os.environ.get(PLATFORM_ROOT_ENV)
+    return Path(value) if value else None
+
+
 def manifest_path() -> Path:
-    """The one installed location (R1.1). No fallback, no discovery ladder."""
+    """The one installed location (R1.1): under the named root, else under `HOME`.
+
+    No other fallback, no discovery ladder.
+    """
+    root = platform_root()
+    if root is not None:
+        return root / "platform-manifest.json"
     return Path(os.environ["HOME"]) / ".agents" / "share" / "platform-manifest.json"
+
+
+def standards_dir() -> Path:
+    """The platform's standards directory: under the named root, else under `HOME`."""
+    root = platform_root()
+    if root is not None:
+        return root / "standards"
+    return Path(os.environ["HOME"]) / ".agents" / "standards"
 
 
 class _NonFiniteNumber(ValueError):
@@ -464,15 +519,25 @@ def load_manifest(path: Path | None = None) -> tuple[dict, Path]:
     under Home Manager is the content-addressed store path — the deployment
     identity, observed rather than authored, so it cannot lie (D2, R1.4).
 
-    An unset or empty `HOME` names no installed manifest, so it refuses as
-    `platform.manifest.missing` before any filesystem read (#177 D4).
+    With a non-empty `AGENT_PLATFORM_ROOT` the installed manifest is
+    `<root>/platform-manifest.json` and `HOME` is never consulted: a missing
+    file refuses as `platform.manifest.missing` whatever `HOME` holds, and so
+    does a root that is not absolute, before any filesystem read
+    (ADR-system-005). Without a root, an unset or empty `HOME` names no
+    installed manifest, so it refuses as `platform.manifest.missing` before
+    any filesystem read (#177 D4).
 
     `path` names another manifest to load by the same rules (issue 579 P7):
     it replaces the installed location and needs no `HOME`, and a missing or
     invalid one refuses exactly as a broken installed manifest does.
     """
     if path is None:
-        if not os.environ.get("HOME"):
+        root = platform_root()
+        if root is not None:
+            unusable = not root.is_absolute()
+        else:
+            unusable = not os.environ.get("HOME")
+        if unusable:
             raise _refuse([_violation(
                 "", "the installed platform manifest was not found",
                 "platform.manifest.missing")])
@@ -627,6 +692,22 @@ def validate_registry(source: object) -> list[dict]:
     return violations
 
 
+def _read_regular_file(path: Path) -> bytes:
+    """The bytes of the regular file at `path`; any other kind raises `OSError`.
+
+    Opened nonblocking and judged by its descriptor, so a FIFO with no writer
+    is refused instead of waiting for one.
+    """
+    fd = open_fd(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(fd)
+
+
 def read_registry() -> list[dict]:
     """The registered fleet entries, in the order the file declares them.
 
@@ -635,15 +716,24 @@ def read_registry() -> list[dict]:
     read-only caller a writer. A registry that exists but will not read, will
     not parse, or does not match the schema raises instead — reporting an
     empty fleet for a corrupt file would hide exactly the projects an operator
-    registered.
+    registered. A registry path that is not absolute (an empty or relative
+    `HOME`), one that is not a regular file, and a dangling link at the
+    registry or at one of its directories are each a registry that exists but
+    will not read.
     """
+    path = registry_path()
+    unreadable = _refuse([_registry_violation(
+        "", "the fleet registry could not be read", "unreadable")])
+    if not path.is_absolute():
+        raise unreadable
     try:
-        raw = registry_path().read_bytes()
+        raw = _read_regular_file(path)
     except FileNotFoundError:
+        if any(p.is_symlink() and not p.exists() for p in (path, *path.parents)):
+            raise unreadable from None
         return []
     except (OSError, RuntimeError):
-        raise _refuse([_registry_violation(
-            "", "the fleet registry could not be read", "unreadable")]) from None
+        raise unreadable from None
     try:
         source = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError):

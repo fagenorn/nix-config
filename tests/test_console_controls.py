@@ -11,12 +11,12 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
-    ACTIVATION, ADD_STEPS, ADDED, ADOPTION_ITEM, RELEASE_ITEM, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
+    ACTIVATION, ADD_STEPS, ADDED, ADOPTION_ITEM, PERMISSION_ITEM, RELEASE_ITEM, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
     FAILED_LINE, asking, check_item, frame, nodes, panel, postable, project, real_capacity, render,
-    look_answered, thread, view, with_check, with_notices, with_run, with_sprints)
+    FAULT_ENTRY, fault_frame, look_answered, thread, view, with_check, with_notices, with_run, with_sprints)
 from .test_console_guest_page import (
     CHANGE_FRAME, GUEST, MANUAL, OPEN_OWN, SHARED_FRAME, TICK, UNSHARED_OPEN, attempt_reply, harness)
 
@@ -49,7 +49,7 @@ def _roles(kinds: frozenset, *names: str) -> dict:
 DESK_CONTROLS: dict = {
     **_roles(PRIMARY_OR_QUIET, "approve", "send", "try-again", "signin-start", ANS_ROLE),
     **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry", "look-retry", "adoption-merge",
-             "release-approve"),
+             "release-approve", "permission-allow"),
     **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "start-withdraw", "progress-withdraw",
              "acct-remove", "acct-remove-send", "share-off", "share-remove", "reading-delete-send"),
     **_roles(OPTION_ONLY, "opt"),
@@ -57,7 +57,7 @@ DESK_CONTROLS: dict = {
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
         "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-signout", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
-        "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
+        "notice-cancel", "notice-withdraw", "live-fault-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
         "follow-cancel", "thread-open", "reading-close", "reading-delete", "reading-delete-keep", "ask-choice", "reply-send", "undo", *ANS_PLAIN, "goal-project",
         "detail-open", "kept-words-dismiss", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
@@ -65,7 +65,7 @@ DESK_CONTROLS: dict = {
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
         "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate",
         "share-open", "share-close", "share-on", "share-edit", "share-project",
-        "share-add", "adoption-failed-dismiss", "release-decline"),
+        "share-add", "adoption-failed-dismiss", "release-decline", "permission-refuse"),
     **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "kept-words-text", "ask-text",
              "follow-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
@@ -198,6 +198,8 @@ def desk_scenarios() -> list:
          {"frame": frame([])}, snapshot],
         # a release card with Approve release and Decline (#1401)
         [START, {"frame": frame([RELEASE_ITEM])}, snapshot],
+        # a permission card with Allow once and Refuse (#1424)
+        [START, {"frame": frame([PERMISSION_ITEM])}, snapshot],
         # a stall and a progress card
         [START, {"frame": frame([STALL, PROGRESS])}, snapshot],
         [START, {"frame": frame([FAILED_START])}, snapshot],
@@ -249,6 +251,8 @@ def desk_scenarios() -> list:
         [*REGISTER_TYPED, snapshot],
         # the notices fold with post opened and an own notice
         drawn_notice,
+        # a sprint's live fault with its Withdraw (#1432)
+        [START, {"frame": fault_frame([FAULT_ENTRY])}, snapshot],
         [begin, {"frame": view([own_notice])}, {"open": "notices:owner/p00"}, snapshot],
         # the goal box open with projects, and a quiet project's Give it a goal
         [START, {"frame": GOAL_FRAME}, {"key": "g"}, snapshot],

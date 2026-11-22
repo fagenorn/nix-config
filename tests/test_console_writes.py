@@ -142,12 +142,13 @@ class WriteRouteTest(Case):
                           "/api/adoption-register", "/api/adoption-merge", "/api/plan-defer",
                           "/api/register-confirm", "/api/trust-check",
                           "/api/register-cancel", "/api/owner-notice",
-                          "/api/owner-notice-withdraw", "/api/project-question",
+                          "/api/owner-notice-withdraw", "/api/live-fault-withdraw", "/api/project-question",
                           "/api/project-question-delete", "/api/activate", "/api/share-tailnet", "/api/share-colleague",
                           "/api/share-remove", "/api/look-retry",
                           "/api/guest-account", "/api/guest-signin-code",
                           "/api/guest-signin-cancel", "/api/guest-account-signout",
-                          "/api/guest-account-remove", "/api/release-answer"})
+                          "/api/guest-account-remove", "/api/release-answer",
+                          "/api/permission-answer"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
@@ -573,7 +574,7 @@ class GoalRouteTest(Case):
             "tell_text": "The manager picks it up at its next turn.", "reach_text": None,
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
             "state_until": None, "pictures": [], "checks": [], "waits": [],
-            "permission_text": None,
+            "live_faults": [], "permission_text": None,
             "movement": {"sessions": [], "nudged_at": None,
                          "base_at": stated.replace(microsecond=stated.microsecond // 1000 * 1000).isoformat(),
                          "issues": [],

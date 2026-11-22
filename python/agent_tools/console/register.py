@@ -652,7 +652,9 @@ def _row_of(event: event_log.Event) -> tuple[dict | None, dict | None]:
         found["note"] = LEGACY_NOTES[found["note"]]
     if isinstance(found["draft"], list) and isinstance(found["root"], str):
         stale = contract_draft.retired_in_use(found["draft"])
-        found["draft"] = contract_draft.refresh(found["root"], found["draft"])
+        refreshed = contract_draft.refresh(found["root"], found["draft"])
+        dropped = len(refreshed) != len(found["draft"])
+        found["draft"] = refreshed
         if stale and (found["result"] != "drafting" or not contract_draft.open_fields(found["draft"])):
             # The plan stored under the row's id was made from the retired field, and a drafting row
             # whose last card was that field has none: a drafting row with one card plans again (#1445).
@@ -663,6 +665,10 @@ def _row_of(event: event_log.Event) -> tuple[dict | None, dict | None]:
             found.update(drafting(found["root"], contract_draft.replanned(found["draft"]),
                                   found["answered"]))
             found["plan_id"] = plan_id
+        elif found["result"] == "planned" and dropped:
+            # The plan was made from a draft that held a record no longer drafted (#1449), so its id
+            # names a plan the refreshed draft would not make: it is planned again, never applied.
+            found["replan"] = True
         elif found["result"] == "drafting":
             found["questions"] = contract_draft.questions(found["draft"])
     return found, kept

@@ -468,7 +468,7 @@ class RunFoldTest(unittest.TestCase):
         batch = (PROGRAMS / "deliver-batch.js").read_text(encoding="utf-8")
         renews = set(re.findall(r"\brenew\('([a-z-]+)'", standard))
         standard_templates, batch_templates = templates(standard), templates(batch)
-        self.assertEqual(renews, {"plan", "amend", "final-review", "look-fix"})
+        self.assertEqual(renews, {"plan", "amend", "final-review", "look-fix", "tasks"})
         for needed in ("setup", "plan", "impl-${t.n}", "close-out", "renew-${at}", "verify", "pr", "merge"):
             self.assertIn(needed, standard_templates)
         for needed in (

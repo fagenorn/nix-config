@@ -53,6 +53,7 @@
 | Digest | Console |
 | Drafted contract | Console |
 | Excluded profile | Console |
+| Fleet preflight | Project contract |
 | Fleet registry | Project contract |
 | Folder trust | Console |
 | Goal | Console |
@@ -69,6 +70,8 @@
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
+| Live fault | Console |
+| Live-fault lane | Delivery |
 | Look approval | Delivery |
 | Look file set | Delivery |
 | Look marker | Delivery |
@@ -83,11 +86,14 @@
 | Outside sprints | Console |
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
+| Permission card | Console |
 | Picture | Console |
 | Pinned profile | Console |
 | Plan question | Console |
 | Plan-gated floor | Guard |
+| Platform command | Project contract |
 | Platform manifest | Project contract |
+| Platform package | Project contract |
 | Prefix reorder | Hosts |
 | Production rule | Guard |
 | Probe | Verification |
