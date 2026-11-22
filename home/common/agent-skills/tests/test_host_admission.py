@@ -28,6 +28,25 @@ class HostAdmissionTest(unittest.TestCase):
             "claude-code": {"support": "supported", "agent_slots": 7},
             "codex": {"support": "unsupported"}}))
         self.assertEqual(host_admission.validate_declaration(committed), committed)
+        self.assertEqual(host_admission.verify_slots(committed), 1)
+
+    def test_verify_slots_is_an_optional_top_level_count(self):
+        supported = {"support": "supported", "agent_slots": 7}
+        with_slots = {**declaration(**{"claude-code": supported}), "verify_slots": 3}
+        without = declaration(**{"claude-code": supported})
+        self.assertEqual(host_admission.validate_declaration(with_slots), with_slots)
+        self.assertEqual(host_admission.validate_declaration(without), without)
+        self.assertEqual(host_admission.verify_slots(with_slots), 3)
+        self.assertEqual(host_admission.verify_slots(without), 1)
+        self.assertEqual(host_admission.DEFAULT_VERIFY_SLOTS, 1)
+
+    def test_a_verify_slots_that_is_not_a_positive_int_is_refused(self):
+        supported = {"support": "supported", "agent_slots": 7}
+        for bad in (0, -1, True, 1.5, "2"):
+            value = {**declaration(**{"claude-code": supported}), "verify_slots": bad}
+            with self.subTest(bad), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration(value)
+            self.assertEqual(raised.exception.reason_code, "declaration_invalid")
 
     def test_invalid_declarations_are_refused(self):
         supported = {"support": "supported", "agent_slots": 7}
@@ -64,6 +83,17 @@ class HostAdmissionTest(unittest.TestCase):
                     target.write_text(text, encoding="utf-8")
                     host_admission.load_declaration()
                 self.assertEqual(invalid.exception.reason_code, "declaration_invalid")
+            target.unlink()
+            for label, make in (("directory", lambda: target.mkdir()),
+                                ("dangling symlink", lambda: target.symlink_to(Path(raw) / "nowhere"))):
+                with self.subTest(label), self.assertRaises(host_admission.DeclarationError) as unusable:
+                    make()
+                    host_admission.load_declaration()
+                self.assertEqual(unusable.exception.reason_code, "declaration_invalid")
+                if target.is_dir():
+                    target.rmdir()
+                else:
+                    target.unlink()
             committed = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
             target.write_text(COMMITTED_DECLARATION.read_text(encoding="utf-8"), encoding="utf-8")
             self.assertEqual(host_admission.load_declaration(), committed)
