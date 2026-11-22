@@ -33,3 +33,7 @@ Any change to a path in `instruction_load.GATE_FILES` (the budget workflow, `ski
 ### P8. The lifecycle guard stays standalone
 
 The Claude Code lifecycle guard, `home/common/claude-code/lifecycle_guard.py`, stays a standalone, standard-library-only file that imports nothing from `agent_tools`, so of these rules only P3's ban on import machinery and `__file__` lookups binds it, and it runs `git`, `gh` and `jq` by the absolute store paths its **base policy** names, and its row check and look check by the store paths its wrapper passes as `--derive-bin` and `--look-bin`, rather than by name on `PATH`; it never runs a program named by the user-writable compiled policy. ([design](../../.agents/artifacts/specs/2026-09-24-issue-176-lifecycle-guard-extraction-design.md))
+
+### P14. A wording pin is a finding, and two scans enforce it for records and docstrings
+
+A test that pins a decision record's or a module docstring's wording is two cases of the bar's wording-pin finding. The ADRs set each scan's scope, the tests it keeps (token and credential tests, the lifecycle guard's) and its exceptions, and stay this rule's source: read them before removing or adding a wording test. ([ADR-delivery-010](../areas/delivery/adr/010-a-test-never-pins-a-decision-records-wording.md), [ADR-delivery-011](../areas/delivery/adr/011-a-test-never-pins-a-module-docstrings-wording.md))
