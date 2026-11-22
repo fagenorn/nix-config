@@ -35,8 +35,12 @@ The one flake package nix-config publishes for Linux and macOS, holding the agen
 _Avoid_: platform bundle
 
 **Platform command**:
-A command the platform defines once under one id, which every ResolvedProject carries in `bindings.commands`; a contract entry under the same id replaces it (ADR-project-contract-010).
+A command the platform defines once under one id, which every ResolvedProject carries in `bindings.commands`; in project schema 2 a contract entry under the same id replaces it, and in project schema 3 such an entry is refused (ADR-project-contract-010, ADR-project-contract-013).
 _Avoid_: built-in command, default command
+
+**Platform constant**:
+A contract value that is the same in every project, which project schema 3 leaves out of the contract and the resolver fills into the ResolvedProject; a schema-3 contract that authors one is refused (ADR-project-contract-013).
+_Avoid_: default, built-in setting
 
 **Production rules**:
 The optional `production` section of a project contract: the commands, key files and MCP tools that change the project's production, the routes that only read it, and the release profile through which a change is allowed, or the declaration that the project has no production. A contract without the section has no production rules, which is not the same as declaring no production. A rules section may name one of its changing commands as its console activation, the command the console's Activate runs (ADR-system-004).

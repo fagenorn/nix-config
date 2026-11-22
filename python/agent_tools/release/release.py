@@ -80,7 +80,7 @@ from agent_tools.release import release_adapter, release_profile, transaction_pl
 from agent_tools.release.release_driver import (
     ApprovalUnreadable, Driver, Project, Refusal, main_checkout, require_cwd)
 from agent_tools.project_contract.resolve_project import (
-    ContractError, add_repo_root, emit_error, emit_json, load_contract,
+    ContractError, add_repo_root, emit_error, emit_json, load_contract_view,
     require_platform_manifest, resolve, resolves_on_path)
 
 SCHEMA_VERSION = 1
@@ -237,7 +237,7 @@ def command_profile_inspect(args: argparse.Namespace) -> int:
     snapshot = resolve(args.repo_root)
     manifest, manifest_path = require_platform_manifest()
     root = Path(snapshot["project"]["root"])
-    source = load_contract(root)
+    source = load_contract_view(root)
     return emit_json(inspect_profile(root, source, args.profile_id, manifest, manifest_path))
 
 
@@ -290,7 +290,7 @@ def _project(snapshot: dict[str, Any], root: Path) -> Project:
     return Project(project_id=snapshot["project"]["id"], root=root, common_dir=main_checkout(root),
                    integration_branch=vcs["integration_branch"],
                    default_branch=vcs["default_branch"],
-                   contract=load_contract(root))
+                   contract=load_contract_view(root))
 
 
 def console_approvals(store_of: Callable[[], Path]) -> Callable[[str, str], bool]:

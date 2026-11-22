@@ -42,6 +42,9 @@ only on the verdict `renewed` with exit 0; an `error` whose `transient` is the b
 `true` is called once more. Otherwise the run ends at `claim-lost` without entering the
 step, its detail carrying the verdict and what the call printed on stdout and stderr.
 
+Before every command it runs, keep-alive included, the shell has the lifecycle guard judge it, and a
+refusal is the outcome `refused` (issue 1515).
+
 An outcome the step's `on` does not map is a `Fault`. A run ends with `run_done` or `stop_reached`.
 
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
@@ -62,11 +65,11 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_commands, engine_core, engine_ledger, engine_session, procedure_check,
+    engine_commands, engine_core, engine_guard, engine_ledger, engine_session, procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.project_contract import resolve_project
@@ -98,6 +101,10 @@ def platform_revision(environ: Mapping[str, str]) -> str:
     """The package directory name above `AGENT_PLATFORM_ROOT`, or `source`."""
     root = environ.get("AGENT_PLATFORM_ROOT", "")
     return Path(root).parent.parent.name if root else "source"
+
+
+def _guard() -> engine_guard.Hook | engine_guard.Unavailable:
+    return engine_guard.locate(engine_guard.settings_path(os.environ))
 
 
 def _host() -> str:
@@ -369,7 +376,8 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
     args = tuple((path, inputs[path.split(".", 1)[1]]) for path in keep_alive["in"])
     for attempt in (1, 2):
         ran = engine_commands.run(table, keep_alive["command"], keep_alive.get("subcommand"),
-                                  args, on_start=lambda pid: None, timeout=KEEP_ALIVE_SECONDS)
+                                  args, guard=_guard(), on_start=lambda pid: None,
+                                  timeout=KEEP_ALIVE_SECONDS)
         verdict = "failed" if ran.outcome == "renewed" and ran.exit_code != 0 else ran.outcome
         engine_ledger.append_event(run_dir, {
             "event": "keep_alive_ran", "at": _now(), "step": action.step,
@@ -378,8 +386,11 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
             return None
         if verdict != "error" or ran.result.get("transient") is not True:
             break
-    text = " ".join(ran.stdout.decode("utf-8", "replace").split()
-                    + ran.stderr.decode("utf-8", "replace").split()) or "no output"
+    if ran.exit_code is None:
+        text = " ".join(ran.result["reason"].split())
+    else:
+        text = " ".join(ran.stdout.decode("utf-8", "replace").split()
+                        + ran.stderr.decode("utf-8", "replace").split()) or "no output"
     need = procedure["stops"][procedure_check.CLAIM_LOST]["need"]
     return _stop(run_dir, action.step, procedure_check.CLAIM_LOST, need,
                  f"The claim was not renewed before step {action.step}, the keep-alive "
@@ -398,7 +409,7 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
                                              "started": _now()})
 
     ran = engine_commands.run(table, action.command, action.subcommand, action.args,
-                              on_start=started)
+                              guard=_guard(), on_start=started)
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
                                spend_usd=0)
@@ -431,8 +442,7 @@ def _visit_session(run_dir: Path, root: str, step: dict,
         "session": session, "role": role.name,
         "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
     launched, reading, stopped, no_reply = _launch_until_answered(
-        run_dir, root, (name, visit, session), prompt,
-        lambda resume: engine_session.launch_argv(role, schema, session, system, resume=resume))
+        run_dir, root, (name, visit, session), prompt, (role, schema, system))
     if stopped is not None:
         return stopped
     if no_reply:
@@ -474,7 +484,7 @@ def _visit_session(run_dir: Path, root: str, step: dict,
 
 def _launch_until_answered(
         run_dir: Path, root: str, visit_of: tuple[str, int, str], prompt: str,
-        argv_for: Callable[[bool], tuple[str, ...]],
+        launch_of: tuple[engine_session.Role, Mapping, Path],
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
     """Launch the session, again with `--resume` after each usage limit and after the first other
     API error (once, after `API_RETRY_SECONDS`), until a launch that is neither, or a second API
@@ -482,6 +492,7 @@ def _launch_until_answered(
     member is the `quota-wait` stop (record stored, wait open) when no account can answer, the
     fourth is true for the second API error, the outcome `no-reply`."""
     name, visit, session = visit_of
+    role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = 1, set(), False, False, False, False
 
     def event(kind: str, **members: object) -> None:
@@ -514,8 +525,9 @@ def _launch_until_answered(
             env = {**os.environ, engine_session.ANSWER_ENV: str(answer_path)}
             if released:
                 env.pop("CLAUDE_ACCOUNT", None)
-            launched = engine_session.launch(argv_for(attempt > 1), root, prompt,
-                                             on_start=on_start, env=env)
+            launched = engine_session.launch(
+                engine_session.launch_argv(role, schema, session, system, resume=attempt > 1),
+                root, prompt, on_start=on_start, env=env)
             answer = engine_session.read_answer(answer_path)
         reading = engine_session.read_result(launched.stdout)
         if answer.all_out and launched.exit_code == engine_session.ALL_OUT_EXIT:

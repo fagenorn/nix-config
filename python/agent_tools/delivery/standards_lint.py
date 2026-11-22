@@ -5,18 +5,19 @@ directory; Layer 2 is the repository's `docs/standards/` directory, a README ind
 plus one shard per file. The lint checks shapes only: whether a rule restates a
 higher layer, or is process filed as a standard, stays with the reviewer.
 
-Usage: standards-lint --repo-root <absolute dir> [--platform-standards <absolute dir>]
+Usage: standards-lint --repo-root <absolute dir> [--platform-standards <absolute dir>] [--index]
 The platform directory defaults to the installed platform's standards directory
 (`AGENT_PLATFORM_ROOT/standards`, else `$HOME/.agents/standards`).
 
-Exits 0 with empty stdout and stderr when clean. Exits 1 with one problem per
+Exits 0 with empty stdout and stderr when clean (`--index` aside). Exits 1 with one problem per
 stdout line, in this order, each `<label>: <reason>`. A platform file's label is
 its path under the platform directory (`the-bar.md`, `stacks/python.md`,
 `acceptance-planning.md`); a repository file's label is its path under the
 repository root (`docs/standards/README.md`). Exits 2 with one stderr line
 `standards-lint: <reason>` and empty stdout for a relative path, a missing
-directory or a platform directory with no `the-bar.md`; an argparse usage error
-exits 2 too. The lint reads no project policy.
+directory, a platform directory with no `the-bar.md` or a `lint` member that
+runs no module; an argparse usage error exits 2 too. The lint reads no project
+policy.
 
 Checks, in output order:
 1. The platform. For `the-bar.md`, then each `stacks/*.md` by name: the size cap
@@ -48,6 +49,25 @@ the id it should carry: `line <n>: no well-formed id: <line>`, `more than one
 id`, `<id> should carry the prefix R`, `<id> repeats the id`, `rule title is <n>
 characters, over 100`, and `no planning rule` when the section holds none.
 
+5. The citations, when the repository's justfile has the `agent-workflow-tests`
+   recipe: each enforcer an `agent_tools.delivery.citation_lint.enforcers` reads (the
+   recipe's members and the source of each module the `lint` verification command
+   runs) is read, and a citation is `standard:<id>` (`agent_tools.delivery.rule_ids`).
+   The problems, in enforcer then line order: `<path>: registered enforcer is
+   missing`; `<path>:<line>: malformed citation standard:<token>` for a token that
+   is no rule id; `<path>:<line>: cites <id>, which is in no applicable layer`. A
+   `P` id resolves only against the repository's `docs/standards` shards and any
+   other id only against the platform directory (the bar and the stacks), so a
+   deleted rule's citation fails. Without the recipe no enforcer is registered.
+
+With `--index` the problems still print and set exit status 1, and the rule index
+follows them on stdout, computed on the run and written to no file: for each rule
+(the bar, the stacks by filename, then the project shards by filename, each in
+heading order) `<id>. <title>` and one line `  <path>` per enforcer citing the id
+with a well-formed citation, sorted, each once; then `judged rules: <n>` (rules no
+enforcer cites) and `enforcers citing nothing: <m>` (existing registered enforcers
+holding neither a citation nor a decision-record id `ADR-<area>-NNN`).
+
 Caps: a shard is at most 8192 bytes, a heading line at most 100 characters, the
 Layer 2 index at most 40 lines, a hint file at most 60 lines.
 """
@@ -59,7 +79,7 @@ import re
 import sys
 from pathlib import Path
 
-from agent_tools.delivery import hint_phases
+from agent_tools.delivery import citation_lint, hint_phases
 from agent_tools.delivery.context_map_lint import CODE_RE, LINK_RE
 from agent_tools.delivery.rule_ids import (
     HEADING_LINE, REASON_NO_ID, REASON_TWO_IDS, SECOND_ID, layer_problems, numbered_items,
@@ -272,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=COMMAND)
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--platform-standards")
+    parser.add_argument("--index", action="store_true")
     args = parser.parse_args(argv)
     repo = Path(args.repo_root)
     platform = Path(args.platform_standards) if args.platform_standards else agent_platform.standards_dir()
@@ -285,9 +306,14 @@ def main(argv: list[str] | None = None) -> int:
     if not (platform / "the-bar.md").is_file():
         print(f"{COMMAND}: no the-bar.md in {platform}", file=sys.stderr)
         return 2
-    problems = lint(repo, platform)
-    for problem in problems:
-        print(problem)
+    try:
+        cited, index = citation_lint.check(repo, platform, args.index)
+    except (ValueError, OSError) as error:
+        print(f"{COMMAND}: {error}", file=sys.stderr)
+        return 2
+    problems = lint(repo, platform) + cited
+    for line in problems + index:
+        print(line)
     return 1 if problems else 0
 
 
