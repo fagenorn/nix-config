@@ -17,7 +17,9 @@ which is the copy the loop reads (`<run>/procedure/deliver.json`).
 
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
-run's `sessions/`, `session_starting` is on disk before the process is spawned,
+run's `sessions/`, the session holds one of the engine route's agent slots
+(`engine_slots`), waiting with `wait_started` and `wait_ended` (`host-slot`) when
+none is free, `session_starting` is on disk before the process is spawned,
 and only the `outcome_from` member of the session's structured reply grades the
 step. A session with no structured reply is a `Fault`, so neither the prose nor
 the exit code selects an outcome, and so is a session denied a shell command,
@@ -239,7 +241,7 @@ def _running(runs: list[Path], issue: int) -> tuple[int, dict] | None:
 def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
     procedures_dir = Path(procedures_dir)
     snapshot, table = _resolve()
-    _admitted()
+    slots = _admitted()
     project = snapshot["project"]["id"]
     try:
         running = _running(engine_ledger.find_runs(engine_ledger.runs_root(), issue, project),
@@ -289,7 +291,7 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
         _release(held)
         raise
     try:
-        return _walk(run_dir, table, inputs)
+        return _walk(run_dir, table, inputs, slots)
     except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
             OSError, ValueError, KeyError) as error:
         raise Fault(str(error)) from error
@@ -314,7 +316,7 @@ def _release(held: list[int]) -> None:
         os.close(held.pop())
 
 
-def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
+def _walk(run_dir: Path, table: CommandTable, inputs: dict, slots: int) -> tuple[int, dict]:
     procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
     steps = {item["id"]: item for item in procedure["steps"]}
     ran = 0
@@ -334,7 +336,7 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
                          f"The {ENTRY} procedure stopped at step {step} with "
                          f"{action.name}, which needs {action.need}.")
         if isinstance(action, engine_core.StartSession):
-            _visit_session(run_dir, table.root, steps[action.step], action)
+            _visit_session(run_dir, table.root, steps[action.step], action, slots)
         elif isinstance(action, engine_core.RunCommand):
             if steps[action.step].get("mutates") is True and "keep_alive" in procedure:
                 lost = _renew(run_dir, table, procedure, inputs, action)
@@ -402,8 +404,8 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
                                          "to": step["on"][ran.outcome]})
 
 
-def _visit_session(run_dir: Path, root: str, step: dict,
-                   action: engine_core.StartSession) -> None:
+def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.StartSession,
+                   slots: int) -> None:
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
                                          "visit": visit, "stage": step["stage"]})
@@ -416,18 +418,28 @@ def _visit_session(run_dir: Path, root: str, step: dict,
     system = engine_ledger.store_session_file(run_dir, f"{name}.{visit}.system.md",
                                               role.body.encode("utf-8"))
     engine_ledger.store_session_file(run_dir, f"{name}.{visit}.prompt.md", prompt.encode("utf-8"))
-    engine_ledger.append_event(run_dir, {
-        "event": "session_starting", "at": _now(), "step": name, "visit": visit,
-        "session": session, "role": role.name,
-        "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
 
     def started(pid: int) -> None:
         engine_ledger.append_event(run_dir, {"event": "process_started", "at": _now(),
                                              "step": name, "visit": visit, "pid": pid,
                                              "started": _now()})
 
-    launched = engine_session.launch(
-        engine_session.launch_argv(role, schema, session, system), root, prompt, on_start=started)
+    def waiting() -> None:
+        engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
+                                             "wait": engine_slots.WAIT, "until": None})
+
+    def waited() -> None:
+        engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(),
+                                             "wait": engine_slots.WAIT})
+
+    with engine_slots.hold(run_dir, slots, on_wait=waiting, on_waited=waited):
+        engine_ledger.append_event(run_dir, {
+            "event": "session_starting", "at": _now(), "step": name, "visit": visit,
+            "session": session, "role": role.name,
+            "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
+        launched = engine_session.launch(
+            engine_session.launch_argv(role, schema, session, system), root, prompt,
+            on_start=started)
     reading = engine_session.read_result(launched.stdout)
     record = {"denials": reading.denials, "exit_code": launched.exit_code,
               "prose": reading.prose, "session": session, "subtype": reading.subtype}
