@@ -1406,7 +1406,7 @@ class ToolError(Exception):
 SKILLS_CONFIG = ".claude/skills.config.json"
 RETIRED_COMMAND = "release deploy inspect"
 C11D_DEFAULT_SCOPE = (".", ":!.agents/artifacts")
-# The #130 checklist (.agents/artifacts/evidence/cutover-130-checklist.md, C11) documents the
+# The #130 checklist (C11, kept at https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/.agents/artifacts/evidence/cutover-130-checklist.md) documents the
 # per-root pathspec: "for `fagenorn/nix-config` its pathspec is `home/common/agent-skills/skills`".
 # Keyed on the resolved `project.id`, so the command's own constant, this adapter and the tests
 # never count as users of the retired command.
