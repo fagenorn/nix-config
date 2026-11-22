@@ -107,6 +107,18 @@ class PromptRouteTest(PromptCase):
         self.assertEqual(self.count(svc), 0)
         self.assertEqual(self.rows(event_log.PROMPT_ANSWERED), [{"prompt": n, "answer": "allow"}])
 
+    def test_a_long_prompts_card_reads_its_summary_against_the_registered_root(self):
+        svc, sid = self.boot()
+        long = "cat > notes.txt <<'EOF'\n" + "a line\n" * 40 + "EOF\ncp notes.txt /tmp/notes.txt"
+        self.ask(svc, sid, command=long)
+        (item,) = self.items(svc)
+        self.assertEqual(item["summary"], {
+            "read": True, "runs": ["cat", "cp"], "writes": ["notes.txt", "/tmp/notes.txt"],
+            "outside": ["/tmp/notes.txt"], "scripts": []})
+        self.ask(svc, sid)
+        short = [i for i in self.items(svc) if i["command"] == COMMAND]
+        self.assertEqual([i["summary"] for i in short], [None])
+
     def test_the_owner_refuses_and_a_second_answer_is_refused(self):
         svc, sid = self.boot()
         n = self.ask(svc, sid)["prompt"]

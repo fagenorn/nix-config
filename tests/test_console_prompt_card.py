@@ -185,21 +185,34 @@ class PromptCardTest(unittest.TestCase):
         title = sprints.sprint_title(state)
         found = prompt_card.prompts([asked(
             3, description="Create the delivery's worktree\nmore")])
-        entry = prompt_card.inbox_entries(list(found.values()), {SPRINT: state})
+        entry = prompt_card.inbox_entries(list(found.values()), {SPRINT: state}, {PROJECT: "/srv/p00"})
         self.assertEqual(entry, [{
             "type": "inbox_item", "reason": "permission", "key": "permission/3",
             "project_id": PROJECT, "sprint_id": SPRINT, "prompt": 3, "title": title,
             "headline": f"The manager of {title} asks to run a command",
             "words": "Create the delivery's worktree", "command": "git worktree add ../w",
-            "answered": False, "waiting_since": AT}])
+            "summary": None, "answered": False, "waiting_since": AT}])
         plain = prompt_card.prompts([asked(1)])
-        self.assertEqual(prompt_card.inbox_entries(list(plain.values()), {SPRINT: state})[0]["words"],
-                         prompt_card.NO_WORDS)
-        self.assertEqual(prompt_card.inbox_entries(list(plain.values()), {}), [])
+        self.assertEqual(prompt_card.inbox_entries(
+            list(plain.values()), {SPRINT: state}, {PROJECT: "/srv/p00"})[0]["words"],
+            prompt_card.NO_WORDS)
+        self.assertEqual(prompt_card.inbox_entries(list(plain.values()), {}, {}), [])
         long = prompt_card.words("y" * 300)
         self.assertEqual((len(long), long[-1]), (200, "…"))
         self.assertEqual(prompt_card.words("   \n"), prompt_card.NO_WORDS)
         self.assertEqual(prompt_card.words(None), prompt_card.NO_WORDS)
+
+    def test_a_long_commands_entry_carries_its_summary_against_its_projects_root(self):
+        long = "cat > notes.txt <<'EOF'\n" + "a line\n" * 40 + "EOF\ncp notes.txt /tmp/notes.txt"
+        found = prompt_card.prompts([asked(1, command=long), asked(2)])
+        state = sprint()
+        entries = prompt_card.inbox_entries(list(found.values()), {SPRINT: state}, {PROJECT: "/srv/p00"})
+        bare = prompt_card.inbox_entries(list(found.values()), {SPRINT: state}, {})
+        self.assertEqual(entries[0]["summary"], command_summary.summarize(long, "/srv/p00"))
+        self.assertEqual(entries[0]["summary"]["outside"], ["/tmp/notes.txt"])
+        self.assertIsNone(entries[1]["summary"])
+        self.assertEqual(bare[0]["summary"], command_summary.summarize(long, None))
+        self.assertEqual(bare[0]["summary"]["outside"], ["notes.txt", "/tmp/notes.txt"])
 
     def test_parsers_refuse_anything_but_the_exact_shapes(self):
         def body(**fields):
