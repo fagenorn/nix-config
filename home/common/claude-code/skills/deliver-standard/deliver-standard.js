@@ -3103,8 +3103,8 @@ const CARRY_REASONS = ['no-approval', 'source-differs', 'pictures-unreadable', '
 const CARRY_RULES = ['pictures', 'look-files']
 // A picture path the carry command is given: absolute and on one line; shq quotes it, so a space or a shell character is fine.
 const USABLE_PICTURE = /^\/[^\0\r\n]+$/
-// A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry line). #1597: since is the head the worktree was last verified at (the owner's head at the landing; the verified head an approve resume found the PR head moved past), and how names what brought the PR to H. The verification of H always runs, so every later stop shows H's verified record and pictures.
-const carryLook = async (pr, H, since = ownerHead, how = 'the landing') => {
+// A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry line). #1597: since is the head the worktree was last verified at (the owner's head at the landing; the verified head an approve resume found the PR head moved past), and how names what brought the PR to H. The verification of H always runs. outside is true when H was not made by this delivery (a head moved outside it): H is then recorded as verified only when it is clean merges of the integration branch past the owner's head, so a commit nobody here reviewed never reads as a reviewed one and still gets its code review on the next resume.
+const carryLook = async (pr, H, since = ownerHead, how = 'the landing', outside = false) => {
   const S = ownerHead
   const CLEAN = `a clean two-parent merge, meaning git -C ${W} merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C ${W} rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged)`
   const only = from => `git -C ${W} rev-list --no-merges ${from}..${H} ^origin/${INT} prints nothing, and every merge in git -C ${W} rev-list --merges ${from}..${H} ^origin/${INT} is ${CLEAN}`
@@ -3116,9 +3116,14 @@ The owner approved head ${S} of PR #${pr}; ${how} brought it to ${H}. Run only g
 1. git -C ${W} fetch origin. When git -C ${W} rev-parse HEAD is not ${H} and git -C ${W} merge-base --is-ancestor HEAD ${H} succeeds, run git -C ${W} merge --ff-only ${H}; never any other merge, reset, checkout or push. When HEAD is then not ${H}, run nothing more and return head (git -C ${W} rev-parse HEAD), clean, results [] and merge_only false.
 2. ${merges}
 3. Whatever merge_only is: ${verifyBody}`, { label: 'look-carry-verify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_VERIFY })
+  // A worktree that could not be brought to H (a force-push replaced the head with one the worktree does not contain) answers with its own head, merge_only false and no results: H was never verified, so the owner is asked for a look at it.
+  if (complete(lv, LOOK_CARRY_VERIFY) && SHA_RE.test(lv.head) && !sameSha(lv.head, H) && lv.merge_only === false && lv.results.length === 0) {
+    lookWhy = `the approval of ${S} does not carry to ${H}: the worktree head ${lv.head} cannot be brought to it`
+    return lookWaitStop(pr, H)
+  }
   if (!complete(lv, LOOK_CARRY_VERIFY) || !SHA_RE.test(lv.head) || !sameSha(lv.head, H)) return stop('look-carry', { pr: pr, head: H, details: `the verification of ${H} returned no usable reply for it`, result: lv })
   if (verifyProblems(lv).length) return stop('look-carry', { pr: pr, head: H, problems: verifyProblems(lv) })
-  verify = { head: fuller(H, lv.head), clean: true, results: lv.results, ...(picturesOf(lv).length ? { pictures: picturesOf(lv) } : {}) }
+  if (!outside || lv.merge_only === true) verify = { head: fuller(H, lv.head), clean: true, results: lv.results, ...(picturesOf(lv).length ? { pictures: picturesOf(lv) } : {}) }
   if (lv.merge_only !== true) {
     lookWhy = `the approval of ${S} does not carry to ${H}: it adds commits that are not clean merges of ${INT}`
     return lookWaitStop(pr, H)
@@ -3176,17 +3181,24 @@ It prints one JSON line. Return its verdict, kept_from and any detail. Run nothi
 ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_STATUS_SCHEMA })
   const answeredOf = read => `look-approval status answered ${read ? (read.verdict || 'no verdict') : 'nothing'}${read && present(read.detail) ? `: ${read.detail}` : ''}`
   if (!sameSha(hd.head, A)) {
-    lookWhy = `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head}`
+    // Only a stop for a new look says the approval was not recorded: a read that failed, a carry and every later stop speak for themselves.
+    const MOVED = `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head}`
     // The live lane lands only the commit its one reviewer read: a moved head is never read or carried there.
-    if (LANE === 'live') return lookWaitStop(P, hd.head)
+    if (LANE === 'live') {
+      lookWhy = MOVED
+      return lookWaitStop(P, hd.head)
+    }
     // #1597: the approval is read for A; a head moved outside the delivery (a merge made by hand) is verified, then carried under the landing's rules.
     const read = await lookRead()
     const answered = answeredOf(read)
     if (!read || typeof read.verdict !== 'string' || read.verdict === 'error') return stop('look-approve', { details: `the approval of ${A} could not be checked: PR #${P}'s head is now ${hd.head} and ${answered}`, result: read })
-    if (read.verdict === 'needed') return lookWaitStop(P, hd.head)
-    if (read.verdict !== 'approved') return stop('look-approve', { details: `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head} and ${answered}`, result: read })
+    if (read.verdict === 'needed') {
+      lookWhy = MOVED
+      return lookWaitStop(P, hd.head)
+    }
+    if (read.verdict !== 'approved') return stop('look-approve', { details: `${MOVED} and ${answered}`, result: read })
     ownerHead = typeof read.kept_from === 'string' && SHA_RE.test(read.kept_from) ? read.kept_from : A
-    const row = await carryLook(P, hd.head, V0, 'a merge made outside this delivery')
+    const row = await carryLook(P, hd.head, V0, 'a merge made outside this delivery', true)
     if (row) return row
     expected = verify.head
     head = expected

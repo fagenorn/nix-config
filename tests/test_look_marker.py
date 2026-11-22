@@ -902,6 +902,61 @@ class MergeCarryTest(unittest.TestCase):
                     lm.look_files_unchanged(A, H, lm.Carry(B, reads))
                 self.assertEqual(str(raised.exception), path)
 
+    def test_a_look_file_one_merge_brought_in_and_a_later_merge_took_out_carries_nothing(self):
+        two = [(T, [A, X]), (H, [T, F1])]
+        steps = {lm.compare_path(A, T): cmp([DOC]), lm.compare_path(T, H): cmp([DOC])}
+        reads = files_world(two, [DOC], [DOC])
+        self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, reads)),
+                         lm.Kept(False, (lm.compare_path(A, T), lm.compare_path(T, H))))
+        self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, {**reads, **steps})), lm.Kept(True, ()))
+        for name, listed in {"the first merge": {lm.compare_path(A, T): cmp([DOC, PAGE])},
+                             "the last merge": {lm.compare_path(T, H): cmp([PAGE])},
+                             "a look file renamed out": {lm.compare_path(A, T): cmp([
+                                 {"filename": DOC, "previous_filename": PAGE, "status": "renamed"}])}}.items():
+            with self.subTest(name=name):
+                self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, {**reads, **steps, **listed})),
+                                 lm.Kept(False, ()))
+        for path in steps:
+            with self.subTest(none=path):
+                self.assertEqual(lm.look_files_unchanged(A, H, lm.Carry(B, {**reads, **steps, path: None})),
+                                 lm.Kept(False, ()))
+            with self.subTest(unreadable=path):
+                with self.assertRaises(lm.Unreadable) as raised:
+                    lm.look_files_unchanged(A, H, lm.Carry(B, {**reads, **steps, path: {"status": "ahead"}}))
+                self.assertEqual(str(raised.exception), path)
+        seen = []
+
+        def read(path):
+            seen.append(path)
+            return {**reads, **steps}[path]
+
+        self.assertIs(lm.settle_look_files(A, H, B, read), True)
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertIs(lm.settle_look_files(A, H, B, lambda path: {**reads, **steps, lm.compare_path(T, H): cmp([PAGE])}[path]),
+                      False)
+
+    def test_a_renamed_look_file_compares_by_its_previous_name_and_blob(self):
+        one = [(H, [A, X])]
+        old = "python/agent_tools/console/old.html"
+
+        def renamed(sha="1" * 40, previous=old, patch=True):
+            entry = {"filename": PAGE, "previous_filename": previous, "status": "renamed", "sha": sha}
+            if patch:
+                entry["patch"] = edit(PAGE)["patch"]
+            return entry
+
+        def run(a_entry, h_entry):
+            return lm.look_files_unchanged(A, H, lm.Carry(B, files_world(one, [a_entry], [h_entry])))
+
+        self.assertEqual(run(renamed(), renamed()), lm.Kept(True, ()))
+        self.assertEqual(run(renamed(patch=False), renamed(patch=False)), lm.Kept(True, ()))
+        for name, other in {"another blob": renamed(sha="2" * 40), "another source": renamed(previous="python/agent_tools/console/z.html"),
+                            "not renamed": edit(PAGE)}.items():
+            with self.subTest(name=name):
+                self.assertEqual(run(renamed(), other), lm.Kept(False, ()))
+        no_sha = {k: v for k, v in renamed().items() if k != "sha"}
+        self.assertEqual(run(no_sha, no_sha), lm.Kept(False, ()))
+
     def test_kept_asks_the_look_files_rule_for_a_pictureless_approval_with_a_line(self):
         c = lm.Candidate(1200, A, "approved", 10, None, 11)
         reads = files_world([(H, [A, X])], [DOC], [DOC])

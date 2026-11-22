@@ -501,7 +501,8 @@ receives it as `validate_release_merge`'s last parameter).
    kept by that line alone, never by the look file rule. An `approved` approval with no
    `pictures` field is also carried by a `look-carry` line with `rule=look-files` when the
    pull request's change to the look files is unchanged (issue 1597); that rule reads the set
-   file and the three compares, and refuses when `A...H` lists a look file.
+   file, the three compares and, when more than one merge came in, each merge's compare with
+   its first parent, and refuses when any of them lists a look file.
 Every lookup runs with the token variables scrubbed and the child timeout; a
 timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
 `issue <n> comment lookup timed out`, a non-zero one `PR body lookup failed`,

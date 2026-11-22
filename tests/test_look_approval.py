@@ -803,6 +803,19 @@ class CarryVerbTest(unittest.TestCase):
         self.seed([self.plain(5)], self.files(ah_files=("docs/x.md", PAGE)))
         self.assert_look_needed("look-files-differ")
 
+    def test_a_look_file_one_merge_brought_in_and_a_later_merge_took_out_carries_nothing(self):
+        two = [(A, [FORK]), (self.T, [A, self.X]), (HEAD, [self.T, OTHER])]
+        compares = self.files(tail=two)
+        compares[f"compare/{A}...{self.T}"] = cmp([PAGE])
+        compares[f"compare/{self.T}...{HEAD}"] = cmp([PAGE])
+        self.seed([self.plain(5)], compares)
+        self.assert_look_needed("look-files-differ")
+        compares[f"compare/{A}...{self.T}"] = cmp(["docs/x.md"])
+        compares[f"compare/{self.T}...{HEAD}"] = cmp(["docs/y.md"])
+        self.seed([self.plain(5)], compares)
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["rule"]), (0, "carried", "look-files"))
+
     def test_an_unreadable_listing_of_the_merges_is_an_error(self):
         compares = self.files()
         compares[f"compare/{A}...{HEAD}"] = {"status": "ahead", "files": "x", "total_commits": 0, "commits": []}

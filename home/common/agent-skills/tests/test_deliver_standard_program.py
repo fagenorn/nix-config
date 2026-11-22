@@ -13423,6 +13423,17 @@ class LookCarryLandingTest(unittest.TestCase):
         self.assertNotIn("look-carry", got)
         self.assertIn("look-checks-1", got)
 
+    def test_a_worktree_that_cannot_reach_the_new_head_asks_for_the_owners_look(self):
+        stale = {"head": F, "clean": True, "merge_only": False, "results": []}
+        result, calls = self.approve(replies={"look-carry-verify": stale})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        for label in ("look-carry", "merge"):
+            self.assertNotIn(label, got)
+        self.assertIn("look-checks-1", got)
+        self.assertIn("land-unlock", got)
+
     def test_a_carry_whose_verification_fails_stops_without_asking(self):
         failed = {"head": D, "clean": True, "merge_only": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
         result, calls = self.approve(replies={"look-carry-verify": failed})
@@ -13592,6 +13603,46 @@ class LookMovedHeadTest(unittest.TestCase):
         self.assertTrue(result["reason"].endswith("it adds commits that are not clean merges of dev; " + AWAIT_REASON), result["reason"])
         self.assertNotIn("look-carry", got)
         self.assertNotIn("merge", got)
+
+    def test_a_stop_after_the_approval_was_read_never_says_it_was_not_recorded(self):
+        stopped = {
+            "a merge stop after a carry": (dict(self.carries(), merge=None), "merge"),
+            "an unusable verification": ({"look-carry-verify": None}, "look-carry"),
+            "an unexpected carry reply": ({"look-carry-verify": self.BARE, "look-carry": {"verdict": "moved"}}, "look-carry"),
+        }
+        for name, (replies, stage) in stopped.items():
+            with self.subTest(name=name):
+                result, _ = self.approve(replies=replies)
+                self.assertEqual(result["stage"], stage)
+                self.assertNotIn("was not recorded", result["reason"])
+
+    def test_an_approval_read_that_failed_on_a_moved_head_never_says_it_was_not_recorded(self):
+        for reply in ({"verdict": "error", "detail": "x"}, None):
+            with self.subTest(reply=reply):
+                result, _ = self.approve(replies={"look-read": reply})
+                self.assertEqual(result["stage"], "look-approve")
+                self.assertNotIn("was not recorded", result["reason"])
+                self.assertIn("could not be checked", result["reason"])
+
+    def test_a_commit_made_outside_the_delivery_is_not_recorded_as_verified(self):
+        first, _ = run(patch={"setup": {"look": MARKED}})
+        result, calls = self.approve(replies={"look-carry-verify": dict(self.BARE, merge_only=False)})
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertEqual(result["cont"]["verified"]["head"], first["cont"]["verified"]["head"])
+        self.assertNotEqual(result["cont"]["verified"]["head"], D)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
+
+    def test_a_worktree_that_cannot_reach_the_moved_head_asks_for_the_owners_look(self):
+        stale = {"head": F, "clean": True, "merge_only": False, "results": []}
+        result, calls = self.approve(replies={"look-carry-verify": stale})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertTrue(result["reason"].startswith("the approval of " + SHA + " does not carry to " + D), result["reason"])
+        for label in ("look-carry", "merge"):
+            self.assertNotIn(label, got)
+        self.assertIn("look-checks-1", got)
 
     def test_a_moved_head_whose_approval_is_not_recorded_stops_as_before(self):
         result, calls = self.approve(replies={"look-read": {"verdict": "needed", "kept_from": None}})

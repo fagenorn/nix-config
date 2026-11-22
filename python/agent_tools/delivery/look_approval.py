@@ -122,7 +122,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    files'; neither reads the pull request or a compare), then after one read of the pull request
    and of the compares, `not-merges`, and under the look-files rule `no-look-files` (the look file
    set is absent at the base) or `look-files-differ` (the change to the look files differs, or a
-   merge brought a look file in); `moved` (exit 1: the pull request is not open or its head is
+   merge brought a look file in, even one a later merge took out again); `moved` (exit 1: the pull request is not open or its head is
    not `--head`, decided right after the pictures checks); then `carried` (0) with the comment id of
    the carry line, an existing one posting nothing. A look file set `look_marker.read_look_files`
    rejects and a listing `look_marker.compare_files` rejects are `look_marker.Unreadable`. Each

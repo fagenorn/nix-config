@@ -110,8 +110,10 @@ no `rule` field and a look-files line no `pictures` field, so a line naming both
 A malformed `pictures` field is not an absent one and takes no look-files line. `look_files_unchanged`
 reads the set file at B and the compares `B...A`, `A...H` and `B...H`, and keeps the approval when
 `merges_only` holds, `A...H` lists no look file (the globs of every set, so a merge that brought one in
-from the integration branch is refused), and the look-file diff of `B...A` equals that of `B...H`
-(a renamed or copied look file, or a listing with no patch, is not comparable). A set file or a
+from the integration branch is refused, and so is a look file that one merge brought in and a later
+merge took out again, because each merge is compared with its first parent), and the look-file diff
+of `B...A` equals that of `B...H` (a renamed or copied look file compares by its previous name and
+blob sha, and a look-file listing with no patch is not comparable). A set file or a
 listing it cannot read raises `Unreadable`. When it decides false the issue 1211 rule runs as for a
 pictures line; `settle_look_files` drives it alone. `carry_rule` names the rule a candidate's line
 must carry, or None.
@@ -767,19 +769,28 @@ def merges_only(approved_head: str, head: str, carry: Carry) -> Kept:
     return Kept(walked == added)
 
 
-def _look_diff(compare: Any, globs: tuple[str, ...]) -> dict[str, tuple[str, tuple[str, ...]]] | None:
-    """Each look file a compare lists mapped to its status and changed lines; None when not comparable.
+def _look_diff(compare: Any, globs: tuple[str, ...]) -> dict[str, tuple[Any, ...]] | None:
+    """Each look file a compare lists mapped to what the pull request did to it; None when not comparable.
 
-    A renamed or copied look file, or a listing of one with no patch, cannot be compared.
+    A modified, added or removed file maps to its status and changed lines, and needs its patch. A
+    renamed or copied one maps to its status, previous name, blob sha and changed lines, and needs a
+    previous name and a sha (a pure rename has no patch).
     """
-    found: dict[str, tuple[str, tuple[str, ...]]] = {}
+    found: dict[str, tuple[Any, ...]] = {}
     for entry in _entries(compare) or ():
         names = (entry["filename"], entry.get("previous_filename"))
         if not any(isinstance(n, str) and glob_match(g, n) for g in globs for n in names):
             continue
-        if entry["status"] in ("renamed", "copied") or "patch" not in entry:
+        name = entry["filename"]
+        if entry["status"] in ("renamed", "copied"):
+            previous, sha = entry.get("previous_filename"), entry.get("sha")
+            if not isinstance(previous, str) or not isinstance(sha, str) or not sha:
+                return None
+            found[name] = (entry["status"], previous, sha, _changes(compare, name))
+        elif "patch" not in entry:
             return None
-        found[entry["filename"]] = (entry["status"], _changes(compare, entry["filename"]))
+        else:
+            found[name] = (entry["status"], None, None, _changes(compare, name))
     return found
 
 
@@ -813,7 +824,26 @@ def look_files_unchanged(approved_head: str, head: str, carry: Carry) -> Kept:
     if any(glob_match(g, n) for g in globs for n in compare_files(reads[a_head]) or ()):
         return Kept(False)
     side_a, side_h = _look_diff(reads[base_a], globs), _look_diff(reads[base_h], globs)
-    return Kept(side_a is not None and side_a == side_h)
+    if side_a is None or side_a != side_h:
+        return Kept(False)
+    # A merge that brought a look file in and a later one that took it out leaves A...H clean: compare each merge with its first parent.
+    own_h = compare_commits(reads[base_h])
+    chain = _walk(approved_head, head, own_h, compare_commits(reads[base_a])) if own_h is not None else None
+    if chain is None:
+        return Kept(False)
+    steps = tuple(dict.fromkeys(compare_path(own_h[commit][0], commit) for commit in chain))
+    missing = tuple(p for p in steps if p not in reads)
+    if missing:
+        return Kept(False, missing)
+    if any(reads[p] is None for p in steps):
+        return Kept(False)
+    for path in steps:
+        names = compare_files(reads[path])
+        if names is None:
+            raise Unreadable(path)
+        if any(glob_match(g, n) for g in globs for n in names):
+            return Kept(False)
+    return Kept(True)
 
 
 def kept(candidate: Candidate, head: str, carry: Carry) -> Kept:

@@ -429,7 +429,7 @@ class LookGateWorld:
         at = self.git("rev-parse", "HEAD", cwd=path)
         merge_only = (at == brought
                       and self.git("merge-base", "--is-ancestor", approved, brought, cwd=path, check=False).returncode == 0
-                      and not self.git("rev-list", "--no-merges", f"{approved}..{brought}", cwd=path))
+                      and not self.git("rev-list", "--no-merges", f"{approved}..{brought}", "^origin/main", cwd=path))
         return {"head": at, "clean": True, "merge_only": merge_only,
                 "results": [{"id": "build", "status": "pass", "summary": "ok"}]}
 
