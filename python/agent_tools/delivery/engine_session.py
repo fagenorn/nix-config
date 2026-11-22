@@ -12,7 +12,10 @@ argument words of the step's `in` values.
 
 `read_result` reads the one JSON object a print-mode session writes to stdout:
 its `structured_output` is the only source of the reply, the prose in `result`
-never is, and every measurement that is absent or invalid reads as zero.
+never is, and every measurement that is absent or invalid reads as zero. A result whose
+`is_error` is true with an `api_error` string or an integer `api_error_status` is an API failure
+(`Reading.api_failure`): `usage-limit` for the `api_error` `usage_limit_reached`, else `api-error`, which the shell retries once and then
+reads as the outcome `no-reply`.
 
 `launch_argv` builds the one launch form: the account launcher's print mode
 (`claude-account run -p`) with the role handed over by flags (`--model`,
@@ -22,8 +25,10 @@ role body as `--append-system-prompt-file`), the bounds `--max-turns` and
 procedure, project or environment variable changes), the reply schema as
 `--json-schema`, the session id first fixed by the engine, and the permission
 mode `dontAsk`, so a tool the role does not allow is denied rather than asked
-about. The engine never passes `--agent`, `--bare`, `--setting-sources`,
-`--dangerously-skip-permissions` or `bypassPermissions`: `--bare` would skip the
+about. A session that hit a usage limit is started again with `--resume <session>` in place of
+`--session-id <session>`, every other word unchanged; the transcripts are shared between accounts,
+so the launcher's next account continues the same session. The engine never passes `--agent`, `--bare`,
+`--setting-sources`, `--dangerously-skip-permissions` or `bypassPermissions`: `--bare` would skip the
 hooks that guard the session, and the others would hand the session its own
 settings or its permissions. The prompt is never in the argv: the tool options
 are variadic and would swallow a positional prompt, so `launch` writes it on
@@ -44,6 +49,12 @@ graded reply.
 `items` (the engine carries no schema library) so an incomplete reply is a
 fault, never a transition.
 
+The launcher tells the engine its choice through an answer file: the launch environment carries
+`CLAUDE_ACCOUNT_ANSWER`, the path of a file the launcher writes, and `read_answer` reads it. It holds
+exactly `{"account": <name>}` (the account the session ran on) or `{"all_out": true,
+"resumes_at": <RFC3339 UTC time or null>}` (every account is out; the launcher then exits
+`ALL_OUT_EXIT`), and anything else, or no file, is no answer.
+
 `launch` starts the argv as its own process group (`start_new_session`) because
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
@@ -56,7 +67,8 @@ be gone, and SIGKILL to the group if any member is still alive; the call returns
 with `timed_out` set within `timeout + GRACE_SECONDS + DRAIN_SECONDS`. A launcher that
 cannot start gives exit 127 and the `OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
-stderr; `diagnostic` gives the last line of it for the engine's one fault line.
+stderr; `diagnostic` gives the last line of it for the engine's one fault line. A given `env` is
+the launcher's whole environment; without one it inherits the engine's.
 
 A session ended by a bound has no reply: its result subtype is `error_max_turns` (the bound
 `turns`) or `error_max_budget_usd` (the bound `spend`), named by `CAP_SUBTYPES`; `WALL_TIME`
@@ -79,7 +91,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
-from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.canonical import (
+    parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal,
+)
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
 from agent_tools.delivery.procedure_check import PLACEHOLDER_RE, ROLES
@@ -95,6 +109,10 @@ WALL_TIME = "wall-time"
 CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
     {"error_max_turns": "turns", "error_max_budget_usd": "spend"})
 NOT_STARTED = 127
+ANSWER_ENV = "CLAUDE_ACCOUNT_ANSWER"
+ALL_OUT_EXIT = 75
+USAGE_LIMIT = "usage-limit"
+API_ERROR = "api-error"
 GRACE_SECONDS = 5
 DRAIN_SECONDS = 5
 READ_ONLY_BASH: tuple[str, ...] = tuple(
@@ -213,6 +231,14 @@ class Reading:
     turns: int
     tokens: dict[str, int]
     spend_usd: float
+    api_failure: str | None = None
+
+
+@dataclass(frozen=True)
+class Answer:
+    account: str | None
+    all_out: bool
+    resumes_at: str | None
 
 
 def _count(value: object) -> int:
@@ -228,11 +254,48 @@ def _amount(value: object) -> float | None:
         return None
 
 
+def _strict_json(text: str) -> object:
+    return json.loads(text, object_pairs_hook=reject_duplicate_keys,
+                      parse_constant=reject_nonfinite_literal)
+
+
+def read_answer(path: Path) -> Answer:
+    """The launcher's answer in `path`; anything but the two exact forms is no answer."""
+    nothing = Answer(None, False, None)
+    try:
+        document = _strict_json(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        return nothing
+    if not isinstance(document, dict):
+        return nothing
+    account = document.get("account")
+    if set(document) == {"account"} and isinstance(account, str) and account:
+        return Answer(account, False, None)
+    resumes_at = document.get("resumes_at")
+    if set(document) == {"all_out", "resumes_at"} and document["all_out"] is True:
+        if resumes_at is not None:
+            try:
+                parse_rfc3339_utc(resumes_at)
+            except ValueError:
+                return nothing
+        return Answer(None, True, resumes_at)
+    return nothing
+
+
+def _api_failure(document: dict) -> str | None:
+    error, status = document.get("api_error"), document.get("api_error_status")
+    if document.get("is_error") is not True:
+        return None
+    if not (isinstance(error, str) and error) and not (
+            isinstance(status, int) and not isinstance(status, bool)):
+        return None
+    return USAGE_LIMIT if error == "usage_limit_reached" else API_ERROR
+
+
 def read_result(stdout: bytes) -> Reading:
     """The reply, prose, denials and measurements of a session's stdout."""
     try:
-        document = json.loads(stdout.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
-                              parse_constant=reject_nonfinite_literal)
+        document = _strict_json(stdout.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
         document = None
     if not isinstance(document, dict):
@@ -251,11 +314,16 @@ def read_result(stdout: bytes) -> Reading:
         wall_seconds=None if wall is None else wall / 1000,
         turns=_count(document.get("num_turns")),
         tokens={key: _count(usage.get(_USAGE_KEYS[key])) for key in TOKEN_COUNTS},
-        spend_usd=_amount(document.get("total_cost_usd")) or 0)
+        spend_usd=_amount(document.get("total_cost_usd")) or 0,
+        api_failure=_api_failure(document))
 
 
-def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) -> tuple[str, ...]:
-    """The launcher argv of one session; no word of it is a prompt."""
+def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, *,
+                resume: bool = False) -> tuple[str, ...]:
+    """The launcher argv of one session; no word of it is a prompt.
+
+    With `resume`, `--resume <session>` takes the place of `--session-id <session>`.
+    """
     refuse_value(role.name, "model", role.model)
     refuse_value(role.name, "effort", role.effort)
     for field, names in (("tools", role.tools), ("disallowedTools", role.disallowed)):
@@ -264,7 +332,7 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) 
     limits = bounds(role.name)
     argv = [*LAUNCHER, "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
-            "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
+            "--resume" if resume else "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
             "--model", role.model, "--effort", role.effort,
             "--max-turns", str(limits.turns), "--max-budget-usd", f"{limits.spend_usd:.2f}"]
     disallowed = list(role.disallowed or ())
@@ -397,7 +465,8 @@ def _end_overrun(process: subprocess.Popen) -> tuple[bytes, bytes]:
 
 
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
-           on_start: Callable[[int], None], timeout: float | None = None) -> Launched:
+           on_start: Callable[[int], None], timeout: float | None = None,
+           env: Mapping[str, str] | None = None) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written.
 
     With a `timeout` the session is ended at `started + timeout` (see the module docstring)
@@ -415,7 +484,8 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         try:
             process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       start_new_session=True)
+                                       start_new_session=True,
+                                       env=None if env is None else dict(env))
         except OSError as error:
             if deferred:  # no group to end, but the engine was told to stop
                 raise SystemExit(128 + deferred[0])

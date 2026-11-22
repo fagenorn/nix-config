@@ -275,8 +275,16 @@ def _first_step_recovery_reading(path: str) -> Callable[[dict], None]:
     return edit
 
 
+def _no_reply_to_review(toy: dict) -> None:
+    step(toy, "draft")["on"]["no-reply"] = "review"
+
+
 def _exhausted_stop(toy: dict) -> None:
     toy["stops"]["exhausted"] = {"need": "retry", "reenter": "draft"}
+
+
+def _quota_wait_stop(toy: dict) -> None:
+    toy["stops"]["quota-wait"] = {"need": "retry", "reenter": "draft"}
 
 
 def _entry_id_with_newline(toy: dict) -> None:
@@ -456,6 +464,11 @@ CASES = [
          [("toy", "scope\n", "invalid_field")]),
     Case("stop_named_exhausted", editing("toy", _exhausted_stop),
          [("toy", None, "invalid_field")]),
+    Case("stop_named_quota_wait", editing("toy", _quota_wait_stop),
+         [("toy", None, "invalid_field")]),
+    Case("no_reply_to_a_reader_of_the_reply", editing("toy", _no_reply_to_review),
+         [("toy", "children", "unproduced_input"), ("toy", "review-a", "unproduced_input"),
+          ("toy", "review-b", "unproduced_input")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
     Case("agent_step_without_out_of_bounds",
@@ -575,6 +588,25 @@ class ToyProcedureTest(unittest.TestCase):
                     {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
 
 
+class NoReplyOutcomeTest(unittest.TestCase):
+    def test_an_agent_step_may_map_no_reply_and_a_command_step_may_not(self):
+        with self.subTest("agent step"):
+            directory = broken_copy(editing(
+                "toy", _set(lambda toy: step(toy, "draft")["on"], "no-reply", "needs-owner")))
+            code, out, _ = run_check("--procedures", str(directory))
+            self.assertEqual((code, out), (0, compact(
+                {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+        with self.subTest("command step"):
+            directory = broken_copy(editing(
+                "toy", _set(lambda toy: step(toy, "scope")["on"], "no-reply", "needs-owner")))
+            code, out, _ = run_check("--procedures", str(directory))
+            document = json.loads(out)
+            self.assertEqual(code, 1)
+            self.assertEqual([(r["procedure"], r["step"], r["defect"])
+                              for r in document["refusals"]],
+                             [("toy", "scope", "unknown_outcome")])
+
+
 class RefusedOutcomeTest(unittest.TestCase):
     def test_a_command_step_that_does_not_map_refused_is_refused_and_one_that_maps_it_is_accepted(self):
         missing = broken_copy(editing("toy", lambda doc: step(doc, "scope")["on"].pop("refused", None)))
@@ -663,6 +695,79 @@ class DataFlowTest(unittest.TestCase):
         code, out, _ = run_check("--procedures", str(directory))
         self.assertEqual((code, out), (0, compact(
             {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+
+    def test_a_no_reply_route_bypasses_its_step_whatever_order_the_steps_are_listed_in(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        steps = {
+            "a": agent("a", {"ok": "s1"}),
+            "s1": agent("s1", {"ok": "s2", "no-reply": "s2"}),
+            "s2": agent("s2", {"ok": "done", "no-reply": "r"}),
+            "r": agent("r", {"ok": "done"}, ("s1.x",)),
+        }
+        for order in (("a", "s1", "s2", "r"), ("a", "s2", "s1", "r")):
+            with self.subTest(order=order):
+                procedure = {"steps": [steps[name] for name in order], "stops": {}, "inputs": []}
+                graph = procedure_check.result_flow_graph(procedure)
+                dominating = procedure_check.dominators(graph, procedure_check.START)["r"]
+                self.assertNotIn("s1(result)", dominating)
+
+    @staticmethod
+    def _dominating(procedure: dict, reader: str) -> frozenset[str]:
+        graph = procedure_check.result_flow_graph(procedure)
+        return procedure_check.dominators(graph, procedure_check.START)[reader]
+
+    def test_a_no_reply_route_into_a_mutating_step_can_still_lose_its_claim(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        procedure = {
+            "inputs": [], "keep_alive": {"command": "k", "in": []},
+            "stops": {"claim-lost": {"need": "retry", "reenter": "r"}},
+            "steps": [agent("s", {"ok": "m", "no-reply": "m"}),
+                      {"id": "m", "kind": "command", "mutates": True, "on": {"ok": "done"}, "in": []},
+                      agent("r", {"ok": "done"}, ("s.x",))]}
+        graph = procedure_check.result_flow_graph(procedure)
+        self.assertIn(procedure_check.CLAIM_LOST, graph["s"])
+        self.assertNotIn("s(result)", self._dominating(procedure, "r"))
+
+    def test_a_step_that_reaches_no_mutating_step_has_no_claim_lost_edge(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        procedure = {
+            "inputs": [], "keep_alive": {"command": "k", "in": []},
+            "stops": {"claim-lost": {"need": "retry", "reenter": "r"}},
+            "steps": [agent("s", {"ok": "done", "no-reply": "m"}),
+                      {"id": "m", "kind": "command", "mutates": True, "on": {"ok": "done"}, "in": []},
+                      agent("r", {"ok": "done"}, ("s.x",))]}
+        graph = procedure_check.result_flow_graph(procedure)
+        self.assertNotIn(procedure_check.CLAIM_LOST, graph["s(result)"])
+        self.assertIn(procedure_check.CLAIM_LOST, graph["s"])
+
+    def test_an_exhausted_entry_after_a_no_reply_does_not_credit_the_reply(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = (), **more) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads), **more}
+
+        procedure = {
+            "inputs": [], "stops": {},
+            "steps": [agent("a", {"ok": "done", "no-reply": "a", "exhausted": "reader"}, max_visits=1),
+                      agent("reader", {"ok": "done"}, ("a.x",))]}
+        self.assertNotIn("a(result)", self._dominating(procedure, "reader"))
+
+    def test_an_exhausted_target_that_is_itself_a_no_reply_step_is_split_too(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = (), **more) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads), **more}
+
+        procedure = {
+            "inputs": [], "stops": {},
+            "steps": [agent("a", {"ok": "p", "no-reply": "a", "exhausted": "s2"}, max_visits=1),
+                      agent("p", {"ok": "s2"}),
+                      agent("s2", {"ok": "done", "no-reply": "t"}),
+                      agent("t", {"ok": "done"}, ("p.x",))]}
+        self.assertNotIn("p", self._dominating(procedure, "t"))
 
 
 class RoleTest(unittest.TestCase):
