@@ -474,6 +474,15 @@ class _Reader:
                 return _Reader.remote_of(arguments[at + 1:])
         return None, []
 
+    @staticmethod
+    def cluster_values(cluster, letters, every):
+        """How many following words a short-option cluster consumes as values: a shell takes one for each
+        value letter wherever it sits (`-oe pipefail`, `-oO a b`); python takes the rest of the cluster
+        for `-W`, so only a last letter takes the next word."""
+        if every:
+            return sum(letter in letters for letter in cluster[1:])
+        return int(cluster[-1] in letters)
+
     def reads_stdin(self, name, rest):
         """True when the interpreter takes its code from standard input: no code argument, and no script
         operand once the values of its value-taking options are skipped (`-`, `/dev/stdin` are stdin)."""
@@ -487,15 +496,18 @@ class _Reader:
         takes = _SHELL_VALUES if base in _SHELLS else _VALUE_OPTIONS.get(family, frozenset())
         letters = frozenset(option[1] for option in takes if len(option) == 2)
         operands = []
-        skip = ended = False
+        ended = False
+        skip = 0
         for item in rest:
             value = item.word.value
             if skip:
-                skip = False
+                skip -= 1
             elif ended:
                 operands.append(value)
-            elif value in takes or (_CLUSTER_SIGNED.fullmatch(value) and value[-1] in letters):
-                skip = True
+            elif value in takes:
+                skip = 1
+            elif _CLUSTER_SIGNED.fullmatch(value) and self.cluster_values(value, letters, base in _SHELLS):
+                skip = self.cluster_values(value, letters, base in _SHELLS)
             elif value == "--":
                 ended = True
             elif not item.word.option:
