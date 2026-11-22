@@ -49,6 +49,7 @@ let
     "attempt-budget" = "delivery.attempt_budget";
     "bypass-proof" = "console.bypass_proof";
     "cache-proxy" = "hosts.cache_proxy";
+    "comment-lint" = "delivery.comment_lint";
     "conformance" = "project_contract.conformance";
     "console" = "console.console";
     "context-map-lint" = "delivery.context_map_lint";

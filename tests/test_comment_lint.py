@@ -4,15 +4,48 @@ Measures what each stack's lexer reads as a comment block: a comment inside a
 string, a heredoc body or a block scalar is not one, a docstring is one block
 bounded by its string literal, a run of own-line comments is one block and a
 comment after code stands alone, and a file that cannot be lexed never raises.
+
+The suite holds `standard:B18`, `standard:B19` and `standard:B20`, the comment rules, by
+running their enforcers (`agent_tools.delivery.comment_lint`) over a fixture per stack,
+over hand-built snapshots and over real git worlds, so the rule index lists this suite.
 """
 
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 import warnings
+from pathlib import Path
 
-from agent_tools.delivery import comment_syntax
+from agent_tools.delivery import comment_lint, comment_syntax, never_rise, rule_ids
 from agent_tools.delivery.comment_syntax import Block
+from agent_tools.delivery.never_rise import Rise, Snapshot, Violation
+from tests.test_never_rise import commit_all, fixture_env, git, mark_base, repo, write
 
 TIER = "integration"
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = REPO_ROOT / "tests/fixtures/comment-lint"
+BAR = REPO_ROOT / "home/common/agent-skills/standards/the-bar.md"
+REPOSITORY = "fixture-owner/fixture-repo"
+
+COMMON = [("B18", 13), ("B18", 15), ("B19", 23), ("B19", 32), ("B20", 34)]
+EXPECTED = {
+    "module.py": [("B18", 13), ("B18", 15), ("B19", 23), ("B19", 32), ("B19", 39), ("B20", 34)],
+    "module.mjs": COMMON,
+    "module.ts": COMMON,
+    "Module.cs": COMMON,
+    "default.nix": [("B18", 14), ("B18", 16), ("B19", 24), ("B19", 33), ("B20", 35)],
+    "script.sh": COMMON + [("B20", 39)],
+    "workflow.yaml": COMMON + [("B20", 40)],
+    "justfile": COMMON,
+}
+
+
+def cite(token: str) -> str:
+    return "standard" + ":" + token
 
 
 def lines(*rows: str) -> str:
@@ -313,6 +346,224 @@ class CommentSyntaxTest(unittest.TestCase):
             for text in texts:
                 with self.subTest(path=path, text=text):
                     self.assertIsInstance(comment_syntax.blocks(path, text), tuple)
+
+
+def run_command(*arguments, cwd=None):
+    return subprocess.run(
+        [sys.executable, "-m", "agent_tools.delivery.comment_lint", *arguments],
+        capture_output=True, text=True, timeout=60, env=fixture_env(), cwd=cwd)
+
+
+class FixtureTest(unittest.TestCase):
+    def test_each_stack_fixture_prints_its_violations_and_nothing_else(self):
+        fixtures = sorted(FIXTURES.glob("*.fixture"))
+        self.assertEqual({f.name.removesuffix(".fixture") for f in fixtures}, set(EXPECTED))
+        for fixture in fixtures:
+            target = fixture.name.removesuffix(".fixture")
+            with self.subTest(fixture=target), tempfile.TemporaryDirectory() as tmp:
+                root = repo(tmp)
+                shutil.copyfile(fixture, root / target)
+                commit_all(root)
+                done = run_command("--repo-root", str(root), "--repository", REPOSITORY)
+                lines = "".join(f"{rule} {target}:{line}\n" for rule, line in EXPECTED[target])
+                self.assertEqual((done.returncode, done.stdout), (1, lines), done.stderr)
+                rules = {"module.py": ["B18", "B18", "B19", "B19", "B19", "B20"],
+                         "script.sh": ["B18", "B18", "B19", "B19", "B20", "B20"],
+                         "workflow.yaml": ["B18", "B18", "B19", "B19", "B20", "B20"]}
+                self.assertEqual(
+                    sorted(rule for rule, _ in EXPECTED[target]),
+                    rules.get(target, ["B18", "B18", "B19", "B19", "B20"]))
+
+    def test_every_covered_stack_has_a_fixture(self):
+        found = {}
+        for fixture in FIXTURES.glob("*.fixture"):
+            target = fixture.name.removesuffix(".fixture")
+            found[target] = comment_syntax.stack_of(target, fixture.read_text("utf-8"))
+        self.assertEqual(set(found.values()), set(comment_syntax.STACKS))
+        self.assertIn("module.mjs", found)
+        self.assertIn("module.ts", found)
+
+
+class BarRuleTest(unittest.TestCase):
+    def test_the_bar_holds_the_three_comment_rules_and_not_the_old_sentence(self):
+        text = BAR.read_text("utf-8")
+        found = rule_ids.sections(text)
+        self.assertLessEqual({"B18", "B19", "B20"}, set(found))
+        self.assertNotIn("the code already says what", text)
+        self.assertTrue("TODO" in found["B20"] and "FIXME" in found["B20"])
+        self.assertTrue("TODO" not in found["B2"] and "FIXME" not in found["B2"])
+        link = "https://github.com/fagenorn/nix-config/issues/1420"
+        clauses = {
+            "B18": ("does not restate the code", "name an issue or pull request",
+                    "a decision-record id", "the condition for removing it"),
+            "B19": ("at most five lines", "at most 120 characters",
+                    "a module docstring or file header is exempt"),
+            "B20": ("`TODO`", "`FIXME`"),
+        }
+        for rule, wanted in clauses.items():
+            self.assertIn(link, found[rule], rule)
+            for clause in wanted:
+                with self.subTest(rule=rule, clause=clause):
+                    self.assertIn(clause, found[rule])
+
+    def test_the_rule_ids_are_rules_of_the_bar(self):
+        found = rule_ids.sections(BAR.read_text("utf-8"))
+        rules = tuple(enforcer.rule for enforcer in comment_lint.enforcers(None))
+        self.assertEqual(rules, ("B18", "B19", "B20"))
+        for rule in rules:
+            self.assertIn(rule, found)
+
+
+class ReferenceTest(unittest.TestCase):
+    def test_each_issue_or_pull_request_form_is_a_reference(self):
+        forms = (
+            "# see #12", "# (issue 608)", "# issues 1412 and 1414", "# Issue #3", "# PR 1618",
+            "# PR #7", "# pull request 9", "# GH-4",
+            "# https://github.com/fixture-owner/fixture-repo/pull/15",
+            "# fixture-owner/fixture-repo#5",
+            "# HTTPS://WWW.GITHUB.COM/Fixture-Owner/Fixture-Repo/issues/1",
+            "# https://github.com/upstream/GH-42/issues/7 see #12",
+        )
+        for text in forms:
+            with self.subTest(text=text):
+                self.assertTrue(comment_lint.references(text, REPOSITORY))
+
+    def test_other_text_is_not_a_reference(self):
+        plain = (
+            "# ADR-delivery-015 D3", "# " + cite("B12"), "# noqa: E501",
+            "# https://github.com/upstream/project/issues/42 (drop once fixed)",
+            "# https://github.com/upstream/GH-42/issues/7", "# https://example.com/docs#12",
+            "// &#123;", "# color #fff", "# 12 steps", "# prefix#12", "# the issue at hand",
+        )
+        for text in plain:
+            with self.subTest(text=text):
+                self.assertFalse(comment_lint.references(text, REPOSITORY))
+
+    def test_without_a_repository_only_the_shorthand_forms_count(self):
+        own = "# https://github.com/fixture-owner/fixture-repo/pull/15"
+        self.assertFalse(comment_lint.references(own, None))
+        self.assertTrue(comment_lint.references("# see #12", None))
+
+
+def snapshot(**contents):
+    files = {path.replace("__", "."): text.encode() for path, text in contents.items()}
+    return Snapshot("a" * 40, {}, files)
+
+
+def found(rule, snap):
+    enforcer = next(e for e in comment_lint.enforcers(None) if e.rule == rule)
+    return enforcer.find(snap)
+
+
+def hash_lines(*rows):
+    return "\n".join(rows) + "\n"
+
+
+class RuleTest(unittest.TestCase):
+    def test_a_header_is_exempt_from_length_but_not_from_references_or_markers(self):
+        wide = "w" * 124 + " #12"
+        doc = hash_lines('"""Header one.', "Header two.", wide, "Header four.", "TODO five",
+                         "Header six.", 'Header seven."""', "x = 1")
+        snap = snapshot(a__py=doc)
+        self.assertEqual(found("B18", snap), [Violation("B18", "a.py", 3)])
+        self.assertEqual(found("B19", snap), [])
+        self.assertEqual(found("B20", snap), [Violation("B20", "a.py", 5)])
+
+    def test_five_lines_and_120_characters_pass_and_six_and_121_fail(self):
+        text = hash_lines(
+            "x=1", *["# five"] * 5, "y=2", *["# six"] * 6, "z=3", "# " + "q" * 118, "w=4",
+            "# " + "q" * 119)
+        self.assertEqual(
+            found("B19", snapshot(a__sh=text)),
+            [Violation("B19", "a.sh", 8), Violation("B19", "a.sh", 17)])
+
+    def test_a_long_block_with_a_long_first_line_is_one_violation(self):
+        text = hash_lines("x=1", "# " + "z" * 119, *["# row"] * 5)
+        self.assertEqual(found("B19", snapshot(a__sh=text)), [Violation("B19", "a.sh", 2)])
+
+    def test_a_long_trailing_comment_line_counts(self):
+        text = hash_lines("x = 1", "y = 2  # " + "z" * 112)
+        self.assertEqual(found("B19", snapshot(a__py=text)), [Violation("B19", "a.py", 2)])
+
+    def test_a_line_with_two_references_is_one_violation(self):
+        text = hash_lines("x = 1", "# #1 and #2")
+        self.assertEqual(found("B18", snapshot(a__py=text)), [Violation("B18", "a.py", 2)])
+
+    def test_a_marker_in_a_string_is_not_counted(self):
+        snap = snapshot(a__py='x = "TODO #12"\n')
+        self.assertEqual((found("B18", snap), found("B20", snap)), ([], []))
+
+    def test_an_uncovered_file_is_not_read(self):
+        snap = Snapshot("a" * 40, {}, {"notes.md": b"# TODO #12\n"})
+        for rule in ("B18", "B19", "B20"):
+            self.assertEqual(found(rule, snap), [], rule)
+
+
+class NeverRiseCommentTest(unittest.TestCase):
+    def judge(self, base, branch):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            for path, text in base.items():
+                write(root, path, text)
+            commit_all(root)
+            mark_base(root)
+            for path, text in branch.items():
+                write(root, path, text)
+            commit_all(root)
+            enforcers = list(comment_lint.enforcers(REPOSITORY))
+            return never_rise.judge(root, "main", enforcers, timeout=60)
+
+    def test_a_branch_adding_a_todo_comment_rises_on_b20(self):
+        verdict = self.judge({"a.py": "x = 1\n"}, {"a.py": "x = 1\n# TODO: finish\n"})
+        self.assertEqual(verdict.rises, (Rise("B20", 0, 1, (Violation("B20", "a.py", 2),)),))
+
+    def test_a_branch_adding_an_issue_reference_rises_on_b18(self):
+        verdict = self.judge({"a.py": "x = 1\n"}, {"a.py": "x = 1\n# fixes #12\n"})
+        self.assertEqual(verdict.rises, (Rise("B18", 0, 1, (Violation("B18", "a.py", 2),)),))
+
+    def test_existing_comments_are_carried_by_the_merge_base(self):
+        base = {"a.py": "x = 1\n# fixes #12\n# TODO: x\n"}
+        self.assertEqual(self.judge(base, {"b.py": "y = 2\n"}).rises, ())
+
+    def test_a_removed_reference_does_not_hide_a_new_todo(self):
+        verdict = self.judge({"a.py": "x = 1\n# fixes #12\n"}, {"a.py": "x = 1\n# TODO: x\n"})
+        self.assertEqual([rise.rule for rise in verdict.rises], ["B20"])
+
+
+class CommandTest(unittest.TestCase):
+    def committed(self, tmp, text):
+        root = repo(tmp)
+        write(root, "a.py", text)
+        commit_all(root)
+        return root
+
+    def test_a_clean_tree_exits_0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, "x = 1  # why\n")
+            done = run_command("--repo-root", str(root))
+            self.assertEqual((done.returncode, done.stdout), (0, ""))
+
+    def test_violations_print_in_rule_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, "x = 1\n# TODO #12\n")
+            done = run_command("--repo-root", str(root))
+            self.assertEqual((done.returncode, done.stdout), (1, "B18 a.py:2\nB20 a.py:2\n"))
+
+    def test_a_bad_repository_or_a_relative_root_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.committed(tmp, "x = 1\n")
+            for arguments in (("--repo-root", str(root), "--repository", "nope"),
+                              ("--repo-root", "repo")):
+                with self.subTest(arguments=arguments):
+                    done = run_command(*arguments)
+                    self.assertEqual((done.returncode, done.stdout), (2, ""))
+                    self.assertTrue(done.stderr.startswith("comment-lint: "), done.stderr)
+
+    def test_the_command_is_a_row_of_the_command_table(self):
+        table = (REPO_ROOT / "lib/agent-tools.nix").read_text("utf-8")
+        self.assertIn('"comment-lint" = "delivery.comment_lint";', table)
+        verdicts = REPO_ROOT / "python/agent_tools/delivery/command_verdicts.json"
+        self.assertIsNone(json.loads(verdicts.read_text("utf-8"))["comment-lint"])
 
 
 if __name__ == "__main__":

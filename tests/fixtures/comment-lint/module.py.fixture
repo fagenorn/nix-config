@@ -1,0 +1,45 @@
+"""Fixture module header.
+Second line of the header.
+Wide third line of the header: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+Fourth.
+Fifth.
+Sixth.
+Seventh."""
+x1 = 1
+# Kept for ADR-fixture-001.
+x2 = 2
+# Remove once that ships: https://github.com/upstream-owner/upstream-repo/issues/42
+x3 = 3
+# Added to fix #12.
+x4 = 4
+# See https://github.com/fixture-owner/fixture-repo/issues/7
+x5 = 5
+# Five line block, row a.
+# Five line block, row b.
+# Five line block, row c.
+# Five line block, row d.
+# Five line block, row e.
+x6 = 6
+# Six line block, row a.
+# Six line block, row b.
+# Six line block, row c.
+# Six line block, row d.
+# Six line block, row e.
+# Six line block, row f.
+x7 = 7
+# zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+x8 = 8
+# zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+x9 = 9
+# TODO later
+x10 = 10
+s = "TODO"
+x11 = 11
+def f():
+    """Docstring row one.
+    two
+    three
+    four
+    five
+    """
+    return 1

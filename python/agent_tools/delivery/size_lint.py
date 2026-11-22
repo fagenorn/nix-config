@@ -27,7 +27,6 @@ unresolvable revision or a failed git read.
 """
 
 import argparse
-import sys
 from pathlib import Path, PurePosixPath
 
 from agent_tools.delivery import never_rise
@@ -65,20 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--revision", default="HEAD")
     args = parser.parse_args(argv)
-    root = Path(args.repo_root)
-    if not root.is_absolute():
-        print(f"{COMMAND}: --repo-root must be absolute: {root}", file=sys.stderr)
-        return 2
-    if not root.is_dir():
-        print(f"{COMMAND}: not a directory: {root}", file=sys.stderr)
-        return 2
-    if never_rise.in_subdirectory(root, timeout=None):
-        print(f"{COMMAND}: --repo-root is not the repository top level: {root}", file=sys.stderr)
-        return 2
-    sha = resolve(root, args.revision)
-    snapshot = never_rise.read_snapshot(root, sha, timeout=None) if sha else None
+    snapshot = never_rise.command_snapshot(COMMAND, args.repo_root, args.revision)
     if snapshot is None:
-        print(f"{COMMAND}: cannot read {args.revision} in {root}", file=sys.stderr)
         return 2
     found = find(snapshot)
     for violation in found:
