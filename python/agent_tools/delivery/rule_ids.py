@@ -32,7 +32,7 @@ REASON_NO_ID = "no well-formed id"
 REASON_LEVEL = "a rule heading is ###"
 SECOND_ID = re.compile(r"(?<![A-Za-z0-9])[A-Z]+[0-9]+\.(?=\s|$)")
 HEADING_LINE = re.compile(r"^ {0,3}(?:(?:>|[-*+]|[0-9]+[.)])[ \t]+ {0,3}|>)*#{1,6}(\s|$)")
-NUMBERED_ITEM = re.compile(r"^[0-9]+\. ")
+NUMBERED_ITEM = re.compile(r"^[0-9]+[.)] ")
 
 
 BLOCK_TAGS = (
@@ -209,6 +209,8 @@ def layer_problems(files: list[tuple[str, str, str]]) -> list[str]:
 def prefix_table(readme_text: str) -> dict[str, str]:
     table: dict[str, str] = {}
     for cells in table_rows(section(readme_text, "Rule ids")):
+        if len(cells) < 2:
+            continue
         keys, values = CODE_RE.findall(cells[0]), CODE_RE.findall(cells[1])
         if keys and values:
             table[keys[0]] = values[0]

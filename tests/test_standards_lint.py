@@ -117,6 +117,43 @@ class StructureTest(unittest.TestCase):
             encoding="utf-8")
         self.assert_fails_with("docs/standards/helpers.md: line 7: no well-formed id: 1. Another rule")
 
+    def test_an_index_table_that_is_not_rendered_indexes_nothing(self):
+        table = REPO_FILES["docs/standards/README.md"].split("\n\n", 1)[1]
+        for name, opener, closer in (("comment", "<!--", "-->"), ("fence", "```markdown", "```")):
+            with self.subTest(name=name):
+                self.index.write_text(f"# Project standards\n\n{opener}\n{table}{closer}\n", encoding="utf-8")
+                result = lint_fixture(self.repo, self.platform)
+                self.assertEqual((result.returncode, result.stdout), (1, (
+                    "docs/standards/README.md: index has no governs column\n"
+                    "docs/standards/helpers.md: has no row in docs/standards/README.md\n")))
+
+    def test_a_numbered_rule_with_either_delimiter_and_no_id_fails(self):
+        for line in ("1. Another rule", "1) Another rule"):
+            with self.subTest(line=line):
+                self.helpers.write_text(
+                    f"# Helpers\n\n### P1. Helpers live in the package\n\nbody\n\n{line}\n",
+                    encoding="utf-8")
+                self.assert_fails_with(f"docs/standards/helpers.md: line 7: no well-formed id: {line}")
+
+    def test_a_same_directory_link_names_its_shard(self):
+        self.edit(self.index, "(helpers.md)", "(./helpers.md)")
+        self.assert_passes()
+
+    def test_a_row_linking_the_index_itself_names_a_missing_shard(self):
+        with self.index.open("a", encoding="utf-8") as handle:
+            handle.write("| [README.md](README.md) | `x/**` | Index. |\n")
+        self.assert_fails_with("docs/standards/README.md: row names a missing shard README.md")
+
+    def test_a_prefix_row_missing_its_second_cell_is_skipped(self):
+        write_files(self.platform, {"stacks/node.md": "# Node\n\n### NODE1. x\n\nbody\n"})
+        with (self.platform / "README.md").open("a", encoding="utf-8") as handle:
+            handle.write("| `stacks/node.md` |\n")
+        self.assert_fails_with("stacks/node.md: has no prefix row in README.md")
+
+    def test_a_glob_with_ordinary_filename_characters_passes(self):
+        self.edit(self.index, "`python/**`, `scripts/*.py`", "`packages/@scope/**`, `src/C++/**`")
+        self.assert_passes()
+
     def test_a_bare_star_governs_fails(self):
         for value in ("*", "**", "**/*"):
             with self.subTest(value=value):

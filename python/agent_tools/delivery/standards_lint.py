@@ -73,7 +73,7 @@ HEADING_MAX_CHARS = 100
 HINT_MAX_LINES = 60
 LAYER2_DIR = "docs/standards"
 PLANNING_RULES = "acceptance-planning.md"
-GLOB_RE = re.compile(r"^[A-Za-z0-9._/*?\[\]{}!-]+$")
+GLOB_RE = re.compile(r"^[A-Za-z0-9._/*?\[\]{}!@+~%=-]+$")
 PLANNING_RULE = re.compile(
     r"^- \*\*(?P<prefix>[A-Z]+)(?P<number>[1-9][0-9]*)\. (?P<title>[^*]*?)\*\*")
 PLANNING_SECTION = "## Rules"
@@ -172,16 +172,19 @@ def governs_problems(shard: str, cell: str) -> list[str]:
 
 
 def index_table(text: str) -> list[list[str]]:
-    """The rows of the first run of `|` lines, separator rows dropped, the header first."""
+    """The rows of the first run of rendered `|` lines, separator rows dropped, the header first.
+
+    A line inside a fence or an HTML block (a comment included) is not rendered and breaks the run.
+    """
     rows: list[list[str]] = []
-    started = False
-    for line in text.splitlines():
+    previous = None
+    for number, line, _ in scan(text):
         line = line.strip()
-        if not line.startswith("|"):
-            if started:
+        if not line.startswith("|") or (previous is not None and number != previous + 1):
+            if rows:
                 break
             continue
-        started = True
+        previous = number
         cells = [cell.strip() for cell in line.strip("|").split("|")]
         if not all(set(cell) <= set("-: ") for cell in cells):
             rows.append(cells)
@@ -213,7 +216,9 @@ def index_problems(repo: Path) -> list[str]:
             problems.append(f"{INDEX_LABEL}: row {k} names no shard")
             continue
         target = link.group(1)
-        if "/" in target or not (directory / target).is_file():
+        while target.startswith("./"):
+            target = target[2:]
+        if target not in shards:
             problems.append(f"{INDEX_LABEL}: row names a missing shard {target}")
         if target in named:
             problems.append(f"{INDEX_LABEL}: row {k} repeats the shard {target}")
