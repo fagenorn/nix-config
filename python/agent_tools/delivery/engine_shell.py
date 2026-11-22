@@ -199,21 +199,24 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
     try:
         creation = _lock_creation(issue)
         try:
-            newest = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
-            if newest is not None:
-                holder = lock_holder(newest)
+            # Run ids order only to the second, so no one run is the newest: every
+            # run of the issue is checked, a held lock before an unfinished run.
+            runs = engine_ledger.find_runs(engine_ledger.runs_root(), issue, project)
+            for existing in runs:
+                holder = lock_holder(existing)
                 if holder is not None:
                     return EXIT_RUNNING, {
                         "detail": f"The {ENTRY} procedure of issue {issue} is already running "
                                   f"as process {holder['pid']}.",
                         "end": None, "need": None,
                         "process": {"pid": holder["pid"], "started": holder["started"]},
-                        "run": newest.name}
+                        "run": existing.name}
+            for existing in runs:
                 state = engine_ledger.fold(
-                    engine_ledger.read_run(newest),
-                    engine_ledger.replay(newest / "events.jsonl"), engine_ledger.process_alive)
+                    engine_ledger.read_run(existing),
+                    engine_ledger.replay(existing / "events.jsonl"), engine_ledger.process_alive)
                 if not state.done:
-                    raise Refused(f"run {newest.name} is not done, and continuing a run is a "
+                    raise Refused(f"run {existing.name} is not done, and continuing a run is a "
                                   "later slice of the engine")
             run_dir = engine_ledger.create_run(
                 project=project, issue=issue, procedure=ENTRY,

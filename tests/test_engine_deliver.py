@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.delivery import engine, engine_ledger
@@ -371,6 +372,45 @@ class LockTest(unittest.TestCase):
         again = project.deliver(procedures)
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertEqual(len(project.runs()), 2)
+
+    def seed_runs(self, project: EngineProject, procedures: Path, *, done: str, other: str):
+        """Two runs of the issue started in one second: `done` is finished, `other` is not."""
+        root = project.world.home / ".agents/state/engine/runs"
+        now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+        runs = {}
+        for token in (done, other):
+            runs[token] = engine_ledger.create_run(
+                project="example/engine", issue=1512, procedure="deliver",
+                procedures_dir=procedures, platform_revision="source", host="test",
+                inputs={"issue": 1512}, now=now, token=token, root=root)
+        engine_ledger.append_event(runs[done], {"event": "run_done",
+                                                "at": "2026-11-21T00:00:01Z"})
+        return runs[other]
+
+    def test_a_done_run_never_hides_a_running_run_started_in_the_same_second(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        running = self.seed_runs(project, procedures, done="zzzz", other="aaaa")
+        descriptor = os.open(running / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        os.write(descriptor, json.dumps({"pid": os.getpid(),
+                                         "started": "2026-11-21T00:00:00Z"}).encode("utf-8"))
+        runs_before = project.runs()
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 4, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["run"], running.name)
+        self.assertEqual(project.runs(), runs_before)
+
+    def test_a_done_run_never_hides_a_stopped_run_started_in_the_same_second(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-json", "done")])
+        stopped = self.seed_runs(project, procedures, done="zzzz", other="aaaa")
+        runs_before = project.runs()
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 2, second.stdout + second.stderr)
+        self.assertIn(stopped.name, second.stderr)
+        self.assertEqual(project.runs(), runs_before)
 
     def test_lock_holder_reads_only_a_held_lock(self):
         with tempfile.TemporaryDirectory() as name:
