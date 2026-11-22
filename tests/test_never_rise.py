@@ -40,7 +40,7 @@ LONG = Enforcer("FX2", lambda snap: [
 MEASURED = Enforcer("FX4", lambda snap: [
     Violation("FX4", p, 1, len(snap.blobs[p]))
     for p in sorted(snap.blobs) if p.endswith(".rec") and len(snap.blobs[p]) > 3],
-    per_file=True)
+    per_file=True, reads=lambda path: path.endswith(".rec"))
 
 
 def fixture_env(extra=None):
@@ -303,6 +303,20 @@ class NeverRiseTest(unittest.TestCase):
                 {"a.txt": b"x\ny", "bin.dat": b"a\0b", "empty.txt": b""})
             self.assertEqual(snapshot.line_counts, {"a.txt": 2})
 
+    def test_the_snapshot_keeps_only_the_blobs_asked_for_but_every_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.rec", b"x\ny")
+            write(root, "bin.dat", b"a\0b")
+            write(root, "empty.txt", b"")
+            commit_all(root)
+            head = git(root, "rev-parse", "HEAD").strip()
+            snapshot = never_rise.read_snapshot(
+                root, head, timeout=60, keep=lambda path: path.endswith(".rec"))
+            self.assertEqual(dict(snapshot.blobs), {"a.rec": b"x\ny"})
+            self.assertEqual(snapshot.paths, {"a.rec", "bin.dat", "empty.txt"})
+            self.assertEqual(snapshot.line_counts, {"a.rec": 2})
+
     def test_the_verdict_lists_the_added_paths_and_the_renames(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = repo(tmp)
@@ -315,7 +329,8 @@ class NeverRiseTest(unittest.TestCase):
             git(root, "mv", "old.txt", "moved.txt")
             write(root, "keep.txt", lines(5) + "one more\n")
             commit_all(root)
-            verdict = self.judge(root, [BAD])
+            reading = Enforcer("FX1", BAD.find, reads=lambda path: path.endswith(".txt"))
+            verdict = self.judge(root, [reading])
             self.assertEqual(verdict.added, ("empty.txt", "moved.txt", "new.txt"))
             self.assertEqual(dict(verdict.renamed), {"moved.txt": "old.txt"})
             self.assertEqual(
@@ -707,6 +722,22 @@ class RecordHistoryTest(unittest.TestCase):
             self.assertEqual(
                 verdict.rises, (Rise("B19", 0, 1, (Violation("B19", self.P, 1, 1),)),))
             self.assertEqual(context_map_lint.added_records(verdict), [self.P])
+
+    def test_an_over_cap_guide_moved_into_a_record_rises_and_is_listed(self):
+        moved = "docs/areas/a/adr/002-b.md"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "docs/guides/old.md", b"# Guide\n\n" + b"x" * 2000 + b"\n")
+            commit_all(root)
+            mark_base(root)
+            (root / "docs/areas/a/adr").mkdir(parents=True)
+            git(root, "mv", "docs/guides/old.md", moved)
+            write(root, moved, "# ADR-a-002 \u2014 B\n\n".encode() + b"x" * 2000 + b"\n")
+            commit_all(root)
+            verdict = self.judge(root)
+            self.assertEqual(dict(verdict.renamed), {moved: "docs/guides/old.md"})
+            self.assertEqual(verdict.rises, (Rise("B18", 0, 1, (Violation("B18", moved, 3, 2020),)),))
+            self.assertEqual(context_map_lint.added_records(verdict), [moved])
 
     def test_a_guide_moved_into_a_record_is_listed_and_a_moved_record_is_not(self):
         with tempfile.TemporaryDirectory() as tmp:

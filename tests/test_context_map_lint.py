@@ -217,6 +217,16 @@ class RecordFormTest(unittest.TestCase):
                 H + b"\nOne.\n\nSee **Formerly:** ADR-b-001 here.\n", [V("B19", P, 5, 1)]),
             "Formerly after the paragraph": (
                 H + b"\nOne.\n\n**Formerly:** ADR-b-001\n", [V("B19", P, 5, 1)]),
+            "emphasised status line": (H + b"\n*Status:* accepted\nPara.\n", [V("B19", P, 3, 1)]),
+            "adjacent bold sub-decisions": (
+                H + b"\n**D1.** First choice.\n**D2.** Second choice.\n", [V("B19", P, 4, 1)]),
+            "two Formerly lines": (
+                H + b"\n**Formerly:** ADR-b-001\n**Formerly:** ADR-c-001\n\nPara.\n",
+                [V("B19", P, 4, 2)]),
+            "soft-wrapped prose that starts a line with an ordinal": (
+                H + b"\nWe chose protocol version\n2. It supports retries.\n", []),
+            "an ordinal opening a block": (
+                H + b"\n2. It supports retries.\n", [V("B19", P, 3, 1)]),
         }
         for name, (content, expected) in rows.items():
             with self.subTest(name):
@@ -300,6 +310,11 @@ class RecordFormTest(unittest.TestCase):
             "over the cap": (H + over, header + over, ()),
             "under the cap, over it after the move": (H + near_cap, header + near_cap, ()),
             "body amended": (H + over, header + over + b"More.\n", ("B18",)),
+            "blank lines appended": (H + over, header + over + b"\n" * 5, ("B18",)),
+            "a padded blank line appended": (
+                H + over, header + over + b" " * 400 + b"\n", ("B18",)),
+            "two Formerly lines": (
+                H + over, header + b"**Formerly:** ADR-c-001\n" + over, ("B18",)),
         }
         for name, (old, new, expected) in rows.items():
             with self.subTest(name):
@@ -307,6 +322,17 @@ class RecordFormTest(unittest.TestCase):
                 branch = never_rise.Snapshot("b" * 40, {}, {moved: new})
                 found = never_rise.compare(base, branch, {moved: P}, (RECORD_SIZE_ENFORCER,))
                 self.assertEqual(tuple(rise.rule for rise in found), expected if expected else ())
+
+    def test_a_file_that_was_no_record_is_not_a_migration_whatever_its_size(self):
+        guide = "docs/guides/old.md"
+        moved = "docs/areas/a/adr/002-b.md"
+        body = b"\n" + b"x" * 2000 + b"\n"
+        base = never_rise.Snapshot("a" * 40, {}, {guide: b"# Guide\n" + body})
+        branch = never_rise.Snapshot(
+            "b" * 40, {}, {moved: "# ADR-a-002 \u2014 B\n".encode() + body})
+        self.assertEqual(
+            never_rise.compare(base, branch, {moved: guide}, RECORD_ENFORCERS),
+            (never_rise.Rise("B18", 0, 1, (V("B18", moved, 3, 2020),)),))
 
     def test_the_record_rules_are_rules_of_the_bar(self):
         rules = rule_ids.sections(BAR.read_text(encoding="utf-8"))
@@ -320,6 +346,11 @@ class RecordFormTest(unittest.TestCase):
                 "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-a-001\n".encode() + b"\nOne paragraph.\n",
                 True),
             "a blank line added": (old + b"\n", True),
+            "three blank lines added": (old + b"\n\n\n", False),
+            "a padded blank line added": (old + b" " * 400 + b"\n", False),
+            "a second Formerly line": (
+                "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-a-001\n**Formerly:** ADR-c-001\n"
+                .encode() + b"\nOne paragraph.\n", False),
             "the paragraph amended": (H + b"\nOne paragraph, amended.\n", False),
             "a line added": (H + b"\nOne paragraph.\nMore.\n", False),
         }

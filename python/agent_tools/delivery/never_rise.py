@@ -14,9 +14,9 @@ failed git read is no verdict (`None`), never a pass.
 Both sides are judged by the enforcers passed in, so a rule introduced by the
 branch itself is measured on the base by the same code and passes while its
 violations only persist. Each enforcer is a `rule` id and a `find` function
-over a `Snapshot` (the revision, every tracked text file's line count and every
-committed blob's bytes); it may emit only its own rule id, else the comparison
-raises `ValueError`.
+over a `Snapshot` (the revision, every path, every tracked text file's line count
+and the committed bytes of each path an enforcer `reads`); it may emit only its
+own rule id, else the comparison raises `ValueError`.
 
 The comparison, per enforcer in the order given. A count rule (the default)
 compares the project total: it rises when the branch has more violations than
@@ -32,7 +32,10 @@ violation to the target unless the enforcer has a `carries` function and it
 refuses the pair's bytes (old, new); a refused target is judged as if the base
 held no violation for it. With `exempts_carried`, a rename the enforcer carries
 never rises, whatever its measure: a move that only adds bytes the rule does not
-judge (a header, a pointer line) cannot turn the rule red. A move git does not pair is a new file.
+judge (a header, a pointer line) cannot turn the rule red. An enforcer's
+`carries_from`, when set, names the source paths a rename may be carried from:
+a rename from any other path is judged as a new file, as no move of a file the
+rule never judged can be a migration. A move git does not pair is a new file.
 
 A `Verdict` also lists the blob paths the head adds over the base (`added`, a
 rename target included), the renames git pairs (`renamed`, new path to old
@@ -111,6 +114,7 @@ class Snapshot(NamedTuple):
     revision: str
     line_counts: Mapping[str, int]
     blobs: Mapping[str, bytes] = MappingProxyType({})
+    paths: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,8 @@ class Enforcer:
     per_file: bool = False
     carries: Callable[[bytes, bytes], bool] | None = None
     exempts_carried: bool = False
+    carries_from: Callable[[str], bool] | None = None
+    reads: Callable[[str], bool] | None = None
 
 
 class Rise(NamedTuple):
@@ -181,13 +187,16 @@ def in_subdirectory(root: Path, timeout: float | None) -> bool:
 BINARY_PROBE_BYTES = 8000
 
 
-def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
-    """Every text file's line count and every blob's bytes at a revision.
+def read_snapshot(root: Path, revision: str, timeout: float | None,
+                  keep: Callable[[str], bool] | None = None) -> Snapshot | None:
+    """Every path, every text file's line count and the kept blobs' bytes at a revision.
 
     Lines are counted as `git grep -c` counts them: the newline-terminated lines
     plus an unterminated last line, empty files not listed. A file with a NUL in
-    its first `BINARY_PROBE_BYTES` bytes is binary and not counted; `blobs` holds
-    every blob's bytes, empty and binary ones included; a submodule is no file. A blob that cannot be read is no snapshot.
+    its first `BINARY_PROBE_BYTES` bytes is binary and not counted; `paths` holds
+    every blob's path; `blobs` holds the bytes of each blob `keep` accepts (every
+    blob when `keep` is None), empty and binary ones included; a submodule is no
+    file. A blob that cannot be read is no snapshot.
     """
     listing = _git(root, ["ls-tree", "-r", "-z", "--full-tree", revision], timeout)
     if listing is None:
@@ -218,10 +227,11 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
         stop = start + int(header[2])
         content = out[start:stop]
         position = stop + 1
-        blobs[path] = content
+        if keep is None or keep(path):
+            blobs[path] = content
         if content and b"\0" not in content[:BINARY_PROBE_BYTES]:
             counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
-    return Snapshot(revision, counts, blobs)
+    return Snapshot(revision, counts, blobs, frozenset(paths))
 
 
 def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str, str] | None:
@@ -243,23 +253,26 @@ def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     return found
 
 
-def _is_carried(enforcer: Enforcer, base: Snapshot, branch: Snapshot,
-                renamed: Mapping[str, str], violation: Violation) -> bool:
-    source = renamed.get(violation.path)
-    return source is not None and (enforcer.carries is None or enforcer.carries(
-        base.blobs.get(source, b""), branch.blobs.get(violation.path, b"")))
+def _carried_source(enforcer: Enforcer, base: Snapshot, branch: Snapshot,
+                    renamed: Mapping[str, str], path: str) -> str | None:
+    """The source a rename to `path` carries violations from, or None when it carries none."""
+    source = renamed.get(path)
+    if source is None or (enforcer.carries_from is not None
+                          and not enforcer.carries_from(source)):
+        return None
+    if enforcer.carries is not None and not enforcer.carries(
+            base.blobs.get(source, b""), branch.blobs.get(path, b"")):
+        return None
+    return source
 
 
 def _base_measure(enforcer: Enforcer, base: Snapshot, branch: Snapshot,
                   renamed: Mapping[str, str], base_measure: Mapping[str, int],
                   violation: Violation) -> int:
-    source = renamed.get(violation.path)
-    if source is None:
+    if violation.path not in renamed:
         return base_measure.get(violation.path, 0)
-    if enforcer.carries is not None and not enforcer.carries(
-            base.blobs.get(source, b""), branch.blobs.get(violation.path, b"")):
-        return 0
-    return base_measure.get(source, 0)
+    source = _carried_source(enforcer, base, branch, renamed, violation.path)
+    return 0 if source is None else base_measure.get(source, 0)
 
 
 def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
@@ -273,7 +286,7 @@ def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
             base_measure = {v.path: v.magnitude() for v in before}
             new = [v for v in after
                    if not (enforcer.exempts_carried
-                           and _is_carried(enforcer, base, branch, renamed, v))
+                           and _carried_source(enforcer, base, branch, renamed, v.path) is not None)
                    and _base_measure(enforcer, base, branch, renamed, base_measure, v)
                    < v.magnitude()]
         elif len(after) > len(before):
@@ -299,12 +312,15 @@ def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
     if pair is None:
         return None
     base, head = pair
-    base_snapshot = read_snapshot(root, base, timeout)
-    branch_snapshot = read_snapshot(root, head, timeout)
+    def keep(path: str) -> bool:
+        return any(e.reads is not None and e.reads(path) for e in enforcers)
+
+    base_snapshot = read_snapshot(root, base, timeout, keep)
+    branch_snapshot = read_snapshot(root, head, timeout, keep)
     renamed = renames(root, base, head, timeout)
     if base_snapshot is None or branch_snapshot is None or renamed is None:
         return None
-    added = tuple(sorted(set(branch_snapshot.blobs) - set(base_snapshot.blobs)))
+    added = tuple(sorted(branch_snapshot.paths - base_snapshot.paths))
     rename_blobs = {new: (base_snapshot.blobs.get(old, b""), branch_snapshot.blobs.get(new, b""))
                     for new, old in renamed.items()}
     return Verdict(base, head,

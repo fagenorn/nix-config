@@ -18,8 +18,9 @@ per-file violations for the never-rise check, `RECORD_ENFORCERS`, not findings
 of this command, so a run neither prints nor fails on them: the records written
 before the form are carried by the change's merge base, and only a record that
 grows past its base, or that is added, rises. A rename git pairs carries a
-record's violations only as a migration, its body unchanged; a superseding
-record that reuses the old text is judged as a new record. `added_records`
+record's violations only as a migration of a record, its body unchanged and
+at most two bytes of blank lines added; a superseding record that reuses the old
+text, and a file that was no record, are judged as a new record. `added_records`
 lists the records a change adds, a migration excluded.
 
 A repository that owns its context-map lint, with its own rules and budgets,
@@ -70,10 +71,13 @@ RECORD_BYTES_CAP = 1500
 RECORD_SIZE_RULE = "B18"
 RECORD_FORM_RULE = "B19"
 FORMERLY_LINE_RE = re.compile(r"^\*\*Formerly:\*\* ADR-[a-z0-9][a-z0-9-]*-\d{3}\s*$")
+MIGRATION_BLANK_BYTES = 2
+LABEL_RE = re.compile(r"^ {0,3}(?:\*\*|__)[^*_]{1,40}[.:](?:\*\*|__)")
+ORDERED_RE = re.compile(r"^ {0,3}(\d{1,9})[.)](?:[ \t]|$)")
 FORM_BREACH_RES = tuple(re.compile(pattern, flags) for pattern, flags in (
     (r"^ {0,3}#{1,6}(?:[ \t]|$)", 0),
-    (r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?status(?:\*\*|__)?\s*:", re.I),
-    (r"^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)", 0),
+    (r"^\s*(?:[-*+]\s+)?[*_]{0,2}status[*_]{0,2}\s*:", re.I),
+    (r"^ {0,3}[-*+](?:[ \t]|$)", 0),
     (r"^ {0,3}(?:=+|-+|(?:[*_][ \t]*){3,})[ \t]*$", 0),
     (r"^ {0,3}(?:```|~~~)", 0),
     (r"^ {0,3}>", 0)))
@@ -164,33 +168,70 @@ def record_lines(content: bytes) -> list[str]:
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
+def record_parts(content: bytes) -> tuple[int, tuple[str, ...]]:
+    """The bytes of the blank lines around the body, and the body's lines.
+
+    The body is what follows the header, less the blank lines before and after it
+    and one leading Formerly line; its inner lines, blank ones included, are kept.
+    """
+    lines = record_lines(content)[1:]
+    start, end = 0, len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    edge = lines[:start] + lines[end:]
+    body = lines[start:end]
+    if body and FORMERLY_LINE_RE.match(body[0]):
+        body = body[1:]
+        after = 0
+        while after < len(body) and not body[after].strip():
+            after += 1
+        edge, body = edge + body[:after], body[after:]
+    return sum(len(line) + 1 for line in edge), tuple(body)
+
+
 def record_body(content: bytes) -> tuple[str, ...]:
-    """The lines from line 2 on that are neither blank nor a Formerly line."""
-    return tuple(line for line in record_lines(content)[1:]
-                 if line.strip() and not FORMERLY_LINE_RE.match(line))
+    """The lines of the record's body: no header, no leading Formerly line, no edge blanks."""
+    return record_parts(content)[1]
 
 
 def is_record_migration(old: bytes, new: bytes) -> bool:
-    """True when a move left the body alone: only the header, a Formerly line or blanks changed."""
-    return record_body(old) == record_body(new)
+    """True when a move left the body alone: the header, a Formerly line and a
+    little blank space around the body (at most `MIGRATION_BLANK_BYTES` more
+    than the old record held) are all that changed."""
+    old_blank, old_body = record_parts(old)
+    new_blank, new_body = record_parts(new)
+    return old_body == new_body and new_blank <= old_blank + MIGRATION_BLANK_BYTES
 
 
 def form_breaches(content: bytes) -> list[int]:
     """The 1-based line of each breach of the record form, in line order."""
     lines = record_lines(content)
-    breaches = {number for number, line in enumerate(lines[1:], 2)
-                if any(pattern.match(line) for pattern in FORM_BREACH_RES)}
+    breaches: set[int] = set()
     blocks: list[list[int]] = []
     previous_blank = True
+    in_list = False
     for number, line in enumerate(lines[1:], 2):
         if not line.strip():
             previous_blank = True
+            in_list = False
             continue
+        ordered = ORDERED_RE.match(line)
+        # An ordered item starts a list at the top of a block, as "1.", or after
+        # another item; any other number in mid-paragraph is prose.
+        starts_list = ordered is not None and (
+            previous_blank or in_list or int(ordered.group(1)) == 1)
+        in_list = starts_list or any(
+            pattern.match(line) for pattern in FORM_BREACH_RES[2:3])
+        if (starts_list or any(pattern.match(line) for pattern in FORM_BREACH_RES)
+                or (not previous_blank and LABEL_RE.match(line))):
+            breaches.add(number)
         if previous_blank:
             blocks.append([])
         blocks[-1].append(number)
         previous_blank = False
-    if blocks and all(FORMERLY_LINE_RE.match(lines[n - 1]) for n in blocks[0]):
+    if blocks and len(blocks[0]) == 1 and FORMERLY_LINE_RE.match(lines[blocks[0][0] - 1]):
         blocks = blocks[1:]
     if not blocks:
         return [1]
@@ -226,9 +267,11 @@ def find_record_form(snapshot: Snapshot) -> list[Violation]:
 
 RECORD_SIZE_ENFORCER = Enforcer(
     RECORD_SIZE_RULE, find_record_size, per_file=True, carries=is_record_migration,
-    exempts_carried=True)  # a move adds header and Formerly bytes the cap must not count
+    exempts_carried=True,  # a move adds header and Formerly bytes the cap must not count
+    carries_from=is_record_path, reads=is_record_path)
 RECORD_FORM_ENFORCER = Enforcer(
-    RECORD_FORM_RULE, find_record_form, per_file=True, carries=is_record_migration)
+    RECORD_FORM_RULE, find_record_form, per_file=True, carries=is_record_migration,
+    carries_from=is_record_path, reads=is_record_path)
 RECORD_ENFORCERS = (RECORD_SIZE_ENFORCER, RECORD_FORM_ENFORCER)
 
 
