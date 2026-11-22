@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import types
 import unittest
 import unittest.mock
@@ -672,6 +673,36 @@ class LintChecksTest(ReportAssertions, unittest.TestCase):
                     self.summary(by_id[self.MAP_ID]),
                     ["failed", "context_map_lint_failed", self.MAP_REPAIR,
                      {"paths": ["docs/CONTEXT-MAP.md"], "count": len(problems)}])
+
+    def test_a_docs_areas_symlinked_outside_the_root_is_a_finding_and_is_never_read(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(tmp, "host/secret/adr/001-a.md", "# ADR-secret-001 — A\n")
+            write_file(tmp, "host/other/private.md", "private\n")
+            areas = root / "docs/areas"
+            if areas.is_symlink() or areas.is_file():
+                areas.unlink()
+            elif areas.is_dir():
+                shutil.rmtree(areas)
+            areas.symlink_to(tmp / "host")
+            opened = []
+            original = Path.read_text
+
+            def recording(path, *args, **kwargs):
+                opened.append(Path(path).resolve())
+                return original(path, *args, **kwargs)
+
+            with unittest.mock.patch.object(Path, "read_text", recording):
+                problems = context_map_lint.check(
+                    root, root / "docs/CONTEXT-MAP.md")
+            host = (tmp / "host").resolve()
+            self.assertEqual(
+                [path for path in opened if host in path.parents], [])
+            self.assertTrue(
+                any("resolves outside the repository" in problem
+                    for problem in problems), problems)
+            self.assertFalse(
+                any(str(tmp) in problem for problem in problems), problems)
 
     def test_lint_facts_carry_no_absolute_path_or_authored_text(self):
         with self.subTest(case="long path"), fixture() as tmp:

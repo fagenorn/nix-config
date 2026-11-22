@@ -291,7 +291,11 @@ def check(root: Path, map_path: Path) -> list[str]:
             errors.append(f"{rel(area_file)}: term '{term}' is defined but missing from the map's term table")
 
     # The standard docs layout — only where the repo has adopted it.
-    if areas_dir.is_dir():
+    if areas_dir.is_dir() and root.resolve() not in areas_dir.parents:
+        # Contained before it is listed: a docs/areas that resolves outside the
+        # checkout is a finding, and neither it nor its siblings are read.
+        errors.append("docs/areas: resolves outside the repository, so docs/ is not linted")
+    elif areas_dir.is_dir():
         errors += area_dirs_agree(areas_dir, areas, rel_map, rel)
         records, record_errors = index_records(areas_dir, rel)
         errors += record_errors
