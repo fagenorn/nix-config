@@ -5,7 +5,7 @@
 
 ## Context
 
-#438 shipped routing as opt-in because the measured time-to-first-token gap of the routed path was not shown to be small. #450 re-measured it (`docs/spikes/cache-proxy-ttft-gap.md` § Issue 450). The proxy hop itself added no measurable time, and one real effect was found: Claude Code sends its `<total_tokens>` budget line only to api.anthropic.com, so a routed turn opened with a thinking block far more often until `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown` restored the line.
+#438 shipped routing as opt-in because the measured time-to-first-token gap of the routed path was not shown to be small. #450 re-measured it ([the time-to-first-token gap record](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/docs/spikes/cache-proxy-ttft-gap.md) § Issue 450). The proxy hop itself added no measurable time, and one real effect was found: Claude Code sends its `<total_tokens>` budget line only to api.anthropic.com, so a routed turn opened with a thinking block far more often until `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown` restored the line.
 
 ## Decision
 

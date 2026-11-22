@@ -226,6 +226,13 @@ def assert_read_only(case: unittest.TestCase, root: Path,
 
 # P11: a pinned schema-2 contract, so a later change to this repository's own contract cannot move the suites.
 SCHEMA_TWO_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "project-contract-schema-2.json"
+# The snapshot the base resolver printed for that fixture, with the temp root spelled `<root>`.
+def canonical_json(document: object) -> str:
+    """The document's JSON text with sorted keys, so a scalar's type (`true` against `1`) is kept."""
+    return json.dumps(document, sort_keys=True, separators=(",", ":"))
+
+
+SCHEMA_TWO_SNAPSHOT = Path(__file__).resolve().parent / "fixtures" / "project-contract-schema-2.snapshot.json"
 
 
 def source_contract() -> dict:
@@ -357,7 +364,8 @@ class CoAuthorMemberTest(unittest.TestCase):
                         continue
                     if b"co_authored_by" in path.read_bytes():
                         found.append(path.relative_to(REPO_ROOT).as_posix())
-        self.assertEqual(sorted(found), ["python/agent_tools/project_contract/resolve_project.py"])
+        self.assertEqual(sorted(found), ["python/agent_tools/project_contract/resolve_project.py",
+                          "python/agent_tools/project_contract/schema_three.py"])
 
     def test_the_retired_member_is_written_false_and_is_a_schema_two_commit_member(self):
         self.assertEqual(dict(resolve_project.RETIRED_COMMIT_MEMBERS), {"co_authored_by": False})
@@ -423,6 +431,40 @@ class ResolverTestCase(unittest.TestCase):
         for violation in error["violations"]:
             self.assertEqual(sorted(violation), ["message", "pointer"])
         return error
+
+
+class SchemaTwoSnapshotPinTest(ResolverTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+
+    def test_the_pinned_schema_two_fixture_resolves_to_the_stored_snapshot(self):
+        root = self.make_root(source_contract())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        stub = make_stub_bin(("codex-companion", "gh", "git", "just"))
+        self.addCleanup(shutil.rmtree, stub, ignore_errors=True)
+        code, out, err = run_with_path(str(stub), "resolve", "--repo-root", str(root),
+                                       home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(canonical_json(json.loads(out.replace(str(root), "<root>"))),
+                         canonical_json(json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8"))))
+
+    def test_the_snapshot_pin_tells_a_boolean_from_an_integer(self):
+        stored = json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8"))
+        changed = copy.deepcopy(stored)
+        self.assertIs(stored["bindings"]["vcs"]["commit"]["signed"], True)
+        changed["bindings"]["vcs"]["commit"]["signed"] = 1
+        self.assertEqual(changed, stored)
+        self.assertNotEqual(canonical_json(changed), canonical_json(stored))
+
+    def test_the_stored_snapshot_has_the_schema_two_shape(self):
+        stored = json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8"))
+        self.assertEqual(stored["schema_version"], 2)
+        self.assertEqual(sorted(stored["project"]), ["id", "name", "root"])
+        self.assertIn("artifacts", stored["bindings"]["paths"])
+        self.assertEqual(sorted(stored["bindings"]["vcs"]["commit"]),
+                         ["co_authored_by", "signed"])
+        self.assertNotIn("commit-environment", stored["bindings"]["commands"])
 
 
 class SchemaTwoContractTest(ResolverTestCase):
@@ -741,8 +783,9 @@ class ErrorOutputTest(ResolverTestCase):
 
     def test_other_integer_schema_version_is_unsupported_schema(self):
         contract = source_contract()
-        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
-        contract["schema_version"] = 3
+        # P3: schema 2 is supported since platform 1.2.0. Platform 2.1.0 reads
+        # schemas 2 and 3; 4 is an unsupported integer.
+        contract["schema_version"] = 4
         code, payload, _ = self.resolve(self.make_root(contract))
         error = self.assert_refusal(code, payload, "unsupported_schema")
         self.assertEqual(error["repair_id"], "contract.schema_version.unsupported")
@@ -951,8 +994,8 @@ class OnePassCollectionTest(ResolverTestCase):
 
     def test_an_unsupported_integer_version_short_circuits(self):
         source = source_contract()
-        # Platform 2.0.0 supports schema 2 alone; 3 is an unsupported integer.
-        source["schema_version"] = 3
+        # Platform 2.1.0 reads schemas 2 and 3; 4 is an unsupported integer.
+        source["schema_version"] = 4
         del source["bindings"]["paths"]
         root = self.make_root(source)
         code, payload, _ = self.resolve(root)

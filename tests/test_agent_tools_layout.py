@@ -390,7 +390,8 @@ class LightLaneRetirementTest(unittest.TestCase):
                 continue
             if "light_lane" in text:
                 named.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(sorted(named), ["python/agent_tools/project_contract/resolve_project.py"])
+        self.assertEqual(sorted(named), ["python/agent_tools/project_contract/resolve_project.py",
+                          "python/agent_tools/project_contract/schema_three.py"])
 
 
 if __name__ == "__main__":

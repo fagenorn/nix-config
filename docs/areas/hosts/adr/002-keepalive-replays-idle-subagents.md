@@ -5,7 +5,7 @@
 
 ## Context
 
-A subagent that waits on a tool or on its parent lets its 5-minute prompt-cache entry expire, and the next turn then pays a full cache rewrite. The spike measured, as fact 2 (`docs/spikes/cache-proxy-spike.md`), that replaying a conversation's last request refreshes the entry. The proxy cannot tell a subagent that has finished for good from one waiting to be woken.
+A subagent that waits on a tool or on its parent lets its 5-minute prompt-cache entry expire, and the next turn then pays a full cache rewrite. The spike measured, as fact 2 ([the cache-proxy spike](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/docs/spikes/cache-proxy-spike.md)), that replaying a conversation's last request refreshes the entry. The proxy cannot tell a subagent that has finished for good from one waiting to be woken.
 
 ## Decision
 

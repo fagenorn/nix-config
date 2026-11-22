@@ -123,7 +123,7 @@ class ActionTest(unittest.TestCase):
         step(doc, "tally")["on"]["accept"] = "publish"
         doc["steps"].append(
             {"id": "publish", "stage": "final review", "kind": "command", "command": "diff-scope",
-             "in": ["tally.verdict"], "on": {"ok": "done", "failed": "needs-owner"}}
+             "in": ["tally.verdict"], "on": {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}}
         )
         self.assertEqual(refusals(doc), ())
         events = (
@@ -141,7 +141,7 @@ class ActionTest(unittest.TestCase):
         step(doc, "tally")["on"]["accept"] = "publish"
         doc["steps"].append(
             {"id": "publish", "stage": "final review", "kind": "command", "command": "diff-scope",
-             "in": ["tally.score"], "on": {"ok": "done", "failed": "needs-owner"}}
+             "in": ["tally.score"], "on": {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}}
         )
         self.assertEqual([(item.step, item.defect) for item in refusals(doc)], [("publish", "unknown_member")])
 
@@ -346,6 +346,7 @@ class WalkTest(unittest.TestCase):
             [
                 "scope:ok -> draft | scope=ok draft=drafted review=approve => done",
                 "scope:failed -> needs-owner | scope=failed => needs-owner",
+                "scope:refused -> needs-owner | scope=refused => needs-owner",
                 "draft:drafted -> review | scope=ok draft=drafted review=approve => done",
                 "draft:stuck -> draft | scope=ok draft=stuck draft=stuck => needs-owner",
                 "draft:exhausted -> needs-owner | scope=ok draft=stuck draft=stuck => needs-owner",
