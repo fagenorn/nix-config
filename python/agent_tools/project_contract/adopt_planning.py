@@ -805,9 +805,13 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
 
     projections = (amended or {}).get("projections")
     if isinstance(projections, list):
+        # A `conformance_workflow` entry carries no `source`: it renders from
+        # the contract alone, so the contract file is the source it
+        # regenerates from.
         rows = [entry for entry in projections if isinstance(entry, dict)
                 and isinstance(entry.get("target"), str)
-                and isinstance(entry.get("source"), str)]
+                and (isinstance(entry.get("source"), str)
+                     or entry.get("kind") == "conformance_workflow")]
         for entry in sorted(rows, key=lambda row: row["target"]):
             # The one variable path this module opens. It is authored in the
             # contract, and this runs whether or not the resolver accepted that
@@ -823,7 +827,8 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
             current = (None if resolved is None
                        else read_bytes_bounded(resolved))
             tail.append(operation(
-                "regenerate-projection", [entry["source"]], [target],
+                "regenerate-projection",
+                [entry.get("source") or CONTRACT_FILENAME], [target],
                 None if current is None else sha256_hash(current),
                 # The rendered bytes are the resolver's to produce, so the
                 # plan states the source it regenerates from rather than

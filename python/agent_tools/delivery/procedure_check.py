@@ -9,8 +9,9 @@ names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with exactly `
 id) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
 object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
 keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
-is never named `done`, `exhausted` or like a step. `exhausted` is reserved: no stop, declared verdict or reply enum value
-carries it.
+is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait` or like a step. `exhausted` and `out-of-bounds` are reserved:
+no stop, declared verdict or reply enum value carries either. `quota-wait` is the engine's own stop, taken when every account
+is out of usage (`engine_shell`).
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`), `kind` (one of `KINDS`), `in` (distinct paths,
 `<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group member, forbidden on
@@ -50,7 +51,8 @@ first): `unreachable_step` (a step the walk of `flow_graph` from the first step 
 renewal failure as an edge to `claim-lost` into a `mutates` step; a group member is reached when its group is),
 `unreachable_done` (no reachable step has an `on` entry to `done` that is an edge of `flow_graph`), `unmapped_outcome` and
 `unknown_outcome` (a step's `on` keys against `outcomes_of`; an `agent` step also produces `no-reply`, the shell's outcome when
-no valid reply came back, so a non-member agent step whose `on` lacks it is `unmapped_outcome`; a command step also produces
+no valid reply came back, so a non-member agent step whose `on` lacks it is `unmapped_outcome`; an agent step outside a group also
+produces `out-of-bounds`, which its `on` must map, and a command step may map it; a command step also produces
 `refused`, because the engine calls the lifecycle guard before every command (issue 1515), so its `on` maps it; a step on a
 cycle of `step_graph` also produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the
 group, where neither `no-reply` nor `refused` passes) and `unbounded_cycle` (a cycle among steps
@@ -61,11 +63,12 @@ first step). An outcome check whose reference failed phase B is skipped for that
 Phase C, data flow (after the graph checks; in step order, the header's `keep_alive` first): `unproduced_input` (an `in` path
 `run.<n>` whose `n` is not a header input, or `<X>.<m>` where `X` is not produced on every route to the step: `X` is a
 non-member step, or a member of a group, among the `dominators` of the step without itself; a group member is dominated
-through its group; an `<X>.<m>` path is also unproduced when `X` is a non-member agent step whose `no-reply` edge
-reaches the step without running `X` again, since a missed answer stores `{}`; a step never reads its own result; a step the walk does not reach, and a member of a group it does not
-reach, skip this route check and keep the `run.<n>` and member checks), `unknown_member` (`X` is an agent step whose reply
+through its group; a step never reads its own result; a step the walk does not reach, and a member of a group it does not
+reach, skip this route check and keep the `run.<n>` and member checks; a step's `no-reply` result is `{}`, so the edge
+it maps `no-reply` to produces none of its members, and a reader reached through it is refused), `unknown_member` (`X` is an agent step whose reply
 schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
-consumed; `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
+consumed; a step ended by a bound (`out-of-bounds`) produces none of its members, so a read of `<X>.<m>` is refused on a
+route where `X` ended by the bound, unless the route reenters `X` and passes a normal outcome before the reader (the `exhausted` entry of a step on a cycle follows an earlier visit and keeps that visit's reply, unless the bound route leads back to the step); `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
 declares no schema and is not member-checked) and `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
 its `in` paths; skipped when the prompt is missing)."""
 
@@ -95,9 +98,11 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
            "unknown_member", "unknown_placeholder")
 EXHAUSTED = "exhausted"
+OUT_OF_BOUNDS = "out-of-bounds"
 NO_REPLY = "no-reply"
 REFUSED = "refused"
 CLAIM_LOST = "claim-lost"
+QUOTA_WAIT = "quota-wait"
 START = "(start)"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -188,8 +193,9 @@ def _verdict_list(value: object, where: str) -> tuple[str, ...]:
     if (not isinstance(value, list) or not all(isinstance(item, str) and item for item in value)
             or len(set(value)) != len(value)):
         raise DeclarationError(f"{where}: verdicts are distinct non-empty strings")
-    if EXHAUSTED in value:
-        raise DeclarationError(f"{where}: {EXHAUSTED!r} is reserved, not a verdict")
+    for reserved in (EXHAUSTED, OUT_OF_BOUNDS):
+        if reserved in value:
+            raise DeclarationError(f"{where}: {reserved!r} is reserved, not a verdict")
     return tuple(value)
 
 
@@ -304,8 +310,9 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
     for name, stop in stops.items():
         if not NAME_RE.fullmatch(name):
             found.add("invalid_field", f"stop name {name!r} must match {NAME_RE.pattern}.")
-        elif name in ("done", EXHAUSTED) or name in ids:
-            found.add("invalid_field", f"stop name {name!r} is `done`, `{EXHAUSTED}` or a step id.")
+        elif name in ("done", EXHAUSTED, OUT_OF_BOUNDS, QUOTA_WAIT) or name in ids:
+            found.add("invalid_field",
+                      f"stop name {name!r} is `done`, `{EXHAUSTED}`, `{OUT_OF_BOUNDS}`, `{QUOTA_WAIT}` or a step id.")
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue
@@ -514,10 +521,9 @@ def _reply_schema(path: Path, outcome_from: str, name: str) -> _Reply | tuple[st
     if (not isinstance(enum, list) or not enum or not all(_is_text(v) for v in enum)
             or len(set(enum)) != len(enum)):
         return "invalid_reply", f"properties.{outcome_from} has no enum of distinct non-empty strings."
-    if EXHAUSTED in enum:
-        return "invalid_reply", f"properties.{outcome_from} enum names {EXHAUSTED!r}, which is reserved."
-    if NO_REPLY in enum:
-        return "invalid_reply", f"properties.{outcome_from} enum names {NO_REPLY!r}, which is reserved."
+    for reserved in (EXHAUSTED, OUT_OF_BOUNDS, NO_REPLY):
+        if reserved in enum:
+            return "invalid_reply", f"properties.{outcome_from} enum names {reserved!r}, which is reserved."
     problem = schema_problem(schema)
     if problem:
         return "unsupported_reply", f"{name} uses {problem}, outside the reply schema subset."
@@ -717,6 +723,14 @@ def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
     return frozenset(node for node in graph if node in _reach(graph, node))
 
 
+def _changing_steps(procedure: dict) -> set[str]:
+    """The ids of the `mutates` steps and of the groups with a `mutates` member."""
+    changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
+    changing |= {item["id"] for item in procedure["steps"]
+                 if changing.intersection(m["step"] for m in item.get("members", ()))}
+    return changing
+
+
 def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     """Steps and stops -> where control can go (`START` to the first step), `done` and dead `exhausted` left out.
 
@@ -725,9 +739,7 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     members = _members_of(procedure)
     cyclic = on_cycle(step_graph(procedure))
     renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
-    changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
-    changing |= {item["id"] for item in procedure["steps"]
-                 if changing.intersection(m["step"] for m in item.get("members", ()))}
+    changing = _changing_steps(procedure)
     graph: dict[str, tuple[str, ...]] = {START: (procedure["steps"][0]["id"],)}
     for item in procedure["steps"]:
         if item["id"] in members:
@@ -740,6 +752,49 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     for node, targets in graph.items():
         if renews and changing.intersection(targets):
             graph[node] = targets + (CLAIM_LOST,)
+    return graph
+
+
+def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """`flow_graph` with a `(result)` node after each step whose `on` maps `out-of-bounds` or, for an agent step, `no-reply`.
+
+    The step's node keeps its `out-of-bounds` and `no-reply` edges (unless their target is `done`) and goes to
+    `<id>(result)`, which stands for the step having ended by a normal outcome and carries the step's other outcome
+    edges. A route through the step's own node alone is one on which the step ended by a bound or with no reply and
+    stored no member of this visit (a bound stores `{"bound": ...}`, no reply stores `{}`).
+
+    The `exhausted` edge of a step on a cycle is taken on an entry after a visit ended, and a visit's result is
+    kept until the next one replaces it, so it hangs on `<id>(result)`: the previous visit ended by a normal outcome.
+    It hangs on the step's own node too only when its `out-of-bounds` or `no-reply` target leads back to the step
+    through steps, the one way the previous visit can have ended with no member stored.
+    """
+    members = _members_of(procedure)
+    cyclic = on_cycle(step_graph(procedure))
+    renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
+    changing = _changing_steps(procedure)
+    graph = flow_graph(procedure)
+    steps_only = step_graph(procedure)
+
+    def renewing(targets: tuple[str, ...]) -> tuple[str, ...]:
+        return targets + (CLAIM_LOST,) if renews and changing.intersection(targets) else targets
+
+    for item in procedure["steps"]:
+        if item["id"] in members or item["kind"] not in ("agent", "command"):
+            continue
+        bare = {OUT_OF_BOUNDS} | ({NO_REPLY} if item["kind"] == "agent" else set())
+        if not bare.intersection(item["on"]):
+            continue
+        name = item["id"]
+        result_node = f"{name}(result)"
+        bare_targets = tuple(dict.fromkeys(
+            target for outcome, target in item["on"].items() if outcome in bare and target != "done"))
+        bare_returns = any(target == name or name in _reach(steps_only, target) for target in bare_targets)
+        exhausted = tuple(target for outcome, target in item["on"].items()
+                          if outcome == EXHAUSTED and target != "done" and name in cyclic)
+        graph[name] = renewing(bare_targets + (exhausted if bare_returns else ()) + (result_node,))
+        graph[result_node] = renewing(tuple(
+            target for outcome, target in item["on"].items()
+            if outcome not in bare | {EXHAUSTED} and target != "done") + exhausted)
     return graph
 
 
@@ -765,7 +820,7 @@ def dominators(graph: Mapping[str, tuple[str, ...]], entry: str) -> dict[str, fr
 
 
 def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> None:
-    graph = flow_graph(procedure)
+    graph = result_flow_graph(procedure)
     by_id = {item["id"]: item for item in procedure["steps"]}
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
                 if item["kind"] == "group" for member in item["members"]}
@@ -783,7 +838,10 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
             owner = group_of.get(label, label)
             if owner in dom:
                 before = dom[owner] - {owner}
-                if producer not in by_id or group_of.get(producer, producer) not in before:
+                node = group_of.get(producer, producer)
+                if f"{node}(result)" in graph:
+                    node = f"{node}(result)"
+                if producer not in by_id or node not in before:
                     found.add("unproduced_input",
                               f"{path!r} is not produced on every route to the step.", label)
         known = resolved.steps.get(producer)
@@ -798,28 +856,6 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                       f"{path!r} is not a member the result of {producer!r} carries; a decide step publishes only 'verdict'.",
                       label)
 
-    def check_no_reply(producer: dict) -> None:
-        """Flag each reader of `producer` that a `no-reply` edge reaches without the producer running again.
-
-        A reader the producer does not dominate is already flagged by `check_path`.
-        """
-        target = producer["on"][NO_REPLY]
-        if target == "done" or target == producer["id"]:
-            return
-        blocked = {node: tuple(t for t in targets if t != producer["id"])
-                   for node, targets in graph.items() if node != producer["id"]}
-        reached = {target} | _reach(blocked, target)
-        for item in procedure["steps"]:
-            owner = group_of.get(item["id"], item["id"])
-            if (item["id"] == producer["id"] or owner not in reached
-                    or producer["id"] not in dom.get(owner, frozenset()) - {owner}):
-                continue  # a producer that does not dominate the reader is already unproduced
-            for path in item.get("in", ()):
-                if path.split(".", 1)[0] == producer["id"]:
-                    found.add("unproduced_input",
-                              f"{path!r} is read after {producer['id']!r} replied nothing, "
-                              "when its result is empty.", item["id"])
-
     for path in procedure.get("keep_alive", {}).get("in", ()):
         check_path(path, None)
     for item in procedure["steps"]:
@@ -832,9 +868,6 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                 if name not in reads:
                     found.add("unknown_placeholder",
                               f"the prompt names {{{{{name}}}}}, which is not an in path.", item["id"])
-    for item in procedure["steps"]:
-        if item["kind"] == "agent" and item["id"] not in group_of and NO_REPLY in item.get("on", {}):
-            check_no_reply(item)
 
 
 def _check_reachability(procedure: dict, found: _Findings) -> None:
@@ -884,13 +917,15 @@ def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> No
                               label)
         if label in members:
             continue
-        producible = set(produced) | ({EXHAUSTED} if label in cyclic else set())
-        unmapped = [o for o in sorted(producible, key=(*produced, EXHAUSTED).index)
+        producible = (set(produced) | ({EXHAUSTED} if label in cyclic else set())
+                      | ({OUT_OF_BOUNDS} if item["kind"] == "agent" else set()))
+        unmapped = [o for o in sorted(producible, key=(*produced, OUT_OF_BOUNDS, EXHAUSTED).index)
                     if o not in item["on"]]
         if unmapped:
             found.add("unmapped_outcome",
                       f"on does not map {', '.join(map(repr, unmapped))}.", label)
-        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED]
+        unknown = [o for o in item["on"] if o not in producible and o != EXHAUSTED
+                   and not (o == OUT_OF_BOUNDS and item["kind"] in ("agent", "command"))]
         if unknown:
             found.add("unknown_outcome",
                       f"on maps {', '.join(map(repr, unknown))}, which the step cannot produce.", label)

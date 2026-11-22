@@ -11,10 +11,12 @@
     {"id": "draft", "stage": "building", "kind": "agent", "role": "implementer",
      "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
      "in": ["run.issue"], "max_visits": 2, "mutates": true,
-     "on": {"drafted": "review", "stuck": "draft", "no-reply": "step-failed", "exhausted": "needs-owner"}},
+     "on": {"drafted": "review", "stuck": "draft", "no-reply": "step-failed", "exhausted": "needs-owner",
+            "out-of-bounds": "step-failed"}},
     {"id": "review", "stage": "final review", "kind": "agent", "role": "reviewer",
      "prompt": "review.md", "reply": "review.reply.json", "outcome_from": "verdict",
-     "in": ["draft.summary"], "on": {"approve": "tally", "revise": "tally", "no-reply": "step-failed"}},
+     "in": ["draft.summary"], "on": {"approve": "tally", "revise": "tally", "no-reply": "step-failed",
+                                     "out-of-bounds": "step-failed"}},
     {"id": "tally", "stage": "final review", "kind": "decide", "grader": "toy-tally",
      "in": ["review.verdict"], "on": {"accept": "done", "revise": "needs-owner"}}
   ]

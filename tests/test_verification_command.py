@@ -576,6 +576,10 @@ CI_STEP_CLASSES = {
     ("ci.yaml", "nix-eval", "nix build --no-link '.#checks.x86_64-linux.agnostic-lint'"):
         ("lint", "agnostic-lint"),
     ("instruction-budget.yaml", "instruction-budget", BUDGET): ("lint", "instruction-budget"),
+    ("conformance.yaml", "conformance", CHECKOUT): SETUP,
+    ("conformance.yaml", "conformance", INSTALL): SETUP,
+    ("conformance.yaml", "conformance", "nix shell .#agent-platform --command conformance run --purpose ci"):
+        ("not-lint", "runs the conformance engine against the checkout"),
 }
 
 

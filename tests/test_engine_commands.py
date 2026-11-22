@@ -25,8 +25,8 @@ from unittest import mock
 
 from agent_tools.delivery import engine_caps, engine_commands
 from agent_tools.delivery.engine_commands import (
-    PLATFORM_MODULES, CommandTable, Invocation, UnknownCommand, argument, command_text, grade,
-    run)
+    PLATFORM_MODULES, PLATFORM_WALL_SECONDS, PROJECT_WALL_SECONDS, CommandTable, Invocation,
+    UnknownCommand, argument, command_text, grade, run)
 from agent_tools.delivery.engine_guard import Hook, Unavailable, locate
 from agent_tools.delivery.procedure_check import load_commands
 from agent_tools.system.siblings import sibling_argv
@@ -34,6 +34,8 @@ from tests.engine_guards import (
     GUARD_NAME, STANDIN_GUARD, payloads, script, standin_guard, write_settings)
 
 TIER = "fast"
+
+HEARTBEAT = "import sys, time\nwhile True:\n    open(sys.argv[1], 'a').write('x')\n    time.sleep(0.05)\n"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDIN = REPO_ROOT / "tests/fixtures/engine-deliver/standin.py"
@@ -116,6 +118,24 @@ class TableTest(unittest.TestCase):
         self.assertEqual(set(PLATFORM_MODULES), declared)
         for name in declared:
             self.assertEqual(PLATFORM_MODULES[name], rows[name])
+
+
+class WallBoundTest(unittest.TestCase):
+    def test_every_platform_command_declares_a_wall_bound(self):
+        self.assertEqual(set(PLATFORM_WALL_SECONDS), set(PLATFORM_MODULES))
+        for name, seconds in PLATFORM_WALL_SECONDS.items():
+            with self.subTest(command=name):
+                self.assertGreater(seconds, 0)
+
+    def test_wall_seconds_reads_the_platform_row_then_the_project_bound(self):
+        commands = table(mine=project("json", "0"))
+        self.assertEqual(commands.wall_seconds("diff-scope"), 300)
+        self.assertEqual(commands.wall_seconds("forge-claim"), 1200)
+        self.assertEqual(commands.wall_seconds("mine"), PROJECT_WALL_SECONDS)
+        self.assertEqual(PROJECT_WALL_SECONDS, 3600)
+        with self.assertRaises(UnknownCommand):
+            commands.wall_seconds("nothing")
+
 
 
 class GuardTest(unittest.TestCase):
@@ -282,6 +302,8 @@ def _callee(node: ast.AST) -> str:
 
 def _is_process_call(callee: str) -> bool:
     head, _, attr = callee.partition(".")
+    if callee == "subprocess.TimeoutExpired":  # an exception raised, not a process started
+        return False
     if head in ("subprocess", "pty", "multiprocessing"):
         return True
     return head == "os" and attr.startswith(PROCESS_ATTRS)
@@ -451,6 +473,7 @@ class GradeTest(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertEqual(ran.outcome, "timeout")
         self.assertEqual(ran.outcome, engine_commands.TIMED_OUT)
+        self.assertTrue(ran.timed_out)
         self.assertEqual(ran.result, {})
         self.assertNotEqual(ran.exit_code, 0)
         self.assertLess(elapsed, 20, "a grandchild held the pipes open")
@@ -519,6 +542,69 @@ class GradeTest(unittest.TestCase):
                 self.assertEqual(ran.stdout, b'{"argv":["5"],"verdict":"renewed"}\n')
                 self.assertEqual(ran.stderr, b"")
                 self.assertEqual((ran.outcome, ran.exit_code), ("renewed", 0))
+                self.assertFalse(ran.timed_out)
+
+    def test_time_spent_recording_the_start_counts_against_the_timeout(self):
+        entry = {"argv": [sys.executable, "-c",
+                          "import time; time.sleep(1.5); print('{\"verdict\": \"ok\"}')"],
+                 "cwd": self.tmp, "env": []}
+        ran = run(table(slow=entry), "slow", None, (), guard=self.allow,
+                  on_start=lambda pid: time.sleep(1.2), timeout=1)
+        self.assertTrue(ran.timed_out)
+        self.assertEqual(ran.outcome, engine_commands.TIMED_OUT)
+
+    def test_a_stalled_start_callback_cannot_keep_the_group_past_its_bound(self):
+        beat = Path(self.tmp) / "beat"
+        entry = {"argv": [sys.executable, "-c", HEARTBEAT, str(beat)], "cwd": self.tmp, "env": []}
+        sizes: list[tuple[int, int]] = []
+
+        def stalled(pid: int) -> None:
+            time.sleep(2.5)
+            before = beat.stat().st_size
+            time.sleep(0.5)
+            sizes.append((before, beat.stat().st_size))
+
+        ran = run(table(beat=entry), "beat", None, (), guard=self.allow, on_start=stalled, timeout=1)
+        self.assertTrue(ran.timed_out)
+        self.assertEqual(sizes[0][0], sizes[0][1], "the group still ran while on_start stalled")
+
+    def test_a_sigterm_between_the_spawn_and_the_engine_handler_still_ends_the_group(self):
+        entry = {"argv": [sys.executable, "-c", "import time; time.sleep(60)"], "cwd": self.tmp,
+                 "env": []}
+        real = subprocess.Popen
+        pids: list[int] = []
+
+        def spawn_then_term(*args, **kwargs):
+            child = real(*args, **kwargs)
+            if kwargs.get("env") is None:  # the lifecycle guard's spawn, not the command's
+                return child
+            pids.append(child.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+
+        def kill_group() -> None:
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        self.addCleanup(kill_group)
+        outer = signal.signal(signal.SIGTERM, lambda signum, frame: None)
+        self.addCleanup(signal.signal, signal.SIGTERM, outer)
+        with mock.patch.object(engine_commands.subprocess, "Popen", spawn_then_term):
+            with self.assertRaises(SystemExit) as raised:
+                run(table(sleepy=entry), "sleepy", None, (), guard=self.allow,
+                    on_start=lambda pid: None, timeout=3)
+        self.assertEqual(raised.exception.code, 128 + signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pids[0], 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail("the command group outlived the engine's SIGTERM")
 
     def test_arguments_are_text_integers_and_compact_json(self):
         self.assertEqual(argument("a b"), "a b")

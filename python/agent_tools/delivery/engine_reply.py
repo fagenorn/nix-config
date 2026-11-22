@@ -1,9 +1,8 @@
 """The reply schema subset, and the one validator for it (#1525).
 
-An agent step's reply schema is held to a small subset so that the engine and the
-Claude client read it the same way, and so that the engine carries no schema
-library. Both `engine check` (`schema_problem`) and the shell (`reply_problem`)
-use this module, so what the checker admits is exactly what the shell validates.
+An agent step's reply schema is held to a small subset so that the engine and the Claude client
+read it the same way and the engine carries no schema library. `engine check` (`schema_problem`)
+and the shell (`reply_problem`) both use this module, so the checker admits exactly what the shell validates.
 
 The subset. The root is an object node. A node is one of:
 
@@ -33,22 +32,16 @@ _SCALARS = {
 _OBJECT_KEYS = {"type", "properties", "required", "additionalProperties"}
 
 
-def _root_problem(schema: object, where: str) -> str | None:
-    if not isinstance(schema, dict):
-        return f"a node that is not an object at {where}"
-    if "enum" in schema or schema.get("type") != "object":
-        return f"a root that is not an object node at {where}"
-    return None
-
-
 def schema_problem(schema: object, where: str = "reply") -> str | None:
     """None when `schema` is a subset object node, else the first construct outside it."""
-    return _root_problem(schema, where) or _node_problem(schema, where)
+    if isinstance(schema, dict) and ("enum" in schema or schema.get("type") != "object"):
+        return f"a root that is not an object node at {where}"
+    return _node_problem(schema, where)
 
 
 def reply_problem(schema: Mapping, value: object, where: str = "reply") -> str | None:
     """None when `value` conforms to the subset `schema`, else the first way it does not."""
-    problem = _root_problem(schema, where) or _node_problem(schema, where)
+    problem = schema_problem(schema, where)
     if problem:
         return f"the schema uses {problem}"
     return _value_problem(schema, value, where)

@@ -18,7 +18,9 @@ order `find_runs` returns. The caller serialises the creation of an issue's runs
 `<root>/.<run id>.tmp` and renamed into place, so a run directory is either complete or absent.
 
 Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, exactly the
-other members it carries.
+other members it carries. An agent step visit that hits a usage limit or an API error, or gives no valid
+answer, is launched again in the same visit: `session_resuming` records each such launch (its `attempt`, 2 or
+more) and `session_answered` the account the launcher answered for a launch whose process started.
 
 Order rule: a result file is written to a writer-owned temporary file (fsynced), then linked into place,
 which refuses a result that exists, before its `result_stored` event is appended; `append_event` refuses
@@ -66,8 +68,9 @@ TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
 EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
     "step_entered": frozenset(("step", "visit", "stage")),
     "session_starting": frozenset(("step", "visit", "session", "role", "account")),
-    "session_resuming": frozenset(("step", "visit", "session")),
     "process_started": frozenset(("step", "visit", "pid", "started")),
+    "session_resuming": frozenset(("step", "visit", "session", "attempt")),
+    "session_answered": frozenset(("step", "visit", "session", "attempt", "account")),
     "result_stored": frozenset(("step", "visit", "result", "wall_seconds", "turns",
                                 "tokens", "spend_usd")),
     "outcome_graded": frozenset(("step", "visit", "outcome")),

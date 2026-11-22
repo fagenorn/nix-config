@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -22,10 +23,12 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_ledger, engine_session, engine_shell
+from agent_tools.delivery import (
+    engine, engine_ledger, engine_session, engine_shell, procedure_check,
+)
 from agent_tools.delivery.engine_session import (
-    NOT_STARTED, Reading, Role, RoleError, diagnostic, launch, launch_argv, read_result,
-    read_role, render_prompt,
+    NOT_STARTED, ROLE_BOUNDS, Answer, Bounds, Reading, Role, RoleError, diagnostic, launch,
+    launch_argv, read_answer, read_result, read_role, render_prompt,
 )
 from tests.test_engine_deliver import EngineProject, shape
 
@@ -40,6 +43,10 @@ RESULT_MISSING = REPO_ROOT / "tests/fixtures/engine-session/result-missing.json"
 RESULT_INVALID = REPO_ROOT / "tests/fixtures/engine-session/result-invalid.json"
 SETTINGS_GUARDED = REPO_ROOT / "tests/fixtures/engine-session/settings-guarded.json"
 SETTINGS_UNGUARDED = REPO_ROOT / "tests/fixtures/engine-session/settings-unguarded.json"
+RESULT_LIMIT = REPO_ROOT / "tests/fixtures/engine-session/result-limit.json"
+RESULT_API_ERROR = REPO_ROOT / "tests/fixtures/engine-session/result-api-error.json"
+RESULT_MAX_TURNS = REPO_ROOT / "tests/fixtures/engine-session/result-max-turns.json"
+RESULT_MAX_BUDGET = REPO_ROOT / "tests/fixtures/engine-session/result-max-budget.json"
 ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 DENIAL = {"tool_name": "Write", "tool_use_id": "toolu_01",
           "tool_input": {"file_path": "/etc/hosts"}}
@@ -104,6 +111,18 @@ class ReadResultTest(unittest.TestCase):
         huge = b"1" + b"0" * 400
         reading = read_result(b'{"duration_ms": ' + huge + b', "total_cost_usd": ' + huge + b"}")
         self.assertEqual((reading.wall_seconds, reading.spend_usd), (None, 0))
+
+    def test_a_limit_result_reads_as_a_usage_limit(self):
+        reading = read_result(RESULT_LIMIT.read_bytes())
+        self.assertEqual(reading.api_failure, "usage-limit")
+        self.assertIsNone(reading.reply)
+
+    def test_a_result_that_is_no_error_has_no_api_failure(self):
+        self.assertIsNone(read_result(json.dumps(RESULT).encode()).api_failure)
+        self.assertIsNone(read_result(raw(is_error=True)).api_failure)
+        self.assertIsNone(read_result(raw(is_error=True, api_error_status=True)).api_failure)
+        self.assertIsNone(read_result(raw(api_error="usage_limit_reached",
+                                          api_error_status=429)).api_failure)
 
     def test_invalid_measurements_read_as_zero(self):
         reading = read_result(raw(num_turns=True, total_cost_usd=-1, duration_ms=-5,
@@ -261,9 +280,28 @@ class LaunchArgvTest(unittest.TestCase):
             '"required":["verdict"],"type":"object"}',
             "--session-id", "0b0b8a8e-6f0e-4d47-9d6a-3f1f2b9c1a11", "--strict-mcp-config",
             "--permission-mode", "dontAsk", "--model", "opus", "--effort", "high",
+            "--max-turns", "150", "--max-budget-usd", "15.00",
             "--tools", "Read,Bash", "--allowedTools", f"Read,{GIT_READ_ONLY}",
             "--disallowedTools", GIT_WRITING,
             "--append-system-prompt-file", "/run/sessions/review.1.system.md"))
+
+    def test_a_resume_names_the_session_by_resume_and_never_session_id(self):
+        first = list(launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM))
+        again = list(launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM, resume=True))
+        self.assertEqual(after(again, "--resume"), SESSION)
+        self.assertNotIn("--session-id", again)
+        at = first.index("--session-id")
+        self.assertEqual(first[:at] + ["--resume", SESSION] + first[at + 2:], again)
+
+    def test_the_role_bounds_table_is_the_issue_table(self):
+        self.assertEqual(dict(ROLE_BOUNDS), {
+            "planner": Bounds(1800, 150, 15.0), "implementer": Bounds(3600, 300, 20.0),
+            "reviewer": Bounds(1800, 150, 15.0), "reviewer-lite": Bounds(900, 80, 3.0)})
+        self.assertEqual(set(ROLE_BOUNDS), set(procedure_check.ROLES))
+
+    def test_a_role_with_no_bounds_is_refused(self):
+        with self.assertRaises(RoleError):
+            launch_argv(Role("stranger", "opus", "high", None, None, ""), SCHEMA, SESSION, SYSTEM)
 
     def test_a_role_with_disallowed_tools_passes_only_disallowed_tools(self):
         argv = launch_argv(IMPLEMENTER, SCHEMA, SESSION, SYSTEM)
@@ -320,6 +358,13 @@ class LaunchTest(unittest.TestCase):
                               on_start=lambda pid: None)
         self.assertEqual(json.loads(launched.stdout), [None, "kept", "required"])
 
+    def test_a_given_env_is_the_launchers_whole_environment(self):
+        env = {"PATH": os.environ["PATH"], "X_ANSWER": "1"}
+        launched = launch(["env"], tempfile.gettempdir(), "", on_start=lambda pid: None, env=env)
+        lines = launched.stdout.decode().splitlines()
+        self.assertIn("X_ANSWER=1", lines)
+        self.assertFalse([line for line in lines if line.startswith("HOME=")])
+
     def test_the_launchers_stderr_is_captured_and_its_last_line_is_the_diagnostic(self):
         code = ("import sys; sys.stderr.write('first\\nclaude-account: no account \\'work\\'\\n'); "
                 "sys.exit(1)")
@@ -347,6 +392,44 @@ class LaunchTest(unittest.TestCase):
                 self.assertIn("No such file or directory", diagnostic(launched.stderr))
                 self.assertIn(word, diagnostic(launched.stderr))
                 self.assertEqual(started, [])
+
+    def test_a_sigterm_during_the_spawn_still_ends_the_launchers_group_and_restores_the_handler(self):
+        real = subprocess.Popen
+        pids: list[int] = []
+        started: list[int] = []
+
+        def spawn_then_term(*args, **kwargs):
+            child = real(*args, **kwargs)
+            pids.append(child.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+
+        def kill_group() -> None:
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        self.addCleanup(kill_group)
+        before = lambda signum, frame: None  # noqa: E731
+        outer = signal.signal(signal.SIGTERM, before)
+        self.addCleanup(signal.signal, signal.SIGTERM, outer)
+        with mock.patch.object(engine_session.subprocess, "Popen", spawn_then_term):
+            with self.assertRaises(SystemExit) as raised:
+                launch([sys.executable, "-c", "import time; time.sleep(60)"],
+                       tempfile.gettempdir(), "p", on_start=started.append, timeout=30)
+        self.assertEqual(raised.exception.code, 143)
+        self.assertEqual(started, [])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pids[0], 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail("the launcher's group outlived the engine's SIGTERM")
 
     def test_a_sigterm_to_the_engine_ends_the_launchers_whole_group_and_restores_the_handler(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -432,6 +515,81 @@ class LaunchTest(unittest.TestCase):
                         pass
 
 
+    def test_a_launcher_past_its_timeout_gets_sigterm_and_its_grace_before_sigkill(self):
+        code = ("import signal, sys, time; "
+                "signal.signal(signal.SIGTERM, lambda s, f: open(sys.argv[1], 'w').write('term')); "
+                "print('ready', flush=True); time.sleep(60)")
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "marker"
+            seen: list[int] = []
+            began = time.monotonic()
+            with mock.patch.object(engine_session, "GRACE_SECONDS", 2):
+                launched = launch([sys.executable, "-c", code, str(marker)], directory, "p",
+                                  on_start=seen.append, timeout=1)
+            elapsed = time.monotonic() - began
+            self.assertTrue(launched.timed_out)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "term")
+            self.assertGreaterEqual(elapsed, 1 + 2 - 0.25)
+            self.assertLess(elapsed, 1 + 2 + engine_session.DRAIN_SECONDS + 5)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(seen[0], 0)
+
+    def test_time_spent_recording_the_start_counts_against_the_wall_bound(self):
+        launched = launch([sys.executable, "-c", "import time; time.sleep(1.5); print('{}')"],
+                          tempfile.gettempdir(), "p", on_start=lambda pid: time.sleep(1.2),
+                          timeout=1)
+        self.assertIs(launched.timed_out, True)
+
+    def test_a_stalled_start_callback_cannot_keep_the_group_past_its_wall_bound(self):
+        code = "import sys, time\nwhile True:\n    open(sys.argv[1], 'a').write('x')\n    time.sleep(0.05)\n"
+        with tempfile.TemporaryDirectory() as directory:
+            beat = Path(directory) / "beat"
+            sizes: list[tuple[int, int]] = []
+
+            def stalled(pid: int) -> None:
+                time.sleep(2.5)
+                before = beat.stat().st_size
+                time.sleep(0.5)
+                sizes.append((before, beat.stat().st_size))
+
+            launched = launch([sys.executable, "-c", code, str(beat)], directory, "p",
+                              on_start=stalled, timeout=1)
+        self.assertIs(launched.timed_out, True)
+        self.assertEqual(sizes[0][0], sizes[0][1], "the group still ran while on_start stalled")
+
+    def test_an_untimed_launch_is_not_timed_out(self):
+        launched = launch([sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+                          tempfile.gettempdir(), "word", on_start=lambda pid: None)
+        self.assertIs(launched.timed_out, False)
+        self.assertEqual(launched.stdout, b"word\n")
+
+
+class ReadAnswerTest(unittest.TestCase):
+    def read(self, text: str | None) -> Answer:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "answer.json"
+            if text is not None:
+                path.write_text(text, encoding="utf-8")
+            return read_answer(path)
+
+    def test_anything_but_the_two_exact_forms_is_no_answer(self):
+        nothing = Answer(None, False, None)
+        for text in (None, "", "not json", "[1]", '{"account":""}', '{"account":1}',
+                     '{"account":"a","x":1}', '{"account":"a","account":"b"}',
+                     '{"all_out":true,"resumes_at":"soon"}', '{"all_out":true}',
+                     '{"all_out":false,"resumes_at":null}', '{"all_out":1,"resumes_at":null}',
+                     '{"all_out":true,"resumes_at":null,"account":"a"}', "{}"):
+            with self.subTest(text=text):
+                self.assertEqual(self.read(text), nothing)
+
+    def test_the_two_valid_forms_give_their_values(self):
+        self.assertEqual(self.read('{"account":"p1"}'), Answer("p1", False, None))
+        self.assertEqual(self.read('{"all_out":true,"resumes_at":null}'),
+                         Answer(None, True, None))
+        self.assertEqual(self.read('{"all_out":true,"resumes_at":"2030-03-17T17:46:40Z"}'),
+                         Answer(None, True, "2030-03-17T17:46:40Z"))
+
+
 DRAFT_REPLY = {"type": "object",
                "properties": {"status": {"enum": ["drafted", "stuck"]},
                               "summary": {"type": "string"},
@@ -447,7 +605,8 @@ ROLE_NAMES = ("planner", "implementer", "reviewer", "reviewer-lite")
 
 
 def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
-                 diagnostic: str | None = None, resumed: Path | bytes | None = None) -> Path:
+                 diagnostic: str | None = None, resumed: Path | bytes | None = None,
+                 hold: Path | None = None) -> Path:
     """Put the stand-in launcher first on the project's PATH; return the log it appends to.
 
     `resumed` is what the stub prints instead of `canned` when it is launched with `--resume`.
@@ -468,9 +627,16 @@ def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
         Path(diagnostic_path).write_text(diagnostic, encoding="utf-8")
     launcher = project.bin / "claude-account"
     launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {log} {canned} {resumed_path} "
-                        f"{exit} {diagnostic_path} \"$@\"\n", encoding="utf-8")
+                        f"{exit} {diagnostic_path} {hold if hold else '-'} \"$@\"\n", encoding="utf-8")
     launcher.chmod(0o755)
     return log
+
+
+def install_answers(project: EngineProject, entries: list[dict]) -> Path:
+    """Put a launcher stand-in that answers each launch from `entries`; return its log."""
+    canned = project.tmp / "stub.answers.json"
+    canned.write_text(json.dumps(entries), encoding="utf-8")
+    return install_stub(project, canned)
 
 
 def copy_roles(project: EngineProject, *names: str) -> None:
@@ -481,6 +647,8 @@ def copy_roles(project: EngineProject, *names: str) -> None:
 
 
 def agent_step(id: str, role: str, on: dict, **members) -> dict:
+    on = {**on}
+    on.setdefault("out-of-bounds", "needs-owner")
     document = {"id": id, "stage": "building", "kind": "agent", "role": role,
                 "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
                 "in": ["run.issue"], "on": {"no-reply": "step-failed", **on}}
@@ -488,10 +656,11 @@ def agent_step(id: str, role: str, on: dict, **members) -> dict:
     return document
 
 
-def write_procedures(project: EngineProject, steps: list[dict], files: dict | None = None) -> Path:
+def write_procedures(project: EngineProject, steps: list[dict], files: dict | None = None,
+                     stops: dict | None = None) -> Path:
     directory = project.procedures(
-        steps, stops={"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]},
-                      "step-failed": {"need": "retry", "reenter": steps[0]["id"]}})
+        steps, stops=stops or {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]},
+                               "step-failed": {"need": "retry", "reenter": steps[0]["id"]}})
     for name, text in (files or {"draft.md": "Draft issue {{run.issue}}.\n",
                                  "draft.reply.json": json.dumps(DRAFT_REPLY)}).items():
         (directory / name).write_text(text, encoding="utf-8")
@@ -598,6 +767,24 @@ class DeliverSessionTest(unittest.TestCase):
             self.assertEqual(event["account"], "console")
         self.assertEqual(len(set(ids)), 4)
 
+    def test_each_role_reaches_the_stub_with_its_turn_and_spend_bounds(self):
+        project = self.project
+        log = install_stub(project, RESULT_NORMAL)
+        steps = [agent_step(name[0] if name != "reviewer-lite" else "l", name,
+                            {"drafted": nxt, "stuck": "needs-owner"})
+                 for name, nxt in zip(ROLE_NAMES, ("i", "r", "l", "done"))]
+        procedures = write_procedures(project, steps)
+        done = project.deliver(procedures, issue=1520)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = self.log(log)
+        self.assertEqual(len(lines), 4)
+        expected = (("150", "15.00"), ("300", "20.00"), ("150", "15.00"), ("80", "3.00"))
+        for line, pair in zip(lines, expected):
+            argv = line["argv"]
+            self.assertEqual((after(argv, "--max-turns"), after(argv, "--max-budget-usd")), pair)
+            self.assertEqual(argv.count("--max-turns"), 1)
+            self.assertEqual(argv.count("--max-budget-usd"), 1)
+
     def test_the_session_is_recorded_before_its_process_starts(self):
         log = install_stub(self.project, RESULT_NORMAL)
         done = self.project.deliver(one_step(self.project), issue=1514)
@@ -605,9 +792,9 @@ class DeliverSessionTest(unittest.TestCase):
         run = self.run_dir()
         self.assertEqual(shape(self.project.events(run)), [
             ("step_entered", "draft", 1), ("session_starting", "draft", 1),
-            ("process_started", "draft", 1), ("result_stored", "draft", 1),
-            ("outcome_graded", "draft", 1), ("transition_taken", "draft", 1),
-            ("run_done", None, None)])
+            ("process_started", "draft", 1), ("session_answered", "draft", 1),
+            ("result_stored", "draft", 1), ("outcome_graded", "draft", 1),
+            ("transition_taken", "draft", 1), ("run_done", None, None)])
         (line,) = self.log(log)
         self.assertTrue(line["announced"])
         self.assertEqual((run / "sessions/draft.1.prompt.md").read_text(encoding="utf-8"),
@@ -620,12 +807,13 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         seen: list[tuple] = []
 
-        def checking(argv, cwd, prompt, *, on_start):
+        def checking(argv, cwd, prompt, *, on_start, **options):
+            self.assertEqual(options["timeout"], 3600)
             (run,) = project.runs()
             events = engine_ledger.replay(run / "events.jsonl")
             seen.append((events[-1]["event"], events[-1].get("session"),
                          [e["event"] for e in events], after(list(argv), "--session-id")))
-            return real(argv, cwd, prompt, on_start=on_start)
+            return real(argv, cwd, prompt, on_start=on_start, **options)
 
         with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
             code, line = engine_shell.deliver(1514, procedures)
@@ -691,6 +879,112 @@ class DeliverSessionTest(unittest.TestCase):
                          "tool_input": {"file_path": "/etc/hosts"}}],
             "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
             "problem": None, "session": self.starting()["session"], "subtype": "success"})
+
+    def capped_procedures(self) -> Path:
+        copy_roles(self.project, "implementer")
+        step = agent_step("draft", "implementer", {"drafted": "done", "stuck": "needs-owner",
+                                                   "out-of-bounds": "step-failed"})
+        return write_procedures(self.project, [step], stops={
+            "needs-owner": {"need": "owner-decision", "reenter": "draft"},
+            "step-failed": {"need": "retry", "reenter": "draft"}})
+
+    def test_a_turn_cap_or_a_spend_cap_is_out_of_bounds_naming_the_bound_with_no_second_session(self):
+        for fixture, bound, turns, spend in ((RESULT_MAX_TURNS, "turns", 300, 1.25),
+                                             (RESULT_MAX_BUDGET, "spend", 42, 20.01)):
+            with self.subTest(bound=bound):
+                self.setUp()
+                log = install_stub(self.project, fixture, exit=1)
+                done = self.project.deliver(self.capped_procedures(), issue=1520)
+                self.assertEqual(done.returncode, 3, done.stderr)
+                self.assertEqual(json.loads(done.stdout)["end"], "step-failed")
+                self.assertEqual(json.loads(done.stdout)["need"], "retry")
+                run = self.run_dir()
+                self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+                    encoding="utf-8")), {"bound": bound})
+                events = self.project.events(run)
+                (stored,) = [e for e in events if e["event"] == "result_stored"]
+                self.assertEqual((stored["turns"], stored["spend_usd"], stored["wall_seconds"]),
+                                 (turns, spend, 54.321))
+                self.assertEqual(stored["tokens"],
+                                 {"input": 1, "cache_write": 2, "cache_read": 3, "output": 4})
+                self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                                 ["out-of-bounds"])
+                self.assertEqual([e["to"] for e in events if e["event"] == "transition_taken"],
+                                 ["step-failed"])
+                (line,) = log.read_text(encoding="utf-8").splitlines()
+                self.assertNotIn("--resume", line)
+                self.assertNotIn("--continue", line)
+
+    def test_a_session_past_a_shortened_wall_bound_ends_with_its_child_as_out_of_bounds(self):
+        project = self.project
+        hold = project.tmp / "hold.pids"
+        log = install_stub(project, RESULT_NORMAL, hold=hold)
+        procedures = self.capped_procedures()
+        bounds = {**engine_session.ROLE_BOUNDS, "implementer": engine_session.Bounds(3, 300, 20.0)}
+        began = time.monotonic()
+        with project.inside(), mock.patch.object(engine_session, "ROLE_BOUNDS", bounds):
+            code, line = engine_shell.deliver(1520, procedures)
+        elapsed = time.monotonic() - began
+        pids: list[int] = []
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not pids:
+            pids = [int(word) for word in hold.read_text(encoding="utf-8").split()] \
+                if hold.exists() else []
+            time.sleep(0.05)
+        self.assertEqual(len(pids), 2)
+        for pid in pids:
+            self.addCleanup(self.kill_quietly, pid)
+        self.assertEqual((code, line["end"]), (3, "step-failed"), line)
+        self.assertLess(elapsed, 30)
+        run = self.run_dir()
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+            encoding="utf-8")), {"bound": "wall-time"})
+        events = project.events(run)
+        (stored,) = [e for e in events if e["event"] == "result_stored"]
+        self.assertGreaterEqual(stored["wall_seconds"], 3)
+        self.assertLess(stored["wall_seconds"], 30)
+        self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                         ["out-of-bounds"])
+        self.assertEqual(len([e for e in events if e["event"] == "process_started"]), 1)
+        self.assertLessEqual(len(self.log(log)), 1)
+        deadline = time.monotonic() + 5
+        for pid in pids:
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() > deadline:
+                    self.fail(f"process {pid} outlived the wall-time ending")
+                time.sleep(0.05)
+
+    @staticmethod
+    def kill_quietly(pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def test_a_capped_session_denied_a_shell_command_is_still_out_of_bounds(self):
+        document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
+        document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_03",
+                                           "tool_input": {"command": "make build"}}]
+        install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
+        done = self.project.deliver(self.capped_procedures(), issue=1520)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        run = self.run_dir()
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+            encoding="utf-8")), {"bound": "turns"})
+
+    def test_a_session_ending_with_an_error_subtype_that_is_no_cap_is_still_a_fault(self):
+        document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
+        document["subtype"] = "error_during_execution"
+        install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
+        done = self.project.deliver(self.capped_procedures(), issue=1520)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(len(done.stderr.strip().splitlines()), 1)
+        self.assertEqual([e for e in self.project.events(self.run_dir())
+                          if e["event"] == "outcome_graded"], [])
 
     def test_a_denied_shell_command_is_a_fault_not_a_graded_reply(self):
         denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
@@ -795,7 +1089,7 @@ class DeliverSessionTest(unittest.TestCase):
                 log = project.tmp / "claude.log"
                 client = project.tmp / "client"
                 client.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {log} "
-                                  f"{RESULT_NORMAL} - 0 - \"$@\"\n", encoding="utf-8")
+                                  f"{RESULT_NORMAL} - 0 - - \"$@\"\n", encoding="utf-8")
                 client.chmod(0o755)
                 project.env.update(CLAUDE_BIN=str(client),
                                    CLAUDE_ACCOUNTS_DIR=str(project.tmp / "accounts"),
@@ -879,8 +1173,9 @@ class DeliverSessionTest(unittest.TestCase):
         events = self.project.events(run)
         self.assertEqual(shape(events), [
             ("step_entered", "draft", 1), ("session_starting", "draft", 1),
-            ("process_started", "draft", 1), ("session_resuming", "draft", 1),
-            ("process_started", "draft", 1), ("result_stored", "draft", 1),
+            ("process_started", "draft", 1), ("session_answered", "draft", 1),
+            ("session_resuming", "draft", 1), ("process_started", "draft", 1),
+            ("session_answered", "draft", 1), ("result_stored", "draft", 1),
             ("outcome_graded", "draft", 1), ("transition_taken", "draft", 1),
             ("stop_reached", "draft", None)])
         self.assertEqual(self.kinds().count("step_entered"), 1)
@@ -981,7 +1276,7 @@ class DeliverSessionTest(unittest.TestCase):
         self.assertNotIn("session_resuming", self.kinds())
 
     def test_a_result_that_is_not_a_success_and_has_no_reply_is_a_fault_with_no_resume(self):
-        for subtype in ("error_max_turns", "error_during_execution"):
+        for subtype in ("error_during_execution",):
             with self.subTest(subtype):
                 project = EngineProject(self)
                 project.env.pop("CLAUDE_ACCOUNT", None)
@@ -1043,9 +1338,9 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         launches: list[list[str]] = []
 
-        def losing(argv, cwd, prompt, *, on_start):
+        def losing(argv, cwd, prompt, *, on_start, **options):
             launches.append(list(argv))
-            launched = real(argv, cwd, prompt, on_start=on_start)
+            launched = real(argv, cwd, prompt, on_start=on_start, **options)
             project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
             return launched
 
@@ -1067,9 +1362,9 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         launches: list[list[str]] = []
 
-        def losing(argv, cwd, prompt, *, on_start):
+        def losing(argv, cwd, prompt, *, on_start, **options):
             launches.append(list(argv))
-            launched = real(argv, cwd, prompt, on_start=on_start)
+            launched = real(argv, cwd, prompt, on_start=on_start, **options)
             project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
             return launched
 
@@ -1113,11 +1408,11 @@ class DeliverSessionTest(unittest.TestCase):
         real = engine_session.launch
         seen: list[tuple] = []
 
-        def checking(argv, cwd, prompt, *, on_start):
+        def checking(argv, cwd, prompt, *, on_start, **options):
             (run,) = project.runs()
             last = engine_ledger.replay(run / "events.jsonl")[-1]
             seen.append((last["event"], last.get("session"), list(argv)))
-            return real(argv, cwd, prompt, on_start=on_start)
+            return real(argv, cwd, prompt, on_start=on_start, **options)
 
         with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
             code, line = engine_shell.deliver(1514, procedures)
@@ -1150,3 +1445,362 @@ class DeliverSessionTest(unittest.TestCase):
     def test_the_deliver_help_names_agent_steps(self):
         text = " ".join(engine.build_parser().format_help().split())
         self.assertIn("run a procedure of command, agent and decide steps to done or a stop", text)
+
+
+QUOTA_RESET = "2030-03-17T17:46:40Z"
+
+
+class DeliverLimitTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, *ROLE_NAMES)
+
+    def log(self, log: Path) -> list[dict]:
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def run_dir(self) -> Path:
+        (run,) = self.project.runs()
+        return run
+
+    def events(self, kind: str) -> list[dict]:
+        return [e for e in self.project.events(self.run_dir()) if e["event"] == kind]
+
+    def canned(self, name: str, data: bytes) -> str:
+        path = self.project.tmp / name
+        path.write_bytes(data)
+        return str(path)
+
+    def limit(self, account: str) -> dict:
+        return {"stdout": str(RESULT_LIMIT), "exit": 1, "account": account}
+
+    def normal(self, account: str | None) -> dict:
+        return {"stdout": str(RESULT_NORMAL), "exit": 0, "account": account}
+
+    def all_out(self, resumes_at: str | None = QUOTA_RESET) -> dict:
+        return {"stdout": self.canned("empty.json", b""), "exit": 75, "account": None,
+                "all_out": {"resumes_at": resumes_at}}
+
+    def limit_then_reply(self) -> tuple[Path, Path]:
+        log = install_answers(self.project, [self.limit("p1"), self.normal("p2")])
+        return log, one_step(self.project)
+
+    def test_a_limit_then_a_reply_resumes_the_same_session_in_one_visit_on_the_answering_account(self):
+        log, procedures = self.limit_then_reply()
+        done = self.project.deliver(procedures, issue=1521)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        run = self.run_dir()
+        records = self.log(log)
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(record["answer_file"] for record in records))
+        first, second = (record["argv"] for record in records)
+        session = after(first, "--session-id")
+        self.assertNotIn("--resume", first)
+        self.assertEqual(after(second, "--resume"), session)
+        self.assertNotIn("--session-id", second)
+        prompt = (run / "sessions/draft.1.prompt.md").read_text(encoding="utf-8")
+        self.assertEqual([record["stdin"] for record in records], [prompt, prompt])
+        events = self.project.events(run)
+        self.assertEqual(shape(events), [
+            ("step_entered", "draft", 1), ("session_starting", "draft", 1),
+            ("process_started", "draft", 1), ("session_answered", "draft", 1),
+            ("wait_started", None, None), ("session_resuming", "draft", 1),
+            ("process_started", "draft", 1), ("session_answered", "draft", 1),
+            ("wait_ended", None, None), ("result_stored", "draft", 1),
+            ("outcome_graded", "draft", 1), ("transition_taken", "draft", 1),
+            ("run_done", None, None)])
+        (started,) = [e for e in events if e["event"] == "wait_started"]
+        self.assertEqual((started["wait"], started["until"]), ("usage-limit", None))
+        (ended,) = [e for e in events if e["event"] == "wait_ended"]
+        self.assertEqual(ended["wait"], "usage-limit")
+        self.assertIsNone(json.loads(self.project.status(1521).stdout)["wait"])
+        answered = [e for e in events if e["event"] == "session_answered"]
+        self.assertEqual([e["account"] for e in answered], ["p1", "p2"])
+        self.assertEqual([e["attempt"] for e in answered], [1, 2])
+        (resuming,) = [e for e in events if e["event"] == "session_resuming"]
+        self.assertEqual(resuming["attempt"], 2)
+        for event in (*answered, resuming):
+            self.assertEqual(event["session"], session)
+        record = json.loads((run / "sessions/draft.1.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["session"], session)
+        (graded,) = [e for e in events if e["event"] == "outcome_graded"]
+        self.assertEqual(graded["outcome"], "drafted")
+
+    def test_an_all_out_answer_stops_the_run_at_quota_wait_with_the_resume_time(self):
+        install_answers(self.project, [self.all_out()])
+        done = self.project.deliver(one_step(self.project), issue=1521)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual((line["end"], line["need"]), ("quota-wait", "retry"))
+        self.assertIn(QUOTA_RESET, line["detail"])
+        events = self.project.events(self.run_dir())
+        kinds = [e["event"] for e in events]
+        self.assertNotIn("session_answered", kinds)
+        self.assertNotIn("result_stored", kinds)
+        waited, stopped = events[-2:]
+        self.assertEqual((waited["event"], waited["wait"], waited["until"]),
+                         ("wait_started", "usage-limit", QUOTA_RESET))
+        self.assertEqual((stopped["event"], stopped["step"], stopped["stop"], stopped["need"]),
+                         ("stop_reached", "draft", "quota-wait", "retry"))
+        status = json.loads(self.project.status(1521).stdout)
+        self.assertEqual(status["wait"]["until"], QUOTA_RESET)
+        self.assertEqual(status["stop"]["name"], "quota-wait")
+
+    def test_an_all_out_answer_needs_both_the_document_and_exit_75(self):
+        empty = self.canned("empty.json", b"")
+        with self.subTest("document, exit 1"):
+            install_answers(self.project, [{"stdout": empty, "exit": 1, "account": None,
+                                            "all_out": {"resumes_at": None}}])
+            done = self.project.deliver(one_step(self.project), issue=1521)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("no structured reply, exit 1", done.stderr)
+            self.assertEqual(self.events("stop_reached"), [])
+            self.assertEqual([e["account"] for e in self.events("session_answered")],
+                             ["unknown"])
+        with self.subTest("exit 75, account document"):
+            self.project = EngineProject(self)
+            self.project.env.pop("CLAUDE_ACCOUNT", None)
+            copy_roles(self.project, *ROLE_NAMES)
+            install_answers(self.project, [{"stdout": empty, "exit": 75, "account": "p1"}])
+            done = self.project.deliver(one_step(self.project), issue=1521)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("exit 75", done.stderr)
+            self.assertEqual(self.events("stop_reached"), [])
+
+    def test_a_limit_then_all_out_reopens_the_wait_with_the_resume_time(self):
+        log = install_answers(self.project, [self.limit("p1"), self.all_out()])
+        done = self.project.deliver(one_step(self.project), issue=1521)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        events = self.project.events(self.run_dir())
+        self.assertEqual(
+            [(e["event"], e.get("until", "-")) for e in events
+             if e["event"] in ("wait_started", "wait_ended", "stop_reached")],
+            [("wait_started", None), ("wait_ended", "-"), ("wait_started", QUOTA_RESET),
+             ("stop_reached", "-")])
+        records = self.log(log)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(after(records[1]["argv"], "--resume"),
+                         after(records[0]["argv"], "--session-id"))
+
+    def test_an_account_that_answers_a_limit_twice_stops_the_run_at_quota_wait(self):
+        log = install_answers(self.project, [self.limit("p1"), self.limit("p2"),
+                                             self.limit("p1"), self.normal("p3")])
+        done = self.project.deliver(one_step(self.project), issue=1521)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertEqual(len(self.log(log)), 3)
+        self.assertEqual(json.loads(done.stdout)["end"], "quota-wait")
+        self.assertEqual(len(self.events("wait_started")), 1)
+        self.assertEqual(self.events("wait_ended"), [])
+        status = json.loads(self.project.status(1521).stdout)
+        self.assertEqual(status["wait"]["wait"], "usage-limit")
+        self.assertIsNone(status["wait"]["until"])
+        self.assertEqual(status["stop"]["name"], "quota-wait")
+
+    def test_an_inherited_account_override_is_released_after_a_limit(self):
+        self.project.env["CLAUDE_ACCOUNT"] = "p1"
+        log, procedures = self.limit_then_reply()
+        done = self.project.deliver(procedures, issue=1521)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual([r["account_env"] for r in self.log(log)], ["p1", None])
+        (starting,) = self.events("session_starting")
+        self.assertEqual(starting["account"], "p1")
+        self.assertEqual([e["account"] for e in self.events("session_answered")], ["p1", "p2"])
+        (graded,) = self.events("outcome_graded")
+        self.assertEqual(graded["outcome"], "drafted")
+
+    def test_a_denied_shell_command_beside_a_limit_is_a_fault_not_a_relaunch(self):
+        denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
+                  "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
+        limited = self.canned("denied.json", canned_result(
+            is_error=True, api_error_status=429, api_error="usage_limit_reached",
+            structured_output=..., permission_denials=[denial]))
+        log = install_answers(self.project, [
+            {"stdout": limited, "exit": 1, "account": "p1"}, self.normal("p2")])
+        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
+                            prompt="review.md", reply="review.reply.json",
+                            outcome_from="verdict")]
+        procedures = write_procedures(self.project, steps, {
+            "review.md": "Review {{run.issue}}.\n",
+            "review.reply.json": json.dumps(REVIEW_REPLY)})
+        done = self.project.deliver(procedures, issue=1521)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("python3 -m unittest tests.test_x", done.stderr)
+        self.assertEqual(len(self.log(log)), 1)
+        self.assertEqual(self.events("wait_started"), [])
+        record = json.loads((self.run_dir() / "sessions/review.1.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(record["denials"], [denial])
+
+    def test_a_launch_with_no_answer_file_is_answered_by_unknown(self):
+        install_answers(self.project, [self.normal(None)])
+        done = self.project.deliver(one_step(self.project), issue=1521)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        (answered,) = self.events("session_answered")
+        self.assertEqual(answered["account"], "unknown")
+
+    def test_a_launcher_that_cannot_start_is_a_fault_with_its_diagnostic_and_no_answer(self):
+        install_stub(self.project, RESULT_NORMAL)
+        procedures = one_step(self.project)
+        with self.project.inside(), mock.patch.object(
+                engine_session, "LAUNCHER", ("/nonexistent/claude-account", "run")):
+            with self.assertRaises(engine_shell.Fault) as raised:
+                engine_shell.deliver(1521, procedures)
+        self.assertIn("exit 127", str(raised.exception))
+        self.assertIn("/nonexistent/claude-account", str(raised.exception))
+        kinds = [e["event"] for e in self.project.events(self.run_dir())]
+        self.assertNotIn("process_started", kinds)
+        self.assertNotIn("session_answered", kinds)
+
+    def test_handling_a_limit_opens_no_connection(self):
+        log, procedures = self.limit_then_reply()
+        with self.project.inside(), \
+                mock.patch.object(socket.socket, "connect", side_effect=OSError("no socket")) as connect, \
+                mock.patch.object(socket.socket, "connect_ex", side_effect=OSError("no socket")) as connect_ex, \
+                mock.patch.object(socket, "create_connection", side_effect=OSError("no socket")) as create:
+            code, line = engine_shell.deliver(1521, procedures)
+        self.assertEqual(code, 0, line)
+        self.assertEqual(line["end"], "done")
+        self.assertEqual((connect.call_count, connect_ex.call_count, create.call_count), (0, 0, 0))
+        self.assertEqual(len(self.log(log)), 2)
+
+
+class DeliverApiErrorTest(unittest.TestCase):
+    NO_REPLY_ON = {"drafted": "done", "stuck": "needs-owner", "no-reply": "needs-owner"}
+
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, *ROLE_NAMES)
+
+    def log(self, log: Path) -> list[dict]:
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def run_dir(self) -> Path:
+        (run,) = self.project.runs()
+        return run
+
+    def events(self, kind: str) -> list[dict]:
+        return [e for e in self.project.events(self.run_dir()) if e["event"] == kind]
+
+    def api_error(self, account: str = "p1") -> dict:
+        return {"stdout": str(RESULT_API_ERROR), "exit": 1, "account": account}
+
+    def limit(self, account: str = "p1") -> dict:
+        return {"stdout": str(RESULT_LIMIT), "exit": 1, "account": account}
+
+    def normal(self, account: str = "p1") -> dict:
+        return {"stdout": str(RESULT_NORMAL), "exit": 0, "account": account}
+
+    def canned(self, name: str, data: bytes) -> str:
+        path = self.project.tmp / name
+        path.write_bytes(data)
+        return str(path)
+
+    def deliver(self, log: Path, procedures: Path) -> tuple[int, dict, list[tuple[float, int]]]:
+        """`engine_shell.deliver` in process, with each sleep recorded as (seconds, invocations so far)."""
+        sleeps: list[tuple[float, int]] = []
+
+        def record(seconds: float) -> None:
+            sleeps.append((seconds, len(log.read_text(encoding="utf-8").splitlines())))
+
+        with self.project.inside(), mock.patch("time.sleep", side_effect=record):
+            code, line = engine_shell.deliver(1521, procedures)
+        return code, line, sleeps
+
+    def test_an_api_error_is_retried_once_after_thirty_seconds_on_the_same_session(self):
+        log = install_answers(self.project, [self.api_error(), self.normal()])
+        code, line, sleeps = self.deliver(log, one_step(self.project))
+        self.assertEqual(code, 0, line)
+        self.assertEqual(sleeps, [(30, 1)])
+        records = self.log(log)
+        self.assertEqual(len(records), 2)
+        first, second = (record["argv"] for record in records)
+        session = after(first, "--session-id")
+        self.assertNotIn("--resume", first)
+        self.assertEqual(after(second, "--resume"), session)
+        self.assertEqual(len(self.events("step_entered")), 1)
+        self.assertEqual(self.events("wait_started"), [])
+        (graded,) = self.events("outcome_graded")
+        self.assertEqual(graded["outcome"], "drafted")
+        (resuming,) = self.events("session_resuming")
+        self.assertEqual(resuming["attempt"], 2)
+
+    def test_a_second_api_error_is_the_outcome_no_reply(self):
+        log = install_answers(self.project, [self.api_error(), self.api_error(), self.normal()])
+        code, line, sleeps = self.deliver(log, one_step(self.project, on=self.NO_REPLY_ON))
+        self.assertEqual(code, 3, line)
+        self.assertEqual(line["end"], "needs-owner")
+        self.assertEqual(len(self.log(log)), 2)
+        self.assertEqual(sleeps, [(30, 1)])
+        run = self.run_dir()
+        events = self.project.events(run)
+        self.assertEqual(
+            [e["event"] for e in events if e["event"] in (
+                "result_stored", "outcome_graded", "transition_taken")],
+            ["result_stored", "outcome_graded", "transition_taken"])
+        (stored,) = [e for e in events if e["event"] == "result_stored"]
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(encoding="utf-8")), {})
+        self.assertEqual(stored["wall_seconds"], 1.5)
+        (graded,) = [e for e in events if e["event"] == "outcome_graded"]
+        self.assertEqual(graded["outcome"], "no-reply")
+        (taken,) = [e for e in events if e["event"] == "transition_taken"]
+        self.assertEqual((taken["outcome"], taken["to"]), ("no-reply", "needs-owner"))
+
+    def test_a_no_reply_keeps_a_measured_duration_of_zero(self):
+        failed = self.canned("zero.json", canned_result(
+            is_error=True, api_error_status=529, api_error="overloaded_error",
+            structured_output=..., duration_ms=0))
+        entry = {"stdout": failed, "exit": 1, "account": "p1"}
+        log = install_answers(self.project, [entry, entry])
+        code, line, _ = self.deliver(log, one_step(self.project, on=self.NO_REPLY_ON))
+        self.assertEqual(code, 3, line)
+        (stored,) = self.events("result_stored")
+        self.assertEqual(stored["wall_seconds"], 0.0)
+
+    def test_a_limit_after_an_api_error_still_resumes(self):
+        log = install_answers(self.project, [self.api_error(), self.limit(), self.normal("p2")])
+        code, line, sleeps = self.deliver(log, one_step(self.project))
+        self.assertEqual(code, 0, line)
+        self.assertEqual(len(self.log(log)), 3)
+        self.assertEqual(sleeps, [(30, 1)])
+        (graded,) = self.events("outcome_graded")
+        self.assertEqual(graded["outcome"], "drafted")
+        self.assertEqual(len(self.events("wait_started")), 1)
+        self.assertEqual(len(self.events("wait_ended")), 1)
+
+    def test_a_limit_an_api_error_and_a_limit_on_the_same_account_stop_with_the_wait_open(self):
+        log = install_answers(self.project, [
+            self.limit(), self.api_error(), self.limit(), self.normal()])
+        code, line, sleeps = self.deliver(log, one_step(self.project))
+        self.assertEqual(code, 3, line)
+        self.assertEqual(line["end"], "quota-wait")
+        self.assertEqual(len(self.log(log)), 3)
+        self.assertEqual(sleeps, [(30, 2)])
+        self.assertEqual(len(self.events("wait_started")), 1)
+        self.assertEqual(self.events("wait_ended"), [])
+        status = json.loads(self.project.status(1521).stdout)
+        self.assertEqual(status["wait"]["wait"], "usage-limit")
+        self.assertIsNone(status["wait"]["until"])
+        self.assertEqual(status["stop"]["name"], "quota-wait")
+
+    def test_a_denied_shell_command_beside_an_api_error_is_a_fault_before_any_retry(self):
+        denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
+                  "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
+        failed = self.canned("denied.json", canned_result(
+            is_error=True, api_error_status=529, api_error="overloaded_error",
+            structured_output=..., permission_denials=[denial]))
+        log = install_answers(self.project, [
+            {"stdout": failed, "exit": 1, "account": "p1"}, self.normal()])
+        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
+                            prompt="review.md", reply="review.reply.json",
+                            outcome_from="verdict")]
+        procedures = write_procedures(self.project, steps, {
+            "review.md": "Review {{run.issue}}.\n",
+            "review.reply.json": json.dumps(REVIEW_REPLY)})
+        with self.assertRaises(engine_shell.Fault) as raised:
+            self.deliver(log, procedures)
+        self.assertIn("python3 -m unittest tests.test_x", str(raised.exception))
+        self.assertEqual(len(self.log(log)), 1)
+        record = json.loads((self.run_dir() / "sessions/review.1.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(record["denials"], [denial])

@@ -28,3 +28,4 @@
 - The Hosts binding stays until the launcher stops reading it.
 - Amended by ADR-console-087 D1: a listed colleague's own account serves his own sprints first, and anyone's when it has room.
 - Related: ADR-console-015 (the profile rule), ADR-console-020 (the quota wait), ADR-console-022 (the sign-in reading).
+- Amended by ADR-system-006: a launch that names an answer file asks the profile question with all_out=1 and starts no client when every account is out.

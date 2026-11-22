@@ -161,7 +161,7 @@ class ActionTest(unittest.TestCase):
         self.assertEqual(result.transitions[-1], Transition("tally", "accept", "done"))
 
     def test_shell_outcomes_are_ordinary(self) -> None:
-        for outcome in ("no-reply", "out-of-bounds", "refused"):
+        for outcome in ("no-reply", "refused"):
             with self.subTest(outcome=outcome):
                 doc = toy()
                 step(doc, "draft")["on"][outcome] = "needs-owner"
@@ -170,6 +170,14 @@ class ActionTest(unittest.TestCase):
                 result = replay(doc, INPUTS, pair("scope", "ok") + pair("draft", outcome))
                 self.assertEqual(result.action, STOP)
                 self.assertEqual(result.transitions[-1], Transition("draft", outcome, "needs-owner"))
+
+
+    def test_a_fired_bound_is_an_ordinary_outcome_of_the_core(self) -> None:
+        doc = toy()
+        self.assertEqual(refusals(doc), ())
+        result = replay(doc, INPUTS, pair("scope", "ok") + pair("draft", "out-of-bounds", {"bound": "wall-time"}))
+        self.assertEqual(result.action, Stop(name="step-failed", need="retry", reenter="draft"))
+        self.assertEqual(result.transitions[-1], Transition("draft", "out-of-bounds", "step-failed"))
 
 
 class VisitTest(unittest.TestCase):
@@ -352,9 +360,11 @@ class WalkTest(unittest.TestCase):
                 "draft:stuck -> draft | scope=ok draft=stuck draft=stuck => needs-owner",
                 "draft:no-reply -> step-failed | scope=ok draft=no-reply => step-failed",
                 "draft:exhausted -> needs-owner | scope=ok draft=stuck draft=stuck => needs-owner",
+                "draft:out-of-bounds -> step-failed | scope=ok draft=out-of-bounds => step-failed",
                 "review:approve -> tally | scope=ok draft=drafted review=approve => done",
                 "review:revise -> tally | scope=ok draft=drafted review=revise => needs-owner",
                 "review:no-reply -> step-failed | scope=ok draft=drafted review=no-reply => step-failed",
+                "review:out-of-bounds -> step-failed | scope=ok draft=drafted review=out-of-bounds => step-failed",
                 "tally:accept -> done | scope=ok draft=drafted review=approve => done",
                 "tally:revise -> needs-owner | scope=ok draft=drafted review=revise => needs-owner",
             ],
@@ -374,6 +384,9 @@ class WalkTest(unittest.TestCase):
                     if event["outcome"] == "no-reply":
                         self.assertEqual(result, {})
                         continue
+                    if event["outcome"] == "out-of-bounds":
+                        self.assertEqual(result, {"bound": "wall-time"})
+                        continue
                     self.assertEqual(reply_errors(schemas[event["step"]], result), [])
                     self.assertEqual(sorted(result), sorted(expected[event["step"]]))
                     self.assertEqual(result[next(iter(expected[event["step"]]))], event["outcome"])
@@ -386,6 +399,35 @@ class WalkTest(unittest.TestCase):
         self.assertNotEqual(reply_errors(schema, {"status": "other", "summary": "s", "items": []}), [])
         self.assertNotEqual(reply_errors(schema, {"status": "drafted", "summary": 1, "items": []}), [])
         self.assertEqual(reply_errors(schema, {"status": "drafted", "summary": "s", "items": ["a"]}), [])
+
+    def test_the_shipped_toy_with_a_group_has_step_outcomes(self) -> None:
+        self.assertEqual(
+            step_outcomes(SHIPPED_TOY.parent, "toy"),
+            {
+                "scope": ("ok", "failed", "refused"),
+                "draft": ("drafted", "stuck", "no-reply", "out-of-bounds"),
+                "review-a": ("approve", "revise", "no-reply"),
+                "review-b": ("approve", "revise", "no-reply"),
+            },
+        )
+
+    def test_an_edge_reachable_only_through_a_bound_is_credited_to_that_walk(self) -> None:
+        doc = toy()
+        step(doc, "draft")["on"]["out-of-bounds"] = "recover"
+        doc["steps"].append(
+            {"id": "recover", "stage": "building", "kind": "command", "command": "diff-scope",
+             "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}}
+        )
+        outcomes = {**step_outcomes(FIXTURE, "toy-core"), "recover": ("ok", "failed")}
+        coverage = walk_edges(doc, INPUTS, outcomes, reply_schemas(FIXTURE, "toy-core"))
+        self.assertEqual(coverage.unwalked, ())
+        self.assertEqual(
+            [describe(walk) for walk in coverage.walks if walk.edge.step == "recover"],
+            [
+                "recover:ok -> done | scope=ok draft=out-of-bounds recover=ok => done",
+                "recover:failed -> needs-owner | scope=ok draft=out-of-bounds recover=failed => needs-owner",
+            ],
+        )
 
     def test_an_edge_no_walk_takes_is_reported(self) -> None:
         doc = toy()
