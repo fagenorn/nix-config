@@ -12,6 +12,18 @@ sorted-key JSON to stdout, starting no process and opening no socket:
   `command_verdicts.json`.
 
 The procedure format and every refusal code are `procedure_check`'s contract.
+
+`engine status <issue> [--project <slug>]` reads the newest run of the issue
+under `~/.agents/state/engine/runs/` (the run directory `engine_ledger`
+describes) and prints one line of compact sorted-key JSON, the state one fold
+derives from the run's `events.jsonl`. It writes nothing and creates no
+directory:
+
+- exit 0: the folded state (`engine_ledger.RunState.as_json()`);
+- exit 1: `{"issue": <n>, "run": null}`, no run of that issue (and project);
+- exit 2, stdout empty and one stderr line: a usage error, an issue that is not
+  an integer of 1 or more, runs of several projects with no `--project`, an
+  unreadable `run.json`, or an event file the ledger refuses.
 """
 
 from __future__ import annotations
@@ -21,7 +33,7 @@ import json
 import sys
 from pathlib import Path
 
-from agent_tools.delivery import procedure_check
+from agent_tools.delivery import engine_ledger, procedure_check
 
 PROCEDURES_DIR = Path(__file__).with_name("procedures")
 
@@ -32,6 +44,16 @@ def compact(value: object) -> str:
 
 class UsageError(Exception):
     pass
+
+
+def _issue_number(text: str) -> int:
+    try:
+        number = int(text)
+    except ValueError:
+        raise UsageError(f"issue is not an integer: {text}") from None
+    if number < 1:
+        raise UsageError(f"issue must be 1 or more: {text}")
+    return number
 
 
 class _Parser(argparse.ArgumentParser):
@@ -45,6 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser = commands.add_parser(
         "check", help="refuse a malformed procedure by step and defect")
     check_parser.add_argument("--procedures", type=Path, default=PROCEDURES_DIR)
+    status_parser = commands.add_parser(
+        "status", help="print the state a run's recorded events fold to")
+    status_parser.add_argument("issue", type=_issue_number)
+    status_parser.add_argument("--project")
     return parser
 
 
@@ -53,11 +79,29 @@ def _usage(message: str) -> int:
     return 2
 
 
+def _status(issue: int, project: str | None) -> int:
+    try:
+        run_dir = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
+        if run_dir is None:
+            sys.stdout.write(compact({"issue": issue, "run": None}))
+            return 1
+        state = engine_ledger.fold(
+            engine_ledger.read_run(run_dir),
+            engine_ledger.replay(run_dir / "events.jsonl"),
+            engine_ledger.process_alive)
+    except (engine_ledger.LedgerError, OSError, KeyError) as error:
+        return _usage(str(error))
+    sys.stdout.write(compact(state.as_json()))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
     except UsageError as error:
         return _usage(str(error))
+    if args.command == "status":
+        return _status(args.issue, args.project)
     if not args.procedures.is_dir():
         return _usage(f"--procedures is not a directory: {args.procedures}")
     try:
