@@ -117,6 +117,29 @@ class ReadWriteTest(unittest.TestCase):
         self.assertEqual(fm.contest(markers, "claim", MATCH), [])
 
 
+    def test_write_contests_only_the_markers_accept_admits(self):
+        rival = comment(50, fm.render("claim", {"issue": str(ISSUE), "holder": A, "extra": "x"}, "x"))
+        fields = {"issue": str(ISSUE), "holder": A}
+        delete = ["api", "-X", "DELETE", f"repos/{SLUG}/issues/comments/101"]
+
+        def written(**kw):
+            self.world = ForgeWorld(self)
+            self.world.comment_store(SLUG, ISSUE, [rival], next_id=101)
+            return fm.write(SLUG, ISSUE, "claim", fields, "s", fields, **kw)
+
+        result = written(accept=lambda m: "extra" not in m.fields)
+        self.assertEqual((result.won, result.own_id), (True, 101))
+        self.assertNotIn(delete, self.world.argvs("gh"))
+        result = written()
+        self.assertEqual((result.won, result.winner.comment_id), (False, 50))
+        self.assertIn(delete, self.world.argvs("gh"))
+        self.world = ForgeWorld(self)
+        self.world.comment_store(SLUG, ISSUE, [rival], next_id=101)
+        with self.assertRaises(ValueError):
+            fm.write(SLUG, ISSUE, "claim", fields, "s", fields, accept=lambda m: False)
+        self.assertFalse([a for a in self.world.argvs("gh") if a[:3] == ["api", "-X", "POST"]])
+
+
 def live_claims(world):
     markers = [m for m in (fm.parse(c) for c in world.stored()) if m]
     return fm.contest(markers, "claim", MATCH)

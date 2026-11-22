@@ -146,6 +146,7 @@ agent-workflow-tests *args:
     tests/test_engine_core.py \
     tests/test_engine_commands.py \
     tests/test_engine_deliver.py \
+    tests/test_engine_session.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_caps.py \
     tests/test_plan_amend.py \
@@ -224,6 +225,7 @@ agent-workflow-tests *args:
     tests/test_docs_tree.py \
     tests/test_standard_ids.py \
     tests/test_standards_lint.py \
+    tests/test_citation_lint.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \
@@ -326,6 +328,7 @@ agent-workflow-tests *args:
     tests/test_console_movement.py \
     tests/test_console_movement_check.py \
     tests/test_console_spend.py \
+    tests/test_console_transcript_digest.py \
     tests/test_console_spend_page.py \
     tests/test_console_guest.py \
     tests/test_console_peer.py \

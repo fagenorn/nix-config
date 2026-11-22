@@ -46,6 +46,12 @@ RECORDS = json.dumps({
         "sprints": []}}, indent=1, sort_keys=True) + "\n"
 
 
+# The same records with the transcripts part a deeper question is also told to read.
+DEEP_RECORDS = json.dumps({**json.loads(RECORDS), "transcripts": {
+    "phases": [{"phase": "plan", "tokens": 1234567, "seconds": 90}]}}, indent=1, sort_keys=True) + "\n"
+DEEP_KEY = KEYS[0]
+
+
 def grounded(qid):
     return "Answer: figures, 4,200 tokens ($0.42)\nRead: " + READ.format(qid) + " (spend)"
 
@@ -145,9 +151,10 @@ class Harness:
     def records(self, question_id):
         return self.record_texts.get(question_id, RECORDS)
 
-    def run(self, *extra, **seams):
+    def run(self, *extra, files=True, **seams):
         argv = ["--project", PROJECT, "--token-file", str(self.token_file),
-                "--state-file", str(self.state_file), "--result-file", str(self.result_file), *extra]
+                *(["--state-file", str(self.state_file), "--result-file", str(self.result_file)] if files else []),
+                *extra]
         wired = dict(state=self.state, post=self.post, now=self.now, sleep=self.sleep,
                      new_key=self.new_key, revision=self.revision, records=self.records)
         wired.update(seams)
@@ -699,6 +706,127 @@ class QuestionCheckTest(unittest.TestCase):
         last = (ROOT / WRAPPER).read_text(encoding="utf-8").splitlines()[-1]
         self.assertEqual(
             last, 'PYTHONPATH=python exec python3 -m agent_tools.console.question_check "$@"')
+
+    def deep_seed(self, h, answer, read):
+        """Ask the deeper question as q1 under its key, answered by `answer` and `read`, over records with transcripts."""
+        h.add(h.asked("q1", question_check.DEEP_QUESTION, DEEP_KEY),
+              h.answered("q1", "Answer: " + answer + "\nRead: " + READ.format("q1") + " (" + read + ")"))
+        h.record_texts["q1"] = DEEP_RECORDS
+
+    def test_deep_posts_the_deeper_question_alone_and_deep(self):
+        h = Harness(self)
+        code, line = h.run("--deep", "--wait", "1")
+        self.assertEqual((code, line["status"]), (75, "waiting"))
+        self.assertEqual(h.documents(), [{"project_id": PROJECT, "question": question_check.DEEP_QUESTION,
+                                          "request_key": KEYS[0], "deep": True}])
+        self.assertEqual(h.saved()["projects"][PROJECT]["keys"], {question_check.DEEP_QUESTION: KEYS[0]})
+
+    def test_without_deep_the_bodies_carry_no_deep(self):
+        h = Harness(self)
+        h.run("--wait", "1")
+        self.assertEqual(h.documents(), three_posts())
+        self.assertTrue(all("deep" not in document for document in h.documents()))
+
+    def test_a_deeper_answer_must_cite_the_transcripts_part(self):
+        h = Harness(self)
+        self.deep_seed(h, "Plan took 1,234,567 tokens", "spend")
+        code, line = h.run("--deep")
+        self.assertEqual((code, line["status"], line["verdicts"]), (1, "not_met", ["ungrounded"]))
+
+    def test_a_deeper_answer_must_quote_a_transcripts_figure(self):
+        h = Harness(self)
+        self.deep_seed(h, "Planning used 4,200 tokens", "transcripts")
+        code, line = h.run("--deep")
+        self.assertEqual((code, line["status"], line["verdicts"]), (1, "not_met", ["ungrounded"]))
+        self.assertEqual(question_check.section_figures(DEEP_RECORDS, "transcripts"),
+                         frozenset({"1234567", "90"}))
+        self.assertEqual(question_check.section_figures(DEEP_RECORDS, "spend"), question_check.spend_figures(RECORDS))
+        self.assertEqual(question_check.section_figures('{"spend": {"seconds": 5}}', "spend"), frozenset())
+
+    def test_a_grounded_deeper_answer_waits_for_the_leads_comparison(self):
+        for choice, expected in (("agree", (0, "met", True)), ("disagree", (1, "not_met", False))):
+            with self.subTest(choice):
+                h = Harness(self)
+                self.deep_seed(h, "Plan took 1,234,567 tokens", "transcripts")
+                code, line = h.run("--deep")
+                self.assertEqual((code, line["status"], line["verdicts"]), (75, "waiting", ["grounded"]))
+                self.assertIsNone(h.result()["comparison"])
+                code, line = h.run("--deep", "--compare", choice)
+                self.assertEqual((code, line), (0, {"status": "compared", "agrees": choice == "agree"}))
+                code, line = h.run("--deep")
+                self.assertEqual((code, line["status"]), expected[:2])
+                self.assertIs(h.result()["comparison"]["agrees"], expected[2])
+                self.assertEqual(h.posts, [])
+
+    def test_compare_records_only_against_a_grounded_answer_of_this_revision(self):
+        h = Harness(self)
+        code, line = h.run("--deep", "--compare", "agree")
+        self.assertEqual((code, line), (2, {"status": "nothing_to_compare"}))
+        self.assertFalse(h.state_file.exists())
+        h = Harness(self)
+        self.deep_seed(h, "Planning used 4,200 tokens", "transcripts")
+        h.run("--deep")
+        before = h.saved()
+        code, line = h.run("--deep", "--compare", "agree")
+        self.assertEqual((code, line), (2, {"status": "nothing_to_compare"}))
+        self.assertEqual(h.saved(), before)
+        h = Harness(self)
+        self.deep_seed(h, "Plan took 1,234,567 tokens", "transcripts")
+        h.run("--deep")
+        saved = h.saved()
+        saved["projects"][PROJECT]["revision"] = "0" * 40
+        h.state_file.write_text(json.dumps(saved), encoding="utf-8")
+        code, line = h.run("--deep", "--compare", "agree")
+        self.assertEqual((code, line), (2, {"status": "nothing_to_compare"}))
+        self.assertEqual(h.saved(), saved)
+        h = Harness(self)
+        code, line = h.run("--compare", "agree")
+        self.assertEqual((code, line, h.posts), (2, {"status": "bad_usage"}, []))
+        h = Harness(self)
+        self.deep_seed(h, "Plan took 1,234,567 tokens", "transcripts")
+        h.run("--deep")
+        h.run("--deep", "--compare", "agree")
+        self.assertEqual(h.saved()["projects"][PROJECT]["comparison"], {
+            "question_id": "q1", "request_key": DEEP_KEY, "revision": REV, "agrees": True,
+            "at": START.isoformat()})
+        self.assertEqual(h.posts, [])
+        h.rev = "2" * 40
+        code, line = h.run("--deep", "--wait", "1")
+        self.assertEqual((code, line["status"]), (75, "waiting"))
+        self.assertEqual([d["request_key"] for d in h.documents()], [KEYS[1]])
+        self.assertEqual(h.saved()["projects"][PROJECT], {
+            "revision": "2" * 40, "keys": {question_check.DEEP_QUESTION: KEYS[1]}})
+
+    def test_a_deep_retry_survives_an_ordinary_check_between(self):
+        h = Harness(self)
+        h.keys = iter(KEYS + ("d" * 32,))
+        h.after_post = lambda document: (h.add(h.asked(
+            f"q{len(h.posts)}", document["question"], document["request_key"])), (204, ""))[1]
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with mock.patch.object(manager_check, "_state_dir", return_value=directory):
+            h.run("--deep", "--wait", "1", files=False)
+            h.rev = "2" * 40
+            h.run("--wait", "1", files=False)
+            h.rev = REV
+            h.run("--deep", "--wait", "1", files=False)
+        documents = h.documents()
+        self.assertEqual(len(documents), 4)
+        self.assertEqual(documents[0]["request_key"], KEYS[0])
+        self.assertTrue(all("deep" not in document for document in documents[1:]))
+        checks = sorted(path.name for path in (directory / "checks").iterdir() if not path.name.endswith(".lock"))
+        self.assertEqual(checks, ["question-check-deep-result.json", "question-check-deep.json",
+                                  "question-check-result.json", "question-check.json"])
+        deep = json.loads((directory / "checks" / "question-check-deep.json").read_text(encoding="utf-8"))
+        self.assertEqual(deep["projects"][PROJECT]["keys"], {question_check.DEEP_QUESTION: KEYS[0]})
+
+    def test_deep_stdout_holds_no_text(self):
+        h = Harness(self)
+        self.deep_seed(h, "Plan took 1,234,567 tokens", "transcripts")
+        for argv in (["--deep"], ["--deep", "--compare", "agree"]):
+            code, line = h.run(*argv)
+            self.assertIsInstance(line, dict)
+            self.assertNotIn(question_check.DEEP_QUESTION, h.stdout)
+            self.assertNotIn("1,234,567", h.stdout)
 
     def test_an_off_loopback_url_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
