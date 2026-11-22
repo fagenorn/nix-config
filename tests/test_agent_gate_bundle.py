@@ -1526,7 +1526,19 @@ class NoRegressionCriterionTest(unittest.TestCase):
 CHECKPOINT = {"expanded": True, "checkpoint_ref": "https://example.invalid/issues/757#checkpoint"}
 V2_PINNED_ID = "sha256:1f05a270f480b642f672ce5c14b37581ce3efeeda4e59c867bff93816ff80455"
 V3_PINNED_ID = "sha256:34e5f04b27d3f296316b1958f2231959c43e98dbed7abc2d65735fc61905f420"
-FIXTURES_V3 = ("cutover-130", "cutover-130-x10", "cutover-130-x10r")
+# The bundle ids the three issue-130 runs carried when their bundles were committed (version 2, all unmeasured,
+# kept at commit 6b06a4e277ab8885d02cca9cec38e85a6de5dc55) and the ids and states their recomputation under
+# version 3 recorded, each keyed by run name here and not read from the fixture it checks.
+HISTORICAL_V2 = {
+    "cutover-130": "sha256:8385ddb998a0c493ee5d7861c9f80184722c96bc83682e2110e846ada90a2ac6",
+    "cutover-130-x10": "sha256:bc82101a9bff3b5109b20986d75840d3b61cbab26026a17d645aac26f33223d2",
+    "cutover-130-x10r": "sha256:5093e55306150283683a272edfd8617e979336b881e7e91edcb70499ad83749b",
+}
+HISTORICAL_V3 = {
+    "cutover-130": ("sha256:8310ea65ff817c6d879be18547043eaa1e80cd733f5c0050d5a35815ee16a179", "unmeasured"),
+    "cutover-130-x10": ("sha256:b59ea39a2654e58463c7ab71429927b1ba08f6f04c6e84c03a70343c9139ed96", "rejected"),
+    "cutover-130-x10r": ("sha256:5069c68ade820f510f2cc8dda21240d1c2eafb53e6966e1a181744082e20cd55", "unmeasured"),
+}
 
 
 def synthetic_cutover_manifest(tmp):
@@ -1802,9 +1814,10 @@ class RecomputedCutoverBundlesTest(unittest.TestCase):
     """Issue 757: the issue-130 runs recomputed under gate version 3 reassemble and verify as recorded."""
 
     def test_each_fixture_reassembles_from_its_recorded_evidence(self):
-        for name in FIXTURES_V3:
+        for name, (bundle_id, state) in HISTORICAL_V3.items():
             with self.subTest(name=name):
                 fixture = load_fixture(name)
+                self.assertEqual((fixture["bundle_id"], fixture["state"]), (bundle_id, state))
                 self.assertEqual((fixture["gate_version"], fixture["bundle_kind"]),
                                  (3, "cutover"))
                 self.assertEqual(gate.verify_bundle(fixture, kind="cutover"), fixture["state"])
@@ -1815,7 +1828,19 @@ class RecomputedCutoverBundlesTest(unittest.TestCase):
                     {"identity": fixture["identity"], "expansion": fixture["expansion"]},
                     fixture["evidence"], [], fixture["override"], fixture["state"],
                     gate=gate.gate_profile(3, "cutover"))
-                self.assertEqual(reassembled["bundle_id"], fixture["bundle_id"])
+                self.assertEqual(reassembled["bundle_id"], bundle_id)
+
+    def test_each_fixture_reassembles_under_version_two_as_its_historical_bundle(self):
+        for name, bundle_id in HISTORICAL_V2.items():
+            with self.subTest(name=name):
+                fixture = load_fixture(name)
+                reassembled = gate.assemble_bundle(
+                    {"identity": fixture["identity"], "expansion": fixture["expansion"]},
+                    fixture["evidence"], [], fixture["override"], "unmeasured",
+                    gate=gate.gate_profile(2, "cutover"))
+                self.assertEqual(reassembled["bundle_id"], bundle_id)
+                self.assertEqual((reassembled["gate_version"], reassembled["bundle_kind"]), (2, "cutover"))
+                self.assertEqual(gate.verify_bundle(reassembled, kind="cutover"), "unmeasured")
 
     def test_the_version_three_cli_emits_its_pinned_bundle_id(self):
         tmp = Path(tempfile.mkdtemp())

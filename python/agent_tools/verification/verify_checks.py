@@ -96,7 +96,8 @@ otherwise 75 (`not_yet`), and each row's `reason` is the first rule it fails (`b
 `cutover-preflight` runs it with `~/.agents/bin` prepended to `PATH`.
 
 `cutover-bundle [--repo-root R] [--branch B]` (issue 579, C3) is met (0, `green`) when a `*-bundle.json`
-under `.agents/artifacts/evidence/` at origin's main verifies, through `agent_gate_bundle.verify_bundle`,
+under `.agents/artifacts/evidence/` at `RETAINED_EVIDENCE_COMMIT` (the last commit of origin's main history that
+holds the directory) verifies, through `agent_gate_bundle.verify_bundle`,
 as `approved` and binds the commit at the tip of origin's candidate branch. The state is the verifier's
 return value, never the document's own `state` field; a bundle the verifier refuses is `unreadable` and
 never counts. It is 75 otherwise (`absent` when the branch does not exist) and 2 when git cannot be
@@ -1328,6 +1329,9 @@ def cutover_preflight(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
 
 
 EVIDENCE_DIR = ".agents/artifacts/evidence"
+# The last commit whose tree holds the cutover bundles: the evidence directory left the tree in #1444, so a
+# bundle is read from the history that retains it, never from the tip of origin's main.
+RETAINED_EVIDENCE_COMMIT = "6b06a4e277ab8885d02cca9cec38e85a6de5dc55"
 CUTOVER_BUNDLE_KIND = "cutover"
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}")
 
@@ -1367,23 +1371,24 @@ def bundle_verdict(bundles: Mapping[str, object], candidate_sha: str) -> tuple[i
 
 
 def cutover_bundle(repo_root: Path, branch: str = CANDIDATE_BRANCH) -> tuple[int, dict]:
-    """C3 over origin's candidate branch and the bundles committed at origin's main.
+    """C3 over origin's candidate branch and the bundles retained at `RETAINED_EVIDENCE_COMMIT`.
 
     Fetches objects and `FETCH_HEAD` only (`--refmap=` keeps it from updating a remote-tracking
-    ref). Raises GitError when git cannot be driven; the caller exits 2."""
+    ref); the fetch of origin's main brings in the history that holds the retained commit.
+    Raises GitError when git cannot be driven; the caller exits 2."""
     sha = _candidate_sha(repo_root, branch, None)
     if sha is None:
         return 75, {"verdict": "absent", "candidate": None, "approved": [], "other": [],
                     "unreadable": []}
     _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "--refmap=", "origin", "refs/heads/main")
-    listing = _git(repo_root, "ls-tree", "--name-only", f"FETCH_HEAD:{EVIDENCE_DIR}/")
+    listing = _git(repo_root, "ls-tree", "--name-only", f"{RETAINED_EVIDENCE_COMMIT}:{EVIDENCE_DIR}/")
     names = sorted(name for name in listing.stdout.splitlines()
                    if listing.returncode == 0 and name.endswith("-bundle.json"))
     bundles: dict[str, object] = {}
     unparsed: list[dict] = []
     for name in names:
         path = f"{EVIDENCE_DIR}/{name}"
-        shown = _git(repo_root, "show", f"FETCH_HEAD:{path}")
+        shown = _git(repo_root, "show", f"{RETAINED_EVIDENCE_COMMIT}:{path}")
         try:
             if shown.returncode != 0:
                 raise ValueError(f"git show failed: {shown.returncode}")

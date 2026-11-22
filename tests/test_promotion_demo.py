@@ -60,7 +60,7 @@ class DemoWalkTest(DemoCase):
         for relative in (DRAFT, CANDIDATE):
             (root / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO_ROOT / relative, root / relative)
-        write_bundle(root, BUNDLE, "unmeasured")
+        given_id = json.loads(write_bundle(root, BUNDLE, "unmeasured").read_text(encoding="utf-8"))["bundle_id"]
         env = make_env(self.tmp, resolved_project(root))
         path = str(root / CANDIDATE)
         code, payload, err = run(env, "advance", "--candidate", path, "--to", "evaluating",
@@ -74,8 +74,7 @@ class DemoWalkTest(DemoCase):
         self.assertEqual(code, 0, err)
         self.assertEqual([payload["evidence"]["state"], payload["evidence"]["bundle_id"],
                           payload["evidence"]["bundle_path"]],
-                         ["unmeasured", json.loads((root / BUNDLE).read_text(encoding="utf-8"))["bundle_id"],
-                          BUNDLE])
+                         ["unmeasured", given_id, BUNDLE])
         self.assertEqual([c["repository"] for c in payload["corroboration"]["repositories"]],
                          ["fagenorn/argus", "elevenyellow/nodocom"])
         code, payload, _ = run(env, "advance", "--candidate", path, "--to", "authorized",

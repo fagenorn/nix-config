@@ -1686,7 +1686,7 @@ EVIDENCE = ".agents/artifacts/evidence"
 
 
 class CutoverBundleTest(unittest.TestCase):
-    def test_the_check_reads_the_bundles_at_origin_main(self):
+    def test_the_check_reads_the_bundles_retained_at_the_pinned_commit(self):
         world = CutoverWorld(self)
         candidate = world.publish_candidate()
         code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
@@ -1694,12 +1694,24 @@ class CutoverBundleTest(unittest.TestCase):
         files = {f"{EVIDENCE}/a-bundle.json": json.dumps(emitted("approved", candidate)),
                  f"{EVIDENCE}/b-bundle.json": "not json",
                  f"{EVIDENCE}/c-trials.json": "{}"}
-        world.commit(world.pusher, manifests()[0], files)
+        retained = world.commit(world.pusher, manifests()[0], files)
+        world.git(world.pusher, "rm", "-q", "-r", EVIDENCE)
+        world.git(world.pusher, "commit", "-q", "-m", "the evidence directory leaves the tree")
         world.git(world.pusher, "push", "-q", "origin", "main")
-        code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
+        with mock.patch.object(verify_checks, "RETAINED_EVIDENCE_COMMIT", retained):
+            code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
         self.assertEqual((code, report["verdict"]), (0, "green"))
         self.assertEqual(report["approved"], [f"{EVIDENCE}/a-bundle.json"])
         self.assertEqual([u["path"] for u in report["unreadable"]], [f"{EVIDENCE}/b-bundle.json"])
+
+    def test_the_default_retained_commit_holds_the_cutover_bundle_as_unmeasured(self):
+        shown = subprocess.run(
+            ["git", "-C", str(ROOT), "show",
+             f"{verify_checks.RETAINED_EVIDENCE_COMMIT}:{EVIDENCE}/cutover-579-bundle.json"],
+            check=True, capture_output=True)
+        doc = json.loads(shown.stdout)
+        self.assertEqual(agent_gate_bundle.verify_bundle(doc), "unmeasured")
+        self.assertRegex(doc["identity"]["bound"]["commit"]["candidate"], r"^[0-9a-f]{40}$")
 
     def test_an_absent_candidate_branch_is_not_yet(self):
         world = CutoverWorld(self)

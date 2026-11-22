@@ -10,10 +10,10 @@ from pathlib import Path
 
 from agent_tools.project_contract.adopt_inspection import (
     blob_at,
-    evidence_records_at,
     parses_as_evidence_record,
     parses_as_migration_map,
 )
+from agent_tools.project_contract.adopt_links import links
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -64,11 +64,16 @@ SECTION_CITE_RE = re.compile(r"python/README\.md\S*\s*§")
 
 PIN = "6b06a4e277ab8885d02cca9cec38e85a6de5dc55"
 WORKING_ARTIFACT_DIRS = (".agents/artifacts", "docs/archive", "docs/spikes")
-WORKING_ARTIFACT_RE = re.compile(
-    r"\.agents/artifacts/(specs|plans|evidence|replays)/[0-9A-Za-z]|docs/(archive|spikes)/[a-z0-9]"
-)
+PATH_EXCLUDED = r"\s\"'`()<>\[\]{}#,;|*\\?"
+PATH_CHAR = "[^" + PATH_EXCLUDED + "]"
+SEGMENT_CHAR = "[^" + PATH_EXCLUDED + "/]"
+# A file under one of the three roots, whatever its name or depth: the root, then a subdirectory and a child
+# or a name with an extension. A bare directory name, which the project contract still carries, is not one.
+DESCENDANT = "(?=" + SEGMENT_CHAR + r"+/[\w-]|" + SEGMENT_CHAR + r"*\.[A-Za-z0-9])"
+WORKING_ARTIFACT_RE = re.compile(r"\.agents/artifacts/" + DESCENDANT + "|docs/(?:archive|spikes)/" + DESCENDANT)
 PINNED_LINK_RE = re.compile(r"https://github\.com/fagenorn/nix-config/blob/([0-9a-f]{40})/\Z")
-PATH_TAIL_RE = re.compile(r"[^\s\"'`()<>\[\]{}#,;|*\\]*")
+URL_BEFORE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'`()<>]*\Z")
+PATH_TAIL_RE = re.compile(PATH_CHAR + "*")
 TEST_TREES = ("tests/", "home/common/agent-skills/tests/")
 # The adoption evidence record and its path-migration map stay in the tree until adoption retires them;
 # the record's path is concatenated so this constant does not match the working-artifact pattern.
@@ -115,12 +120,27 @@ def archived_files() -> frozenset[str]:
     return frozenset(name for name in listing.split("\0") if name)
 
 
-def working_artifact_hits(path: str, lines: list[str], archived: frozenset[str]) -> list[str]:
+def held_at(commit: str, token: str) -> bool:
+    """Whether `commit` exists and holds `token` as a file."""
+    done = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "cat-file", "-t", f"{commit}:{token}"],
+        capture_output=True, text=True,
+    )
+    return done.returncode == 0 and done.stdout.strip() == "blob"
+
+
+def link_targets(line: str) -> list[str]:
+    """Each markdown link destination on `line`, as the repository's own link parser reads it."""
+    return [link.target for link in links(line)]
+
+
+def working_artifact_hits(path: str, lines: list[str], archived: frozenset[str], holds=held_at) -> list[str]:
     """`path:line` for each line that names a working artifact other than through a live pinned link.
 
-    A match preceded by a commit-pinned blob URL is admitted only when the sha is PIN and the path is a
-    file PIN holds. An unpinned match is admitted only inside the test trees and only when it names no
-    file PIN held. In a markdown file a relative link into a working-artifact directory is a hit.
+    A match preceded by a commit-pinned blob URL is admitted only when `holds(sha, path)` finds the path
+    as a file at the cited commit. Any other match inside a URL is a hit. A match outside a URL is admitted
+    only inside the test trees and only when it names no file PIN held. In a markdown file a relative link
+    into a working-artifact directory is a hit, titled or not.
     """
     in_tests = path.startswith(TEST_TREES)
     hits = []
@@ -128,20 +148,23 @@ def working_artifact_hits(path: str, lines: list[str], archived: frozenset[str])
         bad = False
         for m in WORKING_ARTIFACT_RE.finditer(line):
             token = (m.group(0) + PATH_TAIL_RE.match(line, m.end()).group(0)).rstrip(".:")
-            pin = PINNED_LINK_RE.search(line[: m.start()])
+            before = line[: m.start()]
+            pin = PINNED_LINK_RE.search(before)
             if pin is not None:
-                bad = bad or not (pin.group(1) == PIN and token in archived)
+                bad = bad or not holds(pin.group(1), token)
+            elif URL_BEFORE_RE.search(before) is not None:
+                bad = True
             else:
                 names_archived = token in archived or any(
                     a.startswith(token.rstrip("/") + "/") for a in archived
                 )
                 bad = bad or not in_tests or names_archived
         if not bad and path.endswith(".md"):
-            for target in MD_LINK_RE.findall(line):
+            for target in link_targets(line):
                 if "://" in target or target.startswith(("#", "mailto:")):
                     continue
                 resolved = posixpath.normpath(
-                    posixpath.join(posixpath.dirname(path), target.split("#", 1)[0])
+                    posixpath.join(posixpath.dirname(path), target.split("#", 1)[0].split("?", 1)[0])
                 )
                 if any(resolved.startswith(d + "/") for d in WORKING_ARTIFACT_DIRS):
                     bad = True
@@ -164,10 +187,15 @@ def index_destinations(text: str) -> list[str]:
             break
     found = []
     for row in rows[2:]:
-        for target in MD_LINK_RE.findall(row.split("|")[1]):
+        for target in link_targets(row.split("|")[1]):
             if "://" not in target:
-                found.append(posixpath.normpath(posixpath.join("docs", target.split("#", 1)[0])))
+                found.append(posixpath.normpath(posixpath.join("docs", target.split("#", 1)[0].split("?", 1)[0])))
     return found
+
+
+def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[str]]]:
+    """Every tracked text file the working-artifact scan reads: all of them but the path-migration map."""
+    return [(path, lines) for path, lines in tracked_text(archived_dirs) if path != ADOPTION_MAP]
 
 
 class DocsTreeTest(unittest.TestCase):
@@ -201,17 +229,11 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(paths, [ADOPTION_RECORD])
 
     def test_the_adoption_records_survive_the_deletion(self):
-        tree = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "write-tree"], check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        parsed = {
-            p: r
-            for p in evidence_records_at(REPO_ROOT, tree)
-            if (r := parses_as_evidence_record(blob_at(REPO_ROOT, tree, p))) is not None
-        }
-        self.assertEqual(list(parsed), [ADOPTION_RECORD])
-        self.assertEqual(parsed[ADOPTION_RECORD]["path_migration_map"], ADOPTION_MAP)
-        self.assertIsNotNone(parses_as_migration_map(blob_at(REPO_ROOT, tree, ADOPTION_MAP)))
+        # The staged blobs are read directly: building a tree object would write into the developer's repository.
+        record = parses_as_evidence_record(blob_at(REPO_ROOT, "", ADOPTION_RECORD))
+        self.assertIsNotNone(record)
+        self.assertEqual(record["path_migration_map"], ADOPTION_MAP)
+        self.assertIsNotNone(parses_as_migration_map(blob_at(REPO_ROOT, "", ADOPTION_MAP)))
 
     def test_the_index_has_no_archive_or_spikes_entry(self):
         text = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
@@ -228,6 +250,8 @@ class DocsTreeTest(unittest.TestCase):
             "| K | H |\n|---|---|\n| [s](./spikes/) | s |\n"
         )
         self.assertEqual(index_destinations(text), ["docs/archive", "docs/guides"])
+        titled = "| K | H |\n|---|---|\n| [Past reports](./archive/ \"History\") | old |\n"
+        self.assertEqual(index_destinations(titled), ["docs/archive"])
 
     def test_the_docs_tree_passes_the_context_map_lint(self):
         map_path = REPO_ROOT / "docs/CONTEXT-MAP.md"
@@ -240,13 +264,15 @@ class DocsTreeTest(unittest.TestCase):
 
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
-        files = [
-            (path, lines)
-            for path, lines in tracked_text(tuple(d + "/" for d in WORKING_ARTIFACT_DIRS))
-            if path != ADOPTION_MAP
-        ]
-        hits = [hit for path, lines in files for hit in working_artifact_hits(path, lines, archived)]
+        hits = [hit for path, lines in scanned_files() for hit in working_artifact_hits(path, lines, archived)]
         self.assertEqual(hits, [])
+
+    def test_the_scan_reads_the_adoption_record_and_exempts_only_the_path_migration_map(self):
+        names = [path for path, _ in scanned_files()]
+        self.assertIn(ADOPTION_RECORD, names)
+        self.assertNotIn(ADOPTION_MAP, names)
+        added = [("see " + ".agents/" + "artifacts/specs/new.md")]
+        self.assertEqual(working_artifact_hits(ADOPTION_RECORD, added, frozenset()), [ADOPTION_RECORD + ":1"])
 
     def test_the_working_artifact_scan_admits_only_pinned_links_and_synthetic_test_paths(self):
         archived_doc = "docs/" + "archive/x.md"
@@ -256,6 +282,10 @@ class DocsTreeTest(unittest.TestCase):
         other = "https://github.com/fagenorn/nix-config/blob/" + "a" * 40 + "/"
         archived = frozenset({real})
         adr = "docs/areas/a/adr/001-x.md"
+
+        def holds(sha, token):
+            return sha == PIN and token in archived
+
         cases = {
             "bare path": (adr, ["see `" + archived_doc + "`"], [adr + ":1"]),
             "pinned link": (adr, ["[x](" + pinned + real + ")"], []),
@@ -277,11 +307,38 @@ class DocsTreeTest(unittest.TestCase):
             "test tree synthetic path": ("tests/test_x.py", ["p = '" + spec + "'"], []),
             "test tree real file": (
                 "tests/test_x.py", ["p = ROOT / '" + real + "'"], ["tests/test_x.py:1"]),
+            "test tree branch link to a real file with a query": (
+                "tests/test_x.py", ["u = 'https://github.com/fagenorn/nix-config/blob/main/" + archived_doc
+                                    + "?plain=1'"], ["tests/test_x.py:1"]),
+            "test tree branch link to a synthetic path": (
+                "tests/test_x.py", ["u = 'https://example.invalid/" + spec + "'"], ["tests/test_x.py:1"]),
+            "test tree pinned link with a query": (
+                "tests/test_x.py", ["u = '" + pinned + real + "?plain=1'"], []),
+            "titled relative link into the archive": (
+                adr, ["[x](../../../" + "archive/x.md \"History\")"], [adr + ":1"]),
+            "uppercase archive descendant": (adr, ["see `docs/" + "archive/README.md`"], [adr + ":1"]),
+            "other artifacts directory": (adr, ["see `.agents/" + "artifacts/notes/a.md`"], [adr + ":1"]),
+            "the adoption record": (
+                ADOPTION_RECORD, ["see `" + spec + "`"], [ADOPTION_RECORD + ":1"]),
             "module path": ("python/agent_tools/m.py", ["# see " + spec], ["python/agent_tools/m.py:1"]),
         }
         for label, (path, lines, expected) in cases.items():
             with self.subTest(label):
-                self.assertEqual(working_artifact_hits(path, lines, archived), expected)
+                self.assertEqual(working_artifact_hits(path, lines, archived, holds), expected)
+
+    def test_a_pin_is_checked_at_the_commit_it_cites(self):
+        commit = "7343c8fedee64a6154dd0d611231bec6cf4bed43"
+        plan = ".agents/" + "artifacts/plans/2026-08-12-broker-reaping.md"
+        adr = "docs/areas/a/adr/001-x.md"
+        base = "https://github.com/fagenorn/nix-config/blob/"
+        for label, sha, name, expected in (
+            ("a path the cited commit holds", commit, plan, []),
+            ("a path the cited commit lacks", commit, plan + "x", [adr + ":1"]),
+            ("a commit that does not exist", "a" * 40, plan, [adr + ":1"]),
+        ):
+            with self.subTest(label):
+                self.assertEqual(
+                    working_artifact_hits(adr, ["[x](" + base + sha + "/" + name + ")"], frozenset()), expected)
 
     def test_the_delivery_glossary_defines_the_engine_terms(self):
         area = (REPO_ROOT / "docs/areas/delivery/CONTEXT.md").read_text(encoding="utf-8")
