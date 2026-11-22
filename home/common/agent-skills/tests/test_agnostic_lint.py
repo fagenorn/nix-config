@@ -103,6 +103,7 @@ class AgnosticTest(unittest.TestCase):
             f"{self.ISSUE}/12,notes",
             f"{self.ISSUE}/1417(extra)",
             f"([x]({self.ISSUE}/1417(extra)))",
+            *(f"[x]({self.ISSUE}/1417{stop}extra)" for stop in "'\"]<`"),
         ]
         for line in refused:
             with self.subTest(line=line):

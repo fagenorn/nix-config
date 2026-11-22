@@ -12,7 +12,7 @@ from pathlib import Path
 
 from agent_tools.delivery.context_map_lint import (
     CODE_RE, MAP_BUDGET, TERM_DEF_RE, section, table_rows)
-from agent_tools.delivery.look_marker import body_lines
+from agent_tools.delivery.look_marker import FENCE_OPEN
 from agent_tools.delivery.rule_ids import RULE_ID_HEADING
 from agent_tools.project_contract.adopt_links import links
 
@@ -23,13 +23,36 @@ README = GLOBAL / "README.md"
 PROJECT = REPO_ROOT / "docs/standards"
 
 SECOND_ID = re.compile(r"(?<![A-Za-z0-9])[A-Z]+[0-9]+\.(?=\s|$)")
-HEADING_LINE = re.compile(r"^ {0,3}#{1,6}(\s|$)")
+HEADING_LINE = re.compile(r"^ {0,3}(?:(?:>|[-*+]|[0-9]+[.)])[ \t]+ {0,3}|>)*#{1,6}(\s|$)")
 NUMBERED_ITEM = re.compile(r"^[0-9]+\. ")
 
 
 def unfenced(text: str):
-    """`(line number, line)` of every line outside a ``` or ~~~ fence, fence lines excluded."""
-    return body_lines(text.removesuffix("\n"))
+    """`(line number, line)` of every line outside a ``` or ~~~ fence and an HTML comment block.
+
+    The fence and comment lines are excluded; a comment block opens at a line of at most three
+    spaces then `<!--` and ends at the line holding `-->`.
+    """
+    fence: tuple[str, int] | None = None
+    comment = False
+    for number, raw in enumerate(text.removesuffix("\n").split("\n"), 1):
+        line = raw.rstrip()
+        if fence is not None:
+            char, size = fence
+            if re.fullmatch(rf" {{0,3}}{re.escape(char)}{{{size},}}[ \t]*", line):
+                fence = None
+            continue
+        if comment:
+            comment = "-->" not in line
+            continue
+        opened = FENCE_OPEN.match(line)
+        if opened:
+            fence = (opened.group(1)[0], len(opened.group(1)))
+            continue
+        if re.match(r" {0,3}<!--", line):
+            comment = "-->" not in line
+            continue
+        yield number, line
 
 
 def rule_match(line: str):
@@ -183,6 +206,23 @@ class RuleHeadingTest(unittest.TestCase):
         self.assertEqual(len(rule_headings("# T\n ### Missing ID\n")[1]), 1)
         self.assertEqual(len(rule_headings("# T\n   ### Missing ID\n")[1]), 1)
         self.assertEqual(rule_headings("# T\n    ### Missing ID\n"), ([], []))
+
+    def test_a_heading_in_a_blockquote_or_a_list_item_is_read(self):
+        for line in ("> ### Missing ID", "- ### Missing ID", "* ### Missing ID", "1. ### Missing ID",
+                     "> > ### Missing ID", "  - ### Missing ID", ">### Missing ID"):
+            with self.subTest(line=line):
+                self.assertEqual(len(rule_headings(f"# T\n{line}\n")[1]), 1)
+        self.assertEqual(rule_headings("# T\n> quoted prose # not a heading\n- item\n"), ([], []))
+
+    def test_an_html_comment_block_hides_its_lines(self):
+        text = "# T\n<!--\n### P1. x\nbody [a](../x.md)\n-->\n### P2. y\nbody\n"
+        self.assertEqual(set(sections(text)), {"P2"})
+        self.assertEqual(rule_headings(text)[0], [("P", 2, 6)])
+        self.assertEqual(numbered_items("# T\n<!--\n1. step\n-->\n2. one\n"), [5])
+        one_line = "# T\n<!-- ### P1. x -->\n### P2. y\nbody\n"
+        self.assertEqual(set(sections(one_line)), {"P2"})
+        fenced = "# T\n<!--\n```\n-->\n### P1. x\nbody\n```\n"
+        self.assertEqual(sections(fenced), {"P1": "body\n"})
 
     def test_a_tilde_fence_hides_its_lines(self):
         text = "# T\n~~~md\n### P1. x\nbody\n~~~\n### P2. y\nbody\n"
