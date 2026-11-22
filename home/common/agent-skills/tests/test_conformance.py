@@ -1147,7 +1147,7 @@ class AdmissionDeclarationCheckTest(ReportAssertions, unittest.TestCase):
             [check[key] for key in ("status", "domain", "subject_kind", "requirement",
                                     "reason_code", "repair_id")],
             ["passed", "host", "capability", "optional", None, None])
-        self.assertEqual(check["facts"], {"supported_routes": ["claude-code=7"],
+        self.assertEqual(check["facts"], {"supported_routes": ["claude-code=7", "engine=8"],
                                           "unsupported_routes": ["codex"]})
 
     def test_missing_and_invalid_declarations_name_the_repair(self):
