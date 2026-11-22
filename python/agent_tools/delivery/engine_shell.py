@@ -7,12 +7,14 @@ next action, record it) until the walk is `Done` or a `Stop`.
 
 Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
-held run lock answers `EXIT_RUNNING` first; `<procedures_dir>/deliver.json` must
-pass `procedure_check.check_directory` against the platform declarations plus
-every project command, hold only `command`, `agent` and `decide` steps, a `mutates: true`
-step only as a `command` step, and no input but `issue`, and every agent step's role file
-must read (`engine_session.read_role`). The same checks run again on the run's staged copy,
-which is the copy the loop reads (`<run>/procedure/deliver.json`).
+held run lock answers `EXIT_RUNNING` first; the host's settings must name the lifecycle
+guard as the one unconditional Bash hook with no hook switch on (`engine_guard.locate`),
+checked after the running-run answer and before any run is created;
+`<procedures_dir>/deliver.json` must pass `procedure_check.check_directory` against the
+platform declarations plus every project command, hold only `command`, `agent` and
+`decide` steps, a `mutates: true` step only as a `command` step, and no input but `issue`,
+and every agent step's role file must read (`engine_session.read_role`). The same checks
+run again on the run's staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
 
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
@@ -250,6 +252,10 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
         raise Refused(str(error)) from error
     if running is not None:
         return running
+    guard = _guard()
+    if isinstance(guard, engine_guard.Unavailable):
+        raise Refused(f"the host's settings load no lifecycle guard hook, so no run starts: "
+                      f"{guard.reason}")
     procedure = _validate(procedures_dir, table)
     inputs = {name: issue for name in procedure["inputs"]}
     held: list[int] = []

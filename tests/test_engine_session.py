@@ -36,6 +36,8 @@ STUB = REPO_ROOT / "tests/fixtures/engine-session/claude_stub.py"
 RESULT_NORMAL = REPO_ROOT / "tests/fixtures/engine-session/result-normal.json"
 RESULT_MISSING = REPO_ROOT / "tests/fixtures/engine-session/result-missing.json"
 RESULT_INVALID = REPO_ROOT / "tests/fixtures/engine-session/result-invalid.json"
+SETTINGS_GUARDED = REPO_ROOT / "tests/fixtures/engine-session/settings-guarded.json"
+SETTINGS_UNGUARDED = REPO_ROOT / "tests/fixtures/engine-session/settings-unguarded.json"
 ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 DENIAL = {"tool_name": "Write", "tool_use_id": "toolu_01",
           "tool_input": {"file_path": "/etc/hosts"}}
@@ -719,6 +721,39 @@ class DeliverSessionTest(unittest.TestCase):
     def kinds(self, project: EngineProject | None = None) -> list[str]:
         project = project or self.project
         return [e["event"] for e in project.events(project.runs()[0])]
+
+    def test_a_host_without_the_guard_hook_starts_no_run_and_with_it_starts(self):
+        guarded = json.loads(SETTINGS_GUARDED.read_text(encoding="utf-8"))
+        filtered = json.loads(SETTINGS_GUARDED.read_text(encoding="utf-8"))
+        filtered["hooks"]["PreToolUse"][0]["hooks"][0]["if"] = "Bash(git push *)"
+        cases = {"unguarded": SETTINGS_UNGUARDED.read_text(encoding="utf-8"),
+                 "switch on": json.dumps({**guarded, "disableAllHooks": True}),
+                 "filtered": json.dumps(filtered),
+                 "guarded": SETTINGS_GUARDED.read_text(encoding="utf-8")}
+        for name, text in cases.items():
+            with self.subTest(name):
+                project = EngineProject(self)
+                project.env.pop("CLAUDE_ACCOUNT", None)
+                copy_roles(project, "implementer")
+                log = install_stub(project, RESULT_NORMAL)
+                project.use_settings_text(text)
+                done = project.deliver(one_step(project), issue=1514)
+                if name == "guarded":
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    self.assertEqual(json.loads(done.stdout)["end"], "done")
+                    self.assertEqual(len(self.log(log)), 1)
+                    continue
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                self.assertIn("lifecycle guard", done.stderr)
+                self.assertEqual(project.runs(), [])
+                self.assertFalse((project.world.home / ".agents/state/engine/runs").exists())
+                self.assertFalse(log.exists())
+                if name == "switch on":
+                    self.assertIn("disableAllHooks", done.stderr)
+                if name == "filtered":
+                    self.assertIn("if filter", done.stderr)
 
     def test_a_missing_answer_then_a_valid_one_resumes_the_same_session_once(self):
         log = install_stub(self.project, RESULT_MISSING, resumed=canned_result(

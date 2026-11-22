@@ -40,8 +40,8 @@ JSON when it ends (`engine_shell` is the contract):
 - exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"}, "run"}`,
   another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
-- exit 2, stdout empty and one stderr line: a usage error, or a refusal before any run
-  exists, which creates no run directory.
+- exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
+  lifecycle guard hook, or a refusal before any run exists, which creates no run directory.
 """
 
 from __future__ import annotations
