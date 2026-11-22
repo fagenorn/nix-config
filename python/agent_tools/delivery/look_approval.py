@@ -98,29 +98,42 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    environment. A refusal (exit 1) adds, after `covers` and each only when non-empty, `candidates`
    (`[{"issue", "head", "answer"}, ...]`, the carry candidates of the failing issues) and then
    `need` (the paths a further carry run must read). An admit is unchanged.
-9. `carry` (issue 1566) records the carry line that lets the owner's approval of `--from` stand at
-   `--head` when only merges of the integration branch came in and the re-rendered pictures are
-   unchanged. `--from` and `--head` are 40 lowercase hex and different, and each `--before`, `--after`
-   and `--picture` (a picture with no role) is a file read whole, at least one in all (the ids are
-   `look_marker.picture_id`, the digest `look_marker.picture_digest` over each id with its role, so
-   a card whose before and after pictures swapped is another card); a break of these, an unreadable
-   file included, is a usage error (exit 2) before any `gh` call.
+9. `carry` (issues 1566, 1597) records the carry line that lets the owner's approval of `--from` stand
+   at `--head` when only merges of the integration branch came in. `--from` and `--head` are 40
+   lowercase hex and different. Each `--before`, `--after` and `--picture` (a picture with no role)
+   is a file read whole and every picture flag is optional (the ids are `look_marker.picture_id`, the
+   digest `look_marker.picture_digest` over each id with its role, so a card whose before and after
+   pictures swapped is another card); an unreadable file is a usage error (exit 2) before any `gh`
+   call. The approval names the rule, `look_marker.carry_rule`: `pictures` when it carries a valid
+   `pictures` field (the re-rendered pictures must be unchanged), `look-files` when it carries none
+   (the pull request's change to the look files must be unchanged, read from the look file set at
+   the base). A `pictures` field that is not a digest names no rule.
    Output keys, in order: `command`, `action`, `repo`, `issue`, `pr`, `head`, `verdict`, `from` (the
-   head of the latest approval, or null), `reason` (null unless `needed`), `pictures` (the digest of
-   the given files) and `comment_id` (or null). `verdict`, decided in this order after the reads each
-   needs: `unmarked` (exit 0: nothing else read), `approved` (0: a trusted live exact `approved`
-   marker names `--head`; nothing posted), `needed` (0) with `reason` `no-approval` (no candidate or
-   one that is not an `approved` answer), `source-differs` (the candidate's head is not `--from`: the
-   command records only the interval the caller checked), `no-pictures` (the approval names none),
-   `pictures-differ` (its digest is not the given files') or, after one read of the pull request
-   and of the compares, `not-merges`; `moved` (exit 1: the pull request is not open or its head is
-   not `--head`); then `carried` (0) with the comment id of the carry line, an existing one posting
-   nothing. Otherwise one line is written with `forge_markers.write` (one post, at most one delete
-   of its own comment) and read back through the trusted authors: the own comment present is
-   `carried`, absent is `untrusted` (exit 1); a lost write names the smallest trusted live line, so
-   every writer that reports `carried` names the same one, and no such line is `untrusted`. A forge
-   error is the `status` forge error, `look_marker.Unreadable` being `payload_invalid`. `carry`
-   never posts a `look` marker and never reads the look file set.
+   head of the latest approval, or null), `reason` (null unless `needed`), `rule` (`pictures`,
+   `look-files` or null; null for `unmarked`, `approved`, `no-approval`, `source-differs` and
+   `pictures-unreadable`), `pictures` (the digest of the given files, null when none were given)
+   and `comment_id` (or null). `verdict`, decided in this order after the reads each needs:
+   `unmarked` (exit 0: nothing else read), `approved` (0: a trusted live exact `approved` marker
+   names `--head`; nothing posted), `needed` (0) with `reason` `no-approval` (no candidate or one
+   that is not an `approved` answer), `source-differs` (the candidate's head is not `--from`: the
+   command records only the interval the caller checked), `pictures-unreadable` (its `pictures`
+   field is malformed; no pull request or compare is read), under the pictures rule
+   `pictures-missing` (no picture was given) or `pictures-differ` (its digest is not the given
+   files'; neither reads the pull request or a compare), then after one read of the pull request
+   and of the compares, `not-merges`, and under the look-files rule `no-look-files` (the look file
+   set is absent at the base) or `look-files-differ` (the change to the look files differs, or a
+   merge brought a look file in, even one a later merge took out again); `moved` (exit 1: the pull request is not open or its head is
+   not `--head`, decided right after the pictures checks); then `carried` (0) with the comment id of
+   the carry line, an existing one posting nothing. A look file set `look_marker.read_look_files`
+   rejects and a listing `look_marker.compare_files` rejects are `look_marker.Unreadable`. Each
+   compare and the set file is read at most once per call. Otherwise one line is written with
+   `forge_markers.write` (one post, at most one delete of its own comment) and read back through
+   the trusted authors: the own comment present is `carried`, absent is `untrusted` (exit 1). The
+   write contends only with lines `look_marker.carry_matches` admits for the rule, so a line naming
+   both rules never wins it and the writer names the line the status reader accepts; a lost write
+   names the smallest such trusted live line, and no such line is `untrusted`. A forge error is the
+   `status` forge error, `look_marker.Unreadable` being `payload_invalid`. `carry` never posts a
+   `look` marker.
 """
 import argparse
 import json
@@ -346,16 +359,28 @@ def tick(args: argparse.Namespace) -> int:
     return finish("ticked", 0, changed)
 
 
+def _memo(read: Callable[[str], Any]) -> Callable[[str], Any]:
+    """`read` that asks each path once and returns the first answer to every later ask."""
+    seen: dict[str, Any] = {}
+
+    def memoised(path: str) -> Any:
+        if path not in seen:
+            seen[path] = read(path)
+        return seen[path]
+
+    return memoised
+
+
 def carry(args: argparse.Namespace) -> int:
-    """Record the carry line of `--from`'s approval at `--head` once only merges came in (issue 1566)."""
+    """Record the carry line of `--from`'s approval at `--head` once only merges came in (issues 1566, 1597)."""
     body = _issue_body(args)
-    state: dict[str, Any] = {"from": None, "reason": None, "comment_id": None}
+    state: dict[str, Any] = {"from": None, "reason": None, "rule": None, "comment_id": None}
 
     def finish(verdict: str, code: int = 0, **found: Any) -> int:
         state.update(found)
         emit({"command": COMMAND, "action": "carry", "repo": args.repo, "issue": args.issue, "pr": args.pr,
               "head": args.head, "verdict": verdict, "from": state["from"], "reason": state["reason"],
-              "pictures": args.digest, "comment_id": state["comment_id"]})
+              "rule": state["rule"], "pictures": args.digest, "comment_id": state["comment_id"]})
         return code
 
     def needed(reason: str) -> int:
@@ -373,27 +398,41 @@ def carry(args: argparse.Namespace) -> int:
     state["from"] = candidate.head
     if candidate.head != args.from_head:
         return needed("source-differs")
-    if candidate.pictures is None:
-        return needed("no-pictures")
-    if candidate.pictures != args.digest:
-        return needed("pictures-differ")
+    rule = lm.carry_rule(comments, candidate)
+    if rule is None:
+        return needed("pictures-unreadable")
+    state["rule"] = rule
+    if rule == lm.PICTURES_RULE:
+        if args.digest is None:
+            return needed("pictures-missing")
+        if candidate.pictures != args.digest:
+            return needed("pictures-differ")
     pull = forge_api.gh_json(["api", f"repos/{args.repo}/pulls/{args.pr}"])
     head = pull.get("head") if isinstance(pull, dict) else None
     if not isinstance(pull, dict) or pull.get("state") != "open" or not isinstance(head, dict) \
             or head.get("sha") != args.head:
         return finish("moved", 1)
+    read = _memo(_reader(args.repo))
     try:
-        holds = lm.settle_merges(args.from_head, args.head, _base_tip(args, pull), _reader(args.repo))
+        base = _base_tip(args, pull)
+        if not lm.settle_merges(args.from_head, args.head, base, read):
+            return needed("not-merges")
+        if rule == lm.LOOK_FILES_RULE:
+            if read(lm.contents_path(base)) is None:
+                return needed("no-look-files")
+            if not lm.settle_look_files(args.from_head, args.head, base, read):
+                return needed("look-files-differ")
     except lm.Unreadable as error:
         raise forge_api.ForgeError("payload_invalid", str(error)) from None
-    if not holds:
-        return needed("not-merges")
     if candidate.line is not None:
         return finish("carried", comment_id=candidate.line)
-    fields = lm.carry_fields(args.issue, args.pr, args.from_head, args.head, args.digest)
+    pictures = args.digest if rule == lm.PICTURES_RULE else None
+    fields = lm.carry_fields(args.issue, args.pr, args.from_head, args.head, pictures)
     result = forge_markers.write(args.repo, args.issue, lm.CARRY_KIND, fields,
-                                 lm.carry_sentence(args.pr, args.from_head, args.head), match=fields,
-                                 associations=lm.TRUSTED)
+                                 lm.carry_sentence(args.pr, args.from_head, args.head, rule), match=fields,
+                                 associations=lm.TRUSTED,
+                                 accept=lambda m: lm.carry_matches(m.fields, args.issue, args.pr, args.from_head,
+                                                                   args.head, pictures))
     if result.won:
         trusted = any(m.comment_id == result.own_id
                       for m in forge_markers.list_markers(args.repo, args.issue, lm.TRUSTED))
@@ -487,9 +526,7 @@ def _carry_usage(args: argparse.Namespace) -> None:
                     ids.append((role, lm.picture_id(handle.read())))
             except OSError as error:
                 raise UsageError(f"the picture {path!r} is unreadable: {error}") from None
-    if not ids:
-        raise UsageError("carry needs at least one --before, --after or --picture")
-    args.digest = lm.picture_digest(ids)
+    args.digest = lm.picture_digest(ids) if ids else None
 
 
 def main(argv: list[str] | None = None) -> int:

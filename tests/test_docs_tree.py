@@ -480,6 +480,15 @@ class DocsTreeTest(unittest.TestCase):
         )
         self.assertEqual(empty, [])
 
+    def test_no_area_numbers_two_adrs_alike(self):
+        shared = []
+        for adr_dir in sorted((REPO_ROOT / "docs/areas").glob("*/adr")):
+            seen = {}
+            for path in sorted(adr_dir.glob("*.md")):
+                seen.setdefault(path.name[:3], []).append(path.name)
+            shared += [f"{adr_dir.parent.name}/{n}: {names}" for n, names in seen.items() if len(names) > 1]
+        self.assertEqual(shared, [])
+
     def test_the_console_area_owns_its_terms(self):
         text = (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text()
         cells = [[c.strip() for c in line.strip().strip("|").split("|")]

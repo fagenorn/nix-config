@@ -11,7 +11,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
-    ACTIVATION, ADD_STEPS, ADDED, ADOPTION_ITEM, PERMISSION_ITEM, RELEASE_ITEM, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
+    ACTIVATION, ADD_STEPS, ADDED, ADOPTION_ITEM, PERMISSION_ITEM, RELEASE_ITEM, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASK_DEEP_OFFER, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
@@ -58,7 +58,7 @@ DESK_CONTROLS: dict = {
         "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-signout", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
         "notice-cancel", "notice-withdraw", "live-fault-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
-        "follow-cancel", "thread-open", "reading-close", "reading-delete", "reading-delete-keep", "ask-choice", "reply-send", "undo", *ANS_PLAIN, "goal-project",
+        "follow-cancel", "thread-open", "reading-close", "reading-delete", "reading-delete-keep", "ask-choice", "ask-deep", "ask-deep-start", "ask-deep-cancel", "reply-send", "undo", *ANS_PLAIN, "goal-project",
         "detail-open", "kept-words-dismiss", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
@@ -172,6 +172,10 @@ def desk_scenarios() -> list:
          {"open": "questions:owner/p00"}, {"click": "thread-open"}, snapshot, {"click": "follow-open"},
          {"type": {"class": "follow-text", "text": "and then?"}}, snapshot,
          {"click": "reading-delete"}, snapshot],
+        # Dig deeper offered under the last answer, then its estimate with Start and Cancel (#1274)
+        [begin, {"frame": view([asking(project(0, []), thread(ASK_DEEP_OFFER))])},
+         {"open": "questions:owner/p00"}, {"click": "thread-open"}, snapshot, {"click": "ask-deep"},
+         snapshot],
         # a sprint block with Tell open and End the sprint opened, then a stop question
         [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
          {"open": MORE_KEY}, snapshot],

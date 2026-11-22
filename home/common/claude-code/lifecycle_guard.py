@@ -498,7 +498,11 @@ receives it as `validate_release_merge`'s last parameter).
    the approved head, the current head and the approval's picture digest, when every
    commit after the approved head is a two-parent merge whose second parent is no pull
    request commit (issue 1566); that rule reads only compares, never the set file. An approval that records pictures is
-   kept by that line alone, never by the look file rule.
+   kept by that line alone, never by the look file rule. An `approved` approval with no
+   `pictures` field is also carried by a `look-carry` line with `rule=look-files` when the
+   pull request's change to the look files is unchanged (issue 1597); that rule reads the set
+   file, the three compares and, when more than one merge came in, each merge's compare with
+   its first parent, and refuses when any of them lists a look file.
 Every lookup runs with the token variables scrubbed and the child timeout; a
 timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
 `issue <n> comment lookup timed out`, a non-zero one `PR body lookup failed`,
