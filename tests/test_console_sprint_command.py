@@ -960,8 +960,7 @@ class SprintCommandTest(Case):
         self.assertIn("- Give every Bash call a description that says why you run the command, on the first attempt. "
                       "A permission prompt for a Bash command in this session waits up to ten minutes for the owner to allow it once or refuse it on the console, "
                       "and only when the call's description says why you run the command: such a prompt whose call has no description, or a blank one, is refused at once, "
-                      "so describe the call and run it again. Any other prompt is refused at once. "
-                      "Never wait for a prompt any other way.", section)
+                      "so describe the call and run it again. Any other prompt is refused at once. Never wait for a prompt any other way.", section)
         self.assertIn("- Never enter or create a worktree yourself, because a delivery makes its "
                       "own.", section)
 
