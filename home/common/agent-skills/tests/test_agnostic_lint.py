@@ -104,10 +104,25 @@ class AgnosticTest(unittest.TestCase):
             f"{self.ISSUE}/1417(extra)",
             f"([x]({self.ISSUE}/1417(extra)))",
             *(f"[x]({self.ISSUE}/1417{stop}extra)" for stop in "'\"]<`"),
+            f"[x](<{self.ISSUE}/1417)extra>)",
+            f"[x]({self.ISSUE}/1417>extra)",
+            f"[x](<{self.ISSUE}/1417 extra>)",
+            f"[x](<a {self.ISSUE}/1417>)",
+            f"[x](<{self.ISSUE}/1417.>)",
+            f"<{self.ISSUE}/1417)extra>",
+            f"<{self.ISSUE}/1417(extra>",
+            f"x{self.ISSUE}/1417",
+            f"[x](../{self.ISSUE}/1417)",
         ]
         for line in refused:
             with self.subTest(line=line):
                 self.assertTrue(self.hits({self.STANDARD: f"{line}\n".encode()}))
+
+    def test_an_exact_tracker_link_is_accepted_in_every_form(self):
+        for line in (f"[x]({self.ISSUE}/1417)", f"[x](<{self.ISSUE}/1417>)", f"<{self.ISSUE}/1417>",
+                     f"see {self.ISSUE}/1417.", f"([x]({self.ISSUE}/1417 \"t\"))", f"({self.ISSUE}/1417)"):
+            with self.subTest(line=line):
+                self.assertEqual(self.hits({self.STANDARD: f"{line}\n".encode()}), [])
 
     def test_a_bare_mention_beside_an_accepted_link_is_still_refused(self):
         extra = {self.STANDARD: f"see {self.ISSUE}/12 and nix-config\n".encode()}

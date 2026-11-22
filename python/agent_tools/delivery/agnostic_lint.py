@@ -28,6 +28,8 @@ HOSTING_LITERALS = ("fagenorn/nix-config", "nix-config", "origin/main", "--base 
 # A link to an issue on the hosting tracker is accepted in the global standards only (#1438).
 TRACKER_LINK_ROOT = "home/common/agent-skills/standards"
 URL_SPAN = re.compile(r"""https?://[^\s()<>\[\]"'`]+""")
+ANGLE_DESTINATION = re.compile(r"\]\(<(?P<url>[^<>\n]*)>")
+AUTOLINK = re.compile(r"<(?P<url>https?://[^\s<>]*)>")
 TRACKER_ISSUE_LINK = re.compile(r"https://github\.com/fagenorn/nix-config/issues/[1-9][0-9]*")
 # Every exemption is one (file, token) pair with its reason; evals and LICENSE files are skipped by name.
 AGNOSTIC_ALLOW = {
@@ -39,18 +41,27 @@ AGNOSTIC_ALLOW = {
 
 
 def without_tracker_links(line: str) -> str:
-    """The line with each URL that is exactly a tracker issue link (bar trailing punctuation) blanked out.
+    """The line with each tracker issue link blanked out, the whole destination being that link.
 
-    A span followed by anything but whitespace, `)`, `>` or the end of the line is part of a longer
-    destination and stays.
+    A link destination is read as CommonMark reads it: `](<...>)` and `<...>` hold everything up to
+    the closing `>`, so each is blanked only when that is exactly the issue link. Any other URL is a
+    bare destination or prose: it is blanked (bar trailing punctuation) when it follows whitespace,
+    `(`, `[` or the start of the line and is followed by whitespace, `)` or the end of the line.
+    Anything else continues the destination, and the span stays.
     """
+    def exact(match):
+        return " " * len(match.group(0)) if TRACKER_ISSUE_LINK.fullmatch(match.group("url")) else match.group(0)
+
     def blank(match):
         span = match.group(0)
         url = span.rstrip(".,;:!?")
+        before = match.string[match.start() - 1:match.start()]
         after = match.string[match.end():match.end() + 1]
-        if after and not (after.isspace() or after in ")>"):  # the destination goes on past the span
+        if (before and not (before.isspace() or before in "([")) or (after and not (after.isspace() or after == ")")):
             return span
         return " " + span[len(url):] if TRACKER_ISSUE_LINK.fullmatch(url) else span
+    line = ANGLE_DESTINATION.sub(exact, line)
+    line = AUTOLINK.sub(exact, line)
     return URL_SPAN.sub(blank, line)
 
 

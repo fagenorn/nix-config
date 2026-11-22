@@ -27,31 +27,90 @@ HEADING_LINE = re.compile(r"^ {0,3}(?:(?:>|[-*+]|[0-9]+[.)])[ \t]+ {0,3}|>)*#{1,
 NUMBERED_ITEM = re.compile(r"^[0-9]+\. ")
 
 
-def unfenced(text: str):
-    """`(line number, line)` of every line outside a ``` or ~~~ fence and an HTML comment block.
+BLOCK_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|"
+    "div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|"
+    "legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|"
+    "table|tbody|td|tfoot|th|thead|title|tr|track|ul")
+ATTRIBUTE = r"""\s+[A-Za-z_:][\w:.-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?"""
+# CommonMark HTML blocks 1-5 end at a marker on a line; 6 and 7 end at a blank line (7 cannot
+# interrupt a paragraph).
+HTML_MARKED = (
+    (re.compile(r" {0,3}<(?:pre|script|style|textarea)(?:\s|>|$)", re.I),
+     re.compile(r"</(?:pre|script|style|textarea)>", re.I)),
+    (re.compile(r" {0,3}<!--"), re.compile(r"-->")),
+    (re.compile(r" {0,3}<\?"), re.compile(r"\?>")),
+    (re.compile(r" {0,3}<![A-Za-z]"), re.compile(r">")),
+    (re.compile(r" {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
+)
+HTML_BLANK_END = re.compile(rf" {{0,3}}</?(?:{BLOCK_TAGS})(?:\s|/?>|$)", re.I)
+HTML_LONE_TAG = re.compile(
+    rf" {{0,3}}(?:<[A-Za-z][A-Za-z0-9-]*(?:{ATTRIBUTE})*\s*/?>|</[A-Za-z][A-Za-z0-9-]*\s*>)\s*$")
+LIST_MARKER = re.compile(r"( *)([-*+]|[0-9]{1,9}[.)])( +|$)")
+THEMATIC_BREAK = re.compile(r" *([-*_])(?: *\1){2,} *")
 
-    The fence and comment lines are excluded; a comment block opens at a line of at most three
-    spaces then `<!--` and ends at the line holding `-->`.
+
+def scan(text: str):
+    """`(line number, line, content)` of every line outside a ``` or ~~~ fence and an HTML block.
+
+    The fence and HTML lines are excluded. `content` is the line with the content column of the
+    list item it continues removed, which is how it reads when rendered; `line` is as written.
+    An HTML block opens at CommonMark's seven start conditions and ends at its end condition.
     """
     fence: tuple[str, int] | None = None
-    comment = False
+    html: re.Pattern | None = None   # the end marker of an open block 1-5
+    until_blank = False              # an open block 6 or 7
+    paragraph = False
+    columns: list[int] = []
     for number, raw in enumerate(text.removesuffix("\n").split("\n"), 1):
         line = raw.rstrip()
+        indent = len(line) - len(line.lstrip(" "))
+        inside = fence is not None or html is not None or until_blank
+        if line and not inside:
+            while columns and indent < columns[-1]:
+                columns.pop()
+        content = line[min(columns[-1] if columns else 0, indent):]
         if fence is not None:
             char, size = fence
-            if re.fullmatch(rf" {{0,3}}{re.escape(char)}{{{size},}}[ \t]*", line):
+            if re.fullmatch(rf" {{0,3}}{re.escape(char)}{{{size},}}[ \t]*", content):
                 fence = None
             continue
-        if comment:
-            comment = "-->" not in line
+        if html is not None:
+            if html.search(line):
+                html, paragraph = None, False
             continue
-        opened = FENCE_OPEN.match(line)
+        if until_blank:
+            if line:
+                continue
+            until_blank = False
+        if not line:
+            paragraph = False
+            continue
+        opened = FENCE_OPEN.match(content)
         if opened:
-            fence = (opened.group(1)[0], len(opened.group(1)))
+            fence, paragraph = (opened.group(1)[0], len(opened.group(1))), False
             continue
-        if re.match(r" {0,3}<!--", line):
-            comment = "-->" not in line
+        marked = next((end for start, end in HTML_MARKED if start.match(content)), None)
+        if marked:
+            paragraph = False
+            if not marked.search(content):
+                html = marked
             continue
+        if HTML_BLANK_END.match(content) or (not paragraph and HTML_LONE_TAG.match(content)):
+            until_blank, paragraph = True, False
+            continue
+        item = LIST_MARKER.match(content)
+        if item and not THEMATIC_BREAK.fullmatch(content):
+            base = columns[-1] if columns else 0
+            width = len(item[1]) + len(item[2]) + (len(item[3]) if 0 < len(item[3]) < 5 else 1)
+            columns.append(base + width)
+        paragraph = not HEADING_LINE.match(content)
+        yield number, line, content
+
+
+def unfenced(text: str):
+    """`(line number, line)` of every line `scan` keeps."""
+    for number, line, _ in scan(text):
         yield number, line
 
 
@@ -67,7 +126,7 @@ def rule_headings(text: str) -> tuple[list[tuple[str, int, int]], list[str]]:
     ids: list[tuple[str, int, int]] = []
     problems: list[str] = []
     seen_heading = False
-    for number, line in unfenced(text):
+    for number, _, line in scan(text):
         if not HEADING_LINE.match(line):
             continue
         first, seen_heading = not seen_heading, True
@@ -86,14 +145,14 @@ def sections(text: str) -> dict[str, str]:
     """Rule id to the body between its heading and the next heading of any level."""
     bodies: dict[str, list[str]] = {}
     current = None
-    for _, line in unfenced(text):
+    for _, raw, line in scan(text):
         if HEADING_LINE.match(line):
             found = rule_match(line)
             current = f"{found['prefix']}{found['number']}" if found else None
             if current:
                 bodies[current] = []
         elif current:
-            bodies[current].append(line)
+            bodies[current].append(raw)
     return {key: "".join(f"{line}\n" for line in lines) for key, lines in bodies.items()}
 
 
@@ -229,6 +288,44 @@ class RuleHeadingTest(unittest.TestCase):
         self.assertEqual(set(sections(text)), {"P2"})
         self.assertEqual(rule_headings(text)[0], [("P", 2, 6)])
         self.assertEqual(numbered_items("# T\n~~~\n1. step\n~~~\n"), [])
+
+    def test_a_heading_on_a_list_item_continuation_line_is_read(self):
+        for text in ("# T\n- a\n  - b\n\n    ### Missing ID\n", "# T\n- a\n\n  ### Missing ID\n",
+                     "# T\n1. a\n\n   ### Missing ID\n", "# T\n- a\n  - b\n    - c\n\n      ### Missing ID\n",
+                     "# T\n- a\n\n     ### Missing ID\n"):
+            with self.subTest(text=text):
+                self.assertEqual(len(rule_headings(text)[1]), 1)
+        for text in ("# T\n- a\n\n      ### code in the item\n", "# T\n- a\n\n### P1. x\nbody\n",
+                     "# T\n- a\n  - b\n\n  ### P1. x\nbody\n"):
+            with self.subTest(text=text):
+                self.assertEqual(rule_headings(text)[1], [])
+        self.assertEqual(rule_headings("# T\n- a\n\n  ### P1. x\n  body\n")[0], [("P", 1, 4)])
+        self.assertEqual(rule_headings("# T\n- a\n  ```\n  ### x\n  ```\n")[1], [])
+        self.assertEqual(rule_headings("# T\n* * *\n\n    ### code\n"), ([], []))
+
+    def test_an_html_block_hides_its_lines(self):
+        for opener, closer in (("<div>", "</div>"), ("<details>", "</details>"), ("<pre>", "</pre>"),
+                               ("<DIV class=x>", "</DIV>"), ("<table>", "</table>"), ("</div>", ""),
+                               ("<script>", "</script>"), ("<style>", "</style>"),
+                               ("<textarea>", "</textarea>"), ("<?php", "?>"), ("<!DOCTYPE html", ">"),
+                               ("<![CDATA[", "]]>"), ("<custom-tag>", ""), ("  <p>", "")):
+            with self.subTest(opener=opener):
+                text = f"# T\n{opener}\n### P1. x\nbody [a](../x.md)\n{closer}\n\n### P2. y\nbody\n"
+                self.assertEqual(set(sections(text)), {"P2"})
+                self.assertEqual(rule_headings(text)[0], [("P", 2, 7)])
+                self.assertEqual(numbered_items(f"# T\n{opener}\n1. step\n{closer}\n\n2. one\n"), [6])
+
+    def test_an_html_block_ends_where_commonmark_ends_it(self):
+        one_line = "# T\n<pre>x</pre>\n### P1. x\nbody\n"
+        self.assertEqual(set(sections(one_line)), {"P1"})
+        after_blank = "# T\n<div>\nx\n\n### P1. x\nbody\n"
+        self.assertEqual(set(sections(after_blank)), {"P1"})
+        pre_runs_on = "# T\n<pre>\n\n### P1. x\nbody\n</pre>\n### P2. y\nbody\n"
+        self.assertEqual(set(sections(pre_runs_on)), {"P2"})
+        self.assertEqual(set(sections("# T\ntext\n<span>\n### P1. x\nbody\n")), {"P1"})
+        self.assertEqual(set(sections("# T\n<span>x</span> y\n### P1. x\nbody\n")), {"P1"})
+        self.assertEqual(set(sections("# T\n    <div>\n### P1. x\nbody\n")), {"P1"})
+        self.assertEqual(set(sections("# T\ntext\n<divx>\n### P1. x\nbody\n")), {"P1"})
 
     def test_a_link_in_a_code_span_is_no_destination(self):
         self.assertEqual(link_destinations("a `[d](https://x/y)` b"), [])
