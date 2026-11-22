@@ -8,6 +8,21 @@ Three layers, most specific wins. Machine-global layers live here (`~/.agents/st
 | 1 — stack | `stacks/{dotnet,typescript-react,node,python}.md` | Project-independent idioms and trap libraries for one language or framework. Version-stamped. |
 | 2 — project | the repo's `docs/standards/` | Deltas only: layout, fixture machinery, telemetry names, tenant rules, migration registries. |
 
+## Rule ids
+
+Every rule in the three layers is one `###` heading that opens with its id, written `### B12. Fail loud`, the form the planning rules' `R1` to `R9` use.
+
+| Layer file | Prefix |
+|---|---|
+| `the-bar.md` | `B` |
+| `stacks/dotnet.md` | `NET` |
+| `stacks/node.md` | `NODE` |
+| `stacks/python.md` | `PY` |
+| `stacks/typescript-react.md` | `TSR` |
+| the repo's `docs/standards/` shards | `P` |
+
+A heading carries one id, and a new rule takes the next unused number of its prefix. Ids are never renumbered or reused. Project ids are local to their repository, so a report that spans projects prefixes the repository name. `R1` to `R9` keep their ids and form and stay outside the layers.
+
 ## Precedence
 
 Direct user instruction > Layer 2 (project) > Layer 1 (stack) > Layer 0 (the bar) > general convention. More specific always overrides more general — the same rule that makes "match the file you're editing" beat personal preference. A recurring conflict between a layer and what the code actually does is a bug in one of them; fix it in the work that touches it, not as a separate refactor.
@@ -21,7 +36,7 @@ Nobody reads a whole standards corpus. Briefs paste **Layer 0 in full** (~600 to
 A repo's `docs/standards/` is a directory of shards plus a **README index of at most 40 lines**, one row per shard carrying its `governs:` globs and a one-line gist — the same index-not-store discipline as `CONTEXT-MAP.md`.
 
 - **Deltas only.** Anything that restates Layer 0 or 1 gets deleted, not copied. If a rule is true for every project on this stack, it belongs upstream in `stacks/`.
-- **Case law is written rule-first**: the rule in at most two sentences, plus one issue or ADR link. The narrative lives in the issue. Incident memoirs are what make a standards file grow linearly with project age.
+- **Case law is written rule-first**: each rule is one `### P<n>.` heading, then the rule in at most two sentences, plus one issue or ADR link. The narrative lives in the issue. Incident memoirs are what make a standards file grow linearly with project age.
 - **Process content is not a standard.** Deploy checklists go to `.claude/hints/`, review procedure to `REVIEW-CONTRACT.md`, lint commands nowhere — the environment already names them.
 
 ## Planning rules
