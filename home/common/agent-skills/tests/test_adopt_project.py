@@ -35,8 +35,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.project_contract import (adopt_inspection, adopt_links, adopt_planning,
-                                          adopt_project)
+from agent_tools.project_contract import (adopt_conformance, adopt_inspection, adopt_links,
+                                          adopt_planning, adopt_project, derived_values)
 from agent_tools.system.siblings import sibling_argv
 
 from ._inprocess_cli import run_module
@@ -3684,6 +3684,263 @@ class AdoptFailureWrapperTest(unittest.TestCase):
         self.assertEqual(payload["error"]["repair_id"], "adopt.internal")
         self.assertNotIn("SECRET-TRACEBACK-TEXT", buffer.getvalue())
         self.assertNotIn("RuntimeError", buffer.getvalue())
+
+
+# --------------------------------------------------------------------------
+# The conformance file edits (pure functions of bytes)
+# --------------------------------------------------------------------------
+
+FIXTURE_REVISION = {
+    "type": "github", "owner": "fixture", "repo": "platform", "rev": "0f" * 20,
+    "narHash": "sha256-" + "A" * 43 + "=", "lastModified": 1700000000,
+}
+DEVENV_YAML = "inputs:\n  nixpkgs:\n    url: github:cachix/devenv-nixpkgs/rolling\n"
+DEVENV_YAML_DECLARED = (DEVENV_YAML + "  agent-platform:\n"
+                        "    url: github:fixture/platform\n    flake: false\n")
+DEVENV_LOCK = json.dumps({
+    "nodes": {
+        "nixpkgs": {
+            "locked": {"lastModified": 1, "narHash": "sha256-" + "B" * 43 + "=",
+                       "owner": "cachix", "repo": "devenv-nixpkgs",
+                       "rev": "ab" * 20, "type": "github"},
+            "original": {"owner": "cachix", "repo": "devenv-nixpkgs",
+                         "type": "github"},
+        },
+        "root": {"inputs": {"nixpkgs": "nixpkgs"}},
+    },
+    "root": "root",
+    "version": 7,
+}, indent=2, sort_keys=True)
+
+
+def locked_platform_node(revision: dict) -> dict:
+    return {"flake": False, "locked": revision,
+            "original": {"owner": revision["owner"], "repo": revision["repo"],
+                         "type": "github"}}
+
+
+def lock_bytes(document: dict) -> bytes:
+    return json.dumps(document, indent=2, sort_keys=True).encode()
+
+
+class LockEntryTest(unittest.TestCase):
+    def lock(self) -> dict:
+        return json.loads(DEVENV_LOCK)
+
+    def test_a_lock_gains_the_platform_node_and_root_input(self):
+        entry = adopt_conformance.lock_with_platform(
+            DEVENV_LOCK.encode(), FIXTURE_REVISION)
+        expected = self.lock()
+        expected["nodes"]["agent-platform"] = locked_platform_node(FIXTURE_REVISION)
+        expected["nodes"]["root"]["inputs"]["agent-platform"] = "agent-platform"
+        self.assertIs(entry.kept, False)
+        self.assertEqual(entry.node, "agent-platform")
+        self.assertEqual(entry.locked, FIXTURE_REVISION)
+        self.assertEqual(json.loads(entry.after), expected)
+        self.assertTrue(entry.after.endswith(b"}"))
+
+    def test_the_lock_keeps_its_bytes_style(self):
+        for name, ending in (("devenv.lock", b"}"), ("flake.lock", b"}\n")):
+            with self.subTest(name):
+                data = (REPO_ROOT / name).read_bytes()
+                entry = adopt_conformance.lock_with_platform(data, FIXTURE_REVISION)
+                expected = json.loads(data)
+                root = expected["nodes"][expected["root"]]
+                expected["nodes"]["agent-platform"] = locked_platform_node(FIXTURE_REVISION)
+                root.setdefault("inputs", {})["agent-platform"] = "agent-platform"
+                self.assertEqual(json.loads(entry.after), expected)
+                self.assertEqual(entry.after, json.dumps(
+                    expected, indent=2, sort_keys=True, ensure_ascii=False).encode()
+                    + (b"\n" if ending.endswith(b"\n") else b""))
+                self.assertTrue(entry.after.endswith(ending))
+                self.assertEqual(entry.after.endswith(b"\n"), data.endswith(b"\n"))
+
+    def test_a_taken_node_name_gets_the_next_free_key(self):
+        document = self.lock()
+        document["nodes"]["agent-platform"] = {"flake": False, "locked": {}}
+        entry = adopt_conformance.lock_with_platform(lock_bytes(document), FIXTURE_REVISION)
+        self.assertEqual(entry.node, "agent-platform_2")
+        result = json.loads(entry.after)
+        self.assertEqual(result["nodes"]["root"]["inputs"]["agent-platform"],
+                         "agent-platform_2")
+        self.assertEqual(result["nodes"]["agent-platform"],
+                         document["nodes"]["agent-platform"])
+        self.assertEqual(result["nodes"]["agent-platform_2"],
+                         locked_platform_node(FIXTURE_REVISION))
+
+    def test_a_well_formed_entry_is_kept_as_found(self):
+        document = self.lock()
+        found = {**FIXTURE_REVISION, "rev": "1e" * 20}
+        document["nodes"]["agent-platform"] = locked_platform_node(found)
+        document["nodes"]["root"]["inputs"]["agent-platform"] = "agent-platform"
+        entry = adopt_conformance.lock_with_platform(lock_bytes(document), FIXTURE_REVISION)
+        self.assertIsNone(entry.after)
+        self.assertIs(entry.kept, True)
+        self.assertEqual(entry.locked["rev"], "1e" * 20)
+
+    def test_an_existing_entry_out_of_shape_is_never_replaced(self):
+        def variant(mutate, reference="agent-platform"):
+            document = self.lock()
+            document["nodes"]["agent-platform"] = locked_platform_node(dict(FIXTURE_REVISION))
+            document["nodes"]["root"]["inputs"]["agent-platform"] = reference
+            mutate(document["nodes"]["agent-platform"])
+            return lock_bytes(document)
+
+        def drop_nar_hash(node):
+            del node["locked"]["narHash"]
+
+        cases = {
+            "a follows path": variant(lambda node: None, ["nixpkgs"]),
+            "a missing node": variant(lambda node: None, "absent"),
+            "flake true": variant(lambda node: node.update(flake=True)),
+            "no narHash": variant(drop_nar_hash),
+            "git type": variant(lambda node: node["locked"].update(type="git")),
+            "repo differs": variant(lambda node: node["original"].update(repo="other")),
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(adopt_conformance.Undeclarable) as caught:
+                    adopt_conformance.lock_with_platform(data, FIXTURE_REVISION)
+                self.assertEqual(caught.exception.repair_id,
+                                 adopt_conformance.LOCK_ENTRY_INCOMPATIBLE)
+
+    def test_a_lock_out_of_shape_is_unreadable(self):
+        def with_root_inputs(value):
+            document = self.lock()
+            document["nodes"]["root"]["inputs"] = value
+            return lock_bytes(document)
+
+        cases = {
+            "not json": b"not json",
+            "a list": b"[]",
+            "no nodes": b'{"root": "root"}',
+            "root names no node": b'{"nodes": {}, "root": "root"}',
+            "root inputs a list": with_root_inputs(["nixpkgs"]),
+            "duplicate keys": b'{"nodes": {}, "nodes": {}, "root": "root"}',
+            "invalid utf-8": b'{"nodes": {"root": {}}, "root": "\xff"}',
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(adopt_conformance.Undeclarable) as caught:
+                    adopt_conformance.lock_with_platform(data, FIXTURE_REVISION)
+                self.assertEqual(caught.exception.repair_id,
+                                 adopt_conformance.LOCK_UNREADABLE)
+
+
+class InputDeclarationTest(unittest.TestCase):
+    def declare(self, data):
+        return adopt_conformance.declare_input(data, "fixture", "platform")
+
+    def test_the_declaration_is_inserted_into_the_inputs_block(self):
+        self.assertEqual(self.declare(DEVENV_YAML.encode()), DEVENV_YAML_DECLARED.encode())
+
+    def test_a_file_without_inputs_gains_the_block(self):
+        expected = (b"imports: []\ninputs:\n  agent-platform:\n"
+                    b"    url: github:fixture/platform\n    flake: false\n")
+        for data in (b"imports: []\n", b"imports: []"):
+            with self.subTest(data):
+                self.assertEqual(self.declare(data), expected)
+
+    def test_a_compatible_declaration_is_kept(self):
+        declared = DEVENV_YAML_DECLARED
+        swapped = DEVENV_YAML + ("  agent-platform:\n    flake: false\n"
+                                 "    url: github:fixture/platform\n")
+        for name, text in (
+                ("as declared", declared),
+                ("quoted key", declared.replace("  agent-platform:", '  "agent-platform":')),
+                ("swapped body", swapped)):
+            with self.subTest(name):
+                self.assertIsNone(self.declare(text.encode()))
+
+    def test_an_incompatible_declaration_is_refused(self):
+        cases = {
+            "other url": DEVENV_YAML_DECLARED.replace("fixture/platform", "other/platform"),
+            "flake true": DEVENV_YAML_DECLARED.replace("flake: false", "flake: true"),
+            "no flake line": DEVENV_YAML + ("  agent-platform:\n"
+                                           "    url: github:fixture/platform\n"),
+            "extra line": DEVENV_YAML_DECLARED + "    follows: nixpkgs\n",
+            "inline value": DEVENV_YAML + "  agent-platform: github:fixture/platform\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(adopt_conformance.Undeclarable) as caught:
+                    self.declare(text.encode())
+                self.assertEqual(caught.exception.repair_id,
+                                 adopt_conformance.INPUT_INCOMPATIBLE)
+
+    def test_a_shape_the_edit_cannot_handle_is_undeclarable(self):
+        cases = {
+            "flow mapping": b"{}\n",
+            "document marker": b"---\ninputs: {}\n",
+            "inline inputs": b"inputs: {}\n",
+            "tab-indented child": b"inputs:\n\tnixpkgs:\n\t\turl: github:a/b\n",
+            "two inputs lines": b"inputs:\n  a:\n    url: github:a/b\ninputs:\n",
+            "a sequence": b"- a\n",
+            "invalid utf-8": b"inputs:\n  \xff:\n",
+            "no file": None,
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(adopt_conformance.Undeclarable) as caught:
+                    self.declare(data)
+                self.assertEqual(caught.exception.repair_id,
+                                 adopt_conformance.INPUT_UNDECLARABLE)
+
+
+class ProtectionFileTest(unittest.TestCase):
+    def require(self, document):
+        return adopt_conformance.require_in_protection_file(json.dumps(document).encode())
+
+    def test_conformance_is_appended_in_the_resolvers_shape(self):
+        data = (REPO_ROOT / ".github" / "branch-protection.json").read_bytes()
+        before = json.loads(data)
+        result = adopt_conformance.require_in_protection_file(data)
+        after = json.loads(result)
+        checks = before["required_status_checks"]["checks"]
+        self.assertEqual(after["required_status_checks"]["checks"],
+                         [*checks, {"context": "Conformance"}])
+        self.assertEqual(len(checks), 3)
+        self.assertTrue(all(entry["app_id"] == 15368 for entry in checks))
+        after["required_status_checks"]["checks"] = checks
+        self.assertEqual(after, before)
+        self.assertTrue(result.endswith(b"\n"))
+        with tempfile.TemporaryDirectory() as raw:
+            target = Path(raw) / ".github" / "branch-protection.json"
+            target.parent.mkdir()
+            target.write_bytes(result)
+            self.assertEqual(derived_values.required_checks(Path(raw)),
+                             ["Nix Eval", "Instruction Budget", "Agent Workflow Tests",
+                              "Conformance"])
+
+    def test_a_contexts_list_beside_checks_is_kept_in_step(self):
+        document = {"required_status_checks": {
+            "checks": [{"context": "Nix Eval"}], "contexts": ["Nix Eval"]}}
+        section = json.loads(self.require(document))["required_status_checks"]
+        self.assertEqual(section["checks"],
+                         [{"context": "Nix Eval"}, {"context": "Conformance"}])
+        self.assertEqual(section["contexts"], ["Nix Eval", "Conformance"])
+        document = {"required_status_checks": {
+            "checks": [{"context": "Conformance"}], "contexts": ["Conformance"]}}
+        self.assertIsNone(self.require(document))
+
+    def test_a_file_outside_the_resolvers_shape_is_refused(self):
+        def section(**members):
+            return {"required_status_checks": members}
+
+        cases = {
+            "null section": {"required_status_checks": None},
+            "contexts only": section(strict=True, contexts=["Nix Eval"]),
+            "checks not a list": section(checks={"context": "Nix Eval"}),
+            "entry without context": section(checks=[{"app_id": 1}]),
+            "duplicate context": section(checks=[{"context": "A"}, {"context": "A"}]),
+            "contexts holding a number": section(checks=[{"context": "A"}], contexts=[1]),
+        }
+        for name, document in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(adopt_conformance.Undeclarable) as caught:
+                    self.require(document)
+                self.assertEqual(caught.exception.repair_id,
+                                 adopt_conformance.PROTECTION_FILE_UNREQUIRED)
 
 
 if __name__ == "__main__":
