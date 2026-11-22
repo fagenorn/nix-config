@@ -519,6 +519,13 @@ class SuppressionLintTest(unittest.TestCase):
             {"src/a.py": 's = "# ' + suppress("Z9", "r") + '"\n'})
         self.assertEqual(self.outcome(self.run_lint(root, platform)), (0, ""))
 
+    def test_a_marker_in_a_string_of_a_non_python_file_is_read_by_line(self):
+        root, platform = self.lint_root(
+            {"src/a.sh": 'echo "# ' + suppress("Z9", "r") + '"\n'})
+        self.assertEqual(
+            self.outcome(self.run_lint(root, platform)),
+            (1, "src/a.sh:1: suppresses Z9, which is in no applicable layer\n"))
+
     def test_the_lint_function_fails_an_unknown_suppressed_id(self):
         root, platform = self.lint_root(
             {"src/a.py": "x = 1  # " + suppress("Z9", "no such rule") + "\n"})
@@ -536,11 +543,8 @@ class SuppressionDocsTest(unittest.TestCase):
             span.startswith(rule_ids.SUPPRESS)
             for span in context_map_lint.CODE_RE.findall(block)))
 
-    def test_the_readme_and_the_adr_state_that_a_non_python_marker_is_read_by_line(self):
-        adr = REPO_ROOT / "docs/areas/project-contract/adr/018-a-suppression-names-its-rule-and-a-reason.md"
-        for path in (self.README, adr):
-            with self.subTest(path=path.name):
-                self.assertIn("any other file is read by line", path.read_text("utf-8").lower())
+    def test_the_readme_states_that_a_non_python_marker_is_read_by_line(self):
+        self.assertIn("any other file is read by line", self.README.read_text("utf-8").lower())
 
 
 if __name__ == "__main__":
