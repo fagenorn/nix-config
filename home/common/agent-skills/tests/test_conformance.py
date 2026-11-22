@@ -283,6 +283,29 @@ class ValidateReportTest(unittest.TestCase):
         self.assertIn("usage:", err)
 
 
+class CiExitTest(ReportAssertions, unittest.TestCase):
+    """A red `ci` run exits 1 after printing its report; no other purpose
+    turns a failed outcome into a non-zero exit."""
+
+    def test_a_failed_ci_report_exits_one_and_still_prints_it(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            code, out, err = run("run", "--purpose", "ci", "--repo-root",
+                                 str(root), "--require", "knowledge.hints")
+            self.assertEqual(code, 1, err)
+            report = json.loads(out)
+            self.assertEqual(report["outcome"]["status"], "failed")
+            self.assert_validates(report)
+            for purpose in ("adoption", "fleet", "doctor"):
+                with self.subTest(purpose=purpose):
+                    code, out, err = run("run", "--purpose", purpose,
+                                         "--repo-root", str(root),
+                                         "--require", "knowledge.hints")
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(json.loads(out)["outcome"]["status"],
+                                     "failed")
+
+
 class RunReportShapeTest(ReportAssertions, unittest.TestCase):
     """AC1: both purposes emit a schema-valid report, differing in shape."""
 

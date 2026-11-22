@@ -288,6 +288,9 @@ REPAIRS = {
     "release_profile.deadline.require": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
+    "conformance.workflow.regenerate": {
+        "module": "resolve-project", "safety_class": "worktree",
+        "operation": None},
 }
 
 
@@ -380,6 +383,10 @@ REGISTRY: tuple[Check, ...] = (
           "required", ("repository.contract.valid",),
           (("shell_indirection", "contract.commands.destructure"),),
           "check_commands_no_shell_indirection"),
+    Check("verification.conformance_workflow.fresh", "verification", "projection",
+          "required", ("repository.contract.valid",),
+          (("conformance_workflow_stale", "conformance.workflow.regenerate"),),
+          "check_conformance_workflow_fresh"),
     Check("repository.residue.nested_ledger", "repository", "residue", "optional",
           ("repository.contract.valid",), NESTED_LEDGER_FINDINGS,
           "check_residue_nested_ledger"),

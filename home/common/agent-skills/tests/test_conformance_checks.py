@@ -15,6 +15,8 @@ import types
 import unittest
 from pathlib import Path
 
+from agent_tools.project_contract import resolve_project
+
 from .conformance_test_support import (
     REPO_ROOT, ReportAssertions, doctor, fixture, load_module, make_root, run,
 )
@@ -260,6 +262,107 @@ class ShellIndirectionTest(ReportAssertions, unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 ids = [c["id"] for c in json.loads(out)["checks"]]
                 self.assertEqual(self.CHECK_ID in ids, expected)
+
+
+class ConformanceWorkflowCheckTest(ReportAssertions, unittest.TestCase):
+    """The interim freshness check: the committed conformance workflow is
+    judged against the renderer's bytes until a contract declares it."""
+
+    CHECK_ID = "verification.conformance_workflow.fresh"
+    REPAIR_ID = "conformance.workflow.regenerate"
+    TARGET = ".github/workflows/conformance.yaml"
+
+    def ci(self, root: Path) -> tuple[int, dict]:
+        code, out, err = run("run", "--purpose", "ci", "--repo-root", str(root))
+        self.assertIn(code, (0, 1), err)
+        return code, json.loads(out)
+
+    def write_workflow(self, root: Path, data: bytes) -> None:
+        target = root / self.TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    def test_a_hand_edited_conformance_workflow_turns_ci_red_and_names_it(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            self.write_workflow(
+                root,
+                resolve_project.render_conformance_workflow("main", 2)
+                + b"# hand edit\n")
+            code, report = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"], {
+                "status": "failed", "primary_check_id": self.CHECK_ID})
+            check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["reason_code"], check["repair_id"],
+                 check["facts"]],
+                ["failed", "conformance_workflow_stale", self.REPAIR_ID,
+                 {"target": self.TARGET, "state": "stale"}])
+            repair = {r["repair_id"]: r for r in report["repairs"]}[self.REPAIR_ID]
+            self.assertEqual(
+                [repair["module"], repair["safety_class"], repair["operation"]],
+                ["resolve-project", "worktree", None])
+            self.assert_validates(report)
+
+    def test_the_rendered_workflow_and_an_absent_one_both_pass(self):
+        for label, data in (
+                ("rendered", resolve_project.render_conformance_workflow("main", 2)),
+                ("absent", None)):
+            with self.subTest(workflow=label), fixture() as tmp:
+                root = make_root(tmp)
+                if data is not None:
+                    self.write_workflow(root, data)
+                code, report = self.ci(root)
+                self.assertEqual(code, 0)
+                check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+                self.assertEqual([check["status"], check["facts"]], ["passed", {}])
+                self.assertEqual(report["outcome"]["status"], "passed")
+
+    def test_an_unrenderable_branch_is_a_finding(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["bindings"]["vcs"]["integration_branch"] = "main: x"
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            self.write_workflow(root, b"anything\n")
+            code, report = self.ci(root)
+            self.assertEqual(code, 1)
+            check = {c["id"]: c for c in report["checks"]}[self.CHECK_ID]
+            self.assertEqual(
+                [check["status"], check["facts"]],
+                ["failed", {"target": self.TARGET, "state": "unrenderable"}])
+
+    def test_ci_and_doctor_select_it_and_adoption_and_fleet_do_not(self):
+        selected = {}
+        for purpose in ("ci", "doctor", "adoption", "fleet"):
+            with fixture() as tmp:
+                code, out, err = run("run", "--purpose", purpose, "--repo-root",
+                                     str(make_root(tmp)))
+                self.assertEqual(code, 0, err)
+                selected[purpose] = self.CHECK_ID in [
+                    c["id"] for c in json.loads(out)["checks"]]
+        self.assertEqual(selected, {"ci": True, "doctor": True,
+                                    "adoption": False, "fleet": False})
+
+    def test_a_declared_workflow_projection_passes_doctor(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            authored["projections"].append({
+                "id": "conformance.workflow", "kind": "conformance_workflow",
+                "target": self.TARGET})
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            self.write_workflow(
+                root, resolve_project.render_conformance_workflow("main", 2))
+            report, by_id = doctor(self, root)
+            for check_id in ("repository.projection.fresh",
+                             "repository.paths.classified",
+                             "host.policy_path.no_follow_readable",
+                             self.CHECK_ID):
+                self.assertEqual(by_id[check_id]["status"], "passed", check_id)
 
 
 def make_run(root: Path, worktree: str, run_id: str, states: list, *,

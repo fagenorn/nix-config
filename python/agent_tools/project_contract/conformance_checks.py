@@ -279,7 +279,8 @@ def declared_policy_paths(contract: dict) -> list[str]:
     """
     paths = contract["bindings"]["paths"]
     subjects = {entry for member in POLICY_PATH_MEMBERS for entry in paths[member]}
-    subjects.update(projection["source"] for projection in contract["projections"])
+    subjects.update(projection["source"] for projection in contract["projections"]
+                    if "source" in projection)
     return sorted(subjects)
 
 
@@ -618,6 +619,38 @@ def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
         return Outcome("passed")
     return Outcome("failed", "shell_indirection", "contract.commands.destructure",
                    {"commands": bound_facts(offending), "count": len(offending)})
+
+
+def check_conformance_workflow_fresh(context: "Context") -> "Outcome":
+    """Contract: failed when the committed conformance workflow differs from
+    the renderer's bytes for the contract's integration branch and schema
+    version, or when that branch cannot be rendered; passed when the file is
+    absent or exact.
+
+    Interim: it judges the file whether or not the contract declares a
+    `conformance_workflow` projection, until the contract declares one and the
+    projection check owns it. Only an absent file is tolerated; any other read
+    error reaches the engine boundary.
+    """
+    resolver = context.resolver
+    target = resolver.CONFORMANCE_WORKFLOW_TARGET
+    try:
+        committed = (context.root / target).read_bytes()
+    except FileNotFoundError:
+        return Outcome("passed")
+    try:
+        expected = resolver.render_conformance_workflow(
+            context.contract["bindings"]["vcs"]["integration_branch"],
+            context.contract["schema_version"])
+    except ValueError:
+        return Outcome("failed", "conformance_workflow_stale",
+                       "conformance.workflow.regenerate",
+                       {"target": bound_fact(target), "state": "unrenderable"})
+    if committed == expected:
+        return Outcome("passed")
+    return Outcome("failed", "conformance_workflow_stale",
+                   "conformance.workflow.regenerate",
+                   {"target": bound_fact(target), "state": "stale"})
 
 
 # --------------------------------------------------------------------------
