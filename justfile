@@ -138,6 +138,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
+    home/common/agent-skills/tests/test_adopt_schema_three_draft.py \
     home/common/agent-skills/tests/test_adopt_conformance_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
     home/common/agent-skills/tests/test_adopt_links.py \

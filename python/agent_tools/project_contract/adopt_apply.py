@@ -78,6 +78,7 @@ from agent_tools.project_contract.adopt_inspection import (
     read_bytes_bounded,
     refuse,
     run_git,
+    seed_origin,
     sha256_hash,
     tracked_inventory,
 )
@@ -713,7 +714,9 @@ def gate_cold_clone_resolves(run: GateRun) -> bool:
     `git write-tree` over the index without committing, then `git archive` of
     that tree: what lands in the temporary directory is exactly what a fresh
     clone would see, so an adoption that only works because of an untracked
-    file cannot pass.
+    file cannot pass. A fresh clone has an origin, and a schema-3 contract
+    derives its identity from it, so the authored origin is seeded into the
+    export before it resolves.
     """
     tree = git_or_fail(
         run.worktree, "write-tree").decode("ascii", "strict").strip()
@@ -728,6 +731,7 @@ def gate_cold_clone_resolves(run: GateRun) -> bool:
                 bundle.extractall(export, filter="data")
         except (tarfile.TarError, OSError):
             return False
+        seed_origin(run.worktree, export)
         exit_code, payload = run.run_resolver(export, "resolve")
         if exit_code != 0 or not isinstance(payload, dict):
             return False
