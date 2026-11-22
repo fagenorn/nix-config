@@ -59,6 +59,8 @@ from .test_resolve_project import (
     tree_snapshot,
 )
 
+TIER = "integration"  # git worlds and real leashed child processes
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
 BASE = "b" * 40
