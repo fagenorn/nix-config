@@ -46,7 +46,12 @@ refuses `adopt.migration.projection_in_retired_tree` for a projection target
 inside `.agents/artifacts`, `adopt.migration.symlink_target` for a retired file
 or any directory above it that is a symbolic link, and
 `adopt.migration.artifact_modified` for a retired file with an unstaged edit
-(a staged change is recoverable from the index). It then removes every
+or one marked assume-unchanged or skip-worktree, whose edit git cannot see (a
+staged change is recoverable from the index), and
+`adopt.migration.pinned_platform_too_old` when the platform the repository pins
+is older than the installed one that reads schema 3. A projection target counts
+as inside the retired tree by normalised and by resolved path. Only descendants
+of `.agents/artifacts` are retired, never a file named exactly like it. It then removes every
 retired, constant and derived member and each command's `cwd` and `env`, prunes
 the objects those removals emptied, and sets `schema_version` 3. It deletes
 every tracked file under `.agents/artifacts/` from the working tree (the index
@@ -288,13 +293,27 @@ def deploy_in_use(source: dict) -> str | None:
     return None
 
 
-def _retired_files(root: Path, trees: tuple[str, ...]) -> list[str]:
-    """The tracked files under `trees`, sorted; no git call when there is none."""
+def _retired_files(root: Path,
+                   trees: tuple[str, ...]) -> tuple[list[str], set[str]]:
+    """The tracked files below `trees`, sorted, and those git is told not to watch.
+
+    Only descendants of a tree count: a tracked file named exactly like the tree
+    is outside the scope. A flagged file is one `ls-files -v` tags other than
+    `H`: assume-unchanged (lowercase) or skip-worktree (`S`), both of which hide
+    a working-copy edit from `git diff`. No git call when there is no tree.
+    """
     found: set[str] = set()
+    flagged: set[str] = set()
     for tree in trees:
-        found.update(adopt_inspection.split_nul(
-            adopt_inspection.git_or_fail(root, "ls-files", "-z", "--", tree)))
-    return sorted(found)
+        for entry in adopt_inspection.split_nul(adopt_inspection.git_or_fail(
+                root, "ls-files", "-v", "-z", "--", tree)):
+            tag, name = entry[:1], entry[2:]
+            if not name.startswith(tree + "/"):
+                continue
+            found.add(name)
+            if tag.islower() or tag == "S":
+                flagged.add(name)
+    return sorted(found), flagged
 
 
 def _modified_files(root: Path, trees: tuple[str, ...]) -> set[str]:
@@ -311,6 +330,16 @@ def _inside_root(name: str) -> bool:
     the only kind this module may read, restore or remove."""
     path = Path(name)
     return bool(name) and not path.is_absolute() and ".." not in path.parts
+
+
+def _within(root: Path, target: str, tree: str) -> bool:
+    """Whether `target` is `tree` or below it, by normalised and by resolved path,
+    so `./tree/x` and a path through a link into the tree both count."""
+    normal = os.path.normpath(target)
+    if normal == tree or normal.startswith(tree + "/"):
+        return True
+    resolved, base = os.path.realpath(root / target), os.path.realpath(root / tree)
+    return resolved == base or resolved.startswith(base + os.sep)
 
 
 def touched_paths(source: dict) -> tuple[str, ...]:
@@ -375,6 +404,26 @@ def _child_refusal(exit_code: int, payload: object) -> adopt_inspection.AdoptErr
     return None
 
 
+def _require_pinned_platform_reads(manifest: dict,
+                                   derived: derived_values.Derived) -> None:
+    """Refuse a checkout whose pinned platform predates the installed one.
+
+    The installed platform is the one known to read the schema the migration
+    writes. A repository that pins an older platform runs a resolver that reads
+    only the schema it has, so rewriting it would leave the checkout unreadable
+    to its own pin.
+    """
+    pinned = derived.values.get(derived_values.PLATFORM, {}).get("min_inclusive")
+    installed = manifest.get("platform_version")
+    if (semver.parse_semver(pinned) is not None
+            and semver.parse_semver(installed) is not None
+            and semver.compare_semver(pinned, installed) < 0):
+        raise _refuse("adopt.migration.pinned_platform_too_old", "/platform",
+                      f"the repository pins platform {pinned}, older than the "
+                      f"installed {installed} that reads the target schema; "
+                      "update the pin first")
+
+
 def migrate(root: Path, migration_id: str, manifest: dict,
             source: dict | None, run_resolver: Resolver) -> dict:
     """Apply `migration_id` to the checkout at `root` and report what changed."""
@@ -384,7 +433,8 @@ def migrate(root: Path, migration_id: str, manifest: dict,
     if entry is None or migration is None:
         raise _refuse("adopt.migration.unknown", "/migration",
                       "the manifest names no executable migration of that id")
-    if source is None or source.get("schema_version") != entry["from_schema"]:
+    version = None if source is None else source.get("schema_version")
+    if type(version) is not int or version != entry["from_schema"]:
         raise _refuse("adopt.migration.not_applicable", "/schema_version",
                       "the contract is not at the schema this migration starts from")
     if migration.retires_deploy:
@@ -402,11 +452,13 @@ def migrate(root: Path, migration_id: str, manifest: dict,
                       "is not a pair of strict SemVer strings",
                       "verification_failed") from None
 
+    if migration.derives:
+        _require_pinned_platform_reads(manifest, derived)
     projections = touched_paths(source)
-    retired = _retired_files(root, migration.retired_trees) if migration.retired_trees else []
+    retired, flagged = (_retired_files(root, migration.retired_trees)
+                        if migration.retired_trees else ([], set()))
     inside = [f"/{target}" for target in projections
-              if any(target == tree or target.startswith(tree + "/")
-                     for tree in migration.retired_trees)]
+              if any(_within(root, target, tree) for tree in migration.retired_trees)]
     if inside:
         raise _refuse_all("adopt.migration.projection_in_retired_tree", [
             {"pointer": pointer,
@@ -433,14 +485,15 @@ def migrate(root: Path, migration_id: str, manifest: dict,
                           "writer would replace with a regular file and a "
                           "restore could not put back")
     if retired:
-        modified = _modified_files(root, migration.retired_trees)
+        modified = _modified_files(root, migration.retired_trees) | flagged
         edited = [f"/{name}" for name in retired
                   if name in modified and os.path.lexists(root / name)]
         if edited:
             raise _refuse_all("adopt.migration.artifact_modified", [
                 {"pointer": pointer,
-                 "message": "the working copy differs from the index, so "
-                            "deleting it would lose the edit"}
+                 "message": "the working copy differs from the index, or git is "
+                            "told not to watch it (assume-unchanged or "
+                            "skip-worktree), so deleting it could lose an edit"}
                 for pointer in edited])
     for name in touched:
         created.extend(path for path in _missing_parents(root, name)

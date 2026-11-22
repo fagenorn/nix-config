@@ -29,7 +29,7 @@ Every registered project's schema-2 contract spells out the same values: the bra
 - `adopt.migration.not_derivable`: a value the repository cannot state.
 - `adopt.migration.derived_differs`: a derived value that disagrees with its source. This includes the attempt budget, compared with what the recorded history gives (ADR-project-contract-016). Two exceptions: an authored platform interval agrees when it admits the platform version the repository states, and the derived interval replaces it; and with no declared checks, an absent or null `required_checks` agrees.
 
-It deletes the tracked files under `.agents/artifacts/` (#1418). It refuses when a projection targets that tree or a tracked file there carries an unstaged edit. A second run is not applicable.
+It deletes the tracked files under `.agents/artifacts/` (#1418). It refuses when a projection targets that tree (by normalised or resolved path), when a tracked file there carries an unstaged edit or is marked assume-unchanged or skip-worktree, or when the platform the repository pins is older than the installed one (`adopt.migration.pinned_platform_too_old`). Only descendants of the tree are deleted. A second run is not applicable.
 
 ## Consequences
 

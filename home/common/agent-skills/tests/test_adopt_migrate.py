@@ -570,6 +570,83 @@ class RetirePlatformConstantsTest(AdoptTestCase):
                                     [f"/.agents/artifacts/{name}"])
                 self.assertEqual(target.read_bytes(), kept)
 
+    def test_a_projection_target_spelled_differently_is_still_inside_the_artifacts_directory(self):
+        def dotted(c):
+            for entry in c["projections"]:
+                if entry["kind"] == "generated_file":
+                    entry["target"] = "./.agents/artifacts/AGENTS.md"
+
+        def through_link(c):
+            for entry in c["projections"]:
+                if entry["kind"] == "generated_file":
+                    entry["target"] = "shortcut/AGENTS.md"
+
+        def tracked(root):
+            (root / ".agents/artifacts").mkdir(parents=True)
+            (root / "AGENTS.md").rename(root / ".agents/artifacts/AGENTS.md")
+
+        def linked(root):
+            tracked(root)
+            (root / "shortcut").symlink_to(".agents/artifacts")
+
+        for name, mutate, before, pointer in (
+                ("dotted", dotted, tracked, "/./.agents/artifacts/AGENTS.md"),
+                ("link", through_link, linked, "/shortcut/AGENTS.md")):
+            with self.subTest(name):
+                root = self.root(mutate, before=before)
+                target = root / ".agents/artifacts/AGENTS.md"
+                kept = target.read_bytes()
+                self.assert_refused(
+                    root, "adopt.migration.projection_in_retired_tree", [pointer])
+                self.assertEqual(target.read_bytes(), kept)
+
+    def test_an_edit_git_cannot_see_is_refused_and_kept(self):
+        def tracked(root):
+            (root / ARTIFACT).parent.mkdir(parents=True)
+            (root / ARTIFACT).write_text("original\n", encoding="utf-8")
+
+        for flag in ("--assume-unchanged", "--skip-worktree"):
+            with self.subTest(flag):
+                root = self.root(before=tracked)
+                git(root, "update-index", flag, ARTIFACT)
+                (root / ARTIFACT).write_text("edited\n", encoding="utf-8")
+                self.assert_refused(
+                    root, "adopt.migration.artifact_modified", [f"/{ARTIFACT}"])
+                self.assertEqual((root / ARTIFACT).read_text("utf-8"), "edited\n")
+
+    def test_a_tracked_file_named_like_the_artifacts_directory_is_not_deleted(self):
+        def tracked(root):
+            (root / ".agents/artifacts").write_text("a file\n", encoding="utf-8")
+
+        root = self.root(before=tracked)
+        report = self.assert_migrates(root)
+        self.assertEqual((root / ".agents/artifacts").read_text("utf-8"), "a file\n")
+        self.assertNotIn(".agents/artifacts", report["written"])
+
+    def test_a_schema_version_that_is_not_an_integer_is_not_applicable(self):
+        for value in (2.0, True):
+            with self.subTest(value=value):
+                root = self.root(lambda c: c.update(schema_version=value))
+                contract = self.contract_bytes(root)
+                code, out, err = self.migrate(root)
+                self.assertEqual(code, 2, err)
+                self.assertEqual(json.loads(out)["error"]["repair_id"],
+                                 "adopt.migration.not_applicable")
+                self.assertEqual(self.contract_bytes(root), contract)
+
+    def test_a_checkout_pinning_an_older_platform_is_refused(self):
+        def pinned(c):
+            c["platform"] = {"min_inclusive": "2.0.0", "max_exclusive": "3.0.0"}
+
+        def older(root):
+            manifest = root / derived_values.TREE_MANIFEST
+            document = json.loads(manifest.read_text("utf-8"))
+            document["platform_version"] = "2.0.0"
+            manifest.write_text(json.dumps(document), encoding="utf-8")
+
+        root = self.root(pinned, before=older)
+        self.assert_refused(root, "adopt.migration.pinned_platform_too_old", ["/platform"])
+
     def test_an_unstaged_edit_to_a_tracked_artifact_is_refused_and_kept(self):
         def tracked(root):
             (root / ARTIFACT).parent.mkdir(parents=True)

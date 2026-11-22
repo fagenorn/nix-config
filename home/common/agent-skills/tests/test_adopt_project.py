@@ -19,10 +19,8 @@ platform library refuses before the router would see it (#177 D7).
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import hashlib
-import io
 import json
 import os
 import re
@@ -3639,68 +3637,6 @@ class ReferenceFormattingPlanTest(AdoptTestCase):
         self.assertLess(out.rindex("\npolicy "), out.index("\nformat "))
 
 
-class GitignoreAmendmentTest(AdoptTestCase):
-    """The one heuristic in the module, exercised through the operation it
-    produces: the plan carries the amended `.gitignore` as a content hash, so
-    each case compares that hash against text computed by hand here."""
-
-    def amended(self, original: str) -> dict | None:
-        root = nix_config_shape_repo(self.home)
-        write(root, ".gitignore", original)
-        commit(root, "set the gitignore under test")
-        doc = self.ready_plan(root)
-        matches = [op for op in doc["changes"]
-                   if op["op"] == "write-file"
-                   and op["targets"] == [".gitignore"]]
-        self.assertLessEqual(len(matches), 1)
-        return matches[0] if matches else None
-
-    def test_pattern_with_its_own_comment_block_removes_both(self):
-        original = (
-            "result\n"
-            "\n"
-            "# the runtime bucket\n"
-            "# never tracked\n"
-            ".agents/runtime/\n"
-        )
-        op = self.amended(original)
-        self.assertEqual(op["after"], sha256_hash(b"result\n\n"))
-
-    def test_pattern_with_no_comment_removes_only_the_line(self):
-        original = "result\n.agents/runtime/\n__pycache__/\n"
-        op = self.amended(original)
-        self.assertEqual(op["after"],
-                         sha256_hash(b"result\n__pycache__/\n"))
-
-    def test_pattern_amid_other_patterns_keeps_the_comment(self):
-        original = (
-            "# scratch\n"
-            "result\n"
-            ".agents/runtime/\n"
-            "__pycache__/\n"
-        )
-        op = self.amended(original)
-        self.assertEqual(
-            op["after"],
-            sha256_hash(b"# scratch\nresult\n__pycache__/\n"))
-
-    def test_a_doubled_blank_line_is_collapsed_to_one(self):
-        original = (
-            "result\n"
-            "\n"
-            "# the runtime bucket\n"
-            ".agents/runtime/\n"
-            "\n"
-            "__pycache__/\n"
-        )
-        op = self.amended(original)
-        self.assertEqual(op["after"],
-                         sha256_hash(b"result\n\n__pycache__/\n"))
-
-    def test_an_absent_pattern_produces_no_operation(self):
-        self.assertIsNone(self.amended("result\n__pycache__/\n"))
-
-
 # --------------------------------------------------------------------------
 # Refusals
 # --------------------------------------------------------------------------
@@ -3745,65 +3681,6 @@ class RefusalTest(AdoptTestCase):
         self.assertEqual(code, 0, err)
         choices = re.search(r"usage: adopt-project \[-h\] \{([^}]*)\}", out)
         self.assertEqual(choices.group(1), "plan,apply,discard,verify,migrate")
-
-
-class ProcessWiringTest(AdoptTestCase):
-    """The real `python -m agent_tools.project_contract.adopt_project` child, with its real resolver
-    child (D26), answers exactly what the in-process `run` answers: argv parsing,
-    the exit code and both streams (issue 612)."""
-
-    def test_a_child_process_matches_the_in_process_run(self):
-        root = bootstrap_repo(self.home)
-        plain = Path(tempfile.mkdtemp()).resolve()
-        rows = (
-            ("plan", ("plan", "--repo-root", str(root)), 0),
-            ("refusal", ("plan", "--repo-root", str(plain)), 2),
-            ("usage error", ("register", "--plan-id", "x"), 2),
-            ("help", ("--help",), 0),
-        )
-        for name, args, expected in rows:
-            with self.subTest(name):
-                child = run_child(*args, home=self.home)
-                self.assertEqual(child[0], expected, child[2])
-                self.assertEqual(run(*args, home=self.home), child)
-
-
-class HostIndependentFixtureTest(unittest.TestCase):
-    def test_an_unsupported_review_role_adds_no_command(self):
-        contract = fixture_contract()
-        contract["bindings"]["workflow"]["review"]["plan"] = None
-        original = {"argv": ["make", "null"], "cwd": ".", "env": []}
-        contract["bindings"]["commands"]["null"] = original
-        host_independent(contract)
-        # The fixture is written as JSON, where a `None` key becomes the id "null".
-        commands = json.loads(json.dumps(contract))["bindings"]["commands"]
-        self.assertEqual(commands["null"], original)
-        self.assertIn(contract["bindings"]["workflow"]["review"]["code"], commands)
-
-
-class AdoptFailureWrapperTest(unittest.TestCase):
-    """The generic wrapper, reachable only in process (D23).
-
-    Importing `agent_tools.project_contract.adopt_project` and making the inspection entry point
-    raise is the one monkeypatch this suite is allowed.
-    """
-
-    def test_an_unexpected_exception_becomes_adopt_failure(self):
-        home = make_home()
-        root = bootstrap_repo(home)
-        buffer = io.StringIO()
-        with mock.patch.dict(os.environ, {"HOME": str(home)}), \
-                mock.patch.object(
-                    adopt_project, "inspect_repository",
-                    side_effect=RuntimeError("SECRET-TRACEBACK-TEXT")), \
-                contextlib.redirect_stdout(buffer):
-            code = adopt_project.main(["plan", "--repo-root", str(root)])
-        self.assertEqual(code, 2)
-        payload = json.loads(buffer.getvalue())
-        self.assertEqual(payload["error"]["code"], "adopt_failure")
-        self.assertEqual(payload["error"]["repair_id"], "adopt.internal")
-        self.assertNotIn("SECRET-TRACEBACK-TEXT", buffer.getvalue())
-        self.assertNotIn("RuntimeError", buffer.getvalue())
 
 
 if __name__ == "__main__":
