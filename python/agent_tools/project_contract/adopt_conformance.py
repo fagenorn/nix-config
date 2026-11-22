@@ -6,7 +6,7 @@ one file at the plan's base commit and each a pure function: no file is read, no
 process runs, and the resolver is never imported (D26). The plan side (reading
 the base commit, composing operations and the ready gate) is `adopt_project` and
 `adopt_planning`; the forge side (the required check on the integration branch)
-is the apply step.
+is the apply step and is the last section of this module.
 
 - `lock_with_platform` adds the platform's node to `devenv.lock` and points the
   root node's `agent-platform` input at it, in the shape the resolver reads
@@ -29,6 +29,38 @@ is the apply step.
   of objects with a unique `context`), keeping every existing entry, its
   `app_id` included, and every other member. A file outside that shape is
   refused, never normalised.
+
+The forge side (`required_check_state`, `add_required_check`, `preflight`,
+`settle_required_check`) runs only for a plan that carries `plan.conformance`;
+a plan without it makes no `gh` call and writes no pending record. It reaches
+the forge only through `agent_tools.system.forge_api` (no token variable reaches
+`gh`), reads one endpoint and writes one, and never removes or narrows a
+protection: `GET repos/<repo>/branches/<branch>/protection/required_status_checks`
+and `POST .../required_status_checks/contexts` with `contexts[]=Conformance`.
+The order of an apply is:
+
+1. Before anything is mutated, and after the dirty-overlap refusal, `preflight`
+   requires `remote_slug(root)` to equal the plan's `required_check.repo`
+   (`adopt.required_check.origin_mismatch`, no `gh` call) and reads the state.
+   A 404, or a readable answer that lists no context, is
+   `adopt.required_check.unprotected` (the owner turns on required status checks
+   and adopts again; adoption never creates or widens a protection); an
+   unreadable or malformed answer is `adopt.required_check.unreadable`. `Conformance`
+   already listed is `already_required`: no request is made.
+2. After the commit's bytes are proved and the worktree is removed, a state of
+   `missing` writes the pending record (`pending_path`) and `settle_required_check`
+   makes the one POST. `added` is success. A refused or lost POST is followed by
+   one re-read: present is success; a readable answer without the context is a
+   confirmed absence, so the adoption branch is deleted by a compare-and-delete
+   whose result is read back and apply refuses `adopt.required_check.refused`
+   (`adopt.required_check.rollback_failed` when the branch could not be deleted);
+   a re-read that raises is an unknown outcome, so the branch and the record are
+   kept and apply refuses `adopt.required_check.unknown`.
+3. Applying the same plan again with a pending record present skips planning,
+   the worktree and the commit: the branch must still be the recorded commit
+   (`adopt.required_check.pending_mismatch`), and the same origin check, read and
+   settlement run, so a POST that landed is never repeated. The record is removed
+   once the result is emitted.
 
 A refusal is `Undeclarable` carrying one of the `adopt.conformance.*` repair ids
 below; the plan's ready gate reports it.
@@ -74,6 +106,7 @@ from typing import NamedTuple
 from agent_tools.canonical import reject_duplicate_keys
 from agent_tools.project_contract import adopt_inspection, agent_platform, derived_values
 from agent_tools.project_contract.agent_platform import valid_revision
+from agent_tools.system import forge_api
 
 CONTEXT = "Conformance"
 LOCK_FILE = "devenv.lock"
@@ -98,6 +131,16 @@ INPUT_UNDECLARABLE = "adopt.conformance.input_undeclarable"
 INPUT_INCOMPATIBLE = "adopt.conformance.input_incompatible"
 PROTECTION_FILE_UNREQUIRED = "adopt.conformance.protection_file_unrequired"
 CONTRACT_REFUSED = "adopt.conformance.contract_refused"
+
+REQUIRED_ORIGIN_MISMATCH = "adopt.required_check.origin_mismatch"
+REQUIRED_UNPROTECTED = "adopt.required_check.unprotected"
+REQUIRED_UNREADABLE = "adopt.required_check.unreadable"
+REQUIRED_REFUSED = "adopt.required_check.refused"
+REQUIRED_ROLLBACK_FAILED = "adopt.required_check.rollback_failed"
+REQUIRED_UNKNOWN = "adopt.required_check.unknown"
+REQUIRED_PENDING_MISMATCH = "adopt.required_check.pending_mismatch"
+REQUIRED_POINTER = "/plan/conformance/required_check"
+PENDING_MEMBERS = ("plan_id", "branch", "commit", "repo", "integration_branch", "result")
 
 _KEY_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*:([ \t]+\S.*|[ \t]*(#.*)?)$")
 _INPUTS_OPEN = re.compile(r"^inputs:[ \t]*(#.*)?$")
@@ -526,3 +569,153 @@ def plan_conformance(root: Path, base_revision: str, contract_source: dict | Non
         contents, before, projection = {}, {}, False
     return ConformancePlan(True, not settled, repair,
                            candidate if repair is None else None, contents, before, projection)
+
+
+# --------------------------------------------------------------------------
+# The forge side
+# --------------------------------------------------------------------------
+
+
+def _required_failure(repair_id: str, message: str, pointer: str = REQUIRED_POINTER):
+    return adopt_inspection.refuse("adopt_failure", repair_id, pointer, message)
+
+
+def _answer_contexts(answer: object, branch: str) -> list[str]:
+    """Every context a `required_status_checks` answer lists, or the refusal `unreadable`."""
+    def unreadable() -> Exception:
+        return _required_failure(
+            REQUIRED_UNREADABLE,
+            f"the required status checks of {branch} could not be read as a list of contexts")
+
+    if not isinstance(answer, dict) or ("checks" not in answer and "contexts" not in answer):
+        raise unreadable()
+    found: list[str] = []
+    if "contexts" in answer:
+        contexts = answer["contexts"]
+        if not isinstance(contexts, list) or not all(isinstance(item, str) for item in contexts):
+            raise unreadable()
+        found.extend(contexts)
+    if "checks" in answer:
+        checks = answer["checks"]
+        if not isinstance(checks, list) or not all(
+                isinstance(item, dict) and isinstance(item.get("context"), str) and item["context"]
+                for item in checks):
+            raise unreadable()
+        found.extend(item["context"] for item in checks)
+    return found
+
+
+def required_check_state(repo: str, branch: str) -> str:
+    """`required` when `Conformance` is a required check of `branch`, else `missing`.
+
+    A branch with no protection, or whose protection requires no status check, is
+    the refusal `adopt.required_check.unprotected`; a forge failure or an answer of
+    another shape is `adopt.required_check.unreadable`.
+    """
+    path = f"repos/{repo}/branches/{branch}/protection/required_status_checks"
+    try:
+        answer = forge_api.gh_json(["api", path], allow=(404,))
+    except forge_api.ForgeError:
+        raise _required_failure(
+            REQUIRED_UNREADABLE,
+            f"the required status checks of {branch} could not be read from the forge") from None
+    unprotected = _required_failure(
+        REQUIRED_UNPROTECTED,
+        f"the integration branch {branch} has no protection or requires no status checks; "
+        f"turn on required status checks for {branch} and adopt again")
+    if answer is None:
+        raise unprotected
+    contexts = _answer_contexts(answer, branch)
+    if not contexts:
+        raise unprotected
+    return "required" if CONTEXT in contexts else "missing"
+
+
+def add_required_check(repo: str, branch: str) -> str:
+    """Add `Conformance` to the required checks: `added`, or `refused` on a forge refusal.
+
+    Any other failure (a timeout, a transport failure, a 5xx) propagates as an unknown outcome.
+    """
+    path = f"repos/{repo}/branches/{branch}/protection/required_status_checks/contexts"
+    status, _ = forge_api.run_gh(
+        ["api", "--method", "POST", path, "-f", f"contexts[]={CONTEXT}"], allow=(403, 404, 422))
+    return "refused" if status else "added"
+
+
+def pending_path(digest: str) -> Path:
+    """The one home of an adoption's pending required-check record."""
+    return agent_platform.state_root() / "adopt" / "worktrees" / f"{digest}.required-check.json"
+
+
+def write_pending(digest: str, record: dict) -> None:
+    path = pending_path(digest)
+    agent_platform.ensure_directory(path.parent)
+    agent_platform.write_atomically(path, adopt_inspection.canonical_json(record) + b"\n")
+
+
+def read_pending(digest: str) -> dict:
+    """The pending record, or the refusal `adopt.required_check.pending_mismatch`."""
+    try:
+        record = json.loads(pending_path(digest).read_bytes())
+    except (OSError, ValueError):
+        record = None
+    if (not isinstance(record, dict) or sorted(record) != sorted(PENDING_MEMBERS)
+            or not all(isinstance(record[key], str) and record[key] for key in PENDING_MEMBERS[:5])
+            or not isinstance(record["result"], dict)):
+        raise _required_failure(
+            REQUIRED_PENDING_MISMATCH,
+            "the pending required-check record of this plan cannot be read", "")
+    return record
+
+
+def preflight(root: Path, repo: str, branch: str) -> str:
+    """The origin check, then the state read, before anything is mutated or requested."""
+    try:
+        origin = derived_values.remote_slug(root)
+    except derived_values.Underivable:
+        origin = None
+    if origin != repo:
+        raise _required_failure(
+            REQUIRED_ORIGIN_MISMATCH,
+            f"the remote origin is not {repo}, the repository the required check is requested on",
+            f"{REQUIRED_POINTER}/repo")
+    return required_check_state(repo, branch)
+
+
+def settle_required_check(root: Path, digest: str, record: dict) -> dict:
+    """The forge step after a proved commit: request the check and settle its outcome.
+
+    Returns the `required_check` result member, or raises the refusals of the
+    module docstring. The pending record is removed here only when the adoption
+    branch was deleted; the caller removes it once the result is emitted.
+    """
+    repo, branch = record["repo"], record["integration_branch"]
+    member = {"repo": repo, "branch": branch, "context": CONTEXT, "state": "added"}
+    try:
+        if add_required_check(repo, branch) == "added":
+            return member
+    except forge_api.ForgeError:
+        pass
+    adopt_branch, commit = record["branch"], record["commit"]
+    try:
+        state = required_check_state(repo, branch)
+    except adopt_inspection.AdoptError:
+        raise _required_failure(
+            REQUIRED_UNKNOWN,
+            f"the forge's answer to adding {CONTEXT} to {branch} is unknown; the adoption branch "
+            f"{adopt_branch} at {commit} is kept, and applying this plan again settles it") from None
+    if state == "required":
+        return member
+    ref = f"refs/heads/{adopt_branch}"
+    deleted, _ = adopt_inspection.run_git(root, "update-ref", "-d", ref, commit)
+    remaining, _ = adopt_inspection.run_git(root, "rev-parse", "--verify", "--quiet", ref)
+    if deleted == 0 and remaining != 0:
+        pending_path(digest).unlink(missing_ok=True)
+        raise _required_failure(
+            REQUIRED_REFUSED,
+            f"the forge did not add {CONTEXT} to {branch}; the adoption branch was deleted, "
+            "so nothing is committed")
+    raise _required_failure(
+        REQUIRED_ROLLBACK_FAILED,
+        f"the forge did not add {CONTEXT} to {branch} and the adoption branch {adopt_branch} at "
+        f"{commit} could not be deleted; delete it by hand")

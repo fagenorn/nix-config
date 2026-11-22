@@ -181,6 +181,28 @@ integration_branch}`, the last read from the resolver's view of the worktree
 (null when it names none); a retained attempt's record is at
 `adopt_apply.failure_record_path(<digest>)`.
 
+A plan with `plan.conformance` also requires `Conformance` on the forge, all
+three writes or none (#1454; `adopt_conformance` states the contract). Before
+anything is created `apply` checks that `origin` is the plan's repository and
+reads the integration branch's required checks: no protection, or none
+requiring a status check, is `adopt.required_check.unprotected` and an
+unreadable answer `adopt.required_check.unreadable`, both leaving nothing
+behind. After the commit's conformance bytes are proved (a hook that edits a
+planned conformance file is `adopt.commit.conformance_unproved`) and the worktree
+is removed, it records a pending file beside the worktrees and adds the context
+with one POST; the result then carries `required_check: {repo, branch, context,
+state}` with `state` `added` or `already_required`. A refusal the forge confirms
+deletes the adoption branch and refuses `adopt.required_check.refused`; an
+unknown outcome keeps the branch and the pending record and refuses
+`adopt.required_check.unknown`, and applying the same plan id again settles it
+from the record without a second request (`--discard-retained` never removes
+it). Adoption never removes or narrows a protection, so once apply has
+succeeded the requirement outlives the adoption: until the adoption pull request
+merges every other pull request to the integration branch is blocked, and a
+failed push, a closed or abandoned pull request, or a failing Conformance run
+leaves it in place until the owner removes `Conformance` from the branch's
+required checks or merges a fresh adoption.
+
 `verify` answers the conformance question read-only against one pinned
 revision — the contract resolves, every projection is in sync, no agent path is
 unclassified, and exactly one adoption evidence record is discoverable in it
@@ -846,6 +868,41 @@ def command_discard(args: argparse.Namespace) -> int:
     return emit_json({"plan_id": args.plan_id, "discarded": True})
 
 
+def prove_conformance_projections(worktree: Path) -> None:
+    """The clean worktree, which holds the commit's bytes, has fresh projections (P16)."""
+    code, _ = run_resolver(worktree, "check-projections")
+    if code != 0:
+        raise adopt_inspection.refuse(
+            "verification_failed", adopt_apply.CONFORMANCE_UNPROVED, "",
+            "the adoption commit's generated projections are not those the resolver renders")
+
+
+def reconcile_required_check(root: Path, digest: str) -> int:
+    """Settle the required check of an adoption whose forge step is still pending.
+
+    Planning, the worktree and the commit are skipped: the branch must still be
+    the recorded commit, and the origin check, the state read and the settlement
+    are those of a first apply, so a request that landed is never repeated.
+    """
+    record = adopt_conformance.read_pending(digest)
+    code, out = adopt_inspection.run_git(
+        root, "rev-parse", "--verify", f"refs/heads/{record['branch']}")
+    if code != 0 or out.decode("ascii", "replace").strip() != record["commit"]:
+        raise adopt_inspection.refuse(
+            "adopt_failure", adopt_conformance.REQUIRED_PENDING_MISMATCH, "",
+            f"the adoption branch {record['branch']} is no longer at the recorded commit "
+            f"{record['commit']}")
+    if adopt_conformance.preflight(
+            root, record["repo"], record["integration_branch"]) == "required":
+        required = {"repo": record["repo"], "branch": record["integration_branch"],
+                    "context": adopt_conformance.CONTEXT, "state": "added"}
+    else:
+        required = adopt_conformance.settle_required_check(root, digest, record)
+    status = emit_json({**record["result"], "required_check": required})
+    adopt_conformance.pending_path(digest).unlink(missing_ok=True)
+    return status
+
+
 def command_apply(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     digest = adopt_apply.plan_digest(args.plan_id)
@@ -870,6 +927,11 @@ def command_apply(args: argparse.Namespace) -> int:
 
     root = adopt_inspection.require_repository(document["handoff"]["repo_root"])
     adopt_apply.validate_operations(root, changes)
+
+    # An adoption whose required check is still to settle has its commit and
+    # branch already: only the forge step is left (P6).
+    if adopt_conformance.pending_path(digest).exists():
+        return reconcile_required_check(root, digest)
 
     # Before the repository is re-inspected, because a retained worktree is
     # registered in the target and therefore *changes* what the inspection
@@ -916,6 +978,15 @@ def command_apply(args: argparse.Namespace) -> int:
             "dirty_worktree", "adopt.worktree.dirty", "",
             "an uncommitted change overlaps an inspected source or a planned "
             "destination")
+
+    # The one forge read of an apply, before any branch, worktree or commit:
+    # the member is the re-derived one, never the stored copy.
+    member = composed.document["plan"].get("conformance")
+    required_state = None
+    if member is not None:
+        target = member["required_check"]
+        required_state = adopt_conformance.preflight(
+            root, target["repo"], target["branch"])
 
     branch = f"adopt-{digest[:12]}"
     base_revision = stored_plan["base_revision"]
@@ -1015,6 +1086,9 @@ def command_apply(args: argparse.Namespace) -> int:
     try:
         adopt_apply.prove_commit_content(worktree, commit, changes)
         adopt_apply.prove_commit_links(worktree, commit, changes)
+        adopt_apply.prove_conformance_bytes(worktree, commit, changes)
+        if member is not None:
+            prove_conformance_projections(worktree)
     except adopt_inspection.AdoptError as error:
         adopt_apply.retain_failure(digest, document, worktree, branch, gates,
                                    error.repair_id)
@@ -1035,9 +1109,24 @@ def command_apply(args: argparse.Namespace) -> int:
 
     document["verification"]["commit_gates"] = gates
     adopt_planning.store_document(stored_plan["plan_id"], document)
-    return emit_json({"branch": branch, "commit": commit,
-                      "plan_id": stored_plan["plan_id"], **records,
-                      "integration_branch": branch_name})
+    result = {"branch": branch, "commit": commit,
+              "plan_id": stored_plan["plan_id"], **records,
+              "integration_branch": branch_name}
+    if member is None:
+        return emit_json(result)
+    target = member["required_check"]
+    if required_state == "required":
+        return emit_json({**result, "required_check": {
+            "repo": target["repo"], "branch": target["branch"],
+            "context": adopt_conformance.CONTEXT, "state": "already_required"}})
+    pending = {"plan_id": stored_plan["plan_id"], "branch": branch,
+               "commit": commit, "repo": target["repo"],
+               "integration_branch": target["branch"], "result": result}
+    adopt_conformance.write_pending(digest, pending)
+    required = adopt_conformance.settle_required_check(root, digest, pending)
+    status = emit_json({**result, "required_check": required})
+    adopt_conformance.pending_path(digest).unlink(missing_ok=True)
+    return status
 
 
 def find_repository_root() -> str:

@@ -34,8 +34,10 @@ import unittest
 from pathlib import Path, PurePosixPath
 from unittest import mock
 
-from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
+from agent_tools.project_contract import (adopt_apply, adopt_conformance, adopt_inspection, adopt_links,
                                           adopt_planning, resolve_project)
+
+from . import _inprocess_cli
 
 from .test_adopt_project import (
     CHECK_LINKS,
@@ -47,6 +49,8 @@ from .test_adopt_project import (
     DEPTH_RETAIN_ANSWERS,
     DEPTH_REWRITE_ANSWERS,
     DEPTH_ROWS,
+    DEVENV_LOCK,
+    FIXTURE_REVISION,
     GITIGNORE_WITH_COMMENT,
     JOBS_DIR,
     JOBS_NEW,
@@ -78,6 +82,7 @@ from .test_adopt_project import (
     fixture_contract,
     git,
     init_repo,
+    install_platform_revision,
     make_home,
     run,
     scaffold,
@@ -85,6 +90,7 @@ from .test_adopt_project import (
     variable_code,
     write,
     write_depth_tree,
+    write_devenv,
     write_dissolved_tree,
     write_linked_tree,
     write_moved_tool,
@@ -216,6 +222,100 @@ def referenced_apply_repo(home: Path) -> Path:
     root = apply_repo(home)
     write_reference_tree(root)
     return root
+
+
+def locked_apply_repo(home: Path) -> Path:
+    """`apply_repo` plus a devenv lock and the installed platform revision."""
+    install_platform_revision(home)
+    root = apply_repo(home)
+    write_devenv(root)
+    return root
+
+
+DEFAULT_PROTECTION = {"strict": True,
+                      "checks": [{"context": "Nix Eval", "app_id": 15368}],
+                      "contexts": ["Nix Eval"]}
+
+STUB_GH = """#!__PYTHON__
+import json
+import sys
+
+STATE = __STATE__
+LOG = __LOG__
+with open(LOG, "a", encoding="utf-8") as log:
+    log.write(json.dumps({"argv": sys.argv[1:]}) + "\\n")
+with open(STATE, encoding="utf-8") as handle:
+    state = json.load(handle)
+
+
+def save():
+    with open(STATE, "w", encoding="utf-8") as handle:
+        json.dump(state, handle)
+
+
+def land():
+    protection = state.get("protection")
+    if isinstance(protection, dict):
+        protection.setdefault("contexts", []).append("Conformance")
+        protection.setdefault("checks", []).append(
+            {"context": "Conformance", "app_id": None})
+
+
+if "--method" in sys.argv and "POST" in sys.argv:
+    mode = state.get("post", "ok")
+    if mode == "ok":
+        land()
+        state["posted"] = True
+        save()
+        print(json.dumps(["Conformance"]))
+        sys.exit(0)
+    if state.get("post_lands"):
+        land()
+    state["posted"] = True
+    save()
+    if mode == "refuse":
+        print("gh: Resource not accessible by integration (HTTP 403)", file=sys.stderr)
+    else:
+        print("gh: connection reset by peer", file=sys.stderr)
+    sys.exit(1)
+if state.get("read_fails") or (state.get("read_fails_after_post") and state.get("posted")):
+    print("gh: HTTP 502 (HTTP 502)", file=sys.stderr)
+    sys.exit(1)
+if state.get("protection") is None:
+    print("gh: Branch not protected (HTTP 404)", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps(state["protection"]))
+"""
+
+
+def stub_forge(directory: Path, state: dict) -> tuple[str, Path, Path]:
+    """A `gh` that logs each call and answers from a state file (see the cases)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    log_path = directory / "gh.log"
+    state_path = directory / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    script = directory / "gh"
+    script.write_text(
+        STUB_GH.replace("__PYTHON__", sys.executable)
+        .replace("__STATE__", repr(str(state_path)))
+        .replace("__LOG__", repr(str(log_path))), encoding="utf-8")
+    script.chmod(0o755)
+    return str(directory), log_path, state_path
+
+
+def posts(log: Path) -> list[list[str]]:
+    """The argv of every logged call that was a POST."""
+    if not log.exists():
+        return []
+    calls = [json.loads(line)["argv"]
+             for line in log.read_text("utf-8").splitlines()]
+    return [argv for argv in calls if "--method" in argv and "POST" in argv]
+
+
+def rewrite_state(state_path: Path, **changes: object) -> None:
+    state = json.loads(state_path.read_text("utf-8"))
+    state.update(changes)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
 
 
 class ApplyTestCase(unittest.TestCase):
@@ -2508,6 +2608,36 @@ class CommitContentTest(ApplyTestCase):
         self.assert_refused(root, plan_id,
                             git(root, "rev-parse", "HEAD").strip())
 
+    def test_a_commit_hook_that_changes_a_planned_conformance_file_is_refused(self):
+        """`prove_commit_content` compares path names only, and a hook can
+        change the bytes of a path the plan already writes."""
+        hooks = {
+            "the lock": "printf ' ' >> devenv.lock\ngit add devenv.lock\n",
+            "the workflow": ("printf '# x\\n' >> .github/workflows/conformance.yaml\n"
+                             "git add .github/workflows/conformance.yaml\n"),
+        }
+        for name, body in hooks.items():
+            with self.subTest(name):
+                home = make_home()
+                self.home = home
+                root = locked_apply_repo(home)
+                bin_dir, log, _ = stub_forge(
+                    Path(tempfile.mkdtemp()), {"protection": DEFAULT_PROTECTION})
+                plan_id = self.ready_plan(root)["plan"]["plan_id"]
+                hook = root / ".git" / "hooks" / "pre-commit"
+                hook.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+                hook.chmod(0o755)
+                path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+                with mock.patch.dict(os.environ, {"PATH": path}):
+                    code, payload, err = self.apply(plan_id)
+                self.assertEqual(code, 2, err or payload)
+                self.assertEqual(payload["error"]["code"], "verification_failed")
+                self.assertEqual(payload["error"]["repair_id"],
+                                 "adopt.commit.conformance_unproved")
+                self.assertTrue(self.worktree(plan_id).is_dir())
+                self.assertEqual(posts(log), [])
+                hook.unlink()
+
     def test_the_planned_commit_changes_exactly_the_planned_paths(self):
         """The control: with nothing smuggled in, the proof passes and the set
         of changed paths is the operations' own."""
@@ -2527,6 +2657,274 @@ class CommitContentTest(ApplyTestCase):
         self.assertTrue(required)
         self.assertTrue(required <= changed, required - changed)
         self.assertTrue(changed <= required | optional, changed - required)
+
+
+# --------------------------------------------------------------------------
+# Adopting a project with a devenv lock: the lock entry, the workflow and the
+# required check on the forge, all three or none
+# --------------------------------------------------------------------------
+
+
+class ConformanceAdoptionApplyTest(ApplyTestCase):
+    BRANCH = "main"
+
+    def forge(self, **state: object) -> tuple[Path, Path]:
+        """A stub `gh` first on `PATH` for this case; returns its log and state."""
+        state.setdefault("protection", DEFAULT_PROTECTION)
+        bin_dir, log, state_path = stub_forge(Path(tempfile.mkdtemp()), state)
+        patch = mock.patch.dict(
+            os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return log, state_path
+
+    def pending(self, plan_id: str) -> Path:
+        return self.state("adopt", "worktrees",
+                          self.digest(plan_id) + ".required-check.json")
+
+    def adopt_branch(self, plan_id: str) -> str:
+        return f"adopt-{self.digest(plan_id)[:12]}"
+
+    def failing(self, root: Path, plan_id: str, repair_id: str) -> dict:
+        payload = self.refuse(root, plan_id, "adopt_failure")
+        self.assertEqual(payload["error"]["repair_id"], repair_id)
+        self.assertEqual(self.pending(plan_id).exists(), False)
+        return payload
+
+    def test_apply_locks_the_revision_writes_the_rendered_workflow_and_requests_conformance_once(self):
+        root = locked_apply_repo(self.home)
+        log, _ = self.forge()
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        branch = result["branch"]
+        lock = json.loads(git(root, "show", f"{branch}:devenv.lock"))
+        node = lock["nodes"][lock["nodes"]["root"]["inputs"]["agent-platform"]]
+        self.assertEqual(node, {
+            "flake": False, "locked": FIXTURE_REVISION,
+            "original": {"owner": "fixture", "repo": "platform", "type": "github"}})
+        self.assertEqual(node["locked"]["rev"],
+                         document["plan"]["conformance"]["revision"]["rev"])
+        workflow = subprocess.run(
+            ["git", "-C", str(root), "show",
+             f"{branch}:.github/workflows/conformance.yaml"],
+            capture_output=True, check=True).stdout
+        self.assertEqual(workflow,
+                         resolve_project.render_conformance_workflow("main", 2, locked=True))
+        self.assertEqual(posts(log), [[
+            "api", "--method", "POST",
+            "repos/fixture/target/branches/main/protection/required_status_checks/contexts",
+            "-f", "contexts[]=Conformance"]])
+        self.assertEqual(result["required_check"], {
+            "repo": "fixture/target", "branch": "main",
+            "context": "Conformance", "state": "added"})
+        self.assertFalse(self.pending(document["plan"]["plan_id"]).exists())
+
+    def test_a_hand_edited_workflow_fails_the_projection_freshness_check_of_a_ci_run(self):
+        root = locked_apply_repo(self.home)
+        self.forge()
+        result = self.succeed(root, self.ready_plan(root)["plan"]["plan_id"])
+        git(root, "merge", "--ff-only", "--quiet", result["branch"])
+
+        def ci_run() -> tuple[int, dict]:
+            done = _inprocess_cli.run_module(
+                "agent_tools.project_contract.conformance",
+                ("run", "--purpose", "ci", "--repo-root", str(root)),
+                env={**os.environ, "HOME": str(self.home)})
+            return done.returncode, json.loads(done.stdout)
+
+        def fresh(report: dict) -> str:
+            (check,) = [check for check in report["checks"]
+                        if check["id"] == "repository.projection.fresh"]
+            return check["status"]
+
+        _, report = ci_run()
+        self.assertEqual(fresh(report), "passed", report)
+        workflow = root / ".github" / "workflows" / "conformance.yaml"
+        workflow.write_text(workflow.read_text("utf-8") + "# hand edit\n",
+                            encoding="utf-8")
+        commit(root, "hand edit the workflow")
+        code, report = ci_run()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["outcome"]["status"], "failed")
+        self.assertEqual(fresh(report), "failed")
+
+    def test_a_refused_required_check_request_leaves_no_lock_entry_and_no_workflow_committed(self):
+        root = locked_apply_repo(self.home)
+        log, _ = self.forge(post="refuse")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        before = git(root, "rev-list", "--all")
+        payload = self.refuse(root, plan_id, "adopt_failure")
+        self.assertEqual(payload["error"]["repair_id"], "adopt.required_check.refused")
+        self.assertEqual(git(root, "rev-list", "--all"), before)
+        self.assertEqual(git(root, "for-each-ref", "refs/heads/adopt-"), "")
+        self.assertFalse(self.pending(plan_id).exists())
+        self.assertEqual(len(posts(log)), 1)
+
+    def test_an_unknown_outcome_keeps_the_branch_and_a_later_apply_settles_it(self):
+        root = locked_apply_repo(self.home)
+        log, state = self.forge(post="lost", post_lands=True, read_fails_after_post=True)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["repair_id"], "adopt.required_check.unknown")
+        branch = self.adopt_branch(plan_id)
+        self.assertIn("devenv.lock", self.branch_files(root, branch))
+        self.assertIn("agent-platform", git(root, "show", f"{branch}:devenv.lock"))
+        self.assertTrue(self.pending(plan_id).is_file())
+        rewrite_state(state, read_fails_after_post=False)
+        result = self.succeed(root, plan_id)
+        self.assertEqual(result["required_check"]["state"], "added")
+        self.assertEqual(result["commit"], git(root, "rev-parse", branch).strip())
+        self.assertEqual(len(posts(log)), 1)
+        self.assertFalse(self.pending(plan_id).exists())
+
+    def test_an_unknown_outcome_that_did_not_land_is_requested_again(self):
+        root = locked_apply_repo(self.home)
+        log, state = self.forge(post="lost", post_lands=False, read_fails_after_post=True)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["repair_id"], "adopt.required_check.unknown")
+        rewrite_state(state, post="ok", read_fails_after_post=False)
+        result = self.succeed(root, plan_id)
+        self.assertEqual(result["required_check"]["state"], "added")
+        self.assertEqual(len(posts(log)), 2)
+        self.assertFalse(self.pending(plan_id).exists())
+
+    def test_a_rollback_that_cannot_delete_the_branch_says_so(self):
+        root = locked_apply_repo(self.home)
+        self.forge(post="refuse")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        hook = root / ".git" / "hooks" / "reference-transaction"
+        hook.write_text(
+            "#!/bin/sh\n"
+            '[ "$1" = prepared ] || exit 0\n'
+            "while read old new ref; do\n"
+            '  case "$ref" in\n'
+            "    refs/heads/adopt-*)\n"
+            '      case "$new" in *[!0]*) ;; *) exit 1 ;; esac ;;\n'
+            "  esac\n"
+            "done\n"
+            "exit 0\n", encoding="utf-8")
+        hook.chmod(0o755)
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["repair_id"], "adopt.required_check.rollback_failed")
+        self.assertIn(self.adopt_branch(plan_id), git(root, "branch", "--list"))
+        self.assertTrue(self.pending(plan_id).is_file())
+
+    def test_an_unprotected_integration_branch_refuses_before_anything_is_committed(self):
+        root = locked_apply_repo(self.home)
+        log, state = self.forge(protection=None)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        payload = self.failing(root, plan_id, "adopt.required_check.unprotected")
+        self.assertIn("main", payload["error"]["violations"][0]["message"])
+        self.assertEqual(posts(log), [])
+        rewrite_state(state, protection=DEFAULT_PROTECTION)
+        result = self.succeed(root, plan_id)
+        self.assertEqual(result["required_check"]["state"], "added")
+
+    def test_a_branch_requiring_no_checks_is_unprotected(self):
+        for protection in ({"strict": True, "checks": [], "contexts": []},
+                           {"strict": True, "contexts": []}):
+            with self.subTest(protection=protection):
+                self.home = make_home()
+                root = locked_apply_repo(self.home)
+                log, _ = self.forge(protection=protection)
+                plan_id = self.ready_plan(root)["plan"]["plan_id"]
+                self.failing(root, plan_id, "adopt.required_check.unprotected")
+                self.assertEqual(posts(log), [])
+
+    def test_a_malformed_or_unreadable_protection_refuses_before_anything_is_committed(self):
+        cases = ({"read_fails": True}, {"protection": {"contexts": "Nix Eval"}},
+                 {"protection": {"checks": [{"app_id": 1}], "contexts": []}},
+                 {"protection": {"strict": True}}, {"protection": []})
+        for state in cases:
+            with self.subTest(state=state):
+                self.home = make_home()
+                root = locked_apply_repo(self.home)
+                log, _ = self.forge(**state)
+                plan_id = self.ready_plan(root)["plan"]["plan_id"]
+                self.failing(root, plan_id, "adopt.required_check.unreadable")
+                self.assertEqual(posts(log), [])
+
+    def test_an_origin_that_is_not_the_forge_target_refuses_before_any_forge_request(self):
+        """P13. Re-planning already sees a moved origin, so a first apply is stale
+        before its own origin check; the check is the one a reconciliation and the
+        window between planning and the forge read rely on."""
+        root = locked_apply_repo(self.home)
+        log, state = self.forge(post="lost", read_fails_after_post=True)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        with self.subTest("a first apply"):
+            git(root, "remote", "set-url", "origin", "https://github.com/fixture/other.git")
+            self.refuse(root, plan_id, "plan_stale")
+            self.assertFalse(log.exists() and log.read_text("utf-8"))
+            git(root, "remote", "set-url", "origin", "https://github.com/fixture/target.git")
+        with self.subTest("the check itself"):
+            git(root, "remote", "set-url", "origin", "https://github.com/fixture/other.git")
+            with self.assertRaises(adopt_inspection.AdoptError) as raised:
+                adopt_conformance.preflight(root, "fixture/target", "main")
+            self.assertEqual(raised.exception.repair_id, "adopt.required_check.origin_mismatch")
+            self.assertEqual(raised.exception.violations[0]["pointer"],
+                             "/plan/conformance/required_check/repo")
+            self.assertFalse(log.exists() and log.read_text("utf-8"))
+            git(root, "remote", "set-url", "origin", "https://github.com/fixture/target.git")
+        with self.subTest("a reconciliation"):
+            code, payload, err = self.apply(plan_id)
+            self.assertEqual(payload["error"]["repair_id"], "adopt.required_check.unknown")
+            calls = log.read_text("utf-8")
+            git(root, "remote", "set-url", "origin", "https://github.com/fixture/other.git")
+            code, payload, err = self.apply(plan_id)
+            self.assertEqual(code, 2, err or payload)
+            self.assertEqual(payload["error"]["repair_id"], "adopt.required_check.origin_mismatch")
+            self.assertEqual(log.read_text("utf-8"), calls)
+            self.assertTrue(self.pending(plan_id).is_file())
+
+    def test_a_check_already_required_is_not_requested_again(self):
+        root = locked_apply_repo(self.home)
+        protection = {**DEFAULT_PROTECTION, "checks": [
+            *DEFAULT_PROTECTION["checks"], {"context": "Conformance", "app_id": None}]}
+        log, _ = self.forge(protection=protection)
+        result = self.succeed(root, self.ready_plan(root)["plan"]["plan_id"])
+        self.assertEqual(result["required_check"]["state"], "already_required")
+        self.assertEqual(posts(log), [])
+        files = self.branch_files(root, result["branch"])
+        self.assertIn(".github/workflows/conformance.yaml", files)
+        self.assertIn("agent-platform", git(root, "show", f"{result['branch']}:devenv.lock"))
+
+    def test_a_request_whose_answer_is_lost_but_landed_succeeds(self):
+        root = locked_apply_repo(self.home)
+        self.forge(post="refuse", post_lands=True)
+        result = self.succeed(root, self.ready_plan(root)["plan"]["plan_id"])
+        self.assertEqual(result["required_check"]["state"], "added")
+        self.assertIn(result["branch"], git(root, "branch", "--list"))
+
+    def test_an_uncommitted_edit_to_the_lock_refuses_as_dirty(self):
+        root = locked_apply_repo(self.home)
+        log, _ = self.forge()
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        with (root / "devenv.lock").open("a", encoding="utf-8") as handle:
+            handle.write(" ")
+        self.refuse(root, plan_id, "dirty_worktree")
+        self.assertFalse(log.exists() and log.read_text("utf-8"))
+
+    def test_an_adoption_without_a_devenv_lock_makes_no_forge_request(self):
+        root = apply_repo(self.home)
+        log, _ = self.forge()
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        result = self.succeed(root, plan_id)
+        self.assertNotIn("required_check", result)
+        self.assertFalse(log.exists() and log.read_text("utf-8"))
+        self.assertFalse(self.pending(plan_id).exists())
+
+    def test_an_adoption_without_a_devenv_lock_keeps_its_evidence_record(self):
+        root = apply_repo(self.home)
+        result = self.succeed(root, self.ready_plan(root)["plan"]["plan_id"])
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        self.assertEqual([check["id"] for check in record["checks"]],
+                         list(adopt_inspection.READY_GATES[:-1]))
+        self.assertNotIn("conformance", record)
 
 
 # --------------------------------------------------------------------------

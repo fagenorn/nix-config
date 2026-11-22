@@ -49,7 +49,7 @@ import subprocess
 import tarfile
 import tempfile
 
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import adopt_conformance, agent_platform
 from agent_tools.project_contract.adopt_links import (
     Tree,
     broken_count,
@@ -70,6 +70,7 @@ from agent_tools.project_contract.adopt_inspection import (
     contained_path,
     contained_relative,
     gate_entry,
+    blob_at,
     git_or_fail,
     is_agent_path,
     is_secret_path,
@@ -1295,6 +1296,33 @@ def prove_commit_content(worktree: Path, commit: str,
             "verification_failed", "adopt.commit.unplanned_content", "",
             "the adoption commit does not change exactly the paths the "
             "plan's operations declare")
+
+
+CONFORMANCE_UNPROVED = "adopt.commit.conformance_unproved"
+
+
+def prove_conformance_bytes(worktree: Path, commit: str,
+                            operations: list[dict]) -> None:
+    """Each conformance file the plan writes is committed with the planned bytes.
+
+    `prove_commit_content` compares path names only, so a hook or a verification
+    command that edits the lock, the input declaration or the protection file
+    after the gates passed leaves it satisfied. The forge write that follows is
+    irreversible without a rollback, so the committed blob of each planned
+    conformance target must hash to its operation's `after` first. The worktree
+    is retained as for the other proofs and no forge request is made.
+    """
+    for operation in operations:
+        if operation.get("op") != "write-file":
+            continue
+        for target in operation["targets"]:
+            if target not in adopt_conformance.CONFORMANCE_TARGETS:
+                continue
+            blob = blob_at(worktree, commit, target)
+            if blob is None or sha256_hash(blob) != operation["after"]:
+                raise refuse(
+                    "verification_failed", CONFORMANCE_UNPROVED, "",
+                    f"the adoption commit does not carry the planned bytes of {target}")
 
 
 def prove_commit_links(worktree: Path, commit: str,
