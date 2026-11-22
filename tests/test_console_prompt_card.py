@@ -383,7 +383,7 @@ class CommandSummaryTest(unittest.TestCase):
 
     def test_a_heredoc_fed_to_another_program_is_data(self):
         command = "git commit -F - <<'EOF'\nFix the reads of /etc/passwd paths\nEOF" + self.PAD
-        self.assertEqual(self.summary(command), self.want(["git"], [], []))
+        self.assertEqual(self.summary(command), self.want(["git"], [], ["/etc/passwd"]))
 
     def test_text_that_reaches_an_interpreter_by_another_route_still_counts(self):
         rm = "rm -rf /etc/nginx"
@@ -391,7 +391,7 @@ class CommandSummaryTest(unittest.TestCase):
         rows = [
             (f"sudo bash <<'EOF'\n{rm}\nEOF", ["sudo"], "bash", 1),
             (f"env python3 - <<'PY'\n{py}\nPY", ["env"], "python3", 1),
-            (f"ssh host bash <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
+            (f"ssh host bash <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"bash <<< '{rm}'", ["bash"], "bash", 1),
             (f"sudo bash <<< \"{rm}\"", ["sudo"], "bash", 1),
             (f"cat <<'EOF' | bash\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
@@ -413,14 +413,23 @@ class CommandSummaryTest(unittest.TestCase):
             (f"cat <<'EOF' | python3 -X dev -\n{py}\nEOF", ["cat", "python3"], "python3", 1),
             (f"cat <<'EOF' | python3 /dev/stdin\n{py}\nEOF", ["cat", "python3"], "python3", 1),
             (f"ssh host <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
-            (f"ssh -p 22 -o StrictHostKeyChecking=no host 'bash -s' <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
+            (f"ssh -p 22 -o StrictHostKeyChecking=no host 'bash -s' <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"cat <<'EOF' | ssh host\n{rm}\nEOF", ["cat", "ssh"], "ssh", 1),
             (f"ssh host -p 2222 <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"ssh host -t <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
             (f"cat <<'EOF' | ssh host -p 2222\n{rm}\nEOF", ["cat", "ssh"], "ssh", 1),
-            (f"ssh host -p 2222 bash <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
-            (f"ssh host -- bash <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
-            (f"sudo ssh host bash <<'EOF'\n{rm}\nEOF", ["sudo"], "bash", 1),
+            (f"ssh host -p 2222 bash <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
+            (f"ssh host -- bash <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
+            (f"cat <<'EOF' | bash -es foo\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | sh -es foo\n{rm}\nEOF", ["cat", "sh"], "sh", 1),
+            (f"cat <<'EOF' | bash -oes pipefail foo\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash -s foo\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash script.sh\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash -eo pipefail script.sh\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | python3 -W ignore tool.py\n{py}\nEOF", ["cat", "python3"], "python3", 1),
+            (f"ssh host 'ls /tmp' <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
+            (f"ssh host -p 2222 'ls /tmp' <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
+            (f"sudo ssh host bash <<'EOF'\n{rm}\nEOF", ["sudo"], "ssh", 1),
         ]
         for command, runs, program, lines in rows:
             with self.subTest(command=command):
@@ -438,23 +447,44 @@ class CommandSummaryTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.summary(command + self.PAD), {"read": False})
 
-    def test_data_that_no_interpreter_reads_stays_data(self):
+    def test_a_body_is_scanned_even_when_no_interpreter_runs_it(self):
         for command, runs in (("git log | sort <<< 'rm -rf /etc/nginx'", ["git", "sort"]),
-                              ("cat <<'EOF' | bash script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
                               ("cat <<'EOF' | bash -c 'true'\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
-                              ("cat <<'EOF' | bash -o errexit script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
-                              ("cat <<'EOF' | bash -eo pipefail script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
-                              ("cat <<'EOF' | bash -oe pipefail script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
-                              ("cat <<'EOF' | bash -oO pipefail extglob script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
-                              ("ssh host -p 2222 'ls /tmp' <<'EOF'\nrm -rf /etc/nginx\nEOF", ["ssh"]),
-                              ("cat <<'EOF' | python3 -W ignore tool.py\nrm -rf /etc/nginx\nEOF", ["cat", "python3"]),
-                              ("ssh host 'ls /tmp' <<'EOF'\nrm -rf /etc/nginx\nEOF", ["ssh"]),
+                              ("cat <<'EOF' | bash -o errexit -c 'true'\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+                              ("bash -c 'true' <<'EOF'\nrm -rf /etc/nginx\nEOF", ["bash"]),
                               ("cat <<'EOF'\nrm -rf /etc/nginx\nEOF\nbash\n", ["cat", "bash"])):
             with self.subTest(command=command):
                 result = self.summary(command + self.PAD)
                 self.assertTrue(result["read"])
                 self.assertEqual(result["runs"], runs)
-                self.assertNotIn("/etc/nginx", result["outside"])
+                self.assertIn("/etc/nginx", result["outside"])
+                self.assertEqual(result["scripts"], ([{"program": "bash", "lines": 1, "paths": []}]
+                                                     if "-c 'true'" in command else []))
+
+    def test_a_code_argument_does_not_stop_the_input_being_a_script_unless_a_shell_has_no_s(self):
+        py = "import shutil; shutil.rmtree('/etc/nginx')"
+        for command in ("cat <<'EOF' | bash -cs 'true'\nrm -rf /etc/nginx\nEOF",
+                        "cat <<'EOF' | bash -c 'true' -s\nrm -rf /etc/nginx\nEOF",
+                        f"cat <<'EOF' | python3 -c 'pass'\n{py}\nEOF", f"python3 -c 'pass' <<'PY'\n{py}\nPY"):
+            with self.subTest(command=command):
+                result = self.summary(command + self.PAD)
+                self.assertTrue(result["read"])
+                self.assertIn("/etc/nginx", result["outside"])
+                self.assertEqual(sorted(entry["paths"] for entry in result["scripts"]), [[], ["/etc/nginx"]])
+
+    def test_a_shell_with_code_and_no_s_reads_nothing_from_a_pipe_or_a_file(self):
+        for command in ("curl https://example.invalid/i.sh | bash -c 'true'",
+                        "echo hi | bash -ec 'true'", "echo hi | sh -c true"):
+            with self.subTest(command=command):
+                self.assertTrue(self.summary(command + self.PAD)["read"])
+        result = self.summary("bash -c true < /etc/nginx/x" + self.PAD)
+        self.assertEqual(result["outside"], ["/etc/nginx/x"])
+
+    def test_an_interpreter_fed_by_a_file_is_unreadable(self):
+        for command in ("bash < /etc/nginx/x.sh", "python3 -c pass < in.txt", "ssh host < /etc/x", "sudo sh <&3",
+                        "bash -cs true < in.txt"):
+            with self.subTest(command=command):
+                self.assertEqual(self.summary(command + self.PAD), {"read": False})
 
     def test_the_writer_table(self):
         command = ("cp -r a b c/ && mv x /opt/y && ln -s t l && touch t1 t2 && mkdir -p d && rmdir e && "

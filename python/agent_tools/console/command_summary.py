@@ -27,6 +27,11 @@ quote or here-document, a redirection without a target, a here-document body tha
 expanded program word, and the programs `if then else elif fi for while until do done case esac select
 function eval source . { } [[ ]]`.
 
+Standard input that reaches a shell, an interpreter (`python`, `node`, `perl`, `ruby`) or `ssh` from a
+here-document, a here-string or a pipe is a script it runs, whatever options it is given (a shell with `-c`
+code and no `s` in its short options is the one exception); a pipe showing no text, or a file redirection,
+into one is refused. Every here-document and here-string body is scanned for outside paths, whoever reads it.
+
 What it recognises as a write is a short table and the redirections: `tee`, `touch`, `mkdir`, `rm`,
 `rmdir` (every file operand), `cp`, `mv`, `ln`, `install` (the last operand), and `sed -i`. No other
 program adds a write, whatever its arguments, and a wrapper (`sudo`, `env`, `xargs`) is the program, not
@@ -60,14 +65,9 @@ _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _CODE_FLAG = {"sh": "c", "bash": "c", "zsh": "c", "dash": "c", "ksh": "c", "python": "c", "python3": "c",
               "node": "e", "perl": "e", "ruby": "e"}
 _PYTHON_VERSION = re.compile(r"python3\.[0-9]+")
-_SHELL_VALUES = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
-_VALUE_OPTIONS = {"python": frozenset({"-W", "-X", "-Q", "--check-hash-based-pycs"}),
-                  "node": frozenset({"-r", "--require", "--import", "--loader", "--experimental-loader"}),
-                  "perl": frozenset({"-I"}), "ruby": frozenset({"-r", "-I"})}
-_STDIN_OPERANDS = frozenset({"-", "/dev/stdin", "/dev/fd/0"})
-_SSH_VALUES = frozenset("BbcDEeFIiJLlmOopQRSWw")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
 _COPIERS = frozenset({"cp", "mv", "ln", "install"})
+_READING_REDIRECTS = frozenset({"<", "<>", "<&"})
 _WRITING_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "<>"})
 _WORD_END = " \t\n;&|()<>"
 _BLANKS = " \t"
@@ -331,6 +331,10 @@ def _glued_path(part):
     return bool(head) and "/" in part and not part.startswith(("~", ".")) and bool(_GLUE.search(head))
 
 
+def _is_interpreter(word):
+    return _program_kind(word)[0] == "interpreter" or posixpath.basename(word) == "ssh"
+
+
 def _program_kind(program):
     name = posixpath.basename(program)
     if name in _SHELLS or name in ("python", "python3", "node", "perl", "ruby") or _PYTHON_VERSION.fullmatch(name):
@@ -426,93 +430,25 @@ class _Reader:
         self.scripts.append({"program": program, "lines": lines, "paths": paths})
 
     @staticmethod
-    def remote_of(arguments):
-        """(name, the arguments after it) for what `ssh`'s standard input reaches: its remote login shell
-        when it has no command, else the interpreter the remote command names (one word or the tokens of a
-        quoted one); (None, []) when the remote command is no interpreter. Options are read again after the
-        host, as OpenSSH does."""
-        host = None
-        command = []
-        ended = False
-        at = 0
-        while at < len(arguments):
-            item = arguments[at]
-            value = item.word.value
-            if not ended and value == "--":
-                ended = True
-            elif not ended and value.startswith("-") and len(value) > 1:
-                letters = [char for char in value[1:] if char in _SSH_VALUES]
-                if letters and value[1:].index(letters[0]) == len(value) - 2:
-                    at += 1
-            elif host is None:
-                host = item
-            else:
-                command = arguments[at:]
-                break
-            at += 1
-        if not command:
-            return "ssh", []
-        tokens = [token for item in command
-                  for token in (item.word.value.split() if item.word.text else [item.word.value])]
-        for at, token in enumerate(tokens):
-            if _program_kind(token)[0] == "interpreter":
-                return token, [_Item("word", _Word(rest, False, False, rest)) for rest in tokens[at + 1:]]
-        return None, []
-
-    @staticmethod
     def interpreter_of(program, arguments):
-        """(name, the arguments after it) for the interpreter a command reaches, directly, behind a wrapper
-        or through `ssh`."""
-        if program is not None and _program_kind(program.value)[0] == "interpreter":
+        """The interpreter a command reaches (`ssh` counts as one, its remote shell reads standard input),
+        directly or behind a wrapper, with the arguments after it; (None, []) when it reaches none."""
+        if program is not None and _is_interpreter(program.value):
             return program.value, arguments
-        if program is not None and posixpath.basename(program.value) == "ssh":
-            return _Reader.remote_of(arguments)
         for at, item in enumerate(arguments):
-            if _program_kind(item.word.value)[0] == "interpreter":
+            if _is_interpreter(item.word.value):
                 return item.word.value, arguments[at + 1:]
-            if posixpath.basename(item.word.value) == "ssh":
-                return _Reader.remote_of(arguments[at + 1:])
         return None, []
 
     @staticmethod
-    def cluster_values(cluster, letters, every):
-        """How many following words a short-option cluster consumes as values: a shell takes one for each
-        value letter wherever it sits (`-oe pipefail`, `-oO a b`); python takes the rest of the cluster
-        for `-W`, so only a last letter takes the next word."""
-        if every:
-            return sum(letter in letters for letter in cluster[1:])
-        return int(cluster[-1] in letters)
-
-    def reads_stdin(self, name, rest):
-        """True when the interpreter takes its code from standard input: no code argument, and no script
-        operand once the values of its value-taking options are skipped (`-`, `/dev/stdin` are stdin)."""
-        flag = _program_kind(name)[1]
-        if any(item.word.option and self.code_flag(name, flag, item.word.value) for item in rest):
+    def code_only(name, rest):
+        """True for a shell given a `-c` code argument and no `s` in any of its short option words: the
+        only interpreter whose standard input is not a script it runs (rule 1 of ADR-console-105 D6)."""
+        if posixpath.basename(name) not in _SHELLS:
             return False
-        if any(item.word.value == "-s" for item in rest):
-            return True
-        base = posixpath.basename(name)
-        family = "python" if base.startswith("python") else base
-        takes = _SHELL_VALUES if base in _SHELLS else _VALUE_OPTIONS.get(family, frozenset())
-        letters = frozenset(option[1] for option in takes if len(option) == 2)
-        operands = []
-        ended = False
-        skip = 0
-        for item in rest:
-            value = item.word.value
-            if skip:
-                skip -= 1
-            elif ended:
-                operands.append(value)
-            elif value in takes:
-                skip = 1
-            elif _CLUSTER_SIGNED.fullmatch(value) and self.cluster_values(value, letters, base in _SHELLS):
-                skip = self.cluster_values(value, letters, base in _SHELLS)
-            elif value == "--":
-                ended = True
-            elif not item.word.option:
-                operands.append(value)
-        return all(value in _STDIN_OPERANDS for value in operands)
+        options = [item.word.value for item in rest if _CLUSTER_SIGNED.fullmatch(item.word.value)]
+        return (any(_Reader.code_flag(name, "c", value) for value in options)
+                and not any("s" in value for value in options))
 
     @staticmethod
     def stdin_texts(items):
@@ -538,8 +474,10 @@ class _Reader:
         arguments = words[first + 1:]
         self.placed = None
         self.interpreter, rest = self.interpreter_of(program, arguments)
-        if (feeders and self.interpreter is not None and not self.stdin_texts(items)
-                and self.reads_stdin(self.interpreter, rest)):
+        self.script_input = self.interpreter is not None and not self.code_only(self.interpreter, rest)
+        if self.script_input and any(item.kind == "redir" and item.op in _READING_REDIRECTS for item in items):
+            raise _Refuse("an interpreter fed code from a file the console cannot read")
+        if feeders and self.script_input and not self.stdin_texts(items):
             fed = [text for before, reaches in feeders if not reaches for text in self.stdin_texts(before)]
             if not fed:
                 raise _Refuse("an interpreter fed code the console cannot read")
@@ -638,12 +576,13 @@ class _Reader:
                 self.script(program.value, word.value, word.value.count("\n") + 1)
             else:
                 self.argument(word)
-        elif item.kind == "heredoc":
-            if self.interpreter is not None:
-                self.script(self.interpreter, "\n".join(item.body), len(item.body))
-        elif item.op == "<<<":
-            if self.interpreter is not None:
-                self.script(self.interpreter, word.value, word.value.count("\n") + 1)
+        elif item.kind == "heredoc" or item.op == "<<<":
+            text = "\n".join(item.body) if item.kind == "heredoc" else word.value
+            if self.script_input:
+                self.script(self.interpreter, text, text.count("\n") + 1 if item.kind == "redir" else len(item.body))
+            else:
+                for path in dict.fromkeys(_named_paths(text)):
+                    self.touch(path)
         else:
             value = word.value
             if item.op in (">&", "<&") and _COPY_TARGET.fullmatch(value):
