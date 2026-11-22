@@ -1,5 +1,6 @@
 """Eval case files as data (#293): setup kinds, setup inputs and pipeline cases."""
 
+import copy
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EVALS_DIR = REPO_ROOT / "home/common/agent-skills/evals"
@@ -700,14 +702,99 @@ def marked_pr_sandbox(tmp):
     return repo, env
 
 
+SANDBOXES = None
+BUILT = {}
+
+
+def restored(key, build):
+    """The sandbox `build(work)` makes for `key`, built once per run, put back before every use.
+
+    A sandbox bakes its own absolute path into git links, remote URLs and wrapper scripts, so
+    a copy is valid only where it was built: build at a fixed path, keep a pristine copy and
+    put that copy back at the same path. Returns (work, a deep copy of the build's result)."""
+    global SANDBOXES
+    if SANDBOXES is None:
+        SANDBOXES = Path(tempfile.mkdtemp(prefix="eval-sandboxes-")).resolve()
+        unittest.addModuleCleanup(shutil.rmtree, SANDBOXES, True)
+    work, pristine = SANDBOXES / key / "work", SANDBOXES / key / "pristine"
+    if key not in BUILT:
+        work.mkdir(parents=True)
+        BUILT[key] = build(work)
+        shutil.copytree(work, pristine, symlinks=True)
+    shutil.rmtree(work)
+    shutil.copytree(pristine, work, symlinks=True)
+    return work, copy.deepcopy(BUILT[key])
+
+
+class RestoredSandboxTest(unittest.TestCase):
+    """#1615: a sandbox is built once per run and put back in place before every use."""
+
+    @staticmethod
+    def head_of(repo):
+        return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    def test_a_restored_sandbox_is_its_build_without_an_earlier_tests_change(self):
+        key = f"probe-{self.id()}"
+        calls = []
+
+        def build(work):
+            calls.append(work)
+            repo, git = fixture_sandbox(work)
+            head = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True,
+                                  check=True).stdout.strip()
+            return {"repo": str(repo), "head": head, "env": {"OUT": "built"}}
+
+        first_work, first = restored(key, build)
+        with open(Path(first["repo"]) / "README.md", "a", encoding="utf-8") as readme:
+            readme.write("edit\n")
+        subprocess.run(eval_git(Path(first["repo"])) + ["commit", "-qam", "edit"], check=True)
+        (first_work / "stray").write_text("x", encoding="utf-8")
+        first["head"] = "changed"
+        first["env"]["OUT"] = "changed"
+        second_work, second = restored(key, build)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(second_work, first_work)
+        self.assertFalse((second_work / "stray").exists())
+        self.assertNotIn("edit", (Path(second["repo"]) / "README.md").read_text(encoding="utf-8"))
+        self.assertEqual(self.head_of(second["repo"]), second["head"])
+        self.assertNotEqual(second["head"], "changed")
+        self.assertEqual(second["env"], {"OUT": "built"})
+        status = subprocess.run(["git", "-C", second["repo"], "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertEqual(status, "")
+
+    def test_the_first_use_is_already_a_restored_copy(self):
+        key = f"probe-{self.id()}"
+        held = []
+        self.addCleanup(lambda: [handle.close() for handle in held])
+
+        def build(work):
+            marker = work / "marker"
+            marker.write_text("m", encoding="utf-8")
+            held.append(open(marker, "a", encoding="utf-8"))
+            return None
+
+        work, _ = restored(key, build)
+        held[0].write("changed")
+        held[0].flush()
+        self.assertEqual((work / "marker").read_text(encoding="utf-8"), "m")
+
+    def test_marked_sandboxes_are_built_once_per_run(self):
+        module = sys.modules[__name__]
+        with mock.patch.object(module, "marked_pr_sandbox", wraps=marked_pr_sandbox) as spy:
+            first = MarkedIssueEvalCaseTest("test_every_assert_passes_on_a_good_run").sandbox()
+            second = MarkedIssueResumeEvalCaseTest("test_every_assert_passes_on_a_good_run").sandbox()
+        self.assertLessEqual(spy.call_count, 1)
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(self.head_of(second[2]["PRE_WT"]), second[2]["PRE_WT_HEAD"])
+
+
 class MarkedPrSetupTest(unittest.TestCase):
     """#1140: the marked-pr setup gives a marked issue 3, its pushed branch and an open pull request 7."""
 
     def sandbox(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name).resolve()
-        repo, env = marked_pr_sandbox(root)
+        root, (repo, env) = restored("marked-pr", marked_pr_sandbox)
         return root, repo, env
 
     def git(self, path, *argv):
@@ -1272,11 +1359,10 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
         out.write_text(text, encoding="utf-8")
         env["OUT"] = str(out)
 
-    def good_run(self, tmp):
-        repo, env = marked_pr_sandbox(tmp)
-        self.log(Path(tmp) / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, self.CHECKS_READ)
-        (Path(tmp) / "forge-claim-calls.jsonl").unlink(missing_ok=True)
-        self.write_output(tmp, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
+    def good_run(self, root, repo, env):
+        self.log(Path(root) / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, self.CHECKS_READ)
+        (Path(root) / "forge-claim-calls.jsonl").unlink(missing_ok=True)
+        self.write_output(root, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
                           f"{env['PRE_WT_HEAD'][:7]}: issue 3 needs the owner's look before merge.")
         return repo, env
 
@@ -1284,10 +1370,8 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
         return run_assert(case_assert("deliver-direct", 2, name), repo, **env)
 
     def sandbox(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name).resolve()
-        repo, env = self.good_run(root)
+        root, (repo, env) = restored("marked-pr", marked_pr_sandbox)
+        repo, env = self.good_run(root, repo, env)
         return root, repo, env
 
     def commit_empty(self, path):
@@ -1444,10 +1528,7 @@ class MarkedIssueResumeEvalCaseTest(unittest.TestCase):
     WAITED = "the checks of pull request 7 were waited for"
 
     def sandbox(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name).resolve()
-        repo, env = marked_pr_sandbox(root)
+        root, (repo, env) = restored("marked-pr", marked_pr_sandbox)
         MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", self.VIEW, self.CHECKS)
         MarkedIssueEvalCaseTest().write_output(
             root, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
