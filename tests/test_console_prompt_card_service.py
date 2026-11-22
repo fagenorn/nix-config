@@ -130,6 +130,25 @@ class PromptRouteTest(PromptCase):
         self.assertEqual((status, self.reply(sid, text)), (200, {"prompt": None, "state": "refused"}))
         self.assertEqual(len(self.rows(event_log.PROMPT_ASKED)), 1)
 
+    def test_a_prompt_with_no_reason_is_refused_for_its_reason_and_records_no_card(self):
+        svc, sid = self.boot()
+        cases = (("absent", {}), ("empty", {"description": ""}),
+                 ("blank", {"description": "  \n\t"}))
+        for label, fields in cases:
+            with self.subTest(label):
+                status, _, text = self.hook(svc, sid, "ask", command=COMMAND, **fields)
+                self.assertEqual(status, 200)
+                self.assertEqual(self.reply(sid, text), {"prompt": None, "state": "unexplained"})
+        self.assertEqual(self.rows(event_log.PROMPT_ASKED), [])
+        self.assertEqual(self.items(svc), [])
+        self.assertEqual(self.count(svc), 0)
+        asked = self.ask(svc, sid)
+        self.assertEqual(asked, {"prompt": asked["prompt"], "state": "open"})
+        self.assertEqual(self.rows(event_log.PROMPT_ASKED), [
+            {"sprint_id": sid, "session_id": "s-1", "command": COMMAND, "description": WORDS}])
+        (item,) = self.items(svc)
+        self.assertEqual(item["words"], WORDS)
+
     def test_the_answer_route_is_owner_only(self):
         svc, sid = self.boot()
         n = self.ask(svc, sid)["prompt"]
@@ -227,7 +246,8 @@ class PromptRouteTest(PromptCase):
         # R1: whatever listens on the port gets no secret and cannot sign a decision the hook honours.
         svc, sid = self.boot()
         secret = self.secret(sid)
-        body = self.signed(sid, {"phase": "ask", "session_id": "s-1", "command": COMMAND})
+        body = self.signed(sid, {"phase": "ask", "session_id": "s-1", "command": COMMAND,
+                                  "description": WORDS})
         self.assertNotIn(secret, json.dumps(body))
         status, _, text = self.post(svc, prompt_card.ASK_PATH, body)
         self.assertEqual(status, 200)
