@@ -535,5 +535,117 @@ class StatusTest(unittest.TestCase):
             self.assertIn("line 2", err)
 
 
+class ReviewDefectsTest(unittest.TestCase):
+    def test_an_append_after_a_torn_tail_cuts_the_tail_and_replays(self):
+        stopped = (FIXTURES / "stopped.jsonl").read_bytes()
+        for tail in (b'{"at":"2026-11-21T16:09:00Z","event":"run_contin', b"{"):
+            with self.subTest(tail=tail), tempfile.TemporaryDirectory() as tmp:
+                run = new_run(tmp)
+                (run / "events.jsonl").write_bytes(stopped + tail)
+                event = {"event": "run_continued", "at": "2026-11-21T16:10:00Z"}
+                engine_ledger.append_event(run, event)
+                self.assertEqual((run / "events.jsonl").read_bytes(), stopped + compact(event).encode())
+                self.assertEqual(engine_ledger.replay(run / "events.jsonl"),
+                                 engine_ledger.replay(FIXTURES / "stopped.jsonl") + [event])
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            (run / "events.jsonl").write_bytes(b'{"at":"2026')
+            engine_ledger.append_event(run, EXAMPLES["run_done"])
+            self.assertEqual((run / "events.jsonl").read_bytes(), compact(EXAMPLES["run_done"]).encode())
+
+    def test_a_symlinked_entry_procedure_inside_the_directory_is_copied_under_its_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "procedures"
+            shutil.copytree(PROCEDURES, source)
+            (source / "alias.json").symlink_to("toy.json")
+            run = new_run(tmp, procedure="alias", procedures_dir=source, root=Path(tmp) / "runs")
+            copied = run / "procedure" / "alias.json"
+            self.assertFalse(copied.is_symlink())
+            self.assertEqual(copied.read_bytes(), (source / "toy.json").read_bytes())
+            sums = (run / "procedure/SHA256SUMS").read_text(encoding="utf-8")
+            self.assertIn(f"{hashlib.sha256(copied.read_bytes()).hexdigest()}  alias.json\n", sums)
+
+    def test_an_entry_procedure_that_resolves_outside_the_directory_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "procedures"
+            shutil.copytree(PROCEDURES, source)
+            outside = Path(tmp) / "outside.json"
+            outside.write_bytes((source / "toy.json").read_bytes())
+            (source / "alias.json").symlink_to(outside)
+            with self.assertRaises(LedgerError):
+                new_run(tmp, procedure="alias", procedures_dir=source, root=Path(tmp) / "runs")
+            self.assertFalse((Path(tmp) / "runs").exists())
+
+    def test_a_second_writer_never_replaces_a_stored_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            store(run)
+            with mock.patch("os.path.lexists", return_value=False):
+                with self.assertRaises(LedgerError):
+                    store(run, result={"verdict": "other"})
+            self.assertEqual(json.loads((run / "results/scope.1.json").read_text()),
+                             {"verdict": "ok"})
+            self.assertEqual(len((run / "events.jsonl").read_text().splitlines()), 1)
+            self.assertEqual([p.name for p in (run / "results").iterdir()], ["scope.1.json"])
+
+    def test_a_writer_uses_its_own_temporary_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            foreign = run / "results" / ".scope.1.json.tmp"
+            foreign.write_bytes(b"another writer pending")
+            store(run)
+            self.assertEqual(foreign.read_bytes(), b"another writer pending")
+            self.assertEqual(json.loads((run / "results/scope.1.json").read_text()),
+                             {"verdict": "ok"})
+
+    def test_creating_the_runs_hierarchy_fsyncs_each_parent_of_a_new_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "a" / "b" / "runs"
+            synced: list[Path] = []
+            real = engine_ledger._fsync_path
+
+            def spy(path):
+                synced.append(Path(path))
+                real(path)
+
+            with mock.patch.object(engine_ledger, "_fsync_path", side_effect=spy):
+                new_run(tmp, root=root)
+            for parent in (Path(tmp), Path(tmp) / "a", Path(tmp) / "a" / "b", root):
+                self.assertIn(parent, synced)
+
+    def test_the_fold_reports_the_last_unresolved_process_when_a_later_visit_resolves(self):
+        first = {**EXAMPLES["process_started"], "step": "scope", "pid": 11}
+        second = {**EXAMPLES["process_started"], "step": "draft", "pid": 22}
+        stored = {**EXAMPLES["result_stored"], "step": "draft", "result": "results/draft.1.json"}
+        probed = []
+
+        def probe(pid, started):
+            probed.append(pid)
+            return True
+
+        folded = engine_ledger.fold(RUN, [first, second, stored], probe)
+        self.assertEqual(folded.process, {"pid": 11, "started": AT, "step": "scope", "visit": 1})
+        self.assertIs(folded.alive, True)
+        self.assertEqual(probed, [11])
+        done = engine_ledger.fold(RUN, [first, second, stored,
+                                        {**stored, "step": "scope", "result": "results/scope.1.json"}],
+                                  never)
+        self.assertIsNone(done.process)
+
+    def test_a_run_json_whose_run_is_not_its_directory_name_is_refused(self):
+        for recorded in (None, 7, "1511-20261121T160231Z-zzzz"):
+            with self.subTest(recorded=recorded), tempfile.TemporaryDirectory() as tmp:
+                run = sibling_run(tmp, RUN_ID)
+                document = json.loads((run / "run.json").read_text())
+                document["run"] = recorded
+                (run / "run.json").write_text(compact(document))
+                with self.assertRaises(LedgerError):
+                    engine_ledger.read_run(run)
+                home_with(tmp, run)
+                code, out, err = main_status(tmp, "status", "1511")
+                self.assertEqual((code, out), (2, ""))
+                self.assertEqual(len(err.splitlines()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

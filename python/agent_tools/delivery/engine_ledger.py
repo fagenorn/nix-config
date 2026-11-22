@@ -16,10 +16,12 @@ lists, per type, exactly the other members it carries. A run is assembled in
 `<root>/.<run id>.tmp` and renamed into place, so a run directory is either
 complete or absent.
 
-Order rule: a result file is written (fsynced, replaced into place) before its
-`result_stored` event is appended, and `append_event` refuses that event while
-the file is absent. A crash between the two leaves a result with no event,
-never an event naming no result.
+Order rule: a result file is written to a writer-owned temporary file (fsynced),
+then linked into place, which refuses a result that exists, before its
+`result_stored` event is appended; `append_event` refuses that event while the
+file is absent. A crash between the two leaves a result with no event, never
+an event naming no result. An append first cuts a write that was cut short back
+to the last newline, so a torn tail never joins the next event.
 
 The ledger holds no environment value and no credential: `run.json` carries
 only the names and values its caller passes as `inputs`.
@@ -44,7 +46,8 @@ from agent_tools.canonical import (
     reject_duplicate_keys,
     reject_nonfinite_literal,
 )
-from agent_tools.delivery.procedure_check import INPUT_RE, NAME_RE, NEEDS, ROLES, STAGES
+from agent_tools.delivery.procedure_check import (
+    INPUT_RE, NAME_RE, NEEDS, ROLES, STAGES, _inside)
 
 RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 TOKEN_RE = re.compile(r"^[a-z0-9]{4}$")
@@ -127,6 +130,22 @@ def _write_file(path: Path, data: bytes) -> None:
         os.close(descriptor)
 
 
+def _make_root(root: Path) -> None:
+    """Create `root` and every missing ancestor, fsyncing the parent of each new directory."""
+    missing = []
+    probe = root
+    while not probe.exists():
+        missing.append(probe)
+        probe = probe.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory)
+        except FileExistsError:
+            pass
+        _fsync_path(directory)
+        _fsync_path(directory.parent)
+
+
 def _check_inputs(inputs: Mapping[str, str | int]) -> None:
     if not isinstance(inputs, Mapping):
         raise LedgerError("inputs must be a mapping")
@@ -148,7 +167,7 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
     if not isinstance(procedure, str) or not NAME_RE.fullmatch(procedure):
         raise LedgerError("procedure is not a procedure name")
     procedures_dir = Path(procedures_dir)
-    if not (procedures_dir / f"{procedure}.json").is_file():
+    if _inside(procedures_dir, f"{procedure}.json") is None:
         raise LedgerError(f"no procedure file {procedure}.json in the procedure directory")
     _check_inputs(inputs)
     if token is None:
@@ -157,7 +176,7 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
     started = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     root = runs_root() if root is None else Path(root)
-    root.mkdir(parents=True, exist_ok=True)
+    _make_root(root)
     final = root / run_id
     if os.path.lexists(final):
         raise LedgerError(f"run {run_id} already exists")
@@ -172,8 +191,9 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
         copied = temporary / "procedure"
         os.mkdir(copied, 0o700)
         sources = sorted((entry for entry in procedures_dir.iterdir()
-                          if entry.suffix in (".json", ".md") and entry.is_file()
-                          and not entry.is_symlink()), key=lambda entry: entry.name)
+                          if entry.suffix in (".json", ".md")
+                          and _inside(procedures_dir, entry.name) is not None),
+                         key=lambda entry: entry.name)
         lines = []
         for source in sources:
             data = source.read_bytes()
@@ -207,6 +227,8 @@ def read_run(run_dir: Path) -> dict:
         raise LedgerError("run.json does not have exactly the run members")
     if not isinstance(document["project"], str):
         raise LedgerError("run.json project is not a string")
+    if document["run"] != Path(run_dir).name:
+        raise LedgerError("run.json run is not the name of its run directory")
     return document
 
 
@@ -303,12 +325,32 @@ def validate_event(event: object) -> dict:
     return dict(event)
 
 
+def _cut_torn_tail(descriptor: int) -> None:
+    """Cut the file back to its last newline, dropping a write that was cut short."""
+    end = os.fstat(descriptor).st_size
+    if end == 0 or os.pread(descriptor, 1, end - 1) == b"\n":
+        return
+    keep = 0
+    position = end
+    while position > 0:
+        start = max(0, position - 65536)
+        chunk = os.pread(descriptor, position - start, start)
+        found = chunk.rfind(b"\n")
+        if found >= 0:
+            keep = start + found + 1
+            break
+        position = start
+    os.ftruncate(descriptor, keep)
+    os.fsync(descriptor)
+
+
 def _append_line(events_path: Path, line: bytes) -> None:
     try:
-        descriptor = os.open(events_path, os.O_WRONLY | os.O_APPEND)
+        descriptor = os.open(events_path, os.O_RDWR | os.O_APPEND)
     except FileNotFoundError as error:
         raise LedgerError(f"{events_path.name} is absent") from error
     try:
+        _cut_torn_tail(descriptor)
         view = memoryview(line)
         while view:
             view = view[os.write(descriptor, view):]
@@ -326,13 +368,17 @@ def append_event(run_dir: Path, event: Mapping[str, object]) -> None:
 
 
 def _write_result(path: Path, document: object) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
+    """Publish `document` at `path` atomically, refusing a destination that exists."""
+    token = "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(8))
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{token}.tmp")
     try:
         _write_file(temporary, _compact(document).encode("utf-8"))
-        os.replace(temporary, path)
-    except BaseException:
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise LedgerError(f"{path.name} is already stored") from error
+    finally:
         temporary.unlink(missing_ok=True)
-        raise
     _fsync_path(path.parent)
 
 
@@ -409,7 +455,8 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
     state: reading those first is the caller's concern.
     """
     stage = step = last_event = None
-    wait = stop = process = None
+    wait = stop = None
+    open_processes: dict[tuple[str, int], dict] = {}
     done = False
     for event in events:
         kind = event["event"]
@@ -428,12 +475,13 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
         elif kind == "run_done":
             done = True
         elif kind == "process_started":
-            process = {"pid": event["pid"], "started": event["started"],
-                       "step": event["step"], "visit": event["visit"]}
+            key = (event["step"], event["visit"])
+            open_processes.pop(key, None)
+            open_processes[key] = {"pid": event["pid"], "started": event["started"],
+                                   "step": event["step"], "visit": event["visit"]}
         elif kind == "result_stored":
-            if process is not None and process["step"] == event["step"] \
-                    and process["visit"] == event["visit"]:
-                process = None
+            open_processes.pop((event["step"], event["visit"]), None)
+    process = list(open_processes.values())[-1] if open_processes else None
     running = alive(process["pid"], process["started"]) if process is not None else False
     return RunState(run=run["run"], project=run["project"], issue=run["issue"],  # type: ignore[arg-type]
                     stage=stage, step=step, wait=wait, stop=stop, done=done,
