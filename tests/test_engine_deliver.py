@@ -654,7 +654,39 @@ class GuardDeliverTest(unittest.TestCase):
         self.assertEqual([e for e in project.events(run) if e["event"] == "process_started"], [])
         return stored
 
-    def test_a_guard_past_its_timeout_or_unusable_is_refused_and_runs_nothing(self):
+    def test_settings_that_lose_the_guard_during_a_run_refuse_the_next_command(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-block", "b"),
+                                         step("b", "standin-record", "done")])
+        argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(argv, **options)
+        self.addCleanup(process.communicate)
+        self.addCleanup(process.kill)
+        self.addCleanup(project.release.write_text, "go", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            runs = project.runs()
+            if runs and any(e["event"] == "process_started" and e["step"] == "a"
+                            for e in project.events(runs[0])):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the run never started its step process")
+        run = runs[0]
+        project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
+        project.release.write_text("go", encoding="utf-8")
+        stdout, stderr = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 3, stdout + stderr)
+        self.assertEqual(json.loads(stdout)["end"], "needs-owner")
+        stored = json.loads((run / "results/b.1.json").read_text())
+        self.assertEqual(stored["verdict"], "refused")
+        self.assertIn("no usable guard", stored["reason"])
+        self.assertFalse(project.record.exists())
+        started = [e["step"] for e in project.events(run) if e["event"] == "process_started"]
+        self.assertEqual(started, ["a"])
+
+    def test_a_guard_past_its_timeout_or_missing_is_refused_and_runs_nothing(self):
         with self.subTest("timeout"):
             project = EngineProject(self)
             pidfile = project.tmp / "pids"
@@ -674,16 +706,20 @@ class GuardDeliverTest(unittest.TestCase):
                     time.sleep(0.05)
                 else:
                     self.fail(f"process {pid} outlived the guard timeout")
+        with self.subTest("missing"):
+            project = EngineProject(self)
+            project.use_guard(project.tmp / "missing/bin/claude-bash-lifecycle-guard")
+            self.refused_once(project, "missing")
+
+    def test_a_settings_shape_with_no_usable_guard_refuses_before_any_run(self):
         missing = "missing/bin/claude-bash-lifecycle-guard"
-        for name in ("missing", "arguments", "nul", "huge timeout", "other hook"):
+        for name in ("arguments", "nul", "huge timeout", "other hook"):
             with self.subTest(name):
                 project = EngineProject(self)
                 other = project.tmp / "other.log"
-                word = {"missing": "missing", "arguments": "arguments", "nul": "absolute path",
+                word = {"arguments": "arguments", "nul": "absolute path",
                         "huge timeout": "timeout", "other hook": "not the lifecycle guard"}[name]
-                if name == "missing":
-                    project.use_guard(project.tmp / missing)
-                elif name == "arguments":
+                if name == "arguments":
                     project.use_guard(project.tmp / missing, args=["--x"])
                 elif name == "nul":
                     project.use_guard("/g\u0000x/bin/claude-bash-lifecycle-guard")
@@ -695,7 +731,14 @@ class GuardDeliverTest(unittest.TestCase):
                 else:
                     project.use_guard(script(project.tmp / "other-hook", sys.executable,
                                              str(STANDIN_GUARD), "allow", str(other)))
-                self.refused_once(project, word)
+                done = project.deliver(project.procedures(
+                    [literal("a", ALLOW_ON, "standin-record")]))
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                self.assertIn(word, done.stderr)
+                self.assertEqual(project.runs(), [])
+                self.assertFalse(project.record.exists())
                 if name == "other hook":
                     self.assertEqual(payloads(other), [])
 
@@ -769,6 +812,12 @@ class RefusalTest(unittest.TestCase):
         self.assertIn(word, done.stderr)
         self.assertEqual(project.runs(), [])
         self.assertFalse(project.record.exists())
+
+    def test_a_host_without_the_guard_hook_starts_no_command_run(self):
+        project = EngineProject(self)
+        project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
+        done = project.deliver(project.procedures([step("a", "standin-record", "done")]))
+        self.assertRefused(project, done, "lifecycle guard")
 
     def test_an_unknown_command_id_refuses_the_procedure_before_any_process(self):
         project = EngineProject(self)
@@ -845,6 +894,7 @@ class LockTest(unittest.TestCase):
         run = runs[0]
         before = (run / "events.jsonl").read_bytes()
         runs_before = project.runs()
+        project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
         second = project.deliver(procedures)
         self.assertEqual(second.returncode, 4, second.stdout + second.stderr)
         self.assertEqual(len(second.stdout.splitlines()), 1)
