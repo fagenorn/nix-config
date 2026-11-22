@@ -7,6 +7,7 @@ far to the next action. These cases drive it over the checked toy procedure in
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import threading
@@ -25,6 +26,7 @@ from agent_tools.delivery.engine_core import (
     replay,
 )
 from agent_tools.delivery.engine_graders import Grader
+from tests.engine_walks import describe, edges, step_outcomes, walk_edges
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "tests/fixtures/engine-core"
@@ -254,6 +256,105 @@ class EventErrorTest(unittest.TestCase):
                 with self.assertRaises(engine_core.CoreError):
                     next_action(doc, inputs, events)
                 self.assertEqual((doc, inputs, events), before)
+
+
+PURE_CALLS = {"open", "exec", "eval", "compile", "__import__", "input", "breakpoint"}
+
+
+def impure(source: str, allowed: set[str]) -> list[str]:
+    """Every import outside `allowed` and every call of a builtin that reads or runs code, sorted."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                found.add(".")
+            elif node.module.startswith("agent_tools"):
+                found.update(f"{node.module}.{alias.name}" for alias in node.names)
+            else:
+                found.add(node.module)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in PURE_CALLS:
+            found.add(f"call:{node.func.id}")
+    return sorted(name for name in found if name not in allowed)
+
+
+def toy_coverage():
+    return walk_edges(toy(), INPUTS, step_outcomes(FIXTURE, "toy-core"))
+
+
+class WalkTest(unittest.TestCase):
+    def test_the_walks_take_every_edge_of_the_toy(self) -> None:
+        doc = toy()
+        coverage = toy_coverage()
+        self.assertEqual(coverage.unwalked, ())
+        self.assertEqual([(w.edge.step, w.edge.outcome) for w in coverage.walks], list(edges(doc)))
+        for walk in coverage.walks:
+            self.assertTrue(walk.end == "done" or walk.end in doc["stops"])
+            print(describe(walk))
+        self.assertEqual(
+            [describe(walk) for walk in coverage.walks],
+            [
+                "scope:ok -> draft | scope=ok draft=drafted review=approve => done",
+                "scope:failed -> needs-owner | scope=failed => needs-owner",
+                "draft:drafted -> review | scope=ok draft=drafted review=approve => done",
+                "draft:stuck -> draft | scope=ok draft=stuck draft=stuck => needs-owner",
+                "draft:exhausted -> needs-owner | scope=ok draft=stuck draft=stuck => needs-owner",
+                "review:approve -> tally | scope=ok draft=drafted review=approve => done",
+                "review:revise -> tally | scope=ok draft=drafted review=revise => needs-owner",
+                "tally:accept -> done | scope=ok draft=drafted review=approve => done",
+                "tally:revise -> needs-owner | scope=ok draft=drafted review=revise => needs-owner",
+            ],
+        )
+
+    def test_an_edge_no_walk_takes_is_reported(self) -> None:
+        doc = toy()
+        step(doc, "scope")["on"]["error"] = "needs-owner"
+        coverage = walk_edges(doc, INPUTS, step_outcomes(FIXTURE, "toy-core"))
+        self.assertEqual(coverage.unwalked, (("scope", "error"),))
+
+
+class PurityTest(unittest.TestCase):
+    def test_the_core_returns_the_same_action_for_the_same_inputs(self) -> None:
+        doc = toy()
+        for walk in toy_coverage().walks:
+            for k in range(len(walk.events) + 1):
+                with self.subTest(edge=describe(walk), k=k):
+                    events = list(walk.events[:k])
+                    snapshot = copy.deepcopy((doc, INPUTS, events))
+                    first = next_action(*copy.deepcopy((doc, INPUTS, events)))
+                    second = next_action(*copy.deepcopy((doc, INPUTS, events)))
+                    third = next_action(doc, INPUTS, events)
+                    self.assertEqual(first, second)
+                    self.assertEqual(first, third)
+                    self.assertEqual((doc, INPUTS, events), snapshot)
+
+    def test_the_core_imports_only_pure_modules(self) -> None:
+        delivery = REPO_ROOT / "python/agent_tools/delivery"
+        core = (delivery / "engine_core.py").read_text(encoding="utf-8")
+        graders = (delivery / "engine_graders.py").read_text(encoding="utf-8")
+        common = {"__future__", "dataclasses", "typing", "collections.abc"}
+        self.assertEqual(impure(core, common | {"agent_tools.delivery.engine_graders"}), [])
+        self.assertEqual(impure(graders, common), [])
+
+    def test_the_purity_check_refuses_an_impure_source(self) -> None:
+        allowed = {"__future__", "dataclasses", "typing"}
+        sources = (
+            "import time",
+            "from datetime import datetime",
+            "from pathlib import Path",
+            "import subprocess",
+            "import os.path",
+            "import random",
+            "from . import engine_graders",
+            "from agent_tools.delivery import procedure_check",
+            "open('f')",
+            "__import__('os')",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertNotEqual(impure(source, allowed), [])
+        self.assertEqual(impure("from dataclasses import dataclass", {"dataclasses"}), [])
 
 
 if __name__ == "__main__":
