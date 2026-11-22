@@ -1,4 +1,9 @@
-"""Refuse hosting-project specifics in the installed global agent corpus (#572)."""
+"""Refuse hosting-project specifics in the installed global agent corpus (#572).
+
+Inside the global standards directory only, a link to an issue on this repository's own tracker in
+exactly the form `https://github.com/fagenorn/nix-config/issues/<n>` is accepted (#1438); every other
+mention of the repository stays refused.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +25,10 @@ GLOBAL_CORPUS = (
 # Constants no file in the hosting repo states; the check names and recipes are derived instead.
 HOSTING_LITERALS = ("fagenorn/nix-config", "nix-config", "origin/main", "--base main",
                     "home/common/", "python/agent_tools/", "anis-desktop")
+# A link to an issue on the hosting tracker is accepted in the global standards only (#1438).
+TRACKER_LINK_ROOT = "home/common/agent-skills/standards"
+URL_SPAN = re.compile(r"""https?://[^\s()<>\[\]"'`]+""")
+TRACKER_ISSUE_LINK = re.compile(r"https://github\.com/fagenorn/nix-config/issues/[1-9][0-9]*")
 # Every exemption is one (file, token) pair with its reason; evals and LICENSE files are skipped by name.
 AGNOSTIC_ALLOW = {
     # retro audits the global environment and legitimately names nix-config as its generator.
@@ -27,6 +36,15 @@ AGNOSTIC_ALLOW = {
     ("home/common/agent-skills/skills/retro/SKILL.md", "fagenorn/nix-config"),
     ("home/common/agent-skills/skills/retro/SKILL.md", "home/common/"),
 }
+
+
+def without_tracker_links(line: str) -> str:
+    """The line with each URL that is exactly a tracker issue link (bar trailing punctuation) blanked out."""
+    def blank(match):
+        span = match.group(0)
+        url = span.rstrip(".,;:!?")
+        return " " + span[len(url):] if TRACKER_ISSUE_LINK.fullmatch(url) else span
+    return URL_SPAN.sub(blank, line)
 
 
 def hosting_tokens(snapshot):
@@ -63,6 +81,8 @@ def hosting_specifics(snapshot):
             scanned.add(root)
             text = (snapshot.read(path) or b"").decode("utf-8", "replace")
             for number, line in enumerate(text.splitlines(), start=1):
+                if path.startswith(TRACKER_LINK_ROOT + "/"):
+                    line = without_tracker_links(line)
                 found.extend(f"{path}:{number}:{token}" for token, pattern in patterns
                              if pattern.search(line) and (path, token) not in AGNOSTIC_ALLOW)
     missing = sorted(set(GLOBAL_CORPUS) - scanned)
