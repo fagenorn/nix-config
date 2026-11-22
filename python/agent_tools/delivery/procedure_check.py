@@ -92,8 +92,9 @@ reads its own result; a step the walk does not reach, and a member of a group
 it does not reach, skip this route check and keep the `run.<n>` and member
 checks), `unknown_member` (`X` is an agent step whose reply schema resolved and
 `m` is not in its `properties` or not in its `required` list, because a value
-the reply may leave out cannot be consumed; the result of any other kind
-declares no schema and is not member-checked) and `unknown_placeholder` (a
+the reply may leave out cannot be consumed; `X` is a decide step and `m` is
+not `verdict`, the only member its result publishes; the result of any other
+kind declares no schema and is not member-checked) and `unknown_placeholder` (a
 `{{<path>}}` of the step's prompt that is none of its `in` paths; skipped when
 the prompt is missing).
 """
@@ -800,6 +801,10 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
                 and (member not in known.reply_properties or member not in known.reply_required)):
             found.add("unknown_member",
                       f"{path!r} is not a member the reply of {producer!r} always carries.", label)
+        elif producer in by_id and by_id[producer]["kind"] == "decide" and member != "verdict":
+            found.add("unknown_member",
+                      f"{path!r} is not a member the result of {producer!r} carries; a decide step publishes only 'verdict'.",
+                      label)
 
     for path in procedure["keep_alive"]["in"]:
         check_path(path, None)

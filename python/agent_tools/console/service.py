@@ -350,7 +350,9 @@ round's `questions.asked` row as `look_repo` when a question carries a look, and
 that, never to the checkout's origin at answer time (a card issued without one is `LOOK_NO_REPOSITORY`).
 Otherwise the refusals of any answer are checked again (a question withdrawn or answered meanwhile is refused
 and nothing is posted), one `question.answered` row is appended with its `look` member (the repository too), and the approval is
-posted through `look_recorder` with `str(<that row's seq>)` as the message, outside the lock, retrying
+posted through `look_recorder` with `str(<that row's seq>)` as the message and the ids of every picture on the
+card as the sixth argument, each with its pair (the marker names their digest, #1566; the digest is no part of the answer's
+identity, so a retry finds an earlier marker of the answer whatever it carries), outside the lock, retrying
 transient failures (each retry logs `console: look_post_retry <sprint> <round> <index> <attempt> <code>:
 <detail>`). It then appends `look.recorded posted` and nudges the manager, or `look.recorded failed` with the
 plain reason after logging `console: look_post_failed <sprint> <round> <index> <code>: <detail>` (`refused:
@@ -4588,7 +4590,7 @@ class ConsoleService:
                  write_sleep: Callable[[float], object] | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
                  look_reader: Callable[[str, int], tuple[str, str | None]] = answer.look_head,
-                 look_recorder: Callable[[str, int, int, str, str], int] = answer.record_look,
+                 look_recorder: Callable[[str, int, int, str, str, Sequence[tuple[str | None, str]]], int] = answer.record_look,
                  look_ender: Callable[[str, int, int], None] = answer.end_look,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
@@ -9838,7 +9840,7 @@ class ConsoleService:
                 else answer.LOOK_MOVED.format(found=head[:7], head=look.head[:7]))
         seq = appended[-1].seq
         try:
-            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq, asked)
         except answer.LookMoved as error:
             raise sprints.Refused(str(error)) from None
         except (ForgeError, answer.Refused):
@@ -9846,12 +9848,15 @@ class ConsoleService:
         return seq
 
     def _post_look(self, project_id: str, sprint_id: str, round_id: int, index: int, slug: str,
-                   look: sprints.QuestionLook, seq: int) -> None:
+                   look: sprints.QuestionLook, seq: int, asked: sprints.Question) -> None:
         """Post the approval of the answer `seq` and record the outcome; a failure is raised after it is recorded.
+
+        The marker names the digest of the ids of every picture on `asked`, the card the owner answered.
 
         A pull request found closed or at another head is recorded as `moved` with the answer's id, which
         takes the answer back and opens the question again; `answer.LookMoved` is raised after it."""
         key = f"{sprint_id} {round_id} {index}"
+        ids = tuple((picture.pair, picture.picture) for picture in asked.pictures)
 
         def on_retry(attempt: int, error: ForgeError) -> None:
             print(f"console: look_post_retry {key} {attempt} {error.code}: "
@@ -9864,7 +9869,7 @@ class ConsoleService:
                 current = self._sprints.get(sprint_id)
                 if current is None or not sprints.takes_questions(current):
                     raise answer.Refused(sprints.ENDED)
-            return self._look_recorder(slug, look.issue, look.pr, look.head, str(seq))
+            return self._look_recorder(slug, look.issue, look.pr, look.head, str(seq), ids)
 
         try:
             comment = answer.with_retries(
@@ -9943,7 +9948,7 @@ class ConsoleService:
                 raise sprints.Refused(answer.LOOK_NOT_PENDING)
             self._look_sending.add(slot)
         try:
-            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq, asked)
         except answer.LookMoved as error:
             raise sprints.Refused(str(error)) from None
         finally:

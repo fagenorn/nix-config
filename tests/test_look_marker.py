@@ -1,5 +1,6 @@
 """Tests for `agent_tools.delivery.look_marker` (issue 1138)."""
 import base64
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -88,6 +89,30 @@ def cand(answer="approved"):
 
 def approval(cid, head, answer="approved", association="OWNER", words=None, pr=1300, issue=1200):
     return comment(cid, lm.approval_body(issue, pr, head, answer, f"m{cid}", words=words), association)
+
+
+DIG = hashlib.sha256(("a" * 64 + "\n" + "c" * 64).encode()).hexdigest()
+
+
+def pics_approval(cid, head=A, pictures=DIG):
+    return comment(cid, lm.approval_body(1200, 1300, head, "approved", f"m{cid}", pictures=pictures))
+
+
+def carry_comment(cid, a=A, h=H, pictures=DIG, association="OWNER", pr=1300):
+    return comment(cid, lm.carry_body(1200, pr, a, h, pictures), association)
+
+
+def merges_world(after):
+    """The three compares the merges-only rule reads; no set file."""
+    return {
+        lm.compare_path(B, A): cmp([PAGE], commits=[(A, [FORK])]),
+        lm.compare_path(A, H): cmp([DOC]),
+        lm.compare_path(B, H): cmp(commits=[(A, [FORK])] + after),
+    }
+
+
+def three_reads():
+    return (lm.compare_path(B, A), lm.compare_path(A, H), lm.compare_path(B, H))
 
 
 def judge(*comments):
@@ -543,6 +568,209 @@ class KeptTest(unittest.TestCase):
 
     def test_an_exact_approval_still_admits_without_a_carry(self):
         self.assertIs(judge(approval(10, H)).admit, True)
+
+
+
+class MergeCarryTest(unittest.TestCase):
+    """Issue 1566: a look approval with pictures carries across merges of the integration branch."""
+
+    def test_approval_body_records_the_picture_digest(self):
+        body = lm.approval_body(1200, 1300, A, "approved", "m1", pictures=DIG)
+        self.assertEqual(body.splitlines()[0],
+                         f"<!-- agent:look v1 issue=1200 pr=1300 head={A} answer=approved message=m1 "
+                         f"pictures={DIG} -->")
+        self.assertEqual(body.splitlines()[1],
+                         f"The owner approved head {A[:7]} of pull request 1300 after a look.")
+        self.assertEqual(lm.approval_body(1200, 1300, A, "approved", "m1"),
+                         f"<!-- agent:look v1 issue=1200 pr=1300 head={A} answer=approved message=m1 -->\n"
+                         f"The owner approved head {A[:7]} of pull request 1300 after a look.")
+        for answer, words in (("fix", "w"), ("changes", None)):
+            with self.subTest(answer=answer):
+                with self.assertRaises(ValueError):
+                    lm.approval_body(1200, 1300, A, answer, "m1", words=words, pictures=DIG)
+        for bad in ("A" * 64, "a" * 63):
+            with self.subTest(pictures=bad):
+                with self.assertRaises(ValueError):
+                    lm.approval_body(1200, 1300, A, "approved", "m1", pictures=bad)
+
+    def test_picture_digest_is_the_hash_of_the_sorted_ids(self):
+        expected = hashlib.sha256(("a" * 64 + "\n" + "c" * 64).encode()).hexdigest()
+        self.assertEqual(lm.picture_digest(["c" * 64, "a" * 64]), expected)
+        self.assertEqual(lm.picture_digest(["a" * 64, "c" * 64]), expected)
+        self.assertEqual(lm.picture_id(b"x"), hashlib.sha256(b"x").hexdigest())
+        for bad in ([], ["g" * 64]):
+            with self.subTest(ids=bad):
+                with self.assertRaises(ValueError):
+                    lm.picture_digest(bad)
+
+    def test_picture_digest_names_each_pictures_role(self):
+        a, c = "a" * 64, "c" * 64
+        expected = hashlib.sha256(f"after:{c}\nbefore:{a}".encode()).hexdigest()
+        self.assertEqual(lm.picture_digest([("before", a), ("after", c)]), expected)
+        self.assertEqual(lm.picture_digest([("after", c), ("before", a)]), expected)
+        swapped = lm.picture_digest([("before", c), ("after", a)])
+        self.assertNotEqual(swapped, expected)
+        self.assertNotEqual(lm.picture_digest([("before", a), ("after", c)]), lm.picture_digest([a, c]))
+        self.assertEqual(lm.picture_digest([(None, a), (None, c)]), lm.picture_digest([a, c]))
+        for bad in ([("middle", a)], [("before", "g" * 64)], [("before",)]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    lm.picture_digest(bad)
+
+    def test_carry_line_names_the_smallest_live_line_the_writers_elect(self):
+        self.assertEqual(lm.carry_line([carry_comment(101), carry_comment(100)], 1200, 1300, A, H, DIG), 100)
+        self.assertEqual(lm.carry_candidate([pics_approval(10), carry_comment(101), carry_comment(100)],
+                                            1200, 1300, H).line, 100)
+
+    def test_carry_body_is_the_exact_marker(self):
+        self.assertEqual(
+            lm.carry_body(1200, 1300, A, H, DIG),
+            f"<!-- agent:look-carry v1 issue=1200 pr=1300 from={A} to={H} pictures={DIG} -->\n"
+            f"Carried the owner's look approval of head {A[:7]} of pull request 1300 to head {H[:7]}: "
+            "only merges of the integration branch came in and the re-rendered pictures are unchanged.")
+        cases = {"same head": (1200, 1300, A, A, DIG), "pr 0": (1200, 0, A, H, DIG),
+                 "short head": (1200, 1300, A, "a" * 39, DIG), "uppercase digest": (1200, 1300, A, H, "A" * 64)}
+        for name, args in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    lm.carry_body(*args)
+
+    def test_the_candidate_names_its_pictures_and_a_matching_carry_line(self):
+        self.assertEqual(lm.carry_candidate([pics_approval(10), carry_comment(11)], 1200, 1300, H),
+                         lm.Candidate(1200, A, "approved", 10, DIG, 11))
+        other = lm.picture_digest(["b" * 64])
+        shapes = {
+            "another to": [pics_approval(10), carry_comment(11, h=T)],
+            "another from": [pics_approval(10), carry_comment(11, a=X)],
+            "another digest": [pics_approval(10), carry_comment(11, pictures=other)],
+            "another pr": [pics_approval(10), carry_comment(11, pr=999)],
+            "a collaborator": [pics_approval(10), carry_comment(11, association="COLLABORATOR")],
+            "ended": [pics_approval(10), carry_comment(11), comment(12, fm.end_body(11, "withdrawn"))],
+            "no line": [pics_approval(10)],
+        }
+        for name, comments in shapes.items():
+            with self.subTest(name=name):
+                self.assertEqual(lm.carry_candidate(comments, 1200, 1300, H),
+                                 lm.Candidate(1200, A, "approved", 10, DIG, None))
+        self.assertEqual(lm.carry_candidate([approval(10, A), carry_comment(11)], 1200, 1300, H),
+                         lm.Candidate(1200, A, "approved", 10, None, None))
+        self.assertEqual(lm.carry_candidate([approval(10, A, "fix", words="w"), carry_comment(11)],
+                                            1200, 1300, H),
+                         lm.Candidate(1200, A, "fix", 10, None, None))
+
+    def test_merges_only_names_its_three_reads(self):
+        self.assertEqual(lm.merges_only(A, H, lm.Carry(B, {})), lm.Kept(False, three_reads()))
+
+    def test_merges_of_the_integration_branch_carry(self):
+        for after in ([(H, [A, X])], [(T, [A, X]), (H, [T, F])]):
+            with self.subTest(after=after):
+                self.assertEqual(lm.merges_only(A, H, lm.Carry(B, merges_world(after))), lm.Kept(True, ()))
+
+    def test_merges_only_refuses_each_other_shape(self):
+        diverged = merges_world([(H, [A, X])])
+        diverged[lm.compare_path(A, H)] = cmp([DOC], status="diverged")
+        chained = [(f"{n + 1:040x}", [A if n == 0 else f"{n:040x}", X]) for n in range(lm.CHAIN_LIMIT + 1)]
+        chained[-1] = (H, chained[-1][1])
+        cases = {
+            "a one-parent commit": merges_world([(H, [A])]),
+            "a pull request commit as second parent": merges_world([(T, [A]), (H, [T, A])]),
+            "a pull request commit as second parent, swapped": merges_world([(T, [A]), (H, [A, T])]),
+            "an octopus": merges_world([(H, [A, X, F])]),
+            "a merge of an earlier pull request merge": merges_world([(T, [A, X]), (F, [T, X]), (H, [F, T])]),
+            "A...H diverged": diverged,
+            "too many merges": merges_world(chained),
+        }
+        for name, reads in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(lm.merges_only(A, H, lm.Carry(B, reads)), lm.Kept(False, ()))
+        for path in three_reads():
+            with self.subTest(none=path):
+                reads = {**merges_world([(H, [A, X])]), path: None}
+                self.assertEqual(lm.merges_only(A, H, lm.Carry(B, reads)), lm.Kept(False, ()))
+        short = merges_world([(H, [A, X])])
+        short[lm.compare_path(B, H)]["total_commits"] += 1
+        with self.assertRaises(lm.Unreadable):
+            lm.merges_only(A, H, lm.Carry(B, short))
+        self.assertEqual(lm.merges_only(A, A, lm.Carry(B, merges_world([(H, [A, X])]))), lm.Kept(False, ()))
+
+    def test_kept_asks_the_merge_rule_only_for_an_approved_candidate_with_a_line(self):
+        c = lm.Candidate(1200, A, "approved", 10, DIG, 11)
+        self.assertEqual(lm.kept(c, H, lm.Carry(B, {})), lm.Kept(False, three_reads()))
+        self.assertEqual(lm.kept(c, H, lm.Carry(B, merges_world([(H, [A, X])]))), lm.Kept(True, ()))
+        four = lm.Kept(False, (lm.contents_path(B), lm.compare_path(B, A), lm.compare_path(A, H),
+                               lm.compare_path(B, H)))
+        for other in (lm.Candidate(1200, A, "approved", 10, None, None), lm.Candidate(1200, A, "fix", 10, None, 11)):
+            with self.subTest(other=other):
+                self.assertEqual(lm.kept(other, H, lm.Carry(B, {})), four)
+
+    def test_an_approval_with_pictures_and_no_line_is_kept_by_no_look_file_rule(self):
+        # Issue 1566 review: the owner looked at pictures, so a head no look file changed is kept only by a carry line.
+        reads = world(*TEST_ONLY)
+        self.assertEqual(lm.kept(lm.Candidate(1200, A, "approved", 10), H, lm.Carry(B, reads)), lm.Kept(True, ()))
+        for read in (reads, {}):
+            with self.subTest(reads=len(read)):
+                pictured = lm.Candidate(1200, A, "approved", 10, DIG, None)
+                self.assertEqual(lm.kept(pictured, H, lm.Carry(B, read)), lm.Kept(False, ()))
+        self.assertIs(lm.settle(lm.Candidate(1200, A, "approved", 10, DIG, None), H, B, reads.__getitem__), False)
+        bare = lm.IssueFacts(1200, BODY, (pics_approval(10),))
+        self.assertEqual(lm.judge(1300, H, [bare], lm.Carry(B, reads)).admit, False)
+
+    def test_a_clean_integration_merge_needs_its_carry_line_under_pictures(self):
+        merged = merges_world([(H, [A, X])])
+        no_line = lm.IssueFacts(1200, BODY, (pics_approval(10),))
+        self.assertEqual(lm.judge(1300, H, [no_line], lm.Carry(B, merged)).admit, False)
+        lined = lm.IssueFacts(1200, BODY, (pics_approval(10), carry_comment(11)))
+        self.assertEqual(lm.judge(1300, H, [lined], lm.Carry(B, merged)).admit, True)
+
+    def test_judge_admits_a_carried_head_only_with_its_line(self):
+        carry = lm.Carry(B, merges_world([(H, [A, X])]))
+        facts = lm.IssueFacts(1200, BODY, (pics_approval(10), carry_comment(11)))
+        self.assertEqual(lm.judge(1300, H, [facts], carry), lm.Verdict(True, marked=(1200,)))
+        bare = lm.IssueFacts(1200, BODY, (pics_approval(10),))
+        refused = lm.judge(1300, H, [bare], carry)
+        self.assertEqual((refused.admit, refused.issue), (False, 1200))
+        empty = lm.judge(1300, H, [facts], lm.Carry(B, {}))
+        self.assertEqual((empty.admit, empty.issue, empty.need), (False, 1200, tuple(sorted(three_reads()))))
+
+    def test_settle_merges_reads_only_compares(self):
+        reads = merges_world([(H, [A, X])])
+        seen = []
+
+        def read(path):
+            seen.append(path)
+            return reads[path]
+
+        self.assertIs(lm.settle_merges(A, H, B, read), True)
+        self.assertEqual(len(seen), 3)
+        for path in seen:
+            self.assertRegex(path, lm.COMPARE_PATH)
+
+    def fallback_world(self):
+        after = [(T, [A]), (H, [T])]
+        return merges_world(after)
+
+    def test_a_line_that_does_not_carry_falls_back_in_one_batched_run(self):
+        c = lm.Candidate(1200, A, "approved", 10, DIG, 11)
+        three = self.fallback_world()
+        self.assertEqual(lm.kept(c, H, lm.Carry(B, three)),
+                         lm.Kept(False, (lm.contents_path(B), lm.compare_path(A, T), lm.compare_path(T, H))))
+        full = {**three, lm.contents_path(B): CONSOLE, lm.compare_path(A, T): cmp([DOC]),
+                lm.compare_path(T, H): cmp([DOC])}
+        self.assertEqual(lm.kept(c, H, lm.Carry(B, full)), lm.Kept(True, ()))
+
+    def test_settle_decides_a_fallback_within_its_runs(self):
+        c = lm.Candidate(1200, A, "approved", 10, DIG, 11)
+        full = {**self.fallback_world(), lm.contents_path(B): CONSOLE, lm.compare_path(A, T): cmp([DOC]),
+                lm.compare_path(T, H): cmp([DOC])}
+        seen = []
+
+        def read(path):
+            seen.append(path)
+            return full[path]
+
+        self.assertIs(lm.settle(c, H, B, read), True)
+        self.assertEqual(seen, [*three_reads(), lm.contents_path(B), lm.compare_path(A, T),
+                                lm.compare_path(T, H)])
 
 
 class SettleTest(unittest.TestCase):
