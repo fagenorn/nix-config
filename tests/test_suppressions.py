@@ -162,6 +162,12 @@ class SuppressionCountTest(unittest.TestCase):
                 {"a.py": 's = "x"  # ' + marker + "\n"}, PY)
             self.assertEqual(result, ([], []))
 
+    def test_a_marker_outside_a_python_file_is_read_by_line_comment_or_not(self):
+        for line in ('x = "' + suppress("FX1", "why") + '";', "echo " + suppress("FX1", "why")):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    [m.rule for m in rule_ids.markers(line + "\n")], ["FX1"])
+
     def test_a_marker_in_a_binary_file_is_not_read(self):
         _, snapshot = self.counted_in(
             {"a.bin": b"\0" + ("# " + suppress("FX1") + "\n").encode()})
@@ -247,6 +253,27 @@ class NeverRiseSuppressionTest(unittest.TestCase):
         verdict = self.world({"b.txt": old}, {"b.txt": reasoned + "y\n" + old})
         self.assertEqual(
             verdict.suppressions, (Suppression("FX1", "b.txt", 1, "generated fixture"),))
+
+    def test_an_old_suppression_pushed_far_by_an_insert_is_not_the_one_listed(self):
+        reasoned = "x  # " + suppress("FX1", "generated fixture") + "\n"
+        old = lines(39) + reasoned
+        verdict = self.world({"b.txt": old}, {"b.txt": lines(40, "new") + reasoned + old})
+        self.assertEqual(
+            verdict.suppressions, (Suppression("FX1", "b.txt", 41, "generated fixture"),))
+
+    def test_a_suppression_whose_line_was_edited_in_place_is_not_listed(self):
+        marker = "  # " + suppress("FX1", "generated fixture") + "\n"
+        verdict = self.world(
+            {"b.txt": lines(9) + "x" + marker}, {"b.txt": lines(9) + "y" + marker})
+        self.assertEqual(verdict.suppressions, ())
+
+    def test_a_suppression_kept_in_a_renamed_and_edited_file_is_not_listed(self):
+        marker = "x  # " + suppress("FX1", "generated fixture") + "\n"
+        body = lines(30) + marker + lines(30)
+        verdict = self.world(
+            {"src/b.txt": body}, {"dst/b.txt": "new\n" + body},
+            after=lambda root: git(root, "rm", "-q", "src/b.txt"))
+        self.assertEqual(verdict.suppressions, ())
 
     def test_an_existing_bare_marker_holds(self):
         verdict = self.world(
@@ -469,6 +496,12 @@ class SuppressionDocsTest(unittest.TestCase):
         self.assertTrue(any(
             span.startswith(rule_ids.SUPPRESS)
             for span in context_map_lint.CODE_RE.findall(block)))
+
+    def test_the_readme_and_the_adr_state_that_a_non_python_marker_is_read_by_line(self):
+        adr = REPO_ROOT / "docs/areas/project-contract/adr/018-a-suppression-names-its-rule-and-a-reason.md"
+        for path in (self.README, adr):
+            with self.subTest(path=path.name):
+                self.assertIn("any other file is read by line", path.read_text("utf-8").lower())
 
 
 if __name__ == "__main__":

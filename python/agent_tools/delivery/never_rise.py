@@ -44,9 +44,12 @@ each such rule as a count rule of its own, so adding one rises.
 
 `Verdict.suppressions` lists each reasoned suppression the branch adds, by
 `added_suppressions`: those of the branch not matched, as a multiset of `(rule, path,
-reason)` with the path followed through git renames, by a reasoned suppression of the
-base. Of equal ones, the base's is matched to the branch's on the same line, then to the
-nearest, so the one listed is the one the branch added. It lists and never fails: a listed
+line, reason)`, by a reasoned suppression of the base carried to the branch. A base
+suppression is carried by `line_changes`, the hunks of `git diff-tree -M -U0` from base to
+head: its path follows the git renames, and its line moves by the net lines the hunks above
+it add or remove, or, inside a hunk that replaces as many lines as it removes, to the same
+place in the replacement; inside any other hunk it is gone. So the one listed is the one
+the branch added, wherever it sits. It lists and never fails: a listed
 suppression raises no count. `Suppression.text()` is `<rule> <path>:<line> <reason>` on one
 line, path and reason escaped as below. `text(limit)` holds the line to `limit` characters
 by bounding each field alone: the rule to `RULE_FIELD`, the path to `PATH_FIELD` keeping its
@@ -75,6 +78,7 @@ enforcer.
 
 import os
 import subprocess
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -142,6 +146,14 @@ class Suppression(NamedTuple):
         if len(reason) > room:
             reason = reason[:room - len(ELLIPSIS)] + ELLIPSIS
         return f"{rule} {path}:{self.line} {reason}"
+
+
+class Hunk(NamedTuple):
+    """One `@@ -old_start,old_count +new_start,new_count @@` hunk of a zero-context diff."""
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
 
 
 class Snapshot(NamedTuple):
@@ -272,6 +284,68 @@ def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str
     return {tokens[i + 2]: tokens[i + 1] for i in range(0, len(tokens) - 2, 3)}
 
 
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+QUOTED_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
+
+
+def _unquote(name: bytes) -> bytes:
+    """A path as git writes it in a diff header: C-quoted when it holds a special character."""
+    if not (len(name) >= 2 and name.startswith(b'"') and name.endswith(b'"')):
+        return name
+    body, out, i = name[1:-1], bytearray(), 0
+    while i < len(body):
+        if body[i] == 92 and i + 1 < len(body):
+            octal = re.match(rb"[0-7]{1,3}", body[i + 1:])
+            if octal:
+                out.append(int(octal[0], 8) & 255)
+                i += 1 + len(octal[0])
+                continue
+            out.append(QUOTED_ESCAPES.get(chr(body[i + 1]), body[i + 1]))
+            i += 2
+        else:
+            out.append(body[i])
+            i += 1
+    return bytes(out)
+
+
+def line_changes(root: Path, base: str, head: str,
+                 timeout: float | None) -> dict[str, tuple[Hunk, ...]] | None:
+    """The zero-context hunks from base to head, keyed by the path they leave at head."""
+    out = _git(root, ["-c", "core.quotepath=off", "diff-tree", "--no-color", "-r", "-M", "-p",
+                      "-U0", "--src-prefix=a/", "--dst-prefix=b/", base, head], timeout)
+    if out is None:
+        return None
+    changes: dict[str, list[Hunk]] = {}
+    path: str | None = None
+    for raw in out.split(b"\n"):
+        if raw.startswith(b"diff --git "):
+            path = None
+        elif raw.startswith(b"+++ "):
+            name = _unquote(raw[4:].rstrip(b"\t"))
+            path = os.fsdecode(name[2:]) if name.startswith(b"b/") else None
+        elif raw.startswith(b"@@") and path is not None:
+            match = HUNK_HEADER.match(raw.decode("ascii", errors="replace"))
+            if match:
+                old_start, old_count, new_start, new_count = (
+                    int(g) if g is not None else 1 for g in match.groups())
+                changes.setdefault(path, []).append(
+                    Hunk(old_start, old_count, new_start, new_count))
+    return {name: tuple(hunks) for name, hunks in changes.items()}
+
+
+def carried(line: int, hunks: Sequence[Hunk]) -> int | None:
+    """The line a base line is at on the branch through `hunks`, or None when a hunk replaced it."""
+    offset = 0
+    for hunk in hunks:
+        if line <= (hunk.old_start if hunk.old_count == 0 else hunk.old_start - 1):
+            break
+        if hunk.old_count and line < hunk.old_start + hunk.old_count:
+            same = hunk.old_count == hunk.new_count
+            return hunk.new_start + (line - hunk.old_start) if same else None
+        offset += hunk.new_count - hunk.old_count
+    return line + offset
+
+
 def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     found = enforcer.find(snapshot)
     for violation in found:
@@ -343,41 +417,31 @@ def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
     return tuple(rises)
 
 
-def added_suppressions(base: Snapshot, branch: Snapshot,
-                       renamed: Mapping[str, str]) -> tuple[Suppression, ...]:
-    """The reasoned suppressions the branch adds, those the base does not hold; pure.
+def added_suppressions(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
+                       changes: Mapping[str, Sequence[Hunk]]) -> tuple[Suppression, ...]:
+    """The reasoned suppressions the branch adds, those the base does not carry over; pure.
 
-    A branch suppression equal to one of the base (rule, path through renames, reason) is
-    matched to the base's on the same line first, then to the nearest line left, so a
-    suppression added above an old one is the one listed.
+    A base suppression is carried to its path through `renamed` and its line through the
+    `changes` hunks of that path; a branch suppression equal to one carried over (rule, path,
+    line, reason) is the base's, and every other is added.
     """
-    held: dict[tuple, list[int]] = {}
+    moved = {old: new for new, old in renamed.items()}
+    held: Counter[tuple] = Counter()
     for suppression in base.suppressions:
         if suppression.reasoned:
-            key = (suppression.rule, suppression.path, suppression.reason)
-            held.setdefault(key, []).append(suppression.line)
-    groups: dict[tuple, list[Suppression]] = {}
-    for suppression in branch.suppressions:
-        if suppression.reasoned:
-            key = (suppression.rule, renamed.get(suppression.path, suppression.path),
-                   suppression.reason)
-            groups.setdefault(key, []).append(suppression)
+            path = moved.get(suppression.path, suppression.path)
+            line = carried(suppression.line, changes.get(path, ()))
+            if line is not None:
+                held[(suppression.rule, path, line, suppression.reason)] += 1
     added = []
-    for key, group in groups.items():
-        lines = Counter(held.get(key, ()))
-        rest = []
-        for suppression in group:
-            if lines[suppression.line] > 0:
-                lines[suppression.line] -= 1
-            else:
-                rest.append(suppression)
-        left = sorted(line for line, count in lines.items() for _ in range(count))
-        for line in left:
-            if not rest:
-                break
-            nearest = min(range(len(rest)), key=lambda k: abs(rest[k].line - line))
-            del rest[nearest]
-        added += rest
+    for suppression in branch.suppressions:
+        if not suppression.reasoned:
+            continue
+        key = (suppression.rule, suppression.path, suppression.line, suppression.reason)
+        if held[key] > 0:
+            held[key] -= 1
+        else:
+            added.append(suppression)
     return tuple(sorted(added, key=lambda s: (s.path, s.line)))
 
 
@@ -391,8 +455,9 @@ def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
     base_snapshot = read_snapshot(root, base, timeout)
     branch_snapshot = read_snapshot(root, head, timeout)
     renamed = renames(root, base, head, timeout)
-    if base_snapshot is None or branch_snapshot is None or renamed is None:
+    changes = line_changes(root, base, head, timeout)
+    if base_snapshot is None or branch_snapshot is None or renamed is None or changes is None:
         return None
     return Verdict(
         base, head, compare(base_snapshot, branch_snapshot, renamed, enforcers),
-        added_suppressions(base_snapshot, branch_snapshot, renamed))
+        added_suppressions(base_snapshot, branch_snapshot, renamed, changes))
