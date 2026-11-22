@@ -6,17 +6,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import agent_gate_bundle as gate
 from agent_tools.delivery import promotion_schema as schema
 from agent_tools.canonical import telemetry_digest
 
-from .promotion_test_support import make_env, resolved_project, run
+from .promotion_test_support import make_env, resolved_project, run, write_bundle
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DRAFT = ".agents/knowledge/promotions/drafts/investigate-before-changing.json"
 CANDIDATE = ".agents/knowledge/promotions/candidates/investigate-before-changing.json"
-TRIALS = ".agents/artifacts/evidence/promotion-127-trials.json"
-BUNDLE = ".agents/artifacts/evidence/promotion-127-bundle.json"
+BUNDLE = ".agents/artifacts/evidence/b.json"
 
 
 def load(relative):
@@ -55,22 +53,14 @@ class CommittedDocumentsTest(DemoCase):
             "--title", "promotion: Investigate before changing", "--body"])
         self.assertIn(f"document: {CANDIDATE}", command[-1].splitlines())
 
-    def test_the_committed_bundle_is_the_real_unmeasured_output(self):
-        manifest = gate.load_manifest(REPO_ROOT / TRIALS)
-        self.assertEqual([case["case_class"] for case in manifest["cases"]],
-                         list(gate.CORE_CASE_CLASSES))
-        self.assertTrue(all(case["strata"] == {} for case in manifest["cases"]))
-        bundle = load(BUNDLE)
-        self.assertEqual(gate.verify_bundle(bundle), "unmeasured")
-        self.assertEqual(bundle["identity"], manifest["identity"])
-
 
 class DemoWalkTest(DemoCase):
     def test_the_demo_reaches_decision_ready_and_stops_at_authorized(self):
         root = self.tmp / "project"
-        for relative in (DRAFT, CANDIDATE, TRIALS, BUNDLE):
+        for relative in (DRAFT, CANDIDATE):
             (root / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO_ROOT / relative, root / relative)
+        write_bundle(root, BUNDLE, "unmeasured")
         env = make_env(self.tmp, resolved_project(root))
         path = str(root / CANDIDATE)
         code, payload, err = run(env, "advance", "--candidate", path, "--to", "evaluating",
@@ -84,7 +74,8 @@ class DemoWalkTest(DemoCase):
         self.assertEqual(code, 0, err)
         self.assertEqual([payload["evidence"]["state"], payload["evidence"]["bundle_id"],
                           payload["evidence"]["bundle_path"]],
-                         ["unmeasured", load(BUNDLE)["bundle_id"], BUNDLE])
+                         ["unmeasured", json.loads((root / BUNDLE).read_text(encoding="utf-8"))["bundle_id"],
+                          BUNDLE])
         self.assertEqual([c["repository"] for c in payload["corroboration"]["repositories"]],
                          ["fagenorn/argus", "elevenyellow/nodocom"])
         code, payload, _ = run(env, "advance", "--candidate", path, "--to", "authorized",

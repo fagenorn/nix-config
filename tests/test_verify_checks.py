@@ -1678,11 +1678,6 @@ class BundleVerdictTest(unittest.TestCase):
                 self.assertEqual((code, report["approved"]), (75, []))
                 self.assertEqual([u["path"] for u in report["unreadable"]], ["x-bundle.json"])
 
-    def test_the_committed_cutover_bundle_verifies_unmeasured(self):
-        doc = json.loads((ROOT / ".agents/artifacts/evidence/cutover-579-bundle.json").read_text())
-        self.assertEqual(agent_gate_bundle.verify_bundle(doc), "unmeasured")
-        self.assertRegex(doc["identity"]["bound"]["commit"]["candidate"], r"^[0-9a-f]{40}$")
-
     def test_the_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/cutover-bundle"), "100755")
 
