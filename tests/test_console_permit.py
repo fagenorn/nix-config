@@ -390,6 +390,21 @@ class JudgeTest(unittest.TestCase):
                 self.assertTrue(mentions(command))
         self.assertEqual([], self.fake.calls)
 
+    def test_a_release_run_behind_another_command_of_a_chain_is_refused(self):
+        """The client matches each subcommand of a chain on its own, so the release allow rule matches
+        the segment wherever it stands, and the permit must decide the whole text (#1592)."""
+        plain = f"release transaction run --repo-root r --commit {SHA} --version v1.2.3 --confirm t"
+        for command in ("git status && release transaction run --help",
+                        f"git status && {plain}", f"git status; {plain}", f"git status | {plain}",
+                        f"git status\n{plain}", f"(git status; {plain})", f"echo $({plain})",
+                        f"timeout 5 {plain}", f"git status && time {plain}"):
+            with self.subTest(command):
+                self.assertTrue(mentions(command))
+                verdict = self.judge(command)
+                self.assertEqual((DENY, permit.RELEASE, permit.RELEASE_SPELLING),
+                                 (verdict.decision, verdict.verb, verdict.reason))
+        self.assertEqual([], self.fake.calls)
+
     def test_every_other_release_spelling_gets_no_decision(self):
         for command in self.NO_DECISION:
             with self.subTest(command):

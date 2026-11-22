@@ -5400,9 +5400,25 @@ def structure_problem(compiled, words):
     return f"{shown_value(found)} is out of place"
 
 
+def valued_flags(elements):
+    """The literal flag words in `elements`, groups included, each followed immediately
+    by a slot: the flags whose next word is a value, not an option (issue 1592)."""
+    valued = set()
+    for index, element in enumerate(elements):
+        if isinstance(element, Group):
+            valued |= valued_flags(element.elements)
+        elif isinstance(element, Literal) and element.word.startswith("-"):
+            following = elements[index + 1:index + 2]
+            if following and isinstance(following[0], Slot):
+                valued.add(element.word)
+    return valued
+
+
 def missing_flags(compiled, words):
     """The flags every form of `compiled` spells at the top level (issue 1592), in the
-    first form's order, that `words` lack; a word inside a `Group` is not required."""
+    first form's order, that `words` lack; a word inside a `Group` is not required.
+    A word that is the value of a flag taking one (`--subject "--merge"`) is not an
+    option, so it never counts as the flag it spells."""
     required = [
         element.word for element in compiled.forms[0].elements
         if isinstance(element, Literal) and element.word.startswith("-")
@@ -5411,7 +5427,12 @@ def missing_flags(compiled, words):
         spelled = {element.word for element in form.elements
                    if isinstance(element, Literal)}
         required = [flag for flag in required if flag in spelled]
-    return [flag for flag in required if flag not in words]
+    valued = set()
+    for form in compiled.forms:
+        valued |= valued_flags(form.elements)
+    options = {word for index, word in enumerate(words)
+               if not (index and words[index - 1] in valued)}
+    return [flag for flag in required if flag not in options]
 
 
 def missing_clause(problem, flags):

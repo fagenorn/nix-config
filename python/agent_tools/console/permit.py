@@ -39,12 +39,14 @@ owner's word and disposes on the owner's yes to a token). A literal command is j
 value is never an option: `--notes-file /tmp/a--dispose.md` is an ordinary run. The one word read
 as a command line is a shell wrapper's body (the word after a `-c` style flag, or after `eval`): an
 abandon or a dispose inside it is `ABANDON` or `DISPOSE`. The plain run is
-`RELEASE` only as the literal shape above and only as the first command. A command whose text begins
-with `release transaction run`, and that is neither the plain run nor abandon or dispose (a preview
-flag, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a repeated flag, a
-value beginning with `-`, a chained operator, an expansion), is `DENY` with `RELEASE_SPELLING`, so every
-text the manager's release allow rule matches is decided (#1592, ADR-console-101). Every other release
-spelling (a preview, a wrapper, `xargs`, text built at run time and piped to a shell) gets no decision
+`RELEASE` only as the literal shape above and only as the first command. A command that runs
+`release transaction run` at a command position (the text start, after a chain or pipe operator, or behind
+a wrapper the client strips before it matches rules), and that is neither the plain run nor abandon or
+dispose (a preview flag, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a
+repeated flag, a value beginning with `-`, a chain, an expansion), is `DENY` with `RELEASE_SPELLING`, so
+every text the manager's release allow rule matches, which the client matches for each subcommand of a
+chain on its own, is decided (#1592, ADR-console-101). Every other release
+spelling (a preview, text built at run time and piped to a shell) gets no decision
 and falls to the session's classifier, as a merge spelling does; the release command's own approval
 check is what makes that safe, and the residual is that an abandon or dispose spelling the scan cannot
 see also gets no decision.
@@ -390,8 +392,13 @@ def words(command: str) -> list[str] | None:
 
 _SPLIT = re.compile(r"[\s;|&()<>$`,\[\]{}]+")
 _SHELL_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
-# A command whose own text begins with the release run, the text the manager's release allow rule matches.
-_RELEASE_RUN_TEXT = re.compile(r"\s*release\s+transaction\s+run(?:\s|\Z)")
+# A release run at a command position: the text start or after an operator, and after the wrappers the client
+# strips before it matches rules (the guard refuses the detaching one). The client matches each subcommand of
+# a chain on its own, so the manager's release allow rule matches such a segment wherever it stands (#1592).
+_RELEASE_RUN_TEXT = re.compile(
+    r"(?:\A|[;&|\n(){`]|\$\()\s*"
+    r"(?:(?:timeout|time|nice|stdbuf|command|builtin|noglob|xargs)(?:\s+-?[\w=.,:-]+)*?\s+)*"
+    r"release\s+transaction\s+run(?:\s|\Z)")
 
 
 def release_target(command: str) -> dict | None:
@@ -462,7 +469,7 @@ def _verb_of(command: str) -> str | None:
         if name == "gh" and rest == ["run", "rerun"]:
             return RERUN
     found = release_operation(command)
-    if found is None and _RELEASE_RUN_TEXT.match(command):
+    if found is None and _RELEASE_RUN_TEXT.search(command):
         return RELEASE
     return found
 

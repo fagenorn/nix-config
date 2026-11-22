@@ -236,13 +236,28 @@ class AllowRulesTest(unittest.TestCase):
         return (re.fullmatch(pattern, command, re.S) is not None
                 or (body.endswith(" *") and body.count("*") == 1 and command == body[:-2]))
 
+    GLOBAL_ALLOW = ("Bash(git status:*)",)
+
     def rules(self, document, command):
+        """The client's rule outcome: a chain is split into its subcommands, a deny rule matching any
+        of them denies, and the chain is allowed only when every one is (the owner's global allow
+        rules, `GLOBAL_ALLOW`, count as the owner's allow list)."""
         permissions = document["permissions"]
-        if any(self.matches(rule, command) for rule in permissions["deny"]):
+        allow = [*permissions.get("allow", []), *self.GLOBAL_ALLOW]
+        segments = [command, *(part for part in re.split(r"\s*(?:&&|\|\||;|\||&|\n)\s*", command)
+                               if part)]
+        if any(self.matches(rule, part) for rule in permissions["deny"] for part in segments):
             return "deny"
-        if any(self.matches(rule, command) for rule in permissions.get("allow", [])):
+        if all(any(self.matches(rule, part) or self.legacy(rule, part) for rule in allow)
+               for part in segments[1:] or segments):
             return "allow"
         return None
+
+    @staticmethod
+    def legacy(rule, command):
+        """The legacy `Bash(prefix:*)` rule."""
+        body = rule[len("Bash("):-1]
+        return body.endswith(":*") and (command == body[:-2] or command.startswith(body[:-2] + " "))
 
     def effective(self, document, command):
         hook = permit.judge(command, self.grant, self.fake.forge())
@@ -292,12 +307,27 @@ class AllowRulesTest(unittest.TestCase):
                 + "c" * 40 + " --delete-branch",
                 "release transaction run --repo-root=r --confirm t",
                 f"release transaction run --commit {SHA} --version v1.2.3 --preview",
-                'release transaction run --repo-root r --title "$HOME" --confirm t'):
+                'release transaction run --repo-root r --title "$HOME" --confirm t',
+                "git status && release transaction run --help",
+                "git status; release transaction run --repo-root r --confirm t"):
             with self.subTest(boundary=command):
                 self.assertEqual(self.rules(self.document, command), "allow")
                 self.assertEqual(permit.judge(command, self.grant, self.fake.forge()).decision,
                                  permit.DENY)
                 self.assertEqual(self.effective(self.document, command), "deny")
+        flags = "--repo o/r --merge --match-head-commit * --delete-branch"
+        self.assertEqual(self.document["permissions"]["allow"], [
+            f"Bash(gh pr merge * {flags})",
+            f"Bash(env -u GH_TOKEN -u GITHUB_TOKEN gh pr merge * {flags})",
+            f"Bash(env -u GITHUB_TOKEN -u GH_TOKEN gh pr merge * {flags})",
+            f"Bash(env -u GITHUB_TOKEN gh pr merge * {flags})",
+            f"Bash(env -u GH_TOKEN gh pr merge * {flags})",
+            "Bash(gh run rerun * --failed --repo o/r)",
+            "Bash(env -u GH_TOKEN -u GITHUB_TOKEN gh run rerun * --failed --repo o/r)",
+            "Bash(env -u GITHUB_TOKEN -u GH_TOKEN gh run rerun * --failed --repo o/r)",
+            "Bash(env -u GITHUB_TOKEN gh run rerun * --failed --repo o/r)",
+            "Bash(env -u GH_TOKEN gh run rerun * --failed --repo o/r)",
+            "Bash(release transaction run *)"])
         openings = ("Bash(gh pr merge ", "Bash(gh run rerun ", "Bash(release transaction run ",
                     *(f"Bash({spelling}gh " for spelling in self.ENV))
         for rule in self.document["permissions"]["allow"]:
@@ -307,7 +337,7 @@ class AllowRulesTest(unittest.TestCase):
 
     def test_the_rules_allow_no_close_no_admin_merge_and_no_deploy_rerun(self):
         for command in ("gh pr close 7 --repo o/r", "gh pr close 7 --repo o/r --delete-branch",
-                        "env -u GITHUB_TOKEN -u GH_TOKEN gh pr close 7 --repo o/r"):
+                        *(f"{prefix}gh pr close 7 --repo o/r" for prefix in self.ENV)):
             with self.subTest(close=command):
                 self.assertNotEqual(self.rules(self.document, command), "allow")
         tail = f"--repo o/r --merge --match-head-commit {SHA} --delete-branch"

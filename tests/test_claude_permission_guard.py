@@ -4197,6 +4197,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              + GRAMMAR),
             (f"gh pr merge 2342 --repo {NODO} {head}",
              "lifecycle guard: unsafe merge: missing --merge; accepted: "),
+            # A flag spelled as another flag's value is not the flag.
+            (f'gh pr merge 2342 --repo {NODO} --merg --subject "--merge" {head}',
+             "lifecycle guard: unsafe merge: unknown flag --merg; missing --merge; accepted: "),
         ):
             with self.subTest(command=command):
                 line = self.refusal_line(self.run_guard(command, cwd=nodo,
