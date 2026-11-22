@@ -217,6 +217,51 @@ class VerifySlotTest(unittest.TestCase):
         self.assertEqual(later_code, 0)
         self.assertNotIn(verify_slot.DEFERRING_LINE, later_err)
 
+    def test_a_live_run_stays_within_its_wait_limit_while_an_ordinary_probe_is_stalled(self):
+        self.slots.mkdir(parents=True)
+        probe = os.open(self.slots / verify_slot.LIVE_MARKER, os.O_RDWR | os.O_CREAT, 0o666)
+        fcntl.flock(probe, fcntl.LOCK_EX)
+        self.release("d")
+        try:
+            started = time.monotonic()
+            code, err = self.finish(self.start("d", "--live", "--wait-limit", "1"), timeout=6)
+            elapsed = time.monotonic() - started
+        finally:
+            os.close(probe)
+        self.assertEqual(code, NO_SLOT_EXIT)
+        self.assertIn(NO_SLOT_LINE.format(limit=1), err.splitlines())
+        self.assertLess(elapsed, 5)
+        self.assertFalse(self.mark("d", "start").exists())
+
+    def test_an_unusable_marker_is_a_setup_error_and_frees_the_slot(self):
+        self.slots.mkdir(parents=True)
+        (self.slots / verify_slot.LIVE_MARKER).mkdir()
+        code, err = self.finish(self.start("b", "--wait-limit", "1"))
+        self.assertEqual(code, 2)
+        self.assertIn("verify-slot: cannot take a slot", err)
+        self.assertFalse(self.mark("b", "start").exists())
+        slot = os.open(self.slots / "slot-0.lock", os.O_RDWR)
+        self.addCleanup(os.close, slot)
+        fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_concurrent_ordinary_probes_do_not_defer_to_each_other(self):
+        self.slots.mkdir(parents=True)
+        marker = os.open(self.slots / verify_slot.LIVE_MARKER, os.O_RDWR | os.O_CREAT, 0o666)
+        guard = os.open(self.slots / verify_slot.LIVE_PROBE, os.O_RDWR | os.O_CREAT, 0o666)
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        fcntl.flock(marker, fcntl.LOCK_EX)
+        self.release("b")
+        proc = self.start("b", "--wait-limit", "10")
+        try:
+            time.sleep(0.7)
+        finally:
+            os.close(marker)
+            os.close(guard)
+        code, err = self.finish(proc)
+        self.assertEqual(code, 0)
+        self.assertTrue(self.mark("b", "start").exists())
+        self.assertNotIn(verify_slot.DEFERRING_LINE, err)
+
     def test_an_ordinary_run_goes_on_once_the_live_waiter_is_gone(self):
         first = self.start("a")
         self.assertTrue(wait_for(self.mark("a", "start")))

@@ -24,13 +24,23 @@ waiter goes before every ordinary one (see `--live`).
 `--live` (issue 1434) marks a live-fault run, which waits ahead of every ordinary run and
 never stops one in progress. While it waits it holds a shared `flock` on the marker file
 `LIVE_MARKER` (`live-waiting.lock`) in the slot directory, created with mode 0666 like a slot
-file so every account can lock it; it is not a slot and no slot count includes it. The run
-drops the marker once it holds a slot or ends for any other reason, and the kernel drops it
-when the waiter dies, so a SIGKILLed live waiter frees the ordinary runs at once. An ordinary
-run that took a slot checks the marker last and, while any live waiter holds it, gives the
-slot back and waits: it prints `DEFERRING_LINE` once instead of `WAITING_LINE`. A slot that a
-live run did not yet hold is thereby left to the live waiter, and a run in progress is never
-preempted.
+file so every account can lock it; it is not a slot and no slot count includes it. The live
+run registers with a non-blocking lock retried every `REGISTER_RETRY_SECONDS` inside its
+timed, signal-aware wait, so a process that stalls while probing the marker delays neither
+`--wait-limit` nor a signal. The run drops the marker once it holds a slot or ends for any
+other reason, and the kernel drops it when the waiter dies, so a SIGKILLed live waiter frees
+the ordinary runs at once. An ordinary run that took a slot checks the marker last and, while
+any live waiter holds it, gives the slot back and waits: it prints `DEFERRING_LINE` once
+instead of `WAITING_LINE`. A slot that a live run did not yet hold is thereby left to the live
+waiter, and a run in progress is never preempted.
+
+The check is an exclusive non-blocking probe of the marker, which another ordinary run's
+probe would also fail, so ordinary probes take turns: each holds an exclusive `flock` on the
+guard file `LIVE_PROBE` (`live-probe.lock`, also mode 0666) around its probe, and a live run
+never takes it. A probe that finds the guard taken retries for up to `PROBE_SECONDS`; a probe
+that still cannot take it gives its slot back and waits one poll without deferring. A marker
+or guard that cannot be opened, for example a directory in its place, is a setup error (exit
+2) and the slot just taken is closed.
 
 Admission counts every live holder, in whichever slot file. A run that took a slot checks
 that the holders of all `slot-*.lock` files, itself included, number at most the declared
@@ -85,8 +95,12 @@ WAITING_LINE = "verify-slot: all {count} verify slots of this host are taken; wa
 WAITED_LINE = "verify-slot: waited {seconds:.1f}s for a verify slot"
 DEFERRING_LINE = "verify-slot: a live-fault verify run is waiting for a slot; this run waits behind it"
 LIVE_MARKER = "live-waiting.lock"
+LIVE_PROBE = "live-probe.lock"
 NO_SLOT_EXIT = 75
 POLL_SECONDS = 0.2
+REGISTER_RETRY_SECONDS = 0.005
+PROBE_RETRY_SECONDS = 0.005
+PROBE_SECONDS = 1.0
 DEFAULT_SLOT_DIR = "/tmp/agent-verify-slots"
 SLOT_DIR_ENV = "VERIFY_SLOT_DIR"
 USAGE_EXIT = 2
@@ -189,6 +203,52 @@ def _held(path: Path) -> bool:
     return False
 
 
+def _live_waiting(directory: Path) -> bool | None:
+    """Whether a live waiter holds the marker; `None` when another ordinary probe kept the guard.
+
+    Ordinary probes take turns on the guard, so a probe never mistakes another probe's
+    exclusive lock for a live waiter. An unopenable marker or guard raises `OSError`.
+    """
+    guard = _open_slot(directory / LIVE_PROBE)
+    try:
+        give_up = time.monotonic() + PROBE_SECONDS
+        while True:
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= give_up:
+                    return None
+                time.sleep(PROBE_RETRY_SECONDS)
+        try:
+            marker = os.open(directory / LIVE_MARKER, os.O_RDWR)
+        except FileNotFoundError:
+            return False
+        try:
+            fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(marker)
+        return False
+    finally:
+        os.close(guard)
+
+
+def _register_live(directory: Path) -> int | None:
+    """The marker descriptor holding a shared lock, `None` while a probe holds it exclusively."""
+    marker = _open_slot(directory / LIVE_MARKER)
+    try:
+        fcntl.flock(marker, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(marker)
+        return None
+    except BaseException:
+        os.close(marker)
+        raise
+    return marker
+
+
 def _holders_beside(directory: Path, own: Path) -> int:
     """The live holders of every slot file but `own`, whatever their index."""
     return sum(1 for path in sorted(directory.glob("slot-*.lock")) if path != own and _held(path))
@@ -216,9 +276,15 @@ def _try_slots(directory: Path, count: int, live: bool) -> tuple[int | None, boo
         if 1 + _holders_beside(directory, path) > count:
             os.close(descriptor)
             return None, False
-        if not live and _held(directory / LIVE_MARKER):
-            os.close(descriptor)
-            return None, True
+        if not live:
+            try:
+                waiting = _live_waiting(directory)
+            except BaseException:
+                os.close(descriptor)
+                raise
+            if waiting is not False:
+                os.close(descriptor)
+                return None, waiting is True
         return descriptor, False
     return None, False
 
@@ -230,22 +296,25 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run,
     A live run holds the marker for as long as it waits and drops it on every exit.
     """
     marker = None
-    if live:
-        marker = _open_slot(directory / LIVE_MARKER)
-        try:
-            fcntl.flock(marker, fcntl.LOCK_SH)
-        except BaseException:
-            os.close(marker)
-            raise
     try:
         start = time.monotonic()
         waiting = said_waiting = said_deferring = False
         while True:
             if run.received is not None:
                 return None, 128 + run.received
-            if waiting and wait_limit is not None and time.monotonic() - start >= wait_limit:
+            registering = live and marker is None
+            if ((waiting or registering) and wait_limit is not None
+                    and time.monotonic() - start >= wait_limit):
                 _say(NO_SLOT_LINE.format(limit=wait_limit))
                 return None, NO_SLOT_EXIT
+            if registering:
+                marker = _register_live(directory)
+                if marker is None:
+                    pause = REGISTER_RETRY_SECONDS
+                    if wait_limit is not None:
+                        pause = max(0.0, min(pause, start + wait_limit - time.monotonic()))
+                    time.sleep(pause)
+                    continue
             descriptor, deferred = _try_slots(directory, count, live)
             if descriptor is not None:
                 if waiting:
