@@ -73,6 +73,9 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual((DENY, reason), (verdict.decision, verdict.reason), command)
         return verdict
 
+    def spelling(self, sentence, verb="merge", missing=(), grant=None):
+        return permit.spelling_refusal(sentence, verb, grant or self.grant, missing)
+
     def test_the_sprints_own_merge_is_allowed(self):
         verdict = self.judge(self.merge)
         self.assertEqual(ALLOW, verdict.decision)
@@ -86,16 +89,19 @@ class JudgeTest(unittest.TestCase):
 
     def test_a_merge_without_the_head_or_with_another_strategy_is_refused(self):
         cases = {
-            "no head": f"gh pr merge 7 --repo o/r --merge --delete-branch",
-            "squash": f"gh pr merge 7 --repo o/r --squash --match-head-commit {SHA} --delete-branch",
-            "keeps the branch": f"gh pr merge 7 --repo o/r --merge --match-head-commit {SHA}",
-            "short head": f"gh pr merge 7 --repo o/r --merge --match-head-commit {'b' * 39} --delete-branch",
-            "extra flag": self.merge + " --subject x",
-            "leading zero": self.merge.replace("merge 7", "merge 07"),
+            "no head": (f"gh pr merge 7 --repo o/r --merge --delete-branch", ("--match-head-commit",)),
+            "squash": (f"gh pr merge 7 --repo o/r --squash --match-head-commit {SHA} --delete-branch",
+                       ("--merge",)),
+            "keeps the branch": (f"gh pr merge 7 --repo o/r --merge --match-head-commit {SHA}",
+                                 ("--delete-branch",)),
+            "short head": (f"gh pr merge 7 --repo o/r --merge --match-head-commit {'b' * 39} --delete-branch",
+                           ()),
+            "extra flag": (self.merge + " --subject x", ()),
+            "leading zero": (self.merge.replace("merge 7", "merge 07"), ()),
         }
-        for name, command in cases.items():
+        for name, (command, missing) in cases.items():
             with self.subTest(name):
-                self.assertRefused(command, permit.NOT_GRANTED)
+                self.assertRefused(command, self.spelling(permit.NOT_GRANTED, missing=missing))
         self.assertEqual([], self.fake.calls)
 
     def test_a_merge_without_a_granted_project_or_strategy_is_refused(self):
@@ -104,14 +110,15 @@ class JudgeTest(unittest.TestCase):
             "no strategy": Grant("o/r", self.root, None, True, None, frozenset(), frozenset()),
         }.items():
             with self.subTest(name):
-                self.assertRefused(self.merge, permit.NOT_GRANTED, grant)
+                self.assertRefused(self.merge, self.spelling(permit.NOT_GRANTED, grant=grant), grant)
 
     def test_a_merge_that_keeps_no_branch_follows_the_projects_binding(self):
         grant = Grant("o/r", self.root, "squash", False, "issue-<num>-<slug>",
                       frozenset({12}), frozenset())
         command = f"gh pr merge 7 --repo o/r --squash --match-head-commit {SHA}"
         self.assertEqual(ALLOW, self.judge(command, grant).decision)
-        self.assertRefused(command + " --delete-branch", permit.NOT_GRANTED, grant)
+        self.assertRefused(command + " --delete-branch",
+                           self.spelling(permit.NOT_GRANTED, grant=grant), grant)
 
     def test_a_merge_at_another_head_than_the_pull_requests_is_refused(self):
         self.fake.pr = {**self.fake.pr, "head": HEAD}
@@ -148,13 +155,13 @@ class JudgeTest(unittest.TestCase):
         )
         for command in cases:
             with self.subTest(command):
-                self.assertRefused(command, permit.ALONE)
+                self.assertRefused(command, self.spelling(permit.ALONE))
         self.assertEqual([], self.fake.calls)
 
     def test_shell_active_arguments_are_refused(self):
         for word in ('"$(id)"', '"a`b`"', "a*", "{a,b}", "x'y'", '"a!b"', "#c", "~/n"):
             with self.subTest(word):
-                self.assertRefused(self.merge + " " + word, permit.ALONE)
+                self.assertRefused(self.merge + " " + word, self.spelling(permit.ALONE))
 
     def test_a_control_character_inside_a_quoted_word_is_refused_not_raised(self):
         for quote in ("'", '"'):
@@ -162,7 +169,8 @@ class JudgeTest(unittest.TestCase):
                 with self.subTest(quote=quote, bad=repr(bad)):
                     value = f"{quote}a{bad}b{quote}"
                     self.assertIsNone(words(f"x {value}"))
-                    self.assertRefused(self.merge.replace("--repo o/r", f"--repo {value}"), permit.ALONE)
+                    self.assertRefused(self.merge.replace("--repo o/r", f"--repo {value}"),
+                                       self.spelling(permit.ALONE))
 
     def test_quoted_titles_in_the_grammar_pass(self):
         self.assertEqual(["x", "--title", "v1.2.0: fixes (#12)"],
@@ -170,6 +178,68 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(["x", "--title", "v1.2.0 notes"], words('x --title "v1.2.0 notes"'))
         self.assertEqual(["a", "b"], words("a\tb"))
         self.assertIsNone(words("=a"))
+
+    def test_a_merge_or_rerun_behind_a_credential_scrub_prefix_is_judged_as_the_bare_form(self):
+        verdict = self.judge("env -u GITHUB_TOKEN -u GH_TOKEN " + self.merge)
+        self.assertEqual((ALLOW, "merge", {"pr": 7, "head": SHA}),
+                         (verdict.decision, verdict.verb, dict(verdict.target)))
+        for prefix in permit.SCRUB_PREFIXES:
+            with self.subTest(prefix):
+                self.assertEqual(ALLOW, self.judge(prefix + self.merge).decision)
+                self.assertEqual(ALLOW, self.judge(prefix + self.rerun).decision)
+                self.assertEqual({"pr": 7, "head": SHA}, merge_target(prefix + self.merge, self.grant))
+
+    def test_the_permit_takes_exactly_the_guards_scrub_prefixes(self):
+        spec = importlib.util.spec_from_file_location("lifecycle_guard_source", GUARD_SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.SCRUB_PREFIXES, permit.SCRUB_PREFIXES)
+        self.assertEqual(module.GH_ENV_TOKEN_NAMES, permit.GH_ENV_TOKEN_NAMES)
+        self.assertEqual(module.prefix_clause(), permit.PREFIX_CLAUSE)
+
+    def test_a_near_miss_prefix_is_refused_alone_with_the_accepted_form(self):
+        reason = ("This command runs only alone, spelled exactly as the permitted form, with no operator, "
+                  "expansion or wrapper. Accepted: gh pr merge <n> --repo o/r --merge --match-head-commit "
+                  "<sha> --delete-branch; optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | unset "
+                  "GITHUB_TOKEN && | env -u GITHUB_TOKEN")
+        for prefix in ("env -u GITHUB_TOKEN  ", "env -u PATH ", "env -u GITHUB_TOKEN -u GITHUB_TOKEN ",
+                       "env -uGITHUB_TOKEN ", "unset GITHUB_TOKEN && env -u GH_TOKEN ", "unset PATH && ",
+                       "X=1 "):
+            with self.subTest(prefix):
+                verdict = self.judge(prefix + self.merge)
+                self.assertEqual((DENY, reason), (verdict.decision, verdict.reason))
+        self.assertEqual([], self.fake.calls)
+
+    def test_a_merge_spelling_refusal_names_the_missing_flag_and_the_accepted_form(self):
+        n = "The permit grants only the exact merge and rerun forms, and this one differs."
+        a = ("This command runs only alone, spelled exactly as the permitted form, with no operator, "
+             "expansion or wrapper.")
+        p = "optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | unset GITHUB_TOKEN && | env -u GITHUB_TOKEN"
+        f = "gh pr merge <n> --repo o/r --merge --match-head-commit <sha> --delete-branch"
+        keeps = f"gh pr merge 7 --repo o/r --merge --match-head-commit {SHA}"
+        cases = (
+            ("gh pr merge 7 --repo o/r --merge --delete-branch",
+             f"{n} Missing: --match-head-commit. Accepted: {f}; {p}"),
+            (keeps, f"{n} Missing: --delete-branch. Accepted: {f}; {p}"),
+            ("env -u GITHUB_TOKEN -u GH_TOKEN " + keeps,
+             f"{n} Missing: --delete-branch. Accepted: {f}; {p}"),
+            (f"gh pr merge 7 --repo o/r --squash --match-head-commit {SHA} --delete-branch",
+             f"{n} Missing: --merge. Accepted: {f}; {p}"),
+            (self.merge + " --subject x", f"{n} Accepted: {f}; {p}"),
+            (f"gh pr merge 7 --repo o/r --merg --match-head-commit {SHA} --delete-branch",
+             f"{n} Missing: --merge. Accepted: {f}; {p}"),
+            ("env -u PATH " + keeps, f"{a} Missing: --delete-branch. Accepted: {f}; {p}"),
+            (keeps + " | cat", f"{a} Accepted: {f}; {p}"),
+            ("gh run rerun 55 --repo o/r",
+             f"{n} Missing: --failed. Accepted: gh run rerun <id> --failed --repo o/r; {p}"),
+        )
+        for command, reason in cases:
+            with self.subTest(command):
+                verdict = self.judge(command)
+                self.assertEqual((DENY, reason), (verdict.decision, verdict.reason))
+
+    def test_a_release_run_behind_a_scrub_prefix_gets_no_decision(self):
+        self.assertIsNone(self.judge("env -u GITHUB_TOKEN release transaction run --commit " + SHA).decision)
 
     def test_a_rerun_of_the_sprints_check_run_is_allowed(self):
         verdict = self.judge(self.rerun)
@@ -199,7 +269,8 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(ALLOW, self.judge(self.rerun).decision)
 
     def test_a_rerun_of_every_job_or_of_another_pull_request_is_refused(self):
-        self.assertRefused("gh run rerun 55 --repo o/r", permit.NOT_GRANTED)
+        self.assertRefused("gh run rerun 55 --repo o/r",
+                           self.spelling(permit.NOT_GRANTED, "rerun", ("--failed",)))
         self.assertRefused(self.rerun.replace("--repo o/r", "--repo x/y"), permit.OTHER_REPO)
         self.fake.run = {**self.fake.run, "branch": "issue-99-x"}
         self.assertRefused(self.rerun, permit.NOT_OWN_RUN.format(run=55))

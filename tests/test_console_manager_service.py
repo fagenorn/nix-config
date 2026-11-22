@@ -1654,6 +1654,15 @@ class PermitServiceTest(PermitCase):
                                "verb": "merge", "decision": "allow", "reason": "",
                                "target": {"pr": 7, "head": SHA}})
 
+    def test_a_merge_behind_the_documented_prefix_is_allowed_and_lands(self):
+        svc, sid = self.boot()
+        command = "env -u GITHUB_TOKEN -u GH_TOKEN " + MERGE
+        verdict = self.judge(svc, sid, command)
+        self.assertEqual(verdict.decision, permit.ALLOW)
+        self.assertIs(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", command), True)
+        (landed,) = self.rows("permit.landed")
+        self.assertEqual(landed["target"], {"pr": 7, "head": SHA})
+
     def test_a_reported_issue_no_manager_delivery_carries_is_refused(self):
         svc, sid = self.boot()
         svc.send_report(sid, self.secret(sid), issues_report(12, 40))
