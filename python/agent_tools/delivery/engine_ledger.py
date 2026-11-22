@@ -208,6 +208,32 @@ def read_run(run_dir: Path) -> dict:
     return document
 
 
+def find_run(root: Path, issue: int, project: str | None) -> Path | None:
+    """The newest run directory of `issue` under `root`, or None; it writes nothing.
+
+    With no `project`, runs of more than one project are a `LedgerError`.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return None
+    found = []
+    for entry in root.iterdir():
+        match = RUN_ID_RE.match(entry.name)
+        if match is None or match.group(1) != str(issue) or not entry.is_dir():
+            continue
+        document = read_run(entry)
+        if document["issue"] != issue:
+            continue
+        if project is not None and document["project"] != project:
+            continue
+        found.append((entry, document["project"]))
+    projects = sorted({name for _, name in found})
+    if project is None and len(projects) > 1:
+        raise LedgerError(f"runs of issue {issue} belong to several projects: "
+                          + ", ".join(projects) + "; pass --project")
+    return max((entry for entry, _ in found), key=lambda entry: entry.name, default=None)
+
+
 def _instant(value: object, label: str) -> None:
     try:
         parse_rfc3339_utc(value)  # type: ignore[arg-type]

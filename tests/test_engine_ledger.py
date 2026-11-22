@@ -7,17 +7,22 @@ order rule, against the shipped toy procedures.
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
+import io
 import json
 import os
+import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_ledger
+from agent_tools.delivery import engine, engine_ledger
 from agent_tools.delivery.engine_ledger import EVENT_MEMBERS, RUN_ID_RE, LedgerError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -397,6 +402,126 @@ class ProbeTest(unittest.TestCase):
             with self.subTest(error=error.__name__):
                 with mock.patch("os.kill", side_effect=error):
                     self.assertIs(engine_ledger.process_alive(4242, ""), answer)
+
+
+RUN_FIXTURE = FIXTURES / "runs" / "1511-20261121T160231Z-a1b2"
+RUN_ID = RUN_FIXTURE.name
+
+
+def home_with(tmp: str, *run_dirs: Path) -> Path:
+    root = Path(tmp) / ".agents" / "state" / "engine" / "runs"
+    root.mkdir(parents=True)
+    for run_dir in run_dirs:
+        copied = root / run_dir.name
+        shutil.copytree(run_dir, copied)
+        os.chmod(copied, 0o700)
+    return root
+
+
+def sibling_run(tmp: str, name: str, *, events: str | None = None, **members) -> Path:
+    """A copy of the fixture run named `name` with `run.json` members replaced."""
+    path = Path(tmp) / "variants" / name
+    shutil.copytree(RUN_FIXTURE, path)
+    document = json.loads((path / "run.json").read_text())
+    document.update(members, run=name)
+    (path / "run.json").write_text(compact(document))
+    if events is not None:
+        shutil.copyfile(FIXTURES / events, path / "events.jsonl")
+    return path
+
+
+def tree_digest(root: Path) -> list:
+    entries = []
+    for directory, names, files in os.walk(root):
+        for name in [""] + names + files:
+            path = Path(directory) / name if name else Path(directory)
+            info = path.lstat()
+            digest = None if stat.S_ISDIR(info.st_mode) else \
+                hashlib.sha256(path.read_bytes()).hexdigest()
+            entries.append((str(path.relative_to(root)), info.st_mode, info.st_mtime_ns, digest))
+    return sorted(set(entries))
+
+
+def run_status(home: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-m", "agent_tools.delivery.engine", "status", *args],
+                          env={**os.environ, "HOME": str(home)}, capture_output=True,
+                          text=True, timeout=60)
+
+
+def main_status(home: str, *argv: str):
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.dict(os.environ, {"HOME": str(home)}), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = engine.main(list(argv))
+    return code, out.getvalue(), err.getvalue()
+
+
+class StatusTest(unittest.TestCase):
+    def test_status_prints_exactly_the_fold_and_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = home_with(tmp, RUN_FIXTURE)
+            before = tree_digest(Path(tmp) / ".agents")
+            result = run_status(tmp, "1511")
+            run_dir = root / RUN_ID
+            expected = compact(engine_ledger.fold(
+                engine_ledger.read_run(run_dir),
+                engine_ledger.replay(run_dir / "events.jsonl"),
+                engine_ledger.process_alive).as_json())
+            self.assertEqual((result.returncode, result.stderr), (0, ""))
+            self.assertEqual(result.stdout, expected)
+            printed = json.loads(result.stdout)
+            self.assertEqual((printed["stage"], printed["step"]), ("setup", "scope"))
+            self.assertEqual(printed["stop"], STOP)
+            self.assertEqual(tree_digest(Path(tmp) / ".agents"), before)
+
+    def test_status_with_no_run_prints_null_and_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_status(tmp, "1511")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, '{"issue":1511,"run":null}\n')
+            self.assertEqual(result.stderr, "")
+            self.assertFalse((Path(tmp) / ".agents").exists())
+
+    def test_status_reads_the_newest_run_of_the_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            newer = sibling_run(tmp, "1511-20261122T090000Z-zzzz", events="continued.jsonl")
+            other = sibling_run(tmp, "1512-20261123T000000Z-aaaa", issue=1512)
+            home_with(tmp, RUN_FIXTURE, newer, other)
+            code, out, err = main_status(tmp, "status", "1511")
+            self.assertEqual((code, err), (0, ""))
+            printed = json.loads(out)
+            self.assertEqual(printed["run"], "1511-20261122T090000Z-zzzz")
+            self.assertEqual(printed["step"], "draft")
+
+    def test_runs_of_two_projects_need_a_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            other = sibling_run(tmp, "1511-20261122T090000Z-zzzz", project="example/other")
+            home_with(tmp, RUN_FIXTURE, other)
+            code, out, err = main_status(tmp, "status", "1511")
+            self.assertEqual((code, out), (2, ""))
+            self.assertEqual(len(err.splitlines()), 1)
+            code, out, err = main_status(tmp, "status", "1511", "--project", "example/project")
+            self.assertEqual((code, err), (0, ""))
+            self.assertEqual(json.loads(out)["run"], RUN_ID)
+
+    def test_a_bad_status_argument_is_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home_with(tmp, RUN_FIXTURE)
+            for argv in (["status"], ["status", "abc"], ["status", "0"],
+                         ["status", "1511", "--bogus"]):
+                with self.subTest(argv=argv):
+                    code, out, err = main_status(tmp, *argv)
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertEqual(len(err.splitlines()), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            first, second = fixture_lines("stopped.jsonl")[:2]
+            corrupt = sibling_run(tmp, RUN_ID)
+            (corrupt / "events.jsonl").write_bytes(first + b"not json\n" + second)
+            home_with(tmp, corrupt)
+            code, out, err = main_status(tmp, "status", "1511")
+            self.assertEqual((code, out), (2, ""))
+            self.assertEqual(len(err.splitlines()), 1)
+            self.assertIn("line 2", err)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ _Avoid_: context file, index
 The work of carrying one issue from claim to merge on its own branch and worktree. A delivery ends when the integration branch holds the change and its evidence criteria are met or handed to a Verify block.
 
 **Engine**:
-The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run.
+The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run. A run is recorded as a directory under `~/.agents/state/engine/runs/` whose append-only `events.jsonl` is the single source of truth, and `engine status <issue>` prints the state one fold derives from it (issue 1511).
 
 **Grader**:
 A pure function in the engine that turns stored results into an outcome for a `decide` step.
