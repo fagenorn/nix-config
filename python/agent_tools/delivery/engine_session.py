@@ -56,6 +56,10 @@ other exception both do. A launcher that cannot start gives exit 127 and the
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line.
 
+A session is launched without `CLAUDE_CONFIG_DIR` and with
+`CLAUDE_ACCOUNT_HOST_SETTINGS=required`, so the account launcher starts the client
+only on `$HOME/.claude/settings.json`, the file `engine deliver` checked before the run.
+
 This module imports no `engine_core`.
 """
 
@@ -84,6 +88,7 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 )
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
+HOST_SETTINGS_SWITCH = "CLAUDE_ACCOUNT_HOST_SETTINGS"
 NOT_STARTED = 127
 MISS_SUBTYPES: tuple[str, ...] = ("success", "error_max_structured_output_retries")
 REASK_PROMPT = (
@@ -276,6 +281,13 @@ def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+def session_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """The environment of a session: the caller's, without its config dir, with the host-settings switch."""
+    env = {key: value for key, value in environ.items() if key != "CLAUDE_CONFIG_DIR"}
+    env[HOST_SETTINGS_SWITCH] = "required"
+    return env
+
+
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
            on_start: Callable[[int], None]) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
@@ -289,7 +301,8 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         try:
             process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       start_new_session=True)
+                                       start_new_session=True,
+                                       env=session_environment(os.environ))
         except OSError as error:
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)

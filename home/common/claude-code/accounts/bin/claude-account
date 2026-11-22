@@ -511,6 +511,15 @@ launch_account() {
   printf 'default\n'
 }
 
+# With the switch set (the engine's sessions, issue 1525) claude starts only when the settings
+# file it will read is ~/.claude/settings.json itself, so the lifecycle guard checked is loaded.
+require_host_settings() {
+  [ -n "${CLAUDE_ACCOUNT_HOST_SETTINGS:-}" ] || return 0
+  local dir="${CLAUDE_CONFIG_DIR:-$BASE}"
+  [ "$dir/settings.json" -ef "$BASE/settings.json" ] ||
+    die "this session would not load the lifecycle guard: $dir/settings.json is not $BASE/settings.json"
+}
+
 cmd_run() {
   local name status request session
   # A launch from inside a session inherits this, so the mod is added once.
@@ -522,7 +531,7 @@ cmd_run() {
   if [ -z "${CLAUDE_ACCOUNT:-}" ]; then
     case "${CLAUDE_CONFIG_DIR:-}" in
       ""|"$PROFILES"/*) ;;
-      *) route_cache_proxy; exec "$(claude_bin)" "$@" ;;
+      *) require_host_settings; route_cache_proxy; exec "$(claude_bin)" "$@" ;;
     esac
   fi
   name="$(launch_account)"
@@ -537,6 +546,7 @@ cmd_run() {
       sync_profile "$name"
       export CLAUDE_CONFIG_DIR="$(profile_dir "$name")"
     fi
+    require_host_settings
     route_cache_proxy
     status=0
     "$(claude_bin)" "$@" || status=$?

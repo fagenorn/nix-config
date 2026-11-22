@@ -1,8 +1,10 @@
 """A stand-in for the account launcher in the engine's agent-step tests.
 
 Run as `python claude_stub.py <log> <canned> <resumed> <exit> <diagnostic> <launcher args...>`:
-it appends one compact JSON line `{"announced", "argv", "cwd", "stdin"}` to
-`<log>`, prints the bytes of the `<resumed>` file to stdout unchanged when the
+it appends one compact JSON line
+`{"announced", "argv", "config_dir", "cwd", "host_settings", "stdin"}` to `<log>`
+(`config_dir` and `host_settings` are the values of `CLAUDE_CONFIG_DIR` and
+`CLAUDE_ACCOUNT_HOST_SETTINGS` in the environment, or null when unset), prints the bytes of the `<resumed>` file to stdout unchanged when the
 launcher args hold `--resume` and `<resumed>` is not `-`, else those of the
 `<canned>` file, writes the bytes of the `<diagnostic>` file to stderr unless
 `<diagnostic>` is `-`, and exits `<exit>`.
@@ -41,7 +43,9 @@ def announced(argv: list[str]) -> bool:
 def main(argv: list[str]) -> int:
     log, canned, resumed, code, diagnostic, words = (
         argv[0], argv[1], argv[2], int(argv[3]), argv[4], argv[5:])
-    record = {"announced": announced(words), "argv": words, "cwd": os.getcwd(),
+    record = {"announced": announced(words), "argv": words,
+              "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"), "cwd": os.getcwd(),
+              "host_settings": os.environ.get("CLAUDE_ACCOUNT_HOST_SETTINGS"),
               "stdin": sys.stdin.read()}
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")

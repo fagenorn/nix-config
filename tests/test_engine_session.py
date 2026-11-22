@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -33,6 +34,7 @@ TIER = "integration"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 STUB = REPO_ROOT / "tests/fixtures/engine-session/claude_stub.py"
+LAUNCHER_SOURCE = REPO_ROOT / "home/common/claude-code/accounts/bin/claude-account"
 RESULT_NORMAL = REPO_ROOT / "tests/fixtures/engine-session/result-normal.json"
 RESULT_MISSING = REPO_ROOT / "tests/fixtures/engine-session/result-missing.json"
 RESULT_INVALID = REPO_ROOT / "tests/fixtures/engine-session/result-invalid.json"
@@ -292,6 +294,19 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(launched.exit_code, 0)
         self.assertEqual(len(pids), 1)
         self.assertGreater(pids[0], 0)
+
+    def test_the_session_environment_drops_only_the_config_dir(self):
+        given = {"HOME": "/h", "PATH": "/p", "CLAUDE_CONFIG_DIR": "/c"}
+        self.assertEqual(engine_session.session_environment(given), {
+            "HOME": "/h", "PATH": "/p", "CLAUDE_ACCOUNT_HOST_SETTINGS": "required"})
+        self.assertEqual(given["CLAUDE_CONFIG_DIR"], "/c")
+        code = ("import json,os; print(json.dumps([os.environ.get(k) for k in "
+                "('CLAUDE_CONFIG_DIR', 'ENGINE_PROBE', 'CLAUDE_ACCOUNT_HOST_SETTINGS')]))")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"CLAUDE_CONFIG_DIR": "/c", "ENGINE_PROBE": "kept"}):
+            launched = launch([sys.executable, "-c", code], directory, "",
+                              on_start=lambda pid: None)
+        self.assertEqual(json.loads(launched.stdout), [None, "kept", "required"])
 
     def test_the_launchers_stderr_is_captured_and_its_last_line_is_the_diagnostic(self):
         code = ("import sys; sys.stderr.write('first\\nclaude-account: no account \\'work\\'\\n'); "
@@ -754,6 +769,80 @@ class DeliverSessionTest(unittest.TestCase):
                     self.assertIn("disableAllHooks", done.stderr)
                 if name == "filtered":
                     self.assertIn("if filter", done.stderr)
+
+    def test_the_real_launcher_starts_a_session_only_on_the_host_settings(self):
+        for name in ("linked", "default", "divergent", "divergent, not required"):
+            with self.subTest(name):
+                project = EngineProject(self)
+                project.env.pop("CLAUDE_ACCOUNT", None)
+                copy_roles(project, "implementer")
+                launcher = project.bin / "claude-account"
+                launcher.write_text(f"#!/bin/sh\nexec bash {LAUNCHER_SOURCE} \"$@\"\n",
+                                    encoding="utf-8")
+                launcher.chmod(0o755)
+                log = project.tmp / "claude.log"
+                client = project.tmp / "client"
+                client.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {log} "
+                                  f"{RESULT_NORMAL} - 0 - \"$@\"\n", encoding="utf-8")
+                client.chmod(0o755)
+                project.env.update(CLAUDE_BIN=str(client),
+                                   CLAUDE_ACCOUNTS_DIR=str(project.tmp / "accounts"),
+                                   CLAUDE_CACHE_PROXY="0")
+                project.env.pop("CLAUDE_CONFIG_DIR", None)
+                profile = project.tmp / "accounts/profiles/acct"
+                profile.mkdir(parents=True)
+                project.env["CLAUDE_ACCOUNT"] = "default" if name == "default" else "acct"
+                if name.startswith("divergent"):
+                    (profile / "settings.json").write_text("{}", encoding="utf-8")
+                if name == "divergent, not required":
+                    done = subprocess.run(
+                        [str(launcher), "run", "--version"], capture_output=True, timeout=60,
+                        stdin=subprocess.DEVNULL,
+                        env={k: v for k, v in project.env.items()
+                             if k != "CLAUDE_ACCOUNT_HOST_SETTINGS"})
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    lines = self.log(log)
+                    self.assertEqual(len(lines), 1)
+                    self.assertEqual(lines[0]["config_dir"], str(profile))
+                    continue
+                done = project.deliver(one_step(project), issue=1514)
+                if name == "divergent":
+                    self.assertEqual(done.returncode, 1, done.stderr)
+                    self.assertEqual(done.stdout, "")
+                    self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                    self.assertIn("no structured reply", done.stderr)
+                    self.assertIn("lifecycle guard", done.stderr)
+                    self.assertFalse(log.exists())
+                    self.assertEqual((profile / "settings.json").read_text(encoding="utf-8"),
+                                     "{}")
+                    continue
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(json.loads(done.stdout)["end"], "done")
+                lines = self.log(log)
+                self.assertEqual(len(lines), 1)
+                self.assertEqual(lines[0]["host_settings"], "required")
+                if name == "linked":
+                    self.assertEqual(lines[0]["config_dir"], str(profile))
+                    self.assertTrue(os.path.samefile(
+                        Path(lines[0]["config_dir"]) / "settings.json",
+                        project.world.home / ".claude/settings.json"))
+                else:
+                    self.assertIsNone(lines[0]["config_dir"])
+
+    def test_a_caller_config_dir_never_reaches_a_session(self):
+        custom = self.project.tmp / "custom"
+        custom.mkdir()
+        (custom / "settings.json").write_text("{}", encoding="utf-8")
+        self.project.env["CLAUDE_CONFIG_DIR"] = str(custom)
+        log = install_stub(self.project, RESULT_MISSING, resumed=canned_result(
+            structured_output={"status": "drafted", "summary": "s", "items": []}))
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = self.log(log)
+        self.assertEqual(len(lines), 2)
+        self.assertEqual([line["config_dir"] for line in lines], [None, None])
+        self.assertEqual([line["host_settings"] for line in lines], ["required", "required"])
+        self.assertIn("--resume", lines[1]["argv"])
 
     def test_a_missing_answer_then_a_valid_one_resumes_the_same_session_once(self):
         log = install_stub(self.project, RESULT_MISSING, resumed=canned_result(
