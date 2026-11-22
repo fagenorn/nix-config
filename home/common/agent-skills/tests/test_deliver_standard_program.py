@@ -13238,7 +13238,7 @@ class LookCarryLandingTest(unittest.TestCase):
         self.assertIn("merge-tree --write-tree", verify)
         self.assertIn("Run the project's declared verification once on the worktree head", verify)
         self.assertIn("look-approval carry --repo owner/repo --issue 9 --pr 42 --from " + SHA + " --head " + D
-                      + " --picture /r/pics/before.png --picture /r/pics/after.png", prompt(calls, "look-carry"))
+                      + " --before /r/pics/before.png --after /r/pics/after.png", prompt(calls, "look-carry"))
         self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
         self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
         for call in calls:
@@ -13285,11 +13285,27 @@ class LookCarryLandingTest(unittest.TestCase):
                 self.stops_unasked(result, calls)
                 self.assertNotIn("look-carry", labels(calls))
 
-    def test_an_unsafe_picture_path_carries_nothing(self):
-        odd = {"head": D, "clean": True, "merge_only": True, "results": self.OK, "pictures": [{"kind": "after", "path": "/r/my pics/a.png"}]}
-        result, calls = self.approve(replies={"look-carry-verify": odd})
-        self.assertEqual(result["stage"], "awaiting-look")
-        self.assertNotIn("look-carry", labels(calls))
+    def test_a_picture_path_with_a_space_reaches_the_command_as_one_quoted_argument(self):
+        spaced = {"head": D, "clean": True, "merge_only": True, "results": self.OK,
+                  "pictures": [{"kind": "before", "path": "/r/my pics/b.png"}, {"kind": "after", "path": "/r/my pics/it's a.png"}]}
+        result, calls = self.approve(replies={"look-carry-verify": spaced, "look-carry": self.CARRIED})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn(" --head " + D + " --before '/r/my pics/b.png' --after '/r/my pics/it'\\''s a.png'\n", prompt(calls, "look-carry"))
+
+    def test_a_picture_path_that_is_not_absolute_or_spans_lines_carries_nothing(self):
+        for path in ("pics/a.png", "/r/pics/a\nb.png", "/"):
+            with self.subTest(path=path):
+                odd = {"head": D, "clean": True, "merge_only": True, "results": self.OK, "pictures": [{"kind": "after", "path": path}]}
+                result, calls = self.approve(replies={"look-carry-verify": odd})
+                self.assertEqual(result["stage"], "awaiting-look")
+                self.assertNotIn("look-carry", labels(calls))
+
+    def test_an_approval_recorded_between_the_status_and_the_carry_lands_the_head(self):
+        result, calls = self.approve(replies={"look-carry": {"verdict": "approved", "from": None, "reason": None, "comment_id": None}})
+        self.assertEqual(result["stage"], "done", labels(calls))
+        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
+        stopped, _ = self.approve(replies={"look-carry": {"verdict": "approved", "from": None, "reason": None, "comment_id": None}, "merge": None})
+        self.assertEqual(stopped["cont"]["look"], {"pr": 42, "head": D, "approved": D})
 
     def test_an_unusable_carry_reply_stops_without_asking(self):
         replies = (({"verdict": "moved"}), ({"verdict": "error", "detail": "x"}), None, ({"verdict": "carried"}),
@@ -13306,6 +13322,22 @@ class LookCarryLandingTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertNotIn("look-carry-verify", labels(calls))
         self.assertNotIn("look-carry", labels(calls))
+
+    def test_a_stop_after_a_carry_keeps_the_owners_head_for_the_resume(self):
+        stopped, _ = self.approve(replies={"look-carry": self.CARRIED, "merge": None})
+        self.assertEqual(stopped["stage"], "merge")
+        self.assertEqual(stopped["cont"]["look"], {"pr": 42, "head": D, "approved": D, "owner": SHA})
+        stale = {"merged": False, "behind": True, "notes": "Head branch is not up to date with the base branch", "renew": {"verdict": "renewed"},
+                 "lock": {"verdict": "already_held", "lock_sha": D}}
+        replies = {"look-status": {"verdict": "needed", "kept_from": None}, "look-carry": self.CARRIED,
+                   "merge": [stale, {"merged": True, "merge_commit": F, "notes": "merged", "renew": {"verdict": "renewed"},
+                                     "lock": {"verdict": "already_held", "lock_sha": F}}]}
+        patch = dict(LookResumeTest.MOVED, **{"checks-3": {"state": "behind", "head": D}, "sync-2": {"merge_commit": F, "head": F},
+                                              "checks-4": {"state": "passed", "head": F, "required": ["ci"], "passed": ["ci"]}})
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=patch, replies=replies)
+        self.assertEqual(result["stage"], "done", labels(calls))
+        self.assertIn("--from " + SHA + " --head " + F, prompt(calls, "look-carry"))
+        self.assertNotIn("--from " + D, prompt(calls, "look-carry"))
 
     def test_a_second_resync_carries_from_the_owners_head(self):
         stale = {"merged": False, "behind": True, "notes": "Head branch is not up to date with the base branch", "renew": {"verdict": "renewed"},

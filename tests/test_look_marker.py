@@ -603,6 +603,25 @@ class MergeCarryTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     lm.picture_digest(bad)
 
+    def test_picture_digest_names_each_pictures_role(self):
+        a, c = "a" * 64, "c" * 64
+        expected = hashlib.sha256(f"after:{c}\nbefore:{a}".encode()).hexdigest()
+        self.assertEqual(lm.picture_digest([("before", a), ("after", c)]), expected)
+        self.assertEqual(lm.picture_digest([("after", c), ("before", a)]), expected)
+        swapped = lm.picture_digest([("before", c), ("after", a)])
+        self.assertNotEqual(swapped, expected)
+        self.assertNotEqual(lm.picture_digest([("before", a), ("after", c)]), lm.picture_digest([a, c]))
+        self.assertEqual(lm.picture_digest([(None, a), (None, c)]), lm.picture_digest([a, c]))
+        for bad in ([("middle", a)], [("before", "g" * 64)], [("before",)]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    lm.picture_digest(bad)
+
+    def test_carry_line_names_the_smallest_live_line_the_writers_elect(self):
+        self.assertEqual(lm.carry_line([carry_comment(101), carry_comment(100)], 1200, 1300, A, H, DIG), 100)
+        self.assertEqual(lm.carry_candidate([pics_approval(10), carry_comment(101), carry_comment(100)],
+                                            1200, 1300, H).line, 100)
+
     def test_carry_body_is_the_exact_marker(self):
         self.assertEqual(
             lm.carry_body(1200, 1300, A, H, DIG),
@@ -680,9 +699,28 @@ class MergeCarryTest(unittest.TestCase):
         self.assertEqual(lm.kept(c, H, lm.Carry(B, merges_world([(H, [A, X])]))), lm.Kept(True, ()))
         four = lm.Kept(False, (lm.contents_path(B), lm.compare_path(B, A), lm.compare_path(A, H),
                                lm.compare_path(B, H)))
-        for other in (lm.Candidate(1200, A, "approved", 10, DIG, None), lm.Candidate(1200, A, "fix", 10, None, 11)):
+        for other in (lm.Candidate(1200, A, "approved", 10, None, None), lm.Candidate(1200, A, "fix", 10, None, 11)):
             with self.subTest(other=other):
                 self.assertEqual(lm.kept(other, H, lm.Carry(B, {})), four)
+
+    def test_an_approval_with_pictures_and_no_line_is_kept_by_no_look_file_rule(self):
+        # Issue 1566 review: the owner looked at pictures, so a head no look file changed is kept only by a carry line.
+        reads = world(*TEST_ONLY)
+        self.assertEqual(lm.kept(lm.Candidate(1200, A, "approved", 10), H, lm.Carry(B, reads)), lm.Kept(True, ()))
+        for read in (reads, {}):
+            with self.subTest(reads=len(read)):
+                pictured = lm.Candidate(1200, A, "approved", 10, DIG, None)
+                self.assertEqual(lm.kept(pictured, H, lm.Carry(B, read)), lm.Kept(False, ()))
+        self.assertIs(lm.settle(lm.Candidate(1200, A, "approved", 10, DIG, None), H, B, reads.__getitem__), False)
+        bare = lm.IssueFacts(1200, BODY, (pics_approval(10),))
+        self.assertEqual(lm.judge(1300, H, [bare], lm.Carry(B, reads)).admit, False)
+
+    def test_a_clean_integration_merge_needs_its_carry_line_under_pictures(self):
+        merged = merges_world([(H, [A, X])])
+        no_line = lm.IssueFacts(1200, BODY, (pics_approval(10),))
+        self.assertEqual(lm.judge(1300, H, [no_line], lm.Carry(B, merged)).admit, False)
+        lined = lm.IssueFacts(1200, BODY, (pics_approval(10), carry_comment(11)))
+        self.assertEqual(lm.judge(1300, H, [lined], lm.Carry(B, merged)).admit, True)
 
     def test_judge_admits_a_carried_head_only_with_its_line(self):
         carry = lm.Carry(B, merges_world([(H, [A, X])]))

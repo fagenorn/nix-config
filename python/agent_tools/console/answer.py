@@ -56,8 +56,8 @@ returns `("merged", sha)` when `merged` is true, else `("open", sha)` or `("clos
 returns its comment id. It lists the issue's trusted markers (`look_marker.TRUSTED`); a live `look` marker whose
 `issue`, `pr`, `head`, `answer=approved` and `message` all equal the given ones is returned and nothing is posted,
 so a retry after a lost reply posts no second marker, and one a trusted end marker withdrew is settled too: the
-retry never undoes a withdrawal. `pictures` are the ids of every picture on the card the owner answered
-(#1566); given, the posted marker carries `pictures=<look_marker.picture_digest(pictures)>`, so a later head
+retry never undoes a withdrawal. `pictures` are the `(pair, id)` of every picture on the card the owner answered
+(#1566; `pair` is `before`, `after` or None); given, the posted marker carries `pictures=<look_marker.picture_digest(pictures)>`, so a later head
 whose re-rendered pictures have the same ids can carry the approval, and empty it posts today's marker. The
 digest is not part of an answer's identity: a marker found for this message without a `pictures` field (posted
 before the digest existed) is that answer's marker and is returned, and one found with another digest is
@@ -319,7 +319,7 @@ def look_head(slug: str, pr: int) -> tuple[str, str | None]:
 
 
 def record_look(slug: str, issue: int, pr: int, head: str, message: str,
-                pictures: Sequence[str] = ()) -> int:
+                pictures: Sequence[tuple[str | None, str]] = ()) -> int:
     wanted = {"issue": str(issue), "pr": str(pr), "head": head, "answer": "approved",
               "message": message}
     digest = look_marker.picture_digest(pictures) if pictures else None

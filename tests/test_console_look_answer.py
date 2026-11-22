@@ -125,10 +125,10 @@ class LookAnswerTest(QuestionRoutes):
                     if item["reason"] == "question" and item["sprint_id"] == sid)
 
     def card_pictures(self):
-        """The ids of the pictures on the look card, read from the questions.asked row the test appended."""
+        """The (pair, id) of the pictures on the look card, read from the questions.asked row the test appended."""
         (asked,) = self.rows("questions.asked")
         (question,) = asked["questions"]
-        return [picture["picture"] for picture in question["pictures"]]
+        return [(picture.get("pair"), picture["picture"]) for picture in question["pictures"]]
 
     def marker_for(self, seq):
         return look_marker.approval_body(
@@ -173,6 +173,10 @@ class LookAnswerTest(QuestionRoutes):
         self.assertEqual(marker.fields["answer"], "approved")
         candidate = look_marker.carry_candidate(self.world.stored(), ISSUE, PR, "f" * 40)
         self.assertEqual(candidate.pictures, look_marker.picture_digest(ids))
+        # The digest names each picture's role: the same two ids with their roles swapped are another card.
+        self.assertEqual(sorted(pair for pair, _ in ids), ["after", "before"])
+        swapped = [(ids[0][0], ids[1][1]), (ids[1][0], ids[0][1])]
+        self.assertNotEqual(marker.fields["pictures"], look_marker.picture_digest(swapped))
 
     def test_an_approve_for_a_moved_head_records_nothing_and_the_card_says_why(self):
         svc = self.open()

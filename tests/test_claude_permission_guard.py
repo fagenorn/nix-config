@@ -6643,6 +6643,24 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     self.look_carry_env(comments, compares, look_files={}))
                 self.assert_look_refusal(result)
 
+    def test_a_pictured_approval_is_kept_by_no_look_file_rule_without_its_carry_line(self):
+        # Issue 1566 review: the owner looked at pictures, so a head the look files alone would keep needs the carry line.
+        repo = self.look_repo()
+        a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
+        cases = {
+            "a non-merge commit outside the look files": self.look_world([(h, [a])], [self.TESTF]),
+            "a clean merge of main": self.look_world(
+                [(h, [a, x])], [self.DOC], extra=[(a, x, [self.DOC]), (x, a, [self.PAGE]), (x, h, [self.PAGE])]),
+        }
+        for name, compares in cases.items():
+            with self.subTest(case=name):
+                plain = self.run_guard(
+                    self.LOOK_PINNED, repo, self.look_carry_env([self.look_comment(10, head=a)], compares))
+                self.assertEqual(0, plain.returncode, plain.stderr)
+                pictured = self.run_guard(
+                    self.LOOK_PINNED, repo, self.look_carry_env([self.look_pics_comment(10, a)], compares))
+                self.assert_look_refusal(pictured)
+
     def test_a_carried_head_still_needs_the_pinned_head(self):
         a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
         comments = [self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)]

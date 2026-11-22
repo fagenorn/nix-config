@@ -464,6 +464,29 @@ class StatusMergeCarryTest(unittest.TestCase):
         for argv in self.world.argvs("gh"):
             self.assertFalse(any("contents/" in part for part in argv), argv)
 
+    def test_a_non_merge_edit_outside_the_look_files_does_not_keep_a_pictured_approval(self):
+        # Issue 1566 review: the look file rule alone would approve it and the landing would skip the owner's look.
+        for pictured, verdict in ((True, "needed"), (False, "approved")):
+            with self.subTest(pictured=pictured):
+                self.world = ForgeWorld(self)
+                found = self.pics(5) if pictured else comment(5, lm.approval_body(7, 12, A, "approved", "m5"))
+                self.world.comment_store(SLUG, ISSUE, [found])
+                self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
+                self.world.respond_json("gh", PULL_ARGV, self.PULL)
+                self.world.respond_json("gh", self.BRANCH_ARGV, {"name": "main", "commit": {"sha": B}})
+                serve(self.world, SLUG, reads(B))
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"]), (0, verdict))
+
+    def test_a_clean_integration_merge_is_approved_only_through_its_carry_line(self):
+        for lined, verdict in ((False, "needed"), (True, "approved")):
+            with self.subTest(lined=lined):
+                self.world = ForgeWorld(self)
+                self.seed([self.pics(5), *([self.line(6)] if lined else [])])
+                self.world.respond_json("gh", ["api", f"repos/{SLUG}/contents/.github/look-files.json?ref={B}"], CONSOLE)
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"]), (0, verdict))
+
     def test_status_without_the_carry_line_is_needed(self):
         self.seed([self.pics(5)])
         code, out = run(*STATUS)
@@ -490,7 +513,7 @@ class CarryVerbTest(unittest.TestCase):
     BRANCH_ARGV = ["api", f"repos/{SLUG}/branches/main"]
     X = "7" * 40
     T = "6" * 40
-    DIG = lm.picture_digest([lm.picture_id(b"before"), lm.picture_id(b"after")])
+    DIG = lm.picture_digest([("before", lm.picture_id(b"before")), ("after", lm.picture_id(b"after"))])
     LINE = lm.carry_body(7, 12, A, HEAD, DIG)
 
     def setUp(self):
@@ -502,7 +525,7 @@ class CarryVerbTest(unittest.TestCase):
         self.after.write_bytes(b"after")
 
     def carry_args(self, *, source=A):
-        return ["carry", *POST, "--from", source, "--picture", str(self.before), "--picture", str(self.after)]
+        return ["carry", *POST, "--from", source, "--before", str(self.before), "--after", str(self.after)]
 
     def merges(self, tail=None):
         return {
@@ -556,6 +579,23 @@ class CarryVerbTest(unittest.TestCase):
         self.assert_needed("pictures-differ")
         for argv in self.world.argvs("gh"):
             self.assertFalse(any("pulls/" in part or "compare/" in part for part in argv), argv)
+
+    def test_swapped_before_and_after_pictures_carry_nothing(self):
+        # The same two picture ids, each in the other's role, are another card: the approved after picture differs.
+        self.seed([self.pics(5)])
+        argv = ["carry", *POST, "--from", A, "--before", str(self.after), "--after", str(self.before)]
+        code, out = run(*argv)
+        self.assertEqual((code, out["verdict"], out["reason"], out["comment_id"]), (0, "needed", "pictures-differ", None))
+        self.assertEqual(self.posted(), [])
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("pulls/" in part or "compare/" in part for part in argv), argv)
+
+    def test_a_repeat_carry_names_the_line_the_writers_kept_when_two_are_visible(self):
+        # Writers keep the smallest live line and delete the other, so a retry that sees both names the smaller.
+        self.seed([self.pics(5), comment(101, self.LINE), comment(100, self.LINE)])
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "carried", 100))
+        self.assertEqual(self.posted(), [])
 
     def test_a_non_merge_commit_carries_nothing(self):
         self.seed([self.pics(5)], self.merges([(A, [FORK]), (HEAD, [A])]))
@@ -643,6 +683,8 @@ class CarryVerbTest(unittest.TestCase):
         full = self.carry_args()
         cases = {
             "no picture": ["carry", *POST, "--from", A],
+            "unreadable after": ["carry", *POST, "--from", A, "--before", str(self.before),
+                                 "--after", str(self.tmp / "none.png")],
             "missing file": ["carry", *POST, "--from", A, "--picture", str(self.tmp / "none.png")],
             "head not hex": ["carry", *POST[:-1], "xyz", "--from", A, "--picture", str(self.before)],
             "no from": ["carry", *POST, "--picture", str(self.before)],

@@ -80,12 +80,14 @@ issues, and an `Unreadable` read fails its issue with no need.
 
 Carried approvals (issue 1566). An `approved` approval may carry a `pictures=<digest>` field, the
 sha256 of the sorted, newline-joined console picture ids (`picture_id` is the sha256 of the
-picture bytes, `picture_digest` folds the ids), and a trusted live `look-carry` line, written by
+picture bytes, `picture_digest` folds the ids with their roles, `before` or `after`, so swapped
+pictures are another card), and a trusted live `look-carry` line, written by
 `look-approval carry`, may name it:
 `<!-- agent:look-carry v1 issue=<issue> pr=<pr> from=<approved head> to=<head> pictures=<digest> -->`
 then `Carried the owner's look approval of head <from[:7]> of pull request <pr> to head <to[:7]>:
 only merges of the integration branch came in and the re-rendered pictures are unchanged.`
-`carry_candidate` fills `pictures` only for an `approved` latest marker whose field is a 64-hex
+When overlapping writers leave several lines, `carry_line` names the smallest comment id, the one
+`forge_markers.write` keeps. `carry_candidate` fills `pictures` only for an `approved` latest marker whose field is a 64-hex
 digest, and `line` only when `carry_line` finds a trusted live line naming exactly the issue,
 the pull request, the candidate head, the asked head and that digest. For such a candidate `kept`
 asks `merges_only` first: it reads only `B...A`, `A...H` and `B...H` (never the set file), and keeps
@@ -93,8 +95,10 @@ the approval when `A...H` is `ahead` and every commit after A, walked first-pare
 merge with exactly two parents whose second parent is no pull request commit, at most
 `CHAIN_LIMIT` of them. When it decides false and the set file was not yet read, `kept` names the
 set file and the per-commit compares the issue 1211 rule wants in one batch, so the fallback
-decides on the third run; `settle_merges` drives `merges_only` alone. A `fix` answer, an approval
-without pictures or a missing line is judged by the issue 1211 rule exactly as before.
+decides on the third run; `settle_merges` drives `merges_only` alone. A `fix` answer or an approval
+without pictures is judged by the issue 1211 rule exactly as before. An approval with pictures and
+no line is kept by nothing: the owner looked at pictures, so only a carry line, which attests the
+re-rendered ones, lets a later head stand, whatever the look file sets say.
 
 This module reads no network of its own, runs no subprocess and reads no clock; `settle` and
 `merged_under_look` read only through the `read` callable they are given.
@@ -116,6 +120,7 @@ CARRY_KIND = "look-carry"
 TRUSTED: tuple[str, ...] = ("OWNER", "MEMBER")
 ANSWERS: tuple[str, ...] = ("approved", "changes", "fix")
 CARRIED: tuple[str, ...] = ("approved", "fix")
+ROLES: tuple[str, ...] = ("before", "after")
 LOOK_FILES_PATH = ".github/look-files.json"
 COMPARE_FILE_LIMIT = 300
 CHAIN_LIMIT = 10
@@ -254,12 +259,22 @@ def picture_id(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def picture_digest(ids: Iterable[str]) -> str:
-    """The digest of a set of picture ids: sha256 of the sorted ids joined by newlines."""
-    found = list(ids)
-    if not found or not all(isinstance(i, str) and PICTURES_PATTERN.fullmatch(i) for i in found):
-        raise ValueError("a picture digest needs one or more 64-hex picture ids")
-    return hashlib.sha256("\n".join(sorted(found)).encode("ascii")).hexdigest()
+def picture_digest(pictures: Iterable[str | tuple[str | None, str]]) -> str:
+    """The digest of a card's pictures: sha256 of the sorted entries joined by newlines.
+
+    An entry is a picture id, or a `(role, id)` pair with `role` `before`, `after` or None; the role is
+    part of the entry (`before:<id>`), so two pictures that swap roles are another card. An entry
+    with no role is the bare id.
+    """
+    entries = []
+    for item in pictures:
+        role, ident = (None, item) if isinstance(item, str) else item
+        if not isinstance(ident, str) or not PICTURES_PATTERN.fullmatch(ident) or role not in (None, *ROLES):
+            raise ValueError("a picture digest needs 64-hex picture ids, each with no role, before or after")
+        entries.append(ident if role is None else f"{role}:{ident}")
+    if not entries:
+        raise ValueError("a picture digest needs one or more picture ids")
+    return hashlib.sha256("\n".join(sorted(entries)).encode("ascii")).hexdigest()
 
 
 def _digest(value: Any) -> str:
@@ -345,14 +360,18 @@ def carry_body(issue: int, pr: int, approved_head: str, head: str, pictures: str
 
 def carry_line(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, approved_head: str,
                head: str, pictures: str) -> int | None:
-    """The comment id of the latest trusted live carry line naming exactly these, else None."""
+    """The comment id of the smallest trusted live carry line naming exactly these, else None.
+
+    The smallest id is the winner `forge_markers.write` elects among overlapping writers, so a read
+    and a write name the same line.
+    """
     parsed = [forge_markers.parse(c) for c in comments if c.get("author_association") in TRUSTED]
     markers = [m for m in parsed if m is not None]
     wanted = {"issue": str(issue), "pr": str(pr), "from": approved_head, "to": head, "pictures": pictures}
     matching = [m.comment_id for m in markers
                 if m.kind == CARRY_KIND and forge_markers.is_live(m, markers)
                 and all(m.fields.get(key) == value for key, value in wanted.items())]
-    return max(matching, default=None)
+    return min(matching, default=None)
 
 
 def marker_line(line: str) -> bool:
@@ -692,7 +711,9 @@ def merges_only(approved_head: str, head: str, carry: Carry) -> Kept:
 
 def kept(candidate: Candidate, head: str, carry: Carry) -> Kept:
     """Whether the candidate's approval still holds at `head`, or the reads still needed to say."""
-    if candidate.answer == "approved" and candidate.line is not None:
+    if candidate.answer == "approved" and candidate.pictures is not None:
+        if candidate.line is None:
+            return Kept(False)
         found = merges_only(candidate.head, head, carry)
         if found.kept or found.need:
             return found

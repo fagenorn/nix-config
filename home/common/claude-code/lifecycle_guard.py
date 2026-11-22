@@ -497,7 +497,8 @@ receives it as `validate_release_merge`'s last parameter).
    approval carried by a trusted `look-carry` line naming the issue, the pull request,
    the approved head, the current head and the approval's picture digest, when every
    commit after the approved head is a two-parent merge whose second parent is no pull
-   request commit (issue 1566); that rule reads only compares, never the set file.
+   request commit (issue 1566); that rule reads only compares, never the set file. An approval that records pictures is
+   kept by that line alone, never by the look file rule.
 Every lookup runs with the token variables scrubbed and the child timeout; a
 timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
 `issue <n> comment lookup timed out`, a non-zero one `PR body lookup failed`,

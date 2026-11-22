@@ -10,7 +10,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
     look-approval status --repo <owner/name> --issue <n> --pr <n> --head <sha> [--merge-commit <sha>]
     look-approval tick --repo <owner/name> --issue <n> --pr <n> --head <sha> [--merge-commit <sha>]
     look-approval marked --repo <owner/name> --issue <n>
-    look-approval carry --repo <owner/name> --issue <n> --pr <n> --from <sha> --head <sha> --picture <path> [--picture <path> ...]
+    look-approval carry --repo <owner/name> --issue <n> --pr <n> --from <sha> --head <sha> [--before <path>] [--after <path>] [--picture <path> ...]
     look-approval judge            (no options; reads stdin; no network)
 
 1. `post` writes `look_marker.approval_body(...)` with `forge_markers.post`, then reads the issue's
@@ -100,9 +100,11 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `need` (the paths a further carry run must read). An admit is unchanged.
 9. `carry` (issue 1566) records the carry line that lets the owner's approval of `--from` stand at
    `--head` when only merges of the integration branch came in and the re-rendered pictures are
-   unchanged. `--from` and `--head` are 40 lowercase hex and different, and each `--picture` is a
-   file read whole (the ids are `look_marker.picture_id`, the digest `look_marker.picture_digest`);
-   a break of these, an unreadable file included, is a usage error (exit 2) before any `gh` call.
+   unchanged. `--from` and `--head` are 40 lowercase hex and different, and each `--before`, `--after`
+   and `--picture` (a picture with no role) is a file read whole, at least one in all (the ids are
+   `look_marker.picture_id`, the digest `look_marker.picture_digest` over each id with its role, so
+   a card whose before and after pictures swapped is another card); a break of these, an unreadable
+   file included, is a usage error (exit 2) before any `gh` call.
    Output keys, in order: `command`, `action`, `repo`, `issue`, `pr`, `head`, `verdict`, `from` (the
    head of the latest approval, or null), `reason` (null unless `needed`), `pictures` (the digest of
    the given files) and `comment_id` (or null). `verdict`, decided in this order after the reads each
@@ -184,7 +186,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--pr", required=True, type=_number)
     sub.add_argument("--head", required=True)
     sub.add_argument("--from", dest="from_head", required=True)
-    sub.add_argument("--picture", action="append", required=True)
+    for flag in ("--before", "--after", "--picture"):
+        sub.add_argument(flag, action="append", default=[])
     verbs.add_parser("judge")
     return parser
 
@@ -476,13 +479,16 @@ def _carry_usage(args: argparse.Namespace) -> None:
             raise UsageError(f"{name} {value!r} is not 40 lowercase hex")
     if args.from_head == args.head:
         raise UsageError("from and head are the same sha")
-    ids = []
-    for path in args.picture:
-        try:
-            with open(path, "rb") as handle:
-                ids.append(lm.picture_id(handle.read()))
-        except OSError as error:
-            raise UsageError(f"the picture {path!r} is unreadable: {error}") from None
+    ids: list[tuple[str | None, str]] = []
+    for role, paths in (("before", args.before), ("after", args.after), (None, args.picture)):
+        for path in paths:
+            try:
+                with open(path, "rb") as handle:
+                    ids.append((role, lm.picture_id(handle.read())))
+            except OSError as error:
+                raise UsageError(f"the picture {path!r} is unreadable: {error}") from None
+    if not ids:
+        raise UsageError("carry needs at least one --before, --after or --picture")
     args.digest = lm.picture_digest(ids)
 
 
