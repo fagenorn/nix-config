@@ -17,3 +17,4 @@ When `CLAUDE_ACCOUNT` is unset and the caller set no configuration directory of 
 - `claude-account list`, `status`, `use` and `/account <name>` still show and record the binding until a later change removes them; that change supersedes ADR-hosts-005.
 - A profile whose login is not recorded in its own `.claude.json` counts as signed out for the fallback.
 - The console's own rule decides whenever it answers; the launcher's fallback applies only when it does not.
+- Amended by ADR-system-006: a launch that names an answer file asks the profile question with all_out=1 and starts no client when every account is out.

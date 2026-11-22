@@ -124,6 +124,8 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_resolve_platform.py \
     home/common/agent-skills/tests/test_resolve_schema_three.py \
     home/common/agent-skills/tests/test_schema_three_derivation.py \
+    home/common/agent-skills/tests/test_attempt_history.py \
+    home/common/agent-skills/tests/test_attempt_budget.py \
     home/common/agent-skills/tests/test_resolve_platform_status.py \
     home/common/agent-skills/tests/test_fleet_preflight.py \
     home/common/agent-skills/tests/test_host_readiness.py \
@@ -228,6 +230,7 @@ agent-workflow-tests *args:
     tests/test_standard_ids.py \
     tests/test_standards_lint.py \
     tests/test_citation_lint.py \
+    tests/test_never_rise.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \
@@ -366,7 +369,7 @@ agent-instruction-budget *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 110 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 114 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail
