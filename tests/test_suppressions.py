@@ -9,6 +9,7 @@ the check for it. `size-lint` prints the same count.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -239,6 +240,118 @@ class SizeLintSuppressionTest(unittest.TestCase):
                 capture_output=True, text=True, timeout=60,
                 env=fixture_env({"PYTHONPATH": str(REPO_ROOT / "python")}))
         self.assertEqual((done.returncode, done.stdout), (1, "B17 b.py:1501\nB17 b.py:1501\n"))
+
+
+class SuppressionLintTest(unittest.TestCase):
+    PLATFORM_README = (
+        "# Standards\n\n## Rule ids\n\n| Layer file | Prefix |\n|---|---|\n"
+        "| `the-bar.md` | `B` |\n| the repo's `docs/standards/` shards | `P` |\n")
+    BAR = "# The bar\n\n### B1. One\n\nBody.\n\n### B2. Two\n\nBody.\n"
+
+    def lint_root(self, files, *, project_shards=None, init=True, untracked=None):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        platform = tmp / "platform"
+        write(platform, "README.md", self.PLATFORM_README)
+        write(platform, "the-bar.md", self.BAR)
+        root = tmp / "root"
+        root.mkdir()
+        for name, text in files.items():
+            write(root, name, text)
+        if project_shards:
+            index = "# Project standards\n\n| Shard | governs | Gist |\n|---|---|---|\n"
+            for name, text in project_shards.items():
+                write(root, "docs/standards/" + name, text)
+                index += f"| [{name}]({name}) | `x/**` | Shard. |\n"
+            write(root, "docs/standards/README.md", index)
+        if init:
+            git(root, "init", "-q", "-b", "main")
+            git(root, "add", "-A")
+        for name, text in (untracked or {}).items():
+            write(root, name, text)
+        return root, platform
+
+    def run_lint(self, root, platform, *extra):
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.standards_lint",
+             "--repo-root", str(root), "--platform-standards", str(platform), *extra],
+            capture_output=True, text=True, timeout=120,
+            env=fixture_env({"PYTHONPATH": str(REPO_ROOT / "python")}))
+
+    def outcome(self, done):
+        return done.returncode, done.stdout
+
+    def test_a_suppression_naming_an_id_in_no_layer_fails_the_lint(self):
+        root, platform = self.lint_root(
+            {"src/a.py": "x = 1  # " + suppress("Z9", "no such rule") + "\n"})
+        self.assertEqual(
+            self.outcome(self.run_lint(root, platform)),
+            (1, "src/a.py:1: suppresses Z9, which is in no applicable layer\n"))
+
+    def test_a_bare_marker_naming_an_unknown_id_fails_too(self):
+        root, platform = self.lint_root({"src/a.py": "# " + suppress("Z9") + "\n"})
+        self.assertEqual(
+            self.outcome(self.run_lint(root, platform)),
+            (1, "src/a.py:1: suppresses Z9, which is in no applicable layer\n"))
+
+    def test_a_marker_with_no_id_is_no_lint_problem(self):
+        root, platform = self.lint_root({
+            "src/a.py": "# " + suppress("", "why") + "\n# " + suppress("b17", "why") + "\n"})
+        self.assertEqual(self.outcome(self.run_lint(root, platform)), (0, ""))
+
+    def test_a_suppressed_id_resolves_against_its_own_layer(self):
+        root, platform = self.lint_root(
+            {"src/a.py": "".join("# " + suppress(t, "r") + "\n" for t in ("P1", "P2", "B1", "B9"))},
+            project_shards={"a.md": "# A\n\n### P1. One\n\nBody.\n\n### B9. Shadow\n\nBody.\n"})
+        done = self.run_lint(root, platform)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(
+            [l for l in done.stdout.splitlines() if l.startswith("src/a.py:")],
+            ["src/a.py:2: suppresses P2, which is in no applicable layer",
+             "src/a.py:4: suppresses B9, which is in no applicable layer"])
+
+    def test_an_untracked_file_is_not_read(self):
+        root, platform = self.lint_root(
+            {}, untracked={"src/b.py": "# " + suppress("Z9", "r") + "\n"})
+        self.assertEqual(self.outcome(self.run_lint(root, platform)), (0, ""))
+
+    def test_a_root_that_is_no_repository_reads_no_file(self):
+        root, platform = self.lint_root(
+            {"src/a.py": "# " + suppress("Z9", "r") + "\n"}, init=False)
+        self.assertEqual(self.outcome(self.run_lint(root, platform)), (0, ""))
+
+    def test_a_repository_git_cannot_list_exits_2(self):
+        root, platform = self.lint_root({}, init=False)
+        write(root, ".git", "gitdir: " + str(root.parent / "missing") + "\n")
+        done = self.run_lint(root, platform)
+        self.assertEqual((done.returncode, done.stdout), (2, ""))
+        self.assertTrue(done.stderr.startswith("standards-lint: "), done.stderr)
+
+    def test_a_binary_tracked_file_is_not_read(self):
+        root, platform = self.lint_root(
+            {"src/a.bin": b"\0" + ("# " + suppress("Z9", "r") + "\n").encode()})
+        self.assertEqual(self.outcome(self.run_lint(root, platform)), (0, ""))
+
+    def test_the_index_prints_the_reasoned_suppressions_of_each_rule(self):
+        root, platform = self.lint_root({
+            "src/a.py": ("x = 1  # " + suppress("B1", "generated") + "\ny = 2  # "
+                         + suppress("B1") + "\n"),
+            "notes/x.md": "<!-- " + suppress("B2", "vendored table") + " -->\n"})
+        done = self.run_lint(root, platform, "--index")
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertEqual(done.stdout.splitlines(), [
+            "B1. One", "  reasoned suppressions: 1", "B2. Two", "  reasoned suppressions: 1",
+            "judged rules: 2", "enforcers citing nothing: 0"])
+
+    def test_a_project_suppression_is_credited_to_the_project_rule(self):
+        root, platform = self.lint_root(
+            {"src/a.py": "# " + suppress("P1", "r") + "\n"},
+            project_shards={"a.md": "# A\n\n### P1. One\n\nBody.\n"})
+        done = self.run_lint(root, platform, "--index")
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertEqual(done.stdout.splitlines(), [
+            "B1. One", "B2. Two", "P1. One", "  reasoned suppressions: 1",
+            "judged rules: 3", "enforcers citing nothing: 0"])
 
 
 if __name__ == "__main__":

@@ -59,12 +59,20 @@ characters, over 100`, and `no planning rule` when the section holds none.
    `P` id resolves only against the repository's `docs/standards` shards and any
    other id only against the platform directory (the bar and the stacks), so a
    deleted rule's citation fails. Without the recipe no enforcer is registered.
+   The suppression markers (`suppress-standard:<id> <reason>`, `agent_tools.delivery.rule_ids`)
+   of every tracked text file are read whether or not the recipe exists (a root with no
+   `.git` entry reads none, a binary file is skipped, a root `git` cannot list exits 2),
+   and each marker naming an id resolves as a citation does; one naming an id in no
+   applicable layer is a problem after every enforcer problem, in file then line order:
+   `<path>:<line>: suppresses <id>, which is in no applicable layer`, reasoned or bare.
+   A marker naming no id is no problem here.
 
 With `--index` the problems still print and set exit status 1, and the rule index
 follows them on stdout, computed on the run and written to no file: for each rule
 (the bar, the stacks by filename, then the project shards by filename, each in
 heading order) `<id>. <title>` and one line `  <path>` per enforcer citing the id
-with a well-formed citation, sorted, each once; then `judged rules: <n>` (rules no
+with a well-formed citation, sorted, each once, then `  reasoned suppressions: <n>`
+when `n > 0`, the reasoned markers naming the id in its layer; then `judged rules: <n>` (rules no
 enforcer cites) and `enforcers citing nothing: <m>` (existing registered enforcers
 holding neither a citation nor a decision-record id `ADR-<area>-NNN`).
 
