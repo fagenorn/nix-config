@@ -227,8 +227,15 @@ def render_history(slug: str, recorded_at: datetime, attempts: Sequence[Attempt]
 
 
 def write_history(root: Path, text: str) -> Path:
-    """Replace the history file with `text` through a sibling temporary file; returns its path."""
-    path = history_path(root)
+    """Replace the history file with `text` through a sibling temporary file; returns its path.
+
+    A root with no readable git directory has no place for the file: that is an `OSError`,
+    so a caller handles every way the write can fail as one.
+    """
+    try:
+        path = history_path(root)
+    except derived_values.Underivable as error:
+        raise OSError(str(error)) from error
     path.parent.mkdir(exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".attempt-history-", suffix=".tmp")
     try:

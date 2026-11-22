@@ -199,6 +199,15 @@ class CommandTest(AttemptBudgetCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["error"]["code"], "write_failed")
 
+    def test_a_root_without_a_git_directory_prints_a_write_failure(self):
+        root = make_schema_three_root(source_contract())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        shutil.rmtree(root / ".git")
+        code, result = self.command("record", World(twenty_world()), root=root)
+        self.assertEqual(code, 1)
+        self.assertEqual(result["command"], "record")
+        self.assertEqual(result["error"]["code"], "write_failed")
+
     def test_a_pattern_without_both_placeholders_is_unsupported(self):
         contract = source_contract()
         contract["bindings"]["vcs"]["branch_pattern"] = "issue-<num>"
