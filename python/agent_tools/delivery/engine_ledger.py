@@ -5,8 +5,12 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
     run.json            the run's identity: exactly `RUN_MEMBERS`
     procedure/          a byte copy of the entry procedure directory's `*.json`, `*.md`, `SHA256SUMS`
     events.jsonl        one compact JSON event per line, appended and fsynced
-    lock                the deliver process's exclusive flock and its {"pid","started"}
-    results/<step>.<visit>.json   a step visit's stored result
+    lock  the deliver process's exclusive flock and its {"pid","started"}
+    results/<step>.<visit>.json
+                        a step visit's stored result
+    sessions/<step>.<visit>.{system.md,prompt.md,json}
+                        an agent step visit's launch files and raw result,
+                        created with the first one stored
 
 The run id is `<issue>-<UTC start as %Y%m%dT%H%M%SZ>-<four [a-z0-9]>`. It orders only to the second, so
 `run.json` also carries `sequence`: one above the greatest `sequence` among the issue's earlier runs, the
@@ -390,12 +394,12 @@ def append_event(run_dir: Path, event: Mapping[str, object]) -> None:
     _append_line(run_dir / "events.jsonl", _compact(checked).encode("utf-8"))
 
 
-def _write_result(path: Path, document: object) -> None:
-    """Publish `document` at `path` atomically, refusing a destination that exists."""
+def _publish(path: Path, data: bytes) -> None:
+    """Publish `data` at `path` atomically, refusing a destination that exists."""
     token = "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(8))
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{token}.tmp")
     try:
-        _write_file(temporary, _compact(document).encode("utf-8"))
+        _write_file(temporary, data)
         try:
             os.link(temporary, path)
         except FileExistsError as error:
@@ -403,6 +407,11 @@ def _write_result(path: Path, document: object) -> None:
     finally:
         temporary.unlink(missing_ok=True)
     _fsync_path(path.parent)
+
+
+def _write_result(path: Path, document: object) -> None:
+    """Publish `document` at `path` atomically, refusing a destination that exists."""
+    _publish(path, _compact(document).encode("utf-8"))
 
 
 def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: str,
@@ -419,6 +428,29 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
         raise LedgerError(f"{relative} is already stored")
     _write_result(path, result)
     append_event(run_dir, event)
+    return path
+
+
+SESSION_FILE_RE = re.compile(r"[a-z][a-z0-9-]*\.[1-9][0-9]*\.(json|system\.md|prompt\.md)")
+
+
+def store_session_file(run_dir: Path, name: str, data: bytes) -> Path:
+    """Write `sessions/<name>` once, creating `sessions/` (mode 0700) with the first."""
+    run_dir = Path(run_dir)
+    if not isinstance(name, str) or not SESSION_FILE_RE.fullmatch(name):
+        raise LedgerError(f"{name!r} is not a session file name")
+    directory = run_dir / "sessions"
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    else:
+        _fsync_path(directory)
+        _fsync_path(run_dir)
+    path = directory / name
+    if os.path.lexists(path):
+        raise LedgerError(f"sessions/{name} is already stored")
+    _publish(path, data)
     return path
 
 
