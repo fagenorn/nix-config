@@ -8,6 +8,7 @@ The suite holds `standard:NODE11`, `standard:NODE12`, `standard:NODE13`,
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -22,8 +23,8 @@ from agent_tools.delivery.never_rise import Violation
 from agent_tools.project_contract import agent_platform
 
 from .conformance_test_support import (
-    HERMETIC_ENV, REAL_GIT, REPO_ROOT, commit_all, fixture, git,
-    pinned_node_tools, platform_env,
+    HERMETIC_ENV, INTEGRATION_REF, REAL_GIT, REPO_ROOT, ReportAssertions, commit_all, doctor,
+    fixture, git, make_root, node_tools_env, pinned_node_tools, platform_env, run,
 )
 
 TIER = "integration"  # git worlds, nix-built node and eslint, the conformance engine
@@ -395,6 +396,177 @@ class NodeRuleMappingTest(unittest.TestCase):
         ids = {f"{prefix}{number}" for prefix, number, _ in headings}
         self.assertLessEqual(set(node_lint.RULES), ids)
         self.assertEqual(set(node_lint.ESLINT_RULES.values()), {"NODE12", "NODE13", "NODE14"})
+
+class NodeNeverRiseTest(ReportAssertions, unittest.TestCase):
+    """The never-rise check judges Workflow programs with the Node enforcers."""
+
+    CHECK_ID = "verification.violations.never_rise"
+
+    def ci(self, root: Path, env: dict) -> tuple[int, dict, dict]:
+        code, out, err = run("run", "--purpose", "ci", "--repo-root", str(root), env=env)
+        self.assertIn(code, (0, 1), err)
+        report = json.loads(out)
+        return code, report, {c["id"]: c for c in report["checks"]}
+
+    def summary(self, check: dict) -> list:
+        return [check["status"], check["reason_code"], check["repair_id"], check["facts"]]
+
+    def branch(self, tmp: Path, base_text: str, branch_text: str) -> tuple[Path, str]:
+        """A root whose integration tip holds `base_text` as a program, then a branch commit."""
+        root = make_root(tmp)
+        (root / "src").mkdir()
+        (root / "src" / "p.js").write_text(base_text, encoding="utf-8")
+        commit_all(root, "program")
+        git(root, "update-ref", INTEGRATION_REF, "HEAD")
+        base = git(root, "rev-parse", "HEAD").strip()
+        if branch_text != base_text:
+            (root / "src" / "p.js").write_text(branch_text, encoding="utf-8")
+            commit_all(root, "branch")
+        return root, base
+
+    def rose(self, tmp: Path, base_text: str, branch_text: str) -> dict:
+        root, _ = self.branch(tmp, base_text, branch_text)
+        code, report, by_id = self.ci(root, node_tools_env(tmp))
+        self.assertEqual(code, 1)
+        self.assert_validates(report)
+        return by_id[self.CHECK_ID]
+
+    def test_a_branch_that_adds_an_unused_variable_to_a_program_turns_ci_red_naming_node12_and_the_line(self) -> None:
+        with fixture() as tmp:
+            root, base = self.branch(tmp, META, META + "const unused = 1\n")
+            code, report, by_id = self.ci(root, node_tools_env(tmp))
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce", {
+                    "merge_base": base, "rule": "NODE12", "base_count": 0, "branch_count": 1,
+                    "violations": ["NODE12 src/p.js:2"], "rules": ["NODE12"]}])
+            self.assert_validates(report)
+
+    def test_a_branch_that_removes_a_finding_passes_ci(self) -> None:
+        with fixture() as tmp:
+            root, base = self.branch(tmp, META + "const unused = 1\n", META)
+            code, _, by_id = self.ci(root, node_tools_env(tmp))
+            self.assertEqual(code, 0)
+            self.assertEqual(self.summary(by_id[self.CHECK_ID]),
+                             ["passed", None, None, {"merge_base": base}])
+
+    def test_existing_findings_level_with_the_merge_base_pass_ci(self) -> None:
+        with fixture() as tmp:
+            text = META + "const one = 1\nconst two = 2\n"
+            root, _ = self.branch(tmp, text, text)
+            (root / "README.txt").write_text("notes\n", encoding="utf-8")
+            commit_all(root, "readme")
+            code, _, by_id = self.ci(root, node_tools_env(tmp))
+            self.assertEqual(code, 0)
+            self.assertEqual(by_id[self.CHECK_ID]["status"], "passed")
+
+    def test_a_new_bare_disable_comment_turns_ci_red_naming_node15(self) -> None:
+        with fixture() as tmp:
+            check = self.rose(tmp, META + "const unused = 1\n",
+                              META + "// eslint-disable-next-line\nconst unused = 1\n")
+            self.assertEqual(
+                [check["facts"]["rule"], check["facts"]["violations"], check["facts"]["rules"]],
+                ["NODE15", ["NODE15 src/p.js:2"], ["NODE15"]])
+
+    def test_a_new_reasoned_disable_comment_passes_ci(self) -> None:
+        with fixture() as tmp:
+            root, _ = self.branch(
+                tmp, META + "const unused = 1\n",
+                META + "// eslint-disable-next-line no-unused-vars -- kept for the fixture\n"
+                "const unused = 1\n")
+            code, _, _ = self.ci(root, node_tools_env(tmp))
+            self.assertEqual(code, 0)
+
+    def test_a_branch_that_breaks_the_parse_turns_ci_red_naming_node11(self) -> None:
+        with fixture() as tmp:
+            check = self.rose(tmp, META, META + "const = 1\n")
+            self.assertEqual([check["facts"]["rule"], check["facts"]["violations"]],
+                             ["NODE11", ["NODE11 src/p.js:2"]])
+
+    def test_a_branch_that_breaks_the_meta_declaration_turns_ci_red_naming_node11(self) -> None:
+        with fixture() as tmp:
+            check = self.rose(tmp, META, "export const = { name: 'fixture' }\n")
+            facts = check["facts"]
+            self.assertEqual(
+                [facts["rule"], facts["base_count"], facts["branch_count"], facts["violations"]],
+                ["NODE11", 0, 1, ["NODE11 src/p.js:1"]])
+
+    def test_a_program_with_no_tool_record_is_a_failed_check(self) -> None:
+        with fixture() as tmp:
+            root, _ = self.branch(tmp, META, META)
+            code, report, by_id = self.ci(root, HERMETIC_ENV)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["failed", "enforcer_failed", "platform.enforcers.install",
+                 {"tool": "node-tools", "reason": "record_unavailable"}])
+            self.assertNotIn("node-tools.json", json.dumps(by_id[self.CHECK_ID]))
+            self.assert_validates(report)
+
+    def test_an_eslint_that_returns_no_result_is_a_failed_check(self) -> None:
+        with fixture() as tmp:
+            root, _ = self.branch(tmp, META, META)
+            eslint = shim(tmp, "eslint", "printf '[]'\n")
+            env = platform_env(tmp, node_tools={
+                "schema_version": 1, "node": pinned_node_tools()["node"], "eslint": eslint})
+            code, _, by_id = self.ci(root, env)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                self.summary(by_id[self.CHECK_ID]),
+                ["failed", "enforcer_failed", "platform.enforcers.install",
+                 {"tool": "eslint", "reason": "unreadable_output"}])
+
+
+RECORDER = """\
+import hashlib, json, os, sys
+name = os.path.basename(sys.argv[0])
+digests = [hashlib.sha256(open(a, "rb").read()).hexdigest()
+           for a in sys.argv[1:] if a.endswith(".cjs")]
+with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), name + ".jsonl"), "a") as out:
+    out.write(json.dumps({"argv": sys.argv[1:], "digests": digests}) + "\\n")
+os.execv(PINNED, [PINNED, *sys.argv[1:]])
+"""
+
+
+class ThisRepositoryNodeTest(unittest.TestCase):
+    """This repository's two programs reach both tools, as the executable boundary shows."""
+
+    PROGRAMS = ("home/common/claude-code/skills/deliver-standard/deliver-standard.js",
+                "home/common/claude-code/skills/deliver-standard/deliver-batch.js")
+
+    def recording(self, tmp: Path, name: str, pinned: str) -> str:
+        path = tmp / name
+        path.write_text(f"#!{sys.executable} -I\nPINNED = {pinned!r}\n" + RECORDER,
+                        encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def calls(self, tmp: Path, name: str) -> list[dict]:
+        log = tmp / f"{name}.jsonl"
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def test_doctor_on_this_repository_lints_both_programs_with_both_tools(self) -> None:
+        with fixture() as tmp:
+            pinned = pinned_node_tools()
+            env = platform_env(tmp, node_tools={
+                "schema_version": 1,
+                "node": self.recording(tmp, "node", pinned["node"]),
+                "eslint": self.recording(tmp, "eslint", pinned["eslint"])})
+            expected = {
+                hashlib.sha256(node_lint.wrap(git(REPO_ROOT, "show", f"HEAD:{path}")).text
+                               .encode()).hexdigest()
+                for path in self.PROGRAMS}
+            _, by_id = doctor(self, REPO_ROOT, "--offline", env=env)
+            self.assertEqual(by_id["verification.violations.never_rise"]["status"], "passed")
+            seen = lambda name, flag: {  # noqa: E731
+                d for call in self.calls(tmp, name) if flag(call["argv"]) for d in call["digests"]}
+            self.assertLessEqual(expected, seen(
+                "node", lambda argv: argv[:1] == ["--check"]))
+            self.assertLessEqual(expected, seen(
+                "eslint", lambda argv: node_lint.CONFIG in argv))
+            self.assertLessEqual(expected, seen(
+                "eslint", lambda argv: node_lint.INLINE_CONFIG in argv))
 
 
 if __name__ == "__main__":

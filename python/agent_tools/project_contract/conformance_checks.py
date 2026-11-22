@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    context_map_lint, host_admission, never_rise, size_lint, standards_lint,
+    context_map_lint, host_admission, never_rise, node_lint, size_lint, standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
@@ -779,6 +779,11 @@ def check_standards_lint(context: "Context") -> "Outcome":
 NEVER_RISE_ENFORCERS = (size_lint.ENFORCER,)
 
 
+def _node_tools() -> "node_lint.NodeTools":
+    """The platform's pinned Node tools, read only when a program needs them."""
+    return node_lint.NodeTools(*agent_platform.node_tools())
+
+
 def check_never_rise(context: "Context") -> "Outcome":
     """Contract: no registered enforcer's violation count rises between the
     merge base with the authored integration branch and the committed head.
@@ -789,10 +794,21 @@ def check_never_rise(context: "Context") -> "Outcome":
     suppression the branch adds is listed in the facts, passed or failed, and
     never fails the check (ADR-project-contract-019). Each listed line holds its
     rule, path, line and reason within the fact string bound (`Suppression.text`).
+    The Node enforcers judge the Workflow programs of either revision on both; a
+    failure of an enforcer's tool is `enforcer_failed`, never a pass, and
+    publishes only the tool and a closed-set reason.
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
-    verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
-                               CHILD_TIMEOUT_SECONDS)
+    pair = never_rise.revisions(context.root, branch, CHILD_TIMEOUT_SECONDS)
+    verdict = None
+    if pair is not None:
+        enforcers = NEVER_RISE_ENFORCERS + node_lint.enforcers(
+            context.root, CHILD_TIMEOUT_SECONDS, _node_tools, also=pair)
+        try:
+            verdict = never_rise.judge(context.root, branch, enforcers, CHILD_TIMEOUT_SECONDS)
+        except never_rise.EnforcerFailure as error:
+            return Outcome("failed", "enforcer_failed", "platform.enforcers.install",
+                           {"tool": bound_fact(error.tool), "reason": error.reason})
     if verdict is None:
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})
