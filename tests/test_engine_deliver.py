@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_ledger, engine_shell
+from agent_tools.delivery import engine, engine_core, engine_ledger, engine_shell
 from agent_tools.delivery.engine_ledger import RUN_ID_RE
 from agent_tools.delivery.engine_shell import creation_lock_path, lock_holder, platform_revision
 from tests.guard_policy_world import GuardPolicyWorld
@@ -279,6 +279,62 @@ class DeliverTest(unittest.TestCase):
         stdout, stderr = process.communicate(timeout=60)
         self.assertEqual(process.returncode, 0, stderr)
         self.assertEqual(json.loads(stdout)["end"], "done")
+
+
+    @staticmethod
+    def transitions(events: list[dict]) -> list[tuple]:
+        return [(e["step"], e["visit"], e["outcome"], e["to"])
+                for e in events if e["event"] == "transition_taken"]
+
+    def decide_run(self) -> tuple[EngineProject, Path]:
+        project = EngineProject(self)
+        procedures = project.procedures([
+            step("a", "standin-json", "gate"),
+            {"id": "gate", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+             "on": {"accept": "b", "revise": "needs-owner"}},
+            step("b", "standin-json", "done")])
+        done = project.deliver(procedures, issue=1519)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return project, project.runs()[0]
+
+    def test_a_decide_step_leaves_one_transition_taken_between_its_neighbours(self):
+        project, run = self.decide_run()
+        events = project.events(run)
+        self.assertEqual(self.transitions(events),
+                         [("a", 1, "ok", "gate"), ("gate", 1, "accept", "b"),
+                          ("b", 1, "ok", "done")])
+        first = next(i for i, e in enumerate(events)
+                     if e["event"] == "transition_taken" and e["step"] == "a")
+        gate = next(i for i, e in enumerate(events)
+                    if e["event"] == "transition_taken" and e["step"] == "gate")
+        self.assertGreater(gate, first)
+        self.assertLess(gate, next(i for i, e in enumerate(events)
+                                   if e["event"] == "step_entered" and e["step"] == "b"))
+        self.assertEqual([e["event"] for e in events
+                          if e.get("step") == "gate"], ["transition_taken"])
+
+    def test_an_exhausted_entry_leaves_one_transition_taken(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step(
+            "a", "standin-json", None, max_visits=1,
+            on={"ok": "a", "failed": "needs-owner", "exhausted": "done"})])
+        done = project.deliver(procedures, issue=1519)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        events = project.events(project.runs()[0])
+        self.assertEqual(self.transitions(events),
+                         [("a", 1, "ok", "a"), ("a", 2, "exhausted", "done")])
+        self.assertEqual([(e["step"], e["visit"]) for e in events if e["event"] == "step_entered"],
+                         [("a", 1)])
+
+    def test_a_recorded_core_transition_does_not_change_the_cores_replay(self):
+        project, run = self.decide_run()
+        events = project.events(run)
+        procedure = json.loads((run / "procedure" / "deliver.json").read_text())
+        walk = engine_core.replay(procedure, {"issue": 1519},
+                                  engine_shell.core_events(run, events))
+        self.assertEqual([(t.step, t.outcome, t.target) for t in walk.transitions],
+                         [(step_, outcome, to) for step_, _, outcome, to in self.transitions(events)])
+        self.assertEqual(walk.action, engine_core.Done())
 
 
 class FindingsTest(unittest.TestCase):

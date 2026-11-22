@@ -291,6 +291,7 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
     while True:
         ledger = engine_ledger.replay(run_dir / "events.jsonl")
         walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger))
+        _record_core_transitions(run_dir, ledger, walk)
         action = walk.action
         if isinstance(action, engine_core.Done):
             engine_ledger.append_event(run_dir, {"event": "run_done", "at": _now()})
@@ -311,6 +312,20 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
                 return lost
         _visit(run_dir, table, steps[action.step], action)
         ran += 1
+
+
+def _record_core_transitions(run_dir: Path, ledger: list[dict], walk: engine_core.Replay) -> None:
+    """Append the `transition_taken` of each walk transition the ledger lacks, in order.
+
+    A command visit writes its own in `_visit`; the core resolves a `decide` step and an
+    exhausted entry with no command, so the ledger holds the rest of the walk's transitions here.
+    """
+    taken = sum(1 for event in ledger if event["event"] == "transition_taken")
+    for index, transition in enumerate(walk.transitions[taken:], start=taken):
+        visit = sum(1 for earlier in walk.transitions[:index + 1] if earlier.step == transition.step)
+        engine_ledger.append_event(run_dir, {
+            "event": "transition_taken", "at": _now(), "step": transition.step, "visit": visit,
+            "outcome": transition.outcome, "to": transition.target})
 
 
 def _stop(run_dir: Path, step: str, name: str, need: str, detail: str) -> tuple[int, dict]:
