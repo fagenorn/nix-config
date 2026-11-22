@@ -60,6 +60,7 @@ import json
 import math
 import os
 import re
+import selectors
 import signal
 import subprocess
 import time
@@ -68,7 +69,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery.engine_commands import argument
+from agent_tools.delivery.engine_commands import DRAIN_SECONDS, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
 from agent_tools.delivery.procedure_check import PLACEHOLDER_RE, ROLES
 from agent_tools.skill_lint import parse_frontmatter
@@ -80,6 +81,8 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
 NOT_STARTED = 127
+EXIT_POLL_SECONDS = 0.1
+READ_BYTES = 65536
 READ_ONLY_BASH: tuple[str, ...] = tuple(
     f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
                                       "blame", "merge-base"))
@@ -303,6 +306,59 @@ def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+def _converse(process: subprocess.Popen, prompt: bytes) -> tuple[bytes, bytes]:
+    """Write `prompt` to the session and read its stdout and stderr until it ends.
+
+    The session's end is its exit, polled every `EXIT_POLL_SECONDS`, never the end of its pipes: a
+    descendant that outlives the session and holds a pipe open would keep a read-to-EOF waiting for
+    as long as it lives. After the exit the pipes are read for at most `DRAIN_SECONDS` more, then
+    closed, and what was read is returned.
+    """
+    chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    selector = selectors.DefaultSelector()
+    pending = memoryview(prompt)
+    try:
+        for name in chunks:
+            stream = getattr(process, name)
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        if pending:
+            os.set_blocking(process.stdin.fileno(), False)
+            selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+        else:
+            process.stdin.close()
+        deadline = None
+        while selector.get_map():
+            if deadline is None and process.poll() is not None:
+                deadline = time.monotonic() + DRAIN_SECONDS
+            wait = EXIT_POLL_SECONDS if deadline is None else min(
+                EXIT_POLL_SECONDS, deadline - time.monotonic())
+            if wait <= 0:
+                break
+            for key, _ in selector.select(wait):
+                stream = key.fileobj
+                try:
+                    if key.data == "stdin":
+                        pending = pending[os.write(stream.fileno(), pending[:READ_BYTES]):]
+                        done = not pending
+                    else:
+                        data = os.read(stream.fileno(), READ_BYTES)
+                        chunks[key.data].append(data)
+                        done = not data
+                except BlockingIOError:
+                    continue
+                except BrokenPipeError:
+                    done = True
+                if done:
+                    selector.unregister(stream)
+                    stream.close()
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close()
+    return b"".join(chunks["stdout"]), b"".join(chunks["stderr"])
+
+
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
            on_start: Callable[[int], None]) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
@@ -321,14 +377,17 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)
         on_start(process.pid)
-        stdout, stderr = process.communicate(prompt.encode("utf-8"))
+        stdout, stderr = _converse(process, prompt.encode("utf-8"))
+        process.wait()
     except BaseException:
         if process is not None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.communicate()
+            for stream in (process.stdin, process.stdout, process.stderr):
+                stream.close()
+            process.wait()
         raise
     finally:
         if previous is not None:

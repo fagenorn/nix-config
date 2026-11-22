@@ -34,6 +34,9 @@ CLAUDE_CODE = {"support": "supported", "agent_slots": 7}
 ONE_SLOT = {"schema_version": 1,
             "routes": {"claude-code": CLAUDE_CODE,
                        "engine": {"support": "supported", "agent_slots": 1}}}
+TWO_SLOTS = {"schema_version": 1,
+             "routes": {"claude-code": CLAUDE_CODE,
+                        "engine": {"support": "supported", "agent_slots": 2}}}
 
 
 def install_launcher(project: EngineProject, mode: str) -> Path:
@@ -58,6 +61,13 @@ def held_slots(run: Path) -> int:
         finally:
             os.close(descriptor)
     return held
+
+
+def kill_quietly(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def wait_for(test: unittest.TestCase, condition, message: str, seconds: float = 30) -> None:
@@ -119,8 +129,8 @@ class SlotWaitTest(unittest.TestCase):
         argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         process = subprocess.Popen(argv, **options)
+        self.addCleanup(process.communicate)  # cleanups run last-in first: kill, then reap
         self.addCleanup(process.kill)
-        self.addCleanup(process.communicate)
 
         def started() -> bool:
             runs = project.runs()
@@ -131,10 +141,10 @@ class SlotWaitTest(unittest.TestCase):
         wait_for(self, started, "the run never started its first step")
         (run,) = project.runs()
         ready = project.tmp / "ready"
-        holder = subprocess.Popen([sys.executable, str(HOLDER), str(run / "slots"), "1",
+        holder = subprocess.Popen([sys.executable, str(HOLDER), str(run / "slots"), "0",
                                    str(ready)])
+        self.addCleanup(holder.wait)  # cleanups run last-in first: kill, then reap
         self.addCleanup(holder.kill)
-        self.addCleanup(holder.wait)
         wait_for(self, ready.exists, "the holder never took the slot")
         project.release.write_text("go", encoding="utf-8")
         wait_for(self, lambda: any(e["event"] == "wait_started" for e in project.events(run)),
@@ -176,6 +186,53 @@ class SlotWaitTest(unittest.TestCase):
         self.assertEqual([json.loads(line)["held"] for line in lines], [1])
 
 
+class SlotCountTest(unittest.TestCase):
+    def test_deliver_holds_the_slot_that_is_free_of_the_declared_two(self) -> None:
+        project = EngineProject(self)
+        project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project, "implementer")
+        project.declare(TWO_SLOTS)
+        log = install_launcher(project, "reply")
+        procedures = write_procedures(project, [
+            step("a", "standin-block", "b"), step("b", "standin-json", "draft"),
+            agent_step("draft", "implementer", {"drafted": "done", "stuck": "needs-owner"})])
+        argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(argv, **options)
+        self.addCleanup(process.communicate)  # cleanups run last-in first: kill, then reap
+        self.addCleanup(process.kill)
+        wait_for(self, lambda: bool(project.runs()) and any(
+            e["event"] == "process_started" and e["step"] == "a"
+            for e in project.events(project.runs()[0])), "the run never started its first step")
+        (run,) = project.runs()
+        holders = []
+        for index in (0, 1):
+            ready = project.tmp / f"ready-{index}"
+            holder = subprocess.Popen([sys.executable, str(HOLDER), str(run / "slots"),
+                                       str(index), str(ready)])
+            self.addCleanup(holder.wait)
+            self.addCleanup(holder.kill)
+            wait_for(self, ready.exists, f"the holder never took slot {index}")
+            holders.append(holder)
+        project.release.write_text("go", encoding="utf-8")
+        wait_for(self, lambda: any(e["event"] == "wait_started" for e in project.events(run)),
+                 "the run never waited for a slot")
+        holders[1].send_signal(signal.SIGKILL)
+        holders[1].wait()
+        wait_for(self, lambda: any(e["event"] == "process_started" and e["step"] == "draft"
+                                   for e in project.events(run)),
+                 "the run did not launch on the freed slot")
+        stdout, stderr = process.communicate(timeout=60)
+        held_by_holder = held_slots(run)
+        holders[0].send_signal(signal.SIGKILL)
+        holders[0].wait()
+
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual([json.loads(line)["held"]
+                          for line in log.read_text(encoding="utf-8").splitlines()], [2])
+        self.assertEqual(held_by_holder, 1)
+
+
 class SlotReleaseTest(unittest.TestCase):
     def deliver_with(self, mode: str):
         project = EngineProject(self)
@@ -184,12 +241,15 @@ class SlotReleaseTest(unittest.TestCase):
         log = install_launcher(project, mode)
         procedures = one_step(project)
         with project.inside():
-            if mode in ("reply", "orphan"):
+            if mode in ("reply", "orphan", "pipes"):
                 code, _ = engine_shell.deliver(1512, procedures)
                 self.assertEqual(code, 0)
             else:
                 with self.assertRaises(engine_shell.Fault):
                     engine_shell.deliver(1512, procedures)
+        pid_file = Path(f"{log}.orphan.pid")
+        if pid_file.exists():
+            self.addCleanup(kill_quietly, int(pid_file.read_text(encoding="utf-8")))
         (run,) = project.runs()
         lines = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual([json.loads(line)["held"] for line in lines], [1])
@@ -204,9 +264,14 @@ class SlotReleaseTest(unittest.TestCase):
 
     def test_a_process_the_session_leaves_behind_holds_no_slot(self) -> None:
         log = self.deliver_with("orphan")
-        pid = int(Path(f"{log}.orphan.pid").read_text(encoding="utf-8"))
-        self.addCleanup(lambda: os.kill(pid, signal.SIGKILL))
-        os.kill(pid, 0)
+        os.kill(int(Path(f"{log}.orphan.pid").read_text(encoding="utf-8")), 0)
+
+    def test_a_slot_is_free_when_a_process_left_behind_keeps_the_output_pipes_open(self) -> None:
+        for mode in ("pipes", "killpipes"):
+            with self.subTest(mode):
+                started = time.monotonic()
+                self.deliver_with(mode)
+                self.assertLess(time.monotonic() - started, 30)
 
 
 class HoldTest(unittest.TestCase):

@@ -125,6 +125,22 @@ class HostAdmissionTest(unittest.TestCase):
             target.write_text(COMMITTED_DECLARATION.read_text(encoding="utf-8"), encoding="utf-8")
             self.assertEqual(host_admission.load_declaration(), committed)
 
+    def test_load_names_a_declaration_it_cannot_inspect_invalid_not_missing(self):
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.dict(os.environ, {"HOME": raw}):
+            target = Path(raw) / ".agents/share/host-declaration.json"
+            target.parent.mkdir(parents=True)
+            target.write_text(COMMITTED_DECLARATION.read_text(encoding="utf-8"), encoding="utf-8")
+            target.parent.chmod(0)
+            try:
+                if os.access(target, os.R_OK):
+                    self.skipTest("the process bypasses directory permissions")
+                with self.assertRaises(host_admission.DeclarationError) as raised:
+                    host_admission.load_declaration()
+            finally:
+                target.parent.chmod(0o700)
+            self.assertEqual(raised.exception.reason_code, "declaration_invalid")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,9 +1,10 @@
 """A stand-in for a process that holds every agent slot of an engine run (#1522).
 
-Run as `python holder.py <slots dir> <count> <ready file>`: it creates the slots directory
-(mode 0700), opens `slot-0.lock` .. `slot-<count-1>.lock` there and takes an exclusive
-non-blocking `flock` on each (exit 1 when one is already taken), writes `<ready file>`, then
-sleeps up to 120 seconds and exits 0. The test ends it with SIGKILL, which frees the locks.
+Run as `python holder.py <slots dir> <indices> <ready file>`: it creates the slots directory
+(mode 0700), opens `slot-<i>.lock` there for each `i` of the comma-separated `<indices>` and takes
+an exclusive non-blocking `flock` on each (exit 1 when one is already taken), writes
+`<ready file>`, then sleeps up to 120 seconds and exits 0. The test ends it with SIGKILL, which
+frees the locks.
 """
 
 import fcntl
@@ -13,10 +14,10 @@ import time
 
 
 def main(argv: list[str]) -> int:
-    directory, count, ready = argv[0], int(argv[1]), argv[2]
+    directory, indices, ready = argv[0], [int(i) for i in argv[1].split(",")], argv[2]
     os.makedirs(directory, mode=0o700, exist_ok=True)
     held = []
-    for index in range(count):
+    for index in indices:
         descriptor = os.open(os.path.join(directory, f"slot-{index}.lock"),
                              os.O_RDWR | os.O_CREAT, 0o600)
         try:

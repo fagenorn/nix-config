@@ -11,6 +11,8 @@ JSON line `{"held": <n>, "mode": <mode>}` to `<log>`, then acts by `<mode>`:
     orphan  starts a 60 second sleeper in its own session, writes its pid to `<log>.orphan.pid`,
             then behaves as `reply`; it keeps every inheritable descriptor it was
             given open in the sleeper, so a slot the engine leaked would stay held
+    pipes   as `orphan`, but the sleeper keeps this process's stdout and stderr open
+    killpipes  as `pipes`, but the launcher sends itself SIGKILL instead of replying
 """
 
 import fcntl
@@ -49,12 +51,15 @@ def main(argv: list[str]) -> int:
                                 sort_keys=True, separators=(",", ":")) + "\n")
     if mode == "kill":
         os.kill(os.getpid(), signal.SIGKILL)
-    if mode == "orphan":
+    if mode in ("orphan", "pipes", "killpipes"):
+        output = None if mode != "orphan" else subprocess.DEVNULL
         sleeper = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
-            close_fds=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            close_fds=False, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
         with open(f"{log}.orphan.pid", "w", encoding="utf-8") as handle:
             handle.write(str(sleeper.pid))
+        if mode == "killpipes":
+            os.kill(os.getpid(), signal.SIGKILL)
     result = dict(RESULT)
     if mode != "prose":
         result["structured_output"] = REPLY
