@@ -28,6 +28,7 @@ from agent_tools.project_contract.adopt_conformance import (
     NOT_PLANNED,
     PROJECTION_ENTRY,
 )
+from agent_tools.delivery import hint_phases
 from agent_tools.system import semver
 from agent_tools.project_contract.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
@@ -61,6 +62,7 @@ from agent_tools.project_contract.adopt_inspection import (
     git_or_fail,
     is_evidence_record_path,
     is_secret_path,
+    matches_group,
     object_hash,
     plan_state_is_terminal,
     question_impact,
@@ -602,7 +604,33 @@ def amended_contract(source: dict, interval: dict, found: Candidates,
         paths["rejections"] = [relocations.get(value, value)
                                if isinstance(value, str) else value
                                for value in rejections]
+    hints = paths.get("hints")
+    if isinstance(hints, list):
+        paths["hints"] = [relocated_binding(value, relocations)
+                          if isinstance(value, str) else value
+                          for value in hints]
     return amended
+
+
+def relocated_binding(value: str, relocations: dict[str, str]) -> str:
+    """`value` under the longest relocated group it names or sits inside."""
+    for group in sorted(relocations, key=lambda name: (-len(name), name)):
+        if value == group or value.startswith(group + "/"):
+            return relocations[group] + value[len(group):]
+    return value
+
+
+HINT_WITHOUT_READER = "hint-without-reader"
+
+
+def open_items(found: Candidates) -> list[dict]:
+    """The moved hints no delivery phase reads, as open items (never a gate)."""
+    return [{"id": HINT_WITHOUT_READER, "path": new}
+            for new in sorted(
+                new for old, new in found.moves
+                if matches_group(old, ".claude/hints", "prefix")
+                and new[len(hint_phases.HINT_DIR) + 1:]
+                not in hint_phases.HINT_FILES)]
 
 
 def final_contract(contract_source: dict | None, manifest: dict, found: Candidates,

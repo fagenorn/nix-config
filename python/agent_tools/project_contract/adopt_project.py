@@ -91,6 +91,12 @@ cannot resolve, or whose cwd leaves the worktree, is refused
 `adopt.commit.unresolved_environment`. Untracked files the environment leaves do
 not fail the branch proof, and the proved worktree is removed with `--force`.
 
+Tracked `.claude/hints/` files move to `.agents/knowledge/hints/`, and a
+`paths.hints` binding follows them; point-in-time records keep their citations.
+`plan.open_items` appears only when non-empty, listing `hint-without-reader` for
+a moved hint no delivery phase reads; it never blocks the plan and is outside
+the plan id.
+
 `plan --contract-draft FILE` plans the adoption of a checkout that has no
 project contract by carrying one drafted outside it (#1067). The file holds one
 JSON object, the contract as the draft's author wants it, and must lie outside
@@ -603,7 +609,9 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         adopt_planning.check_reference_writes(changes, set(reference_files))
         evidence_record = records["evidence_record"]
         migration_map = records["migration_map"]
+        items = adopt_planning.open_items(found)
     else:
+        items = []
         state = "not_applicable"
         blockers = []
         changes = []
@@ -666,6 +674,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         document["plan"]["commit_environment"] = amendment[1]
     if conformance.member is not None:
         document["plan"]["conformance"] = conformance.member
+    if items:
+        document["plan"]["open_items"] = items
 
     overlap = adopt_inspection.dirty_targets(found)
     if conformance.planned:
@@ -828,6 +838,8 @@ def emit_human(document: dict) -> int:
                          f"{entry['recommendation']}")
         else:
             lines.append(f"open {entry['id']}: {entry['recommendation']}")
+    for item in plan.get("open_items", []):
+        lines.append(f"open item {item['id']}: {item['path']}")
     for blocker in plan["blockers"]:
         lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
     if plan["available_migration"] is not None:

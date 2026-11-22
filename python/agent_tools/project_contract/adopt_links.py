@@ -18,7 +18,9 @@ spans and link titles. A target resolves against the tracked paths of a tree,
 never the filesystem: it is relative unless it is empty, starts with `#` or
 `/`, carries a URL scheme or holds a backslash, and it resolves when its
 percent-decoded path, joined to the containing directory, names a tracked file
-or a directory inside the root.
+or a directory inside the root. An unmoved point-in-time record (an `adr` path
+component, `.agents/knowledge/archive/`, `.agents/artifacts/`) keeps its
+citations (bar B9) and is no inbound source.
 
 The rewritten bytes come from the plan's base revision. Each changed file is a
 `write-file` at the path the file has after the moves, placed before the
@@ -420,6 +422,12 @@ def _emitted(link: Link, resolved: Resolved, successor: str,
     return urllib.parse.quote(rel, safe="/") + suffix
 
 
+def is_point_in_time_record(path: str) -> bool:
+    """An accepted decision, an archived note or a past plan: it keeps its links."""
+    return ("adr" in path.split("/")
+            or path.startswith((".agents/knowledge/archive/", ".agents/artifacts/")))
+
+
 def plan_link_rewrites(texts: dict[str, str], paths: Iterable[str],
                        moves: Iterable[tuple[str, str]],
                        deleted: Iterable[str]) -> LinkRewrites:
@@ -435,6 +443,8 @@ def plan_link_rewrites(texts: dict[str, str], paths: Iterable[str],
     for source, text in sorted(texts.items()):
         container_after = moved.get(source, source)
         direction = "outbound" if source in moved else "inbound"
+        if direction == "inbound" and is_point_in_time_record(source):
+            continue
         replacements: list[tuple[Link, str]] = []
         for link in links(text):
             if not is_relative(link.target):

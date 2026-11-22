@@ -64,6 +64,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "project_contract": frozenset({
         "agent_tools.release.release_adapter",  # resolve_project, conformance_checks
         "agent_tools.release.release_profile",  # resolve_project, conformance_checks
+        "agent_tools.delivery.hint_phases",  # adopt_inspection, adopt_planning
         "agent_tools.delivery.host_admission",  # conformance_checks
         "agent_tools.delivery.context_map_lint",  # conformance_checks
         "agent_tools.delivery.standards_lint",  # conformance_checks

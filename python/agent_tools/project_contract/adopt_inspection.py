@@ -35,6 +35,8 @@ import subprocess
 import tarfile
 import types
 
+from agent_tools.delivery import hint_phases
+
 # --------------------------------------------------------------------------
 # Closed sets
 #
@@ -236,7 +238,8 @@ CLASSIFICATION_RULES = (
     (".claude/settings.json", "exact", "legacy-native-store",
      "retain-product", None),
     (".claude/skills", "prefix", "legacy-native-store", "retain-product", None),
-    (".claude/hints", "prefix", "legacy-native-store", "retain-product", None),
+    (".claude/hints", "prefix", "canonical-tracked", "move-canonical",
+     hint_phases.HINT_DIR),
     (".claude/rules", "prefix", "legacy-native-store", "retain-product", None),
     (".codex", "prefix", "legacy-native-store", "retain-product", None),
     (".mcp.json", "exact", "legacy-native-store", "retain-product", None),

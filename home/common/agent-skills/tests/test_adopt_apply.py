@@ -34,6 +34,7 @@ import unittest
 from pathlib import Path, PurePosixPath
 from unittest import mock
 
+from agent_tools.delivery import standards_lint
 from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
                                           adopt_planning)
 
@@ -2212,6 +2213,128 @@ class CommitContentTest(ApplyTestCase):
         self.assertTrue(required)
         self.assertTrue(required <= changed, required - changed)
         self.assertTrue(changed <= required | optional, changed - required)
+
+
+# --------------------------------------------------------------------------
+# #1468: the hints move to where the delivery phases read them
+# --------------------------------------------------------------------------
+
+HINT_DIR = ".agents/knowledge/hints"
+HINTS = {
+    ".claude/hints/planning.md": ".agents/knowledge/hints/planning.md",
+    ".claude/hints/building.md": ".agents/knowledge/hints/building.md",
+}
+ORPHAN_HINTS = {
+    ".claude/hints/deploy.md": ".agents/knowledge/hints/deploy.md",
+    ".claude/hints/archive/old.md": ".agents/knowledge/hints/archive/old.md",
+}
+HINT_GUIDE = "docs/guide.md"
+HINT_GUIDE_BEFORE = "# guide\n\nSee [the planning hint](../.claude/hints/planning.md).\n"
+HINT_GUIDE_AFTER = (
+    "# guide\n\nSee [the planning hint](../.agents/knowledge/hints/planning.md).\n")
+HINT_RECORD = "docs/adr/001-hints.md"
+HINT_RECORD_TEXT = (
+    "# ADR 001\n\nDecided from [the planning hint](../../.claude/hints/planning.md).\n")
+
+
+class CleanApplyTestCase(ApplyTestCase):
+    """`ApplyTestCase` whose homes, repositories and exports are removed (B16)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+
+    def owned(self, root: Path) -> Path:
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    def exported(self, root: Path, revision: str) -> Path:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        tree = Path(scratch.name) / "tree"
+        adopt_inspection.export_commit(root, revision, tree)
+        return tree
+
+
+def hinted_apply_repo(home: Path, *, orphans: bool = False) -> Path:
+    """`apply_repo` plus tracked hints, a `paths.hints` binding and two links."""
+    root = apply_repo(home)
+    contract = json.loads((root / CONTRACT).read_text("utf-8"))
+    contract["bindings"]["paths"]["hints"] = [
+        ".claude/hints", ".claude/hints/planning.md"]
+    contract["capabilities"]["knowledge.hints"] = {"support": "supported"}
+    write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+    for path in (*HINTS, *(ORPHAN_HINTS if orphans else ())):
+        write(root, path, f"# {path}\n")
+    write(root, HINT_GUIDE, HINT_GUIDE_BEFORE)
+    write(root, HINT_RECORD, HINT_RECORD_TEXT)
+    commit(root, "add hints")
+    return root
+
+
+class HintMoveApplyTest(CleanApplyTestCase):
+    def adopt_hints(self, **options) -> tuple[Path, dict, dict]:
+        root = self.owned(hinted_apply_repo(self.home, **options))
+        document = self.ready_plan(root)
+        return root, document, self.succeed(root, document["plan"]["plan_id"])
+
+    def test_every_hint_moves_through_git_mv_with_its_history(self):
+        root = self.owned(hinted_apply_repo(self.home))
+        base = git(root, "rev-parse", "HEAD").strip()
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        self.assertEqual(
+            [(op["sources"], op["targets"]) for op in document["changes"]
+             if op["op"] == "git-mv"
+             and op["sources"][0].startswith(".claude/hints/")],
+            [([old], [new]) for old, new in sorted(HINTS.items())])
+        tracked = self.branch_files(root, result["branch"])
+        self.assertEqual(
+            [path for path in tracked if path.startswith(".claude/hints/")], [])
+        for old, new in HINTS.items():
+            with self.subTest(old=old):
+                self.assertIn(new, tracked)
+                self.assertEqual(self.show(root, f"{result['branch']}:{new}"),
+                                 self.show(root, f"HEAD:{old}"))
+                history = git(root, "log", "--follow", "--format=%H",
+                              result["branch"], "--", new).split()
+                self.assertEqual(len(history), 2, history)
+                self.assertEqual(history[1], base)
+
+    def test_a_document_linking_the_old_hint_path_links_the_new_one(self):
+        root, document, result = self.adopt_hints()
+        self.assertEqual(
+            self.show(root, f"{result['branch']}:{HINT_GUIDE}"), HINT_GUIDE_AFTER)
+        files = document["link_rewrites"]["inbound"]["files"]
+        self.assertIn(HINT_GUIDE, files)
+        self.assertNotIn(HINT_RECORD, files)
+        self.assertEqual(
+            self.show(root, f"{result['branch']}:{HINT_RECORD}"), HINT_RECORD_TEXT)
+
+    def test_the_standards_lint_finds_no_hint_problem_on_the_adopted_fixture(self):
+        root, document, result = self.adopt_hints()
+        export = self.exported(
+            root, git(root, "rev-parse", result["branch"]).strip())
+        self.assertEqual(sorted(p.name for p in (export / HINT_DIR).iterdir()),
+                         ["building.md", "planning.md"])
+        self.assertEqual(standards_lint.hint_problems(export), [])
+        self.assertNotIn("open_items", document["plan"])
+
+    def test_a_hint_no_phase_reads_is_an_open_item_of_a_ready_plan(self):
+        root = self.owned(hinted_apply_repo(self.home, orphans=True))
+        document = self.ready_plan(root)
+        code, out, err = run("plan", "--repo-root", str(root), "--format",
+                             "human", home=self.home)
+        self.assertEqual(document["plan"]["state"], "ready")
+        self.assertEqual(document["plan"]["open_items"], [
+            {"id": "hint-without-reader",
+             "path": ".agents/knowledge/hints/archive/old.md"},
+            {"id": "hint-without-reader",
+             "path": ".agents/knowledge/hints/deploy.md"}])
+        self.assertEqual(code, 0, err or out)
+        self.assertIn(
+            "open item hint-without-reader: .agents/knowledge/hints/deploy.md",
+            out.splitlines())
 
 
 # --------------------------------------------------------------------------
