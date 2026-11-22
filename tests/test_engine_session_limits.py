@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -288,7 +289,10 @@ class DeliverApiErrorTest(unittest.TestCase):
         def record(seconds: float) -> None:
             sleeps.append((seconds, len(log.read_text(encoding="utf-8").splitlines())))
 
-        with self.project.inside(), mock.patch("time.sleep", side_effect=record):
+        # Only the engine's own clock is replaced: patching `time.sleep` itself would also record
+        # the polling `subprocess` does while it reaps a launcher that is slow to exit.
+        clock = mock.Mock(wraps=time, sleep=record)
+        with self.project.inside(), mock.patch.object(engine_shell, "time", clock):
             code, line = engine_shell.deliver(1521, procedures)
         return code, line, sleeps
 
@@ -309,6 +313,20 @@ class DeliverApiErrorTest(unittest.TestCase):
         self.assertEqual(graded["outcome"], "drafted")
         (resuming,) = self.events("session_resuming")
         self.assertEqual(resuming["attempt"], 2)
+
+    def test_a_sleep_outside_the_engine_is_not_one_of_its_waits(self):
+        log = install_answers(self.project, [self.api_error(), self.normal()])
+        launch = engine_session.launch
+
+        def slow_to_exit(*args, **kwargs):
+            launched = launch(*args, **kwargs)
+            time.sleep(0.001)  # what `subprocess` does while it reaps a launcher
+            return launched
+
+        with mock.patch.object(engine_session, "launch", side_effect=slow_to_exit):
+            code, line, sleeps = self.deliver(log, one_step(self.project))
+        self.assertEqual(code, 0, line)
+        self.assertEqual(sleeps, [(30, 1)])
 
     def test_a_second_api_error_is_the_outcome_no_reply(self):
         log = install_answers(self.project, [self.api_error(), self.api_error(), self.normal()])

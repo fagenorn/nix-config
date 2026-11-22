@@ -135,6 +135,11 @@ def _next_major(version: str) -> str:
     return f"{int(version.split('.')[0]) + 1}.0.0"
 
 
+def _next_minor(version: str) -> str:
+    major, minor, _ = version.split(".")
+    return f"{major}.{int(minor) + 1}.0"
+
+
 EXPECTED_DERIVED = {
     "/project/id": "fagenorn/nix-config",
     "/bindings/tracker/repo_slug": "fagenorn/nix-config",
@@ -741,7 +746,7 @@ class DerivedValuesTest(SchemaThreeCase):
         root = self.schema_three_root(schema_three_contract())
         code, _, err = self.resolve(root)
         self.assertEqual(code, 0, err)
-        for version, reason in (("2.2.0", "platform_too_old"), ("1.9.0", "platform_too_new")):
+        for version, reason in ((_next_minor(committed_manifest()["platform_version"]), "platform_too_old"), ("1.9.0", "platform_too_new")):
             with self.subTest(version):
                 (root / TREE_MANIFEST).write_text(
                     json.dumps(mutated_manifest(platform_version=version)), encoding="utf-8")

@@ -28,6 +28,7 @@ from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
 from agent_tools.project_contract.conformance_registry import (
     CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER, MAX_FACT_LIST,
+    MAX_FACT_STRING,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
     PROMOTED_DUPLICATE_DRIFTED, PROMOTED_DUPLICATE_FINDINGS,
     PROMOTED_DUPLICATE_PRESENT, PROMOTION_CANDIDATE_KIND,
@@ -633,8 +634,9 @@ def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
 
 def check_conformance_workflow_fresh(context: "Context") -> "Outcome":
     """Contract: failed when the committed conformance workflow differs from
-    the renderer's bytes for the contract's integration branch and schema
-    version, or when that branch cannot be rendered; passed when the file is
+    the renderer's bytes for the contract's integration branch, schema version
+    and form (the platform's own tree's, or the locked one every other tree
+    gets), or when that branch cannot be rendered; passed when the file is
     absent or exact.
 
     Interim: it judges the file whether or not the contract declares a
@@ -660,7 +662,8 @@ def check_conformance_workflow_fresh(context: "Context") -> "Outcome":
     try:
         expected = resolver.render_conformance_workflow(
             context.contract["bindings"]["vcs"]["integration_branch"],
-            context.contract["schema_version"])
+            context.contract["schema_version"],
+            locked=resolver.conformance_workflow_locked(context.root))
     except ValueError:
         return Outcome("failed", "conformance_workflow_stale",
                        "conformance.workflow.regenerate",
@@ -753,8 +756,9 @@ def check_standards_lint(context: "Context") -> "Outcome":
     against the installed platform standards.
 
     The platform directory is the installation's, so its absence is its own
-    finding; an unreadable shard names the authored standards paths, never the
-    shard or the text that failed to decode.
+    finding; an unreadable shard, or a repository git cannot list, names the
+    authored standards paths, never the shard or the text that failed to decode.
+    A suppression naming a rule id in no layer is a finding of the lint.
     """
     platform = agent_platform.standards_dir()
     if not (platform / PLATFORM_STANDARDS_ANCHOR).is_file():
@@ -762,7 +766,7 @@ def check_standards_lint(context: "Context") -> "Outcome":
                        "platform.standards.install", {})
     try:
         problems = standards_lint.lint(context.root, platform)
-    except (UnicodeDecodeError, OSError):
+    except (ValueError, OSError):
         authored = context.contract["bindings"]["paths"]["standards"]
         return Outcome("failed", "standards_unreadable", "docs.standards.repair",
                        {"paths": bound_facts(authored), "count": 1})
@@ -781,7 +785,10 @@ def check_never_rise(context: "Context") -> "Outcome":
 
     It starts only read-only, bounded git children, which read committed
     history and never the working tree; the authored contract supplies the
-    branch. No readable merge base is a failed check, never a pass.
+    branch. No readable merge base is a failed check, never a pass. A reasoned
+    suppression the branch adds is listed in the facts, passed or failed, and
+    never fails the check (ADR-project-contract-019). Each listed line holds its
+    rule, path, line and reason within the fact string bound (`Suppression.text`).
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
     verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
@@ -789,14 +796,17 @@ def check_never_rise(context: "Context") -> "Outcome":
     if verdict is None:
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})
+    listed = verdict.suppressions
+    extra = ({"suppressions": bound_facts([s.text(MAX_FACT_STRING) for s in listed]),
+              "suppression_count": len(listed)} if listed else {})
     if not verdict.rises:
-        return Outcome("passed", facts={"merge_base": verdict.merge_base})
+        return Outcome("passed", facts={"merge_base": verdict.merge_base, **extra})
     first = verdict.rises[0]
     return Outcome("failed", "violation_count_rose", "violations.never_rise.reduce", {
         "merge_base": verdict.merge_base, "rule": first.rule,
         "base_count": first.base_count, "branch_count": first.branch_count,
         "violations": [bound_fact(v.text()) for v in first.new[:MAX_FACT_LIST]],
-        "rules": bound_facts([r.rule for r in verdict.rises])})
+        "rules": bound_facts([r.rule for r in verdict.rises]), **extra})
 
 
 # --------------------------------------------------------------------------

@@ -72,3 +72,6 @@ A named end state of a run that is not `done`, with what it needs (an owner deci
 **Suite member**:
 One test file or script named in the project's declared agent-workflow test recipe. The suite runner schedules the members by recorded duration, and the last member is pinned.
 _Avoid_: test target
+
+**Suppression**:
+The marker that names a rule id and a reason and leaves its line's finding out of that rule's count; without either it is itself a violation (ADR-project-contract-019).
