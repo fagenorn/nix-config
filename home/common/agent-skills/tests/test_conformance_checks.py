@@ -704,6 +704,59 @@ class LintChecksTest(ReportAssertions, unittest.TestCase):
             self.assertFalse(
                 any(str(tmp) in problem for problem in problems), problems)
 
+    def test_a_link_under_docs_to_the_outside_is_a_finding_and_is_never_read(self):
+        def link_area(root, tmp):
+            write_file(tmp, "host/slug/adr/001-a.md", "# ADR-slug-001 — A\n")
+            (root / "docs/areas/slug").symlink_to(tmp / "host/slug")
+
+        def link_record(root, tmp):
+            write_file(tmp, "host/secret.md", "# ADR-real-001 — A\n")
+            (root / "docs/areas/real/adr").mkdir(parents=True)
+            (root / "docs/areas/real/adr/001-a.md").symlink_to(
+                tmp / "host/secret.md")
+
+        def link_adr_dir(root, tmp):
+            write_file(tmp, "host/adr/001-a.md", "# ADR-real-001 — A\n")
+            (root / "docs/areas/real").mkdir(parents=True)
+            (root / "docs/areas/real/adr").symlink_to(tmp / "host/adr")
+
+        def link_doc(root, tmp):
+            write_file(tmp, "host/leak.md", "ADR-nope-001\n")
+            (root / "docs/leak.md").symlink_to(tmp / "host/leak.md")
+
+        def link_readme(root, tmp):
+            write_file(tmp, "host/readme.md", "leaks/\n")
+            (root / "docs/README.md").symlink_to(tmp / "host/readme.md")
+
+        for case in (link_area, link_record, link_adr_dir, link_doc,
+                     link_readme):
+            with self.subTest(case=case.__name__), fixture() as tmp:
+                root = make_root(tmp)
+                (root / "docs/areas").mkdir(parents=True, exist_ok=True)
+                readme = root / "docs/README.md"
+                if case is link_readme and readme.exists():
+                    readme.unlink()
+                case(root, tmp)
+                opened = []
+                original = Path.read_text
+
+                def recording(path, *args, **kwargs):
+                    opened.append(Path(path).resolve())
+                    return original(path, *args, **kwargs)
+
+                with unittest.mock.patch.object(Path, "read_text", recording):
+                    problems = context_map_lint.check(
+                        root, root / "docs/CONTEXT-MAP.md")
+                host = (tmp / "host").resolve()
+                self.assertEqual(
+                    [path for path in opened if host in path.parents], [])
+                leaks = [problem for problem in problems
+                         if "resolves outside the repository" in problem]
+                self.assertEqual(len(leaks), 1, problems)
+                self.assertFalse(
+                    any(str(tmp) in problem or "host" in problem
+                        for problem in leaks), leaks)
+
     def test_lint_facts_carry_no_absolute_path_or_authored_text(self):
         with self.subTest(case="long path"), fixture() as tmp:
             root = make_root(tmp)
