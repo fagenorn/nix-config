@@ -20,6 +20,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from agent_tools.delivery import verify_slot
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from clerk_tools import outside_clerk_tools, granted_tools  # noqa: E402
 from program_harness import server_for  # noqa: E402
@@ -3626,6 +3628,12 @@ class IntegrationBesideCodexTest(unittest.TestCase):
 TWO_IDS = [{"id": "lint", "argv": ["make", "lint"], "cwd": "."}, {"id": "test", "argv": ["make", "test"], "cwd": "."}]
 FULL = json.dumps(TWO_IDS, separators=(",", ":"))
 LINT_ONLY = json.dumps([TWO_IDS[0]], separators=(",", ":"))
+
+
+def slotted(entries):
+    """The entries as a verification prompt holds them: each argv behind verify-slot (#1383)."""
+    return json.dumps([dict(e, argv=["verify-slot", "run", "--wait-limit", "600", "--", *e["argv"]]) for e in entries],
+                      separators=(",", ":"))
 FIXED = "c" * 40
 LINT_RED = {"head": SHA, "clean": True, "results": [{"id": "lint", "status": "fail", "summary": "3 whitespace errors"},
                                                    {"id": "test", "status": "pass", "summary": "ok"}]}
@@ -3773,13 +3781,13 @@ class WhitespaceCarryForwardTest(unittest.TestCase):
                           "verify-fix-1": fix or {"start_head": SHA, "commit": FIXED}})
 
     def assert_full_rerun(self, calls, result):
-        self.assertIn(FULL, prompt(calls, "verify-2"))
+        self.assertIn(slotted(TWO_IDS), prompt(calls, "verify-2"))
         self.assertEqual(result["verify"], BOTH_GREEN["results"])
 
     def test_a_whitespace_only_fix_reruns_only_the_failed_id_and_carries_the_pass(self):
         result, calls = self.scenario(WS_ONLY)
         verify2 = prompt(calls, "verify-2")
-        self.assertIn(LINT_ONLY, verify2)
+        self.assertIn(slotted([TWO_IDS[0]]), verify2)
         self.assertNotIn('"id":"test"', verify2)
         self.assertIn("verify-fix-review-1", labels(calls))
         self.assertEqual((result["stage"], result["head"]), ("ready", FIXED))
@@ -3949,8 +3957,8 @@ class VerifyRerunTest(unittest.TestCase):
     def test_the_rerun_asks_for_each_whole_command_and_never_a_selection_of_tests(self):
         _, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.GREEN})
         rerun = prompt(calls, "verify-rerun-1")
-        self.assertIn("Rerun each failed command below once, whole and exactly as declared, and never a second time, "
-                      "whatever the outcome.", rerun)
+        self.assertIn("Rerun each failed command below once, whole and exactly as its argv below is written, and never "
+                      "a second time once it has run, whatever its outcome;", rerun)
         self.assertIn("Run the project's declared verification once on the worktree head", rerun)
         for wording in ("select", "only its failing tests", "failing tests named", "else the whole command"):
             self.assertNotIn(wording, rerun)
@@ -3996,8 +4004,8 @@ class VerifyRerunTest(unittest.TestCase):
         again = {"head": SHA, "clean": True, "results": [{"id": "test", "status": "pass", "summary": "ok"}]}
         result, calls = run(replies={"verify": first, "verify-rerun-1": again}, patch={"setup": {"verification": TWO_IDS}})
         rerun = prompt(calls, "verify-rerun-1")
-        self.assertIn(json.dumps([TWO_IDS[1]], separators=(",", ":")), rerun)
-        self.assertNotIn(FULL, rerun)
+        self.assertIn(slotted([TWO_IDS[1]]), rerun)
+        self.assertNotIn(slotted(TWO_IDS), rerun)
         self.assertIn(self.FLAKE, rerun)
         self.assertEqual([c["agentType"] for c in calls if c["label"] == "verify-rerun-1"], ["clerk"])
         self.assertEqual(result["stage"], "done")
@@ -4109,6 +4117,67 @@ class VerifyRerunTest(unittest.TestCase):
         self.assertNotIn("verify", labels(calls))
         self.assertEqual((shipped["stage"], shipped["outside_fixes"]), ("done", self.OUT))
         self.assertIn(self.OUT[0]["why"], prompt(calls, "pr"))
+
+
+class VerifySlotTest(unittest.TestCase):
+    """#1383: each verification command runs inside a host verify slot, and a no-slot attempt is not a run."""
+
+    BUILD = {"id": "build", "argv": ["make", "build"], "cwd": "."}
+
+    def test_the_verification_runs_each_declared_command_inside_a_verify_slot(self):
+        _, calls = run()
+        p = prompt(calls, "verify")
+        self.assertIn(slotted([self.BUILD]), p)
+        self.assertNotIn('"argv":["make","build"]', p)
+
+    def test_the_rerun_and_the_next_verification_run_inside_a_verify_slot(self):
+        _, calls = run(replies={"verify": VerifyRerunTest.OUTSIDE, "verify-rerun-1": VerifyRerunTest.OUTSIDE})
+        for label in ("verify-rerun-1", "verify-2"):
+            with self.subTest(label=label):
+                self.assertIn(slotted([self.BUILD]), prompt(calls, label))
+
+    def test_every_verification_prompt_names_the_no_slot_line_and_the_attempts(self):
+        _, calls = run(replies={"verify": VerifyRerunTest.OUTSIDE, "verify-rerun-1": VerifyRerunTest.GREEN})
+        for label in ("verify", "verify-rerun-1"):
+            with self.subTest(label=label):
+                p = prompt(calls, label)
+                self.assertIn(verify_slot.NO_SLOT_LINE.format(limit=600), p)
+                self.assertIn(f"exits {verify_slot.NO_SLOT_EXIT}", p)
+                self.assertIn("12 attempts", p)
+                self.assertIn("does not count as a run", p)
+
+    def test_the_cached_contract_stays_the_declared_commands(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        self.assertEqual(ready["cont"]["verified"]["contract"], '[{"argv":["make","build"],"cwd":".","id":"build"}]')
+
+    def test_the_rerun_does_not_count_a_no_slot_exit_as_its_one_rerun(self):
+        _, calls = run(replies={"verify": VerifyRerunTest.OUTSIDE, "verify-rerun-1": VerifyRerunTest.GREEN})
+        rerun = prompt(calls, "verify-rerun-1")
+        self.assertIn("an attempt that exits 75 with the no-slot line ran nothing, so it is not that rerun and is "
+                      "retried as below.", rerun)
+        self.assertNotIn("exactly as declared, and never a second time, whatever the outcome.", rerun)
+
+    NO_SLOT = {"id": "build", "status": "fail", "no_slot": True,
+               "summary": "no verify slot came free in 12 attempts"}
+
+    def test_a_rerun_that_never_started_for_want_of_a_slot_stops_with_no_fix_step(self):
+        """VS-03: slot exhaustion on the rerun is no reproduced failure, so no implementer is asked to change code."""
+        result, calls = run(replies={"verify": VerifyRerunTest.OUTSIDE,
+                                     "verify-rerun-1": {"head": SHA, "clean": True, "results": [self.NO_SLOT]}})
+        names = labels(calls)
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual([l for l in names if l.startswith("verify")], ["verify", "verify-rerun-1"])
+        self.assertEqual([p["summary"] for p in result["problems"]], [self.NO_SLOT["summary"]])
+
+    def test_a_first_verification_that_never_started_for_want_of_a_slot_stops_with_no_fix_step_or_rerun(self):
+        result, calls = run(replies={"verify": {"head": SHA, "clean": True,
+                                                "results": [dict(self.NO_SLOT, outside_diff=True)]}})
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual([l for l in labels(calls) if l.startswith("verify")], ["verify"])
+
+    def test_the_prompt_asks_for_the_no_slot_mark_only_on_slot_exhaustion(self):
+        _, calls = run()
+        self.assertIn("no_slot: true", prompt(calls, "verify"))
 
 
 class ShipTest(unittest.TestCase):
@@ -8038,7 +8107,7 @@ class ModeTest(unittest.TestCase):
                 self.assertEqual(result["stage"], "done")
                 self.assertIn("verify", labels(calls))
                 self.assertNotIn("final-1", labels(calls))
-                self.assertIn(json.dumps(verification, separators=(",", ":")), prompt(calls, "verify"))
+                self.assertIn(slotted(verification), prompt(calls, "verify"))
 
 
 TIP = "b" * 40
@@ -13132,7 +13201,8 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual([l for l in got if l in ("look-head", "look-verify", "look-read", "look-post", "pr", "merge")],
                          ["look-head", "look-verify", "look-read", "pr", "merge"])
         for part in (w + "merge --ff-only " + D, w + "merge-base --is-ancestor HEAD " + D, w + "merge-base --is-ancestor " + D + " HEAD",
-                     "rev-list --no-merges " + SHA + ".." + D + " ^origin/dev", '"argv":["make","build"]'):
+                     "rev-list --no-merges " + SHA + ".." + D + " ^origin/dev",
+                     slotted([{"id": "build", "argv": ["make", "build"], "cwd": "."}])):
             self.assertIn(part, prompt(calls, "look-verify"))
         self.assertIn("look-approval status --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "look-read"))
         self.assertIn("--sha " + D, prompt(calls, "pr"))

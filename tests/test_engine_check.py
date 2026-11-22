@@ -26,6 +26,9 @@ from unittest import mock
 from agent_tools.delivery import engine, engine_graders, procedure_check
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
+from tests.guard_policy_world import install_platform_manifest_in_environ
+
+setUpModule = install_platform_manifest_in_environ
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROCEDURES = REPO_ROOT / "python/agent_tools/delivery/procedures"
@@ -492,7 +495,7 @@ class NoSideEffectTest(unittest.TestCase):
         self.assertEqual(json.loads(done.stdout), {"called": [], "codes": [0, 1]})
 
     def test_the_check_modules_import_no_process_or_socket_module(self):
-        for name in ("engine.py", "procedure_check.py", "engine_graders.py"):
+        for name in ("engine.py", "procedure_check.py", "engine_graders.py", "engine_caps.py"):
             tree = ast.parse((DELIVERY / name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

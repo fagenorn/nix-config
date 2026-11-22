@@ -47,5 +47,6 @@
   "skill-lint": null,
   "sprint": null,
   "verified-tree": null,
-  "verify-pending": null
+  "verify-pending": null,
+  "verify-slot": null
 }
