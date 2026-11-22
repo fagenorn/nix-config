@@ -22,13 +22,13 @@ import threading
 import time
 import unittest
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
     account_remove, deliveries, event_log, project_question, project_question_hook as hook, question_records, service, sessions,
-    signin, spend, sprints, view,
+    signin, spend, sprints, transcript_digest, view,
     write_guard)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
@@ -1239,6 +1239,204 @@ class RecordsLaunchTest(LaunchCase):
             project_question.hook_command(self.routes, None, None))
 
 
+class DeepLaunchTest(RecordsLaunchTest):
+    """The deeper mode (#1274): opus for 1200 s, its checkout as the hook's root, the transcripts part."""
+
+    def setUp(self):
+        super().setUp()
+        self.deep_records = question_records.encode({
+            "project_id": "owner/p01", "written_at": "2026-11-17T08:00:30+00:00", "spend": None,
+            "sprints": [], "deliveries": [], "activations": [], "held_checks": [],
+            "transcripts": {"runs": []}})
+        self.ask = dataclasses.replace(self.ask, root=os.path.realpath(self.ask.root))
+        self.deep = dataclasses.replace(self.ask, deep=True, records=self.deep_records)
+
+    def test_a_deeper_session_runs_opus_for_1200_seconds(self):
+        self.start(self.fake(), ask=self.deep)
+        argv, timeout = self.calls[0][0], self.calls[0][1]
+        self.assertEqual(argv[argv.index("--model") + 1], "opus")
+        self.assertEqual(timeout, 1200)
+        outcome = self.start(self.fake(error=subprocess.TimeoutExpired("claude", 1200)), ask=self.deep)
+        self.assertEqual(outcome.outcome, project_question.TIMED_OUT)
+        self.assertIn("1200 s", outcome.reason)
+        self.start(self.fake())
+        self.assertEqual(self.calls[-1][1], 300)
+
+    def test_a_deeper_ask_without_records_is_refused_before_any_launch(self):
+        with self.assertRaises(ValueError):
+            project_question.new_ask(
+                "a" * 16, "owner/p01", self.ask.root, "q", "work", (), self.ask.settings.parent,
+                session_id=SESSION_ID, deep=True)
+        bare = dataclasses.replace(self.ask, deep=True, records=None)
+        outcome = self.start(self.fake(), ask=bare)
+        self.assertEqual(outcome, project_question.Outcome(
+            project_question.FAILED, reason=project_question.DEEP_NEEDS_RECORDS))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.settings, {})
+
+    def test_a_deeper_session_adds_only_its_root_to_the_hook(self):
+        self.start(self.fake(), ask=self.deep)
+        deep = json.loads(self.settings["text"])
+        self.settings = {}
+        self.start(self.fake(), ask=dataclasses.replace(self.deep, deep=False))
+        light = json.loads(self.settings["text"])
+        self.assertEqual(deep["permissions"], light["permissions"])
+        self.assertEqual(
+            self.hook_words(deep), self.hook_words(light) + [os.path.realpath(self.ask.root)])
+
+    def test_the_deeper_prompt_names_the_transcripts_part(self):
+        self.start(self.fake(), ask=self.deep)
+        deep_text = self.calls[0][0][-1]
+        index = question_records.section_lines(self.deep_records, question_records.DEEP_SECTIONS)
+        offset, limit = index["transcripts"]
+        self.assertIn(f"transcripts offset {offset} limit {limit}", deep_text)
+        self.assertIn(str(project_question.records_path(self.ask)) + " (transcripts)", deep_text)
+        self.assertIn(project_question.DEEP_TEXT.split("{")[0], deep_text)
+        self.start(self.fake(), ask=dataclasses.replace(self.deep, deep=False))
+        self.assertNotIn("transcripts", self.calls[-1][0][-1])
+
+
+class DeepHookTest(unittest.TestCase):
+    """The deeper session's generated hook reads its checkout and its records only (#1274)."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.t = Path(directory.name).resolve()
+        self.home = self.t / "home"
+        self.transcript = self.home / ".claude" / "projects" / "-x" / "s.jsonl"
+        self.root, self.other = self.t / "srv" / "p01", self.t / "srv" / "other"
+        self.state = self.t / "state" / "console"
+        settings_dir = self.state / project_question.SETTINGS_DIR
+        for folder in (self.transcript.parent, self.root, self.other, settings_dir):
+            folder.mkdir(parents=True)
+        for path in (self.transcript, self.root / "README.md", self.other / "secret.txt"):
+            path.write_text("x\n")
+        self.route = ("sqlite3", str(self.other / "console.db"), ".tables")
+        self.own_route = ("sqlite3", str(self.root / "console.db"), ".tables")
+        self.ask = project_question.new_ask(
+            "a" * 16, "owner/p01", str(self.root), "where does the time go?", "work",
+            (project_question.Route("db", self.route, str(self.root)),
+             project_question.Route("own", self.own_route, str(self.root))), settings_dir,
+            session_id=SESSION_ID, records="{}\n", deep=True)
+        self.sibling = settings_dir / ("b" * 16 + project_question.RECORDS_SUFFIX)
+        self.own = project_question.records_path(self.ask)
+        for path in (self.sibling, self.own):
+            path.write_text("{}\n")
+        document = project_question.settings_document(
+            self.ask.routes, None,
+            (str(project_question.private_dir(self.ask)), str(self.own), self.ask.root))
+        words = shlex.split(document["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+        self.rest = words[len(siblings.sibling_argv(project_question.HOOK_MODULE)):]
+
+    def decision(self, name, tool_input):
+        document = {"tool_name": name, "tool_input": tool_input, "cwd": str(self.root)}
+        environ = {"HOME": str(self.home), "PATH": "/bin"}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, environ, clear=True), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(document))), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(hook.main(list(self.rest)), 0)
+        wire = json.loads(out.getvalue())["hookSpecificOutput"]
+        return wire["permissionDecision"], wire["permissionDecisionReason"]
+
+    def outside(self):
+        return hook.OUTSIDE_ROOT.format(root=str(self.root), records=str(self.own))
+
+    def test_the_deeper_sessions_hook_reads_only_its_checkout_and_records(self):
+        records_denied = hook.RECORDS_DENIED.format(records=str(self.own))
+        rows = (
+            ("own records", "Read", {"file_path": str(self.own)}, ("allow", hook.ALLOWED)),
+            ("checkout file", "Read", {"file_path": str(self.root / "README.md")},
+             ("allow", hook.ALLOWED)),
+            ("another checkout", "Read", {"file_path": str(self.other / "secret.txt")},
+             ("deny", self.outside())),
+            ("another question's records", "Read", {"file_path": str(self.sibling)},
+             ("deny", records_denied)),
+            ("a transcript", "Read", {"file_path": str(self.transcript)}, ("deny", records_denied)),
+            ("a write", "Write", {"file_path": str(self.root / "x"), "content": "x"},
+             ("deny", hook.WRITE_DENIED.format(tool="Write"))),
+            ("a grep outside", "Grep", {"pattern": "x", "path": str(self.other)},
+             ("deny", self.outside())),
+            ("a grep inside", "Grep", {"pattern": "x"}, ("allow", hook.ALLOWED)),
+            ("a glob outside", "Glob", {"pattern": str(self.other) + "/*"}, ("deny", self.outside())),
+            ("a glob inside", "Glob", {"pattern": "*.md"}, ("allow", hook.ALLOWED)),
+            ("a command naming another checkout", "Bash", {"command": f"git -C {self.other} log"},
+             ("deny", self.outside())),
+            ("a git read naming a file of another checkout", "Bash",
+             {"command": f"git log {self.other}/secret.txt"}, ("deny", self.outside())),
+            ("a git read inside", "Bash", {"command": "git log --oneline"}, ("allow", hook.ALLOWED)),
+            ("a declared route naming a database of another checkout", "Bash",
+             {"command": " ".join(self.route)}, ("deny", self.outside())),
+            ("a declared route inside the checkout", "Bash",
+             {"command": " ".join(self.own_route)}, ("allow", hook.ALLOWED)),
+        )
+        for label, name, tool_input, expected in rows:
+            with self.subTest(label):
+                self.assertEqual(self.decision(name, tool_input), expected)
+
+    def test_a_bad_root_is_malformed(self):
+        private, records = str(self.state), str(self.own)
+        for root in ("rel", str(self.state / "x")):
+            with self.subTest(root=root), self.assertRaises(ValueError):
+                hook.parse_confinement(private, records, {}, root=root)
+        for count in (3, 6):
+            with self.subTest(arguments=count):
+                self.rest = [*self.rest[:2], *(["/a"] * (count - 2))]
+                self.assertEqual(self.decision("Read", {"file_path": "/a"}), ("deny", hook.MALFORMED))
+
+
+class DeepRequestTest(unittest.TestCase):
+    def test_deep_must_be_a_boolean(self):
+        body = b'{"project_id":"o/p","question":"q","deep":true}'
+        self.assertIs(project_question.parse_ask(body)[4], True)
+        self.assertIs(project_question.parse_ask(b'{"project_id":"o/p","question":"q"}')[4], False)
+        self.assertEqual(len(project_question.parse_keyed_request(body)), 4)
+        for bad in (b'"yes"', b"1", b"null"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                project_question.parse_ask(b'{"project_id":"o/p","question":"q","deep":' + bad + b"}")
+
+
+class DeepFoldTest(unittest.TestCase):
+    P = "owner/p01"
+
+    def test_an_asked_row_folds_its_deep_flag_and_session(self):
+        folded = project_question.asked_questions([
+            _asked(2, self.P, "q1", deep=True, session_id="s-1"),
+            _asked(3, self.P, "q2", deep="true", session_id=""),
+            _asked(4, self.P, "q3")])[self.P]
+        self.assertEqual(
+            folded[0], project_question.AskedQuestion(
+                "q1", "what?", "2026-11-17T10:00:02Z", 2, thread_id="q1", deep=True, session_id="s-1"))
+        self.assertEqual((folded[1].deep, folded[1].session_id), (False, None))
+        self.assertEqual((folded[2].deep, folded[2].session_id), (False, None))
+
+
+class DeepFollowUpTest(unittest.TestCase):
+    P = "owner/p01"
+
+    def test_dig_deeper_follows_only_the_last_light_answer(self):
+        light = [_asked(2, self.P, "q1", question="q"),
+                 _answered(3, self.P, "q1", outcome="answered", answer="Answer: a")]
+
+        def fold(*rows):
+            return project_question.asked_questions([*light, *rows])[self.P]
+
+        def refused(folded, text):
+            with self.assertRaises(project_question.Refused) as caught:
+                project_question.deep_follow_up(folded, "q1", text)
+            return str(caught.exception)
+
+        Turn = project_question.Turn
+        self.assertEqual(project_question.deep_follow_up(fold(), "q1", "q"), (Turn("q", "Answer: a"),))
+        self.assertEqual(refused(fold(), "other"), project_question.DEEP_STALE)
+        deeper = fold(_asked(4, self.P, "q2", question="q", thread_id="q1", deep=True),
+                      _answered(5, self.P, "q2", outcome="answered", answer="Answer: b"))
+        self.assertEqual(refused(deeper, "q"), project_question.DEEP_STALE)
+        working = fold(_asked(4, self.P, "q2", question="q", thread_id="q1"))
+        self.assertEqual(refused(working, "q"), project_question.THREAD_UNANSWERED)
+
+
 class PlatformTest(unittest.TestCase):
     def test_asker_for_each_platform(self):
         self.assertIs(project_question.asker_for("linux"), project_question.run_question)
@@ -1884,7 +2082,7 @@ def _project_entries(shown):
 
 QUESTION_KEYS = {"id", "question", "asked_at", "state", "state_text", "answered_at", "answer",
                  "read_text", "ran_text", "unknown_text", "back_text", "back_choices",
-                 "production_text", "request_key"}
+                 "production_text", "request_key", "deep", "spend_text", "deep_offer", "deep_text"}
 
 
 class QuestionViewTest(unittest.TestCase):
@@ -2064,6 +2262,101 @@ class QuestionThreadViewTest(unittest.TestCase):
             for question in thread["questions"]:
                 self.assertEqual(set(question), QUESTION_KEYS)
         self.assertIsNone(bare["entries"][0]["questions"])
+
+
+class QuestionDeepViewTest(unittest.TestCase):
+    """Dig deeper is offered on a light answer, with an estimate; a finished question shows its spend (#1274)."""
+
+    P1 = "owner/p01"
+    SPENT = "Spent 1,200 tokens, about $0.42"
+
+    @staticmethod
+    def spend_of(**sessions_):
+        return {"approximate": False, "days": [{"day": "2026-11-17", "session": {
+            sid: spend.Tokens(input=tokens, dollars=dollars).wire()
+            for sid, (tokens, dollars) in sessions_.items()}}]}
+
+    def entries(self, events, spend_view=None):
+        events = [_registered(1, self.P1), *events]
+        shown = view.derive_view(view.project_states(events).values(), spend=spend_view,
+                                 project_questions=project_question.asked_questions(events))
+        threads = shown["entries"][0]["questions"]["threads"]
+        return {q["id"]: q for t in threads for q in t["questions"]}
+
+    def test_dig_deeper_is_offered_only_on_a_threads_last_light_answer(self):
+        events = [
+            _asked(2, self.P1, "q1"),
+            _answered(3, self.P1, "q1", outcome="answered", answer="Answer: a"),
+            _asked(4, self.P1, "q2", thread_id="q1", deep=True),
+            _answered(5, self.P1, "q2", outcome="answered", answer="Answer: b"),
+            _asked(6, self.P1, "q3"),
+            _answered(7, self.P1, "q3", outcome="answered", answer="Answer: c"),
+            _asked(8, self.P1, "q4"),
+            _answered(9, self.P1, "q4", outcome="answered", answer="Answer: "),
+            _asked(10, self.P1, "q5"),
+            _answered(11, self.P1, "q5", outcome="failed", reason="boom"),
+            _asked(12, self.P1, "q6"),
+            _asked(13, self.P1, "q7"),
+            _answered(14, self.P1, "q7", outcome="answered", answer="Answer: d"),
+            _asked(15, self.P1, "q8", thread_id="q7"),
+        ]
+        found = self.entries(events)
+        self.assertIs(found["q3"]["deep_offer"], True)
+        self.assertIsInstance(found["q3"]["deep_text"], str)
+        for name in ("q1", "q2", "q4", "q5", "q6", "q7", "q8"):
+            self.assertIs(found[name]["deep_offer"], False, name)
+            self.assertIsNone(found[name]["deep_text"], name)
+        self.assertEqual((found["q1"]["deep"], found["q2"]["deep"]), (False, True))
+
+    def test_spend_shows_only_after_a_question_ends(self):
+        events = [_asked(2, self.P1, "q1", session_id="s-1")]
+        spent = self.spend_of(**{"s-1": (1200, 0.42)})
+        self.assertIsNone(self.entries(events, spent)["q1"]["spend_text"])
+        events.append(_answered(3, self.P1, "q1", outcome="answered", answer="Answer: a"))
+        self.assertEqual(self.entries(events, spent)["q1"]["spend_text"], self.SPENT)
+        self.assertIsNone(self.entries(events, None)["q1"]["spend_text"])
+        self.assertIsNone(self.entries(events, self.spend_of(**{"s-2": (5, 0.01)}))["q1"]["spend_text"])
+        self.assertIsNone(self.entries(events, self.spend_of(**{"s-1": (0, 0.0)}))["q1"]["spend_text"])
+
+    def test_the_estimate_is_the_mean_of_the_newest_five_deeper_answers(self):
+        events, sessions_ = [], {}
+        for number in range(1, 7):
+            events += [_asked(2 * number, self.P1, f"d{number}", deep=True, session_id=f"s-{number}"),
+                       _answered(2 * number + 1, self.P1, f"d{number}", outcome="answered",
+                                 answer="Answer: x")]
+            sessions_[f"s-{number}"] = (100 * number, number / 10)
+        events += [_asked(18, self.P1, "dz", deep=True, session_id="s-z"),
+                   _answered(19, self.P1, "dz", outcome="failed", reason="boom"),
+                   _asked(20, self.P1, "dw", deep=True, session_id="s-w"),
+                   _asked(21, self.P1, "l1"),
+                   _answered(22, self.P1, "l1", outcome="answered", answer="Answer: y")]
+        sessions_["s-w"] = (9000, 9.0)
+        sessions_["s-z"] = (0, 0.0)
+        found = self.entries(events, self.spend_of(**sessions_))
+        self.assertIs(found["l1"]["deep_offer"], True)
+        self.assertEqual(
+            found["l1"]["deep_text"],
+            "Dig deeper asks again on a stronger model for up to 20 minutes. "
+            "Earlier deeper answers here spent about 400 tokens, $0.40 each.")
+        bare = self.entries(events[-2:])
+        self.assertEqual(
+            bare["l1"]["deep_text"],
+            "Dig deeper asks again on a stronger model for up to 20 minutes. "
+            "No earlier deeper answer here to estimate its spend from.")
+
+    def test_a_working_deeper_question_says_digging_deeper(self):
+        found = self.entries([_asked(2, self.P1, "q1", deep=True), _asked(3, self.P1, "q2")])
+        self.assertEqual(found["q1"]["state_text"], "Digging deeper")
+        self.assertEqual(found["q2"]["state_text"], "Working on it")
+
+    def test_a_question_that_timed_out_still_shows_its_spend(self):
+        events = [_asked(2, self.P1, "q1", deep=True, session_id="s-1"),
+                  _answered(3, self.P1, "q1", outcome="timed_out", reason="too slow"),
+                  _asked(4, self.P1, "q2", session_id="s-1"),
+                  _answered(5, self.P1, "q2", outcome="failed", reason="boom")]
+        found = self.entries(events, self.spend_of(**{"s-1": (1200, 0.42)}))
+        self.assertEqual(found["q1"]["spend_text"], self.SPENT)
+        self.assertEqual(found["q2"]["spend_text"], self.SPENT)
 
 
 class CredentialShapeTest(unittest.TestCase):
@@ -2785,6 +3078,251 @@ class QuestionRecordsServiceTest(QuestionCase):
         self.assertEqual(self.asked, [])
         self.assertTrue(self.question_rows()[-1][2]["reason"].startswith(
             "the project's contract could not be resolved"))
+
+
+class QuestionDeepServiceTest(QuestionRecordsServiceTest):
+    """A deeper question is admitted, given its project's transcript aggregates and its spend read (#1274)."""
+
+    NOW = 1_800_000_000.0
+
+    def today(self):
+        return datetime.fromtimestamp(self.NOW, timezone.utc).date()
+
+    def deep_service(self, **kwargs):
+        sessions_dir = self.store.parent.parent / "sessions"
+        kwargs.setdefault("session_dirs", [sessions_dir])
+        kwargs.setdefault("clock", lambda: self.NOW)
+        return self.arrange(**kwargs)
+
+    def message_line(self, mid, cwd, tokens, session="s1"):
+        return json.dumps({
+            "type": "assistant", "sessionId": session, "cwd": cwd,
+            "timestamp": f"{self.today().isoformat()}T10:00:00.000Z",
+            "message": {"id": mid, "model": "claude-sonnet-4-6", "content": [],
+                        "usage": {"input_tokens": tokens}}}) + "\n"
+
+    def write_agent(self, svc, run, agent, cwd, tokens):
+        directory = svc._projects_dirs()[0] / "-srv" / "s1" / "subagents" / "workflows" / run
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"agent-{agent}.jsonl"
+        path.write_text(self.message_line(f"m-{run}-{agent}", cwd, tokens))
+        os.utime(path, (self.NOW, self.NOW))
+
+    def figures(self, value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from self.figures(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from self.figures(item)
+        else:
+            yield value
+
+    def test_a_deeper_question_is_asked_deep_and_its_row_says_so(self):
+        svc = self.arrange()
+        svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertIs(self.asked[-1][0].deep, True)
+        self.assertIs(self.question_rows()[-2][2]["deep"], True)
+        svc.ask_project_question(WHY, "where does money go?")
+        self.assertIs(self.asked[-1][0].deep, False)
+        self.assertNotIn("deep", self.question_rows()[-2][2])
+
+    def test_a_deeper_questions_records_hold_only_its_own_projects_transcripts(self):
+        svc = self.deep_service()
+        self.write_agent(svc, "wf_a", "a1", "/srv/p01/.worktrees/a", 100)
+        self.write_agent(svc, "wf_a", "a2", "/srv/p00", 900)
+        self.write_agent(svc, "wf_b", "b1", "/srv/p00", 800)
+        with mock.patch.object(
+                sessions, "main_checkout",
+                lambda cwd: "/srv/p01" if cwd.startswith("/srv/p01") else "/srv/p00"):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        part = json.loads(self.asked[-1][0].records)["transcripts"]
+        self.assertEqual(sum(item["tokens"] for item in part["scripts"]), 100)
+        self.assertEqual([item["issue"] for item in part["issues"]], [7])
+        for other in (900, 800):
+            self.assertNotIn(other, list(self.figures(part)))
+
+    def test_a_light_question_reads_no_transcript(self):
+        svc = self.arrange()
+        with mock.patch.object(transcript_digest, "project_runs", mock.Mock()) as read:
+            _ask, records = self.records_of(svc)
+        read.assert_not_called()
+        self.assertIsNone(records["transcripts"])
+
+    def test_the_read_starts_at_the_later_of_the_window_and_the_owners_first_day(self):
+        svc = self.deep_service()
+        window = (self.today() - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
+        later = (self.today() - timedelta(days=3)).isoformat()
+        for owned, expected in ((None, window), (later, later)):
+            with self.subTest(owned=owned):
+                with mock.patch.object(transcript_digest, "project_runs",
+                                       mock.Mock(return_value=())) as read, \
+                        mock.patch.object(question_records, "owner_since", return_value=owned):
+                    svc.ask_project_question(WHY, f"q {owned}", deep=True)
+                read.assert_called_once()
+                self.assertEqual(read.call_args.args[3], expected)
+
+    def test_the_transcript_read_holds_no_lock(self):
+        svc = self.deep_service()
+        held = []
+
+        def read(*args, **kwargs):
+            held.append(svc._ingest.locked())
+            return ()
+
+        with mock.patch.object(transcript_digest, "project_runs", side_effect=read):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertEqual(held, [False])
+
+    def test_unreadable_transcripts_fail_the_question_and_an_empty_tree_does_not(self):
+        svc = self.deep_service()
+        failure = transcript_digest.TranscriptsUnreadable("x")
+        with mock.patch.object(transcript_digest, "project_runs", side_effect=failure), \
+                contextlib.redirect_stderr(io.StringIO()):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertEqual(self.asked, [])
+        answered = self.question_rows()[-1][2]
+        self.assertEqual(answered["outcome"], "failed")
+        self.assertTrue(answered["reason"].startswith(
+            project_question.RECORDS_FAILED.split("{detail}")[0]))
+        with mock.patch.object(transcript_digest, "project_runs", return_value=()):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        ask, _cancel = self.asked[-1]
+        self.assertEqual(json.loads(ask.records)["transcripts"]["runs"], 0)
+
+    def test_a_checkout_taken_while_the_transcripts_are_read_fails_the_question(self):
+        svc = self.deep_service()
+
+        def read(*args, **kwargs):
+            # Another project takes the checkout while the scan runs; the project is still registered.
+            svc._states = {**svc._states, "owner/p02": dataclasses.replace(
+                svc._states[WHY], root="/srv/p01")}
+            svc._states[WHY] = dataclasses.replace(svc._states[WHY], root="/srv/elsewhere")
+            return ()
+
+        with mock.patch.object(transcript_digest, "project_runs", side_effect=read), \
+                contextlib.redirect_stderr(io.StringIO()):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertEqual(self.asked, [])
+        answered = self.question_rows()[-1][2]
+        self.assertEqual(answered["outcome"], "failed")
+        self.assertTrue(answered["reason"].startswith(
+            project_question.RECORDS_FAILED.split("{detail}")[0]))
+
+    def test_a_registry_that_changed_while_the_transcripts_were_read_fails_the_question(self):
+        svc = self.deep_service()
+
+        def read(*args, **kwargs):
+            svc._states = {**svc._states, "owner/p02": dataclasses.replace(
+                svc._states[WHY], root="/srv/p01")}
+            return ()
+
+        with mock.patch.object(transcript_digest, "project_runs", side_effect=read), \
+                contextlib.redirect_stderr(io.StringIO()):
+            svc.ask_project_question(WHY, "where does time go?", deep=True)
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.question_rows()[-1][2]["outcome"], "failed")
+
+    def test_a_checkout_taken_after_the_records_and_before_the_launch_starts_no_session(self):
+        for deep in (False, True):
+            with self.subTest(deep=deep):
+                svc = self.deep_service()
+                real = svc._question_records
+                before = len(self.asked)
+
+                def records(*args, **kwargs):
+                    found = real(*args, **kwargs)
+                    svc._states = {**svc._states, WHY: dataclasses.replace(
+                        svc._states[WHY], root="/srv/elsewhere")}
+                    return found
+
+                svc._question_records = records
+                svc.ask_project_question(WHY, "where does time go?", deep=deep)
+                self.assertEqual(len(self.asked), before)
+                self.assertEqual(self.question_rows()[-1][2], {
+                    "question_id": self.question_rows()[-1][2]["question_id"], "outcome": "failed",
+                    "reason": project_question.CHECKOUT_MOVED})
+
+    def test_a_stale_dig_deeper_confirmation_asks_nothing(self):
+        svc = self.arrange()
+        first = svc.ask_project_question(WHY, "q")
+        svc.ask_project_question(WHY, "q", first, "1" * 32, deep=True)
+        rows = len(self.question_rows())
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, "q", first, "2" * 32, deep=True)
+        self.assertEqual(str(caught.exception), project_question.DEEP_STALE)
+        other = svc.ask_project_question(WHY, "r")
+        rows = len(self.question_rows())
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, "not r", other, "3" * 32, deep=True)
+        self.assertEqual(str(caught.exception), project_question.DEEP_STALE)
+        self.assertEqual(len(self.question_rows()), rows)
+        self.assertEqual(len(self.asked), 3)
+
+    def test_a_deeper_session_runs_opus_under_the_deep_settings(self):
+        svc = self.arrange()
+        svc.ask_project_question(WHY, "where does time go?", deep=True)
+        ask, _cancel = self.asked[-1]
+        command = project_question.launch_command(ask, "linux")
+        self.assertEqual(command[command.index("--model") + 1], "opus")
+        project_question._write_settings(ask)
+        document = json.loads(ask.settings.read_text())
+        hook_command = document["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertEqual(shlex.split(hook_command)[-1], os.path.realpath(ask.root))
+
+    def test_a_deeper_answers_session_spend_is_read_when_it_ends(self):
+        sessions_dir = self.store.parent.parent / "sessions"
+        path = sessions_dir.parent / "projects" / "-srv-p01" / f"{SESSION_ID}.jsonl"
+
+        def writer(ask, cancel):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.message_line("msg_q1", "/srv/p01", 40, session=SESSION_ID))
+            os.utime(path, (self.NOW, self.NOW))
+            return self.outcome
+
+        svc = self.arrange(session_dirs=[sessions_dir], clock=lambda: self.NOW,
+                           project_asker=writer)
+        svc.ask_project_question(WHY, "where does time go?", deep=True)
+        day = json.loads(svc.view_bytes)["spend"]["days"][-1]
+        self.assertEqual(day["session"][SESSION_ID]["input"], 40)
+
+    def test_a_non_boolean_deep_is_a_bad_question(self):
+        svc = self.start()
+        post = lambda body: support.post_page(
+            svc.address, QUESTION_ROUTE, self.own(svc, **JSON), json.dumps(body).encode())
+        got = self.assert_unchanged(
+            svc, lambda: post({"project_id": WHY, "question": "q", "deep": "yes"}))
+        self.assertEqual((got[0], got[2]), (400, b"bad question\n"))
+        self.assertEqual(self.asked, [])
+        status, _, body = post({"project_id": WHY, "question": "q", "deep": True})
+        self.assertEqual((status, body), (204, b""))
+        self.assertIs(self.question_rows()[-2][2]["deep"], True)
+
+
+class QuestionDeepSpendServiceTest(QuestionCase):
+    """A deeper answer's spend reaches the published view when it ends (#1274)."""
+
+    NOW = 1_800_000_000.0
+
+    def test_a_deeper_answers_spend_text_is_published_when_it_ends(self):
+        sessions_dir = self.store.parent.parent / "sessions"
+        path = sessions_dir.parent / "projects" / "-srv-p01" / f"{SESSION_ID}.jsonl"
+        today = datetime.fromtimestamp(self.NOW, timezone.utc).date().isoformat()
+
+        def writer(ask, cancel):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "type": "assistant", "sessionId": SESSION_ID, "cwd": "/srv/p01",
+                "timestamp": f"{today}T10:00:00.000Z",
+                "message": {"id": "msg_q1", "model": "claude-sonnet-4-6", "content": [],
+                            "usage": {"input_tokens": 40}}}) + "\n")
+            os.utime(path, (self.NOW, self.NOW))
+            return self.outcome
+
+        svc = self.start(session_dirs=[sessions_dir], clock=lambda: self.NOW, project_asker=writer)
+        svc.ask_project_question(WHY, "where does time go?", deep=True)
+        question = self.shown(svc)["questions"]["threads"][0]["questions"][0]
+        self.assertTrue(question["spend_text"].startswith("Spent 40 tokens"), question["spend_text"])
 
 
 class QuestionLifecycleTest(QuestionCase):
