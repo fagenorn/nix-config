@@ -27,7 +27,7 @@ absent or `null` means no id is conditional. It maps a `workflow.verification` i
 together; an entry may also carry an optional boolean `pre_commit` (issue 771) marking the id a
 fast pre-commit check that deliver-standard names to every implementer, and an entry holding only
 `pre_commit` leaves its id unconditional. `when_changed` is a non-empty list of globs under the
-`light_lane.risk_paths` rules: repository-relative, canonically spelled, and matched with
+contract glob rules: repository-relative, canonically spelled, and matched with
 `fnmatch.fnmatchcase`, so `*` crosses `/`. `skip_reason` is a non-empty string, reported
 verbatim. At least one declared id must stay unconditional (the resolver validates all of this).
 

@@ -69,7 +69,6 @@
 | Last looked | Console |
 | Launcher | Hosts |
 | Lifecycle verb | Guard |
-| Light lane | Delivery |
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
@@ -132,7 +131,6 @@
 | Stop | Delivery |
 | Suite member | Delivery |
 | Transaction | Release |
-| Triage record | Delivery |
 | Verification pass | Verification |
 | Verified tree | Verification |
 | Verify block | Verification |

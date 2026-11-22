@@ -2657,13 +2657,19 @@ if (pending.length) {
 phase('Verify')
 const VERIFY = {
   type: 'object',
-  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' }, outside_diff: { type: 'boolean' } }, required: ['id', 'status', 'summary'] } }, pictures: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: ['before', 'after'] }, path: { type: 'string' } }, required: ['kind', 'path'] } } },
+  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' }, outside_diff: { type: 'boolean' }, no_slot: { type: 'boolean' } }, required: ['id', 'status', 'summary'] } }, pictures: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: ['before', 'after'] }, path: { type: 'string' } }, required: ['kind', 'path'] } } },
   required: ['head', 'clean', 'results'],
 }
 // #1139: the before and after pictures a verification command wrote, kept when well formed.
 const picturesOf = v => (v && Array.isArray(v.pictures) ? v.pictures.filter(p => isEntry(p) && (p.kind === 'before' || p.kind === 'after') && typeof p.path === 'string' && p.path.trim()).map(p => ({ kind: p.kind, path: p.path })) : [])
-const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. On each failure also return outside_diff: true only when no failing test file and no erroring file is in that git diff --name-only list, else false. When a command's output names image files it wrote as before or after pictures of the change, return them as pictures, one {kind: before or after, path: its absolute path} each; otherwise return no pictures. Do not change any file.
+// #1383: each declared argv runs behind verify-slot, which holds one of the host's verify slots while the command runs; the declared entries stay the contract.
+const SLOT_WAIT_SECONDS = 600
+const SLOT_ATTEMPTS = 12
+const slotted = e => ({ ...e, argv: ['verify-slot', 'run', '--wait-limit', String(SLOT_WAIT_SECONDS), '--', ...e.argv] })
+const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries.map(slotted))}. Run each argv with <worktree>/<its cwd> as working directory. Each argv runs its declared command inside one of the host's verify slots: verify-slot run holds the slot while the command runs and gives it back when it ends. An attempt that prints verify-slot: no verify slot came free within ${SLOT_WAIT_SECONDS}s; nothing ran and exits 75 ran nothing and does not count as a run of that command: run the same argv again, up to ${SLOT_ATTEMPTS} attempts in all, and after the last return that id as fail with the summary no verify slot came free in ${SLOT_ATTEMPTS} attempts and no_slot: true (no_slot is true on that result only, never on a command that ran). Every other exit is the command's own result. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. On each failure also return outside_diff: true only when no failing test file and no erroring file is in that git diff --name-only list, else false. When a command's output names image files it wrote as before or after pictures of the change, return them as pictures, one {kind: before or after, path: its absolute path} each; otherwise return no pictures. Do not change any file.
 ${RULES}`
+// #1383: a result whose command never ran, because no slot came free in every attempt, is no test failure: nothing below fixes or reruns it.
+const noSlot = v => !!v && Array.isArray(v.results) && v.results.some(r => isEntry(r) && r.status === 'fail' && r.no_slot === true)
 const verifyBody = verifyBodyFor(setup.verification)
 const verifyPrompt = `${CTX}\n${verifyBody}`
 // The first verification also renews the claim (#716); the reruns do not.
@@ -2717,12 +2723,14 @@ let rerunFailed = false
 const noteFlaky = rs => { for (const r of Array.isArray(rs) ? rs : []) if (isEntry(r) && present(r.flaky) && !flakySeen.some(f => f.id === r.id && f.summary === r.flaky)) flakySeen.push({ id: r.id, summary: r.flaky }) }
 const rerunOnce = async (v, n) => {
   rerunFailed = false
-  if (!v || !v.clean || !Array.isArray(v.results)) return v
+  if (!v || !v.clean || !Array.isArray(v.results) || noSlot(v)) return v
   const fails = verifyProblems(v)
   if (!fails.length || !fails.every(p => p.status === 'fail' && p.outside_diff === true && VERIFY_IDS.includes(p.id))) return v
   const ids = fails.map(p => p.id)
   log(`verify: ${ids.join(', ')} failed outside the branch's changed files; one rerun before any fix`)
-  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun each failed command below once, whole and exactly as declared, and never a second time, whatever the outcome.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun each failed command below once, whole and exactly as its argv below is written, and never a second time once it has run, whatever its outcome; an attempt that exits 75 with the no-slot line ran nothing, so it is not that rerun and is retried as below.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  // A rerun that never started is not a reproduced failure: the verification stops on it, with no fix step.
+  if (complete(again, VERIFY) && noSlot(again)) return { ...v, results: v.results.map(r => again.results.find(a => a.id === r.id && a.status === 'fail' && a.no_slot === true) || r) }
   if (!complete(again, VERIFY) || !again.clean || !Array.isArray(again.results) || !sameSha(again.head, v.head)) return v
   const passed = id => { const rs = again.results.filter(r => r.id === id); return rs.length === 1 && rs[0].status === 'pass' ? rs[0] : null }
   rerunFailed = ids.some(id => !passed(id))
@@ -2873,7 +2881,7 @@ if (LANE === 'live' && verify) {
   if (failed.length) return liveBound(`the verification failed at ${liveCommit()} (${failed.map(p => p.id).join(', ')}), and a fix would be a second implementer`, { verify })
 }
 let vRounds = 0
-while (verify && verifyProblems(verify).length && vRounds < 2) {
+while (verify && !noSlot(verify) && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
   const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify).map(p => ({ id: p.id, status: p.status, summary: p.summary })))}.${rerunFailed ? ' It failed again on the one rerun at the same head, so it is not flaky.' : ''} Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. When what fails lies outside that diff, first establish with evidence why it fails here: this branch's change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown may you edit a file outside the diff, and then return outside_diff: [{file, why}], one entry per such file with the cause. With no cause established (it fails without this branch${rerunFailed ? '' : ', or it is flaky'}), change and commit nothing and return status blocked with unrelated {test, evidence}, evidence being what you ran or read: establish it by reading, or by running the test, never by checking out another commit in the worktree. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: FIX_OR_UNRELATED })
   // #972: a failure for which the fix step can establish no cause here (the branch's change or the delivery's environment) is not edited

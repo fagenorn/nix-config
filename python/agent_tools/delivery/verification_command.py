@@ -14,7 +14,11 @@ Members, in order:
   `docs/CONTEXT-MAP.md`) and `instruction-budget` (`agent_tools.instruction_load check`
   with no base, so raise control against a base stays with CI). No lint member builds a
   host configuration.
-- `test`: `nix-build` (`just build`) then `agent-workflow-tests` (`just agent-workflow-tests`).
+- `test`: `nix-build` (`just build`) then `agent-workflow-tests` (`just agent-workflow-tests`),
+  which runs with `WORKFLOW_POLICY_SURFACE=source` added to its environment, the way CI runs
+  it: before activation the suite checks the skills from source only (issue 1580). The
+  comparison of the host's activated skills with the source is kept in
+  `just agent-activated-skill-tests`, which is for after activation.
 
 Every member runs even after an earlier one failed. Output, each line flushed before the
 next member starts:
@@ -29,6 +33,7 @@ next member starts:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -41,6 +46,7 @@ from agent_tools.system.siblings import sibling_argv
 class Member(NamedTuple):
     id: str
     argv: tuple[str, ...]
+    env: tuple[tuple[str, str], ...] = ()
 
 
 COMMANDS: tuple[str, ...] = ("lint", "test")
@@ -59,7 +65,8 @@ def members(command: str, root: Path) -> tuple[Member, ...]:
     if command == "test":
         return (
             Member("nix-build", ("just", "build")),
-            Member("agent-workflow-tests", ("just", "agent-workflow-tests")),
+            Member("agent-workflow-tests", ("just", "agent-workflow-tests"),
+                   (("WORKFLOW_POLICY_SURFACE", "source"),)),
         )
     raise ValueError(f"unknown verification command {command!r}")
 
@@ -74,7 +81,8 @@ def run(command: str, root: Path) -> list[str]:
         _say(sys.stderr, f"{command}: run {member.id}")
         sys.stdout.flush()
         try:
-            code = subprocess.run(list(member.argv), cwd=root).returncode
+            code = subprocess.run(
+                list(member.argv), cwd=root, env={**os.environ, **dict(member.env)}).returncode
         except OSError as error:
             _say(sys.stderr, f"{command}: {member.id} failed (cannot start: {error})")
             failed.append(member.id)
