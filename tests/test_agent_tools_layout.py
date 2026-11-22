@@ -49,7 +49,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "delivery": frozenset({
         "agent_tools.console.inbox",  # look_approval
         "agent_tools.claims.forge_markers",  # look_marker, look_approval
-        "agent_tools.project_contract.resolve_project",  # issue_branch
+        "agent_tools.project_contract.resolve_project",  # issue_branch, engine_shell
     }),
     "guard": frozenset({
         "agent_tools.project_contract.adopt_inspection",  # guard_policy, contract_export
