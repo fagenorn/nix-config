@@ -365,17 +365,30 @@ class JudgeTest(unittest.TestCase):
 
     NO_DECISION = ("release transaction preview --repo-root r",
                    "release transaction preview --repo-root r --dispose no_recovery_path",
-                   "release transaction run --repo-root r --disp no_recovery_path --reference x --confirm t",
-                   "release transaction run --repo-root=r --confirm t",
-                   "release transaction run --repo-root r --repo-root s --confirm t",
-                   "release transaction run --repo-root r --title -x --confirm t",
                    "env X=1 release transaction run --repo-root r --confirm t",
-                   "release transaction run --repo-root r --confirm t && echo done",
                    "printf '%s\\n' x | xargs release",
                    "echo 'release transaction abandon'",
                    "bash -c 'release transaction preview --repo-root r'",
                    "r=release; $r transaction run",
                    "git log -1 --format=release%x20transaction%x20run%x20--candidate%x20X | sh")
+
+    def test_a_leading_release_run_the_permit_cannot_read_is_refused(self):
+        spelling = ("A release runs only as the plain release transaction run: each flag one of --repo-root, "
+                    "--profile, --commit, --version, --title, --notes-file, --confirm, each followed by its "
+                    "value as the next word, and only --confirm repeated.")
+        for command in ("release transaction run --repo-root r --disp no_recovery_path --reference x --confirm t",
+                        "release transaction run --repo-root=r --confirm t",
+                        "release transaction run --repo-root r --repo-root s --confirm t",
+                        "release transaction run --repo-root r --title -x --confirm t",
+                        "release transaction run --repo-root r --confirm t && echo done",
+                        f"release transaction run --commit {SHA} --version v1.2.3 --preview",
+                        'release transaction run --repo-root r --title "$HOME" --confirm t'):
+            with self.subTest(command):
+                verdict = self.judge(command)
+                self.assertEqual((DENY, permit.RELEASE, spelling),
+                                 (verdict.decision, verdict.verb, verdict.reason))
+                self.assertTrue(mentions(command))
+        self.assertEqual([], self.fake.calls)
 
     def test_every_other_release_spelling_gets_no_decision(self):
         for command in self.NO_DECISION:
@@ -409,7 +422,7 @@ class JudgeTest(unittest.TestCase):
                     parsed is not None and parsed.action == "run" and parsed.dispose is not None,
                     verb == permit.DISPOSE)
                 if parsed is None:
-                    self.assertNotEqual(permit.RELEASE, verb)
+                    self.assertNotEqual(ALLOW, self.judge(command).decision)
         self.assertGreater(checked, 10)
 
     def test_an_unreadable_forge_is_refused(self):

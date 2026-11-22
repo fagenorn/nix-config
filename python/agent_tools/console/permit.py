@@ -39,10 +39,13 @@ owner's word and disposes on the owner's yes to a token). A literal command is j
 value is never an option: `--notes-file /tmp/a--dispose.md` is an ordinary run. The one word read
 as a command line is a shell wrapper's body (the word after a `-c` style flag, or after `eval`): an
 abandon or a dispose inside it is `ABANDON` or `DISPOSE`. The plain run is
-`RELEASE` only as the literal shape above and only as the first command. Every other run spelling (a
-preview, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a repeated flag, a
-value beginning with `-`, a wrapper, text built at run time and piped to a shell) gets no decision and
-falls to the session's classifier, as a merge spelling does; the release command's own approval
+`RELEASE` only as the literal shape above and only as the first command. A command whose text begins
+with `release transaction run`, and that is neither the plain run nor abandon or dispose (a preview
+flag, an abbreviated flag, which the release parser refuses, a `--flag=value` word, a repeated flag, a
+value beginning with `-`, a chained operator, an expansion), is `DENY` with `RELEASE_SPELLING`, so every
+text the manager's release allow rule matches is decided (#1592, ADR-console-101). Every other release
+spelling (a preview, a wrapper, `xargs`, text built at run time and piped to a shell) gets no decision
+and falls to the session's classifier, as a merge spelling does; the release command's own approval
 check is what makes that safe, and the residual is that an abandon or dispose spelling the scan cannot
 see also gets no decision.
 
@@ -66,6 +69,7 @@ never None. The checks run in this order, the first that applies deciding:
   run's latest attempt, all pages, whose conclusion is not `success`: a failed rerun also runs the
   skipped dependents of a failed job) or one not named by `read_required(slug, base)` is
   `NOT_CHECK_RUN`. Else `ALLOW` with target `{"run", "pr"}`.
+- Release: the plain run is `ALLOW` with its target; any other leading run is `RELEASE_SPELLING`.
 - A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`.
 
 `ALONE` and `NOT_GRANTED` for a merge or rerun are composed by `spelling_refusal(sentence, verb, grant,
@@ -115,6 +119,9 @@ ALONE = "This command runs only alone, spelled exactly as the permitted form, wi
 NOT_GRANTED = "The permit grants only the exact merge and rerun forms, and this one differs."
 NO_ABANDON = "A manager never abandons a release; the lead does, on the owner's word."
 NO_DISPOSE = "A manager never disposes of a release; the lead does, on the owner's yes to its token."
+RELEASE_SPELLING = ("A release runs only as the plain release transaction run: each flag one of --repo-root, "
+                    "--profile, --commit, --version, --title, --notes-file, --confirm, each followed by its "
+                    "value as the next word, and only --confirm repeated.")
 ADMIN = "An administrator merge is never permitted."
 OTHER_REPO = "The command names another repository than this sprint's project."
 NOT_OWN_PR = "Pull request {pr} is not this sprint's own pull request."
@@ -383,6 +390,8 @@ def words(command: str) -> list[str] | None:
 
 _SPLIT = re.compile(r"[\s;|&()<>$`,\[\]{}]+")
 _SHELL_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+# A command whose own text begins with the release run, the text the manager's release allow rule matches.
+_RELEASE_RUN_TEXT = re.compile(r"\s*release\s+transaction\s+run(?:\s|\Z)")
 
 
 def release_target(command: str) -> dict | None:
@@ -452,7 +461,10 @@ def _verb_of(command: str) -> str | None:
             return MERGE
         if name == "gh" and rest == ["run", "rerun"]:
             return RERUN
-    return release_operation(command)
+    found = release_operation(command)
+    if found is None and _RELEASE_RUN_TEXT.match(command):
+        return RELEASE
+    return found
 
 
 def verb_of(command: str) -> str | None:
@@ -603,7 +615,8 @@ def judge(command: str, grant: Grant, forge: Forge) -> Verdict:
     if verb is None:
         return _no_decision()
     if verb == RELEASE:
-        return _allow(RELEASE, release_target(command))
+        target = release_target(command)
+        return _allow(RELEASE, target) if target is not None else _deny(RELEASE, RELEASE_SPELLING)
     if verb == ABANDON:
         return _deny(ABANDON, NO_ABANDON)
     if verb == DISPOSE:

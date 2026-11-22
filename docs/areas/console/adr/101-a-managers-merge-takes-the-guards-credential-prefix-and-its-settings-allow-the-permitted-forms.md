@@ -13,8 +13,11 @@ The guidance of a project such as jarbird prefixes `gh` with `env -u GITHUB_TOKE
 
 **D2. A spelling refusal names the cure.** `ALONE` and `NOT_GRANTED` for a merge or rerun carry the missing flags whenever the words are readable, the accepted form filled with the project's slug and strategy, and the prefix clause the guard prints. State refusals name only their problem (PD4).
 
+**D3. A leading release run the permit cannot read is denied.** The release allow rule (D4) matches any text after `release transaction run `, so a spelling that got no decision would run unjudged by both the permit and the classifier. A command whose text begins with `release transaction run` and that is neither the plain run nor an abandon or dispose is denied with `RELEASE_SPELLING` (PD9).
+
 ## Consequences
 
 - The permit and the guard agree on the prefix, and a test holds them equal.
 - `permit.landed` records a prefixed merge too.
+- The spellings ADR-console-098 let fall to the classifier now get `RELEASE_SPELLING`, while those that do not begin with the run (a wrapper, `xargs`, a shell variable) still fall to it.
 - Related: ADR-console-094, ADR-console-098.
