@@ -48,8 +48,7 @@ initial commit it creates, inside the sandbox repo:
 
 Those three paths, and only those, are listed in the sandbox's `.git/info/exclude`, so
 they never show in `git status` and the agent under test cannot commit them; the
-fixture's tracked `.claude/` content and the specs, plans and maps an eval writes there
-stay visible to git.
+fixture's tracked `.claude/` content stays visible to git.
 
 The run adds `--setting-sources project,local`, which drops the user-level sources —
 so `~/.claude/skills`, `~/.claude/agents` and `~/.claude/CLAUDE.md` no longer shadow the

@@ -9,4 +9,4 @@
 **Where new knowledge goes.** A term or an invariant belongs in the owning area's
 `CONTEXT.md`. A hard-to-reverse decision belongs in that area's `adr/`, or in
 `areas/system/adr/` when it spans areas. A rule about how code gets written belongs in
-`standards/`. Specs, plans and handoffs are not documentation — they live in `.claude/`.
+`standards/`. Specs, plans and handoffs are not documentation: a spec is its issue's body, a plan lives in the worktree's git directory, and handoffs live in `.claude/`.

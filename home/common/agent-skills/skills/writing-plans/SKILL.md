@@ -7,9 +7,9 @@ description: Turns a spec into a task-by-task implementation plan. Use when requ
 
 Write for a skilled engineer new to this codebase who reads one task and no other. DRY, YAGNI, test-first, frequent commits.
 
-**Resolve once at entry.** Run `resolve-project resolve --repo-root <the checkout you were called in>` and read the absolute `bindings.paths.artifacts.plans` from the snapshot it prints. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Never persist the snapshot or infer a policy value.
+**Resolve once at entry.** Run `resolve-project resolve --repo-root <the checkout you were called in>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Never persist the snapshot or infer a policy value.
 
-**Save the package root to** `<bindings.paths.artifacts.plans>/YYYY-MM-DD-<feature-name>.md` and its task members to the sibling `<stem>.tasks/` directory (`<stem>.tasks/task-1.md` first), committed in your worktree.
+**Save the package root to** `<git-dir>/plans/YYYY-MM-DD-<feature-name>.md` (`<git-dir>`: `git rev-parse --absolute-git-dir` in your worktree) and its task members to the sibling `<stem>.tasks/` directory (`<stem>.tasks/task-1.md` first). Commit none of it.
 
 ## Payload discipline
 
@@ -17,9 +17,9 @@ Move information cheaply: targeted `rg` over whole-file reads; bounded reads; te
 
 ## Scope and file structure
 
-A spec covering several independent subsystems gets a plan each.
+A spec covering independent subsystems gets a plan each.
 
-Before mapping files, read the spec's **code map** if one exists: the path your caller named, else the spec's file name with `.code-map.md` for `.md` in the git directory (`git rev-parse --git-dir`). Its entries are leads: check every mapped path and symbol you write into a task against the current tree, and drop a wrong entry. Never cite or copy it into the plan: implementers and reviewers cannot see it.
+Before mapping files, read the spec's **code map** if any: the path your caller named, else the spec draft's path with `.code-map.md` for `.md`. Its entries are leads: check every mapped path and symbol you write into a task against the current tree, and drop a wrong entry. Never cite or copy it into the plan: implementers and reviewers cannot see it.
 
 Before defining tasks, map the files to create or modify and each one's responsibility: one per file, files that change together kept together, split by responsibility not layer, existing patterns followed. Never restructure alone.
 
@@ -93,8 +93,9 @@ holds the single line `None — no acceptance criteria.` Otherwise:
 
 <Cite the spec's `## Decision ledger` rows by ID ("per D3"), never copied. A
 new non-obvious decision forced by planning (scope, interface, behavioral,
-test-seam, irreversible, user-preference) is appended to the ledger and cited;
-routine choices get no row.>
+test-seam, irreversible, user-preference) is appended to the spec's ledger
+(this section's with no spec), remeasured, written back to its issue and read
+back the way `design` does, then cited; routine choices get no row.>
 
 ---
 ```
@@ -153,7 +154,7 @@ git commit -m "feat: add specific feature"
 
 **Each task names its focused test commands**, red then green, plus the project's build check only when the task changes files that check evaluates. No task runs the full declared verification; the delivery's final gate runs it once on the final head.
 
-**Scope every gate to the plan's files.** Give diffs a pathspec (`git diff --stat BASE..HEAD -- <the plan's Files: paths>`) or assert on file content; never expect a raw commit range, because plan and spec commits and a ship-time sync merge land in it too. Where commit shape is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`), exempting artifact and review-fixup subjects.
+**Scope every gate to the plan's files.** Give diffs a pathspec (`git diff --stat BASE..HEAD -- <the plan's Files: paths>`) or assert on file content; never expect a raw commit range, because a ship-time sync merge lands in it. Where commit shape is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`), exempting review-fixup subjects.
 
 ## No placeholders
 
