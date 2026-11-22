@@ -3675,10 +3675,10 @@ FULL = json.dumps(TWO_IDS, separators=(",", ":"))
 LINT_ONLY = json.dumps([TWO_IDS[0]], separators=(",", ":"))
 
 
-def slotted(entries):
-    """The entries as a verification prompt holds them: each argv behind verify-slot (#1383)."""
-    return json.dumps([dict(e, argv=["verify-slot", "run", "--wait-limit", "600", "--", *e["argv"]]) for e in entries],
-                      separators=(",", ":"))
+def slotted(entries, live=False):
+    """The entries as a verification prompt holds them: each argv behind verify-slot (#1383), with --live in the live lane (#1434)."""
+    lead = ["verify-slot", "run", "--wait-limit", "600", *(["--live"] if live else []), "--"]
+    return json.dumps([dict(e, argv=[*lead, *e["argv"]]) for e in entries], separators=(",", ":"))
 FIXED = "c" * 40
 LINT_RED = {"head": SHA, "clean": True, "results": [{"id": "lint", "status": "fail", "summary": "3 whitespace errors"},
                                                    {"id": "test", "status": "pass", "summary": "ok"}]}
@@ -4174,6 +4174,19 @@ class VerifySlotTest(unittest.TestCase):
         p = prompt(calls, "verify")
         self.assertIn(slotted([self.BUILD]), p)
         self.assertNotIn('"argv":["make","build"]', p)
+
+    def test_a_live_lane_verification_waits_ahead_of_ordinary_runs(self):
+        _, calls = run(args=ARGS, patch=LIVE_PATCH)
+        p = prompt(calls, "verify")
+        self.assertIn(slotted([self.BUILD], live=True), p)
+
+    def test_an_ordinary_lane_verification_takes_no_priority(self):
+        for args in (ARGS, dict(ARGS, lane="direct")):
+            with self.subTest(lane=args.get("lane")):
+                _, calls = run(args=args)
+                p = prompt(calls, "verify")
+                self.assertIn(slotted([self.BUILD]), p)
+                self.assertNotIn('"--live"', p)
 
     def test_the_rerun_and_the_next_verification_run_inside_a_verify_slot(self):
         _, calls = run(replies={"verify": VerifyRerunTest.OUTSIDE, "verify-rerun-1": VerifyRerunTest.OUTSIDE})
