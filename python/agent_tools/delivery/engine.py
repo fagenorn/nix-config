@@ -100,7 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("issue", type=_issue_number)
     status_parser.add_argument("--project")
     deliver_parser = commands.add_parser(
-        "deliver", help="run a procedure of command, agent and decide steps to done or a stop")
+        "deliver",
+        help="run a procedure of command, agent, decide, group and call steps to done or a stop")
     deliver_parser.add_argument("issue", type=_issue_number)
     deliver_parser.add_argument("--procedures", type=Path, default=PROCEDURES_DIR)
     return parser

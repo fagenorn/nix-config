@@ -17,6 +17,7 @@ from unittest import mock
 
 from agent_tools.delivery import engine_ledger, engine_shell
 from tests.test_engine_deliver import EngineProject, step
+from tests.test_engine_session import DRAFT_REPLY, RESULT_NORMAL, copy_roles, install_stub
 
 TIER = "integration"
 
@@ -584,11 +585,23 @@ class RefusalTest(unittest.TestCase):
                  "in": ["run.issue"], "mutates": True,
                  "on": {"accept": "done", "revise": "child-stop"}}], inputs=("issue",))})
 
+        def unread_role(project: EngineProject) -> Path:
+            copy_roles(project, "implementer")
+            directory = project.procedures([call], children={"solo": child([
+                {"id": "look", "stage": "building", "kind": "agent", "role": "reviewer",
+                 "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.issue"], "on": {"drafted": "done", "stuck": "child-stop"}}],
+                inputs=("issue",))})
+            (directory / "draft.md").write_text("Draft issue {{run.issue}}.\n", encoding="utf-8")
+            (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+            return directory
+
         cases = {
             "a child input the parent does not supply": ("repo", undeclared),
             "a procedure that calls itself": ("calls", itself),
             "a call member of a group": ("group", member),
             "a mutating child step": ("mutates", mutating),
+            "a child agent step whose role file does not read": ("role reviewer", unread_role),
         }
         for name, (word, build) in cases.items():
             with self.subTest(name):
@@ -599,6 +612,46 @@ class RefusalTest(unittest.TestCase):
                 self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
                 self.assertIn(word, done.stderr)
                 self.assertEqual(project.runs(), [])
+
+
+class ChildSessionTest(unittest.TestCase):
+    def test_an_agent_step_of_each_child_run_runs_as_that_child_runs_session(self):
+        project = EngineProject(self)
+        project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project, "reviewer")
+        log = install_stub(project, RESULT_NORMAL)
+        directory = project.procedures(FAN("standin-items-mixed", 2), children={
+            "fan-child": child([
+                {"id": "look", "stage": "building", "kind": "agent", "role": "reviewer",
+                 "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.item"], "on": {"drafted": "done", "stuck": "child-stop"}}])})
+        (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
+        (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+
+        done = project.deliver(directory, issue=1517)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        kids = children_of(project)
+        self.assertEqual(len(kids), 3)
+        for kid in kids:
+            events = engine_ledger.replay(kid / "events.jsonl")
+            starts = [e for e in events if e["event"] == "session_starting"]
+            self.assertEqual([(e["step"], e["visit"]) for e in starts], [("look", 1)])
+            self.assertTrue((kid / "results" / "look.1.json").is_file())
+            for name in ("look.1.system.md", "look.1.prompt.md", "look.1.json"):
+                self.assertTrue((kid / "sessions" / name).is_file(), name)
+        (root,) = roots(project)
+        events = engine_ledger.replay(root / "events.jsonl")
+        self.assertEqual([e for e in events if e["event"] == "session_starting"], [])
+        self.assertFalse((root / "sessions").exists())
+        lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(sorted(line["stdin"] for line in lines),
+                         ["Review item approve.\n", "Review item approve.\n",
+                          "Review item nope.\n"])
+        self.assertTrue(all(line["announced"] for line in lines))
+        self.assertEqual([e["outcome"] for e in graded(events, "fan")], ["done"])
 
 
 if __name__ == "__main__":

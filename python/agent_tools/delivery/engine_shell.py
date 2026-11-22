@@ -145,6 +145,12 @@ def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ..
         if item.get("mutates") is True and item["kind"] != "command":
             raise Refused(f"step {item['id']} is a {item['kind']} step marked mutates, and the "
                           "engine renews the claim only before a command step")
+    for item in procedure["steps"]:
+        if item["kind"] == "agent":
+            try:
+                engine_session.read_role(engine_session.roles_dir(os.environ), item["role"])
+            except engine_session.RoleError as error:
+                raise Refused(str(error)) from error
     for input_name in procedure["inputs"]:
         if input_name not in supplied:
             raise Refused(f"input {input_name} is not supplied by the engine")
@@ -231,12 +237,6 @@ def _validate(directory: Path, table: CommandTable) -> dict:
     except (ValueError, OSError) as error:
         raise Refused(str(error)) from error
     _refuse_unrunnable(procedure, directory, SUPPLIED_INPUTS, ENTRY)
-    for item in procedure["steps"]:
-        if item["kind"] == "agent":
-            try:
-                engine_session.read_role(engine_session.roles_dir(os.environ), item["role"])
-            except engine_session.RoleError as error:
-                raise Refused(str(error)) from error
     return procedure
 
 
