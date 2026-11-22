@@ -252,10 +252,13 @@ denies with the expiry. The secret is never sent: each request carries a fresh `
 under the secret of its other members (`prompt_card.request_auth`), and a reply counts only when its `mac` is the
 console's HMAC under the secret for that nonce, prompt and state (`prompt_card.reply_mac`): whatever else listens on
 the loopback port (another local account's process while the console restarts) learns no secret and has no decision
-honoured. A reply whose `mac` is not that one ends the hold with one deny line with `manager.REFUSAL`. Everything else prints one deny line with
+honoured. A reply whose `mac` is not that one ends the hold with one deny line with `manager.REFUSAL`. A reply
+`{"prompt": null, "state": "unexplained"}` (the console found no reason in the description, #1622) prints one deny line
+with `prompt_card.NO_REASON_TEXT`, which asks the manager to describe the call and run it again, and sends nothing
+further. Everything else prints one deny line with
 `manager.REFUSAL` and sends nothing further: stdin that is not such an object, any other tool, a command that is missing, empty or too long, no
 session, sprint id or secret, a console that is unreachable or answers other than 200 to the ask, a reply that is
-not `{"prompt", "state", "mac"}` and a null `prompt`. It prints exactly one line, always exit 0. The allow carries no rule,
+not `{"prompt", "state", "mac"}` and any other null `prompt`. It prints exactly one line, always exit 0. The allow carries no rule,
 so the deny rules and the `PreToolUse` hooks keep judging the call.
 
 `sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
@@ -675,7 +678,10 @@ def run_prompt(args: argparse.Namespace, *, clock: Callable[[], float] | None = 
         body = {"sprint_id": sprint, "phase": "ask", "session_id": session, "command": command}
         if description is not None:
             body["description"] = description
-        prompt, _ = ask_signed(args.port, sprint, secret, body)
+        prompt, state = ask_signed(args.port, sprint, secret, body)
+        if prompt is None and state == prompt_card.UNEXPLAINED:
+            print(prompt_card.hook_output("deny", prompt_card.NO_REASON_TEXT))
+            return 0
         if prompt is None:
             raise HookFailure("the console holds no card for this prompt")
     except SandboxRequested:

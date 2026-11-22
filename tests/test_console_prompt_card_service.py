@@ -325,6 +325,41 @@ class PromptRouteTest(PromptCase):
 
 
 class PromptHookWireTest(PromptCase):
+    def run_hook(self, svc, sid, hook):
+        """The exit code and the printed text of the real hook, which fails the test if it waits."""
+        out = io.StringIO()
+        args = sprint.build_parser().parse_args(
+            ["permit", "--prompt", "--port", str(svc.address[1])])
+        with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \
+                contextlib.redirect_stdout(out):
+            code = sprint.run_prompt(args, clock=lambda: 0,
+                                     sleep=lambda seconds: self.fail("the hook waited"))
+        return code, out.getvalue()
+
+    def test_a_hook_prompt_with_no_reason_is_told_to_state_why_and_shows_no_card(self):
+        svc, sid = self.boot()
+        code, out = self.run_hook(svc, sid, {
+            "session_id": "s-1", "tool_name": "Bash", "tool_input": {"command": COMMAND}})
+        self.assertEqual(code, 0)
+        self.assertTrue(out.endswith("\n"))
+        self.assertEqual(out.count("\n"), 1)
+        decision = json.loads(out)["hookSpecificOutput"]["decision"]
+        self.assertEqual(decision["behavior"], "deny")
+        said = decision["message"].lower()
+        self.assertIn("description", said)
+        self.assertIn("why", said)
+        self.assertIn("run it again", said)
+        self.assertNotEqual(decision["message"], manager.REFUSAL)
+        self.assertEqual(out, prompt_card.hook_output("deny", prompt_card.NO_REASON_TEXT) + "\n")
+        self.assertEqual(self.rows(event_log.PROMPT_ASKED), [])
+        self.assertEqual(self.items(svc), [])
+        self.assertEqual(self.run_hook(svc, sid, {
+            "session_id": "s-2", "tool_name": "Bash",
+            "tool_input": {"command": COMMAND, "description": "  "}}),
+            (0, prompt_card.hook_output("deny", manager.REFUSAL) + "\n"))
+        self.assertEqual(self.rows(event_log.PROMPT_ASKED), [])
+
     def test_an_allow_between_the_last_wait_and_the_close_is_honored(self):
         svc, sid = self.boot()
         hook = {"session_id": "s-1", "tool_name": "Bash",

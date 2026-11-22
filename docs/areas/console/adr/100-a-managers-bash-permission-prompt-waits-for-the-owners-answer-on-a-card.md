@@ -1,6 +1,6 @@
 # ADR-console-100 — A manager's Bash permission prompt waits for the owner's answer on a card
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-103
 - **Decided in:** #1424
 
 ## Context

@@ -957,10 +957,10 @@ class SprintCommandTest(Case):
     def test_the_contract_says_a_bash_prompt_waits_for_the_owner_and_a_worktree_is_never_entered(self):
         section = run_sprint("contract").stdout.split("\n## ", 2)[1]
         self.assertTrue(section.startswith("Contract\n"), section)
-        self.assertIn("- A permission prompt for a Bash command in this session waits up to ten "
-                      "minutes for the owner to allow it once or refuse it on the console; any "
-                      "other prompt is refused at once. Never wait for a prompt any other way.",
-                      section)
+        self.assertIn("- A permission prompt for a Bash command in this session waits up to ten minutes for the owner to allow it once or refuse it on the console, "
+                      "and only when the call's description says why you run the command: such a prompt whose call has no description, or a blank one, is refused at once, "
+                      "so describe the call and run it again. Any other prompt is refused at once. "
+                      "Never wait for a prompt any other way.", section)
         self.assertIn("- Never enter or create a worktree yourself, because a delivery makes its "
                       "own.", section)
 
