@@ -26,6 +26,8 @@ from agent_tools.delivery.engine_ledger import RUN_ID_RE
 from agent_tools.delivery.engine_shell import creation_lock_path, lock_holder, platform_revision
 from tests.guard_policy_world import GuardPolicyWorld
 
+TIER = "integration"
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDIN = REPO_ROOT / "tests/fixtures/engine-deliver/standin.py"
 SHIPPED = REPO_ROOT / "python/agent_tools/delivery/procedures"

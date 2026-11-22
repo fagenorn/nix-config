@@ -14,6 +14,7 @@ import ast
 import fnmatch
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -45,17 +46,23 @@ FIXTURE_PREFIX = "home/common/agent-skills/evals/fixture-repo/"
 
 SHELL_TIER = re.compile(r"^TIER=([a-z]+)$")
 TIER_CELL = re.compile(r"^`([a-z]+)`$")
+TIER_TABLE_HEADER = re.compile(r"^\|\s*Tier\s*\|")
+PYTHON_WORD = re.compile(r"^python[0-9.]*$")
+MODULE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
 def standard_tiers(text: str) -> list[str]:
-    """The tier names in the table under `## Tiers`, in table order."""
+    """The tier names in the table whose header row opens with `Tier`, in table order."""
     tiers: list[str] = []
     inside = False
     for line in text.splitlines():
-        if line.startswith("## "):
-            inside = line.strip() == "## Tiers"
+        if TIER_TABLE_HEADER.match(line):
+            inside = True
             continue
-        if not inside or not line.startswith("|"):
+        if not line.startswith("|"):
+            inside = False
+            continue
+        if not inside:
             continue
         cells = line.strip().strip("|").split("|")
         match = TIER_CELL.match(cells[0].strip())
@@ -87,8 +94,29 @@ def declared_tier(path: Path) -> str | None:
     return None
 
 
-def recipe_paths(justfile_text: str, name: str) -> list[str]:
-    """The `.py` and `.sh` tokens of the named recipe's body, in order."""
+def _command_words(line: str) -> list[str]:
+    """The words a shell reads from one recipe line: quotes removed, a comment dropped."""
+    line = line.rstrip().removesuffix("\\")
+    lexer = shlex.shlex(line, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    try:
+        return list(lexer)
+    except ValueError:  # an unbalanced quote: the line continues a quoted string
+        words: list[str] = []
+        for word in line.split():
+            if word.startswith("#"):
+                break
+            words.append(word)
+        return words
+
+
+def recipe_paths(justfile_text: str, name: str, *, modules: bool = True) -> list[str]:
+    """The `.py` and `.sh` arguments of the named recipe's commands, in order.
+
+    A comment names nothing. With `modules`, the argument of `python -m` is a path too,
+    its dots turned into slashes and `.py` added.
+    """
     header = re.compile(r"^" + re.escape(name) + r"(?:\s[^:]*)?:")
     lines = justfile_text.splitlines()
     for index, line in enumerate(lines):
@@ -100,19 +128,32 @@ def recipe_paths(justfile_text: str, name: str) -> list[str]:
     for line in lines[index + 1 :]:
         if not line.startswith("  "):
             break
-        for token in line.split():
-            token = token.removesuffix("\\")
-            token = token.removeprefix("./")
-            if token.endswith((".py", ".sh")):
-                paths.append(token)
+        words = _command_words(line)
+        for index, word in enumerate(words):
+            if (
+                modules
+                and word == "-m"
+                and 0 < index < len(words) - 1
+                and PYTHON_WORD.match(words[index - 1].rsplit("/", 1)[-1])
+                and MODULE_NAME.match(words[index + 1])
+            ):
+                paths.append(words[index + 1].replace(".", "/") + ".py")
+            word = word.removeprefix("./")
+            if word.endswith((".py", ".sh")):
+                paths.append(word)
     return paths
 
 
 def candidates(paths: Iterable[str], justfile_text: str) -> list[str]:
-    """Every test file: recipe members of the suite and nightly recipes, and test-named paths."""
-    found = set(recipe_paths(justfile_text, SUITE_RECIPE))
-    for recipe in NIGHTLY_RECIPES:
-        found.update(recipe_paths(justfile_text, recipe))
+    """Every test file: recipe members of the suite and nightly recipes, and test-named paths.
+
+    A module a recipe runs with `python -m` counts only when it is one of `paths`.
+    """
+    repo = set(paths)
+    found: set[str] = set()
+    for recipe in (SUITE_RECIPE, *NIGHTLY_RECIPES):
+        found.update(recipe_paths(justfile_text, recipe, modules=False))
+        found.update(path for path in recipe_paths(justfile_text, recipe) if path in repo)
     for path in paths:
         parts = path.split("/")
         if "fixtures" in parts[:-1] or path.startswith(FIXTURE_PREFIX):
@@ -225,11 +266,39 @@ class RecipePathsTest(unittest.TestCase):
             "evals skill id:\n  ./e/run.sh {{skill}}\n"
             "other: build\n  z.py\n"
         )
-        self.assertEqual(recipe_paths(text, "agent-workflow-tests"), ["tests/a.py", "b/c.sh"])
+        self.assertEqual(recipe_paths(text, "agent-workflow-tests"), ["m.py", "tests/a.py", "b/c.sh"])
+        self.assertEqual(
+            recipe_paths(text, "agent-workflow-tests", modules=False), ["tests/a.py", "b/c.sh"]
+        )
         self.assertEqual(recipe_paths(text, "evals"), ["e/run.sh"])
         self.assertEqual(recipe_paths(text, "other"), ["z.py"])
         with self.assertRaises(AssertionError):
             recipe_paths(text, "missing")
+
+    def test_a_comment_names_no_test_path(self):
+        text = (
+            "evals skill id:\n"
+            "  # tests/test_commented.py is not run here\n"
+            "  ./e/run.sh {{skill}} # nor is x/test-inline.sh\n"
+            '  echo "a # b" q/test_quoted.py\n'
+            "  #!/usr/bin/env bash\n"
+        )
+        self.assertEqual(recipe_paths(text, "evals"), ["e/run.sh", "q/test_quoted.py"])
+
+    def test_a_module_run_with_python_dash_m_is_its_path(self):
+        text = (
+            "console-screenshots out=\"\":\n"
+            "  #!/usr/bin/env bash\n"
+            '  PW="$b" PYTHONPATH="p" "$py/bin/python3" -m tests.shoot --out "${dir:-x}"\n'
+            "  python -m a.b.c \\\n"
+            "    x/y.py\n"
+            "  git commit -m tests.not_python\n"
+            "  python3 -m\n"
+            "  python3 -m -x tests.flag\n"
+        )
+        self.assertEqual(
+            recipe_paths(text, "console-screenshots"), ["tests/shoot.py", "a/b/c.py", "x/y.py"]
+        )
 
     def test_the_real_justfile_has_every_runner(self):
         text = justfile_text()
@@ -244,6 +313,7 @@ class RecipePathsTest(unittest.TestCase):
             "tests/test_claude_code_installed.py",
             recipe_paths(text, "agent-installed-skill-tests"),
         )
+        self.assertIn("tests/console_screenshots.py", recipe_paths(text, "console-screenshots"))
 
 
 class CandidatesTest(unittest.TestCase):
@@ -274,6 +344,42 @@ class CandidatesTest(unittest.TestCase):
                 "n/test_n.py",
                 "tests/test-example.sh",
             ],
+        )
+
+
+class ModuleCandidatesTest(unittest.TestCase):
+    others = "".join(
+        f"{name}:\n  true\n" for name in (SUITE_RECIPE, *NIGHTLY_RECIPES) if name != "evals"
+    )
+    text = others + "evals skill id:\n  python3 -m tests.shot\n  python3 -m pkg.tool\n"
+
+    def test_a_module_in_the_repository_is_a_candidate_and_one_outside_it_is_not(self):
+        self.assertEqual(candidates(["tests/shot.py", "other.py"], self.text), ["tests/shot.py"])
+
+    def test_a_test_named_in_a_comment_only_is_not_a_candidate_or_a_registration(self):
+        text = self.others + "evals skill id:\n  # tests/test_n.py runs here\n  run.sh\n"
+        self.assertEqual(candidates(["run.sh"], text), ["run.sh"])
+        self.assertNotIn("tests/test_n.py", recipe_paths(text, "evals"))
+        self.assertEqual(
+            registration_errors(
+                {"tests/test_n.py": "nightly"},
+                set(),
+                set(recipe_paths(text, "evals")),
+                ["fast", "integration", "nightly"],
+            ),
+            ["tests/test_n.py: a nightly test is registered with no nightly recipe"],
+        )
+
+    def test_a_nightly_test_run_with_python_dash_m_is_registered(self):
+        text = "evals skill id:\n  python3 -m tests.test_n\n"
+        self.assertEqual(
+            registration_errors(
+                {"tests/test_n.py": "nightly"},
+                set(),
+                set(recipe_paths(text, "evals")),
+                ["fast", "integration", "nightly"],
+            ),
+            [],
         )
 
 

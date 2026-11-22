@@ -81,6 +81,18 @@ class CompareTest(unittest.TestCase):
             "member time at runner speed 1.10. Largest growth: tests/test_new.py (+60.6s). "
             "Slowest test: tests/test_new.py (60.6s).")
 
+    def test_growth_exactly_at_the_threshold_is_within_it_whatever_the_float_error(self):
+        # 64.4 - 4.4 is 60.00000000000001 in binary floating point; the reports say 60.0.
+        base = report({"a": 4.4})
+        head = report({"a": 4.4, "new": 60.0})
+        self.assertEqual(head["member_seconds"], 64.4)
+        comparison = compare(base, head)
+        self.assertEqual(comparison.factor, 1.0)
+        self.assertEqual(comparison.growth, 60.0)
+        self.assertTrue(summary_line(head, comparison, threshold=60.0, base_label="main")
+                        .startswith("Suite time changed by +60.0s over main, within the 60s "
+                                    "threshold:"))
+
     def test_an_existing_member_that_grew_most_is_named(self):
         self.assertEqual(
             line_for(BASE, {"a": 15, "b": 30, "c": 160}),
@@ -245,6 +257,24 @@ class CommandTest(unittest.TestCase):
 
 
 class CompatibilityTest(unittest.TestCase):
+    def test_growth_just_over_the_threshold_survives_the_runners_report(self):
+        base = [MemberResult(0, "tests/test_a.py", 0, 10.0, 1.0),
+                MemberResult(1, "tests/test_b.py", 0, 20.0, 1.0)]
+        head = [*base, MemberResult(2, "tests/test_new.py", 0, 60.04, 1.0)]
+        with tempfile.TemporaryDirectory() as directory:
+            reports = {}
+            for label, results in (("base", base), ("head", head)):
+                path = Path(directory) / f"{label}.json"
+                suite_runner.write_report(
+                    path, suite_runner.timing_report(results, jobs=2, wall_seconds=1.0))
+                reports[label] = load_report(path)
+        comparison = compare(reports["base"], reports["head"])
+        self.assertGreater(comparison.growth, 60.0)
+        self.assertTrue(summary_line(reports["head"], comparison, threshold=60.0,
+                                     base_label="main")
+                        .startswith("Suite time grew by 60.0s over main, past the 60s "
+                                    "threshold:"))
+
     def test_the_runners_report_is_a_valid_head(self):
         results = [MemberResult(0, "tests/test_a.py", 0, 1.2, 1.0),
                    MemberResult(1, "tests/test_b.py", 0, 3.4, 2.0)]

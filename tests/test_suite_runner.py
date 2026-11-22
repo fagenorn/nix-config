@@ -680,21 +680,31 @@ class ReportFileTest(RunnerCase):
         ]
         report = suite_runner.timing_report(
             list(reversed(results)), jobs=3, wall_seconds=12.34)
-        self.assertEqual(report, {
-            "version": 1, "members": 7, "passed": 4, "failed": 3, "jobs": 3,
-            "wall_seconds": 12.3, "member_seconds": 20.5, "cpu_seconds": 8.5,
-            "timings": [
-                {"member": "b.py", "seconds": 5.0, "cpu_seconds": 2.0, "passed": True},
-                {"member": "e.py", "seconds": 5.0, "cpu_seconds": 4.9, "passed": True},
-                {"member": "f.py", "seconds": 3.2, "cpu_seconds": 0.0, "passed": True},
-                {"member": "g.sh", "seconds": 3.2, "cpu_seconds": 0.0, "passed": False},
-                {"member": "a.py", "seconds": 2.0, "cpu_seconds": 1.5, "passed": True},
-                {"member": "c.py", "seconds": 2.0, "cpu_seconds": 0.0, "passed": False},
-                {"member": "d.py", "seconds": 0.0, "cpu_seconds": 0.0, "passed": False},
-            ]})
+        # The member times are written unrounded, so rows run slowest first by the full time
+        # (g.sh at 3.24 s before f.py at 3.21 s) and the member total is 20.49 s.
         self.assertEqual(list(report), [
             "version", "members", "passed", "failed", "jobs", "wall_seconds",
             "member_seconds", "cpu_seconds", "timings"])
+        self.assertAlmostEqual(report.pop("member_seconds"), 20.49, places=9)
+        self.assertEqual(report, {
+            "version": 1, "members": 7, "passed": 4, "failed": 3, "jobs": 3,
+            "wall_seconds": 12.3, "cpu_seconds": 8.5,
+            "timings": [
+                {"member": "b.py", "seconds": 5.0, "cpu_seconds": 2.0, "passed": True},
+                {"member": "e.py", "seconds": 5.0, "cpu_seconds": 4.9, "passed": True},
+                {"member": "g.sh", "seconds": 3.24, "cpu_seconds": 0.0, "passed": False},
+                {"member": "f.py", "seconds": 3.21, "cpu_seconds": 0.0, "passed": True},
+                {"member": "a.py", "seconds": 2.0, "cpu_seconds": 1.5, "passed": True},
+                {"member": "c.py", "seconds": 2.0, "cpu_seconds": 0.0, "passed": False},
+                {"member": "d.py", "seconds": 0.04, "cpu_seconds": 0.0, "passed": False},
+            ]})
+
+    def test_a_member_time_just_over_a_tenth_is_not_rounded_in_the_report(self):
+        results = [MemberResult(index=0, member="a.py", returncode=0, seconds=60.04,
+                                cpu_seconds=1.0)]
+        report = suite_runner.timing_report(results, jobs=1, wall_seconds=60.04)
+        self.assertEqual(report["timings"][0]["seconds"], 60.04)
+        self.assertEqual(report["member_seconds"], 60.04)
 
     def test_a_completed_run_writes_the_timing_report_the_environment_names(self):
         members = self.barrier_members("test_m0.py", "test_fail_m1.py")
@@ -715,6 +725,17 @@ class ReportFileTest(RunnerCase):
         self.assertEqual(report["cpu_seconds"], float(summary.group("cpu")))
         self.assertEqual([path.name for path in (self.work / "out").iterdir()],
                          ["report.json"])
+
+    def test_a_green_run_writes_the_report_too(self):
+        members = self.barrier_members("test_m0.py", "test_m1.py")
+        result = self.run_suite("--jobs", "2", *members, cap=2, total=2,
+                                env={"SUITE_RUNNER_REPORT": "out/green.json"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads((self.work / "out/green.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            {key: report[key] for key in ("version", "members", "passed", "failed", "jobs")},
+            {"version": 1, "members": 2, "passed": 2, "failed": 0, "jobs": 2})
+        self.assertEqual(sorted(t["member"] for t in report["timings"]), sorted(members))
 
     def test_no_report_without_the_variable(self):
         members = self.barrier_members("test_m0.py", "test_m1.py")

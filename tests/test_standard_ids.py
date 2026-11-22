@@ -16,6 +16,8 @@ from agent_tools.delivery.look_marker import FENCE_OPEN
 from agent_tools.delivery.rule_ids import RULE_ID_HEADING
 from agent_tools.project_contract.adopt_links import links
 
+TIER = "fast"
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GLOBAL = REPO_ROOT / "home/common/agent-skills/standards"
 BAR = GLOBAL / "the-bar.md"

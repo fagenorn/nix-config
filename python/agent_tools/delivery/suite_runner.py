@@ -86,8 +86,10 @@ Timing report (issue 1385, ADR-delivery-015). When `SUITE_RUNNER_REPORT` names a
 relative to the working directory, every completed run also writes the report there as JSON
 after the timing table, whether it passed or failed. The keys are `version` (1), `members`,
 `passed`, `failed`, `jobs`, `wall_seconds`, `member_seconds`, `cpu_seconds` and `timings`, one
-`{member, seconds, cpu_seconds, passed}` per member in the table's order. The `wall_seconds`
-and `cpu_seconds` figures are the summary's. The file is written whole through a temporary
+`{member, seconds, cpu_seconds, passed}` per member, slowest first by unrounded `seconds`,
+which a tie leaves in list order. The `wall_seconds` and `cpu_seconds` figures are the
+summary's, rounded to 0.1 s; `member_seconds` and each member's `seconds` keep full precision,
+so a comparison of two reports sees growth the table's rounding hides. The file is written whole through a temporary
 file in its directory, and the parent directories are created. Members do not inherit the
 variable. An unwritable path raises, and an empty or unset value writes nothing.
 
@@ -548,11 +550,11 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
 
 def timing_report(results: Sequence[MemberResult], *, jobs: int,
                   wall_seconds: float) -> dict:
-    """The JSON-ready report of a completed run, with the figures and the row order of
-    `report_lines`."""
+    """The JSON-ready report of a completed run: the summary's figures of `report_lines`, but
+    member times unrounded and rows slowest first by those times."""
     ordered = sorted(results, key=lambda result: result.index)
     failed = sum(1 for result in ordered if not result.passed)
-    rows = sorted(ordered, key=lambda r: (-round(r.seconds, 1), r.index))
+    rows = sorted(ordered, key=lambda r: (-r.seconds, r.index))
     return {
         "version": REPORT_VERSION,
         "members": len(ordered),
@@ -560,9 +562,9 @@ def timing_report(results: Sequence[MemberResult], *, jobs: int,
         "failed": failed,
         "jobs": jobs,
         "wall_seconds": round(wall_seconds, 1),
-        "member_seconds": round(sum(result.seconds for result in ordered), 1),
+        "member_seconds": sum(result.seconds for result in ordered),
         "cpu_seconds": round(sum(result.cpu_seconds for result in ordered), 1),
-        "timings": [{"member": result.member, "seconds": round(result.seconds, 1),
+        "timings": [{"member": result.member, "seconds": result.seconds,
                      "cpu_seconds": round(result.cpu_seconds, 1), "passed": result.passed}
                     for result in rows],
     }

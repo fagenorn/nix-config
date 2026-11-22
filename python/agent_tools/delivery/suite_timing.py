@@ -24,7 +24,9 @@ uniformly slower runner is not growth and a removed member lowers it. The larges
 is the head member with the greatest `seconds - factor * base_seconds`, the first in head
 order on a tie, a member absent from the base counting as 0 s there. The comparison with
 the threshold is made on the unrounded growth and is strict: growth equal to the
-threshold is within it. Rounding is for display only.
+threshold is within it. The arithmetic is decimal on the numbers as the report writes
+them, so a float's error does not move growth across the threshold. Rounding is for
+display only.
 
 Output, on stdout, one of three lines (`{t}` is the threshold in `%g` form):
 
@@ -56,6 +58,7 @@ import statistics
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from agent_tools import canonical
@@ -144,22 +147,28 @@ def speed_factor(base: dict, head: dict) -> float:
     return float(statistics.median(ratios)) if ratios else 1.0
 
 
+def _exact(value: float) -> Decimal:
+    """The decimal a report writes for `value`, so `64.4 - 4.4` is 60.0 and not 60.00000000000001."""
+    return Decimal(repr(float(value)))
+
+
 def compare(base: dict, head: dict) -> Comparison:
     factor = speed_factor(base, head)
+    scale = _exact(factor)
     base_seconds = _seconds_by_member(base)
     largest_member = ""
-    largest_delta = -math.inf
+    largest_delta = Decimal("-Infinity")
     for row in head["timings"]:
-        delta = row["seconds"] - factor * base_seconds.get(row["member"], 0.0)
+        delta = _exact(row["seconds"]) - scale * _exact(base_seconds.get(row["member"], 0.0))
         if delta > largest_delta:
             largest_member, largest_delta = row["member"], delta
     return Comparison(
         base_seconds=base["member_seconds"],
         head_seconds=head["member_seconds"],
         factor=factor,
-        growth=head["member_seconds"] - factor * base["member_seconds"],
+        growth=float(_exact(head["member_seconds"]) - scale * _exact(base["member_seconds"])),
         largest_member=largest_member,
-        largest_delta=largest_delta,
+        largest_delta=float(largest_delta),
     )
 
 

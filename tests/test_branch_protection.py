@@ -549,6 +549,13 @@ class WorkflowShape(unittest.TestCase):
         self.assertIn("          restore-keys: suite-timing-", restore)
         self.assertIn("        run: " + COMPARE, compare)
         self.assertEqual(["BASE_REF: ${{ github.base_ref }}"], step_env(compare))
+        # No step carries an `if:` or a `continue-on-error:`, so the comparison runs whenever the
+        # job does, and the job's own condition covers every pull request (checked above). The
+        # job's `needs:` is the one line of `green_without_work` left.
+        for key in ("suite-timing", "suite-timing-baseline"):
+            with self.subTest(job=key):
+                self.assertEqual(["needs: agent-workflow-tests"],
+                                 green_without_work(job_body(key).splitlines(), None))
 
     def test_agent_workflow_tests_job_has_the_required_triggers_without_schedule(self):
         self.assertIsNotNone(trigger_block("pull_request"))
