@@ -11,7 +11,7 @@
     {"id": "draft", "stage": "building", "kind": "agent", "role": "implementer",
      "prompt": "toy-draft.md", "reply": "toy-draft.reply.json", "outcome_from": "status",
      "in": ["run.issue"], "max_visits": 3, "mutates": true,
-     "on": {"drafted": "review", "stuck": "needs-owner", "exhausted": "needs-owner",
+     "on": {"drafted": "review", "stuck": "needs-owner", "no-reply": "step-failed", "exhausted": "needs-owner",
             "out-of-bounds": "step-failed"}},
     {"id": "review", "stage": "final review", "kind": "group",
      "members": [{"step": "review-a", "pass": ["approve"]}, {"step": "review-b", "pass": ["approve"]}],

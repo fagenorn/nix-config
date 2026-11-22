@@ -1,1 +1,1 @@
-{"type": "object", "properties": {"status": {"enum": ["drafted", "stuck"]}, "summary": {"type": "string"}, "items": {"type": "array", "items": {"type": "string"}}}, "required": ["status", "summary", "items"]}
+{"type": "object", "properties": {"status": {"enum": ["drafted", "stuck"]}, "summary": {"type": "string"}, "items": {"type": "array", "items": {"type": "string"}}}, "required": ["status", "summary", "items"], "additionalProperties": false}

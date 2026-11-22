@@ -77,9 +77,12 @@ missing or invalid `PATH` refuses `resolver_failure` exactly as a broken
 installed manifest does. The cutover preflight runs the candidate's own code
 this way against the candidate's own manifest.
 
-Platform 2.1.0 reads project schemas 2 and 3 (`project_schema_versions` is
+Platform 2.2.0 reads project schemas 2 and 3 (`project_schema_versions` is
 `[2, 3]`) and resolves to schema 2 (`resolved_schema_version` is 2). It
-declares the migration `bindings-deploy.retire` from schema 1 to 2 (issue 579). Schema 2 is schema 1
+declares the migrations `bindings-deploy.retire` (schema 1 to 2, issue 579)
+and `platform-constants.retire` (schema 2 to 3, #1469), and deprecates schema 2
+(`platform-constants`), so `platform-status` lists that id in the
+`deprecated_uses` of every schema-2 root. Schema 2 is schema 1
 without the deploy watch: `bindings.deploy` and `capabilities.deploy` are not
 members of it, so an authored one is refused like any member outside the
 schema, and the resolved snapshot has neither. A schema-1 contract is refused
@@ -1321,13 +1324,7 @@ def platform_commands(source: object) -> dict:
 def derive_for(root: Path, source: object) -> derived_values.Derived:
     """The values `root` states for a schema-3 `source`, with its attempt budget and basis; nothing, and no file read, for any other schema."""
     if schema_three.declares(source):
-        derived = derived_values.derive(root)
-        budget = attempt_history.read(root, derived.values.get(derived_values.REPO_SLUG))
-        return derived_values.Derived(
-            {**derived.values,
-             schema_three.ATTEMPT_BUDGET: budget.minutes,
-             schema_three.ATTEMPT_BUDGET_BASIS: budget.basis},
-            derived.violations)
+        return attempt_history.derive_schema_three(root)
     return derived_values.Derived({}, [])
 
 

@@ -16,7 +16,11 @@ Text output (stdout):
     fleet preflight: candidate platform <version> from <manifest path>
     compatible <project_id> <root>
     refused <project_id> <root> <reason_code> <repair_id>
+    deprecated <project_id> <root> <deprecation id> ...
     fleet preflight: <n> registered project(s) can run on platform <version>
+
+A `deprecated` line is printed after the row of a project whose
+`deprecated_uses` is not empty; it never changes the verdict.
 
 A refusal ends with `fleet preflight: <k> of <n> registered projects cannot run
 on platform <version>; activation refused.` and the remedy: migrate each refused
@@ -91,6 +95,9 @@ def render_text(report: dict) -> str:
         else:
             lines.append(f"refused {row['project_id']} {row['root']} "
                          f"{row['reason_code']} {row['repair_id']}")
+        if row.get("deprecated_uses"):
+            lines.append(f"deprecated {row['project_id']} {row['root']} "
+                         + " ".join(row["deprecated_uses"]))
     total = len(report["fleet"])
     refused = len(report["refused"])
     if refused:

@@ -161,7 +161,11 @@ write.
 
 A schema-1 contract is routed as `migration_required` with the
 `bindings-deploy.retire` step (issue 579 P11); `resolve_project` states the
-schema that refuses it.
+schema that refuses it. A contract of the schema adoption writes
+(`adopt_planning.current_schema`) whose forward step reaches a supported schema
+keeps its outcome, and the plan names that step in `available_migration` (null
+otherwise, and for a draft). The member is not an input of `plan_id`, and
+`--format human` prints it.
 
 `apply` takes a stored `ready` plan by that id, refuses on any drift, and
 carries the whole transformation out in an isolated worktree in the same user
@@ -233,7 +237,9 @@ one plan is never mistaken for an earlier adoption of the same project.
 in place (https://github.com/fagenorn/nix-config/issues/579): it rewrites
 `.agents/project.json`, has the resolver child regenerate the projections and
 then judge the result, restores every byte it wrote when either refuses, and
-stages and commits nothing. `adopt_migrate` owns the executors and the
+stages and commits nothing. For a migration that retires tracked files
+(`platform-constants.retire`: everything under `.agents/artifacts/`) it also
+deletes them from the working tree, refusing an unstaged edit to one. `adopt_migrate` owns the executors and the
 transaction.
 
 The resolver is consumed **only** as a child process, never imported (D26):
@@ -615,6 +621,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     if state not in adopt_inspection.PLAN_STATES:
         raise ValueError(f"unknown plan state: {state!r}")
 
+    available = adopt_planning.offered_migration(
+        manifest, None if draft is not None else contract_source)
     plan_path = adopt_planning.store_plan_path(plan_id)
     document = {
         "schema_version": adopt_inspection.ADOPT_SCHEMA_VERSION,
@@ -627,6 +635,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
             "input_digest": plan_id,
             "plan_id": plan_id,
             "blockers": blockers,
+            "available_migration": available,
         },
         "evidence": evidence,
         "decisions": decisions,
@@ -821,6 +830,8 @@ def emit_human(document: dict) -> int:
             lines.append(f"open {entry['id']}: {entry['recommendation']}")
     for blocker in plan["blockers"]:
         lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
+    if plan["available_migration"] is not None:
+        lines.append(f"available: migrate {plan['available_migration']}")
     lines.append(f"next: {document['handoff']['next_command'] or '(none)'}")
     lines.append(f"stored at {document['handoff']['plan_path']}")
     sys.stdout.write("\n".join(lines) + "\n")

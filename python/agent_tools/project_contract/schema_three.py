@@ -145,7 +145,7 @@ def _write(view: dict, pointer: str, value: object) -> None:
     node[keys[-1]] = copy.deepcopy(value)
 
 
-def _delete(view: dict, pointer: str) -> None:
+def remove_at(view: dict, pointer: str) -> None:
     keys = _segments(pointer)
     node = view
     for key in keys[:-1]:
@@ -168,7 +168,7 @@ def fill(source: dict, derived: Mapping[str, object]) -> dict:
     # An authored derived value is refused by `refusals`; it is never read as the value, so a
     # value the repository cannot state stays absent instead of falling back to the authored one.
     for pointer in RETIRED + DERIVED:
-        _delete(view, pointer)
+        remove_at(view, pointer)
     for pointer in ("/project/id", "/platform"):
         if pointer in derived:
             _write(view, pointer, derived[pointer])
@@ -193,15 +193,15 @@ def fill(source: dict, derived: Mapping[str, object]) -> dict:
     return view
 
 
-_ABSENT = object()
+ABSENT = object()
 
 
-def _present(source: dict, pointer: str) -> object:
-    """The value authored at `pointer`, or `_ABSENT` when an object on the way lacks it."""
+def authored_at(source: dict, pointer: str) -> object:
+    """The value authored at `pointer`, or `ABSENT` when an object on the way lacks it."""
     node: object = source
     for key in _segments(pointer):
         if not isinstance(node, dict) or key not in node:
-            return _ABSENT
+            return ABSENT
         node = node[key]
     return node
 
@@ -243,18 +243,18 @@ def refusals(source: dict) -> list[dict]:
     if not isinstance(source, dict):
         return found
     for pointer in RETIRED:
-        if _present(source, pointer) is not _ABSENT:
+        if authored_at(source, pointer) is not ABSENT:
             refuse(pointer, "retired_member")
     for pointer in CONSTANTS:
-        if _present(source, pointer) is not _ABSENT:
+        if authored_at(source, pointer) is not ABSENT:
             refuse(pointer, "platform_constant")
     for pointer in DERIVED:
-        if _present(source, pointer) is not _ABSENT:
+        if authored_at(source, pointer) is not ABSENT:
             refuse(pointer, "derived_value")
     for pointer, kind in ([(c, "platform_constant") for c in CONSTANT_CONTAINERS]
                           + [(c, "derived_value") for c in DERIVED_CONTAINERS]):
-        value = _present(source, pointer)
-        if value is not _ABSENT and (not isinstance(value, dict) or not value):
+        value = authored_at(source, pointer)
+        if value is not ABSENT and (not isinstance(value, dict) or not value):
             refuse(pointer, kind)
     bindings = source.get("bindings")
     if not isinstance(bindings, dict):
