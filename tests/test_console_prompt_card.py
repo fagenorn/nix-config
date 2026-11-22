@@ -397,6 +397,17 @@ class CommandSummaryTest(unittest.TestCase):
             (f"cat <<'EOF' | bash\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
             (f"cat <<'EOF' | sudo python3\n{py}\nEOF", ["cat", "sudo"], "python3", 1),
             (f"cat <<'EOF' | tee /tmp/log | bash\n{rm}\nEOF", ["cat", "tee", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash -o errexit\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash -O extglob -\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash --rcfile x\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | bash /dev/stdin\n{rm}\nEOF", ["cat", "bash"], "bash", 1),
+            (f"cat <<'EOF' | python3 -W ignore\n{py}\nEOF", ["cat", "python3"], "python3", 1),
+            (f"cat <<'EOF' | python3 -X dev -\n{py}\nEOF", ["cat", "python3"], "python3", 1),
+            (f"cat <<'EOF' | python3 /dev/stdin\n{py}\nEOF", ["cat", "python3"], "python3", 1),
+            (f"ssh host <<'EOF'\n{rm}\nEOF", ["ssh"], "ssh", 1),
+            (f"ssh -p 22 -o StrictHostKeyChecking=no host 'bash -s' <<'EOF'\n{rm}\nEOF", ["ssh"], "bash", 1),
+            (f"cat <<'EOF' | ssh host\n{rm}\nEOF", ["cat", "ssh"], "ssh", 1),
+            (f"sudo ssh host bash <<'EOF'\n{rm}\nEOF", ["sudo"], "bash", 1),
         ]
         for command, runs, program, lines in rows:
             with self.subTest(command=command):
@@ -418,6 +429,9 @@ class CommandSummaryTest(unittest.TestCase):
         for command, runs in (("git log | sort <<< 'rm -rf /etc/nginx'", ["git", "sort"]),
                               ("cat <<'EOF' | bash script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
                               ("cat <<'EOF' | bash -c 'true'\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+                              ("cat <<'EOF' | bash -o errexit script.sh\nrm -rf /etc/nginx\nEOF", ["cat", "bash"]),
+                              ("cat <<'EOF' | python3 -W ignore tool.py\nrm -rf /etc/nginx\nEOF", ["cat", "python3"]),
+                              ("ssh host 'ls /tmp' <<'EOF'\nrm -rf /etc/nginx\nEOF", ["ssh"]),
                               ("cat <<'EOF'\nrm -rf /etc/nginx\nEOF\nbash\n", ["cat", "bash"])):
             with self.subTest(command=command):
                 result = self.summary(command + self.PAD)

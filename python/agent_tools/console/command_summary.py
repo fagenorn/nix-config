@@ -59,6 +59,12 @@ _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _CODE_FLAG = {"sh": "c", "bash": "c", "zsh": "c", "dash": "c", "ksh": "c", "python": "c", "python3": "c",
               "node": "e", "perl": "e", "ruby": "e"}
 _PYTHON_VERSION = re.compile(r"python3\.[0-9]+")
+_SHELL_VALUES = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+_VALUE_OPTIONS = {"python": frozenset({"-W", "-X", "-Q", "--check-hash-based-pycs"}),
+                  "node": frozenset({"-r", "--require", "--import", "--loader", "--experimental-loader"}),
+                  "perl": frozenset({"-I"}), "ruby": frozenset({"-r", "-I"})}
+_STDIN_OPERANDS = frozenset({"-", "/dev/stdin", "/dev/fd/0"})
+_SSH_VALUES = frozenset("BbcDEeFIiJLlmOopQRSWw")
 _REMOVERS = frozenset({"tee", "touch", "mkdir", "rm", "rmdir"})
 _COPIERS = frozenset({"cp", "mv", "ln", "install"})
 _WRITING_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "<>"})
@@ -419,23 +425,75 @@ class _Reader:
         self.scripts.append({"program": program, "lines": lines, "paths": paths})
 
     @staticmethod
+    def remote_of(arguments):
+        """(name, the arguments after it) for what `ssh`'s standard input reaches: its remote login shell
+        when it has no command, else the interpreter the remote command names (one word or the tokens of a
+        quoted one); (None, []) when the remote command is no interpreter."""
+        operands = []
+        at = 0
+        while at < len(arguments):
+            value = arguments[at].word.value
+            if value == "--":
+                operands.extend(arguments[at + 1:])
+                break
+            if value.startswith("-") and len(value) > 1 and not operands:
+                letters = [char for char in value[1:] if char in _SSH_VALUES]
+                if letters and value[1:].index(letters[0]) == len(value) - 2:
+                    at += 1
+            else:
+                operands.append(arguments[at])
+            at += 1
+        command = operands[1:]
+        if not command:
+            return "ssh", []
+        tokens = [token for item in command
+                  for token in (item.word.value.split() if item.word.text else [item.word.value])]
+        for at, token in enumerate(tokens):
+            if _program_kind(token)[0] == "interpreter":
+                return token, [_Item("word", _Word(rest, False, False, rest)) for rest in tokens[at + 1:]]
+        return None, []
+
+    @staticmethod
     def interpreter_of(program, arguments):
-        """(name, the arguments after it) for the interpreter a command reaches, directly or behind a wrapper."""
+        """(name, the arguments after it) for the interpreter a command reaches, directly, behind a wrapper
+        or through `ssh`."""
         if program is not None and _program_kind(program.value)[0] == "interpreter":
             return program.value, arguments
+        if program is not None and posixpath.basename(program.value) == "ssh":
+            return _Reader.remote_of(arguments)
         for at, item in enumerate(arguments):
             if _program_kind(item.word.value)[0] == "interpreter":
                 return item.word.value, arguments[at + 1:]
+            if posixpath.basename(item.word.value) == "ssh":
+                return _Reader.remote_of(arguments[at + 1:])
         return None, []
 
     def reads_stdin(self, name, rest):
-        """True when the interpreter takes its code from standard input (no code argument, no script operand)."""
+        """True when the interpreter takes its code from standard input: no code argument, and no script
+        operand once the values of its value-taking options are skipped (`-`, `/dev/stdin` are stdin)."""
         flag = _program_kind(name)[1]
         if any(item.word.option and self.code_flag(name, flag, item.word.value) for item in rest):
             return False
         if any(item.word.value == "-s" for item in rest):
             return True
-        return all(item.word.option or item.word.value == "-" for item in rest)
+        base = posixpath.basename(name)
+        family = "python" if base.startswith("python") else base
+        takes = _SHELL_VALUES if base in _SHELLS else _VALUE_OPTIONS.get(family, frozenset())
+        operands = []
+        skip = ended = False
+        for item in rest:
+            value = item.word.value
+            if skip:
+                skip = False
+            elif ended:
+                operands.append(value)
+            elif value in takes:
+                skip = True
+            elif value == "--":
+                ended = True
+            elif not item.word.option:
+                operands.append(value)
+        return all(value in _STDIN_OPERANDS for value in operands)
 
     @staticmethod
     def stdin_texts(items):
