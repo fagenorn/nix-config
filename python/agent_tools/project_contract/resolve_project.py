@@ -101,7 +101,13 @@ fills the constants from `schema_three` (`contract_view`), validates that view
 with the schema-2 rules, and builds the snapshot from it, so the snapshot is
 schema 2 without the four retired members (`schema_three.RETIRED`). Schema 3
 also defines the platform command `commit-environment` (`platform_commands`),
-which the filled commit environment names.
+which the filled commit environment names. A schema-3 contract that authors a
+platform constant, a retired member, a platform command id or a command's `cwd`
+or `env` is refused by name, not overwritten (`schema_three.refusals`): the
+repair id is `contract.<section>.platform_constant` or
+`contract.<section>.retired_member`. Because the verification list is a
+constant, a contract must author the commands `lint` and `test`; an absent one
+is `contract.commands.member_missing` at `/bindings/commands/<id>`.
 
 `write-projections` is the tool's only writer. It renders each declared
 projection from the single instruction source and brings its native entry
@@ -897,7 +903,8 @@ def check_command_id(value: object, pointer: str, commands: dict | None,
 
 def validate_workflow(workflow: dict, commands: dict | None,
                       violations: list[dict], *,
-                      optional: tuple[str, ...] = WORKFLOW_OPTIONAL_MEMBERS) -> None:
+                      optional: tuple[str, ...] = WORKFLOW_OPTIONAL_MEMBERS,
+                      check_verification_ids: bool = True) -> None:
     check_exact_members(
         workflow, "/bindings/workflow", WORKFLOW_MEMBERS, "workflow", violations,
         optional=optional)
@@ -905,7 +912,8 @@ def validate_workflow(workflow: dict, commands: dict | None,
     if "verification" in workflow and check_list(
             workflow["verification"], pointer, "workflow", violations):
         for index, value in enumerate(workflow["verification"]):
-            check_command_id(value, f"{pointer}/{index}", commands, violations)
+            if check_verification_ids:
+                check_command_id(value, f"{pointer}/{index}", commands, violations)
     pointer = "/bindings/workflow/orchestration"
     if "orchestration" in workflow and check_object(
             workflow["orchestration"], pointer, "workflow", violations):
@@ -1031,7 +1039,8 @@ def validate_bindings(source: dict, violations: list[dict], *,
     if "workflow" in present:
         validate_workflow(
             present["workflow"], known, violations,
-            **({"optional": SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS} if three else {}))
+            **({"optional": SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS,
+               "check_verification_ids": False} if three else {}))
 
 
 def validate_capabilities(source: dict, violations: list[dict]) -> None:
@@ -1358,7 +1367,11 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
     validate_schema_version(
         source, violations, manifest["project_schema_versions"])
     # Schema 3 is judged through its filled view: the shape rules are schema 2's,
-    # over the member lists schema 3 keeps.
+    # over the member lists schema 3 keeps. What the contract authors that the
+    # platform decides is refused from the authored source first.
+    if (isinstance(source, dict)
+            and source.get("schema_version") == schema_three.SCHEMA_VERSION):
+        violations.extend(schema_three.refusals(source))
     source = contract_view(source)
     three = source.get("schema_version") == schema_three.SCHEMA_VERSION
     for name in TOP_LEVEL_MEMBERS:

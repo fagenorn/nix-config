@@ -7,6 +7,10 @@ command given the platform's `cwd` and `env`, so the resolver validates and
 resolves the result with the schema-2 rules. The snapshot is therefore schema 2
 without the retired members (`RETIRED`).
 
+`refusals(source)` is the other half: a contract that authors a constant, a
+retired member or a platform command is refused by name, never silently
+overwritten.
+
 The module imports only `copy` and `agent_platform`, never the resolver, so
 adoption can import it later (ADR-project-contract-010 D1).
 """
@@ -136,3 +140,77 @@ def fill(source: dict) -> dict:
     for pointer in RETIRED:
         _delete(view, pointer)
     return view
+
+
+_ABSENT = object()
+
+
+def _present(source: dict, pointer: str) -> object:
+    """The value authored at `pointer`, or `_ABSENT` when an object on the way lacks it."""
+    node: object = source
+    for key in _segments(pointer):
+        if not isinstance(node, dict) or key not in node:
+            return _ABSENT
+        node = node[key]
+    return node
+
+
+def _section(pointer: str) -> str:
+    keys = _segments(pointer)
+    return "project" if keys[0] == "project" else keys[1]
+
+
+def refusals(source: dict) -> list[dict]:
+    """The violations of a schema-3 contract that authors what the platform decides.
+
+    Walks the authored `source`, never the filled view. Each entry is
+    `{"pointer", "message", "repair_id"}`, the shape of the resolver's
+    violations, and the list is unsorted. An authored constant or platform
+    command is `contract.<section>.platform_constant`, an authored retired
+    member is `contract.<section>.retired_member`, and an absent `lint` or
+    `test` (every id of the verification constant) is
+    `contract.commands.member_missing`, where `<section>` is the pointer's
+    namespace under `/bindings`, or `project`.
+    """
+    found: list[dict] = []
+
+    def refuse(pointer: str, kind: str) -> None:
+        message = ("is a platform constant from project schema 3 on, so a contract "
+                   "does not author it" if kind == "platform_constant"
+                   else "was retired in project schema 3")
+        found.append({"pointer": pointer, "message": message,
+                      "repair_id": f"contract.{_section(pointer)}.{kind}"})
+
+    if not isinstance(source, dict):
+        return found
+    for pointer in RETIRED:
+        if _present(source, pointer) is not _ABSENT:
+            refuse(pointer, "retired_member")
+    for pointer in CONSTANTS:
+        if _present(source, pointer) is not _ABSENT:
+            refuse(pointer, "platform_constant")
+    for pointer in CONSTANT_CONTAINERS:
+        value = _present(source, pointer)
+        if value is not _ABSENT and (not isinstance(value, dict) or not value):
+            refuse(pointer, "platform_constant")
+    bindings = source.get("bindings")
+    if not isinstance(bindings, dict):
+        return found
+    commands = bindings.get("commands")
+    if isinstance(commands, dict):
+        for command_id, entry in commands.items():
+            if command_id in COMMANDS:
+                refuse(f"/bindings/commands/{command_id}", "platform_constant")
+            elif isinstance(entry, dict):
+                for member in COMMAND_CONSTANTS:
+                    if member in entry:
+                        refuse(f"/bindings/commands/{command_id}/{member}",
+                               "platform_constant")
+    if "commands" not in bindings or isinstance(commands, dict):
+        for command_id in CONSTANTS["/bindings/workflow/verification"]:
+            if not isinstance(commands, dict) or command_id not in commands:
+                found.append({
+                    "pointer": f"/bindings/commands/{command_id}",
+                    "message": "required member is absent",
+                    "repair_id": "contract.commands.member_missing"})
+    return found

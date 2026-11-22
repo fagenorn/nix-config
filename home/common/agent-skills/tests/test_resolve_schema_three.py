@@ -319,6 +319,102 @@ class SchemaThreeFillTest(unittest.TestCase):
         self.assertNotIn("light_lane", view["bindings"]["workflow"])
 
 
+class SchemaThreeRefusalTest(SchemaThreeCase):
+    """A schema-3 contract that authors a constant or a retired member is refused by name."""
+
+    @staticmethod
+    def section(pointer: str) -> str:
+        keys = pointer.split("/")[1:]
+        return "project" if keys[0] == "project" else keys[1]
+
+    def refused_rows(self) -> list[tuple[str, str, object, str]]:
+        """(label, pointer set, value, pointer refused) for each authored constant or retired member."""
+        rows = [(f"constant {pointer}", pointer, value, pointer)
+                for pointer, value in EXPECTED_CONSTANTS.items()]
+        for container in schema_three.CONSTANT_CONTAINERS:
+            rows.append((f"empty {container}", container, {}, container))
+        rows.append(("paths not an object", "/bindings/paths", None, "/bindings/paths"))
+        for member, value in (("cwd", "."), ("env", [])):
+            pointer = f"/bindings/commands/lint/{member}"
+            rows.append((f"command {member}", pointer, value, pointer))
+        for command_id in ("codex-plan-review", "codex-diff-review", "commit-environment"):
+            pointer = f"/bindings/commands/{command_id}"
+            rows.append((f"platform id {command_id}", pointer,
+                         {"argv": list(schema_three.COMMANDS[command_id]["argv"])}, pointer))
+        rows.append(("malformed platform id", "/bindings/commands/codex-plan-review", None,
+                     "/bindings/commands/codex-plan-review"))
+        rows.extend([
+            ("retired project.name", "/project/name", "nix-config", "/project/name"),
+            ("retired paths.artifacts", "/bindings/paths/artifacts",
+             {"specs": ".agents/artifacts/specs", "plans": ".agents/artifacts/plans"},
+             "/bindings/paths/artifacts"),
+            ("retired co_authored_by", "/bindings/vcs/commit/co_authored_by", False,
+             "/bindings/vcs/commit/co_authored_by"),
+            ("retired light_lane", "/bindings/workflow/light_lane",
+             {"mode": "shadow", "budget_minutes": 90, "risk_paths": []},
+             "/bindings/workflow/light_lane"),
+        ])
+        return rows
+
+    def test_each_authored_constant_or_retired_member_is_refused_by_its_pointer(self):
+        for label, pointer, value, refused in self.refused_rows():
+            with self.subTest(label):
+                contract = schema_three_contract()
+                set_pointer(contract, pointer, value)
+                code, payload, _ = self.resolve(self.schema_three_root(contract))
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual([v["pointer"] for v in error["violations"]], [refused])
+                retired = refused in schema_three.RETIRED
+                self.assertEqual(
+                    error["repair_id"],
+                    f"contract.{self.section(refused)}."
+                    f"{'retired_member' if retired else 'platform_constant'}")
+                for violation in error["violations"]:
+                    self.assertTrue(violation["message"])
+
+    def test_a_missing_verification_command_is_refused_at_its_command(self):
+        def drop(*ids):
+            def mutate(contract):
+                for command_id in ids:
+                    del contract["bindings"]["commands"][command_id]
+            return mutate
+
+        def drop_namespace(contract):
+            del contract["bindings"]["commands"]
+
+        rows = [
+            ("lint", drop("lint"), ["/bindings/commands/lint"]),
+            ("lint and test", drop("lint", "test"),
+             ["/bindings/commands/lint", "/bindings/commands/test"]),
+            ("no commands member", drop_namespace,
+             ["/bindings/commands/lint", "/bindings/commands/test"]),
+        ]
+        for label, mutate, pointers in rows:
+            with self.subTest(label):
+                contract = schema_three_contract()
+                mutate(contract)
+                code, payload, _ = self.resolve(self.schema_three_root(contract))
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual([v["pointer"] for v in error["violations"]], pointers)
+                self.assertEqual(error["repair_id"], "contract.commands.member_missing")
+
+    def test_a_malformed_commands_namespace_keeps_its_shape_error(self):
+        contract = schema_three_contract()
+        contract["bindings"]["commands"] = []
+        code, payload, _ = self.resolve(self.schema_three_root(contract))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]], ["/bindings/commands"])
+        self.assertEqual(error["repair_id"], "contract.bindings.not_object")
+
+    def test_schema_two_still_reads_an_authored_platform_id_as_authored(self):
+        contract = source_contract()
+        contract["bindings"]["commands"]["codex-plan-review"] = {
+            "argv": ["true"], "cwd": ".", "env": []}
+        code, snap, err = self.resolve(self.owned(make_project_root(contract)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["bindings"]["commands"]["codex-plan-review"]["argv"], ["true"])
+
+
 class SnapshotRetirementTest(SchemaThreeCase):
     def test_a_schema_three_snapshot_is_resolved_schema_two_without_retired_members(self):
         root = self.schema_three_root(schema_three_contract())
