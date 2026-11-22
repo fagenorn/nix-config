@@ -1160,7 +1160,8 @@ class RecipeWiringTest(unittest.TestCase):
             body.append(line)
         self.assertEqual(
             body[0],
-            '  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \\')
+            '  AGENT_PLATFORM_TOOLS="$(nix build --no-link --print-out-paths \'{{justfile_directory()}}#agent-platform.tools\')/bin"'
+            ' PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \\')
         self.assertTrue(all(line.endswith(" \\") for line in body[:-1]), body)
         self.assertFalse(body[-1].endswith("\\"), body[-1])
         members = [line.strip().removesuffix(" \\") for line in body[1:]]
