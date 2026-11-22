@@ -46,3 +46,23 @@ Each test file is a fresh process, so a module that memoizes state at import —
 ### NODE10. Prefer the standard library and CLIs to new dependencies
 
 Node's stdlib plus a shell command covers most of what a small dependency would; every added package is supply chain, lockfile churn and a version to keep current. Reach for a dependency when it clearly earns its place. Runtime dependencies are declared in the manifest and pinned by the committed lockfile; system tools belong in the environment definition, never installed globally on the host.
+
+### NODE11. Every program parses
+
+A file the runtime loads parses as the runtime loads it; check it with `node --check`, because a syntax error fails the whole program at load, far from the edit that caused it.
+
+### NODE12. No unused binding
+
+A variable, parameter, label or private member nothing reads is dead code or a typo for a name that is read; delete it or use it.
+
+### NODE13. Every name is declared once and used as its kind
+
+No undeclared name, no redeclaration, no assignment to a constant, function, class, import, caught error or built-in global, and no duplicate key, member or parameter.
+
+### NODE14. No construct the recommended lint set calls a likely bug
+
+Unreachable code, constant conditions, duplicate branches, self-assignment, invalid regular expressions and the rest of ESLint's recommended set are fixed; a true exception is suppressed in place with its reason.
+
+### NODE15. A lint suppression names its rule and a reason
+
+A disable comment names the rules it silences and says why after ` -- `; a bare one, or a comment that configures the linter from inside the file, is itself a violation, because configuration lives outside the file.

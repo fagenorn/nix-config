@@ -25,6 +25,7 @@ PYTHONPATH is the recipe's, made absolute.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import shutil
@@ -238,19 +239,51 @@ class Rebinding:
         setattr(owner, name, value)
 
 
+def install_node_tools(home: Path, record: object) -> None:
+    """Write `record` as JSON to the pinned Node tools record under `home`."""
+    target = home / ".agents" / "share" / "node-tools.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(record), encoding="utf-8")
+
+
+@functools.cache
+def pinned_node_tools() -> dict:
+    """The record the platform package itself carries on this system.
+
+    The package is built from this repository, so the fixture tools are the
+    packaged ones (S05). It raises, never skips, when nix fails.
+    """
+    built = subprocess.run(
+        ["nix", "--extra-experimental-features", "nix-command flakes", "build",
+         "--no-link", "--print-out-paths", f"{REPO_ROOT}#agent-platform"],
+        capture_output=True, text=True, timeout=1200, check=True)
+    out = built.stdout.split()[0]
+    return json.loads(
+        (Path(out) / "share" / "agent-platform" / "node-tools.json").read_text(encoding="utf-8"))
+
+
 def platform_env(tmp: Path, manifest: object = COMMITTED, *,
                  declaration: object = COMMITTED,
-                 standards: object = COMMITTED) -> dict:
+                 standards: object = COMMITTED,
+                 node_tools: object = None) -> dict:
     """HERMETIC_ENV with `HOME` at a platform installation built under `tmp`.
 
     `manifest`, `declaration` and `standards` are `install_home`'s override
     hooks, unchanged: `COMMITTED` copies the repository's manifest (or host
     declaration), `None` installs none, any other value is written in its
-    place.
+    place. `node_tools`, when not None, is the Node tools record installed
+    beside them.
     """
     home = install_home(tmp / "home", manifest,
                         declaration=declaration, standards=standards)
+    if node_tools is not None:
+        install_node_tools(home, node_tools)
     return {**HERMETIC_ENV, "HOME": str(home)}
+
+
+def node_tools_env(tmp: Path) -> dict:
+    """`platform_env` with the pinned Node tools record installed."""
+    return platform_env(tmp, node_tools=pinned_node_tools())
 
 
 class PlatformHome:
