@@ -210,7 +210,7 @@ def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str
     return {tokens[i + 2]: tokens[i + 1] for i in range(0, len(tokens) - 2, 3)}
 
 
-def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
+def violations(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     found = enforcer.find(snapshot)
     for violation in found:
         if violation.rule != enforcer.rule:
@@ -224,8 +224,8 @@ def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
     """The rules whose branch violations rose over the base; pure."""
     rises = []
     for enforcer in enforcers:
-        before = _found(enforcer, base)
-        after = _found(enforcer, branch)
+        before = violations(enforcer, base)
+        after = violations(enforcer, branch)
         if enforcer.per_file:
             base_lines = {v.path: v.line for v in before}
             new = [v for v in after
