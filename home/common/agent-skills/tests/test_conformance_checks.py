@@ -524,6 +524,57 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
                               len(facts["violations"])], [0, 9, 8])
             self.assert_validates(report)
 
+    def red(self, root: Path) -> dict:
+        code, report, by_id = self.ci(root)
+        self.assertEqual(code, 1)
+        self.assert_validates(report)
+        return by_id[self.CHECK_ID]
+
+    def test_a_committed_todo_comment_turns_ci_red_naming_b20(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = git(root, "rev-parse", "refs/remotes/origin/main").strip()
+            write_file(root, "src/todo.py", "x = 1\n# TODO: finish\n")
+            commit_all(root, "todo")
+            self.assertEqual(
+                self.summary(self.red(root)),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B20", "base_count": 0,
+                  "branch_count": 1, "violations": ["B20 src/todo.py:2"],
+                  "rules": ["B20"]}])
+
+    def test_a_long_block_holding_a_fixme_turns_ci_red_naming_b19_and_b20(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = git(root, "rev-parse", "refs/remotes/origin/main").strip()
+            write_file(root, "src/long.py",
+                       "x = 1\n# a\n# FIXME: b\n# c\n# d\n# e\n# f\n")
+            commit_all(root, "long")
+            self.assertEqual(
+                self.summary(self.red(root)),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B19", "base_count": 0,
+                  "branch_count": 1, "violations": ["B19 src/long.py:2"],
+                  "rules": ["B19", "B20"]}])
+
+    def test_a_link_to_the_contracts_own_tracker_turns_ci_red_naming_b18(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            other = authored["bindings"]["tracker"]["repo_slug"]
+            authored["bindings"]["tracker"]["repo_slug"] = "fixture-owner/fixture-repo"
+            targets = authored["release"]["profiles"]["github-release"]["bindings"]["targets"]
+            targets["repository"]["repository"] = "fixture-owner/fixture-repo"
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            write_file(root, "src/ref.py",
+                       "x = 1\n# https://github.com/fixture-owner/fixture-repo/issues/7\n"
+                       + f"# https://github.com/{other}/issues/7\n")
+            commit_all(root, "ref")
+            facts = self.red(root)["facts"]
+            self.assertEqual(facts["rule"], "B18")
+            self.assertEqual(facts["violations"], ["B18 src/ref.py:2"])
+
 
 class LintChecksTest(ReportAssertions, unittest.TestCase):
     """The context-map lint and the standards lint, each run in process by the
