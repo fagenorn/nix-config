@@ -136,6 +136,15 @@ class ActionTest(unittest.TestCase):
             RunCommand(step="publish", visit=1, command="diff-scope", subcommand=None, args=(("tally.verdict", "accept"),)),
         )
 
+    def test_a_decide_step_publishes_nothing_but_its_verdict(self) -> None:
+        doc = toy()
+        step(doc, "tally")["on"]["accept"] = "publish"
+        doc["steps"].append(
+            {"id": "publish", "stage": "final review", "kind": "command", "command": "diff-scope",
+             "in": ["tally.score"], "on": {"ok": "done", "failed": "needs-owner"}}
+        )
+        self.assertEqual([(item.step, item.defect) for item in refusals(doc)], [("publish", "unknown_member")])
+
     def test_an_outcome_is_followed_to_a_stop(self) -> None:
         result = replay(toy(), INPUTS, pair("scope", "failed"))
         self.assertEqual(result.action, STOP)
