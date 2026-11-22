@@ -28,6 +28,7 @@ from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
 from agent_tools.project_contract.conformance_registry import (
     CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER, MAX_FACT_LIST,
+    MAX_FACT_STRING,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
     PROMOTED_DUPLICATE_DRIFTED, PROMOTED_DUPLICATE_FINDINGS,
     PROMOTED_DUPLICATE_PRESENT, PROMOTION_CANDIDATE_KIND,
@@ -753,8 +754,9 @@ def check_standards_lint(context: "Context") -> "Outcome":
     against the installed platform standards.
 
     The platform directory is the installation's, so its absence is its own
-    finding; an unreadable shard names the authored standards paths, never the
-    shard or the text that failed to decode.
+    finding; an unreadable shard, or a repository git cannot list, names the
+    authored standards paths, never the shard or the text that failed to decode.
+    A suppression naming a rule id in no layer is a finding of the lint.
     """
     platform = agent_platform.standards_dir()
     if not (platform / PLATFORM_STANDARDS_ANCHOR).is_file():
@@ -762,7 +764,7 @@ def check_standards_lint(context: "Context") -> "Outcome":
                        "platform.standards.install", {})
     try:
         problems = standards_lint.lint(context.root, platform)
-    except (UnicodeDecodeError, OSError):
+    except (ValueError, OSError):
         authored = context.contract["bindings"]["paths"]["standards"]
         return Outcome("failed", "standards_unreadable", "docs.standards.repair",
                        {"paths": bound_facts(authored), "count": 1})
@@ -783,7 +785,8 @@ def check_never_rise(context: "Context") -> "Outcome":
     history and never the working tree; the authored contract supplies the
     branch. No readable merge base is a failed check, never a pass. A reasoned
     suppression the branch adds is listed in the facts, passed or failed, and
-    never fails the check (ADR-project-contract-018).
+    never fails the check (ADR-project-contract-018). Each listed line holds its
+    rule, path, line and reason within the fact string bound (`Suppression.text`).
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
     verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
@@ -792,7 +795,7 @@ def check_never_rise(context: "Context") -> "Outcome":
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})
     listed = verdict.suppressions
-    extra = ({"suppressions": bound_facts([s.text() for s in listed]),
+    extra = ({"suppressions": bound_facts([s.text(MAX_FACT_STRING) for s in listed]),
               "suppression_count": len(listed)} if listed else {})
     if not verdict.rises:
         return Outcome("passed", facts={"merge_base": verdict.merge_base, **extra})

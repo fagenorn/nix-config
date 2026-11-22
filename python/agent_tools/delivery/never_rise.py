@@ -38,13 +38,19 @@ findings, is one violation of the rule at the marker's own line. A marker naming
 another rule, or none and off a finding, counts nothing. The count of a rule is the sum
 of both lists, so deleting a reason, or adding a bare marker, rises. A per-file rule
 compares the findings left as before and the marker violations as a count, so a bare
-marker on a held finding rises though the finding itself held.
+marker on a held finding rises though the finding itself held. A bare marker naming a rule
+no enforcer holds is no finding's marker but still a violation of that rule: `compare` counts
+each such rule as a count rule of its own, so adding one rises.
 
 `Verdict.suppressions` lists each reasoned suppression the branch adds, by
 `added_suppressions`: those of the branch not matched, as a multiset of `(rule, path,
 reason)` with the path followed through git renames, by a reasoned suppression of the
-base. It lists and never fails: a listed suppression raises no count. `Suppression.text()`
-is `<rule> <path>:<line> <reason>` on one line, path and reason escaped as below.
+base. Of equal ones, the base's is matched to the branch's on the same line, then to the
+nearest, so the one listed is the one the branch added. It lists and never fails: a listed
+suppression raises no count. `Suppression.text()` is `<rule> <path>:<line> <reason>` on one
+line, path and reason escaped as below. `text(limit)` holds the line to `limit` characters
+by bounding each field alone: the rule to `RULE_FIELD`, the path to `PATH_FIELD` keeping its
+end, the reason to what remains, so no field costs another its place.
 
 Output line, one per violation: `Violation.text()` is the rule id, one space,
 the repository-relative path escaped, a colon and the 1-based line. The escape
@@ -84,6 +90,10 @@ SELECTION_VARIABLES = (
 TEXT_ESCAPES = {"\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 UNICODE_LINE_SEPARATORS = ("\x85", " ", " ")
 HEX = frozenset("0123456789abcdef")
+RULE_FIELD = 16
+PATH_FIELD = 80
+LINE_FIELD = 12
+ELLIPSIS = "..."
 
 
 def escape_path(path: str) -> str:
@@ -121,8 +131,17 @@ class Suppression(NamedTuple):
     def reasoned(self) -> bool:
         return rule_ids.is_reasoned(self.rule, self.reason)
 
-    def text(self) -> str:
-        return f"{self.rule} {escape_path(self.path)}:{self.line} {escape_path(self.reason)}"
+    def text(self, limit: int | None = None) -> str:
+        rule, path, reason = str(self.rule), escape_path(self.path), escape_path(self.reason)
+        if limit is None:
+            return f"{rule} {path}:{self.line} {reason}"
+        rule = rule[:RULE_FIELD]
+        if len(path) > PATH_FIELD:
+            path = ELLIPSIS + path[len(path) - PATH_FIELD + len(ELLIPSIS):]
+        room = max(limit - len(rule) - len(path) - LINE_FIELD - 3, len(ELLIPSIS))
+        if len(reason) > room:
+            reason = reason[:room - len(ELLIPSIS)] + ELLIPSIS
+        return f"{rule} {path}:{self.line} {reason}"
 
 
 class Snapshot(NamedTuple):
@@ -237,7 +256,8 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
             if rule_ids.SUPPRESS.encode() in content:
                 found.extend(
                     Suppression(m.rule, path, m.line, m.reason)
-                    for m in rule_ids.markers(content.decode("utf-8", errors="replace")))
+                    for m in rule_ids.markers(content.decode("utf-8", errors="replace"),
+                                              rule_ids.is_python(path)))
     found.sort(key=lambda s: (s.path, s.line))
     return Snapshot(revision, counts, tuple(found))
 
@@ -287,6 +307,12 @@ def _added(after: Sequence[Violation], before: Sequence[Violation]) -> list[Viol
     return new
 
 
+def _bare(snapshot: Snapshot, rule: str) -> list[Violation]:
+    """The bare markers naming `rule`, each a violation of it at its own line."""
+    return [Violation(rule, s.path, s.line) for s in snapshot.suppressions
+            if s.rule == rule and not s.reasoned]
+
+
 def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
             enforcers: Sequence[Enforcer]) -> tuple[Rise, ...]:
     """The rules whose branch violations rose over the base; pure."""
@@ -307,24 +333,52 @@ def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
             new = _added(kept_after + marked_after, kept_before + marked_before)
         if new:
             rises.append(Rise(enforcer.rule, before, after, tuple(new)))
+    held = {enforcer.rule for enforcer in enforcers}
+    for rule in sorted({s.rule for snapshot in (base, branch) for s in snapshot.suppressions
+                        if s.rule is not None and not s.reasoned} - held):
+        before = _bare(base, rule)
+        after = _bare(branch, rule)
+        if len(after) > len(before):
+            rises.append(Rise(rule, len(before), len(after), tuple(_added(after, before))))
     return tuple(rises)
 
 
 def added_suppressions(base: Snapshot, branch: Snapshot,
                        renamed: Mapping[str, str]) -> tuple[Suppression, ...]:
-    """The reasoned suppressions the branch adds, those the base does not hold; pure."""
-    held = Counter((s.rule, s.path, s.reason) for s in base.suppressions if s.reasoned)
-    added = []
+    """The reasoned suppressions the branch adds, those the base does not hold; pure.
+
+    A branch suppression equal to one of the base (rule, path through renames, reason) is
+    matched to the base's on the same line first, then to the nearest line left, so a
+    suppression added above an old one is the one listed.
+    """
+    held: dict[tuple, list[int]] = {}
+    for suppression in base.suppressions:
+        if suppression.reasoned:
+            key = (suppression.rule, suppression.path, suppression.reason)
+            held.setdefault(key, []).append(suppression.line)
+    groups: dict[tuple, list[Suppression]] = {}
     for suppression in branch.suppressions:
-        if not suppression.reasoned:
-            continue
-        key = (suppression.rule, renamed.get(suppression.path, suppression.path),
-               suppression.reason)
-        if held[key] > 0:
-            held[key] -= 1
-        else:
-            added.append(suppression)
-    return tuple(added)
+        if suppression.reasoned:
+            key = (suppression.rule, renamed.get(suppression.path, suppression.path),
+                   suppression.reason)
+            groups.setdefault(key, []).append(suppression)
+    added = []
+    for key, group in groups.items():
+        lines = Counter(held.get(key, ()))
+        rest = []
+        for suppression in group:
+            if lines[suppression.line] > 0:
+                lines[suppression.line] -= 1
+            else:
+                rest.append(suppression)
+        left = sorted(line for line, count in lines.items() for _ in range(count))
+        for line in left:
+            if not rest:
+                break
+            nearest = min(range(len(rest)), key=lambda k: abs(rest[k].line - line))
+            del rest[nearest]
+        added += rest
+    return tuple(sorted(added, key=lambda s: (s.path, s.line)))
 
 
 def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],

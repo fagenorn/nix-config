@@ -551,6 +551,36 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
                     "rules": ["B17"]}])
             self.assert_validates(report)
 
+    def test_a_new_bare_suppression_of_a_rule_with_no_enforcer_turns_ci_red(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = git(root, "rev-parse", "HEAD").strip()
+            write_file(root, "src/new.py", "x = 1  # " + suppression("B1") + "\n")
+            commit_all(root, "bare")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(self.summary(by_id[self.CHECK_ID]), [
+                "failed", "violation_count_rose", "violations.never_rise.reduce", {
+                    "merge_base": base, "rule": "B1", "base_count": 0, "branch_count": 1,
+                    "violations": ["B1 src/new.py:1"], "rules": ["B1"]}])
+            self.assert_validates(report)
+
+    def test_a_long_path_leaves_the_line_and_the_reason_in_the_listing(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            directory = "/".join(["d" * 40] * 5)
+            write_file(root, f"src/{directory}/new.py", "x = 1  # "
+                       + suppression("B17", "generated fixture table") + "\n")
+            commit_all(root, "long path")
+            code, report, by_id = self.ci(root)
+            facts = by_id[self.CHECK_ID]["facts"]
+            self.assertEqual([code, facts["suppression_count"]], [0, 1])
+            [listed] = facts["suppressions"]
+            self.assertLessEqual(len(listed), 200)
+            self.assertTrue(listed.startswith("B17 ") and listed.endswith(
+                "/new.py:1 generated fixture table"), listed)
+            self.assert_validates(report)
+
     def test_the_new_suppressions_are_bounded(self):
         with fixture() as tmp:
             root = make_root(tmp)
@@ -644,6 +674,19 @@ class LintChecksTest(ReportAssertions, unittest.TestCase):
                 check["facts"],
                 conformance_lint_facts(standards_lint.lint(root, STANDARDS)))
             self.assertIn("docs/standards/README.md", check["facts"]["paths"])
+            self.assert_validates(report)
+
+    def test_a_suppression_of_an_unknown_rule_turns_ci_red(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            write_file(root, "src/marked.py", "x = 1  # "
+                       + suppression("Z9", "no such rule") + "\n")
+            commit_all(root, "marked")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 1)
+            self.assertEqual(self.summary(by_id[self.STANDARDS_ID]), [
+                "failed", "standards_lint_failed", "docs.standards.repair",
+                {"paths": ["src/marked.py:1"], "count": 1}])
             self.assert_validates(report)
 
     def test_a_clean_tree_passes_both_lints_and_ci_exits_zero(self):

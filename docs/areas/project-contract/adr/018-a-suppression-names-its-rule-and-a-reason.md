@@ -15,13 +15,15 @@ A lint rule held by the never-rise check (ADR-project-contract-017) has no excep
 
 **D3. Counting.** A reasoned marker drops the findings of the rule it names on its line. A marker that is not reasoned adds one violation `(rule, path, marker line)`: of the rule it names, wherever it is, or, with no id, of each enforcer whose finding is on its line. An id-less marker on a line with no finding counts nothing.
 
+**D3a. A rule without an enforcer.** A bare marker naming a rule no enforcer holds is still a violation of that rule, counted as a rule of its own, so adding one rises.
+
 **D4. Per-file rules.** The findings of a per-file rule are compared per file, as ADR-project-contract-017 D3 says; its marker violations are compared as a count, so a bare marker on a held size violation still rises. D3 and D4 amend the count of ADR-project-contract-017 D3.
 
-**D5. New suppressions.** The listed ones are the branch's reasoned markers minus the base's, a multiset keyed by rule, path matched through git renames, and reason, so a moved or unchanged suppression is not new. A bare marker is never listed, because it is a violation.
+**D5. New suppressions.** The listed ones are the branch's reasoned markers minus the base's, a multiset keyed by rule, path matched through git renames, and reason, so a moved or unchanged suppression is not new. A bare marker is never listed, because it is a violation. Of equal suppressions the base's is matched to the branch's on the same line, then to the nearest, so the one listed is the one added.
 
-**D6. The lint's files.** The cited-id check reads every tracked file of the working tree (`git ls-files -z`) that is a regular file with no NUL in its first 8,000 bytes. A root with no `.git` entry has no tracked file, and a failed listing is a usage error (exit 2).
+**D6. The lint's files.** The cited-id check reads every tracked file of the working tree (`git ls-files -z --deduplicate`, so a conflicted merge lists a path once) that is a regular file with no NUL in its first 8,000 bytes and no symlink in its path, so a tracked directory replaced by a link is not followed out of the repository. A marker in a Python file counts only inside a comment, so a string literal holding the text suppresses nothing. The check runs in `standards_lint.lint`, so the conformance check and the command both fail an unknown id. A root with no `.git` entry has no tracked file, and a failed listing is a usage error (exit 2).
 
-**D7. The index line.** The rule index prints `reasoned suppressions: <n>` after a rule's enforcer lines only when `n` is above 0, crediting the layer the id resolves to.
+**D7. The index line.** The rule index prints `reasoned suppressions: <n>` after each rule's enforcer lines, with `0` for a rule that has none, crediting the layer the id resolves to, so the total of every rule is read off the index.
 
 **D8. The report.** The never-rise check adds `suppressions` (sorted, at most 8, each with rule, path, line and reason) and `suppression_count` (the true total) to its facts, passed or failed, only when the branch added a suppression. A listed suppression never fails the check.
 
@@ -31,7 +33,7 @@ A lint rule held by the never-rise check (ADR-project-contract-017) has no excep
 
 - A marker naming an id no applicable layer defines fails the standards lint, so a deleted rule cannot keep a suppression.
 - An existing reasoned suppression keeps covering its line, so a reasoned size suppression on a file's last line lets that file grow. Only a new one is listed for the reviewer.
-- The report lists at most 8 suppressions and states the true count.
+- The report lists at most 8 suppressions and states the true count; each is bounded field by field (rule 16, path 80 keeping its end, the reason the rest of the 200 characters), so a long path never costs the line or the reason.
 - Off-the-shelf tools keep their native suppression syntax.
 - Rejected: one marker per stack syntax, because the lints are the platform's own and one form is read by all of them.
 - Rejected: failing a run on a new reasoned suppression, because the decision of #1414 allows a reasoned one and leaves the judgement to the reviewer.

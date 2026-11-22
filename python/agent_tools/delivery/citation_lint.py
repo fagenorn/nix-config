@@ -12,11 +12,15 @@ as repository-relative paths under `python/`. A file outside that set is never r
 repository whose justfile has no such recipe registers no enforcers, so it has no citation problem.
 
 A suppression marker (`suppress-standard:<id> <reason>`, `agent_tools.delivery.rule_ids.markers`)
-is read in every tracked file of the repository, not only in an enforcer: the files `git ls-files`
-lists, less a symlink, a file that is not a regular file and a binary file (a NUL in its first
-`never_rise.BINARY_PROBE_BYTES` bytes), each decoded as UTF-8 with replacement. A root with no `.git`
-entry reads none; a root `git` cannot list raises `ValueError`. A marker that names no id is no
-problem here.
+is read in every tracked file of the repository, not only in an enforcer: the files `git ls-files
+--deduplicate` lists (a file of a conflicted merge once, not once per index stage), less a path
+that is or runs through a symlink (a tracked directory replaced by a link is not followed out of the
+repository), a file that is not a regular file and a binary file (a NUL in its first
+`never_rise.BINARY_PROBE_BYTES` bytes), each decoded as UTF-8 with replacement. A Python file is read
+by `rule_ids.markers(text, python=True)`, so a marker inside a string literal is none. A root with no
+`.git` entry reads none; a root `git` cannot list raises `ValueError`. A marker that names no id is no
+problem here. `suppression_problems` is that check alone, which `standards_lint.lint` carries so that
+every caller of the lint, the conformance check included, fails an unknown id.
 
 A rule is a `###` rule-id heading outside a fence and an HTML comment or block
 (`agent_tools.delivery.rule_ids.scan`, the reading the heading test uses), so a rule commented
@@ -34,15 +38,16 @@ a platform id never against the project.
 - `<path>:<line>: cites <id>, which is in no applicable layer`
 - `<path>:<line>: suppresses <id>, which is in no applicable layer` (a marker, reasoned or bare,
   naming an id that resolves against no rule of its layer, as a citation resolves), after every
-  enforcer problem, in file then line order
+  enforcer problem, in file then line order; `check` returns them with the enforcer problems and
+  `suppression_problems` alone
 
 The index is, for each rule in order (the bar, then the stacks by filename, then the project
 shards by filename, each in heading order):
 
 - `<id>. <title>`, then one line `  <path>` per enforcer citing that id with a well-formed
   citation, sorted by path, each path once;
-- then, when `n > 0`, one line `  reasoned suppressions: <n>`, the reasoned markers naming that
-  rule in the layer it resolves to (a bare marker is counted by no one here);
+- then one line `  reasoned suppressions: <n>`, the reasoned markers naming that rule in the layer
+  it resolves to, `0` when none (a bare marker is counted by no one here);
 - then `judged rules: <n>`, the rules no enforcer cites;
 - then `enforcers citing nothing: <m>`, the existing registered enforcers whose text holds
   neither a citation (well-formed or not) nor a decision-record id (`ADR-<area>-NNN`); a missing
@@ -61,7 +66,8 @@ from typing import NamedTuple
 from agent_tools.delivery.context_map_lint import CITATION_RE
 from agent_tools.delivery.never_rise import BINARY_PROBE_BYTES, SELECTION_VARIABLES
 from agent_tools.delivery.rule_ids import (
-    CITATION, CITE, PROJECT_PREFIX, RULE_ID_HEADING, Marker, citations, markers, prefix_of, scan)
+    CITATION, CITE, PROJECT_PREFIX, RULE_ID_HEADING, Marker, citations, is_python, markers, prefix_of,
+    scan)
 from agent_tools.delivery.suite_runner import SUITE_RECIPE, suite_members
 from agent_tools.delivery.verification_command import members
 
@@ -118,6 +124,16 @@ def _citations_of(root: Path, path: str):
     return citations((root / path).read_text("utf-8"))
 
 
+def _regular_file(root: Path, name: str) -> Path | None:
+    """`root / name` when it is a regular file and no part of `name` is a symlink, else None."""
+    path = root
+    for part in Path(name).parts:
+        path = path / part
+        if path.is_symlink():
+            return None
+    return path if path.is_file() else None
+
+
 def tracked_markers(root: Path) -> list[tuple[str, Marker]]:
     """Each suppression marker of each tracked text file of `root`, as (path, marker).
 
@@ -127,7 +143,7 @@ def tracked_markers(root: Path) -> list[tuple[str, Marker]]:
         return []
     env = {k: v for k, v in os.environ.items() if k not in SELECTION_VARIABLES}
     try:
-        listing = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+        listing = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--deduplicate"],
                                  capture_output=True, env=env)
     except OSError:
         listing = None
@@ -138,14 +154,14 @@ def tracked_markers(root: Path) -> list[tuple[str, Marker]]:
         if not raw:
             continue
         name = os.fsdecode(raw)
-        path = root / name
-        if path.is_symlink() or not path.is_file():
+        path = _regular_file(root, name)
+        if path is None:
             continue
         content = path.read_bytes()
         if b"\0" in content[:BINARY_PROBE_BYTES]:
             continue
         text = content.decode("utf-8", errors="replace")
-        found += [(name, marker) for marker in markers(text)]
+        found += [(name, marker) for marker in markers(text, is_python(name))]
     return found
 
 
@@ -153,8 +169,8 @@ def problems(root: Path, paths: list[str], platform: list[Rule], project: list[R
              marks: list[tuple[str, Marker]]) -> list[str]:
     """One line per missing enforcer, malformed citation, citation of an id in no applicable layer,
     then suppression of an id in no applicable layer."""
-    layers = {True: {rule.id for rule in project}, False: {rule.id for rule in platform}}
     found: list[str] = []
+    layers = _layers(platform, project)
     for path in paths:
         if not (root / path).is_file():
             found.append(f"{path}: registered enforcer is missing")
@@ -165,16 +181,30 @@ def problems(root: Path, paths: list[str], platform: list[Rule], project: list[R
             elif citation.token not in layers[prefix_of(citation.token) == PROJECT_PREFIX]:
                 found.append(f"{path}:{citation.line}: cites {citation.token}, "
                              "which is in no applicable layer")
-    for path, marker in marks:
-        if marker.rule is not None and marker.rule not in layers[prefix_of(marker.rule) == PROJECT_PREFIX]:
-            found.append(f"{path}:{marker.line}: suppresses {marker.rule}, "
-                         "which is in no applicable layer")
-    return found
+    return found + _unknown_suppressions(layers, marks)
+
+
+def _layers(platform: list[Rule], project: list[Rule]) -> dict[bool, set[str]]:
+    return {True: {rule.id for rule in project}, False: {rule.id for rule in platform}}
+
+
+def _unknown_suppressions(layers: dict[bool, set[str]], marks: list[tuple[str, Marker]]) -> list[str]:
+    return [f"{path}:{marker.line}: suppresses {marker.rule}, which is in no applicable layer"
+            for path, marker in marks
+            if marker.rule is not None and marker.rule not in layers[prefix_of(marker.rule) == PROJECT_PREFIX]]
+
+
+def suppression_problems(root: Path, platform_directory: Path) -> list[str]:
+    """One line per suppression marker of a tracked file naming an id in no applicable layer."""
+    project_directory = root / PROJECT_STANDARDS
+    project = project_rules(project_directory) if project_directory.is_dir() else []
+    return _unknown_suppressions(_layers(platform_rules(platform_directory), project),
+                                 tracked_markers(root))
 
 
 def rule_index(root: Path, paths: list[str], platform: list[Rule], project: list[Rule],
                marks: list[tuple[str, Marker]]) -> list[str]:
-    """The index lines: each rule with the enforcers citing it and its reasoned suppressions, then the two counts.
+    """The index lines: each rule with the enforcers citing it and its count of reasoned suppressions, then the two counts.
 
     A citation or a reasoned suppression credits a rule of the layer it resolves to, as `problems`
     resolves it.
@@ -203,8 +233,7 @@ def rule_index(root: Path, paths: list[str], platform: list[Rule], project: list
             lines.append(f"{rule.id}. {rule.title}")
             cited = sorted(citing.get((layer, rule.id), ()))
             lines += [f"  {path}" for path in cited]
-            if reasoned.get((layer, rule.id)):
-                lines.append(f"  reasoned suppressions: {reasoned[(layer, rule.id)]}")
+            lines.append(f"  reasoned suppressions: {reasoned.get((layer, rule.id), 0)}")
             judged += not cited
     return lines + [f"judged rules: {judged}", f"enforcers citing nothing: {nothing}"]
 

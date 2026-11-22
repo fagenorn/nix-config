@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import context_map_lint, never_rise, rule_ids
+from agent_tools.delivery import context_map_lint, never_rise, rule_ids, standards_lint
 from agent_tools.delivery.never_rise import (
     Enforcer, Rise, Suppression, Violation, counted)
 
@@ -87,6 +87,8 @@ def snapshot_of(root):
 
 
 v = Violation("FX1", "a.bad", 1)
+PY = Enforcer("FX1", lambda snap: [
+    Violation("FX1", p, 1) for p in sorted(snap.line_counts) if p.endswith(".py")])
 
 
 class SuppressionCountTest(unittest.TestCase):
@@ -141,6 +143,25 @@ class SuppressionCountTest(unittest.TestCase):
         self.assertEqual(snapshot.suppressions, ())
         self.assertEqual(result, ([v], []))
 
+    def test_a_marker_in_a_python_string_literal_is_no_marker(self):
+        marker = suppress("FX1", "why")
+        py_v = Violation("FX1", "a.py", 1)
+        with self.subTest("string"):
+            result, snapshot = self.counted_in({"a.py": 's = "# ' + marker + '"\n'}, PY)
+            self.assertEqual((result, snapshot.suppressions), (([py_v], []), ()))
+        with self.subTest("docstring"):
+            result, snapshot = self.counted_in(
+                {"a.py": 's = """\n# ' + marker + '\n"""\n'}, PY)
+            self.assertEqual(snapshot.suppressions, ())
+        with self.subTest("comment"):
+            result, snapshot = self.counted_in({"a.py": "x = 1  # " + marker + "\n"}, PY)
+            self.assertEqual(result, ([], []))
+            self.assertEqual(snapshot.suppressions, (Suppression("FX1", "a.py", 1, "why"),))
+        with self.subTest("comment after a string"):
+            result, snapshot = self.counted_in(
+                {"a.py": 's = "x"  # ' + marker + "\n"}, PY)
+            self.assertEqual(result, ([], []))
+
     def test_a_marker_in_a_binary_file_is_not_read(self):
         _, snapshot = self.counted_in(
             {"a.bin": b"\0" + ("# " + suppress("FX1") + "\n").encode()})
@@ -150,6 +171,16 @@ class SuppressionCountTest(unittest.TestCase):
         text = Suppression("FX1", "a\nb.py", 3, "why\tnot").text()
         self.assertEqual(text, "FX1 a\\nb.py:3 why\\tnot")
         self.assertEqual(len(text.splitlines()), 1)
+
+    def test_a_bounded_listing_keeps_every_field(self):
+        path = "/".join(["d" * 40] * 6) + "/new.py"
+        text = Suppression("FX1", path, 1501, "r" * 300).text(200)
+        self.assertLessEqual(len(text), 200)
+        self.assertTrue(text.startswith("FX1 ..."), text)
+        self.assertIn("/new.py:1501 rrrr", text)
+        self.assertTrue(text.endswith("..."), text)
+        self.assertEqual(
+            Suppression("FX1", "a.py", 3, "why").text(200), "FX1 a.py:3 why")
 
 
 class NeverRiseSuppressionTest(unittest.TestCase):
@@ -192,6 +223,30 @@ class NeverRiseSuppressionTest(unittest.TestCase):
             {"b.bad": "x  # " + suppress("FX1", "generated fixture") + "\n"},
             {"b.bad": "x  # " + suppress("FX1") + "\n"})
         self.assertEqual(verdict.rises, (Rise("FX1", 0, 2, (w, w)),))
+
+    def test_a_bare_marker_of_a_rule_with_no_enforcer_rises(self):
+        verdict = self.world({"a.bad": "x\n"}, {"c.txt": "# " + suppress("B1") + "\n"})
+        self.assertEqual(
+            verdict.rises, (Rise("B1", 0, 1, (Violation("B1", "c.txt", 1),)),))
+
+    def test_an_existing_bare_marker_of_a_rule_with_no_enforcer_holds(self):
+        verdict = self.world(
+            {"c.txt": "# " + suppress("B1") + "\n"}, {"d.txt": "y\n"})
+        self.assertEqual(verdict.rises, ())
+
+    def test_an_added_suppression_above_an_equal_one_is_the_one_listed(self):
+        reasoned = "x  # " + suppress("FX1", "generated fixture") + "\n"
+        old = lines(39) + reasoned
+        verdict = self.world({"b.txt": old}, {"b.txt": reasoned + old})
+        self.assertEqual(
+            verdict.suppressions, (Suppression("FX1", "b.txt", 1, "generated fixture"),))
+
+    def test_an_old_suppression_shifted_by_an_insert_is_not_the_one_listed(self):
+        reasoned = "x  # " + suppress("FX1", "generated fixture") + "\n"
+        old = lines(39) + reasoned
+        verdict = self.world({"b.txt": old}, {"b.txt": reasoned + "y\n" + old})
+        self.assertEqual(
+            verdict.suppressions, (Suppression("FX1", "b.txt", 1, "generated fixture"),))
 
     def test_an_existing_bare_marker_holds(self):
         verdict = self.world(
@@ -343,6 +398,16 @@ class SuppressionLintTest(unittest.TestCase):
             "B1. One", "  reasoned suppressions: 1", "B2. Two", "  reasoned suppressions: 1",
             "judged rules: 2", "enforcers citing nothing: 0"])
 
+    def test_the_index_prints_zero_and_totals_several_under_one_rule(self):
+        root, platform = self.lint_root({
+            "src/a.py": ("x = 1  # " + suppress("B1", "first") + "\ny = 2  # "
+                         + suppress("B1", "second") + "\n")})
+        done = self.run_lint(root, platform, "--index")
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertEqual(done.stdout.splitlines(), [
+            "B1. One", "  reasoned suppressions: 2", "B2. Two", "  reasoned suppressions: 0",
+            "judged rules: 2", "enforcers citing nothing: 0"])
+
     def test_a_project_suppression_is_credited_to_the_project_rule(self):
         root, platform = self.lint_root(
             {"src/a.py": "# " + suppress("P1", "r") + "\n"},
@@ -350,8 +415,50 @@ class SuppressionLintTest(unittest.TestCase):
         done = self.run_lint(root, platform, "--index")
         self.assertEqual(done.returncode, 0, done.stdout)
         self.assertEqual(done.stdout.splitlines(), [
-            "B1. One", "B2. Two", "P1. One", "  reasoned suppressions: 1",
-            "judged rules: 3", "enforcers citing nothing: 0"])
+            "B1. One", "  reasoned suppressions: 0", "B2. Two", "  reasoned suppressions: 0",
+            "P1. One", "  reasoned suppressions: 1", "judged rules: 3",
+            "enforcers citing nothing: 0"])
+
+    def test_a_conflicted_file_is_counted_once(self):
+        root, platform = self.lint_root({}, init=False)
+        git(root, "init", "-q", "-b", "main")
+        marker = "# " + suppress("B1", "kept") + "\n"
+        write(root, "src/a.py", marker + "x = 0\n")
+        commit_all(root, "base")
+        git(root, "checkout", "-q", "-b", "side")
+        write(root, "src/a.py", marker + "x = 1\n")
+        commit_all(root, "side")
+        git(root, "checkout", "-q", "main")
+        write(root, "src/a.py", marker + "x = 2\n")
+        commit_all(root, "main")
+        merge = subprocess.run(
+            ["git", "-C", str(root), "merge", "side"], capture_output=True, text=True,
+            env=fixture_env())
+        self.assertEqual(merge.returncode, 1, merge.stdout + merge.stderr)
+        self.assertEqual(len(git(root, "ls-files", "-u").splitlines()), 3)
+        done = self.run_lint(root, platform, "--index")
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertEqual(done.stdout.splitlines()[:2], ["B1. One", "  reasoned suppressions: 1"])
+
+    def test_a_tracked_directory_replaced_by_a_symlink_is_not_followed(self):
+        root, platform = self.lint_root({"d/a.py": "x = 1\n"})
+        outside = root.parent / "outside"
+        write(outside, "a.py", "# " + suppress("Z9", "r") + "\n")
+        shutil.rmtree(root / "d")
+        os.symlink(outside, root / "d")
+        self.assertEqual(self.outcome(self.run_lint(root, platform)), (0, ""))
+
+    def test_a_marker_in_a_python_string_literal_is_not_read(self):
+        root, platform = self.lint_root(
+            {"src/a.py": 's = "# ' + suppress("Z9", "r") + '"\n'})
+        self.assertEqual(self.outcome(self.run_lint(root, platform)), (0, ""))
+
+    def test_the_lint_function_fails_an_unknown_suppressed_id(self):
+        root, platform = self.lint_root(
+            {"src/a.py": "x = 1  # " + suppress("Z9", "no such rule") + "\n"})
+        self.assertEqual(
+            standards_lint.lint(root, platform),
+            ["src/a.py:1: suppresses Z9, which is in no applicable layer"])
 
 
 class SuppressionDocsTest(unittest.TestCase):

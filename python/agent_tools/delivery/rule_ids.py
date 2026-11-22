@@ -24,7 +24,10 @@ counted) as a `Marker(line, rule, reason)`. `rule` is the token when it is a wel
 id, else `None` (a token that is no id is discarded, never part of the reason). The
 reason is the text after the token, stripped, less one trailing `-->` or `*/` comment
 closer. A marker is reasoned (`is_reasoned`) when it names a rule and its reason holds
-a letter or a digit; any other marker is bare.
+a letter or a digit; any other marker is bare. In a Python file (`is_python`, `markers(text,
+python=True)`) a marker is read only inside a comment token, so text in a string literal,
+a docstring included, is no marker; a file the Python tokenizer rejects is read as far as
+it tokenized. Any other file is read by line.
 
 `scan` reads a Markdown file the way CommonMark renders it, skipping fences, indented
 code and HTML blocks. `rule_headings` and `layer_problems` report each bad rule heading
@@ -32,7 +35,9 @@ with one of three reasons (two ids, no well-formed id, a level other than
 `###`). `prefix_table` reads a README's `## Rule ids` table through `scan`.
 """
 
+import io
 import re
+import tokenize
 from typing import NamedTuple
 
 from agent_tools.delivery.context_map_lint import CODE_RE, section, table_rows
@@ -79,11 +84,37 @@ class Marker(NamedTuple):
         return is_reasoned(self.rule, self.reason)
 
 
-def markers(text: str) -> list[Marker]:
-    """The first suppression marker of each line of `text`, in order, with its 1-based line."""
+def is_python(path: str) -> bool:
+    """Whether `path` names a Python source file, whose markers are read from comments only."""
+    return path.endswith((".py", ".pyi"))
+
+
+def _comment_columns(text: str) -> dict[int, int]:
+    """The column where the comment of each 1-based line starts, for the lines that tokenize."""
+    columns: dict[int, int] = {}
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type == tokenize.COMMENT:
+                columns[token.start[0]] = token.start[1]
+    except (tokenize.TokenError, SyntaxError):
+        pass
+    return columns
+
+
+def markers(text: str, python: bool = False) -> list[Marker]:
+    """The first suppression marker of each line of `text`, in order, with its 1-based line.
+
+    With `python`, only a marker inside a comment is read.
+    """
     found = []
+    comments = _comment_columns(text) if python and SUPPRESS in text else {}
     for number, line in enumerate(text.split("\n"), 1):
-        match = SUPPRESSION.search(line.removesuffix("\r"))
+        line = line.removesuffix("\r")
+        if python:
+            if number not in comments:
+                continue
+            line = line[comments[number]:]
+        match = SUPPRESSION.search(line)
         if match is None:
             continue
         reason = match["rest"].strip()
