@@ -21,6 +21,8 @@ from .approve_case_support import PENDING, SERVER_POLL_SECONDS, awaited, quick_s
 from .test_console_approve_service import ApproveCase
 from .test_console_register_service import READY, Case, Fake, git, reconcile_repository
 
+TIER = "integration"  # every case runs the approve service against git repositories and a served socket
+
 
 class QuickShutdownTest(ApproveCase):
     def watch_polls(self):

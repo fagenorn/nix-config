@@ -8,6 +8,8 @@ from unittest import mock
 
 from . import test_eval_cases as cases
 
+TIER = "integration"  # every case builds and restores git repository sandboxes
+
 
 class RestoredSandboxTest(unittest.TestCase):
     """#1615: a sandbox is built once per run and put back in place before every use."""
