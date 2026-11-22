@@ -28,9 +28,11 @@ fold of the run's `events.jsonl` derives. It writes nothing and creates no direc
   an event file the ledger refuses.
 
 `engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a procedure of
-`command`, `decide`, `group` and `call` steps; default: the package's `procedures` directory) for
-the issue, in the project the current directory belongs to, to `done` or a stop, and prints one
-line of compact sorted-key JSON when it ends (`engine_shell` is the contract). A `group` step runs
+`command`, `agent`, `decide`, `group` and `call` steps; an agent step runs as one headless session through the
+account launcher, graded only by its structured reply, its files kept under the run's
+`sessions/`; default: the package's `procedures` directory) for the issue, in the project the
+current directory belongs to, to `done` or a stop, and prints one line of compact sorted-key
+JSON when it ends (`engine_shell` is the contract). A `group` step runs
 its members beside each other; a `call` step runs a child procedure once per item as child runs of
 their own (a `run.json` with a `parent`), never more than `parallel` at once, and admits no further
 child once one faults; `engine status` reads the root run, never a child:
@@ -98,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("issue", type=_issue_number)
     status_parser.add_argument("--project")
     deliver_parser = commands.add_parser(
-        "deliver", help="run a procedure of command steps to done or a stop")
+        "deliver", help="run a procedure of command, agent and decide steps to done or a stop")
     deliver_parser.add_argument("issue", type=_issue_number)
     deliver_parser.add_argument("--procedures", type=Path, default=PROCEDURES_DIR)
     return parser

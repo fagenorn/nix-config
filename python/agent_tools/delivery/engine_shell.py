@@ -1,4 +1,4 @@
-"""The engine's shell: `engine deliver` runs a procedure of command, decide, group and call steps (#1512, #1517).
+"""The engine's shell: `engine deliver` runs a procedure of command, agent, decide, group and call steps (#1512, #1514, #1517).
 
 `deliver(issue, procedures_dir)` is the imperative half over the pure core: it
 refuses what it cannot run before anything exists, creates the run directory,
@@ -11,12 +11,21 @@ Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
 held run lock answers `EXIT_RUNNING` first; `<procedures_dir>/deliver.json` must
 pass `procedure_check.check_directory` against the platform declarations plus
-every project command, hold only `command`, `decide`, `group` and `call` steps,
+every project command, hold only `command`, `agent`, `decide`, `group` and `call` steps,
 a `mutates: true` step only as a `command` step, no input the run does not supply, no `call` member
-of a group and no procedure that calls itself; every child procedure a `call`
+of a group, no procedure that calls itself and no agent step whose role file does not read
+(`engine_session.read_role`); every child procedure a `call`
 names is refused on the same terms, with the parent's inputs (plus `item` under
 `each`) as the inputs it may declare. The same checks run again on the run's
 staged copy, which is the copy the loop reads (`<run>/procedure/`).
+
+An agent step runs as one headless session (`engine_session`) in the project
+root: its role body, rendered prompt and a session record are stored under the
+run's `sessions/`, `session_starting` is on disk before the process is spawned,
+and only the `outcome_from` member of the session's structured reply grades the
+step. A session with no structured reply is a `Fault`, so neither the prose nor
+the exit code selects an outcome, and so is a session denied a shell command,
+whose reply may rest on a check it never ran.
 
 A `group` step runs its members beside each other, one thread each: each member
 records `step_entered`, `process_started`, its stored result and
@@ -62,13 +71,16 @@ import shutil
 import socket
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery import engine_commands, engine_core, engine_ledger, procedure_check
+from agent_tools.delivery import (
+    engine_commands, engine_core, engine_ledger, engine_session, procedure_check,
+)
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.project_contract import resolve_project
 
@@ -81,7 +93,7 @@ KEEP_ALIVE_SECONDS = 1200
 LOCK_NAME = "lock"
 ENTRY = "deliver"
 SUPPLIED_INPUTS = ("issue",)
-RUNNABLE_KINDS = ("command", "decide", "group", "call")
+RUNNABLE_KINDS = ("command", "agent", "decide", "group", "call")
 NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 
@@ -129,6 +141,7 @@ def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ..
         if item["kind"] not in RUNNABLE_KINDS:
             raise Refused(f"step {item['id']} is a {item['kind']} step, "
                           "which the engine does not run yet")
+    for item in procedure["steps"]:
         if item.get("mutates") is True and item["kind"] != "command":
             raise Refused(f"step {item['id']} is a {item['kind']} step marked mutates, and the "
                           "engine renews the claim only before a command step")
@@ -218,6 +231,12 @@ def _validate(directory: Path, table: CommandTable) -> dict:
     except (ValueError, OSError) as error:
         raise Refused(str(error)) from error
     _refuse_unrunnable(procedure, directory, SUPPLIED_INPUTS, ENTRY)
+    for item in procedure["steps"]:
+        if item["kind"] == "agent":
+            try:
+                engine_session.read_role(engine_session.roles_dir(os.environ), item["role"])
+            except engine_session.RoleError as error:
+                raise Refused(str(error)) from error
     return procedure
 
 
@@ -404,7 +423,7 @@ def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
         if isinstance(action, engine_core.Done):
             engine_ledger.append_event(run_dir, {"event": "run_done", "at": _now()})
             return EXIT_DONE, {
-                "detail": f"The {name} procedure reached done after {ran} command "
+                "detail": f"The {name} procedure reached done after {ran} step "
                           f"{'visit' if ran == 1 else 'visits'}.",
                 "end": "done", "need": None, "run": run_dir.name}
         if isinstance(action, engine_core.Stop):
@@ -412,7 +431,10 @@ def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
             return _stop(run_dir, step, action.name, action.need,
                          f"The {name} procedure stopped at step {step} with "
                          f"{action.name}, which needs {action.need}.")
-        if isinstance(action, engine_core.RunCommand):
+        if isinstance(action, engine_core.StartSession):
+            _visit_session(run_dir, table.root, steps[action.step], action)
+            ran += 1
+        elif isinstance(action, engine_core.RunCommand):
             if steps[action.step].get("mutates") is True and "keep_alive" in procedure:
                 lost = _renew(run_dir, table, procedure, inputs, action.step, action.visit)
                 if lost is not None:
@@ -431,8 +453,8 @@ def _walk(run_dir: Path, table: CommandTable) -> tuple[int, dict]:
         elif isinstance(action, engine_core.RunCall):
             _call(run_dir, table, run, steps[action.step], action)
         else:
-            raise Fault(f"step {action.step} needs a session, which the engine does not run yet")
-
+            raise Fault(f"step {action.step} needs {type(action).__name__}, "
+                        "which the engine does not run yet")
 
 
 def _stop(run_dir: Path, step: str, name: str, need: str, detail: str) -> tuple[int, dict]:
@@ -604,3 +626,65 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
     engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
                                          "step": action.step, "visit": action.visit,
                                          "outcome": outcome, "to": step["on"][outcome]})
+
+
+def _visit_session(run_dir: Path, root: str, step: dict,
+                   action: engine_core.StartSession) -> None:
+    name, visit = action.step, action.visit
+    engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
+                                         "visit": visit, "stage": step["stage"]})
+    role = engine_session.read_role(engine_session.roles_dir(os.environ), step["role"])
+    staged = run_dir / "procedure"
+    schema = _load(staged / action.reply)
+    prompt = engine_session.render_prompt(
+        (staged / action.prompt).read_text(encoding="utf-8"), action.args)
+    session = str(uuid.uuid4())
+    system = engine_ledger.store_session_file(run_dir, f"{name}.{visit}.system.md",
+                                              role.body.encode("utf-8"))
+    engine_ledger.store_session_file(run_dir, f"{name}.{visit}.prompt.md", prompt.encode("utf-8"))
+    engine_ledger.append_event(run_dir, {
+        "event": "session_starting", "at": _now(), "step": name, "visit": visit,
+        "session": session, "role": role.name,
+        "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
+
+    def started(pid: int) -> None:
+        engine_ledger.append_event(run_dir, {"event": "process_started", "at": _now(),
+                                             "step": name, "visit": visit, "pid": pid,
+                                             "started": _now()})
+
+    launched = engine_session.launch(
+        engine_session.launch_argv(role, schema, session, system), root, prompt, on_start=started)
+    reading = engine_session.read_result(launched.stdout)
+    record = {"denials": reading.denials, "exit_code": launched.exit_code,
+              "prose": reading.prose, "session": session, "subtype": reading.subtype}
+    engine_ledger.store_session_file(
+        run_dir, f"{name}.{visit}.json",
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    reply = reading.reply
+    denied = next((d for d in reading.denials
+                   if isinstance(d, dict) and d.get("tool_name") == "Bash"), None)
+    if denied is not None:
+        tool_input = denied.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        raise Fault(f"step {name} was denied the shell command {str(command)[:200]!r}, so its "
+                    f"reply is not graded: list it in the role's tools as Bash(<prefix>:*)")
+    if reply is None:
+        reason = engine_session.diagnostic(launched.stderr)
+        raise Fault(f"step {name} gave no structured reply, exit {launched.exit_code}"
+                    + (f": {reason}" if reason else ""))
+    wall = reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds
+    engine_ledger.store_result(run_dir, step=name, visit=visit, result=reply, at=_now(),
+                               wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
+                               spend_usd=reading.spend_usd)
+    problem = engine_session.reply_problem(schema, reply)
+    if problem is not None:
+        raise Fault(f"step {name} gave a reply that breaks its schema: {problem}")
+    outcome = reply.get(step["outcome_from"])
+    if (not isinstance(outcome, str) or outcome == engine_core.EXHAUSTED
+            or outcome not in step["on"]):
+        raise Fault(f"step {name} has no mapping for the outcome {outcome}")
+    engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
+                                         "visit": visit, "outcome": outcome})
+    engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
+                                         "step": name, "visit": visit, "outcome": outcome,
+                                         "to": step["on"][outcome]})
