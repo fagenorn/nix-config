@@ -757,6 +757,35 @@ class RecordHistoryTest(unittest.TestCase):
             self.assertEqual(verdict.rises, (Rise("B19", 0, 1, (
                 Violation("B19", "docs/areas/a/adr/002-b.md", 3, 1),)),))
 
+    def test_a_renamed_over_cap_record_may_not_grow_through_its_header(self):
+        prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(40))
+        old = "docs/areas/a/adr/001-x.md"
+        moved = "docs/areas/b/adr/002-x.md"
+        header = "# ADR-a-001 \u2014 X\n\n"
+        rows = {
+            "a padded header title": (
+                "# ADR-b-002 \u2014 X" + " padded" * 150 + "\n\n**Formerly:** ADR-a-001\n\n", True),
+            "a padded Formerly line": (
+                "# ADR-b-002 \u2014 X\n\n**Formerly:** ADR-a-001" + " " * 1000 + "\n\n", True),
+            "a well-formed migration": ("# ADR-b-002 \u2014 X\n\n**Formerly:** ADR-a-001\n\n", False),
+        }
+        for name, (new_head, rises) in rows.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                root = repo(tmp)
+                write(root, old, header + prose)
+                commit_all(root)
+                mark_base(root)
+                (root / "docs/areas/b/adr").mkdir(parents=True)
+                git(root, "mv", old, moved)
+                write(root, moved, new_head + prose)
+                commit_all(root)
+                verdict = self.judge(root)
+                self.assertEqual(dict(verdict.renamed), {moved: old})
+                self.assertGreater(len((header + prose).encode()), 1500)
+                self.assertEqual(tuple(rise.rule for rise in verdict.rises),
+                                 ("B18",) if rises else ())
+                self.assertEqual(context_map_lint.added_records(verdict), [moved] if rises else [])
+
     def test_a_similar_superseding_record_is_judged_and_listed_as_added(self):
         prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(8))
         new = "docs/areas/a/adr/002-new.md"

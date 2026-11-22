@@ -351,6 +351,22 @@ class RecordFormTest(unittest.TestCase):
             "a second Formerly line": (
                 "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-a-001\n**Formerly:** ADR-c-001\n"
                 .encode() + b"\nOne paragraph.\n", False),
+            "a padded header title": (
+                "# ADR-b-001 \u2014 T".encode() + b" padded" * 150 + b"\n\n**Formerly:** ADR-a-001\n"
+                b"\nOne paragraph.\n", False),
+            "a retitled header": (
+                "# ADR-b-001 \u2014 U\n\n**Formerly:** ADR-a-001\n\nOne paragraph.\n".encode(), False),
+            "a Formerly line with trailing spaces": (
+                "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-a-001".encode() + b" " * 3000
+                + b"\n\nOne paragraph.\n", False),
+            "a Formerly line naming another record": (
+                "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-c-009\n\nOne paragraph.\n".encode(), False),
+            "a Formerly slug thousands of characters long": (
+                "# ADR-b-001 \u2014 T\n\n**Formerly:** ADR-".encode() + b"a" * 3000
+                + b"-001\n\nOne paragraph.\n", False),
+            "a header slug thousands of characters long": (
+                "# ADR-".encode() + b"b" * 3000 + "-001 \u2014 T\n\nOne paragraph.\n".encode(), False),
+            "converted to carriage returns": (old.replace(b"\n", b"\r\n"), False),
             "the paragraph amended": (H + b"\nOne paragraph, amended.\n", False),
             "a line added": (H + b"\nOne paragraph.\nMore.\n", False),
         }

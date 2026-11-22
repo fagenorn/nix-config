@@ -18,8 +18,10 @@ per-file violations for the never-rise check, `RECORD_ENFORCERS`, not findings
 of this command, so a run neither prints nor fails on them: the records written
 before the form are carried by the change's merge base, and only a record that
 grows past its base, or that is added, rises. A rename git pairs carries a
-record's violations only as a migration of a record, its body unchanged and
-at most two bytes of blank lines added; a superseding record that reuses the old
+record's violations only as a migration of a record: a well-formed new header
+with the old title, at most one well-formed Formerly line naming the old record,
+the body byte for byte, and at most two bytes of blank lines added, so the
+exempted growth is one header and one Formerly line; a superseding record that reuses the old
 text, and a file that was no record, are judged as a new record. `added_records`
 lists the records a change adds, a migration excluded.
 
@@ -48,6 +50,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Verdict, Violation
 
@@ -71,6 +74,14 @@ RECORD_BYTES_CAP = 1500
 RECORD_SIZE_RULE = "B18"
 RECORD_FORM_RULE = "B19"
 FORMERLY_LINE_RE = re.compile(r"^\*\*Formerly:\*\* ADR-[a-z0-9][a-z0-9-]*-\d{3}\s*$")
+FORMERLY_BYTES_RE = re.compile(rb"^\*\*Formerly:\*\* ADR-[a-z0-9][a-z0-9-]*-\d{3}\n?\Z")
+# A slug is a directory name: a header naming one longer than this is no migration.
+MAX_SLUG_BYTES = 64
+NEW_HEADER_BYTES_RE = re.compile(
+    rb"\A# ADR-(?P<slug>[a-z0-9][a-z0-9-]{0,%d})-(?P<number>\d{3}) \xe2\x80\x94 (?P<title>\S[^\n]*)\Z"
+    % (MAX_SLUG_BYTES - 1))
+OLD_HEADER_BYTES_RE = re.compile(
+    rb"\A#\s+ADR-(?P<slug>[a-z0-9][a-z0-9-]*)-(?P<number>\d{3})\s+\xe2\x80\x94\s+(?P<title>\S[^\n]*)\Z")
 MIGRATION_BLANK_BYTES = 2
 LABEL_RE = re.compile(r"^ {0,3}(?:\*\*|__)[^*_]{1,40}[.:](?:\*\*|__)")
 ORDERED_RE = re.compile(r"^ {0,3}(\d{1,9})[.)](?:[ \t]|$)")
@@ -168,41 +179,60 @@ def record_lines(content: bytes) -> list[str]:
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
-def record_parts(content: bytes) -> tuple[int, tuple[str, ...]]:
-    """The bytes of the blank lines around the body, and the body's lines.
+class RecordParts(NamedTuple):
+    """One record's bytes, split exactly: nothing is decoded and no '\\r' is dropped."""
+    header: bytes
+    formerly: bytes | None
+    blank_bytes: int
+    body: bytes
 
-    The body is what follows the header, less the blank lines before and after it
-    and one leading Formerly line; its inner lines, blank ones included, are kept.
+
+def record_parts(content: bytes) -> RecordParts:
+    """The header line, a leading Formerly line, the bytes of the blank lines
+    around the body, and the body's own bytes, line endings kept.
+
+    The body runs from the first to the last non-blank line after the header
+    and one well-formed leading Formerly line; a blank line counts whole, its
+    spaces and carriage return included.
     """
-    lines = record_lines(content)[1:]
-    start, end = 0, len(lines)
-    while start < end and not lines[start].strip():
+    lines = re.findall(rb"[^\n]*\n|[^\n]+", content)
+    header = lines[0].rstrip(b"\n") if lines else b""
+    rest = lines[1:]
+    start, end = 0, len(rest)
+    while start < end and not rest[start].strip():
         start += 1
-    while end > start and not lines[end - 1].strip():
+    while end > start and not rest[end - 1].strip():
         end -= 1
-    edge = lines[:start] + lines[end:]
-    body = lines[start:end]
-    if body and FORMERLY_LINE_RE.match(body[0]):
+    edge = rest[:start] + rest[end:]
+    body = rest[start:end]
+    formerly = None
+    if body and FORMERLY_BYTES_RE.match(body[0]):
+        formerly = body[0].rstrip(b"\n")
         body = body[1:]
         after = 0
         while after < len(body) and not body[after].strip():
             after += 1
         edge, body = edge + body[:after], body[after:]
-    return sum(len(line) + 1 for line in edge), tuple(body)
-
-
-def record_body(content: bytes) -> tuple[str, ...]:
-    """The lines of the record's body: no header, no leading Formerly line, no edge blanks."""
-    return record_parts(content)[1]
+    return RecordParts(header, formerly, sum(len(line) for line in edge), b"".join(body))
 
 
 def is_record_migration(old: bytes, new: bytes) -> bool:
-    """True when a move left the body alone: the header, a Formerly line and a
-    little blank space around the body (at most `MIGRATION_BLANK_BYTES` more
-    than the old record held) are all that changed."""
-    old_blank, old_body = record_parts(old)
-    new_blank, new_body = record_parts(new)
-    return old_body == new_body and new_blank <= old_blank + MIGRATION_BLANK_BYTES
+    """True when a move left the record's substance alone, the whole difference
+    bounded: the new header is well formed and keeps the old title; a leading
+    Formerly line is well formed and names the old record (or repeats the old
+    one); the body is byte for byte the old body; and the blank lines around it
+    grow by at most `MIGRATION_BLANK_BYTES`. Nothing else may differ, so a
+    migration adds no more than one header and one Formerly line."""
+    before, after = record_parts(old), record_parts(new)
+    old_header = OLD_HEADER_BYTES_RE.match(before.header)
+    new_header = NEW_HEADER_BYTES_RE.match(after.header)
+    if old_header is None or new_header is None or old_header["title"] != new_header["title"]:
+        return False
+    names_old = b"**Formerly:** ADR-" + old_header["slug"] + b"-" + old_header["number"]
+    if after.formerly not in (None, names_old, before.formerly):
+        return False
+    return (before.body == after.body
+            and after.blank_bytes <= before.blank_bytes + MIGRATION_BLANK_BYTES)
 
 
 def form_breaches(content: bytes) -> list[int]:
