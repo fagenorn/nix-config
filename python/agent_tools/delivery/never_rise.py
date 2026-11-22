@@ -111,10 +111,11 @@ class Verdict(NamedTuple):
 
 
 def _git(root: Path, args: Sequence[str], timeout: float | None,
-         accept: Sequence[int] = (0,)) -> bytes | None:
+         accept: Sequence[int] = (0,), silent: bool = False) -> bytes | None:
     """Run one read-only git child; its stdout, or None when it did not succeed.
 
-    An exit in `accept` other than 0 counts only when it left stderr empty.
+    An exit in `accept` other than 0 counts only when it left stderr empty; with
+    `silent`, any stderr output is a failure whatever the exit.
     """
     env = {k: v for k, v in os.environ.items() if k not in SELECTION_VARIABLES}
     env["GIT_NO_LAZY_FETCH"] = "1"
@@ -125,9 +126,10 @@ def _git(root: Path, args: Sequence[str], timeout: float | None,
         return None
     if done.returncode not in accept:
         return None
-    # `git grep` exits 1 both for "no match" and for an unreadable (missing) blob,
-    # which it reports on stderr: only a silent exit 1 is an empty result.
-    return done.stdout if done.returncode == 0 or not done.stderr.strip() else None
+    # `git grep` reports an unreadable (missing) blob on stderr and skips it, with an
+    # exit that only says whether another file matched: stderr is the only signal.
+    quiet = not done.stderr.strip()
+    return done.stdout if quiet or (done.returncode == 0 and not silent) else None
 
 
 def _revision(output: bytes | None) -> str | None:
@@ -146,7 +148,7 @@ def revisions(root: Path, integration_branch: str, timeout: float | None) -> tup
 def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
     """Every tracked text file's line count at a revision, as `git grep -c` counts."""
     out = _git(root, ["grep", "--no-color", "-I", "-c", "-z", "-e", "", revision, "--"],
-               timeout, accept=(0, 1))
+               timeout, accept=(0, 1), silent=True)
     if out is None:
         return None
     prefix = f"{revision}:"

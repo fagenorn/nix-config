@@ -292,6 +292,30 @@ class NeverRiseTest(unittest.TestCase):
                 env=fixture_env({"GIT_NO_LAZY_FETCH": "1"}), capture_output=True)
             self.assertNotEqual(probe.returncode, 0)
 
+    def test_a_partial_clone_with_some_blobs_present_is_no_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.bad", "x\n")
+            commit_all(root)
+            base = mark_base(root)
+            write(root, "b.bad", "padding line\n" * 200)
+            commit_all(root)
+            bare = Path(tmp) / "bare.git"
+            partial = Path(tmp) / "partial"
+            git(root, "clone", "-q", "--bare", str(root), str(bare))
+            git(bare, "config", "uploadpack.allowFilter", "true")
+            git(Path(tmp), "clone", "-q", "--no-checkout", "--filter=blob:limit=1k",
+                f"file://{bare}", str(partial))
+            git(partial, "update-ref", "refs/remotes/origin/main", base)
+            present = git(partial, "rev-parse", "HEAD:a.bad").strip()
+            missing = git(partial, "rev-parse", "HEAD:b.bad").strip()
+            for blob, exit_code in ((present, 0), (missing, 1)):
+                probe = subprocess.run(
+                    ["git", "-C", str(partial), "cat-file", "-e", blob],
+                    env=fixture_env({"GIT_NO_LAZY_FETCH": "1"}), capture_output=True)
+                self.assertEqual(probe.returncode == 0, exit_code == 0)
+            self.assertIsNone(never_rise.judge(partial, "main", [BAD], 60))
+
     def test_an_inherited_repository_selection_redirects_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             other = Path(tmp) / "other"
