@@ -58,6 +58,8 @@ The agent-facing surface is scarce: design it like it. Few tools and few paramet
 
 A test earns its place by failing for exactly one reason. Assert observable behaviour — the row written, the response returned — never that a particular method was called; a call-count assertion against a mock survives every implementation that keeps the call. Shape fixtures like the values production actually carries rather than the shortest string that parses, or a bug in the consumer and a matching shortcut in the assertion cancel out and both stay green. When a guard's boundary is redundant with a filter upstream of it, delete the guard and ask which test turns red; if none does, the guard is untested.
 
+At review, three kinds of test are findings: a test whose subject is a mock or fake rather than the code, so it passes with the code under test deleted; a test that pins wording — a decision record's, a docstring's, a prompt's or a message's — unless the message is a contract that a caller or a person parses; and a test that stays green with the behaviour it names broken. Break that behaviour and watch which assertion turns red; if none does, the test proves nothing and is cut or rewritten.
+
 ### Verify before claiming done
 
 Run it and show the behaviour. Absence of an error is not evidence of success, and neither is a plausible diff. State what you ran and what it printed, or say plainly that you did not verify.
