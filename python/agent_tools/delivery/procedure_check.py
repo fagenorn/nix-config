@@ -755,12 +755,14 @@ def _data_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     """`flow_graph` with each agent step's `no-reply` edge leaving a node of its own.
 
     A `no-reply` result is `{}`, so a route through that edge does not produce the step's members: for an
-    agent step `s` mapping `no-reply` to a target other than `done`, every predecessor of `s` also goes to
-    `s#no-reply`, whose only successor is the target, and `s` itself drops the target unless another
-    outcome of `s` maps to it.
+    agent step `s` mapping `no-reply` to a target other than `done`, `s#no-reply` has the target as its only
+    successor, `s` itself drops the target unless another outcome of `s` maps to it, and every node that
+    goes to `s` also goes to `s#no-reply`, `s#no-reply` nodes of other steps included. Those edges are added
+    until nothing changes, so the graph does not depend on the order the steps are listed in.
     """
     graph = flow_graph(procedure)
     cyclic = on_cycle(step_graph(procedure))
+    split: dict[str, str] = {}
     for item in procedure["steps"]:
         name, target = item["id"], item.get("on", {}).get(NO_REPLY)
         if item["kind"] != "agent" or name not in graph or target is None or target == "done":
@@ -768,12 +770,19 @@ def _data_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
         node = f"{name}#{NO_REPLY}"
         others = {t for o, t in item["on"].items()
                   if o != NO_REPLY and (o != EXHAUSTED or name in cyclic)}
-        for before, targets in list(graph.items()):
-            if name in targets:
-                graph[before] = targets + (node,)
+        split[name] = node
         graph[node] = (target,)
         if target not in others:
             graph[name] = tuple(t for t in graph[name] if t != target)
+    changed = True
+    while changed:
+        changed = False
+        for before, targets in list(graph.items()):
+            for name, node in split.items():
+                if name in targets and node not in targets:
+                    targets += (node,)
+                    graph[before] = targets
+                    changed = True
     return graph
 
 

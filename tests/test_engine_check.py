@@ -602,6 +602,24 @@ class DataFlowTest(unittest.TestCase):
             {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
 
 
+    def test_a_no_reply_route_bypasses_its_step_whatever_order_the_steps_are_listed_in(self):
+        def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
+            return {"id": step_id, "kind": "agent", "on": on, "in": list(reads)}
+
+        steps = {
+            "a": agent("a", {"ok": "s1"}),
+            "s1": agent("s1", {"ok": "s2", "no-reply": "s2"}),
+            "s2": agent("s2", {"ok": "done", "no-reply": "r"}),
+            "r": agent("r", {"ok": "done"}, ("s1.x",)),
+        }
+        for order in (("a", "s1", "s2", "r"), ("a", "s2", "s1", "r")):
+            with self.subTest(order=order):
+                procedure = {"steps": [steps[name] for name in order], "stops": {}, "inputs": []}
+                graph = procedure_check._data_flow_graph(procedure)
+                dominating = procedure_check.dominators(graph, procedure_check.START)["r"]
+                self.assertNotIn("s1", dominating)
+
+
 class RoleTest(unittest.TestCase):
     def test_each_role_has_its_agent_file(self):
         for name in procedure_check.ROLES:
