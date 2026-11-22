@@ -1,0 +1,4 @@
+{"at":"2026-11-21T16:02:31Z","event":"step_entered","stage":"setup","step":"scope","visit":1}
+{"at":"2026-11-21T16:02:32Z","event":"wait_started","until":null,"wait":"host-slot"}
+{"at":"2026-11-21T16:02:35Z","event":"wait_ended","wait":"host-slot"}
+{"at":"2026-11-21T16:02:36Z","event":"process_started","pid":4242,"started":"2026-11-21T16:02:36Z","step":"scope","visit":1}
