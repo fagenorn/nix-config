@@ -46,6 +46,7 @@ resolver (#148 D26). Standard library only.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import posixpath
 from pathlib import Path
@@ -420,6 +421,44 @@ def _emitted(link: Link, resolved: Resolved, successor: str,
             rel = "./" + rel
         return angle_target(rel) + suffix
     return urllib.parse.quote(rel, safe="/") + suffix
+
+
+def _spans(data: bytes) -> Counter:
+    """Bytes per chunk, as git's rename detection counts them: a chunk ends at a
+    newline or after 64 bytes."""
+    spans: Counter = Counter()
+    chunk = bytearray()
+    for byte in data:
+        chunk.append(byte)
+        if byte == 10 or len(chunk) == 64:
+            spans[bytes(chunk)] += len(chunk)
+            chunk.clear()
+    if chunk:
+        spans[bytes(chunk)] += len(chunk)
+    return spans
+
+
+def stays_a_rename(before: str, after: str) -> bool:
+    """Whether git would still pair `after` with `before` as a rename: the
+    chunks they share are at least half of the larger (git's default
+    threshold), so `git log --follow` crosses the move."""
+    old, new = before.encode("utf-8"), after.encode("utf-8")
+    shared = sum((_spans(old) & _spans(new)).values())
+    return shared * 2 >= max(len(old), len(new))
+
+
+def history_losses(rewrites: "LinkRewrites", moved: Iterable[str]) -> list[dict]:
+    """The links of each `moved` file whose rewrite leaves too little of the
+    file for git to follow the move, as `unrewritable` rows: the file's history
+    would end at the move, and a rewrite that cannot keep it is the operator's
+    to make."""
+    kept = set(moved)
+    return [{"path": rewrite.source, "target": old.target}
+            for rewrite in rewrites.files.values()
+            if rewrite.source in kept
+            and not stays_a_rename(rewrite.before, rewrite.after)
+            for old, new in zip(links(rewrite.before), links(rewrite.after))
+            if old.target != new.target]
 
 
 def is_point_in_time_record(path: str) -> bool:

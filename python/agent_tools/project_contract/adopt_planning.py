@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import shlex
 from collections import Counter
 from collections.abc import Mapping
@@ -622,10 +623,12 @@ def amended_contract(source: dict, interval: dict, found: Candidates,
 
 
 def relocated_binding(value: str, relocations: dict[str, str]) -> str:
-    """`value` under the longest relocated group it names or sits inside."""
+    """`value` under the longest relocated group it names or sits inside, however
+    it is spelled (`./.claude/hints` names `.claude/hints`)."""
+    normal = posixpath.normpath(value)
     for group in sorted(relocations, key=lambda name: (-len(name), name)):
-        if value == group or value.startswith(group + "/"):
-            return relocations[group] + value[len(group):]
+        if normal == group or normal.startswith(group + "/"):
+            return relocations[group] + normal[len(group):]
     return value
 
 

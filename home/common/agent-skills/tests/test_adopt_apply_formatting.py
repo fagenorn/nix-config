@@ -20,6 +20,8 @@ from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_l
 from .test_adopt_apply import CONTRACT, ApplyTestCase, apply_repo
 from .test_adopt_project import answer_args, commit, git, run, write, write_linked_tree
 
+TIER = "integration"  # every case runs a real git repository
+
 
 # #376 D15: the fixture's own lint and formatter, standard-library scripts
 # that walk `*.py` from their working directory, so the same lint runs in

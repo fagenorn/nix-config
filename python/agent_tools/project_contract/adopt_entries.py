@@ -18,6 +18,7 @@ only, never the working tree, because `apply` re-runs the derivation. It imports
 
 from __future__ import annotations
 
+import posixpath
 import re
 from typing import NamedTuple
 
@@ -55,6 +56,7 @@ class EntryConversion(NamedTuple):
     nested: tuple[str, ...]
     before: dict[str, bytes]
     blocks: tuple[tuple[str, str], ...]
+    authored: tuple[tuple[str, str], ...] = ()
 
 
 NO_CONVERSION = EntryConversion((), (), {}, ())
@@ -81,11 +83,18 @@ def decoded(data: bytes, message: str) -> str:
                      message) from None
 
 
+def named(row: dict, member: str) -> str | None:
+    """A declared projection's `target` or `source` as a normal path, or None
+    when it is not a string (the resolver refuses that, never this module)."""
+    value = row.get(member)
+    return posixpath.normpath(value) if isinstance(value, str) else None
+
+
 def projection_paths(contract_source: dict) -> set[str]:
     """Every `target` and `source` a declared projection names."""
     rows = declared_rows(contract_source.get("projections"))
-    return {row[member] for _, row in rows for member in ("target", "source")
-            if isinstance(row.get(member), str)}
+    return {path for _, row in rows for member in ("target", "source")
+            if (path := named(row, member)) is not None}
 
 
 def nested_candidates(records: dict[str, tuple[str, str]],
@@ -118,15 +127,26 @@ def plan_entry_conversion(root, found: Candidates, inventory: Inventory,
     source_bytes = blob_at(root, revision, BOOTSTRAP_SOURCE) \
         if BOOTSTRAP_SOURCE in records else None
     seen: list[str] | None = None
-    paths, nested, blocks = [], [], []
+    paths, nested, blocks, texts, stale = [], [], [], [], []
     before: dict[str, bytes] = {}
     roots = [name for name in ENTRY_FILES if records.get(name, (None,))[0] in REGULAR_MODES]
+
+    def convert(name: str, data: bytes | None) -> None:
+        mark_converted(found, indexed, name, records[name][1])
+        if name not in ENTRY_FILES:
+            nested.append(name)
+        paths.append(name)
+        before[name] = data or b""
+
     for name in (*roots, *nested_candidates(records, projection_paths(contract_source))):
-        oid = records[name][1]
         data = blob_at(root, revision, name)
         if name.rsplit("/", 1)[-1] == "AGENTS.md" and (data or b"").startswith(
                 GENERATED_PREFIX.encode("utf-8")):
-            continue  # the projection of a source that may not be UTF-8 text
+            # The projection of a source that may not be UTF-8 text. A root
+            # one is regenerated; a nested one no projection names is stale.
+            if name not in ENTRY_FILES:
+                stale.append((name, data))
+            continue
         text = decoded(data or b"", "a hand-written entry file is not UTF-8 "
                        "text, so its text cannot move into the bootstrap source")
         authored = authored_entry_text(name, text)
@@ -137,35 +157,43 @@ def plan_entry_conversion(root, found: Candidates, inventory: Inventory,
                 source_bytes, "the bootstrap source is not UTF-8 text, so "
                 "adopted text cannot be joined to it")
             seen = [] if not source else [ended(source)]
-        if indexed.get(name) != oid:
-            raise refuse("dirty_worktree", "adopt.worktree.dirty", "/evidence",
-                         "an entry file is staged differently from the base "
-                         "revision, so its authored text cannot be judged")
-        if name in ENTRY_FILES:
-            found.groups[name]["action"] = "convert-to-source"
-            found.groups[name]["target"] = BOOTSTRAP_SOURCE
-            for entry in found.entries:
-                if entry["path"] == name and entry["provenance"] == "tracked":
-                    entry["action"] = "convert-to-source"
-                    entry["target"] = BOOTSTRAP_SOURCE
-        else:
-            found.entries.append(evidence_entry(
-                name, "tracked", "native-projection", "convert-to-source",
-                BOOTSTRAP_SOURCE, 1, object_hash(oid), None))
-            found.groups[name] = {"action": "convert-to-source",
-                                  "target": BOOTSTRAP_SOURCE,
-                                  "members": [(name, oid)]}
-            nested.append(name)
-        paths.append(name)
-        before[name] = data or b""
+        convert(name, data)
+        texts.append((name, authored))
         if ended(authored) not in seen:
             seen.append(ended(authored))
             blocks.append((name, authored))
+    if paths or source_bytes is not None:
+        for name, data in stale:
+            convert(name, data)
     if not paths:
         return NO_CONVERSION
     if source_bytes is not None:
         before[BOOTSTRAP_SOURCE] = source_bytes
-    return EntryConversion(tuple(paths), tuple(nested), before, tuple(blocks))
+    return EntryConversion(tuple(paths), tuple(nested), before, tuple(blocks),
+                           tuple(texts))
+
+
+def mark_converted(found: Candidates, indexed: dict[str, str], name: str,
+                   oid: str) -> None:
+    """Mark `name` `convert-to-source` in the evidence and the groups."""
+    if indexed.get(name) != oid:
+        raise refuse("dirty_worktree", "adopt.worktree.dirty", "/evidence",
+                     "an entry file is staged differently from the base "
+                     "revision, so its authored text cannot be judged")
+    if name in ENTRY_FILES:
+        found.groups[name]["action"] = "convert-to-source"
+        found.groups[name]["target"] = BOOTSTRAP_SOURCE
+        for entry in found.entries:
+            if entry["path"] == name and entry["provenance"] == "tracked":
+                entry["action"] = "convert-to-source"
+                entry["target"] = BOOTSTRAP_SOURCE
+    else:
+        found.entries.append(evidence_entry(
+            name, "tracked", "native-projection", "convert-to-source",
+            BOOTSTRAP_SOURCE, 1, object_hash(oid), None))
+        found.groups[name] = {"action": "convert-to-source",
+                              "target": BOOTSTRAP_SOURCE,
+                              "members": [(name, oid)]}
 
 
 def declared_rows(projections: object) -> list[tuple[int, dict]]:
@@ -176,15 +204,16 @@ def declared_rows(projections: object) -> list[tuple[int, dict]]:
 def check_entry_projections(contract_source: dict) -> None:
     """Refuse a declared projection that would not carry the converted text."""
     rows = declared_rows(contract_source.get("projections"))
-    named = {row.get("target") for _, row in rows}
+    targets = {named(row, "target") for _, row in rows}
     ids = {entry["id"] for entry in ENTRY_PROJECTIONS
-           if entry["target"] not in named}
+           if entry["target"] not in targets}
     for index, row in rows:
-        clash = row.get("id") in ids
+        row_id = row.get("id")
+        clash = isinstance(row_id, str) and row_id in ids
         for entry in ENTRY_PROJECTIONS:
-            if row.get("target") == entry["target"] and (
+            if named(row, "target") == entry["target"] and (
                     row.get("kind") != entry["kind"]
-                    or row.get("source") != entry["source"]):
+                    or named(row, "source") != entry["source"]):
                 clash = True
         if clash:
             raise refuse(
@@ -197,9 +226,9 @@ def check_entry_projections(contract_source: dict) -> None:
 
 def missing_entry_projections(projections: list) -> list[dict]:
     """The entry projections no declared row names, as fresh copies."""
-    named = {row.get("target") for _, row in declared_rows(projections)}
+    targets = {named(row, "target") for _, row in declared_rows(projections)}
     return [dict(entry) for entry in ENTRY_PROJECTIONS
-            if entry["target"] not in named]
+            if entry["target"] not in targets]
 
 
 def entry_base_text(conversion: EntryConversion, links: LinkRewrites) -> str | None:
@@ -250,6 +279,9 @@ def entry_unrewritable(conversion: EntryConversion,
     for path, text in conversion.blocks:
         rows.update((path, link.target) for link in adopt_links.links(text)
                     if adopt_links.is_relative(link.target))
+    # Every converted `CLAUDE.md`, a block another file's text made redundant
+    # included: its imports resolve from `.agents/instructions/` all the same.
+    for path, text in conversion.authored:
         if path.rsplit("/", 1)[-1] == "CLAUDE.md":
             rows.update((path, target) for target in claude_imports(text))
     return [{"path": path, "target": target} for path, target in sorted(rows)]

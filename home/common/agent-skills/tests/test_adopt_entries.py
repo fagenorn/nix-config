@@ -13,7 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.project_contract import adopt_conformance, adopt_inspection, adopt_links, resolve_project
+from agent_tools.project_contract import (adopt_conformance, adopt_inspection, adopt_links,
+                                          agent_platform, resolve_project)
 
 from .test_adopt_apply import (
     BOOTSTRAP,
@@ -30,7 +31,8 @@ from .test_adopt_apply import (
 )
 from .test_adopt_conformance import conformance_failure
 from .test_adopt_conformance_apply import locked_apply_repo
-from .test_adopt_project import PLAN_MEMBERS, commit, drafted_contract, git, init_repo, run, write
+from .test_adopt_project import (PLAN_MEMBERS, commit, drafted_contract, fixture_contract, git,
+                                 init_repo, run, write)
 
 TIER = "integration"  # every plan case runs a real git repository
 
@@ -406,6 +408,133 @@ class NestedEntryTest(CleanApplyTestCase):
         self.assertEqual(document["plan"]["state"], "draft")
         self.assertIn({"path": "docs/index.md", "target": "AGENTS.md"},
                       document["link_rewrites"]["unrewritable"])
+
+
+class FinalReviewTest(CleanApplyTestCase):
+    """Edges the final review of #1468 found: each plans or applies wrongly without its fix."""
+
+    def plan(self, root: Path) -> tuple[int, dict]:
+        code, out, err = run("plan", "--repo-root", str(root), home=self.home)
+        return code, json.loads(out) if out.strip() else {"stderr": err}
+
+    def deletions(self, document: dict) -> list[list[str]]:
+        return [op["sources"] for op in document["changes"] if op["op"] == "delete-file"]
+
+    def declare(self, root: Path, rows: list[dict]) -> dict:
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        contract["projections"] = [*contract["projections"], *rows]
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+        return contract
+
+    def stale_header(self) -> str:
+        return agent_platform.GENERATED_HEADER_TEMPLATE.format(
+            source=BOOTSTRAP, version=1) + "\n\n# stale\n"
+
+    def test_an_undeclared_nested_agents_md_with_a_generated_header_is_deleted(self):
+        root = self.owned(apply_repo(self.home))
+        write(root, NESTED, self.stale_header())
+        commit(root, "leave a stale generated nested entry file")
+        document = self.ready_plan(root)
+        self.assertEqual(self.deletions(document), [[NESTED]])
+        result = self.succeed(root, document["plan"]["plan_id"], "--acknowledge-deletions")
+        self.assertNotIn(NESTED, self.branch_files(root, result["branch"]))
+        self.assertEqual(self.show(root, f"{result['branch']}:{BOOTSTRAP}"),
+                         self.show(root, f"HEAD:{BOOTSTRAP}"))
+
+    def test_a_hook_that_restages_a_deleted_nested_entry_file_fails_the_apply(self):
+        root = self.owned(entry_apply_repo(self.home))
+        write(root, NESTED, NESTED_TEXT)
+        commit(root, "hand-write a nested entry file")
+        hook = root / ".git" / "hooks" / "pre-commit"
+        hook.write_text(f"#!/bin/sh\nprintf 'edited\\n' > {NESTED} && git add {NESTED}\n",
+                        encoding="utf-8")
+        hook.chmod(0o755)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        code, payload, err = self.apply(plan_id, "--acknowledge-deletions")
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["code"], "verification_failed")
+        self.assertEqual(payload["error"]["repair_id"], "adopt.commit.conversion_unproved")
+
+    def test_a_hint_whose_rewrite_would_lose_its_history_keeps_the_plan_draft(self):
+        root = self.owned(hinted_apply_repo(self.home))
+        write(root, "README.md", "# readme\n")
+        write(root, ".claude/hints/links.md", "[guide](../../README.md)\n")
+        commit(root, "add a one-line linking hint")
+        code, document = self.plan(root)
+        self.assertEqual(code, 0, document)
+        self.assertEqual(document["plan"]["state"], "draft")
+        self.assertIn({"path": ".claude/hints/links.md", "target": "../../README.md"},
+                      document["link_rewrites"]["unrewritable"])
+
+    def test_a_linking_hint_that_stays_similar_keeps_its_history(self):
+        root = self.owned(hinted_apply_repo(self.home))
+        base = git(root, "rev-parse", "HEAD").strip()
+        write(root, "README.md", "# readme\n")
+        text = "".join(f"line {number} of the hint\n" for number in range(8))
+        write(root, ".claude/hints/links.md", text + "[guide](../../README.md)\n")
+        commit(root, "add a linking hint")
+        base = git(root, "rev-parse", "HEAD").strip()
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        new = ".agents/knowledge/hints/links.md"
+        self.assertIn("../../../README.md", self.show(root, f"{result['branch']}:{new}"))
+        history = git(root, "log", "--follow", "--format=%H", result["branch"], "--", new).split()
+        self.assertEqual(history[1], base)
+
+    def test_a_declared_missing_source_is_judged_by_the_source_the_plan_writes(self):
+        root = self.owned(entry_apply_repo(self.home, declared=True, claude=MANAGED_LINE))
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        contract["platform"] = fixture_contract()["platform"]
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+        commit(root, "declare the platform")
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        self.assertEqual(self.show(root, f"{result['branch']}:{BOOTSTRAP}"),
+                         "<!-- adopted from AGENTS.md -->\n" + ENTRY_AGENTS)
+
+    def test_a_declared_projection_source_spelled_with_a_dot_is_never_deleted(self):
+        root = self.owned(apply_repo(self.home))
+        row = {"id": "codex.docs", "agent": "codex", "kind": "generated_file",
+               "target": "tools/AGENTS.md", "source": "./" + NESTED}
+        contract = self.declare(root, [row])
+        write(root, NESTED, NESTED_TEXT)
+        write(root, "tools/AGENTS.md", resolve_project.render_projection(
+            row, NESTED_TEXT.encode(), contract["schema_version"]).decode())
+        commit(root, "read a nested source")
+        self.assertEqual(self.deletions(self.ready_plan(root)), [])
+
+    def test_a_hints_binding_spelled_with_a_dot_follows_the_move(self):
+        root = self.owned(hinted_apply_repo(self.home))
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        contract["bindings"]["paths"]["hints"] = ["./.claude/hints"]
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+        commit(root, "spell the hints binding with a dot")
+        result = self.succeed(root, self.ready_plan(root)["plan"]["plan_id"])
+        committed = json.loads(git(root, "show", f"{result['branch']}:{CONTRACT}"))
+        self.assertEqual(committed["bindings"]["paths"]["hints"], [".agents/knowledge/hints"])
+
+    def test_a_claude_import_in_a_body_identical_to_agents_md_keeps_the_plan_draft(self):
+        body = "# Team\n\nSee @docs/team.md for the rules.\n"
+        root = self.owned(entry_apply_repo(self.home, agents=body, claude=body + MANAGED_LINE))
+        code, document = self.plan(root)
+        self.assertEqual(code, 0, document)
+        self.assertEqual(document["plan"]["state"], "draft")
+        self.assertIn({"path": "CLAUDE.md", "target": "docs/team.md"},
+                      document["link_rewrites"]["unrewritable"])
+
+    def test_a_projection_with_a_list_target_or_id_is_not_an_internal_error(self):
+        for member, row in (
+                ("target", {"id": "x", "agent": "codex", "kind": "generated_file",
+                            "target": ["AGENTS.md"], "source": BOOTSTRAP}),
+                ("id", {"id": ["x"], "agent": "codex", "kind": "generated_file",
+                        "target": "tools/AGENTS.md", "source": BOOTSTRAP})):
+            with self.subTest(member=member):
+                root = self.owned(entry_apply_repo(self.home))
+                self.declare(root, [row])
+                commit(root, "declare a malformed projection")
+                code, document = self.plan(root)
+                self.assertNotEqual(
+                    document.get("error", {}).get("repair_id"), "adopt.internal", document)
 
 
 class PointInTimeRecordTest(unittest.TestCase):

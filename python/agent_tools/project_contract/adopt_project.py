@@ -485,6 +485,9 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     base_text = adopt_entries.entry_base_text(conversion, links)
     source = adopt_entries.entry_source(conversion, links)
     rows = adopt_entries.entry_unrewritable(conversion, base_text)
+    rows += adopt_links.history_losses(links, (
+        old for old, _ in found.moves
+        if adopt_inspection.matches_group(old, ".claude/hints", "prefix")))
     if rows:
         unrewritable = {(row["path"], row["target"])
                         for row in links.summary["unrewritable"] + rows}
@@ -503,6 +506,12 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         contract_resolves, repair_id, payload = True, None, None
     else:
         exit_code, payload = run_resolver(root, "resolve")
+        if (exit_code != 0 and source is not None
+                and adopt_inspection.BOOTSTRAP_SOURCE not in conversion.before):
+            # The conversion creates the source the contract declares, so the
+            # contract is judged with the file the plan writes in its place.
+            exit_code, payload = resolve_scratch(
+                root, inventory.base_revision, None, extra)
         contract_resolves = exit_code == 0
         repair_id = (None if contract_resolves
                      else adopt_inspection.resolver_repair_id(payload))
@@ -760,6 +769,23 @@ def load_contract_draft(path: str, root: Path) -> dict:
     return draft
 
 
+def resolve_scratch(root: Path, base_revision: str, written: bytes | None,
+                    extra: dict[str, bytes] | None) -> tuple[int, object]:
+    """The resolver's verdict on the base revision's tree with `written` as its
+    contract (kept as it is when None) and each `extra` file placed in it."""
+    with tempfile.TemporaryDirectory() as scratch:
+        tree = Path(scratch) / "tree"
+        adopt_inspection.export_commit(root, base_revision, tree)
+        if written is not None:
+            contract = tree / adopt_inspection.CONTRACT_FILENAME
+            contract.parent.mkdir(parents=True, exist_ok=True)
+            contract.write_bytes(written)
+        for relative, data in (extra or {}).items():
+            (tree / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tree / relative).write_bytes(data)
+        return run_resolver(tree, "resolve")
+
+
 def resolve_draft(root: Path, base_revision: str, written: bytes,
                    extra: dict[str, bytes] | None = None) -> bool:
     """Run the resolver on the bytes a drafted plan would write.
@@ -770,16 +796,7 @@ def resolve_draft(root: Path, base_revision: str, written: bytes,
     projections are out of date, which the plan's own regeneration operations
     repair; any other refusal is the draft's.
     """
-    with tempfile.TemporaryDirectory() as scratch:
-        tree = Path(scratch) / "tree"
-        adopt_inspection.export_commit(root, base_revision, tree)
-        contract = tree / adopt_inspection.CONTRACT_FILENAME
-        contract.parent.mkdir(parents=True, exist_ok=True)
-        contract.write_bytes(written)
-        for relative, data in (extra or {}).items():
-            (tree / relative).parent.mkdir(parents=True, exist_ok=True)
-            (tree / relative).write_bytes(data)
-        exit_code, payload = run_resolver(tree, "resolve")
+    exit_code, payload = resolve_scratch(root, base_revision, written, extra)
     if exit_code == 0:
         return False
     if adopt_inspection.resolver_error_code(payload) == "invalid_projection":
@@ -957,8 +974,9 @@ def prove_entry_conversion(worktree: Path, commit: str, operations: list[dict],
 
     `prove_commit_content` compares path names only, so a hook that edits the
     source after the gates passed leaves it satisfied. The committed source and
-    `CLAUDE.md` must hash to their operations' `after`, and the resolver must
-    find every projection of an export of the commit unchanged."""
+    `CLAUDE.md` must hash to their operations' `after`, every planned deletion
+    must be absent from the commit, and the resolver must find every projection
+    of an export of the commit unchanged."""
     if not any(entry["action"] == "convert-to-source" for entry in evidence):
         return
     proved = adopt_inspection.BOOTSTRAP_SOURCE, "CLAUDE.md"
@@ -967,7 +985,10 @@ def prove_entry_conversion(worktree: Path, commit: str, operations: list[dict],
             adopt_inspection.blob_at(worktree, commit, target) or b"")
         == operation["after"]
         for operation in operations if operation["op"] == "write-file"
-        for target in operation["targets"] if target in proved)
+        for target in operation["targets"] if target in proved) and all(
+        adopt_inspection.blob_at(worktree, commit, path) is None
+        for operation in operations if operation["op"] == "delete-file"
+        for path in operation["sources"])
     if ok:
         with tempfile.TemporaryDirectory() as scratch:
             tree = Path(scratch) / "tree"
