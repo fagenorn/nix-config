@@ -37,7 +37,7 @@ TIMEOUT_SECONDS = 60
 # The commands #175, #179, #177, #249, #264, #279, #353, #403, #424, #623, #624, #697 and #1440 accepted as launchers: a floor, not the
 # full set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "adr-number", "agent-model-matrix", "artifact-budget", "conformance",
-                  "context-map-lint", "diff-scope", "forge-claim", "forge-issue", "lane-triage",
+                  "context-map-lint", "diff-scope", "forge-claim", "forge-issue",
                   "owner-actions", "resolve-project")
 # Legacy commands may treat --help as misuse, including parser-backed commands
 # with help disabled; pin each existing exit/stdout/stderr contract.

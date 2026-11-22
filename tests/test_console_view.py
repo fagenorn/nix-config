@@ -3627,7 +3627,7 @@ class RegisterItemViewTest(unittest.TestCase):
         entries = shown["registration"]["draft"]
         texts = ([e["line"] for e in entries] + [o["label"] for e in entries for o in e["options"]]
                  + [shown["registration"]["draft_more"]])
-        self.assertEqual(len(entries), 28)
+        self.assertEqual(len(entries), 27)
         for text in texts:
             for term in ("<num>", "<slug>", "light lane", "hint", "operations path",
                          "rejection path"):
@@ -3637,7 +3637,7 @@ class RegisterItemViewTest(unittest.TestCase):
             f"and {len([f for f in contract_draft.FIELDS if f not in contract_draft.MAIN])} more "
             "settings at their usual values")
         self.assertEqual(shown["registration"]["draft_more"],
-                         "and 21 more settings at their usual values")
+                         "and 20 more settings at their usual values")
 
     def test_a_text_card_carries_the_placeholder_of_its_field(self):
         ask = {"id": "contract-draft", "subject": "project-id",
@@ -3788,6 +3788,19 @@ class ProposedEnvironmentViewTest(unittest.TestCase):
             **contract_draft.read("/nonexistent"), "hooks": ["pre-commit"],
             "environments": ["devenv.nix"]})
         return {**self.LATEST, "draft": fields}
+
+    def test_an_adopted_registration_offers_no_project_id_card(self):
+        latest = {**self.LATEST, "result": "drafting", "state": "drafting", "outcome": None,
+                  "questions": [{"id": contract_draft.QUESTION_ID, "subject": "project-id",
+                                 "ask": "What is the project id?", "why": "It names the project.",
+                                 "options": [], "text": True}]}
+        adoption = {"status": "done", "step": "opened", "state": "merged", "headline": "adopted",
+                    "lines": [], "note": None, "branch": None, "commit": None, "url": None}
+        self.assertEqual(
+            [e["reason"] for e in view._register_entries(register.view_entry(None, latest))],
+            ["register"])
+        self.assertEqual(
+            view._register_entries(register.view_entry(None, latest, adoption=adoption)), [])
 
     def test_the_ready_apply_card_states_the_proposal_first_and_hides_the_draft(self):
         latest = self.latest()

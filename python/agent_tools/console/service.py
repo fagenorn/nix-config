@@ -4910,8 +4910,8 @@ class ConsoleService:
             self._account_identities = account_add.identities_state(events)
             self._trust_failures = folder_trust.failures(events)
             self._registration_fold = register.fold(events)
-            self._registration = self._registration_fold.latest
             self._adoptions = approve.adoptions(events)
+            self._registration = register.shown(self._registration_fold, self._adoptions)
             self._release_cards = release_card.cards(events)
             self._prompts = prompt_card.prompts(events)
             self._deferred = approve.deferrals(events)
@@ -6599,6 +6599,10 @@ class ConsoleService:
             latest = self._registration
             if latest is None or latest["plan_id"] != plan_id:
                 raise sprints.Refused(plan_questions.STALE)
+            adopted = self._adoptions.get(plan_id)
+            if adopted is not None and not register.plans_again(adopted["step"],
+                                                                adopted["pull_state"]):
+                raise sprints.Refused(plan_questions.ADOPTED)
             root = latest["root"]
             changed = None
             if question == contract_draft.QUESTION_ID:
@@ -10295,8 +10299,8 @@ class ConsoleService:
         self._account_identities = account_add.identities_state(appended, self._account_identities)
         self._trust_failures = folder_trust.failures(appended, self._trust_failures)
         self._registration_fold = register.fold(appended, self._registration_fold)
-        self._registration = self._registration_fold.latest
         self._adoptions = approve.adoptions(appended, self._adoptions)
+        self._registration = register.shown(self._registration_fold, self._adoptions)
         self._release_cards = release_card.cards(appended, self._release_cards)
         self._prompts = prompt_card.prompts(appended, self._prompts)
         self._deferred = approve.deferrals(appended, self._deferred)
@@ -10342,8 +10346,8 @@ class ConsoleService:
                 self._account_identities = account_add.identities_state(events)
                 self._trust_failures = folder_trust.failures(events)
                 self._registration_fold = register.fold(events)
-                self._registration = self._registration_fold.latest
                 self._adoptions = approve.adoptions(events)
+                self._registration = register.shown(self._registration_fold, self._adoptions)
                 self._release_cards = release_card.cards(events)
                 self._prompts = prompt_card.prompts(events)
                 self._deferred = approve.deferrals(events)
