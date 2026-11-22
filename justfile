@@ -115,6 +115,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
     home/common/agent-skills/tests/test_eval_cases.py \
+    home/common/agent-skills/tests/test_eval_sandboxes.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
     home/common/agent-skills/tests/test_skill_lint.py \
@@ -279,6 +280,7 @@ agent-workflow-tests *args:
     tests/test_console_register_check.py \
     tests/test_console_approve.py \
     tests/test_console_approve_service.py \
+    tests/test_console_approve_waits.py \
     tests/test_console_commit_failure.py \
     tests/test_console_accounts_sandbox.py \
     tests/test_console_manager_check.py \
