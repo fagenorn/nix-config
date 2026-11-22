@@ -83,6 +83,20 @@ RETIRED = (
 NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow")
 
 
+def declares(source: object) -> bool:
+    """Whether `source` declares schema 3 as an integer; `3.0` and `true` do not."""
+    if not isinstance(source, dict):
+        return False
+    version = source.get("schema_version")
+    return (isinstance(version, int) and not isinstance(version, bool)
+            and version == SCHEMA_VERSION)
+
+
+def _escaped(token: str) -> str:
+    """One reference token of an RFC 6901 JSON pointer."""
+    return token.replace("~", "~0").replace("/", "~1")
+
+
 def _segments(pointer: str) -> list[str]:
     return pointer.split("/")[1:]
 
@@ -123,6 +137,8 @@ def fill(source: dict) -> dict:
     nothing changes when `bindings` is not an object.
     """
     view = copy.deepcopy(source)
+    for pointer in RETIRED:
+        _delete(view, pointer)
     bindings = view.get("bindings")
     if not isinstance(bindings, dict):
         return view
@@ -137,8 +153,6 @@ def fill(source: dict) -> dict:
                 del commands[command_id]
             elif isinstance(commands[command_id], dict):
                 commands[command_id].update(copy.deepcopy(COMMAND_CONSTANTS))
-    for pointer in RETIRED:
-        _delete(view, pointer)
     return view
 
 
@@ -199,12 +213,13 @@ def refusals(source: dict) -> list[dict]:
     commands = bindings.get("commands")
     if isinstance(commands, dict):
         for command_id, entry in commands.items():
+            token = _escaped(command_id)
             if command_id in COMMANDS:
-                refuse(f"/bindings/commands/{command_id}", "platform_constant")
+                refuse(f"/bindings/commands/{token}", "platform_constant")
             elif isinstance(entry, dict):
                 for member in COMMAND_CONSTANTS:
                     if member in entry:
-                        refuse(f"/bindings/commands/{command_id}/{member}",
+                        refuse(f"/bindings/commands/{token}/{member}",
                                "platform_constant")
     if "commands" not in bindings or isinstance(commands, dict):
         for command_id in CONSTANTS["/bindings/workflow/verification"]:

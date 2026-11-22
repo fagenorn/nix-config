@@ -1218,15 +1218,14 @@ def check_production_entries(
 
 def platform_commands(source: object) -> dict:
     """The platform command table the contract's schema reads: schema 3 adds `commit-environment`."""
-    if isinstance(source, dict) and source.get("schema_version") == schema_three.SCHEMA_VERSION:
+    if schema_three.declares(source):
         return schema_three.COMMANDS
     return agent_platform.PLATFORM_COMMANDS
 
 
 def contract_view(source: dict) -> dict:
     """The contract the shape rules and the snapshot read: schema 3 with its constants filled, else `source`."""
-    if (isinstance(source, dict)
-            and source.get("schema_version") == schema_three.SCHEMA_VERSION):
+    if schema_three.declares(source):
         return schema_three.fill(source)
     return source
 
@@ -1369,11 +1368,10 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
     # Schema 3 is judged through its filled view: the shape rules are schema 2's,
     # over the member lists schema 3 keeps. What the contract authors that the
     # platform decides is refused from the authored source first.
-    if (isinstance(source, dict)
-            and source.get("schema_version") == schema_three.SCHEMA_VERSION):
+    three = schema_three.declares(source)
+    if three:
         violations.extend(schema_three.refusals(source))
     source = contract_view(source)
-    three = source.get("schema_version") == schema_three.SCHEMA_VERSION
     for name in TOP_LEVEL_MEMBERS:
         # `schema_version` reports its own absence above, with the repair id
         # that names the version rather than the generic missing-member one.

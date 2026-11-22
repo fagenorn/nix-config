@@ -227,6 +227,11 @@ def assert_read_only(case: unittest.TestCase, root: Path,
 # P11: a pinned schema-2 contract, so a later change to this repository's own contract cannot move the suites.
 SCHEMA_TWO_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "project-contract-schema-2.json"
 # The snapshot the base resolver printed for that fixture, with the temp root spelled `<root>`.
+def canonical_json(document: object) -> str:
+    """The document's JSON text with sorted keys, so a scalar's type (`true` against `1`) is kept."""
+    return json.dumps(document, sort_keys=True, separators=(",", ":"))
+
+
 SCHEMA_TWO_SNAPSHOT = Path(__file__).resolve().parent / "fixtures" / "project-contract-schema-2.snapshot.json"
 
 
@@ -441,8 +446,16 @@ class SchemaTwoSnapshotPinTest(ResolverTestCase):
         code, out, err = run_with_path(str(stub), "resolve", "--repo-root", str(root),
                                        home=self.home)
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out.replace(str(root), "<root>")),
-                         json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8")))
+        self.assertEqual(canonical_json(json.loads(out.replace(str(root), "<root>"))),
+                         canonical_json(json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8"))))
+
+    def test_the_snapshot_pin_tells_a_boolean_from_an_integer(self):
+        stored = json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8"))
+        changed = copy.deepcopy(stored)
+        self.assertIs(stored["bindings"]["vcs"]["commit"]["signed"], True)
+        changed["bindings"]["vcs"]["commit"]["signed"] = 1
+        self.assertEqual(changed, stored)
+        self.assertNotEqual(canonical_json(changed), canonical_json(stored))
 
     def test_the_stored_snapshot_has_the_schema_two_shape(self):
         stored = json.loads(SCHEMA_TWO_SNAPSHOT.read_text("utf-8"))

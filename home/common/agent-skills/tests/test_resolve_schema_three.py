@@ -78,6 +78,9 @@ SKILL_ROOTS = (
 MEMBER_PATH = re.compile(
     r"(?<![\w./-])(project|bindings|capabilities)((?:\.[A-Za-z_][A-Za-z0-9_]*)+)")
 
+INDEXED_READ = re.compile(
+    r"(?<![\w./-])(bindings\.commands)\[([a-z_]+)\]((?:\.[A-Za-z_][A-Za-z0-9_]*)+)")
+
 ISSUE_READS = {
     "project.root",
     "bindings.tracker.repo_slug",
@@ -134,6 +137,34 @@ def named_member_paths() -> dict[str, list[str]]:
             if relative not in named:
                 named.append(relative)
     return found
+
+
+def indexed_reads() -> set[tuple[str, str, str]]:
+    """Each (container, index name, member path) a skill reads as `container[index].member`."""
+    found: set[tuple[str, str, str]] = set()
+    for top in SKILL_ROOTS:
+        for path in sorted(top.rglob("*.md")):
+            if path.name == "CHANGELOG.md":
+                continue
+            for match in INDEXED_READ.finditer(path.read_text(encoding="utf-8")):
+                found.add((match.group(1), match.group(2), match.group(3)[1:]))
+    return found
+
+
+def indexed_read_misses(snapshot: dict, reads: set[tuple[str, str, str]]) -> list[str]:
+    """The indexed reads a snapshot does not answer, for each command a skill's index name selects."""
+    review = snapshot["bindings"]["workflow"]["review"]
+    selected = {"review_id": [review["plan"], review["code"]]}
+    misses = []
+    for container, index, member in sorted(reads):
+        for command_id in selected.get(index, [None]):
+            node = values_at(snapshot, container)[0] if command_id else None
+            node = node.get(command_id) if isinstance(node, dict) else None
+            for key in member.split("."):
+                node = node.get(key, None) if isinstance(node, dict) else None
+            if node is None:
+                misses.append(f"{container}[{command_id or index}].{member}")
+    return misses
 
 
 def values_at(snapshot: dict, path: str) -> list | None:
@@ -216,6 +247,23 @@ class ProgramReadsTest(SchemaThreeCase):
         for path in sorted(set(reads) | ISSUE_READS):
             with self.subTest(path=path):
                 self.assertIsNotNone(values_at(snap, path), reads.get(path, "the issue"))
+
+    def test_a_schema_three_snapshot_answers_every_indexed_command_read(self):
+        reads = indexed_reads()
+        self.assertIn(("bindings.commands", "review_id", "argv"), reads)
+        root = self.schema_three_root(schema_three_contract())
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(indexed_read_misses(snap, reads), [])
+
+    def test_an_indexed_read_of_an_absent_member_is_a_miss(self):
+        root = self.schema_three_root(schema_three_contract())
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        misses = indexed_read_misses(
+            snap, {("bindings.commands", "review_id", "nonexistent")})
+        self.assertEqual(misses, ["bindings.commands[codex-plan-review].nonexistent",
+                                  "bindings.commands[codex-diff-review].nonexistent"])
 
     def test_every_constant_is_filled(self):
         root = self.schema_three_root(schema_three_contract())
@@ -319,6 +367,15 @@ class SchemaThreeFillTest(unittest.TestCase):
         self.assertNotIn("light_lane", view["bindings"]["workflow"])
 
 
+    def test_fill_drops_a_retired_member_when_bindings_is_not_an_object(self):
+        source = schema_three_contract()
+        source["project"]["name"] = "nix-config"
+        source["bindings"] = []
+        view = schema_three.fill(source)
+        self.assertEqual(sorted(view["project"]), ["id"])
+        self.assertEqual(view["bindings"], [])
+
+
 class SchemaThreeRefusalTest(SchemaThreeCase):
     """A schema-3 contract that authors a constant or a retired member is refused by name."""
 
@@ -371,6 +428,36 @@ class SchemaThreeRefusalTest(SchemaThreeCase):
                     f"{'retired_member' if retired else 'platform_constant'}")
                 for violation in error["violations"]:
                     self.assertTrue(violation["message"])
+
+    def test_a_command_id_with_a_slash_or_tilde_is_refused_at_its_escaped_pointer(self):
+        for command_id, token in (("ci/lint", "ci~1lint"), ("ci~lint", "ci~0lint")):
+            with self.subTest(command_id):
+                contract = schema_three_contract()
+                contract["bindings"]["commands"][command_id] = {
+                    "argv": ["just", "lint"], "cwd": "."}
+                code, payload, _ = self.resolve(self.schema_three_root(contract))
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual([v["pointer"] for v in error["violations"]],
+                                 [f"/bindings/commands/{token}/cwd"])
+                self.assertEqual(error["repair_id"], "contract.commands.platform_constant")
+
+    def test_a_retired_member_beside_a_malformed_bindings_is_refused_once(self):
+        contract = schema_three_contract()
+        contract["project"]["name"] = "nix-config"
+        contract["bindings"] = []
+        code, payload, _ = self.resolve(self.schema_three_root(contract))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        pointers = [v["pointer"] for v in error["violations"]]
+        self.assertEqual(pointers.count("/project/name"), 1)
+        self.assertEqual(sorted(pointers), ["/bindings", "/project/name"])
+
+    def test_a_float_schema_version_is_not_schema_three(self):
+        contract = schema_two_equivalent(schema_three_contract())
+        contract["schema_version"] = 3.0
+        code, payload, _ = self.resolve(self.owned(make_project_root(contract)))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]], ["/schema_version"])
+        self.assertEqual(error["repair_id"], "contract.schema_version.invalid")
 
     def test_a_missing_verification_command_is_refused_at_its_command(self):
         def drop(*ids):
