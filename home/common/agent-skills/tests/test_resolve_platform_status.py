@@ -39,6 +39,11 @@ from .test_resolve_project import (
     source_contract,
     tree_snapshot,
 )
+from .test_resolve_schema_three import (
+    EXPECTED_DERIVED,
+    make_schema_three_root,
+    schema_three_contract,
+)
 
 
 PLATFORM_STATUS_MEMBERS = [
@@ -119,6 +124,16 @@ class PlatformStatusTest(ResolverTestCase):
         self.assertNotIn("\n", out[:-1])
         self.assertEqual(out, json.dumps(
             json.loads(out), sort_keys=True, separators=(",", ":")) + "\n")
+
+    def test_a_schema_three_project_reports_its_derived_identity_and_interval(self):
+        root = make_schema_three_root(schema_three_contract())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        code, payload, err = self.status("--repo-root", str(root))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(payload["project"]["project_id"], "fagenorn/nix-config")
+        self.assertEqual(payload["project"]["platform_interval"],
+                         EXPECTED_DERIVED["/platform"])
+        self.assertTrue(payload["compatibility"]["compatible"])
 
     def test_a_compatible_project_reports_a_clean_verdict(self):
         root = self.make_root()
@@ -234,6 +249,17 @@ class PlatformStatusFleetTest(ResolverTestCase):
         self.assertFalse(row["compatible"])
         self.assertEqual(row["reason_code"], "project_schema_unsupported")
         self.assertEqual(row["repair_id"], "contract.schema_version.unsupported")
+
+    def test_a_schema_three_registered_project_is_not_an_identity_mismatch(self):
+        root = make_schema_three_root(schema_three_contract())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(root)}))
+        code, payload, err = self.fleet()
+        self.assertEqual(code, 0, err)
+        row = payload["fleet"][0]
+        self.assertTrue(row["compatible"])
+        self.assertIsNone(row["reason_code"])
 
     def test_an_absent_registry_is_the_empty_fleet(self):
         """And the state root is read, never created (R3.6)."""

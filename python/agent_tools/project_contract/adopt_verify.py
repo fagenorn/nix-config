@@ -96,6 +96,7 @@ from agent_tools.project_contract.adopt_inspection import (
     remote_heads,
     resolver_error_code,
     resolver_violation_pointers,
+    seed_origin,
     tracked_inventory,
     tree_inventory,
     verify_check_entry,
@@ -167,6 +168,17 @@ def _fetch_pin(root: Path, branch: str, listed: str | None,
 FETCH_READER = SourceReader(pin=_fetch_pin, export=export_commit, inventory=True)
 
 
+def export_pinned(reader: SourceReader, root: Path, commit: str,
+                  destination: Path) -> None:
+    """`reader.export` of `commit`, then the checkout's `origin` url seeded into the export.
+
+    The resolver runs on the export, and a schema-3 contract's project id and
+    tracker slug come from that remote (ADR-project-contract-014).
+    """
+    reader.export(root, commit, destination)
+    seed_origin(root, destination)
+
+
 def branch_override(source: VerificationSource) -> dict | None:
     """The `branch_override` member for `source`, or `None` when it has none.
 
@@ -203,7 +215,9 @@ def remote_source(root: Path, run_resolver: Resolver,
     `origin`, is pinned to `R2` the same way, exported, and its own contract
     must still name `B`, so there is no second hop. Every later check reads the
     one pinned commit, and the scratch directory lives as long as the caller's
-    `with` block and is removed on success and on every refusal.
+    `with` block and is removed on success and on every refusal. Each export is
+    given the checkout's `origin` url (`export_pinned`), so a schema-3
+    contract's derived identity is the one the checkout has.
 
     `reader` decides how each branch is pinned and exported, and is handed the
     commit `origin` listed for the branch. The default, `FETCH_READER`, fetches
@@ -254,7 +268,7 @@ def remote_source(root: Path, run_resolver: Resolver,
         pinned = reader.pin(root, default, heads.listed.get(default),
                             network_timeout)
         exported = Path(scratch) / "default"
-        reader.export(root, pinned, exported)
+        export_pinned(reader, root, pinned, exported)
         exit_code, payload = run_resolver(exported, "resolve")
         default_resolved = exit_code == 0
         named = integration_branch(payload) if default_resolved else None
@@ -323,7 +337,7 @@ def pin_integration_branch(root: Path, run_resolver: Resolver, branch: str,
     branch; `network_timeout` bounds that pin's network read.
     """
     pinned = reader.pin(root, branch, listed, network_timeout)
-    reader.export(root, pinned, destination)
+    export_pinned(reader, root, pinned, destination)
     exit_code, payload = run_resolver(destination, "resolve")
     if exit_code != 0 or integration_branch(payload) != branch:
         raise unresolved_integration_branch(unconfirmed)
