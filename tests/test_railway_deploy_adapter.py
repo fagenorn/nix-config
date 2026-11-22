@@ -846,3 +846,25 @@ class CompiledRailwayWatchTest(unittest.TestCase):
         result = binding.inspect({"parameters": unit})
         self.assertEqual((result["outcome"], json.loads(result["reference"])["reason"]),
                          ("diverged", "deployment_failed"))
+
+
+class LinkageTest(unittest.TestCase):
+    CONFIG = {"project": "nodo-prod", "environment": "production", "services": ["api"]}
+    PROBLEM = "the linked project is not nodo-prod with environment production"
+
+    def test_a_matching_link_has_no_problem(self):
+        payload = {"name": "nodo-prod", "environments": {"edges": [
+            {"node": {"name": "staging"}}, {"node": {"name": "production"}}]}}
+        self.assertIsNone(adapter.linkage_problem(payload, self.CONFIG))
+
+    def test_another_project_or_a_missing_environment_is_a_problem(self):
+        payloads = [
+            {"name": "other", "environments": {"edges": [{"node": {"name": "production"}}]}},
+            {"name": "nodo-prod", "environments": {"edges": [{"node": {"name": "staging"}}]}},
+            {"name": "nodo-prod"},
+            {"name": "nodo-prod", "environments": {"edges": ["x", {"node": "y"}]}},
+            [],
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                self.assertEqual(adapter.linkage_problem(payload, self.CONFIG), self.PROBLEM)
