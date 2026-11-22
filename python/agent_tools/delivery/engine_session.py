@@ -30,6 +30,12 @@ stdin.
 The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
 permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
 shell command is denied, so a session cannot write to the worktree through it.
+`git diff`, `git log` and `git show` write a file given `--output`, which those
+prefix patterns would preapprove, so `GIT_WRITING` is passed as
+`--disallowedTools` (a deny rule is checked before an allow rule). A role that
+needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
+one that is denied a shell command anyway is a fault (`engine_shell`), never a
+graded reply.
 
 `reply_problem` checks a structured reply against the reply schema's keywords
 `type`, `enum`, `const`, `required`, `properties`, `additionalProperties` and
@@ -77,6 +83,8 @@ NOT_STARTED = 127
 READ_ONLY_BASH: tuple[str, ...] = tuple(
     f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
                                       "blame", "merge-base"))
+GIT_WRITING: tuple[str, ...] = tuple(
+    f"Bash(git {verb}*--output*)" for verb in ("diff", "log", "show"))
 DIAGNOSTIC_CHARS = 300
 _USAGE_KEYS = {"input": "input_tokens", "cache_write": "cache_creation_input_tokens",
                "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
@@ -220,12 +228,15 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) 
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
             "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
             "--model", role.model, "--effort", role.effort]
+    disallowed = list(role.disallowed or ())
     if role.tools is not None:
         allowed = [entry for name in role.tools
                    for entry in (READ_ONLY_BASH if name == "Bash" else (name,))]
         argv += ["--tools", ",".join(role.tools), "--allowedTools", ",".join(allowed)]
-    if role.disallowed is not None:
-        argv += ["--disallowedTools", ",".join(role.disallowed)]
+        if "Bash" in role.tools:
+            disallowed += GIT_WRITING
+    if role.disallowed is not None or disallowed:
+        argv += ["--disallowedTools", ",".join(disallowed)]
     return (*argv, "--append-system-prompt-file", str(system_prompt))
 
 

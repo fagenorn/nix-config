@@ -211,6 +211,9 @@ LAUNCHER_STANDIN = (
 GIT_READ_ONLY = ("Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),"
                  "Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git blame:*),"
                  "Bash(git merge-base:*)")
+# `git diff`, `git log` and `git show` all write a file given `--output=<file>`; the prefix
+# patterns above would preapprove that, so these deny rules (checked first) refuse it.
+GIT_WRITING = ("Bash(git diff*--output*),Bash(git log*--output*),Bash(git show*--output*)")
 
 
 class LaunchArgvTest(unittest.TestCase):
@@ -222,6 +225,17 @@ class LaunchArgvTest(unittest.TestCase):
         self.assertNotIn("Bash", allowed)
         self.assertEqual(allowed, ["Read", *GIT_READ_ONLY.split(","), "Skill"])
 
+    def test_the_git_commands_that_write_a_file_through_output_are_denied(self):
+        argv = launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM)
+        self.assertEqual(after(list(argv), "--disallowedTools"), GIT_WRITING)
+
+    def test_the_output_denial_joins_a_roles_own_disallowed_tools_and_needs_bash(self):
+        both = Role("reviewer", "opus", "high", ("Read", "Bash"), ("Write",), "")
+        self.assertEqual(after(list(launch_argv(both, SCHEMA, SESSION, SYSTEM)),
+                               "--disallowedTools"), f"Write,{GIT_WRITING}")
+        no_shell = Role("reviewer", "opus", "high", ("Read",), None, "")
+        self.assertNotIn("--disallowedTools", launch_argv(no_shell, SCHEMA, SESSION, SYSTEM))
+
     def test_the_argv_is_the_launcher_print_form_with_the_role_by_flags(self):
         self.assertEqual(launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM), (
             "claude-account", "run", "-p", "--output-format", "json", "--json-schema",
@@ -230,6 +244,7 @@ class LaunchArgvTest(unittest.TestCase):
             "--session-id", "0b0b8a8e-6f0e-4d47-9d6a-3f1f2b9c1a11", "--strict-mcp-config",
             "--permission-mode", "dontAsk", "--model", "opus", "--effort", "high",
             "--tools", "Read,Bash", "--allowedTools", f"Read,{GIT_READ_ONLY}",
+            "--disallowedTools", GIT_WRITING,
             "--append-system-prompt-file", "/run/sessions/review.1.system.md"))
 
     def test_a_role_with_disallowed_tools_passes_only_disallowed_tools(self):
@@ -527,7 +542,10 @@ class DeliverSessionTest(unittest.TestCase):
                 self.assertEqual(after(argv, "--tools"), names(tools))
                 self.assertEqual(after(argv, "--allowedTools"),
                                  names(tools).replace("Bash", GIT_READ_ONLY))
-                self.assertNotIn("--disallowedTools", argv)
+                if "Bash" in tools:
+                    self.assertEqual(after(argv, "--disallowedTools"), GIT_WRITING)
+                else:
+                    self.assertNotIn("--disallowedTools", argv)
             self.assertEqual(Path(after(argv, "--append-system-prompt-file")).read_text(
                 encoding="utf-8"), text.partition("\n---\n")[2])
             for word in ("--agent", "--bare", "--setting-sources",
@@ -650,6 +668,30 @@ class DeliverSessionTest(unittest.TestCase):
                          "tool_input": {"file_path": "/etc/hosts"}}],
             "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
             "session": self.starting()["session"], "subtype": "success"})
+
+    def test_a_denied_shell_command_is_a_fault_not_a_graded_reply(self):
+        denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
+                  "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
+        install_stub(self.project, canned_result(
+            structured_output={"verdict": "approve"}, permission_denials=[denial]))
+        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
+                            prompt="review.md", reply="review.reply.json",
+                            outcome_from="verdict")]
+        procedures = write_procedures(self.project, steps, {
+            "review.md": "Review {{run.issue}}.\n",
+            "review.reply.json": json.dumps(REVIEW_REPLY)})
+        done = self.project.deliver(procedures, issue=1514)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        for word in ("review", "python3 -m unittest tests.test_x"):
+            self.assertIn(word, done.stderr)
+        run = self.run_dir()
+        kinds = [e["event"] for e in self.project.events(run)]
+        for kind in ("result_stored", "outcome_graded", "transition_taken", "run_done"):
+            self.assertNotIn(kind, kinds)
+        record = json.loads((run / "sessions/review.1.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["denials"], [denial])
 
     def test_a_result_without_its_duration_records_the_engines_measure(self):
         install_stub(self.project, canned_result(duration_ms=...))

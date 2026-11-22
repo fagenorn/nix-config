@@ -19,7 +19,8 @@ root: its role body, rendered prompt and a session record are stored under the
 run's `sessions/`, `session_starting` is on disk before the process is spawned,
 and only the `outcome_from` member of the session's structured reply grades the
 step. A session with no structured reply is a `Fault`, so neither the prose nor
-the exit code selects an outcome. An outcome the step's `on` does not map is a
+the exit code selects an outcome, and so is a session denied a shell command,
+whose reply may rest on a check it never ran. An outcome the step's `on` does not map is a
 `Fault`. A run ends with `run_done`
 or `stop_reached`.
 
@@ -387,6 +388,13 @@ def _visit_session(run_dir: Path, root: str, step: dict,
         run_dir, f"{name}.{visit}.json",
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     reply = reading.reply
+    denied = next((d for d in reading.denials
+                   if isinstance(d, dict) and d.get("tool_name") == "Bash"), None)
+    if denied is not None:
+        tool_input = denied.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        raise Fault(f"step {name} was denied the shell command {str(command)[:200]!r}, so its "
+                    f"reply is not graded: list it in the role's tools as Bash(<prefix>:*)")
     if reply is None:
         reason = engine_session.diagnostic(launched.stderr)
         raise Fault(f"step {name} gave no structured reply, exit {launched.exit_code}"
