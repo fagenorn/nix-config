@@ -20,9 +20,19 @@ _Avoid_: context file, index
 **Delivery**:
 The work of carrying one issue from claim to merge on its own branch and worktree. A delivery ends when the integration branch holds the change and its evidence criteria are met or handed to a Verify block.
 
+**Engine**:
+The deterministic program in the platform package that runs a delivery as a procedure, with no model choosing the next step. `engine check` validates every procedure before any run.
+
+**Grader**:
+A pure function in the engine that turns stored results into an outcome for a `decide` step.
+
 **Lane**:
-The route an issue takes to merge: the direct lane for a small concrete change, the standard lane for a specced and planned one. The triage record decides which applies.
+The route an issue takes to merge: the direct lane for a small concrete change, the standard lane for a specced and planned one, the live-fault lane for a declared live fault. The triage record decides between the first two; a live-fault declaration selects the third.
 _Avoid_: track, tier
+
+**Live-fault lane**:
+The route of an issue with a standing live-fault declaration (ADR-console-099), selected by that declaration and with no plan. One implementer gives a failing-then-passing test, and the lane refuses a diff over 80 changed lines outside tests or over 3 files, or one touching authentication, secrets or a guard. One diff review follows, where only a critical finding blocks and the rest become follow-up issues. Everything is bound to one commit, and the time from declaration to a green pull request is recorded (ADR-delivery-013).
+_Avoid_: hotfix lane
 
 **Light lane**:
 The project-declared reduced route for changes that a project's contract names as light. A project that declares none, or `null`, does not support it, and the verdict falls back to the standard route.
@@ -35,6 +45,18 @@ The path globs, declared per area in `.github/look-files.json` on the integratio
 
 **Look marker**:
 An acceptance criterion of kind human written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`; it makes the issue need the owner's look at its pull request head before merge (issue 1138). Read only by `agent_tools.delivery.look_marker`. `look-lint` refuses a body with a criterion line that is a near miss of it (issue 1141). An ordinary `[human]` criterion or a hold in prose is not one.
+
+**Outcome**:
+The one named result a step's grade produces; the only thing a transition reads.
+
+**Procedure**:
+One JSON file in the platform package that describes a delivery as a finite state machine: a header (its `format`, a keep-alive command, its stops) and a flat list of steps, with no expression and no code. Its prompts are sibling Markdown files.
+
+**Step**:
+One entry of a procedure: an id, a stage, a kind (`command`, `agent`, `decide`, `group` or `call`), what it reads, a map from each outcome to the next step, a stop or `done`, a visit bound and whether it changes something.
+
+**Stop**:
+A named end state of a run that is not `done`, with what it needs (an owner decision, an owner look, a retry or nothing) and the step a resumed run re-enters.
 
 **Suite member**:
 One test file or script named in the project's declared agent-workflow test recipe. The suite runner schedules the members by recorded duration, and the last member is pinned.

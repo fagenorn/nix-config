@@ -31,7 +31,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing")
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing", "prompting")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -1034,16 +1034,20 @@ def uncovered(moved, rows) -> list[str]:
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifty_two_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 52)
-        self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:3],
-                         ("waiting-until", "paused", "owner-check"))
+    def test_the_set_is_fifty_five_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 55)
+        self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:5],
+                         ("permission-stale", "permission-card", "waiting-until", "paused",
+                          "owner-check"))
+        self.assertEqual(shots.STATES[shots.STATES.index("notice-post-open") + 1], "live-fault")
         self.assertEqual(shots.STATES[-8:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors", "owner-accounts"))
         self.assertIn("guest-steer", shots.SHARING_STATES)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
+        self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:2],
+                         ("permission-stale", "permission-card"))
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
                          ("inbox-card", "question-words", "question-refused"))
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
@@ -1179,6 +1183,30 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     else:
                         self.assertNotIn(wanted, page.waits)
 
+    def test_the_live_fault_shot_waits_for_its_line_where_the_service_declares_them(self) -> None:
+        wanted = (".sprint-checks .live-fault", ".live-fault-withdraw")
+        for width in (1440, 480):
+            for declared in (True, False):
+                with self.subTest(width=width, declared=declared), \
+                        tempfile.TemporaryDirectory() as tmp, \
+                        mock.patch.object(shots, "declares_live_faults", return_value=declared):
+                    browser, page = fake_browser(set())
+                    order = []
+                    page.screenshot = lambda path, full_page: order.append("shot")
+                    wait = page.wait_for_selector
+                    page.wait_for_selector = lambda s: (wait(s), order.append(s))
+                    shots._shoot(browser, "http://console.test/", "live-fault", width, Path(tmp))
+                    for selector in wanted:
+                        if declared:
+                            self.assertIn(selector, page.waits)
+                            self.assertLess(order.index(selector), order.index("shot"))
+                        else:
+                            self.assertNotIn(selector, page.waits)
+
+    def test_the_live_fault_withdraw_is_not_jargon(self) -> None:
+        self.assertIn("button.live-fault-withdraw", shots.JARGON_COUNT)
+        self.assertIn("button.notice-withdraw", shots.JARGON_COUNT)
+
     def test_the_owner_accounts_shot_opens_the_panel_and_waits_for_sign_out_where_the_service_offers_it(
             self) -> None:
         for width in (1440, 480):
@@ -1306,6 +1334,88 @@ class ScreenshotFixtureTest(unittest.TestCase):
             shots.capture(Path(tmp), states=("adoption-failed",))
         self.assertEqual(started.call_count, len(shots.WIDTHS))
         self.assertEqual(cards, [(width, ["adoption"]) for width in shots.WIDTHS])
+
+    def permission_views(self, state: str) -> list:
+        """What a shot of `state` finds on the console at each width: `(width, /api/state)`, from the real `capture`."""
+        class Browser:
+            def close(self):
+                pass
+
+        class Playwright:
+            chromium = types.SimpleNamespace(launch=lambda args=None: Browser())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        api = types.ModuleType("playwright.sync_api")
+        api.Error = type("Error", (Exception,), {})
+        api.sync_playwright = Playwright
+        views = []
+
+        def fake(browser, url, state, width, out, **kwargs):
+            host, port = url.split("//")[1].split("/")[0].split(":")
+            connection = http.client.HTTPConnection(host, int(port))
+            try:
+                connection.request("GET", "/api/state")
+                views.append((width, json.loads(connection.getresponse().read())))
+            finally:
+                connection.close()
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"),
+                                              "playwright.sync_api": api}), \
+                mock.patch.object(shots, "_shoot", side_effect=fake):
+            shots.capture(Path(tmp), states=(state,))
+        return views
+
+    def test_the_permission_card_shot_finds_the_held_prompt_at_each_width(self) -> None:
+        # Without `hold_permission` in `capture` the PNGs are still named right, so the view is read at the shot.
+        views = self.permission_views("permission-card")
+        self.assertEqual([width for width, _ in views], list(shots.WIDTHS))
+        for width, view in views:
+            with self.subTest(width=width):
+                held = [i for i in view["inbox"]["open"] if i["reason"] == "permission"]
+                self.assertEqual([(i["command"], i["words"]) for i in held],
+                                 [(shots.PERMISSION_COMMAND, shots.PERMISSION_WORDS)])
+                self.assertEqual(view["statement"]["inbox_items"], 1)
+
+    def test_the_permission_stale_shot_finds_nothing_that_needs_the_owner(self) -> None:
+        views = self.permission_views("permission-stale")
+        self.assertEqual([width for width, _ in views], list(shots.WIDTHS))
+        for width, view in views:
+            with self.subTest(width=width):
+                self.assertEqual(view["statement"]["inbox_items"], 0)
+                self.assertEqual(view["inbox"]["open"], [])
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp), "permission-stale", now_s)
+            svc = shots.start_service(fixture, now_s)
+            try:
+                svc.poll_sessions()
+                view = json.loads(svc.view_bytes)
+            finally:
+                svc.close()
+        self.assertEqual(view["statement"]["inbox_items"], 0)
+
+    def test_the_held_prompt_is_a_card_in_the_fixture_view_once_posted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp), "permission-card", now_s)
+            svc = shots.start_service(fixture, now_s)
+            try:
+                before = json.loads(svc.view_bytes)
+                held = shots.hold_permission(svc, fixture)
+                shots.keep_permission(svc, fixture, held)
+                view = json.loads(svc.view_bytes)
+            finally:
+                svc.close()
+        self.assertEqual(before["statement"]["inbox_items"], 0)
+        self.assertIsInstance(held, int)
+        self.assertEqual([i["command"] for i in view["inbox"]["open"]], [shots.PERMISSION_COMMAND])
+        self.assertEqual(view["statement"]["inbox_items"], 1)
 
     def test_the_recipe_help_counts_the_files_a_full_run_writes(self) -> None:
         justfile = (Path(__file__).resolve().parent.parent / "justfile").read_text()
@@ -2671,6 +2781,20 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertFalse(shots.overlap_card())
                     self.assertEqual(
                         [i for i in view["inbox"]["open"] if i.get("reason") == "question"], [])
+                elif state == "live-fault":
+                    self.assertEqual([s["title"] for s in running], ["Fix the settings page"])
+                    faults = running[0]["live_faults"]
+                    self.assertEqual(len(faults), 1)
+                    self.assertIsInstance(faults[0]["id"], int)
+                    self.assertIsInstance(faults[0]["at"], str)
+                    self.assertEqual(faults, [{
+                        "id": faults[0]["id"], "issue": 12,
+                        "observed": shots.LIVE_FAULT_OBSERVED, "when": shots.LIVE_FAULT_WHEN,
+                        "proven": shots.LIVE_FAULT_PROVEN, "at": faults[0]["at"],
+                        "text": "Live fault in production on #12: saving the settings form "
+                                "drops the billing address, seen 12:10 UTC today, proven by a "
+                                "saved form read back from the production database"}])
+                    self.assertEqual(view["statement"]["inbox_items"], 0)
                 elif state in ("ask-box", "ask-goal"):
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
                     threads = web["questions"]["threads"]

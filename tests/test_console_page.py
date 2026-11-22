@@ -183,7 +183,11 @@ class PageTest(unittest.TestCase):
         # Raised from 70 KB by #1272: the thread delete control, the credential refusal's draft cleanup in both
         # editors and the settling of accepted questions after a stream break (about 1 KB compressed) did not fit
         # the 100 bytes the cap had left.
-        self.assertLess(len(gzip.compress(self.data, 9)), 72704)
+        # Raised from 71 KB by #1424: the permission card's answer buttons keep their focus through a redraw and
+        # stay focusable while sending (about 150 bytes compressed, over the 2 the cap had left).
+        # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
+        # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
+        self.assertLess(len(gzip.compress(self.data, 9)), 73728)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -229,7 +233,8 @@ class PageTest(unittest.TestCase):
              "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
              "/api/guest-signin-cancel", "/api/adoption-merge", "/api/account-signout",
              "/api/guest-account-signout", "/api/guest-account-remove",
-             "/api/project-question-delete", "/api/release-answer"},
+             "/api/project-question-delete", "/api/release-answer", "/api/permission-answer",
+             "/api/live-fault-withdraw"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -238,7 +243,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 55)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 57)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -11759,3 +11764,235 @@ class PageOverlapTest(unittest.TestCase):
             {"snapshot": True},
         ])
         self.assertEqual(of_class(snap["projects"], "li", "overlap"), [])
+
+
+PERMISSION_COMMAND = 'git worktree add ../w && echo "<b>"'
+PERMISSION_ITEM = {
+    "type": "inbox_item", "reason": "permission", "key": "permission/7",
+    "project_id": "o/r", "sprint_id": "s-1", "prompt": 7, "title": "Sprint one",
+    "headline": "Sprint one is asking to run a command",
+    "words": "Create the delivery's worktree", "command": PERMISSION_COMMAND,
+    "answered": False, "waiting_since": "2026-11-21T08:00:00+00:00"}
+
+
+def permission_cards(snap: dict) -> list:
+    return [n for n in nodes(snap["inbox"]) if n["tag"] == "article" and has_class(n, "permission")]
+
+
+def run_page_logged(steps: list) -> tuple[list, str]:
+    """The snapshots and everything the page wrote to stderr (a render error caught and logged shows there)."""
+    done = subprocess.run(
+        [shutil.which("node"), str(HARNESS), str(PAGE)], input=json.dumps(steps),
+        capture_output=True, text=True, timeout=30, env={**os.environ, "TZ": "UTC"})
+    if done.returncode != 0:
+        raise AssertionError(done.stderr)
+    return json.loads(done.stdout), done.stderr
+
+
+class PagePermissionCardTest(unittest.TestCase):
+    def test_an_open_card_shows_its_command_and_both_answers(self) -> None:
+        (snap,) = render([START, {"frame": frame([PERMISSION_ITEM])}, {"snapshot": True}])
+        (card,) = permission_cards(snap)
+        self.assertEqual(card["cls"].split(), ["card", "permission"])
+        self.assertEqual(
+            [(c["tag"], c["cls"].split()[0] if c["cls"] else "") for c in card["children"]],
+            [("p", "q"), ("p", "words"), ("pre", "cmd"), ("p", "meta"), ("div", "act")])
+        (headline,) = of_class(card, "p", "q")
+        (words,) = of_class(card, "p", "words")
+        (command,) = of_class(card, "pre", "cmd")
+        self.assertEqual(full(headline), PERMISSION_ITEM["headline"])
+        self.assertEqual(full(words), "Create the delivery's worktree")
+        self.assertEqual(full(command), PERMISSION_COMMAND)
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "b"], [])
+        (meta,) = of_class(card, "p", "meta")
+        self.assertIn("waiting ", full(meta))
+        (allow,) = of_class(card, "button", "permission-allow")
+        (refuse,) = of_class(card, "button", "permission-refuse")
+        self.assertEqual((full(allow), full(refuse)), ("Allow once", "Refuse"))
+        for button in (allow, refuse):
+            self.assertFalse(has_class(button, "picked"))
+            self.assertFalse(button["disabled"])
+        self.assertEqual(picked(snap), [])
+
+    def test_each_answer_posts_the_owners_choice_and_a_refusal_says_why(self) -> None:
+        for button, answer in (("permission-allow", "allow"), ("permission-refuse", "refuse")):
+            with self.subTest(button=button):
+                pending, failed = render([
+                    START, {"frame": frame([PERMISSION_ITEM])}, {"hold": True},
+                    {"click": button}, {"snapshot": True},
+                    {"release": {"status": 409, "text": "This permission prompt is no longer open.\n"}},
+                    {"snapshot": True}])
+                (post,) = pending["posts"]
+                self.assertEqual(post["url"], "/api/permission-answer")
+                self.assertEqual(posted(post), {"prompt": 7, "answer": answer})
+                self.assertIn("X-Console-Token", post["headers"])
+                (card,) = permission_cards(pending)
+                for cls in ("permission-allow", "permission-refuse"):
+                    (b,) = of_class(card, "button", cls)
+                    # aria-disabled, not disabled: a disabled button cannot keep the focus (#1424).
+                    self.assertFalse(b["disabled"])
+                    self.assertEqual(b["aria_disabled"], "true")
+                    self.assertEqual(b["busy"], "true")
+                (card,) = permission_cards(failed)
+                (fail,) = of_class(card, "span", "fail")
+                self.assertEqual(full(fail), "Could not answer: This permission prompt is no longer open.")
+                for cls in ("permission-allow", "permission-refuse"):
+                    (b,) = of_class(card, "button", cls)
+                    self.assertFalse(b["disabled"])
+                    self.assertIsNone(b["aria_disabled"])
+                    self.assertIsNone(b["busy"])
+
+    def test_a_focused_answer_keeps_focus_through_a_frame_and_enter_approves_no_brief(self) -> None:
+        # R6: a streamed frame rebuilds the card and detaches the focused button; focus must come back to its
+        # twin by prompt and answer, not fall to BODY, where Enter reaches the inbox answer keys.
+        begin = {"start": {"focused": False, "clock": NOW_MS}}
+        both = frame([ANSWERABLE, PERMISSION_ITEM])
+        for button in ("permission-allow", "permission-refuse"):
+            with self.subTest(button=button):
+                steps = [begin, {"frame": both}, {"focus_on": button}, {"frame": both}]
+                (kept, pressed, later) = render([*steps, {"snapshot": True}, {"key": "Enter", "follow": True},
+                                                 {"snapshot": True}, {"clock": NOW_MS + 5000},
+                                                 {"snapshot": True}])
+                self.assertEqual(role(kept["active"]), button)
+                self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
+                self.assertEqual(answers(later), [])
+
+    def test_the_focus_returns_to_the_same_prompts_same_answer_only(self) -> None:
+        other = {**PERMISSION_ITEM, "key": "permission/8", "prompt": 8}
+        both = frame([PERMISSION_ITEM, other])
+        steps = [START, {"frame": both}, {"focus_on": "permission-refuse", "nth": 1}, {"frame": both}]
+        (snap,) = render([*steps, {"snapshot": True}])
+        (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"]]
+        self.assertEqual(role(focused["cls"]), "permission-refuse")
+        cards = permission_cards(snap)
+        self.assertEqual([[n["focused"] for n in of_class(c, "button", "permission-refuse")]
+                          for c in cards], [[False], [True]])
+
+    def test_a_focused_answer_keeps_focus_while_it_is_sending(self) -> None:
+        (sending,) = render([
+            START, {"frame": frame([PERMISSION_ITEM])}, {"hold": True},
+            {"focus_on": "permission-refuse"}, {"click": "permission-refuse"}, {"snapshot": True}])
+        self.assertEqual(role(sending["active"]), "permission-refuse")
+
+    def test_a_card_no_longer_listed_drops_its_failed_answer(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([PERMISSION_ITEM])},
+            {"respond": {"status": 409, "text": "no\n"}}, {"click": "permission-allow"},
+            {"frame": frame([])}, {"frame": frame([PERMISSION_ITEM])}, {"snapshot": True}])
+        (card,) = permission_cards(snap)
+        self.assertNotIn("Could not answer", full(card))
+        for cls in ("permission-allow", "permission-refuse"):
+            (b,) = of_class(card, "button", cls)
+            self.assertFalse(b["disabled"])
+
+    def test_a_permission_card_alone_or_beside_a_tracker_item_renders_once(self) -> None:
+        for items in ([PERMISSION_ITEM], [PERMISSION_ITEM, ANSWERABLE]):
+            with self.subTest(items=len(items)):
+                (snap,), logged = run_page_logged(
+                    [START, {"frame": frame(items)}, {"snapshot": True}])
+                self.assertEqual(logged, "")
+                self.assertEqual(len(permission_cards(snap)), 1)
+                tracker = [n for n in nodes(snap["inbox"])
+                           if n["tag"] in ("article", "li") and "Which host?" in full(n)]
+                self.assertEqual(len(tracker), 1 if len(items) == 2 else 0)
+                others = [n for n in nodes(snap["inbox"]) if n["tag"] == "article"
+                          and not has_class(n, "permission")]
+                self.assertEqual(len(others), len(items) - 1)
+                self.assertEqual(
+                    [n for n in others if PERMISSION_ITEM["headline"] in full(n)
+                     or PERMISSION_COMMAND in full(n)], [])
+                rows = [n for n in nodes(snap["inbox"]) if n["tag"] == "li"
+                        and PERMISSION_ITEM["headline"] in full(n)]
+                self.assertEqual(rows, [])
+
+    def test_no_page_text_names_a_terminal(self) -> None:
+        self.assertNotIn("terminal", PAGE.read_text(encoding="utf-8").lower())
+
+
+FAULT_ENTRY = {
+    "id": 41, "issue": 12, "observed": "saving the settings form drops the billing address",
+    "when": "12:10 UTC today", "proven": "a saved form read back from the production database",
+    "at": "2026-11-12T10:00:00+00:00",
+    "text": "Live fault in production on #12: saving the settings form drops the billing address, "
+            "seen 12:10 UTC today, proven by a saved form read back from the production database",
+}
+
+
+def fault_frame(faults: list) -> dict:
+    return view([{**project(0, []), "sprints": [running_sprint("a", live_faults=faults)]}])
+
+
+class PageLiveFaultTest(unittest.TestCase):
+    def test_a_live_fault_is_the_first_line_of_the_sprints_checks_with_a_withdraw(self) -> None:
+        (snap,) = render([START, {"frame": fault_frame([FAULT_ENTRY])}, {"snapshot": True}])
+        (block,) = sprint_lines(snap)
+        (checks,) = of_class(block, "ul", "sprint-checks")
+        line = checks["children"][0]
+        self.assertTrue(has_class(line, "live-fault"))
+        (text,) = of_class(line, "span", "live-fault-text")
+        self.assertEqual(full(text), FAULT_ENTRY["text"])
+        buttons = [n for n in nodes(line) if n["tag"] == "button"]
+        self.assertEqual([(has_class(b, "live-fault-withdraw"), full(b)) for b in buttons],
+                         [(True, "Withdraw")])
+
+    def test_no_line_without_live_faults_or_once_the_view_drops_it(self) -> None:
+        bare = view([{**project(0, []), "sprints": [running_sprint("a")]}])
+        for shown in (fault_frame([]), bare):
+            (snap,) = render([START, {"frame": shown}, {"snapshot": True}])
+            self.assertEqual(of_class(snap["projects"], "li", "live-fault"), [])
+        (snap,) = render([
+            START, {"frame": fault_frame([FAULT_ENTRY])}, {"frame": fault_frame([])},
+            {"snapshot": True},
+        ])
+        self.assertEqual(of_class(snap["projects"], "li", "live-fault"), [])
+
+    def test_withdraw_posts_the_fault_and_a_refusal_says_why(self) -> None:
+        (snap,) = render([
+            START, {"frame": fault_frame([FAULT_ENTRY])},
+            {"respond": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"click": "live-fault-withdraw"}, {"snapshot": True},
+        ])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/live-fault-withdraw")
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "a" * 16, "fault": 41})
+        self.assertIn("X-Console-Token", post["headers"])
+        (line,) = of_class(snap["projects"], "li", "live-fault")
+        (fail,) = of_class(line, "span", "fail")
+        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+
+    def test_a_refused_withdraw_of_a_finished_sprint_shows_its_reason_on_the_row_a_frame_replaced(self) -> None:
+        ended = {**ended_sprint("b", 60_000), "live_faults": [FAULT_ENTRY]}
+        (snap,) = render([
+            START, {"frame": with_sprints([ended])}, {"hold": True},
+            {"click": "live-fault-withdraw"},
+            {"frame": with_sprints([{**ended, "title": "Sprint b again"}])},
+            {"release": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"snapshot": True},
+        ])
+        (row,) = of_class(snap["projects"], "li", "finished-line")
+        (fault,) = of_class(row, "li", "live-fault")
+        (fail,) = of_class(fault, "span", "fail")
+        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+        (button,) = [n for n in nodes(fault) if n["tag"] == "button"]
+        self.assertIs(button["disabled"], False)
+
+    def test_an_ended_sprints_live_fault_stays_on_its_finished_line_and_the_owner_withdraws_it(self) -> None:
+        ended = {**ended_sprint("b", 60_000), "live_faults": [FAULT_ENTRY]}
+        (snap,) = render([
+            START, {"frame": with_sprints([ended])},
+            {"respond": {"status": 204, "text": ""}},
+            {"click": "live-fault-withdraw"}, {"snapshot": True},
+        ])
+        (line,) = of_class(snap["projects"], "li", "finished-line")
+        (fault,) = of_class(line, "li", "live-fault")
+        (text,) = of_class(fault, "span", "live-fault-text")
+        self.assertEqual(full(text), FAULT_ENTRY["text"])
+        (fold,) = [c for c in line["children"] if c["tag"] == "details"]
+        self.assertEqual(of_class(fold, "li", "live-fault"), [])
+        (checks,) = [c for c in line["children"] if c["tag"] == "ul" and has_class(c, "sprint-checks")]
+        self.assertIn(fault, checks["children"])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/live-fault-withdraw")
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "b" * 16, "fault": 41})

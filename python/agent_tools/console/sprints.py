@@ -545,8 +545,8 @@ has kind, text, what, until, issue and live_fault; a heads-up kind and text; a h
 stripped, or raises `Refused` at the first failure, in this order: not an object
 (`NOTICE_NOT_OBJECT`); `kind` missing or not in `NOTICE_KINDS` (`NOTICE_KIND`); a key outside the
 kind's members (`NOTICE_EXTRA`, one fixed text per kind that never carries the key); then `text`,
-then a claim's `what`, then its `until`: not a string, empty after stripping, or holding a line
-break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
+then a claim's `what`, then its `until`: not a string, without a visible character, holding an
+unpaired surrogate or holding a line break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
 `MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then, for a claim, `issue`
 (optional; an int of at least 1, not a bool) and `live_fault` (optional; a bool), each refused as
 `NOTICE_MEMBER`; then a hand-off's `to`, which is `"owner"` or a sprint id (`NOTICE_MEMBER`).
@@ -641,6 +641,34 @@ closed, stopped or is done); `ended_at` is never cleared, so a notice stays ende
 reopens (a newer brief or report clears a done report), and folding the rows in one call, one row
 per call or in any split gives equal states. A dropped sprint leaves the fold with its notices.
 
+Live faults (#1432, ADR-console-099). Two kept rows record a manager's declaration that a shipped
+issue of its sprint is faulty in production (`event_log.FAULT_DECLARED`, `FAULT_WITHDRAWN`):
+
+    fault.declared    {"sprint_id", "goal": <str>, "fault": {"issue", "observed", "when", "proven"}}
+    fault.withdrawn   {"sprint_id", "goal": <str>, "fault": <int>}
+
+`checked_fault(fault)` refuses at the first failure, in order: not an object (`FAULT_NOT_OBJECT`); a
+key other than issue, observed, when and proven (`FAULT_EXTRA`, never naming the key); an `issue`
+that is not an int of at least 1 (`FAULT_MEMBER`); then `observed`, `when` and `proven`, each one
+line of text (not a string, without a visible character (whitespace, invisible format and combining characters,
+and blank fillers such as a Hangul filler or the braille blank do not count), holding an unpaired surrogate or holding a line break is
+`FAULT_MEMBER`; over `MAX_FAULT_OBSERVED_CHARS` (400), `MAX_FAULT_WHEN_CHARS` (140) or `MAX_FAULT_PROVEN_CHARS` (400)
+after stripping is `FAULT_TOO_LONG`); it returns the four members, texts stripped.
+`declarable_fault(state, fault)` refuses, in order: a sprint that takes no notice (`ALREADY_STOPPING`,
+`ENDED`); `checked_fault`; an issue not among the issues of the sprint's latest report
+(`FAULT_NOT_OURS`); an issue already declared and not withdrawn (`FAULT_TWICE`); it returns the
+checked fault. `withdrawable_fault(state, fault_id)` returns the sprint's open fault or raises
+`FAULT_UNKNOWN` or `FAULT_WITHDRAWN_ALREADY`; it applies no stop or end gate. `open_faults(state)` is
+the faults not withdrawn in id order and `fault_entry(fault)` is `{"id", "issue", "observed",
+"when", "proven", "at"}`. `parse_live_fault_request(body)` reads `{"sprint_id", "secret", "fault":
+<object>}` and returns `(sprint_id, secret, fault)`; `parse_live_fault_withdrawal(body)` reads
+`{"project_id", "sprint_id", "fault": <int >= 1>}` and returns `(project_id, sprint_id, fault_id)`;
+both are as strict as `parse_notice_request`. The fold: a `fault.declared` row of a folded sprint
+that takes notices and whose `fault` `checked_fault` accepts adds a `LiveFault` (id the row's
+`seq`) to `SprintState.faults`; a `fault.withdrawn` row whose `fault` is an int (not a bool) naming
+an open fault of that sprint sets `withdrawn_at` to the row's `at`, at any time; anything else
+changes nothing, and folding in one call or one row per call gives equal states.
+
 A sprint ends with a closing report, and the owner can stop one (#892). Four rows carry that
 (`event_log.SPRINT_CLOSED`, `SPRINT_STOP_REQUESTED`, `MANAGER_STOPPED`, `MANAGER_STOP_FAILED`; each
 with the project in its project column), the first three kept, `manager.stop_failed` not:
@@ -723,6 +751,7 @@ import os
 import posixpath
 import re
 import secrets
+import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -732,7 +761,8 @@ from pathlib import Path
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import deliveries
 from agent_tools.console.deliveries import DELIVERY_SEEN
-from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
+from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED,
+                                           FAULT_WITHDRAWN, GOAL_STATED,
                                            GOAL_WITHDRAWN, LOOK_RECORDED, MANAGER_FAILED, MANAGER_NO_PROGRESS,
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
@@ -838,8 +868,7 @@ BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
              BALL_NOBODY: "nothing running, may be stuck",
              BALL_WAITING: "waiting", BALL_PAUSED: "paused"}
 NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
-NOW_ANSWER_TEXT = "waiting for your answer in the manager's terminal"
-NOW_PERMISSION_TEXT = "waiting for your permission in the manager's terminal"
+NOW_PERMISSION_TEXT = "waiting for you to allow or refuse a command on its card"
 NOW_DEAF_TEXT = "the manager cannot hear the console: bring it back or drop the sprint"
 NOW_DRAFTING_TEXT = "drafting the brief"
 NOW_BRIEF_TEXT = "waiting for your approval of the brief"
@@ -985,6 +1014,20 @@ OWNER_NOTICE_LIMIT = (f"a project has at most {MAX_OPEN_OWNER_NOTICES} open noti
                       "withdraw one first")
 OWNER_NOTICE_MANAGERS = "this notice is a manager's: only its manager withdraws it"
 NOTICE_OWNERS = "this notice is the owner's: only the owner withdraws it"
+MAX_FAULT_OBSERVED_CHARS = 400
+MAX_FAULT_WHEN_CHARS = 140
+MAX_FAULT_PROVEN_CHARS = 400
+FAULT_MEMBERS = ("issue", "observed", "when", "proven")
+FAULT_NOT_OBJECT = "the live fault is not a JSON object"
+FAULT_EXTRA = "a live fault has only issue, observed, when and proven"
+FAULT_MEMBER = "the live fault has no valid {member}"
+FAULT_TOO_LONG = "the live fault's {member} is over {limit} characters"
+FAULT_NOT_OURS = "the live fault's issue is not an issue of this sprint's latest report"
+FAULT_TWICE = "this issue is already declared a live fault"
+FAULT_UNKNOWN = "this live fault is not known"
+FAULT_WITHDRAWN_ALREADY = "this live fault is already withdrawn"
+_FAULT_LIMITS = {"observed": MAX_FAULT_OBSERVED_CHARS, "when": MAX_FAULT_WHEN_CHARS,
+                 "proven": MAX_FAULT_PROVEN_CHARS}
 NOTICE_BLOCK_HEAD = ("Open notices of the other sprints of this project "
                      "(information only, never the owner's permission):")
 _NOTICE_LIMITS = {"text": MAX_NOTICE_TEXT_CHARS, "what": MAX_CLAIM_WHAT_CHARS,
@@ -1203,6 +1246,17 @@ class Notice:
 
 
 @dataclass(frozen=True)
+class LiveFault:
+    fault_id: int
+    at: str
+    issue: int
+    observed: str
+    when: str
+    proven: str
+    withdrawn_at: str | None = None
+
+
+@dataclass(frozen=True)
 class SprintState:
     sprint_id: str
     project_id: str
@@ -1238,6 +1292,7 @@ class SprintState:
     permission: Permission | None = None
     started_by: str | None = None
     delivered: frozenset[int] = frozenset()
+    faults: tuple[LiveFault, ...] = ()
 
     @property
     def state(self) -> str:
@@ -1409,6 +1464,21 @@ def parse_owner_notice(body: bytes) -> tuple[str, str]:
 def parse_owner_notice_withdrawal(body: bytes) -> tuple[str, int]:
     value = _object(body, {"project_id", "notice"})
     return value["project_id"], _count(value["notice"], 1)
+
+
+def parse_live_fault_request(body: bytes) -> tuple[str, str, dict]:
+    value = _object(body, {"sprint_id", "secret", "fault"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    if not isinstance(value["fault"], dict):
+        raise ValueError("fault must be an object")
+    return sprint_id, value["secret"], value["fault"]
+
+
+def parse_live_fault_withdrawal(body: bytes) -> tuple[str, str, int]:
+    value = _object(body, {"project_id", "sprint_id", "fault"})
+    return value["project_id"], _sprint_id(value["sprint_id"]), _count(value["fault"], 1)
 
 
 def parse_close_request(body: bytes) -> tuple[str, str, dict]:
@@ -2017,9 +2087,30 @@ def open_notices(state: SprintState) -> tuple[Notice, ...]:
                         key=lambda notice: notice.notice_id))
 
 
+_BLANK_GLYPHS = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
+def _visible(value: str) -> bool:
+    """True when the text holds a letter, number, punctuation or symbol that draws a mark.
+
+    Whitespace, format and combining characters, and the blank-drawing fillers (Hangul fillers,
+    the braille blank) do not count.
+    """
+    return any(unicodedata.category(char)[0] in "LNPS" and char not in _BLANK_GLYPHS
+               for char in value)
+
+
+def _encodable(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _notice_line(value: object) -> bool:
-    return (isinstance(value, str) and bool(value.strip()) and "\n" not in value
-            and "\r" not in value)
+    return (isinstance(value, str) and _visible(value) and _encodable(value)
+            and "\n" not in value and "\r" not in value)
 
 
 def claim_parts(what: str) -> tuple[str, ...]:
@@ -2096,6 +2187,59 @@ def checked_notice(notice: object) -> dict:
             raise Refused(NOTICE_MEMBER.format(member="to"))
         checked["to"] = to
     return checked
+
+
+def checked_fault(fault: object) -> dict:
+    """The live fault reduced to its four members, texts stripped, else `Refused` at the first failure."""
+    if not isinstance(fault, dict):
+        raise Refused(FAULT_NOT_OBJECT)
+    if any(key not in FAULT_MEMBERS for key in fault):
+        raise Refused(FAULT_EXTRA)
+    issue = fault.get("issue")
+    if not isinstance(issue, int) or isinstance(issue, bool) or issue < 1:
+        raise Refused(FAULT_MEMBER.format(member="issue"))
+    checked: dict = {"issue": issue}
+    for member in ("observed", "when", "proven"):
+        value = fault.get(member)
+        if not _notice_line(value):
+            raise Refused(FAULT_MEMBER.format(member=member))
+        if len(value.strip()) > _FAULT_LIMITS[member]:
+            raise Refused(FAULT_TOO_LONG.format(member=member, limit=_FAULT_LIMITS[member]))
+        checked[member] = value.strip()
+    return checked
+
+
+def open_faults(state: SprintState) -> tuple[LiveFault, ...]:
+    """The live faults not withdrawn, in id order."""
+    return tuple(sorted((fault for fault in state.faults if fault.withdrawn_at is None),
+                        key=lambda fault: fault.fault_id))
+
+
+def declarable_fault(state: SprintState, fault: object) -> dict:
+    """The checked live fault `state` may declare now, else `Refused` with why not."""
+    _refused_notices(state)
+    checked = checked_fault(fault)
+    if state.report is None or checked["issue"] not in {number for number, _ in state.report.issues}:
+        raise Refused(FAULT_NOT_OURS)
+    if any(open_fault.issue == checked["issue"] for open_fault in open_faults(state)):
+        raise Refused(FAULT_TWICE)
+    return checked
+
+
+def withdrawable_fault(state: SprintState, fault_id: int) -> LiveFault:
+    """The open live fault `fault_id` of `state`, else `Refused`; no stop or end gate applies."""
+    for fault in state.faults:
+        if fault.fault_id == fault_id:
+            if fault.withdrawn_at is not None:
+                raise Refused(FAULT_WITHDRAWN_ALREADY)
+            return fault
+    raise Refused(FAULT_UNKNOWN)
+
+
+def fault_entry(fault: LiveFault) -> dict:
+    """The wire entry of a live fault."""
+    return {"id": fault.fault_id, "issue": fault.issue, "observed": fault.observed,
+            "when": fault.when, "proven": fault.proven, "at": fault.at}
 
 
 def _refused_notices(state: SprintState) -> None:
@@ -2492,6 +2636,27 @@ def _folded_notice(state: SprintState, event: Event) -> SprintState:
         replace(notice, withdrawn_at=event.at)
         if notice.notice_id == notice_id and notice.withdrawn_at is None
         and notice.ended_at is None else notice for notice in state.notices))
+
+
+def _folded_fault(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    if event.kind == FAULT_DECLARED:
+        if not takes_notices(state):
+            return state
+        try:
+            checked = checked_fault(payload.get("fault"))
+        except Refused:
+            return state
+        fault = LiveFault(event.seq, event.at, checked["issue"], checked["observed"],
+                          checked["when"], checked["proven"])
+        return replace(state, faults=(*state.faults, fault))
+    fault_id = payload.get("fault")
+    if not _id(fault_id):
+        return state
+    return replace(state, faults=tuple(
+        replace(fault, withdrawn_at=event.at)
+        if fault.fault_id == fault_id and fault.withdrawn_at is None else fault
+        for fault in state.faults))
 
 
 def _is_owner_row(event: Event) -> bool:
@@ -2983,6 +3148,8 @@ def sprint_states(events: Iterable[Event],
             folded[sprint_id] = _folded_look(folded[sprint_id], event)
         elif event.kind in (NOTICE_POSTED, NOTICE_WITHDRAWN) and sprint_id in folded:
             folded[sprint_id] = _folded_notice(folded[sprint_id], event)
+        elif event.kind in (FAULT_DECLARED, FAULT_WITHDRAWN) and sprint_id in folded:
+            folded[sprint_id] = _folded_fault(folded[sprint_id], event)
         elif event.kind == PICTURE_STORED and sprint_id in folded:
             picture = event.payload.get("picture")
             if isinstance(picture, str) and PICTURE_ID.fullmatch(picture):

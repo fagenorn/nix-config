@@ -1,0 +1,51 @@
+{
+  "adopt-project": null,
+  "adr-number": null,
+  "agent-model-matrix": null,
+  "artifact-budget": null,
+  "bypass-proof": null,
+  "cache-proxy": null,
+  "conformance": null,
+  "console": null,
+  "context-map-lint": null,
+  "diff-scope": {
+    "verdicts": []
+  },
+  "engine": null,
+  "fallback-audit": null,
+  "fleet-preflight": null,
+  "folder-trust": null,
+  "forge-claim": {
+    "subcommands": {
+      "renew": [
+        "renewed",
+        "not_held",
+        "error"
+      ],
+      "status": [
+        "free",
+        "held_by",
+        "stale",
+        "error"
+      ]
+    }
+  },
+  "forge-issue": null,
+  "guard-policy": null,
+  "issue-branch": null,
+  "lane-triage": null,
+  "look-approval": null,
+  "look-lint": null,
+  "owner-actions": null,
+  "plan-amend": null,
+  "pr-green": null,
+  "program-copies": null,
+  "promotion": null,
+  "release": null,
+  "release-card": null,
+  "resolve-project": null,
+  "skill-lint": null,
+  "sprint": null,
+  "verified-tree": null,
+  "verify-pending": null
+}

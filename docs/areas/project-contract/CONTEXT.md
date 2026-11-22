@@ -16,6 +16,9 @@ _Avoid_: onboarding
 **Deprecation**:
 A platform-manifest entry naming a project file or key that a newer platform version no longer accepts, with its successor and the migration that converts it.
 
+**Fleet preflight**:
+The read-only check `just switch` runs between the build and the activation, judging every **Fleet registry** project with the tree's resolver against the tree's platform manifest; any project that cannot run on it stops the switch, and there is no force flag (ADR-project-contract-011).
+
 **Fleet registry**:
 The per-host list of the projects the agent tooling manages. Verification passes and the guard's compiled policy both read it.
 _Avoid_: project list
@@ -26,6 +29,14 @@ _Avoid_: upgrade script
 
 **Platform manifest**:
 The versioned JSON file the platform ships, listing its deprecations and migrations. A project's contract schema version is checked against it.
+
+**Platform package**:
+The one flake package nix-config publishes for Linux and macOS, holding the agent commands, the standards directory and the platform manifest. A project's CI fetches it and every host installs the same build; every merge to main is a revision (ADR-system-005).
+_Avoid_: platform bundle
+
+**Platform command**:
+A command the platform defines once under one id, which every ResolvedProject carries in `bindings.commands`; a contract entry under the same id replaces it (ADR-project-contract-010).
+_Avoid_: built-in command, default command
 
 **Production rules**:
 The optional `production` section of a project contract: the commands, key files and MCP tools that change the project's production, the routes that only read it, and the release profile through which a change is allowed, or the declaration that the project has no production. A contract without the section has no production rules, which is not the same as declaring no production. A rules section may name one of its changing commands as its console activation, the command the console's Activate runs (ADR-system-004).

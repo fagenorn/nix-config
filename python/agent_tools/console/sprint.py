@@ -10,10 +10,11 @@
     sprint notice [--sprint <id>] [--secret-file <path>] --notice-file <path | -> [--port N]
     sprint notices [--sprint <id>] [--secret-file <path>] [--port N]
     sprint withdraw-notice [--sprint <id>] [--secret-file <path>] --notice <id> [--port N]
+    sprint live-fault [--sprint <id>] [--secret-file <path>] --fault-file <path | -> [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint picture [--sprint <id>] [--secret-file <path>] --file <path> [--port N]
     sprint status [--sprint <id>] [--secret-file <path>] [--port N]
-    sprint permit [--landed] [--sprint <id>] [--secret-file <path>] [--port N]
+    sprint permit [--landed | --prompt] [--sprint <id>] [--secret-file <path>] [--port N]
     sprint contract
 
 `--sprint` is the sprint id (16 lowercase hex characters, `agent_tools.console.sprints.SPRINT_ID`),
@@ -22,7 +23,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief`, `report`, `ask`, `withdraw-question`, `notice`, `notices`, `withdraw-notice`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `ask`, `withdraw-question`, `notice`, `notices`, `withdraw-notice`, `live-fault`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -150,6 +151,15 @@ reading of the claims that overlap, and exit 0.
 notice, a wrong secret) is `sprint: refused <status>: <text>` and exit 1, and a 200 answer without an
 integer `notice` is `sprint: refused 200: unreadable answer: <error>` and exit 1.
 
+`sprint live-fault` reads the secret the same way and the live fault from `--fault-file` (`-` reads
+stdin), a JSON object (`issue`, `observed`, `when`, `proven`), and sends `POST /api/live-fault` with
+`{"sprint_id", "secret", "fault"}`, no `Origin`. On success it prints `sprint: live fault <id>
+declared` and exit 0. The command validates no member of the fault: the console decides, in one
+place, and a refusal (a missing or blank member, an issue not in the sprint's latest report, an issue
+already declared, a wrong secret) is `sprint: refused <status>: <text>` and exit 1. A file that
+cannot be read or is not a JSON object is exit 2 with no request sent; a 200 answer without an
+integer `fault` is `sprint: refused 200: unreadable answer: <error>` and exit 1.
+
 `sprint report --help` and `sprint close --help` list the members of the report and of the closing
 report, each with one line and an example, the same lists `sprint contract` prints.
 
@@ -174,9 +184,10 @@ the JSON line stays line 1. A refused notices request is the command's refusal a
 
 `sprint recap` reads the secret the same way and sends `POST /api/recap` with `{"sprint_id",
 "secret"}`, no `Origin`. It prints the console's answer as one line of JSON, `{"sprint_id", "goal",
-"brief", "report", "unread"}`, and exit 0: the goal, the latest brief (`version`, `decision`,
-`reply`, `parts`, or null), the last report (or null) and the number of the owner's unread
-messages. It marks nothing read; a manager that was restarted or takes a sprint over runs it, then
+"brief", "report", "live_faults", "unread"}`, and exit 0: the goal, the latest brief (`version`,
+`decision`, `reply`, `parts`, or null), the last report (or null), the sprint's standing live-fault
+declarations (`id`, `issue`, `observed`, `when`, `proven`, `at`; `[]` when none) and the number of
+the owner's unread messages. It marks nothing read; a manager that was restarted or takes a sprint over runs it, then
 `sprint inbox`.
 
 `sprint reply` reads the secret the same way and the reply from `--reply-file` (`-` reads stdin) as
@@ -221,6 +232,32 @@ that is unreachable or answers other than 200, a reply that is not `{"decision",
 same object with `deny` and the reason `the console could not judge this command: <why>`. With
 `--landed` the command tells the console the merge ran and prints nothing in every case.
 
+`sprint permit --prompt` is the manager's `PermissionRequest` hook (#1424, ADR-console-021 as amended): the
+client runs it when a tool call needs a permission and takes the one line it prints as the decision. It reads the
+hook input from stdin and holds only a Bash prompt, a JSON object with `tool_name` `Bash`, a string `session_id`
+and a `tool_input.command` of 1 to `prompt_card.MAX_COMMAND_CHARS` characters (the optional string
+`tool_input.description` goes along), resolving the sprint and secret as `sprint inbox` does. A `tool_input` that
+asks to run outside the sandbox (`dangerouslyDisableSandbox` other than absent, null or false) prints one deny line
+with `prompt_card.SANDBOX_TEXT` and sends nothing: Allow once would approve the whole input, the exception included,
+while the card shows only the command. It sends `POST /api/permission-prompt` with phase `ask` and, when the reply is
+`{"prompt": <n>, "state": <str>, "mac": <hex>}` with a number, repeats phase `wait` every `prompt_card.POLL_SECONDS` while the
+reply is `open` (a failed wait is polled again), up to `prompt_card.HOLD_SECONDS` after the ask: `allowed` prints the
+client's allow decision, `refused` its deny with `prompt_card.OWNER_REFUSED_TEXT`, `closed` its deny with
+`prompt_card.EXPIRED_TEXT` and `ended` (the console closed the prompt: the sprint was stopped or ended, or the
+session ended) its deny with `prompt_card.ENDED_TEXT`. A reply counts only when its `prompt` is the number of the
+prompt asked: one naming another prompt is a failed request. When the hold runs out it sends phase `close` once and
+prints what that reply says, which the console decides together with the owner's answer: `allowed` allows, `refused`
+denies with the owner's refusal, `ended` with the console's closure, and `closed`, any other reply or a failed request
+denies with the expiry. The secret is never sent: each request carries a fresh `nonce` and `auth`, the HMAC
+under the secret of its other members (`prompt_card.request_auth`), and a reply counts only when its `mac` is the
+console's HMAC under the secret for that nonce, prompt and state (`prompt_card.reply_mac`): whatever else listens on
+the loopback port (another local account's process while the console restarts) learns no secret and has no decision
+honoured. A reply whose `mac` is not that one ends the hold with one deny line with `manager.REFUSAL`. Everything else prints one deny line with
+`manager.REFUSAL` and sends nothing further: stdin that is not such an object, any other tool, a command that is missing, empty or too long, no
+session, sprint id or secret, a console that is unreachable or answers other than 200 to the ask, a reply that is
+not `{"prompt", "state", "mac"}` and a null `prompt`. It prints exactly one line, always exit 0. The allow carries no rule,
+so the deny rules and the `PreToolUse` hooks keep judging the call.
+
 `sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
 beside this module, to stdout exactly as packaged and exit 0. It takes no sprint id, secret or
 port, reads no environment and sends no request; the console's launch prompt tells the manager to
@@ -241,16 +278,19 @@ in a header: no request sent` and exit 2, with no request sent; bad arguments ar
 from __future__ import annotations
 
 import argparse
+import hmac
 import http.client
 import json
 import os
 import re
+import secrets
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import manager, permit, service, sprints
+from agent_tools.console import manager, permit, prompt_card, service, sprints
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
@@ -364,6 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
                        ("notice", "post one notice for the sprint's project"),
                        ("notices", "print the project's open notices"),
                        ("withdraw-notice", "take back one of the sprint's notices"),
+                       ("live-fault", "declare an issue of the sprint a fault live in production"),
                        ("close", "send the sprint's closing report"),
                        ("inbox", "print the unread messages to the sprint, the owner's and a colleague's"),
                        ("recap", "print what a manager needs to pick the sprint up"),
@@ -392,12 +433,18 @@ def build_parser() -> argparse.ArgumentParser:
             if name == "notice":
                 each.add_argument("--notice-file", required=True,
                                   help="the notice as a JSON object; - reads stdin")
+            if name == "live-fault":
+                each.add_argument("--fault-file", required=True,
+                                  help="the live fault as a JSON object; - reads stdin")
             if name == "close":
                 each.add_argument("--closing-file", required=True,
                                   help="the closing report as a JSON object; - reads stdin")
         if name == "permit":
-            each.add_argument("--landed", action="store_true",
+            mode = each.add_mutually_exclusive_group()
+            mode.add_argument("--landed", action="store_true",
                               help="report that the permitted merge ran; prints nothing")
+            mode.add_argument("--prompt", action="store_true",
+                              help="hold a Bash permission prompt for the owner's answer")
         if name == "picture":
             each.add_argument("--file", type=Path, required=True, help="the PNG file to send")
         if name == "withdraw-question":
@@ -438,6 +485,8 @@ def read_object(name: str, what: str) -> dict:
         text = sys.stdin.read() if name == "-" else Path(name).read_text()
         value = json.loads(text, object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise Unreadable(f"sprint: cannot read {name}: the {what} is nested too deeply") from error
     except (OSError, ValueError) as error:
         raise Unreadable(f"sprint: cannot read {name}: {error}") from error
     if not isinstance(value, dict):
@@ -496,6 +545,14 @@ class HookFailure(Exception):
     """A hook input or a console reply `sprint permit` cannot use; `str(error)` is the reason."""
 
 
+class SandboxRequested(HookFailure):
+    """A Bash prompt that asks to run outside the sandbox."""
+
+
+class Unproven(HookFailure):
+    """Whatever answered on the console's port did not sign its reply with the sprint's secret."""
+
+
 def hook_command(text: str) -> tuple[str, str | None, str]:
     """The session id, tool call id (None when absent) and Bash command of a hook input, else `HookFailure`."""
     try:
@@ -552,6 +609,118 @@ def run_permit(args: argparse.Namespace) -> int:
         return 0
     if decision is not None:
         print(permit_line(decision, reason))
+    return 0
+
+
+def prompt_hook(text: str) -> tuple[str, str, str | None]:
+    """The session id, Bash command and description (None when absent) of a hook input, else `HookFailure`."""
+    try:
+        document = json.loads(text, object_pairs_hook=reject_duplicate_keys,
+                              parse_constant=reject_nonfinite_literal)
+    except (ValueError, RecursionError) as error:
+        raise HookFailure(f"the hook input is not JSON: {error}") from error
+    if not isinstance(document, dict) or document.get("tool_name") != "Bash":
+        raise HookFailure("the prompt is not for a Bash command")
+    tool = document.get("tool_input")
+    command = tool.get("command") if isinstance(tool, dict) else None
+    session = document.get("session_id")
+    if (not isinstance(command, str) or not 0 < len(command) <= prompt_card.MAX_COMMAND_CHARS
+            or not isinstance(session, str) or not session):
+        raise HookFailure("the hook input has no session_id and a usable tool_input.command")
+    if tool.get("dangerouslyDisableSandbox") not in (None, False):
+        raise SandboxRequested("the prompt asks to run outside the sandbox")
+    description = tool.get("description")
+    return session, command, description if isinstance(description, str) else None
+
+
+def prompt_reply(text: str, secret: str, sprint: str, nonce: str) -> tuple[int | None, str]:
+    """The prompt number and state of the console's reply to the request that carried `nonce`.
+
+    A reply of another shape is `HookFailure`; one whose `mac` is not the console's HMAC under `secret`
+    for this sprint, nonce, prompt and state is `Unproven`, so no decision of whatever else answered is used."""
+    try:
+        reply = json.loads(text)
+    except ValueError as error:
+        raise HookFailure(f"the console's answer is not JSON: {error}") from error
+    prompt = reply.get("prompt") if isinstance(reply, dict) else None
+    state = reply.get("state") if isinstance(reply, dict) else None
+    if (not isinstance(reply, dict) or set(reply) - {"mac"} != {"prompt", "state"}
+            or not isinstance(state, str)
+            or not (prompt is None or (type(prompt) is int and prompt >= 1))):
+        raise HookFailure("the console's answer is not a prompt state")
+    wanted = prompt_card.reply_mac(secret, sprint, nonce, prompt, state)
+    given = reply.get("mac")
+    if not isinstance(given, str) or not hmac.compare_digest(given.encode(), wanted.encode()):
+        raise Unproven("the listener on the console's port did not sign its answer with the sprint's secret")
+    return prompt, state
+
+
+def ask_signed(port: int, sprint: str, secret: str, body: dict) -> tuple[int | None, str]:
+    """The prompt number and state the console answers to `body`, sent with a fresh nonce and an `auth` and no secret."""
+    fields = {**body, "nonce": secrets.token_hex(16)}
+    sent = {**fields, "auth": prompt_card.request_auth(secret, prompt_card.signed_bytes(fields))}
+    text = ask(port, "POST", prompt_card.ASK_PATH, json.dumps(sent).encode())
+    return prompt_reply(text, secret, sprint, fields["nonce"])
+
+
+def run_prompt(args: argparse.Namespace, *, clock: Callable[[], float] | None = None,
+               sleep: Callable[[float], None] | None = None) -> int:
+    """The `sprint permit --prompt` hook: one printed line, always exit 0."""
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    refused = prompt_card.hook_output("deny", manager.REFUSAL)
+    try:
+        session, command, description = prompt_hook(sys.stdin.read())
+        sprint, secret = resolve_sprint(args), resolve_secret(args)
+        body = {"sprint_id": sprint, "phase": "ask", "session_id": session, "command": command}
+        if description is not None:
+            body["description"] = description
+        prompt, _ = ask_signed(args.port, sprint, secret, body)
+        if prompt is None:
+            raise HookFailure("the console holds no card for this prompt")
+    except SandboxRequested:
+        print(prompt_card.hook_output("deny", prompt_card.SANDBOX_TEXT))
+        return 0
+    except (HookFailure, Unreadable, Refused, UnicodeDecodeError):
+        print(refused)
+        return 0
+
+    def phase(name: str) -> str:
+        """The state of the prompt after one `wait` or `close` request, "failed" when it did not answer."""
+        try:
+            sent = {"sprint_id": sprint, "phase": name, "session_id": session, "prompt": prompt}
+            named, state = ask_signed(args.port, sprint, secret, sent)
+        except Unproven:
+            raise
+        except (HookFailure, Refused):
+            return "failed"
+        return state if named == prompt else "failed"
+
+    def printed(state: str) -> str | None:
+        if state == prompt_card.ALLOWED:
+            return prompt_card.hook_output("allow")
+        if state == prompt_card.REFUSED:
+            return prompt_card.hook_output("deny", prompt_card.OWNER_REFUSED_TEXT)
+        if state == prompt_card.CLOSED:
+            return prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)
+        if state == prompt_card.ENDED:
+            return prompt_card.hook_output("deny", prompt_card.ENDED_TEXT)
+        return None
+
+    deadline = clock() + prompt_card.HOLD_SECONDS
+    try:
+        while clock() < deadline:
+            line = printed(phase("wait"))
+            if line is not None:
+                print(line)
+                return 0
+            sleep(prompt_card.POLL_SECONDS)
+        state = phase("close")
+    except Unproven:
+        print(refused)
+        return 0
+    print(printed(state) if state in (prompt_card.ALLOWED, prompt_card.REFUSED, prompt_card.ENDED)
+          else prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT))
     return 0
 
 
@@ -722,6 +891,20 @@ def answered_notice(text: str) -> int:
     return notice
 
 
+def send_live_fault(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    fault = read_object(args.fault_file, "live fault")
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "fault": fault}).encode()
+    text = ask(args.port, "POST", service.LIVE_FAULT_PATH, body)
+    try:
+        declared = json.loads(text)["fault"]
+        if type(declared) is not int:
+            raise TypeError("fault is not an integer")
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+    return f"sprint: live fault {declared} declared"
+
+
 def read_notices(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     body = json.dumps({"sprint_id": sprint, "secret": secret}).encode()
@@ -850,7 +1033,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(CONTRACT.read_text(encoding="utf-8"))
         return 0
     if args.command == "permit":
-        return run_permit(args)
+        return run_prompt(args) if args.prompt else run_permit(args)
     try:
         sprint = resolve_sprint(args)
         if args.command == "brief":
@@ -867,6 +1050,8 @@ def main(argv: list[str] | None = None) -> int:
             line = read_notices(args, sprint)
         elif args.command == "withdraw-notice":
             line = send_notice_withdrawal(args, sprint)
+        elif args.command == "live-fault":
+            line = send_live_fault(args, sprint)
         elif args.command == "close":
             line = send_closing(args, sprint)
         elif args.command == "inbox":

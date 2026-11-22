@@ -17,7 +17,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import manager, service, sprint, sprints
+from agent_tools.console import manager, prompt_card, service, sprint, sprints
 from agent_tools.delivery import look_marker
 
 from . import console_test_support as support
@@ -31,6 +31,9 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = REPO_ROOT / "python/agent_tools/console/manager-contract.md"
+FAULT = {"issue": 12, "observed": "saving the settings form drops the billing address",
+         "when": "12:10 UTC today",
+         "proven": "a saved form read back from the production database"}
 
 
 def run_sprint(*args, stdin=None, env=None):
@@ -476,6 +479,104 @@ class SprintCommandTest(Case):
     def notice_rows(self):
         return [row for row in support.log_rows(self.store) if row[2] == "notice.posted"]
 
+    def live_fault(self, svc, sid, fault):
+        return run_sprint("live-fault", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--fault-file", "-", "--port", self.port(svc), stdin=json.dumps(fault))
+
+    def fault_rows(self):
+        return [row for row in support.log_rows(self.store) if row[2] == "fault.declared"]
+
+    def reported_sprint(self, svc, goal="make the importer resumable", report=REPORT):
+        sid = svc.state_goal("owner/p01", goal)
+        secret = self.secret_file(sid).read_text().strip()
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        svc.send_report(sid, secret, report)
+        return sid
+
+    def test_live_fault_declares_an_issue_of_the_latest_report_and_prints_its_id(self):
+        svc = self.open()
+        sid = self.reported_sprint(svc)
+        got = self.live_fault(svc, sid, FAULT)
+        rows = self.fault_rows()
+        self.assertEqual(len(rows), 1)
+        seq, at = rows[0][0], rows[0][1]
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, f"sprint: live fault {seq} declared\n", ""))
+        self.assertEqual(json.loads(rows[0][4]), {
+            "sprint_id": sid, "goal": "make the importer resumable", "fault": FAULT})
+        secret = self.secret_file(sid).read_text().strip()
+        self.assertEqual(svc.recap(sid, secret)["live_faults"], [{"id": seq, **FAULT, "at": at}])
+
+    def test_live_fault_refuses_missing_evidence_and_an_issue_outside_the_sprint(self):
+        svc = self.open()
+        sid = self.reported_sprint(svc)
+        unreported = svc.state_goal("owner/p01", "make the exporter resumable")
+        secret_b = self.secret_file(unreported).read_text().strip()
+        svc.send_brief(unreported, secret_b, PARTS)
+        svc.approve_brief("owner/p01", unreported, 1)
+        latest = self.reported_sprint(svc, "make the reader resumable")
+        svc.send_report(latest, self.secret_file(latest).read_text().strip(), {
+            **REPORT, "issues": [{"issue": 13, "stage": "landed"}], "inbox": []})
+        ours = "the live fault's issue is not an issue of this sprint's latest report"
+        cases = [
+            (sid, {k: v for k, v in FAULT.items() if k != "observed"},
+             "the live fault has no valid observed"),
+            (sid, {k: v for k, v in FAULT.items() if k != "when"},
+             "the live fault has no valid when"),
+            (sid, {k: v for k, v in FAULT.items() if k != "proven"},
+             "the live fault has no valid proven"),
+            (sid, {**FAULT, "proven": "  "}, "the live fault has no valid proven"),
+            (sid, {**FAULT, "observed": "\u200b\u200b", "when": "\u200b", "proven": "\u200b \u200b"},
+             "the live fault has no valid observed"),
+            (sid, {**FAULT, "when": "\u200b"}, "the live fault has no valid when"),
+            (sid, {**FAULT, "proven": "\u200b"}, "the live fault has no valid proven"),
+            (sid, {**FAULT, "observed": "\u3164", "when": "\u115f\u1160", "proven": "\u2800"},
+             "the live fault has no valid observed"),
+            (sid, {**FAULT, "when": "\u034f\ufe0f"}, "the live fault has no valid when"),
+            (sid, {**FAULT, "proven": "\u2800"}, "the live fault has no valid proven"),
+            (sid, {**FAULT, "observed": "saved form \ud800 dropped"},
+             "the live fault has no valid observed"),
+            (sid, {**FAULT, "issue": 99}, ours),
+            (unreported, FAULT, ours),
+            (latest, FAULT, ours),
+        ]
+        for target, value, reason in cases:
+            with self.subTest(reason=reason, value=value):
+                got = self.assert_unchanged(svc, lambda: self.live_fault(svc, target, value))
+                self.assertEqual((got.returncode, got.stdout, got.stderr),
+                                 (1, "", "sprint: refused 409: " + reason + "\n"))
+        wrong = self.store.parent / "wrong-secret"
+        wrong.write_text("A" * 43 + "\n")
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "live-fault", "--sprint", sid, "--secret-file", wrong, "--fault-file", "-",
+            "--port", self.port(svc), stdin=json.dumps(FAULT)))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 403: secret refused\n"))
+        self.assertEqual(self.live_fault(svc, sid, FAULT).returncode, 0)
+        got = self.assert_unchanged(svc, lambda: self.live_fault(svc, sid, FAULT))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused 409: this issue is already declared a live fault\n"))
+        got = self.assert_unchanged(svc, lambda: self.live_fault(svc, sid, []))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertTrue(got.stderr.startswith(
+            "sprint: cannot read -: the live fault is not a JSON object"), got.stderr)
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "live-fault", "--sprint", sid, "--fault-file", "-", "--port", self.port(svc),
+            stdin=json.dumps(FAULT)))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (2, "", (
+            "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n")))
+
+    def test_live_fault_exits_two_for_a_fault_file_nested_too_deeply(self):
+        svc = self.open()
+        sid = self.reported_sprint(svc)
+        deep = "[" * 100000 + "]" * 100000
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "live-fault", "--sprint", sid, "--secret-file", self.secret_file(sid),
+            "--fault-file", "-", "--port", self.port(svc), stdin=deep))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertEqual(got.stderr, "sprint: cannot read -: the live fault is nested too deeply\n")
+
     def test_notice_posts_and_another_sprint_of_the_project_lists_it(self):
         svc = self.open()
         a = self.goal(svc)
@@ -853,11 +954,13 @@ class SprintCommandTest(Case):
 
     SECTION = "## After a restart or a takeover\n\n1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first.\n2. `sprint recap` prints the goal, the latest brief with its decision and the owner's reply, the last report and how many of the owner's messages are unread. The console keeps this record; nothing was handed over to you.\n3. The latest brief's decision comes before the last report, because a newer brief does not remove an older report:\n   - No brief: draft one, as Drafting the brief says.\n   - Decision `changes`: revise the brief from the reply `sprint recap` printed and send the new version, even when `sprint inbox` printed nothing, because that change request was read before the restart.\n   - Decision `none`: the brief waits for the owner; end your turn.\n   - Decision `approved`: the last report may describe an earlier version of the brief, so check its next step against the approved brief's parts before following it. Continue only the work the approved brief still includes and drop what it removed; follow After approval when there is no report or nothing is left.\n"
 
-    def test_the_contract_says_a_permission_prompt_is_refused_and_a_worktree_is_never_entered(self):
+    def test_the_contract_says_a_bash_prompt_waits_for_the_owner_and_a_worktree_is_never_entered(self):
         section = run_sprint("contract").stdout.split("\n## ", 2)[1]
         self.assertTrue(section.startswith("Contract\n"), section)
-        self.assertIn("- A permission prompt in this session is refused automatically, so never "
-                      "wait for one.", section)
+        self.assertIn("- A permission prompt for a Bash command in this session waits up to ten "
+                      "minutes for the owner to allow it once or refuse it on the console; any "
+                      "other prompt is refused at once. Never wait for a prompt any other way.",
+                      section)
         self.assertIn("- Never enter or create a worktree yourself, because a delivery makes its "
                       "own.", section)
 
@@ -913,7 +1016,7 @@ class RecapTest(Case):
                        "milestone": REPORT["milestone"], "tracker_url": REPORT["tracker_url"],
                        "issues": CHECKED["issues"], "inbox": REPORT["inbox"],
                        "next": REPORT["next"]},
-            "unread": 2})
+            "live_faults": [], "unread": 2})
 
     def test_recap_shows_the_wait_or_the_pause_the_report_states_beside_its_next_step(self):
         svc = self.open()
@@ -936,7 +1039,7 @@ class RecapTest(Case):
         sid = self.goal(svc)
         self.assertEqual(svc.recap(sid, self.secret(sid)), {
             "sprint_id": sid, "goal": "make the importer resumable", "brief": None,
-            "report": None, "unread": 0})
+            "report": None, "live_faults": [], "unread": 0})
 
     def test_recap_of_a_changed_newer_brief_shows_the_reply_beside_the_old_report(self):
         svc = self.open()
@@ -1039,6 +1142,27 @@ class ManagerContractTest(unittest.TestCase):
         self.assertIn("`to-issues`", item)
         self.assertIn("changes how something looks", item)
 
+    def test_the_contract_says_how_to_declare_a_live_fault_and_where_scope_changes_go(self):
+        text = run_sprint("contract").stdout
+        flat = " ".join(text.split())
+        section = flat.partition("## A live fault ")[2].partition(" ## ")[0]
+        after = flat.partition("## After approval ")[2].partition(" ## ")[0]
+        self.assertEqual(text.count("\n## A live fault\n"), 1)
+        self.assertLess(text.index("## Questions"), text.index("## A live fault"))
+        self.assertLess(text.index("## A live fault"), text.index("## Notices"))
+        for needle in (
+                "`sprint live-fault --fault-file -`", "`issue`", "`observed`", "`when`",
+                "`proven`", "your latest report names", "needs no go-ahead",
+                "never ask the owner about it", "`sprint: live fault <id> declared`",
+                sprints.FAULT_MEMBER.format(member="<member>"), sprints.FAULT_NOT_OURS,
+                sprints.FAULT_TWICE, "the owner may withdraw it there", "`sprint recap`",
+                "`live_faults`",
+                "scope changes go to the follow-up issue, never into the fix",
+                '`"live_fault": true`'):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        self.assertIn("it goes to the follow-up issue, as A live fault says", after)
+
     def test_the_contract_says_what_to_do_on_an_awaiting_look_stop(self):
         text = run_sprint("contract").stdout
         self.assertIn("\n## A look before merge\n", text)
@@ -1076,6 +1200,16 @@ class ManagerContractTest(unittest.TestCase):
             with self.subTest(needle):
                 self.assertIn(needle, section)
         self.assertNotIn("The resume records the approval", section)
+
+    def test_the_contract_lets_a_live_bound_stop_name_the_ordinary_delivery_the_look_forbids(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        look = text.partition("## A look before merge")[2].partition("## Questions")[0]
+        self.assertIn("never start another delivery of the issue (the one exception is the ordinary "
+                      "delivery that a live-fault delivery's stop at `live-bound` names", look)
+        fault = text.partition("## A live fault")[2].partition("## Notices")[0]
+        self.assertIn("A fix or changes answer at that delivery's look stops it at `live-bound` too: "
+                      "start the ordinary delivery its reason names, and give the head it opens a look "
+                      "card of its own", fault)
 
     def test_the_contract_requires_owner_only_on_a_go_ahead_and_leaves_a_design_choice_to_the_starter(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
@@ -1500,6 +1634,276 @@ class PermitCommandTest(unittest.TestCase):
             with self.subTest(stdin=stdin[:20]):
                 code, out, _ = self.run_permit(stdin, reply, "--landed")
                 self.assertEqual((code, out), (0, ""))
+
+
+class PromptCommandTest(unittest.TestCase):
+    """`sprint permit --prompt` holds a manager's Bash prompt for the owner's answer on the console (#1424)."""
+
+    ENV = {manager.ID_ENV: "a" * 16, manager.SECRET_ENV: "secret"}
+    ASKED = {"prompt": 7, "state": "open"}
+
+    @staticmethod
+    def hook(**change):
+        document = {"session_id": "s-1", "tool_name": "Bash",
+                    "tool_input": {"command": "git worktree add ../w", "description": "Create it"}}
+        return json.dumps({**document, **change})
+
+    @staticmethod
+    def honest(reply, request, secret="secret", nonce=None):
+        """`reply` with the `mac` the console gives it for `request` (or for `nonce`), when it has a prompt and a state."""
+        if not isinstance(reply, dict) or not {"prompt", "state"} <= set(reply):
+            return reply
+        return {**reply, "mac": prompt_card.reply_mac(
+            secret, request["sprint_id"], nonce or request["nonce"], reply["prompt"], reply["state"])}
+
+    @staticmethod
+    def state(word, prompt=7):
+        return {"prompt": prompt, "state": word}
+
+    def run_prompt(self, stdin, replies, times=(0,), env=None, signer=None):
+        """The exit code, the printed text, the requests `(path, body)` and the sleeps.
+
+        Each request is checked to carry no secret and the `auth` of its other members under the
+        sprint's secret, then kept without its `nonce` and `auth` (the nonces are in `self.nonces`,
+        the byte lengths in `self.lengths`). Each reply that has a prompt and a state is sent with
+        the console's honest `mac` for that request's nonce, which `signer` (a function of the
+        reply and the request, returning what is sent) may replace."""
+        sent, slept, out = [], [], StringIO()
+        queue, ticks = list(replies), list(times)
+        self.nonces, self.lengths = [], []
+
+        honest = self.honest
+
+        def fake(port, method, path, body=None, headers=None):
+            request = json.loads(body)
+            self.assertNotIn("secret", request)
+            self.assertEqual(request["auth"], prompt_card.request_auth(
+                "secret", prompt_card.signed_bytes(request)))
+            self.assertRegex(request["nonce"], "^[0-9a-f]{32}$")
+            self.nonces.append(request["nonce"])
+            self.lengths.append(len(body))
+            sent.append((path, {k: v for k, v in request.items() if k not in ("nonce", "auth")}))
+            reply = queue.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return json.dumps((signer or honest)(reply, request))
+
+        def clock():
+            return ticks.pop(0) if len(ticks) > 1 else ticks[0]
+
+        environment = dict(self.ENV if env is None else env)
+        with mock.patch.object(sprint, "ask", side_effect=fake), \
+                mock.patch.dict(os.environ, environment), \
+                mock.patch.object(sys, "stdin", StringIO(stdin)), redirect_stdout(out):
+            for name in (manager.ID_ENV, manager.SECRET_ENV):
+                if name not in environment:
+                    os.environ.pop(name, None)
+            args = sprint.build_parser().parse_args(["permit", "--prompt"])
+            code = sprint.run_prompt(args, clock=clock, sleep=slept.append)
+        return code, out.getvalue(), sent, slept
+
+    def test_an_allowed_prompt_prints_the_allow_decision(self):
+        code, out, sent, slept = self.run_prompt(
+            self.hook(), [self.ASKED, self.state("open"), self.state("allowed")])
+        self.assertEqual((code, out), (0, prompt_card.hook_output("allow") + "\n"))
+        self.assertEqual([path for path, _ in sent], [prompt_card.ASK_PATH] * 3)
+        self.assertEqual(sent[0][1], {
+            "sprint_id": "a" * 16, "phase": "ask", "session_id": "s-1",
+            "command": "git worktree add ../w", "description": "Create it"})
+        for _, body in sent[1:]:
+            self.assertEqual(body, {"sprint_id": "a" * 16, "phase": "wait",
+                                    "session_id": "s-1", "prompt": 7})
+        self.assertEqual(slept, [prompt_card.POLL_SECONDS])
+
+    def test_the_ask_carries_a_description_only_when_it_is_a_string(self):
+        stdin = self.hook(tool_input={"command": "ls", "description": 3})
+        _, _, sent, _ = self.run_prompt(stdin, [self.ASKED, self.state("allowed")])
+        self.assertNotIn("description", sent[0][1])
+
+    def test_a_refused_or_closed_prompt_prints_its_deny(self):
+        for word, text in (("refused", prompt_card.OWNER_REFUSED_TEXT),
+                           ("closed", prompt_card.EXPIRED_TEXT)):
+            with self.subTest(word):
+                code, out, sent, _ = self.run_prompt(self.hook(), [self.ASKED, self.state(word)])
+                self.assertEqual((code, out), (0, prompt_card.hook_output("deny", text) + "\n"))
+                self.assertEqual(len(sent), 2)
+
+    def test_a_failed_wait_is_polled_again(self):
+        code, out, _, slept = self.run_prompt(
+            self.hook(), [self.ASKED, sprint.Refused("sprint: console unreachable"),
+                          {"prompt": "x"}, self.state("allowed")])
+        self.assertEqual(out, prompt_card.hook_output("allow") + "\n")
+        self.assertEqual(slept, [prompt_card.POLL_SECONDS] * 2)
+
+    def test_the_hold_ends_with_a_close_and_its_answer(self):
+        over = prompt_card.HOLD_SECONDS
+        cases = ((self.state("closed"), prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)),
+                 (self.state("allowed"), prompt_card.hook_output("allow")),
+                 (self.state("refused"),
+                  prompt_card.hook_output("deny", prompt_card.OWNER_REFUSED_TEXT)),
+                 (self.state("open"), prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)),
+                 ({"nonsense": 1}, prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)),
+                 (sprint.Refused("sprint: console unreachable"),
+                  prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT)))
+        for reply, expected in cases:
+            with self.subTest(reply=str(reply)):
+                code, out, sent, slept = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("open"), reply], times=[0, 0, over])
+                self.assertEqual((code, out), (0, expected + "\n"))
+                self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait", "close"])
+                self.assertEqual(sent[-1][1]["prompt"], 7)
+                self.assertEqual(slept, [prompt_card.POLL_SECONDS])
+
+    def test_anything_but_a_bash_command_is_refused_at_once(self):
+        refusal = prompt_card.hook_output("deny", manager.REFUSAL) + "\n"
+        for name, stdin in (
+                ("a question", self.hook(tool_name="AskUserQuestion")),
+                ("a write", self.hook(tool_name="Write")),
+                ("no command", self.hook(tool_input={})),
+                ("an empty command", self.hook(tool_input={"command": ""})),
+                ("a list command", self.hook(tool_input={"command": ["ls"]})),
+                ("too long", self.hook(tool_input={
+                    "command": "x" * (prompt_card.MAX_COMMAND_CHARS + 1)})),
+                ("no session", json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}})),
+                ("bad json", "not json"), ("an array", "[]")):
+            with self.subTest(name):
+                code, out, sent, _ = self.run_prompt(stdin, [])
+                self.assertEqual((code, out, sent), (0, refusal, []))
+        with self.subTest("no secret"):
+            code, out, sent, _ = self.run_prompt(
+                self.hook(), [], env={manager.ID_ENV: "a" * 16})
+            self.assertEqual((code, out, sent), (0, refusal, []))
+        with self.subTest("no sprint"):
+            code, out, sent, _ = self.run_prompt(self.hook(), [], env={})
+            self.assertEqual((code, out, sent), (0, refusal, []))
+        for name, reply in (("unreachable", sprint.Refused("sprint: console unreachable")),
+                            ("not a reply", {"nonsense": 1}),
+                            ("a bool prompt", {"prompt": True, "state": "open"}),
+                            ("no prompt", {"prompt": None, "state": "refused"})):
+            with self.subTest(name):
+                code, out, sent, slept = self.run_prompt(self.hook(), [reply])
+                self.assertEqual((code, out, len(sent), slept), (0, refusal, 1, []))
+
+    def test_a_reply_the_console_did_not_sign_decides_nothing(self):
+        # R1: another account's listener on the port gets no secret (the fake checks every request
+        # carries none) and its allow, however well shaped, is not honoured.
+        refusal = prompt_card.hook_output("deny", manager.REFUSAL) + "\n"
+        honest = self.honest
+
+        def forged(request_phase, **how):
+            """A signer that signs every reply honestly except those of `request_phase`, which get `how`."""
+            def sign(reply, request):
+                if request["phase"] != request_phase:
+                    return honest(reply, request)
+                if "mac" in how:
+                    return {**reply, **how} if how["mac"] is not None else reply
+                return honest(reply, request, **how)
+            return sign
+
+        forgeries = (("a wrong mac", {"mac": "0" * 64}), ("no mac", {"mac": None}),
+                     ("a number for a mac", {"mac": 7}),
+                     ("a mac of another secret", {"secret": "other"}),
+                     ("a mac of another nonce", {"nonce": "0" * 32}))
+        for name, how in forgeries:
+            with self.subTest("the ask answered with " + name):
+                code, out, sent, slept = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("allowed")], signer=forged("ask", **how))
+                self.assertEqual((code, out, len(sent), slept), (0, refusal, 1, []))
+            with self.subTest("the wait answered with " + name):
+                code, out, sent, slept = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("allowed")], signer=forged("wait", **how))
+                self.assertEqual((code, out, slept), (0, refusal, []))
+                self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait"])
+            with self.subTest("the close answered with " + name):
+                code, out, sent, _ = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("open"), self.state("allowed")],
+                    times=[0, 0, prompt_card.HOLD_SECONDS], signer=forged("close", **how))
+                self.assertEqual((code, out), (0, refusal))
+                self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait", "close"])
+        with self.subTest("a reply the console signed for an earlier request"):
+            earlier = []
+
+            def replay(reply, request):
+                if request["phase"] == "ask":
+                    earlier.append(honest(reply, request))
+                    return earlier[0]
+                return earlier[0]
+
+            code, out, sent, _ = self.run_prompt(
+                self.hook(), [self.state("allowed"), self.state("allowed")], signer=replay)
+            self.assertEqual((code, out), (0, refusal))
+            self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait"])
+        with self.subTest("fresh nonces"):
+            self.run_prompt(self.hook(), [self.ASKED, self.state("open"), self.state("allowed")])
+            self.assertEqual(len(self.nonces), 3)
+            self.assertEqual(len(set(self.nonces)), 3)
+
+    def test_a_reply_naming_another_prompt_decides_nothing(self):
+        # R2: only the prompt the hook asked about may be allowed, refused or closed.
+        code, out, sent, slept = self.run_prompt(
+            self.hook(), [self.ASKED, self.state("allowed", prompt=8), self.state("allowed")])
+        self.assertEqual((code, out), (0, prompt_card.hook_output("allow") + "\n"))
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(slept, [prompt_card.POLL_SECONDS])
+        expired = prompt_card.hook_output("deny", prompt_card.EXPIRED_TEXT) + "\n"
+        over = prompt_card.HOLD_SECONDS
+        for name, replies in (
+                ("a wait", [self.ASKED, self.state("refused", prompt=8), self.state("closed")]),
+                ("a close", [self.ASKED, self.state("open"), self.state("allowed", prompt=8)])):
+            with self.subTest(name):
+                code, out, sent, _ = self.run_prompt(self.hook(), replies, times=[0, 0, over])
+                self.assertEqual(out, expired)
+                self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait", "close"])
+
+    def test_a_command_of_the_longest_length_in_any_script_fits_the_requests_limit(self):
+        # R4: json escapes each astral character to twelve bytes, and the console limits the whole body.
+        for text in ("\U0001F600" * 6000, "\U0001F600" * prompt_card.MAX_COMMAND_CHARS,
+                     "\u2028" * prompt_card.MAX_COMMAND_CHARS, "\x00" * prompt_card.MAX_COMMAND_CHARS):
+            with self.subTest(len(text)):
+                code, out, sent, _ = self.run_prompt(
+                    self.hook(tool_input={"command": text, "description": "d" * 4000}),
+                    [self.ASKED, self.state("allowed")])
+                self.assertEqual(out, prompt_card.hook_output("allow") + "\n")
+                self.assertEqual(sent[0][1]["command"], text)
+                self.assertLessEqual(self.lengths[0], service.MAX_PROMPT_BYTES)
+
+    def test_a_closure_the_console_made_is_not_told_as_ten_minutes_unanswered(self):
+        # R7: a stopped sprint or an ended session closes the prompt at once; the manager is told that.
+        ended = prompt_card.hook_output("deny", prompt_card.ENDED_TEXT) + "\n"
+        self.assertNotEqual(prompt_card.ENDED_TEXT, prompt_card.EXPIRED_TEXT)
+        self.assertNotIn("ten minutes", prompt_card.ENDED_TEXT)
+        code, out, sent, _ = self.run_prompt(self.hook(), [self.ASKED, self.state("ended")])
+        self.assertEqual((code, out, len(sent)), (0, ended, 2))
+        code, out, _, _ = self.run_prompt(
+            self.hook(), [self.ASKED, self.state("open"), self.state("ended")],
+            times=[0, 0, prompt_card.HOLD_SECONDS])
+        self.assertEqual(out, ended)
+
+    def test_a_request_to_run_outside_the_sandbox_is_refused_and_no_card_is_raised(self):
+        # C1: Allow once would approve the whole tool input, the exception included.
+        refusal = prompt_card.hook_output("deny", prompt_card.SANDBOX_TEXT) + "\n"
+        for flag in (True, "true", 1, "yes"):
+            with self.subTest(flag):
+                code, out, sent, _ = self.run_prompt(self.hook(tool_input={
+                    "command": "./check.sh", "dangerouslyDisableSandbox": flag}), [])
+                self.assertEqual((code, out, sent), (0, refusal, []))
+        for flag in (False, None):
+            with self.subTest(flag):
+                code, out, sent, _ = self.run_prompt(self.hook(tool_input={
+                    "command": "./check.sh", "dangerouslyDisableSandbox": flag}),
+                    [self.ASKED, self.state("allowed")])
+                self.assertEqual(out, prompt_card.hook_output("allow") + "\n")
+        self.assertNotIn("terminal", prompt_card.SANDBOX_TEXT.lower())
+
+    def test_the_command_starts_in_a_fresh_interpreter(self):
+        environment = {k: v for k, v in os.environ.items()
+                       if k not in (manager.ID_ENV, manager.SECRET_ENV)}
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.console.sprint", "permit", "--prompt"],
+            input='{"tool_name": "Write"}', capture_output=True, text=True, timeout=30,
+            env={**environment, "PYTHONPATH": str(REPO_ROOT / "python")})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout, prompt_card.hook_output("deny", manager.REFUSAL) + "\n")
 
 
 class CommandContractTest(unittest.TestCase):

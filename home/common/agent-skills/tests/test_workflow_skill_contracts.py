@@ -1,6 +1,6 @@
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from agent_tools.delivery import agnostic_lint
+from agent_tools.project_contract import agent_platform
 from agent_tools.skill_lint import working_tree
 
 
@@ -2480,6 +2481,79 @@ class CodexCollaborationContractTest(unittest.TestCase):
             for value in severities:
                 with self.subTest(document=path.name, severity=value):
                     self.assertIn(f"`{value}`", text)
+
+
+class PlatformReviewCommandsTest(unittest.TestCase):
+    """The platform's review argv against a model of SKILL.md's companion shape.
+
+    `companion_shape` models the four bullets of `codex-collaboration/SKILL.md`
+    ("Direct configured review"); no skill prose is pinned here.
+    """
+
+    REVIEWER_FLAG = "--reviewer"
+    QUOTED_FLAG = re.compile(r"[\"']--reviewer[\"']")
+
+    def companion_shape(self, argv: list[str], operation: str) -> bool:
+        if len(argv) < 2 or PurePosixPath(argv[0]).name != "codex-companion":
+            return False
+        if argv[1] != "task":
+            return False
+        rest = argv[2:]
+        if rest.count(self.REVIEWER_FLAG) != 1:
+            return False
+        i = rest.index(self.REVIEWER_FLAG)
+        if i + 1 >= len(rest) or rest[i + 1] != operation:
+            return False
+        others = rest[:i] + rest[i + 2:]
+        return others in ([], ["--fresh"])
+
+    def test_the_shape_rule_accepts_both_platform_review_commands(self):
+        for command_id, operation, other in (
+                ("codex-plan-review", "plan-review", "diff-review"),
+                ("codex-diff-review", "diff-review", "plan-review")):
+            with self.subTest(command_id=command_id):
+                argv = agent_platform.PLATFORM_COMMANDS[command_id]["argv"]
+                self.assertTrue(self.companion_shape(argv, operation))
+                self.assertFalse(self.companion_shape(argv, other))
+        argv = agent_platform.PLATFORM_COMMANDS["codex-plan-review"]["argv"]
+        moved = [argv[0], argv[1], self.REVIEWER_FLAG, "--fresh", "plan-review"]
+        for name, bad in (("other binary", ["codex"]),
+                          ("other head", ["codex", *argv[1:]]),
+                          ("other subcommand", [argv[0], "review", *argv[2:]]),
+                          ("extra option", [*argv, "--model", "x"]),
+                          ("flag moved between", moved)):
+            with self.subTest(control=name):
+                self.assertFalse(self.companion_shape(bad, "plan-review"))
+
+    def test_the_platform_review_argv_is_pinned_in_the_stricter_order(self):
+        # Spelled out, not read back from PLATFORM_COMMANDS, so dropping `--fresh`
+        # from the one definition fails here although `companion_shape` accepts it.
+        for command_id, operation in (("codex-plan-review", "plan-review"),
+                                      ("codex-diff-review", "diff-review")):
+            with self.subTest(command_id=command_id):
+                self.assertEqual(
+                    agent_platform.PLATFORM_COMMANDS[command_id]["argv"],
+                    ["codex-companion", "task", "--fresh", self.REVIEWER_FLAG, operation])
+
+    def test_the_reviewer_flag_is_defined_once(self):
+        listing = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--cached", "--others",
+             "--exclude-standard", "--", "python/agent_tools", "home/common"],
+            capture_output=True, check=True).stdout
+        hits = {}
+        for name in listing.decode("utf-8").split("\0"):
+            if not name:
+                continue
+            try:
+                text = (REPO_ROOT / name).read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            count = len(self.QUOTED_FLAG.findall(text))
+            if count:
+                hits[name] = count
+        self.assertEqual(hits, {
+            "python/agent_tools/project_contract/agent_platform.py": 1,
+            "home/common/agent-skills/tests/test_workflow_skill_contracts.py": 1})
 
 
 class LiveSkillsNameNoRetiredSkillTest(unittest.TestCase):

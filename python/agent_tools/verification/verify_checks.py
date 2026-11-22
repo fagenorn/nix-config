@@ -20,6 +20,14 @@ no pull request has merged; and it exits 2 on a forge error.
 
 `keepalive-end-turn-cap` is documented in `agent_tools.hosts.keepalive_pings`.
 
+`fleet-preflight` (`verify_checks.fleet_preflight_check`, issue 1451) runs this checkout's own
+`fleet_preflight.preflight` against this checkout's platform manifest, from the repository root, and
+needs nothing installed. It is met (0, `green`) when no project is refused and the rows are the
+host's registry entries one for one by `project_id`, so a dropped or duplicated row is not met
+(1, `red`, with `missing` and `extra`); it exits 2 (`unreadable`, with a `repair_id`) when the
+manifest or the registry will not read. An empty fleet is met with no row, which a block's
+`min_len` judges. It only reads.
+
 `platform-status` runs the installed `resolve-project platform-status` (from `~/.agents/bin`,
 prepended to `PATH`) and passes its output and exit through, so a block judges it with `expect`.
 
@@ -31,6 +39,31 @@ remote unchanged while a feature-branch push is admitted; the fixture's transpor
 limited to `ssh:file`, so no URL rewrite reaches the network. It exits 0 when met, 1 when not and 2
 on a usage or fixture error, writes only to a temporary directory, and S's owner must be an
 authorized owner in the installed guard policy.
+
+`devenv-shell --probe commit|clean [--repo-root R] [--timeout-seconds N]` (`verify_checks.devenv_shell`,
+issue 1447) is met when a commit made through the project's devenv shell is signed and leaves its
+worktree clean (`commit`), or when a shell leaves a fresh worktree clean (`clean`). It never runs
+in R: it makes a shared-object clone of R at R's `HEAD` in a temporary directory, with a git
+configuration and object database of its own, and removes that directory afterwards (a removal
+that fails is a fixture error), leaving R's HEAD, branch, index, status and configuration
+unchanged and every registration of R's worktrees alone. Every git call and every shell
+runs under the caller's environment without the eight repository-location names
+(`GIT_DIR`, `GIT_WORK_TREE`, ...), so `HOME`, `PATH`, the git configuration and the ssh agent reach
+the shell and an inherited redirect cannot point git at the caller's branch. The `commit` probe
+runs `devenv shell -- git commit --allow-empty -m probe`; its report names the exit, whether a new
+commit exists (HEAD is a commit whose sole parent is the starting commit and whose message is
+`probe`, so a shell that moves HEAD elsewhere has made none), whether its header carries a
+signature, the porcelain status read before the clone is removed, and the clone's `core.hooksPath`
+read outside the shell and, when the commit shell exited 0, inside a second shell run (a
+difference is `hooks_changed`). The reason is
+the first that applies: `devenv_missing`, `timeout`, `shell_failed`, then for `commit`
+`no_commit`, `unsigned`, `dirty`, `hooks_changed`, for `clean` `dirty`; it is null exactly when
+met. Each shell runs under a leash in its own process group (`adopt_apply.run_leashed`) bounded by
+`--timeout-seconds` (1 to 300, the contract's commit-environment bound): the group is killed with
+SIGKILL once the run ends and when the check itself dies, SIGKILL included, so nothing it started
+outlives it; a SIGTERM, SIGHUP or SIGINT to the check ends the live shell's group and exits 128
+plus the signal after the clone is removed. It exits 0 when met, 1 when
+not and 2 on a usage or fixture error.
 
 `cutover-manifest [--repo-root R] [--branch B] [--main-ref REV]` (`verify_checks.cutover_manifest`,
 issue 579, C4.a) is met (0, `green`)
@@ -334,6 +367,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from typing import IO
 from datetime import datetime, timedelta, timezone
@@ -341,7 +375,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import agent_platform, fleet_preflight, resolve_project
+from agent_tools.project_contract.adopt_apply import run_leashed
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers, forge_owner_action
@@ -428,7 +463,9 @@ def _required_checks(repo: str, base: str) -> list[Requirement]:
 
 
 def _context_met(requirement: Requirement, runs: Sequence[object], statuses: Sequence[object],
-                 merged_at: datetime) -> bool:
+                 merged_at: datetime | None, passed: Sequence[str] = ("success",)) -> bool:
+    """Met by a run concluding in `passed`, or for an unbound check a latest successful status, each
+    completed no later than `merged_at` (no time bound when it is None)."""
     context, app_id = requirement
     for run in runs:
         if not isinstance(run, dict) or run.get("name") != context:
@@ -436,8 +473,9 @@ def _context_met(requirement: Requirement, runs: Sequence[object], statuses: Seq
         app = run.get("app")
         if app_id is not None and not (isinstance(app, dict) and app.get("id") == app_id):
             continue
-        if (run.get("status") == "completed" and run.get("conclusion") == "success"
-                and _forge_time(run.get("completed_at"), "check run completed_at") <= merged_at):
+        if (run.get("status") == "completed" and run.get("conclusion") in passed
+                and (merged_at is None
+                     or _forge_time(run.get("completed_at"), "check run completed_at") <= merged_at)):
             return True
     if app_id is not None:
         return False  # a commit status names no app, so it cannot satisfy a bound check
@@ -446,7 +484,7 @@ def _context_met(requirement: Requirement, runs: Sequence[object], statuses: Seq
         if not isinstance(status, dict) or status.get("context") != context:
             continue
         updated = _forge_time(status.get("updated_at"), "status updated_at")
-        if updated <= merged_at and (latest is None or updated > latest[0]):
+        if (merged_at is None or updated <= merged_at) and (latest is None or updated > latest[0]):
             latest = (updated, status.get("state"))
     return latest is not None and latest[1] == "success"
 
@@ -485,6 +523,98 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     report["missing"] = sorted({r[0] for r in required
                                 if not _context_met(r, runs, statuses, merged_at)})
     return (0 if not report["missing"] else 1), report
+
+
+_RUN_PASSED = ("success", "neutral", "skipped")
+_STATUS_STATES = ("success", "failure", "error", "pending")
+
+
+def _ruleset_checks(repo: str, base: str) -> set[Requirement]:
+    """The checks the active rulesets of `base` require, `integration_id` being the app binding
+    (absent or null is any app); classic branch protection is read apart, by `_required_checks`."""
+    pages = forge_api.api_pages(f"repos/{repo}/rules/branches/{base}?per_page=100")
+    if not all(isinstance(page, list) for page in pages):
+        raise _invalid("rules page is not a list")
+    found: set[Requirement] = set()
+    for rule in (rule for page in pages for rule in page):
+        if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+            continue
+        parameters = rule.get("parameters")
+        listed = parameters.get("required_status_checks") if isinstance(parameters, dict) else None
+        for entry in listed or []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("context"), str):
+                continue
+            app_id = entry.get("integration_id")
+            if app_id is not None and not _is_int(app_id):
+                raise _invalid("ruleset required check integration_id is not an integer or null")
+            found.add((entry["context"], app_id))
+    return found
+
+
+def _stamp(moment: datetime) -> str:
+    """An RFC 3339 UTC string of `moment`, keeping any fraction of a second."""
+    utc = moment.astimezone(timezone.utc)
+    if utc.microsecond:
+        return utc.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return utc.strftime(_STAMP)
+
+
+def pr_green_state(repo: str, pr: int) -> tuple[str, dict]:
+    """The one green rule for a pull request's head: `failed`, else `pending`, else `green`.
+
+    Failed: a completed check run concluded outside success, neutral and skipped, or the latest
+    status of a context is failure or error. Pending: a run not completed, the latest status of a
+    context pending, a required check not met at the head (no time bound; classic protection and
+    the active rulesets both count, and a neutral or skipped run meets it), or no run and no status
+    at all. Green otherwise, at the latest run completion or latest status update."""
+    pull = forge_api.api_get(f"repos/{repo}/pulls/{pr}")
+    head = pull.get("head") if isinstance(pull, dict) else None
+    base = pull.get("base") if isinstance(pull, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    ref = base.get("ref") if isinstance(base, dict) else None
+    if not isinstance(sha, str) or not sha or not isinstance(ref, str) or not ref:
+        raise _invalid(f"pull request {pr} has no head sha and base ref")
+    required = {*_required_checks(repo, ref), *_ruleset_checks(repo, ref)}
+    runs = _counted_pages(forge_api.api_pages(
+        f"repos/{repo}/commits/{sha}/check-runs?per_page=100"), "check_runs", "check-run listing")
+    status_pages = forge_api.api_pages(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
+    if not all(isinstance(page, list) for page in status_pages):
+        raise _invalid("status page is not a list")
+    statuses = [entry for page in status_pages for entry in page]
+    failing: set[str] = set()
+    pending: set[str] = set()
+    moments: list[datetime] = []
+    for run in runs:
+        if not isinstance(run, dict) or not isinstance(run.get("name"), str):
+            raise _invalid("check run has no name")
+        if run.get("status") != "completed":
+            pending.add(run["name"])
+        elif run.get("conclusion") not in _RUN_PASSED:
+            failing.add(run["name"])
+        else:
+            moments.append(_forge_time(run.get("completed_at"), "check run completed_at"))
+    latest: dict[str, tuple[datetime, str]] = {}
+    for entry in statuses:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("context"), str)
+                or entry.get("state") not in _STATUS_STATES):
+            raise _invalid("status has no context and state")
+        updated = _forge_time(entry.get("updated_at"), "status updated_at")
+        if entry["context"] not in latest or updated > latest[entry["context"]][0]:
+            latest[entry["context"]] = (updated, entry["state"])
+    for context, (updated, state) in latest.items():
+        moments.append(updated)
+        if state in ("failure", "error"):
+            failing.add(context)
+        elif state == "pending":
+            pending.add(context)
+    missing = sorted({r[0] for r in required if not _context_met(r, runs, statuses, None, _RUN_PASSED)})
+    if not runs and not statuses:
+        pending.add("no check run or status")
+    state = "failed" if failing else "pending" if pending or missing else "green"
+    report = {"pr": pr, "head": sha, "base": ref,
+              "green_at": _stamp(max(moments)) if state == "green" else None,
+              "failing": sorted(failing), "pending": sorted(pending), "missing": missing}
+    return state, report
 
 
 def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
@@ -813,6 +943,145 @@ def managed_pre_push_hook(slug: str, *, git_bin: str,
                            else type(error).__name__) from error
     report["met"] = all(report[key] for key in
                         ("managed", "refused", "remote_unchanged", "control_admitted"))
+    return (0 if report["met"] else 1), report
+
+
+DEVENV_SHELL_TIMEOUT_SECONDS = 300
+DEVENV_SHELL_REPOSITORY_ENV = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
+DEVENV_SHELL_TERMINATION = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+DEVENV_SHELL_TAIL_LINES = 5
+COMMIT_PROBE_MESSAGE = "probe"
+
+
+def _devenv_run(argv: list[str], cwd: Path, env: Mapping[str, str], stdout: Path, log: Path,
+                timeout: float) -> tuple[int | None, float]:
+    """One leashed shell run: (exit or None on timeout, elapsed seconds).
+
+    The leash ends the shell's whole process tree when the run ends and when this process dies."""
+    started = time.monotonic()
+    try:
+        with open(stdout, "ab") as out, open(log, "ab") as err:
+            try:
+                code: int | None = run_leashed(argv, cwd=str(cwd), env=dict(env), stdout=out,
+                                               stderr=err, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                code = None
+    except OSError as error:
+        raise FixtureError(f"{argv[0]}: {type(error).__name__}") from error
+    return code, round(time.monotonic() - started, 1)
+
+
+def _tail(log: Path) -> list[str]:
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines() if log.exists() else []
+    return lines[-DEVENV_SHELL_TAIL_LINES:]
+
+
+def _config_hooks_path(worktree: Path, env: Mapping[str, str]) -> str | None:
+    done = _git(worktree, "config", "--get", "core.hooksPath", environ=env)
+    return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+def devenv_shell(probe: str, repo_root: Path, *, devenv_bin: str | None,
+                 environ: Mapping[str, str], timeout: float) -> tuple[int, dict]:
+    """Met when a commit through the devenv shell is signed and clean, or a shell leaves a clean tree.
+
+    Raises FixtureError when the scratch clone cannot be made, driven or removed, GitError when git fails."""
+    commit = probe == "commit"
+    report: dict = {"probe": probe, "exit": None, "elapsed_seconds": 0.0}
+    if commit:
+        report.update(new_commit=False, signed=False)
+    report["status"] = []
+    if commit:
+        report["hooks_path"] = {"outside": None, "inside": None}
+    report.update(output_tail=[], reason=None, met=False)
+    if devenv_bin is None:
+        report["reason"] = "devenv_missing"
+        return 1, report
+    env = {key: value for key, value in environ.items() if key not in DEVENV_SHELL_REPOSITORY_ENV}
+
+    def terminate(signum: int, _frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = {signum: signal.signal(signum, terminate) for signum in DEVENV_SHELL_TERMINATION}
+    leftover: OSError | None = None
+    try:
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="verify-devenv-shell-"))
+        except OSError as error:
+            raise FixtureError(f"mkdtemp: {type(error).__name__}") from error
+        worktree = tmp / "wt"
+        try:
+            sha = _git_ok(repo_root, "rev-parse", "HEAD", environ=env).strip()
+            # A clone of its own: its configuration and object database are not the caller's, so
+            # nothing the shell writes (core.hooksPath included) outlives the scratch directory.
+            for where, args in (
+                    (repo_root, ("clone", "--quiet", "--shared", "--no-checkout",
+                                 str(repo_root.resolve()), str(worktree))),
+                    (worktree, ("checkout", "--quiet", "--detach", sha))):
+                made = _git(where, "-c", "core.hooksPath=/dev/null", *args, environ=env)
+                if made.returncode != 0:
+                    detail = made.stderr.strip().splitlines()
+                    raise FixtureError(
+                        f"scratch clone failed: {detail[0] if detail else made.returncode}")
+            log = tmp / "shell.log"
+            outside = _config_hooks_path(worktree, env) if commit else None
+            argv = ([devenv_bin, "shell", "--", "git", "commit", "--allow-empty", "-m", COMMIT_PROBE_MESSAGE]
+                    if commit else [devenv_bin, "shell", "--", "true"])
+            code, report["elapsed_seconds"] = _devenv_run(argv, worktree, env, log, log, timeout)
+            report["exit"] = code
+            report["status"] = _git_ok(worktree, "status", "--porcelain",
+                                       environ=env).splitlines()
+            report["output_tail"] = _tail(log)
+            hooks_changed = False
+            if commit:
+                head = _git_ok(worktree, "rev-parse", "HEAD", environ=env).strip()
+                parents = _git_ok(worktree, "rev-list", "--parents", "-n", "1", "HEAD",
+                                  environ=env).split()[1:]
+                message = _git_ok(worktree, "show", "-s", "--format=%B", "HEAD",
+                                  environ=env).strip()
+                report["new_commit"] = (head != sha and parents == [sha]
+                                        and message == COMMIT_PROBE_MESSAGE)
+                if report["new_commit"]:
+                    header = _git_ok(worktree, "cat-file", "commit", "HEAD",
+                                     environ=env).split("\n\n", 1)[0]
+                    report["signed"] = any(line.startswith(("gpgsig ", "gpgsig-sha256 "))
+                                           for line in header.splitlines())
+                report["hooks_path"]["outside"] = outside
+                if code == 0:
+                    hooks_out = tmp / "hooks.out"
+                    inside_code, _ = _devenv_run(
+                        [devenv_bin, "shell", "--", "git", "config", "--get", "core.hooksPath"],
+                        worktree, env, hooks_out, log, timeout)
+                    lines = [line for line in hooks_out.read_text(
+                        encoding="utf-8", errors="replace").splitlines() if line.strip()]
+                    report["hooks_path"]["inside"] = lines[-1] if lines else None
+                    hooks_changed = (inside_code not in (0, 1)
+                                     or report["hooks_path"]["inside"] != outside)
+        finally:
+            try:
+                shutil.rmtree(tmp)
+            except OSError as error:
+                leftover = error
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    if leftover is not None:
+        raise FixtureError(f"scratch clone not removed: {type(leftover).__name__}")
+    if report["exit"] is None:
+        report["reason"] = "timeout"
+    elif report["exit"] != 0:
+        report["reason"] = "shell_failed"
+    elif commit and not report["new_commit"]:
+        report["reason"] = "no_commit"
+    elif commit and not report["signed"]:
+        report["reason"] = "unsigned"
+    elif report["status"]:
+        report["reason"] = "dirty"
+    elif hooks_changed:
+        report["reason"] = "hooks_changed"
+    report["met"] = report["reason"] is None
     return (0 if report["met"] else 1), report
 
 
@@ -1349,8 +1618,11 @@ def _entry_slug(entry: dict, environ: Mapping[str, str]) -> str | None:
 def _candidate_env(environ: Mapping[str, str], candidate_home: Path,
                    candidate_python: Path) -> dict[str, str]:
     """`environ` with the candidate's `HOME` and `PYTHONPATH`. The temporary `HOME` must not
-    strand the forge and git configuration the host reads from its real one."""
+    strand the forge and git configuration the host reads from its real one. The candidate reads
+    the manifest staged under its own `HOME`, never an installed package's root, so
+    `AGENT_PLATFORM_ROOT` is dropped (ADR-system-005)."""
     env = {**environ, "HOME": str(candidate_home), "PYTHONPATH": str(candidate_python)}
+    env.pop("AGENT_PLATFORM_ROOT", None)
     home = environ.get("HOME")
     if home and "GH_CONFIG_DIR" not in env:
         env["GH_CONFIG_DIR"] = str(Path(home) / ".config/gh")
@@ -2622,10 +2894,49 @@ def _notice_spec(value: str) -> tuple[str, tuple[int, ...]]:
     return project, tuple(int(part) for part in parts)
 
 
+def fleet_preflight_verdict(report: dict, entries: list[dict]) -> tuple[int, dict]:
+    """Green when nothing is refused and the report's rows are the registry's entries one for one."""
+    reported = Counter(row["project_id"] for row in report["fleet"])
+    registered = Counter(entry["project_id"] for entry in entries)
+    missing = sorted((registered - reported).elements())
+    extra = sorted((reported - registered).elements())
+    green = not report["refused"] and not missing and not extra
+    return (0 if green else 1), {
+        "verdict": "green" if green else "red",
+        "platform_version": report["platform_version"],
+        "manifest_path": report["manifest_path"],
+        "fleet": report["fleet"],
+        "refused": report["refused"],
+        "registered": sorted(registered.elements()),
+        "missing": missing,
+        "extra": extra,
+    }
+
+
+def fleet_preflight_check(manifest: Path = Path(MANIFEST_PATH)) -> tuple[int, dict]:
+    """This checkout's fleet preflight against `manifest`, compared with the one registry snapshot it judged."""
+    try:
+        report, entries = fleet_preflight.judge(manifest)
+    except (resolve_project.ContractError, agent_platform.PlatformManifestError) as error:
+        return 2, {"verdict": "unreadable", "repair_id": error.repair_id}
+    return fleet_preflight_verdict(report, entries)
+
+
 def _merge_sha(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise argparse.ArgumentTypeError("must be a 40-character lowercase hex sha")
     return value
+
+
+def _devenv_timeout(value: str) -> int:
+    try:
+        seconds = int(value)
+    except ValueError:
+        seconds = 0
+    if not 1 <= seconds <= DEVENV_SHELL_TIMEOUT_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"must be an integer from 1 to {DEVENV_SHELL_TIMEOUT_SECONDS}")
+    return seconds
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2640,6 +2951,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "managed-pre-push-hook",
         help="issue 672: the managed pre-push hook refuses an agent default-branch push")
     hook.add_argument("--slug", type=_repo, required=True)
+    devenv = checks.add_parser(
+        "devenv-shell",
+        help="issue 1447: a commit through the devenv shell is signed and leaves a clean worktree")
+    devenv.add_argument("--probe", choices=("commit", "clean"), required=True)
+    devenv.add_argument("--repo-root", type=Path, default=Path("."))
+    devenv.add_argument("--timeout-seconds", type=_devenv_timeout,
+                        default=DEVENV_SHELL_TIMEOUT_SECONDS)
     for name, help_text in (
             ("cutover-manifest", "issue 579 C4.a: the candidate's removals were main's deprecations"),
             ("cutover-preflight", "issue 579 C4.b: the bridge and the candidate judge the fleet"),
@@ -2751,7 +3069,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "suite-wall-time",
         help="issue 1314: a full agent workflow suite run at this commit passes in under --limit seconds")
     wall.add_argument("--limit", type=_suite_limit, required=True)
+    checks.add_parser(
+        "fleet-preflight",
+        help="issue 1451: the candidate's fleet preflight passes and covers every registered project")
     args = parser.parse_args(argv)
+    if args.check == "fleet-preflight":
+        code, report = fleet_preflight_check()
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "console-state":
         code, report = console_state(args.port)
         print(json.dumps(report, sort_keys=True))
@@ -2860,6 +3185,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = managed_pre_push_hook(args.slug, git_bin=git_bin, environ=os.environ)
         except FixtureError as error:
             print(f"verify-checks: fixture_error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "devenv-shell":
+        devenv_bin = shutil.which("devenv", path=os.environ.get("PATH"))
+        try:
+            code, report = devenv_shell(args.probe, args.repo_root, devenv_bin=devenv_bin,
+                                        environ=os.environ, timeout=args.timeout_seconds)
+        except (FixtureError, GitError) as error:
+            print(f"verify-checks: fixture_error: {str(error).splitlines()[0]}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))
         return code

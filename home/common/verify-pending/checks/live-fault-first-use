@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 1433: the first declared live fault's delivery reaches a green pull
+# request within the hour of its declaration. verify-pending runs it from the repository root
+# at the commit the block names. Exit 0 met, 1 not met, 75 not yet, 2 a usage or forge error.
+PYTHONPATH=python exec python3 -m agent_tools.console.live_fault_check "$@"
