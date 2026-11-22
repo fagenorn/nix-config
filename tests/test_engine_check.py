@@ -142,8 +142,8 @@ def _outcome_not_required(schema: dict) -> None:
 
 def _add_orphan(toy: dict) -> None:
     toy["steps"].append({"id": "orphan", "stage": "building", "kind": "command",
-                         "command": "diff-scope", "in": ["draft.summary"],
-                         "on": {"ok": "done", "failed": "done"}})
+                         "command": "diff-scope", "holds": "run",
+                         "in": ["draft.summary"], "on": {"ok": "done", "failed": "done"}})
 
 
 def _claim_reaches_done_only_through_exhausted(child: dict) -> None:
@@ -209,7 +209,7 @@ def _write_bytes(name: str, data: bytes) -> Callable[[Path], None]:
 def _two_exhausted_steps_hand_over(child: dict) -> None:
     child["steps"] = [
         {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
-         "in": ["run.item"], "max_visits": 1,
+         "holds": "run", "in": ["run.item"], "max_visits": 1,
          "on": {"ok": own, "failed": "done", "exhausted": other}}
         for own, other in (("a", "b"), ("b", "a"))]
     child["stops"]["child-stop"]["reenter"] = "a"
@@ -221,7 +221,7 @@ def _exhausted_and_ordinary_edges_loop(child: dict) -> None:
         if exhausted is not None:
             on["exhausted"] = exhausted
         item = {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
-                "in": ["run.item"], "on": on}
+                "holds": "run", "in": ["run.item"], "on": on}
         if bound:
             item["max_visits"] = 1
         return item
@@ -377,6 +377,30 @@ CASES = [
          [("toy", None, "invalid_field")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
+    Case("step_without_holds",
+         editing("toy", _without(lambda toy: step(toy, "scope"), "holds")),
+         [("toy", "scope", "invalid_field")]),
+    Case("holds_outside_the_three_values",
+         editing("toy", _set(lambda toy: step(toy, "scope"), "holds", "forever")),
+         [("toy", "scope", "invalid_field")]),
+    Case("group_member_without_holds",
+         editing("toy", _without(lambda toy: step(toy, "review-a"), "holds")),
+         [("toy", "review-a", "invalid_field")]),
+    Case("mutating_command_without_check",
+         editing("toy-child", _without(lambda toy: step(toy, "claim"), "check")),
+         [("toy-child", "claim", "invalid_field")]),
+    Case("check_on_a_step_that_does_not_mutate",
+         editing("toy", _set(lambda toy: step(toy, "scope"), "check", {"command": "diff-scope"})),
+         [("toy", "scope", "invalid_field")]),
+    Case("check_that_is_not_an_object",
+         editing("toy-child", _set(lambda toy: step(toy, "claim"), "check", "forge-claim")),
+         [("toy-child", "claim", "invalid_field")]),
+    Case("check_with_an_undefined_member",
+         editing("toy-child", _set(lambda toy: step(toy, "claim")["check"], "timeout", 5)),
+         [("toy-child", "claim", "undefined_field")]),
+    Case("check_with_an_unknown_command",
+         editing("toy-child", _set(lambda toy: step(toy, "claim")["check"], "command", "nope")),
+         [("toy-child", "claim", "unknown_command")]),
 ]
 
 SIDE_EFFECT_SCRIPT = r"""
@@ -433,6 +457,15 @@ class ToyProcedureTest(unittest.TestCase):
             with self.subTest(stage=stage):
                 directory = broken_copy(
                     editing("toy", _set(lambda toy: step(toy, "draft"), "stage", stage)))
+                code, out, _ = run_check("--procedures", str(directory))
+                self.assertEqual((code, out), (0, compact(
+                    {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_each_holds_value_is_accepted(self):
+        for value in ("run", "head", "live"):
+            with self.subTest(value=value):
+                directory = broken_copy(
+                    editing("toy", _set(lambda toy: step(toy, "scope"), "holds", value)))
                 code, out, _ = run_check("--procedures", str(directory))
                 self.assertEqual((code, out), (0, compact(
                     {"procedures": ["toy", "toy-child"], "verdict": "ok"})))

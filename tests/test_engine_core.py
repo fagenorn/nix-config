@@ -123,7 +123,7 @@ class ActionTest(unittest.TestCase):
         step(doc, "tally")["on"]["accept"] = "publish"
         doc["steps"].append(
             {"id": "publish", "stage": "final review", "kind": "command", "command": "diff-scope",
-             "in": ["tally.verdict"], "on": {"ok": "done", "failed": "needs-owner"}}
+             "holds": "run", "in": ["tally.verdict"], "on": {"ok": "done", "failed": "needs-owner"}}
         )
         self.assertEqual(refusals(doc), ())
         events = (
@@ -141,7 +141,7 @@ class ActionTest(unittest.TestCase):
         step(doc, "tally")["on"]["accept"] = "publish"
         doc["steps"].append(
             {"id": "publish", "stage": "final review", "kind": "command", "command": "diff-scope",
-             "in": ["tally.score"], "on": {"ok": "done", "failed": "needs-owner"}}
+             "holds": "run", "in": ["tally.score"], "on": {"ok": "done", "failed": "needs-owner"}}
         )
         self.assertEqual([(item.step, item.defect) for item in refusals(doc)], [("publish", "unknown_member")])
 

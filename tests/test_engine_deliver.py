@@ -119,9 +119,10 @@ class EngineProject:
 
 
 def step(id: str, command: str, ok: str | None, *, failed: str = "needs-owner",
-         subcommand: str | None = None, on: dict | None = None) -> dict:
+         subcommand: str | None = None, on: dict | None = None,
+         holds: str = "run") -> dict:
     document = {"id": id, "stage": "setup", "kind": "command", "command": command,
-                "in": ["run.issue"], "on": on or {"ok": ok, "failed": failed}}
+                "holds": holds, "in": ["run.issue"], "on": on or {"ok": ok, "failed": failed}}
     if subcommand:
         document["subcommand"] = subcommand
     return document

@@ -17,11 +17,15 @@ arguments come from), `inputs` (distinct names matching `^[a-z][a-z0-9_]*$`),
 verdict or reply enum value carries it.
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`),
-`kind` (one of `KINDS`), `in` (distinct paths, `<step id>.<member>` or
-`run.<input>`), `on` (outcome -> target; required on every step except a group
+`kind` (one of `KINDS`), `holds` (one of `HOLDS`, required: how long the step's
+stored result holds when a stopped run continues), `in` (distinct paths,
+`<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group
 member, forbidden on one), `max_visits` (integer >= 1; its presence makes the
-step bounded) and `mutates` (bool). Kind members: `command`: `command` and
-optional `subcommand`, its arguments being its `in` paths; `agent`: `role`,
+step bounded) and `mutates` (bool). Kind members: `command`: `command`,
+optional `subcommand`, its arguments being its `in` paths, and optional `check`
+(an object with `command` and optional `subcommand`: the command that reads
+whether the step's effect already happened; a command step with `mutates` true
+requires one and no other step carries one); `agent`: `role`,
 `prompt` (a bare `*.md` name), `reply` (a bare `*.reply.json` name) and
 `outcome_from`; `decide`: `grader`; `group`: `members`, a non-empty list of
 objects with exactly `step` and `pass` (distinct strings); `call`: `procedure`,
@@ -46,7 +50,7 @@ Phase B (references, only on a file with no phase A refusal; the header,
 `keep_alive` and stops first, then the steps in order, one refusal per failed
 reference): `unknown_target` (an `on` target that is no step, stop or `done`,
 a stop `reenter` or a group member `step` that is no step), `unknown_command`
-and `undeclared_verdicts` (a `command` step or `keep_alive` against
+and `undeclared_verdicts` (a `command` step, its `check` or `keep_alive` against
 `command_verdicts.json`: an id that is no key, or a `subcommand` on a
 `verdicts`-form declaration, is the first; a `null` declaration, or a
 `subcommands`-form declaration that lacks the named subcommand, is the
@@ -132,10 +136,11 @@ FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
 HEADER_MEMBERS = ("format", "keep_alive", "inputs", "stops", "steps")
-COMMON_REQUIRED = ("id", "stage", "kind")
+HOLDS = ("run", "head", "live")
+COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
 KIND_MEMBERS = {
-    "command": (("command",), ("subcommand",)),
+    "command": (("command",), ("subcommand", "check")),
     "agent": (("role", "prompt", "reply", "outcome_from"), ()),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
@@ -383,6 +388,7 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("command must be a command id.")
         if "subcommand" in item and not (isinstance(item["subcommand"], str) and NAME_RE.fullmatch(item["subcommand"])):
             invalid(f"subcommand must match {NAME_RE.pattern}.")
+        _check_member(item, label, found)
     elif kind == "agent":
         if "role" in item and not _is_text(item["role"]):
             invalid("role must be a non-empty string.")
@@ -404,6 +410,25 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("each must be one of the step's in paths.")
         if "parallel" in item and not (_is_int(item["parallel"]) and item["parallel"] >= 1 and "each" in item):
             invalid("parallel must be an integer >= 1 and needs each.")
+
+
+def _check_member(item: dict, label: str | None, found: _Findings) -> None:
+    """A command step's `check` pairs with `mutates`: a mutating step has one, no other does."""
+    mutating = item.get("mutates") is True
+    if "check" not in item:
+        if mutating:
+            found.add("invalid_field", "a command step that mutates needs a check.", label)
+        return
+    check = item["check"]
+    if not mutating:
+        found.add("invalid_field", "check belongs only to a command step whose mutates is true.", label)
+    if not isinstance(check, dict):
+        found.add("invalid_field", "check must be an object.", label)
+        return
+    _members(check, ("command",), ("subcommand",), found, label, "check")
+    for member in ("command", "subcommand"):
+        if member in check and not (isinstance(check[member], str) and NAME_RE.fullmatch(check[member])):
+            found.add("invalid_field", f"check {member} must match {NAME_RE.pattern}.", label)
 
 
 def _listed(item: dict) -> list:
@@ -454,6 +479,8 @@ def _step(item: dict, index: int, layout: _Layout, found: _Findings) -> None:
         _paths(item["in"], False, found, label, "in")
     if "max_visits" in item and not (_is_int(item["max_visits"]) and item["max_visits"] >= 1):
         found.add("invalid_field", "max_visits must be an integer >= 1.", label)
+    if "holds" in item and item["holds"] not in HOLDS:
+        found.add("invalid_field", f"holds must be one of {', '.join(HOLDS)}.", label)
     if "mutates" in item and not isinstance(item["mutates"], bool):
         found.add("invalid_field", "mutates must be a boolean.", label)
     if "on" in item:
@@ -627,6 +654,8 @@ def check_references(name: str, doc: dict, directory: Path,
         step = StepResolved()
         if kind == "command":
             step = StepResolved(_command_outcomes(item, commands, found, label))
+            if "check" in item:
+                _command_outcomes(item["check"], commands, found, label)
         elif kind == "agent":
             step = _agent_references(item, directory, replies, found, label)
         elif kind == "decide":

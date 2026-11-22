@@ -74,6 +74,7 @@ def chain(n: int) -> dict:
                 "stage": "setup",
                 "kind": "command",
                 "command": "diff-scope",
+                "holds": "run",
                 "in": ["run.range"],
                 "on": {"ok": nxt, "failed": nxt},
             }

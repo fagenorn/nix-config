@@ -50,7 +50,7 @@ The one named result a step's grade produces; the only thing a transition reads.
 One JSON file in the platform package that describes a delivery as a finite state machine: a header (its `format`, a keep-alive command, its stops) and a flat list of steps, with no expression and no code. Its prompts are sibling Markdown files.
 
 **Step**:
-One entry of a procedure: an id, a stage, a kind (`command`, `agent`, `decide`, `group` or `call`), what it reads, a map from each outcome to the next step, a stop or `done`, a visit bound and whether it changes something.
+One entry of a procedure: an id, a stage, a kind (`command`, `agent`, `decide`, `group` or `call`), what it reads, a map from each outcome to the next step, a stop or `done`, a visit bound, whether it changes something, how long its result holds (`run`, `head` or `live`) and, on a command step that changes something, the `check` command that reads whether its effect already happened (issue 1516).
 
 **Stop**:
 A named end state of a run that is not `done`, with what it needs (an owner decision, an owner look, a retry or nothing) and the step a resumed run re-enters.
