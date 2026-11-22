@@ -508,7 +508,7 @@ class RegistrationTest(VerifyTestCase):
             "project_schema_version": 2,
             "platform_interval": {"min_inclusive": "1.2.0",
                                   "max_exclusive": "3.0.0"},
-            "deprecated_uses": [],
+            "deprecated_uses": ["platform-constants"],
             "removed_uses": [],
             "compatible": True,
             "reason_code": None,
@@ -739,6 +739,14 @@ class RemoteSourceSeamTest(VerifyTestCase):
             self.assertEqual((source.branch, source.remote_default), ("main", "main"))
         self.assertIsNone(adopt_verify.head_source(single).remote_default)
 
+    def test_the_source_export_carries_the_checkouts_origin_url(self):
+        root = verifiable_repo(self.home)
+        publish(root)
+        origin = git(root, "remote", "get-url", "origin").strip()
+        with adopt_verify.remote_source(root, adopt_project.run_resolver) as source:
+            config = (source.resolver_root / ".git" / "config").read_text(encoding="utf-8")
+        self.assertEqual(config, f'[remote "origin"]\n\turl = {origin}\n')
+
     def test_a_network_child_is_bounded_by_the_caller(self):
         self.assertEqual(adopt_inspection.GIT_TIMEOUT_SECONDS, 300)
         root = verifiable_repo(self.home)
@@ -956,7 +964,7 @@ class IntegrationBranchOperandTest(VerifyTestCase):
             "project_schema_version": 2,
             "platform_interval": {"min_inclusive": "1.2.0",
                                   "max_exclusive": "3.0.0"},
-            "deprecated_uses": [],
+            "deprecated_uses": ["platform-constants"],
             "removed_uses": [],
             "compatible": True,
             "reason_code": None,

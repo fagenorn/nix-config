@@ -11,16 +11,26 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import stat
 import unittest
+from datetime import datetime, timedelta, timezone
+from unittest import mock
 
-from agent_tools.project_contract import adopt_migrate
+from agent_tools.project_contract import (
+    adopt_migrate, attempt_history, derived_values, schema_three)
 
 from .test_adopt_project import AdoptTestCase, git, run, tree_snapshot
 from .test_resolve_project import (
-    MANAGED_LINE, install_home, make_home, make_project_root, mutated_manifest,
-    RETIRED_MEMBER, run as resolve_run, schema_one, source_contract as pinned_contract)
+    MANAGED_LINE, committed_manifest, install_home, make_home, make_project_root,
+    mutated_manifest, RETIRED_MEMBER, run as resolve_run, schema_one,
+    source_contract as pinned_contract)
+from .test_resolve_schema_three import (
+    EXPECTED_DERIVED, ISSUE_READS, make_schema_three_root, named_member_paths,
+    schema_three_contract, schema_two_equivalent, values_at, without_retired)
 
 MIGRATION = "bindings-deploy.retire"
+MIGRATION_THREE = "platform-constants.retire"
 
 
 def source_contract() -> dict:
@@ -249,8 +259,8 @@ class MigrateTest(AdoptTestCase):
         manifest = mutated_manifest()
         manifest["migrations"] = [
             *manifest["migrations"],
-            {"id": "future.step", "from_schema": 2, "to_schema": 3}]
-        manifest["project_schema_versions"] = [1, 2, 3]
+            {"id": "future.step", "from_schema": 3, "to_schema": 4}]
+        manifest["project_schema_versions"] = [2, 3, 4]
         install_home(self.home, manifest)
         root = make_project_root(source_contract())
         commit_all(root)
@@ -258,6 +268,502 @@ class MigrateTest(AdoptTestCase):
                            "--repo-root", str(root), home=self.home)
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(out)["error"]["repair_id"], "adopt.migration.unknown")
+        self.assertEqual(git(root, "status", "--porcelain"), "")
+
+
+SLUG = "fagenorn/nix-config"
+HISTORY_AT = datetime(2026, 11, 22, 12, tzinfo=timezone.utc)
+ARTIFACT = ".agents/artifacts/specs/old.md"
+
+
+def record_history(root) -> None:
+    """Twenty delivered attempts in the repository's git directory (untracked by construction)."""
+    attempts = [
+        attempt_history.Attempt(
+            i, 100 + i,
+            HISTORY_AT - timedelta(days=21 - i) - timedelta(seconds=i * 3600 + 30),
+            HISTORY_AT - timedelta(days=21 - i))
+        for i in range(1, 21)]
+    attempt_history.write_history(
+        root, attempt_history.render_history(SLUG, HISTORY_AT, attempts))
+
+
+class RetirePlatformConstantsTest(AdoptTestCase):
+    def setUp(self) -> None:
+        self.home = make_home()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+
+    def root(self, mutate=None, *, before=None, **sources):
+        contract = schema_two_equivalent(schema_three_contract())
+        if mutate is not None:
+            mutate(contract)
+        root = make_schema_three_root(contract, **sources)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        if before is not None:
+            before(root)
+        commit_all(root)
+        return root
+
+    def migrate(self, root):
+        return run("migrate", "--migration", MIGRATION_THREE,
+                   "--repo-root", str(root), home=self.home)
+
+    def contract_bytes(self, root) -> bytes:
+        return (root / ".agents/project.json").read_bytes()
+
+    def assert_refused(self, root, repair_id, pointers):
+        status = git(root, "status", "--porcelain")
+        contract = self.contract_bytes(root)
+        code, out, err = self.migrate(root)
+        self.assertEqual(code, 2, err)
+        error = json.loads(out)["error"]
+        self.assertEqual(error["repair_id"], repair_id)
+        self.assertEqual([v["pointer"] for v in error["violations"]], pointers)
+        self.assertEqual(git(root, "status", "--porcelain"), status)
+        self.assertEqual(self.contract_bytes(root), contract)
+
+    def assert_migrates(self, root) -> dict:
+        code, out, err = self.migrate(root)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_it_migrates_the_schema_two_equivalent_to_the_schema_three_fixture(self):
+        root = self.root()
+        code, out, err = resolve_run("resolve", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err)
+        snap2 = json.loads(out)
+        report = self.assert_migrates(root)
+        self.assertEqual(json.loads(self.contract_bytes(root)), schema_three_contract())
+        self.assertLessEqual({".agents/project.json", "AGENTS.md"}, set(report["written"]))
+        self.assertIn("(project schema 3)", (root / "AGENTS.md").read_text("utf-8"))
+        code, _, err = resolve_run("check-projections", "--repo-root", str(root),
+                                   home=self.home)
+        self.assertEqual(code, 0, err)
+        code, out, err = resolve_run("resolve", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err)
+        snap3 = json.loads(out)
+        for path in sorted(set(named_member_paths()) | ISSUE_READS):
+            with self.subTest(path=path):
+                self.assertIsNotNone(values_at(snap3, path))
+                self.assertEqual(values_at(snap3, path),
+                                 values_at(without_retired(snap2), path))
+
+    def test_it_is_pure_and_inverts_the_schema_three_fill(self):
+        source = schema_two_equivalent(schema_three_contract())
+        frozen = json.dumps(source)
+        out = adopt_migrate.retire_platform_constants(
+            source, derived_values.Derived(dict(EXPECTED_DERIVED), []))
+        self.assertEqual(json.dumps(source), frozen)
+        self.assertEqual(json.dumps(out), json.dumps(schema_three_contract()))
+
+    def test_the_pinned_schema_two_fixture_is_refused_at_each_differing_constant(self):
+        root = make_schema_three_root(pinned_contract())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        commit_all(root)
+        self.assert_refused(root, "adopt.migration.constant_differs", [
+            "/bindings/commands/commit-environment",
+            "/bindings/paths/architecture",
+            "/bindings/paths/context",
+            "/bindings/paths/hints",
+            "/bindings/paths/operations",
+            "/bindings/paths/standards",
+            "/bindings/tracker/credential_env/unset_before_invocation",
+            "/bindings/vcs/commit/environment",
+            "/bindings/workflow/verification"])
+
+    def test_a_differing_platform_command_or_command_constant_is_refused_by_name(self):
+        def argv(c):
+            c["bindings"]["commands"]["commit-environment"]["argv"] = ["nix", "develop", "-c"]
+
+        def deleted(c):
+            del c["bindings"]["commands"]["commit-environment"]
+
+        def cwd(c):
+            c["bindings"]["commands"]["lint"]["cwd"] = "sub"
+
+        def env(c):
+            c["bindings"]["commands"]["test"]["env"] = ["CI"]
+
+        def signed(c):
+            c["bindings"]["vcs"]["commit"]["signed"] = 1
+
+        def parallel(c):
+            c["bindings"]["workflow"]["orchestration"]["max_parallel"] = 2.0
+
+        def malformed(c):
+            c["bindings"] = "x"
+
+        cases = (
+            ("argv", argv, {}, ["/bindings/commands/commit-environment"]),
+            ("deleted", deleted, {}, ["/bindings/commands/commit-environment"]),
+            ("cwd", cwd, {}, ["/bindings/commands/lint/cwd"]),
+            ("env", env, {}, ["/bindings/commands/test/env"]),
+            ("signed", signed, {}, ["/bindings/vcs/commit/signed"]),
+            ("parallel", parallel, {}, ["/bindings/workflow/orchestration/max_parallel"]),
+            ("malformed", malformed, {"projections": False},
+             sorted([*schema_three.CONSTANTS, "/bindings/commands/commit-environment"])))
+        for name, mutate, sources, pointers in cases:
+            with self.subTest(name):
+                root = self.root(mutate, **sources)
+                self.assert_refused(root, "adopt.migration.constant_differs", pointers)
+        with self.subTest("a review command schema 2 supplies implicitly"):
+            root = self.root(lambda c: c["bindings"]["commands"].pop("codex-plan-review", None))
+            self.assert_migrates(root)
+
+    def test_a_disagreeing_derived_value_is_refused_by_name(self):
+        def slug(c):
+            c["bindings"]["tracker"]["repo_slug"] = "someone/else"
+
+        def project(c):
+            c["project"]["id"] = "someone/else"
+
+        def checks(c):
+            c["bindings"]["vcs"]["merge"]["required_checks"] = ["Nix Eval"]
+
+        def interval(c):
+            c["platform"] = {"min_inclusive": "1.2.0", "max_exclusive": "2.0.0"}
+
+        for name, mutate, pointer in (
+                ("repo_slug", slug, "/bindings/tracker/repo_slug"),
+                ("project id", project, "/project/id"),
+                ("required checks", checks, "/bindings/vcs/merge/required_checks"),
+                ("interval", interval, "/platform")):
+            with self.subTest(name):
+                self.assert_refused(self.root(mutate),
+                                    "adopt.migration.derived_differs", [pointer])
+
+    def test_an_attempt_budget_other_than_the_derived_one_is_refused_by_name(self):
+        budget = "/bindings/workflow/orchestration/attempt_budget_minutes"
+
+        def orchestration(c):
+            return c["bindings"]["workflow"]["orchestration"]
+
+        def other(c):
+            orchestration(c)["attempt_budget_minutes"] = 480
+
+        def dropped(c):
+            del orchestration(c)["attempt_budget_minutes"]
+
+        def basis(c):
+            orchestration(c)["attempt_budget_basis"] = {
+                "source": "fallback", "reason": "no_history"}
+
+        for name, mutate, pointer in (
+                ("other", other, budget), ("absent", dropped, budget),
+                ("basis", basis, budget.replace("minutes", "basis"))):
+            with self.subTest(name):
+                self.assert_refused(self.root(mutate),
+                                    "adopt.migration.derived_differs", [pointer])
+        with self.subTest("history"):
+            root = self.root(before=record_history)
+            derived = attempt_history.read(root, SLUG).minutes
+            self.assertNotEqual(derived, 240)
+            status = git(root, "status", "--porcelain")
+            code, out, err = self.migrate(root)
+            self.assertEqual(code, 2, err)
+            error = json.loads(out)["error"]
+            self.assertEqual(error["repair_id"], "adopt.migration.derived_differs")
+            self.assertEqual([v["pointer"] for v in error["violations"]], [budget])
+            self.assertIn(json.dumps(derived), error["violations"][0]["message"])
+            self.assertEqual(git(root, "status", "--porcelain"), status)
+        with self.subTest("history, authored budget equals it"):
+            def match(c):
+                orchestration(c)["attempt_budget_minutes"] = 1621
+            root = self.root(match, before=record_history)
+            self.assertEqual(attempt_history.read(root, SLUG).minutes, 1621)
+            self.assert_migrates(root)
+            self.assertNotIn(
+                "orchestration", json.loads(self.contract_bytes(root))["bindings"]["workflow"])
+
+    def test_no_declared_checks_accept_absent_or_null_and_refuse_an_empty_list(self):
+        none = {"required_status_checks": None}
+
+        def absent(c):
+            del c["bindings"]["vcs"]["merge"]["required_checks"]
+
+        def null(c):
+            c["bindings"]["vcs"]["merge"]["required_checks"] = None
+
+        def empty(c):
+            c["bindings"]["vcs"]["merge"]["required_checks"] = []
+
+        with self.subTest("absent"):
+            self.assert_migrates(self.root(absent, protection=none))
+        with self.subTest("null"):
+            root = self.root(null, protection=none)
+            self.assert_migrates(root)
+            self.assertNotIn("merge", json.loads(self.contract_bytes(root))["bindings"]["vcs"])
+        with self.subTest("empty"):
+            self.assert_refused(self.root(empty, protection=none),
+                                "adopt.migration.derived_differs",
+                                ["/bindings/vcs/merge/required_checks"])
+
+    def test_a_platform_interval_admitting_the_stated_version_is_dropped(self):
+        def wide(c):
+            c["platform"] = {"min_inclusive": "1.2.0", "max_exclusive": "3.0.0"}
+
+        root = self.root(wide)
+        self.assert_migrates(root)
+        self.assertNotIn("platform", json.loads(self.contract_bytes(root)))
+        code, _, err = resolve_run("resolve", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err)
+
+    def test_an_underivable_value_is_refused_before_any_write(self):
+        self.assert_refused(self.root(protection=None), "adopt.migration.not_derivable",
+                            ["/bindings/vcs/merge/required_checks"])
+
+    def test_a_differing_constant_is_reported_before_a_derived_value(self):
+        def mutate(c):
+            c["bindings"]["paths"]["standards"] = ["docs/standards", "more"]
+            c["bindings"]["tracker"]["repo_slug"] = "someone/else"
+
+        self.assert_refused(self.root(mutate), "adopt.migration.constant_differs",
+                            ["/bindings/paths/standards"])
+
+    def test_it_deletes_every_tracked_file_under_the_artifacts_directory(self):
+        def tracked(root):
+            for name in (ARTIFACT, ".agents/artifacts/evidence/rec.json"):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(f"tracked {name}\n", encoding="utf-8")
+
+        root = self.root(before=tracked)
+        (root / ".agents/artifacts/notes").mkdir()
+        (root / ".agents/artifacts/notes/scratch.md").write_text("scratch\n", encoding="utf-8")
+        (root / "notes.txt").write_text("notes\n", encoding="utf-8")
+        report = self.assert_migrates(root)
+        for name in (ARTIFACT, ".agents/artifacts/evidence/rec.json"):
+            self.assertFalse((root / name).exists(), name)
+            self.assertIn(name, report["written"])
+        self.assertEqual((root / ".agents/artifacts/notes/scratch.md").read_text("utf-8"),
+                         "scratch\n")
+        self.assertEqual((root / "notes.txt").read_text("utf-8"), "notes\n")
+        status = git(root, "status", "--porcelain").splitlines()
+        self.assertIn(f" D {ARTIFACT}", status)
+        self.assertIn(" D .agents/artifacts/evidence/rec.json", status)
+        self.assertEqual(git(root, "diff", "--cached", "--name-only"), "")
+
+    def test_a_projection_target_inside_the_artifacts_directory_is_refused(self):
+        def generated(c):
+            for entry in c["projections"]:
+                if entry["kind"] == "generated_file":
+                    entry["target"] = ".agents/artifacts/AGENTS.md"
+
+        def managed(c):
+            for entry in c["projections"]:
+                if entry["kind"] == "managed_import":
+                    entry["target"] = ".agents/artifacts/CLAUDE.md"
+
+        def move(name):
+            def before(root):
+                (root / ".agents/artifacts").mkdir(parents=True)
+                (root / name).rename(root / ".agents/artifacts" / name)
+            return before
+
+        for name, mutate in (("AGENTS.md", generated), ("CLAUDE.md", managed)):
+            with self.subTest(name):
+                root = self.root(mutate, before=move(name))
+                code, _, err = resolve_run("resolve", "--repo-root", str(root), home=self.home)
+                self.assertEqual(code, 0, err)
+                target = root / ".agents/artifacts" / name
+                kept = target.read_bytes()
+                self.assert_refused(root, "adopt.migration.projection_in_retired_tree",
+                                    [f"/.agents/artifacts/{name}"])
+                self.assertEqual(target.read_bytes(), kept)
+
+    def test_a_projection_target_spelled_differently_is_still_inside_the_artifacts_directory(self):
+        def dotted(c):
+            for entry in c["projections"]:
+                if entry["kind"] == "generated_file":
+                    entry["target"] = "./.agents/artifacts/AGENTS.md"
+
+        def through_link(c):
+            for entry in c["projections"]:
+                if entry["kind"] == "generated_file":
+                    entry["target"] = "shortcut/AGENTS.md"
+
+        def tracked(root):
+            (root / ".agents/artifacts").mkdir(parents=True)
+            (root / "AGENTS.md").rename(root / ".agents/artifacts/AGENTS.md")
+
+        def linked(root):
+            tracked(root)
+            (root / "shortcut").symlink_to(".agents/artifacts")
+
+        for name, mutate, before, pointer in (
+                ("dotted", dotted, tracked, "/./.agents/artifacts/AGENTS.md"),
+                ("link", through_link, linked, "/shortcut/AGENTS.md")):
+            with self.subTest(name):
+                root = self.root(mutate, before=before)
+                target = root / ".agents/artifacts/AGENTS.md"
+                kept = target.read_bytes()
+                self.assert_refused(
+                    root, "adopt.migration.projection_in_retired_tree", [pointer])
+                self.assertEqual(target.read_bytes(), kept)
+
+    def test_a_projection_target_in_another_case_is_refused_on_a_case_insensitive_checkout(self):
+        def upper(c):
+            for entry in c["projections"]:
+                if entry["kind"] == "generated_file":
+                    entry["target"] = ".agents/ARTIFACTS/AGENTS.md"
+
+        def tracked(root):
+            (root / ".agents/artifacts").mkdir(parents=True)
+            (root / "AGENTS.md").rename(root / ".agents/artifacts/AGENTS.md")
+
+        root = self.root(upper, before=tracked)
+        if not (root / ".agents/ARTIFACTS/AGENTS.md").exists():
+            self.skipTest("the checkout's filesystem is case sensitive")
+        target = root / ".agents/artifacts/AGENTS.md"
+        kept = target.read_bytes()
+        self.assert_refused(root, "adopt.migration.projection_in_retired_tree",
+                            ["/.agents/ARTIFACTS/AGENTS.md"])
+        self.assertEqual(target.read_bytes(), kept)
+
+    def test_a_retired_file_the_resolver_recreates_is_refused_and_restored(self):
+        def tracked(root):
+            (root / ARTIFACT).parent.mkdir(parents=True)
+            (root / ARTIFACT).write_text("original\n", encoding="utf-8")
+
+        root = self.root(before=tracked)
+        before = tree_snapshot(root)
+        source = json.loads(self.contract_bytes(root))
+
+        def recreating(repo, command):
+            (repo / ARTIFACT).write_text("recreated\n", encoding="utf-8")
+            return 0, {}
+
+        with self.assertRaises(adopt_migrate.adopt_inspection.AdoptError) as caught:
+            adopt_migrate.migrate(root, MIGRATION_THREE, committed_manifest(),
+                                  source, recreating)
+        self.assertEqual(caught.exception.repair_id,
+                         "adopt.migration.retired_file_recreated")
+        self.assertEqual([v["pointer"] for v in caught.exception.violations],
+                         [f"/{ARTIFACT}"])
+        self.assertEqual(tree_snapshot(root), before)
+        self.assertEqual((root / ARTIFACT).read_text("utf-8"), "original\n")
+
+    def test_an_edit_git_cannot_see_is_refused_and_kept(self):
+        def tracked(root):
+            (root / ARTIFACT).parent.mkdir(parents=True)
+            (root / ARTIFACT).write_text("original\n", encoding="utf-8")
+
+        for flag in ("--assume-unchanged", "--skip-worktree"):
+            with self.subTest(flag):
+                root = self.root(before=tracked)
+                git(root, "update-index", flag, ARTIFACT)
+                (root / ARTIFACT).write_text("edited\n", encoding="utf-8")
+                self.assert_refused(
+                    root, "adopt.migration.artifact_modified", [f"/{ARTIFACT}"])
+                self.assertEqual((root / ARTIFACT).read_text("utf-8"), "edited\n")
+
+    def test_a_tracked_file_named_like_the_artifacts_directory_is_not_deleted(self):
+        def tracked(root):
+            (root / ".agents/artifacts").write_text("a file\n", encoding="utf-8")
+
+        root = self.root(before=tracked)
+        report = self.assert_migrates(root)
+        self.assertEqual((root / ".agents/artifacts").read_text("utf-8"), "a file\n")
+        self.assertNotIn(".agents/artifacts", report["written"])
+
+    def test_a_schema_version_that_is_not_an_integer_is_not_applicable(self):
+        for value in (2.0, True):
+            with self.subTest(value=value):
+                root = self.root(lambda c: c.update(schema_version=value))
+                contract = self.contract_bytes(root)
+                code, out, err = self.migrate(root)
+                self.assertEqual(code, 2, err)
+                self.assertEqual(json.loads(out)["error"]["repair_id"],
+                                 "adopt.migration.not_applicable")
+                self.assertEqual(self.contract_bytes(root), contract)
+
+    def test_a_checkout_pinning_an_older_platform_is_refused(self):
+        def pinned(c):
+            c["platform"] = {"min_inclusive": "2.0.0", "max_exclusive": "3.0.0"}
+
+        def older(root):
+            manifest = root / derived_values.TREE_MANIFEST
+            document = json.loads(manifest.read_text("utf-8"))
+            document["platform_version"] = "2.0.0"
+            manifest.write_text(json.dumps(document), encoding="utf-8")
+
+        root = self.root(pinned, before=older)
+        self.assert_refused(root, "adopt.migration.pinned_platform_too_old", ["/platform"])
+
+    def test_an_unstaged_edit_to_a_tracked_artifact_is_refused_and_kept(self):
+        def tracked(root):
+            (root / ARTIFACT).parent.mkdir(parents=True)
+            (root / ARTIFACT).write_text("original\n", encoding="utf-8")
+
+        root = self.root(before=tracked)
+        (root / ARTIFACT).write_text("edited\n", encoding="utf-8")
+        (root / "notes.txt").write_text("notes\n", encoding="utf-8")
+        self.assert_refused(root, "adopt.migration.artifact_modified", [f"/{ARTIFACT}"])
+        self.assertEqual((root / ARTIFACT).read_text("utf-8"), "edited\n")
+        self.assertEqual(git(root, "diff", "--cached", "--name-only"), "")
+        with self.subTest("staged"):
+            root = self.root(before=tracked)
+            (root / ARTIFACT).write_text("staged\n", encoding="utf-8")
+            git(root, "add", ARTIFACT)
+            self.assert_migrates(root)
+            self.assertFalse((root / ARTIFACT).exists())
+            self.assertEqual(git(root, "show", f":{ARTIFACT}"), "staged\n")
+
+    def test_a_symlinked_artifact_directory_is_refused(self):
+        def tracked(root):
+            (root / ARTIFACT).parent.mkdir(parents=True)
+            (root / ARTIFACT).write_text("original\n", encoding="utf-8")
+
+        root = self.root(before=tracked)
+        (root / "elsewhere").mkdir()
+        (root / ".agents/artifacts/specs").rename(root / "elsewhere/specs")
+        (root / ".agents/artifacts/specs").symlink_to("../../elsewhere/specs")
+        code, out, err = self.migrate(root)
+        self.assertEqual(code, 2, err)
+        error = json.loads(out)["error"]
+        self.assertEqual(error["repair_id"], "adopt.migration.symlink_target")
+        self.assertEqual([v["pointer"] for v in error["violations"]], [f"/{ARTIFACT}"])
+        self.assertEqual((root / "elsewhere/specs/old.md").read_text("utf-8"), "original\n")
+
+    def test_a_resolver_refusal_restores_the_contract_and_the_retired_artifacts(self):
+        install_home(self.home, mutated_manifest(project_schema_versions=[2]))
+
+        def tracked(root):
+            (root / ARTIFACT).parent.mkdir(parents=True)
+            (root / ARTIFACT).write_text("original\n", encoding="utf-8")
+            (root / ARTIFACT).chmod(0o755)
+
+        root = self.root(before=tracked)
+        before = tree_snapshot(root)
+        names = (".agents/project.json", "AGENTS.md", "CLAUDE.md", ARTIFACT)
+        contents = {name: (root / name).read_bytes() for name in names}
+        mode = stat.S_IMODE((root / ARTIFACT).stat().st_mode)
+        code, out, err = self.migrate(root)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(out)["error"]["repair_id"],
+                         "adopt.migration.result_invalid")
+        self.assertEqual(tree_snapshot(root), before)
+        self.assertEqual({name: (root / name).read_bytes() for name in names}, contents)
+        self.assertEqual(stat.S_IMODE((root / ARTIFACT).stat().st_mode), mode)
+        self.assertEqual(git(root, "status", "--porcelain"), "")
+
+    def test_the_schema_one_migration_reads_no_derivation_input(self):
+        root = make_project_root(source_contract())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        commit_all(root)
+        with mock.patch.object(derived_values, "derive", side_effect=AssertionError("derive")), \
+                mock.patch.object(attempt_history, "read", side_effect=AssertionError("read")):
+            code, _, err = run("migrate", "--migration", MIGRATION,
+                               "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err)
+
+    def test_a_second_run_is_not_applicable(self):
+        root = self.root()
+        self.assert_migrates(root)
+        commit_all(root, "migrated")
+        code, out, _ = self.migrate(root)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["error"]["repair_id"],
+                         "adopt.migration.not_applicable")
         self.assertEqual(git(root, "status", "--porcelain"), "")
 
 
@@ -280,8 +786,11 @@ class RetireBindingsDeployTest(unittest.TestCase):
         self.assertEqual(out["platform"],
                          {"min_inclusive": "1.10.0", "max_exclusive": "3.0.0"})
 
-    def test_the_registry_names_exactly_the_one_migration(self):
-        self.assertEqual(list(adopt_migrate.MIGRATIONS), [MIGRATION])
+    def test_the_registry_names_exactly_the_manifests_migrations(self):
+        self.assertEqual(
+            list(adopt_migrate.MIGRATIONS),
+            [m["id"] for m in committed_manifest()["migrations"]])
+        self.assertEqual(list(adopt_migrate.MIGRATIONS), [MIGRATION, MIGRATION_THREE])
 
 
 if __name__ == "__main__":

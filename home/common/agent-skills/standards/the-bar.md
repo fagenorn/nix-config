@@ -67,3 +67,7 @@ Run it and show the behaviour. Absence of an error is not evidence of success, a
 ### B16. Test runs leave nothing behind
 
 A test run creates what it uses and removes it when it ends, takes no fixed port, and leaves nothing behind. ([decision](https://github.com/fagenorn/nix-config/issues/1417))
+
+### B17. Files stay under 1,500 lines
+
+No source or test file is over 1,500 lines. A file already over it may not grow and a file under it may grow up to it, judged against the change's merge base, so a file over the limit stops growing without a hand-set exception. ([decision](https://github.com/fagenorn/nix-config/issues/1422))

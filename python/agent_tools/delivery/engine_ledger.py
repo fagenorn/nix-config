@@ -8,9 +8,10 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
     lock  the deliver process's exclusive flock and its {"pid","started"}
     slots/slot-<i>.lock the run's agent slots, each an exclusive flock held while a session runs
                         (`engine_slots`)
+    stop-request   a pending stop request for the lock holder it names (engine_stop)
     results/<step>.<visit>.json
                         a step visit's stored result
-    sessions/<step>.<visit>.{system.md,prompt.md,json}
+    sessions/<step>.<visit>.{system.md,prompt.md,json,resume.json,resume.prompt.md}
                         an agent step visit's launch files and raw result,
                         created with the first one stored
 
@@ -20,7 +21,9 @@ order `find_runs` returns. The caller serialises the creation of an issue's runs
 `<root>/.<run id>.tmp` and renamed into place, so a run directory is either complete or absent.
 
 Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, exactly the
-other members it carries.
+other members it carries. An agent step visit that hits a usage limit or an API error, or gives no valid
+answer, is launched again in the same visit: `session_resuming` records each such launch (its `attempt`, 2 or
+more) and `session_answered` the account the launcher answered for a launch whose process started.
 
 Order rule: a result file is written to a writer-owned temporary file (fsynced), then linked into place,
 which refuses a result that exists, before its `result_stored` event is appended; `append_event` refuses
@@ -69,6 +72,8 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
     "step_entered": frozenset(("step", "visit", "stage")),
     "session_starting": frozenset(("step", "visit", "session", "role", "account")),
     "process_started": frozenset(("step", "visit", "pid", "started")),
+    "session_resuming": frozenset(("step", "visit", "session", "attempt")),
+    "session_answered": frozenset(("step", "visit", "session", "attempt", "account")),
     "result_stored": frozenset(("step", "visit", "result", "wall_seconds", "turns",
                                 "tokens", "spend_usd")),
     "outcome_graded": frozenset(("step", "visit", "outcome")),
@@ -433,7 +438,7 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
     return path
 
 
-SESSION_FILE_RE = re.compile(r"[a-z][a-z0-9-]*\.[1-9][0-9]*\.(json|system\.md|prompt\.md)")
+SESSION_FILE_RE = re.compile(r"[a-z][a-z0-9-]*\.[1-9][0-9]*\.(json|system\.md|prompt\.md|resume\.json|resume\.prompt\.md)")
 
 
 def store_session_file(run_dir: Path, name: str, data: bytes) -> Path:

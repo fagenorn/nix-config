@@ -27,6 +27,9 @@ from .conformance_test_support import (
     mutated_manifest, platform_env, run,
 )
 from .test_resolve_project import make_project_root, source_contract
+from .test_resolve_schema_three import (
+    make_schema_three_root, schema_three_contract, schema_two_equivalent,
+)
 
 
 def valid_report() -> dict:
@@ -283,6 +286,29 @@ class ValidateReportTest(unittest.TestCase):
         self.assertIn("usage:", err)
 
 
+class CiExitTest(ReportAssertions, unittest.TestCase):
+    """A red `ci` run exits 1 after printing its report; no other purpose
+    turns a failed outcome into a non-zero exit."""
+
+    def test_a_failed_ci_report_exits_one_and_still_prints_it(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            code, out, err = run("run", "--purpose", "ci", "--repo-root",
+                                 str(root), "--require", "knowledge.hints")
+            self.assertEqual(code, 1, err)
+            report = json.loads(out)
+            self.assertEqual(report["outcome"]["status"], "failed")
+            self.assert_validates(report)
+            for purpose in ("adoption", "fleet", "doctor"):
+                with self.subTest(purpose=purpose):
+                    code, out, err = run("run", "--purpose", purpose,
+                                         "--repo-root", str(root),
+                                         "--require", "knowledge.hints")
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(json.loads(out)["outcome"]["status"],
+                                     "failed")
+
+
 class RunReportShapeTest(ReportAssertions, unittest.TestCase):
     """AC1: both purposes emit a schema-valid report, differing in shape."""
 
@@ -410,9 +436,9 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
         cases = (
             ("platform_too_old", "0.9.0", 2, "/platform"),
             ("platform_too_new", "2.0.0", 2, "/platform"),
-            # Platform 2.0.0 supports project schema 2 alone: 1 is retired, 3 is not yet.
+            # Platform 2.2.0 reads project schemas 2 and 3: 1 is retired, 4 does not exist.
             ("project_schema_unsupported", "1.4.2", 1, "/schema_version"),
-            ("project_schema_unsupported", "1.4.2", 3, "/schema_version"),
+            ("project_schema_unsupported", "1.4.2", 4, "/schema_version"),
         )
         for reason_code, version, schema, pointer in cases:
             with self.subTest(reason_code=reason_code, schema=schema), fixture() as tmp:
@@ -428,7 +454,7 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
                      "contract.schema.unsupported"])
                 self.assertEqual(check["facts"], {
                     "platform_version": version,
-                    "supported_project_schemas": ["2"],
+                    "supported_project_schemas": ["2", "3"],
                     "project_schema_version": schema,
                     "platform_min_inclusive": "1.0.0",
                     "platform_max_exclusive": "2.0.0",
@@ -510,7 +536,7 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
                 ["passed", None, None])
             self.assertEqual(check["facts"], {
                 "platform_version": "1.4.2",
-                "supported_project_schemas": ["2"],
+                "supported_project_schemas": ["2", "3"],
                 "project_schema_version": 2,
                 "platform_min_inclusive": "1.0.0",
                 "platform_max_exclusive": "2.0.0",
@@ -580,6 +606,37 @@ class SchemaTwoContractTest(ReportAssertions, unittest.TestCase):
         self.assertNotEqual(got["compatibility.contract.schema_supported"][0], "passed")
 
 
+class SchemaThreeContractTest(ReportAssertions, unittest.TestCase):
+    """Conformance judges a schema-3 contract as it judges its schema-2 equivalent."""
+
+    def test_a_schema_three_contract_is_judged_like_its_schema_two_equivalent(self):
+        root3 = make_schema_three_root(schema_three_contract())
+        self.addCleanup(shutil.rmtree, root3, ignore_errors=True)
+        root2 = make_schema_three_root(schema_two_equivalent(schema_three_contract()))
+        self.addCleanup(shutil.rmtree, root2, ignore_errors=True)
+        report3, by3 = doctor(self, root3, "--offline")
+        report2, by2 = doctor(self, root2, "--offline")
+        self.assert_validates(report3)
+        self.assert_validates(report2)
+        self.assertEqual(by3["repository.contract.resolvable"]["status"], "passed")
+        self.assertEqual(by3["compatibility.contract.schema_supported"]["status"], "passed")
+        self.assertEqual(
+            by3["compatibility.contract.schema_supported"]["facts"]["project_schema_version"], 3)
+        self.assertEqual(sorted(by3), sorted(by2))
+        for check_id in sorted(by3):
+            with self.subTest(check_id):
+                self.assertEqual(
+                    [by3[check_id]["status"], by3[check_id]["reason_code"]],
+                    [by2[check_id]["status"], by2[check_id]["reason_code"]])
+                if check_id == "compatibility.contract.schema_supported":
+                    continue
+                facts3 = json.dumps(by3[check_id]["facts"], sort_keys=True).replace(
+                    str(root3), "<root>")
+                facts2 = json.dumps(by2[check_id]["facts"], sort_keys=True).replace(
+                    str(root2), "<root>")
+                self.assertEqual(facts3, facts2)
+
+
 class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
     """--require reuses the resolver's own capability names, closed at the flag."""
 
@@ -626,8 +683,8 @@ class ReadOnlyTest(unittest.TestCase):
     empty directory, and the mtimes — of directories and of the root itself,
     not only of files — a rewrite with identical bytes and a create-then-delete
     cycle that leaves the path set unchanged. Only the engine subprocess is
-    hermetic; the fixture's own git calls use the caller's environment, and
-    `commit.gpgsign=false` here is bookkeeping in a throwaway temp repository.
+    hermetic; `make_root` already committed the root, and this suite's own git
+    calls only read its status.
     """
 
     def git(self, root: Path, *args: str) -> str:
@@ -646,15 +703,42 @@ class ReadOnlyTest(unittest.TestCase):
     def test_a_doctor_run_leaves_the_subject_root_untouched(self):
         with fixture() as tmp:
             root = make_root(tmp)
-            self.git(root, "init", "-q")
-            self.git(root, "add", "-A")
-            self.git(root, "commit", "-q", "-m", "fixture")
             status = self.git(root, "status", "--porcelain")
             paths, root_mtime = self.snapshot(root), root.stat().st_mtime_ns
             doctor(self, root)
             self.assertEqual(self.git(root, "status", "--porcelain"), status)
             self.assertEqual(self.snapshot(root), paths)
             self.assertEqual(root.stat().st_mtime_ns, root_mtime)
+
+
+    def test_a_doctor_run_with_a_declared_map_lint_leaves_every_tree_untouched(self):
+        for cwd in (".", ".."):
+            with self.subTest(cwd=cwd), fixture() as tmp:
+                root = make_root(tmp)
+                bin_dir = tmp / "bin"
+                bin_dir.mkdir()
+                script = bin_dir / "map-lint"
+                script.write_text(
+                    f"#!/bin/sh\n: > {root}/inside-marker\n: > {tmp}/outside-marker\n",
+                    encoding="utf-8")
+                script.chmod(0o755)
+                contract = root / ".agents/project.json"
+                authored = json.loads(contract.read_text(encoding="utf-8"))
+                authored["bindings"]["commands"]["context-map-lint"] = {
+                    "argv": ["map-lint"], "cwd": cwd, "env": []}
+                contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+                env = {**HERMETIC_ENV, "PATH": f"{bin_dir}:{HERMETIC_ENV['PATH']}"}
+                status = self.git(root, "status", "--porcelain")
+                paths, root_mtime = self.snapshot(root), root.stat().st_mtime_ns
+                for extra in ((), ("--offline",)):
+                    code, _, err = run("run", "--purpose", "doctor", "--repo-root",
+                                       str(root), *extra, env=env)
+                    self.assertIn(code, (0, 2), err)
+                    self.assertEqual(self.git(root, "status", "--porcelain"), status)
+                    self.assertEqual(self.snapshot(root), paths)
+                    self.assertEqual(root.stat().st_mtime_ns, root_mtime)
+                    self.assertFalse((root / "inside-marker").exists())
+                    self.assertFalse((tmp / "outside-marker").exists())
 
 
 class PolicyPathSymlinkTest(ReportAssertions, unittest.TestCase):

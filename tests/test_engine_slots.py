@@ -244,6 +244,9 @@ class SlotReleaseTest(unittest.TestCase):
             if mode in ("reply", "orphan", "pipes"):
                 code, _ = engine_shell.deliver(1512, procedures)
                 self.assertEqual(code, 0)
+            elif mode == "prose":  # a miss: resumed once, then `no-reply` stops the run
+                code, _ = engine_shell.deliver(1512, procedures)
+                self.assertEqual(code, 3)
             else:
                 with self.assertRaises(engine_shell.Fault):
                     engine_shell.deliver(1512, procedures)
@@ -252,7 +255,8 @@ class SlotReleaseTest(unittest.TestCase):
             self.addCleanup(kill_quietly, int(pid_file.read_text(encoding="utf-8")))
         (run,) = project.runs()
         lines = log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual([json.loads(line)["held"] for line in lines], [1])
+        launches = 2 if mode == "prose" else 1  # each launch of a session holds its slot
+        self.assertEqual([json.loads(line)["held"] for line in lines], [1] * launches)
         self.assertEqual(held_slots(run), 0)
         self.assertEqual([e for e in project.events(run) if e["event"] == "wait_started"], [])
         return log

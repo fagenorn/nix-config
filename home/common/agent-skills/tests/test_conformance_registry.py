@@ -61,13 +61,13 @@ class RequiredCapabilitySelectionTest(unittest.TestCase):
     """
 
     def test_no_purpose_passes_while_a_required_capability_is_unavailable(self):
-        for purpose in ("adoption", "ci", "fleet"):
+        for purpose, exit_code in (("adoption", 0), ("ci", 1), ("fleet", 0)):
             with self.subTest(purpose=purpose):
                 with fixture() as tmp:
                     code, out, err = run("run", "--purpose", purpose,
                                          "--repo-root", str(make_root(tmp)),
                                          "--require", "knowledge.hints")
-                    self.assertEqual(code, 0, err)
+                    self.assertEqual(code, exit_code, err)
                     report = json.loads(out)
                     self.assertEqual(report["outcome"], {
                         "status": "failed",
@@ -97,6 +97,10 @@ REGISTERED_CHECK_IDS = (
     "repository.residue.promoted_duplicate",
     "repository.residue.root_scratch",
     "verification.commands.no_shell_indirection",
+    "verification.conformance_workflow.fresh",
+    "verification.context_map.lint",
+    "verification.standards.lint",
+    "verification.violations.never_rise",
 )
 
 ENTRY_LADDER_IDS = (
@@ -120,7 +124,7 @@ PURPOSE_SELECTION = {
 
 
 class RegistryClosureTest(unittest.TestCase):
-    def test_the_registry_is_exactly_the_nineteen_declared_checks(self):
+    def test_the_registry_is_exactly_the_declared_checks(self):
         module = load_module()
         self.assertEqual(sorted(c.id for c in module.REGISTRY),
                          sorted(REGISTERED_CHECK_IDS))

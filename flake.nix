@@ -115,7 +115,16 @@
     {
 
       packages = inputs.nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" ] (system: {
-        agent-platform = import ./lib/agent-tools.nix { pkgs = platformPkgs system; };
+        agent-platform = import ./lib/agent-tools.nix {
+          pkgs = platformPkgs system;
+          revision = {
+            owner = "fagenorn";
+            repo = "nix-config";
+            rev = self.rev or null;
+            narHash = self.narHash;
+            lastModified = self.lastModified;
+          };
+        };
       });
 
       checks = inputs.nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" ] (

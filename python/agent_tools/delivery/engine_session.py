@@ -12,20 +12,34 @@ argument words of the step's `in` values.
 
 `read_result` reads the one JSON object a print-mode session writes to stdout:
 its `structured_output` is the only source of the reply, the prose in `result`
-never is, and every measurement that is absent or invalid reads as zero.
+never is, and every measurement that is absent or invalid reads as zero. A result whose
+`is_error` is true with an `api_error` string or an integer `api_error_status` is an API failure
+(`Reading.api_failure`): `usage-limit` for the `api_error` `usage_limit_reached`, else `api-error`, which the shell retries once and then
+reads as the outcome `no-reply`.
 
 `launch_argv` builds the one launch form: the account launcher's print mode
 (`claude-account run -p`) with the role handed over by flags (`--model`,
 `--effort`, `--tools` with `--allowedTools`, or `--disallowedTools`, and the
-role body as `--append-system-prompt-file`), the reply schema as
+role body as `--append-system-prompt-file`), the bounds `--max-turns` and
+`--max-budget-usd` from the platform's role table (`ROLE_BOUNDS`, which no
+procedure, project or environment variable changes), the reply schema as
 `--json-schema`, the session id first fixed by the engine, and the permission
 mode `dontAsk`, so a tool the role does not allow is denied rather than asked
-about. The engine never passes `--agent`, `--bare`, `--setting-sources`,
-`--dangerously-skip-permissions` or `bypassPermissions`: `--bare` would skip the
+about. A session that hit a usage limit is started again with `--resume <session>` in place of
+`--session-id <session>`, every other word unchanged; the transcripts are shared between accounts,
+so the launcher's next account continues the same session. The engine never passes `--agent`, `--bare`,
+`--setting-sources`, `--dangerously-skip-permissions` or `bypassPermissions`: `--bare` would skip the
 hooks that guard the session, and the others would hand the session its own
 settings or its permissions. The prompt is never in the argv: the tool options
 are variadic and would swallow a positional prompt, so `launch` writes it on
 stdin.
+
+A session that gave no usable structured answer is asked once more on the same session
+(`resume=True`: `--session-id <id>` becomes `--resume <id>`, never `--fork-session`) with the prompt
+`REASK_PROMPT`. A miss is a reading with no reply that conforms to the schema
+(`engine_reply.reply_problem`) whose stdout is a `result` with a `subtype` in `MISS_SUBTYPES`:
+`success` with `is_error` not set, or the client's own `error_max_structured_output_retries`,
+flagged or not (`is_miss`). Any other reading without a usable reply is never resumed.
 
 The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
 permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
@@ -37,19 +51,37 @@ needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
 one that is denied a shell command anyway is a fault (`engine_shell`), never a
 graded reply.
 
-`reply_problem` checks a structured reply against the reply schema's keywords
-`type`, `enum`, `const`, `required`, `properties`, `additionalProperties` and
-`items` (the engine carries no schema library) so an incomplete reply is a
-fault, never a transition.
+The launcher tells the engine its choice through an answer file: the launch environment carries
+`CLAUDE_ACCOUNT_ANSWER`, the path of a file the launcher writes, and `read_answer` reads it. It holds
+exactly `{"account": <name>}` (the account the session ran on) or `{"all_out": true,
+"resumes_at": <RFC3339 UTC time or null>}` (every account is out; the launcher then exits
+`ALL_OUT_EXIT`), and anything else, or no file, is no answer.
 
 `launch` starts the argv as its own process group (`start_new_session`) because
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
-other exception both do. A launcher that cannot start gives exit 127 and the
-`OSError` text as its stderr. Its stderr is
+other exception, `engine_stop.Stopped` from a polled `stop` included, both do; the
+kill reaps the launcher and closes the pipes without waiting for EOF, so a descendant
+outside the group that holds a pipe cannot hold the engine. Its `timeout` is the wall bound, counted from the spawn
+(so the time `on_start` takes is inside it, and the deadline is armed, as a `Watchdog` thread, before
+`on_start` runs, so a stalled `on_start` cannot keep the group past it): a session past it gets SIGTERM to
+its whole group, then `GRACE_SECONDS` for the group (not only the launcher) to
+be gone, and SIGKILL to the group if any member is still alive; the call returns
+with `timed_out` set within `timeout + GRACE_SECONDS + DRAIN_SECONDS`. A `stop` that is true before
+the launcher starts, or turns true while it runs or by the time it ended, raises `Stopped` (after the
+group is killed, once it started). A launcher that
+cannot start gives exit 127 and the `OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
-stderr; `diagnostic` gives the last line of it for the engine's one fault line.
+stderr; `diagnostic` gives the last line of it for the engine's one fault line. A given `env` is
+the launcher's whole environment, without one it inherits the engine's; `session_environment` is applied to either.
+
+A session ended by a bound has no reply: its result subtype is `error_max_turns` (the bound
+`turns`) or `error_max_budget_usd` (the bound `spend`), named by `CAP_SUBTYPES`; `WALL_TIME`
+names the bound the engine's own clock fires.
+
+`session_environment` drops `CLAUDE_CONFIG_DIR` and sets `CLAUDE_ACCOUNT_HOST_SETTINGS=required`, so the
+launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked.
 
 This module imports no `engine_core`.
 """
@@ -60,16 +92,19 @@ import json
 import math
 import os
 import re
-import selectors
 import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
-from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery.engine_commands import DRAIN_SECONDS, argument
+from agent_tools.canonical import (
+    parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal,
+)
+from agent_tools.delivery import engine_stop
+from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
 from agent_tools.delivery.procedure_check import PLACEHOLDER_RE, ROLES
 from agent_tools.skill_lint import parse_frontmatter
@@ -80,9 +115,23 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 )
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
+HOST_SETTINGS_SWITCH = "CLAUDE_ACCOUNT_HOST_SETTINGS"
+WALL_TIME = "wall-time"
+CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
+    {"error_max_turns": "turns", "error_max_budget_usd": "spend"})
 NOT_STARTED = 127
-EXIT_POLL_SECONDS = 0.1
-READ_BYTES = 65536
+STRUCTURED_OUTPUT_EXHAUSTED = "error_max_structured_output_retries"
+MISS_SUBTYPES: tuple[str, ...] = ("success", STRUCTURED_OUTPUT_EXHAUSTED)
+REASK_PROMPT = (
+    "Your last answer was not a valid structured answer. Reply again with only the structured "
+    "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
+    "other text.")
+ANSWER_ENV = "CLAUDE_ACCOUNT_ANSWER"
+ALL_OUT_EXIT = 75
+USAGE_LIMIT = "usage-limit"
+API_ERROR = "api-error"
+GRACE_SECONDS = 5
+DRAIN_SECONDS = 5
 READ_ONLY_BASH: tuple[str, ...] = tuple(
     f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
                                       "blame", "merge-base"))
@@ -105,6 +154,26 @@ class Role:
     tools: tuple[str, ...] | None
     disallowed: tuple[str, ...] | None
     body: str
+
+
+@dataclass(frozen=True)
+class Bounds:
+    wall_seconds: float
+    turns: int
+    spend_usd: float
+
+
+ROLE_BOUNDS: Mapping[str, Bounds] = MappingProxyType({
+    "planner": Bounds(1800, 150, 15.0), "implementer": Bounds(3600, 300, 20.0),
+    "reviewer": Bounds(1800, 150, 15.0), "reviewer-lite": Bounds(900, 80, 3.0)})
+
+
+def bounds(role: str) -> Bounds:
+    """The wall-time, turn and spend bounds of `role`; a role the table lacks is refused."""
+    found = ROLE_BOUNDS.get(role)
+    if found is None:
+        raise RoleError(f"role {role}: no bounds")
+    return found
 
 
 def refuse_value(role: str, field: str, value: str) -> None:
@@ -179,6 +248,22 @@ class Reading:
     turns: int
     tokens: dict[str, int]
     spend_usd: float
+    is_result: bool = False
+    is_error: bool = False
+    api_failure: str | None = None
+
+
+@dataclass(frozen=True)
+class Answer:
+    account: str | None
+    all_out: bool
+    resumes_at: str | None
+
+
+def _number(text: str) -> int | float:
+    """A JSON number written with a fraction or exponent: an int when it is integral, so `2.0` reads as 2."""
+    value = float(text)
+    return int(value) if value.is_integer() else value
 
 
 def _count(value: object) -> int:
@@ -194,11 +279,48 @@ def _amount(value: object) -> float | None:
         return None
 
 
+def _strict_json(text: str) -> object:
+    return json.loads(text, object_pairs_hook=reject_duplicate_keys,
+                      parse_constant=reject_nonfinite_literal, parse_float=_number)
+
+
+def read_answer(path: Path) -> Answer:
+    """The launcher's answer in `path`; anything but the two exact forms is no answer."""
+    nothing = Answer(None, False, None)
+    try:
+        document = _strict_json(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        return nothing
+    if not isinstance(document, dict):
+        return nothing
+    account = document.get("account")
+    if set(document) == {"account"} and isinstance(account, str) and account:
+        return Answer(account, False, None)
+    resumes_at = document.get("resumes_at")
+    if set(document) == {"all_out", "resumes_at"} and document["all_out"] is True:
+        if resumes_at is not None:
+            try:
+                parse_rfc3339_utc(resumes_at)
+            except ValueError:
+                return nothing
+        return Answer(None, True, resumes_at)
+    return nothing
+
+
+def _api_failure(document: dict) -> str | None:
+    error, status = document.get("api_error"), document.get("api_error_status")
+    if document.get("is_error") is not True:
+        return None
+    if not (isinstance(error, str) and error) and not (
+            isinstance(status, int) and not isinstance(status, bool)):
+        return None
+    return USAGE_LIMIT if error == "usage_limit_reached" else API_ERROR
+
+
 def read_result(stdout: bytes) -> Reading:
     """The reply, prose, denials and measurements of a session's stdout."""
     try:
-        document = json.loads(stdout.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
-                              parse_constant=reject_nonfinite_literal)
+        document = _strict_json(stdout.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
         document = None
     if not isinstance(document, dict):
@@ -217,20 +339,39 @@ def read_result(stdout: bytes) -> Reading:
         wall_seconds=None if wall is None else wall / 1000,
         turns=_count(document.get("num_turns")),
         tokens={key: _count(usage.get(_USAGE_KEYS[key])) for key in TOKEN_COUNTS},
-        spend_usd=_amount(document.get("total_cost_usd")) or 0)
+        spend_usd=_amount(document.get("total_cost_usd")) or 0,
+        is_result=document.get("type") == "result",
+        is_error=document.get("is_error") is True,
+        api_failure=_api_failure(document))
 
 
-def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) -> tuple[str, ...]:
-    """The launcher argv of one session; no word of it is a prompt."""
+def is_miss(reading: Reading) -> bool:
+    """True when a reading with no usable reply is one the session is asked again about: a result whose
+    subtype is in `MISS_SUBTYPES`, a `success` flagging `is_error` being a client error and no miss.
+    """
+    if not reading.is_result or reading.subtype not in MISS_SUBTYPES:
+        return False
+    return not reading.is_error or reading.subtype == STRUCTURED_OUTPUT_EXHAUSTED
+
+
+def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, *,
+                resume: bool = False) -> tuple[str, ...]:
+    """The launcher argv of one session; no word of it is a prompt.
+
+    With `resume`, `--resume <session>` takes the place of `--session-id <session>`.
+    """
     refuse_value(role.name, "model", role.model)
     refuse_value(role.name, "effort", role.effort)
     for field, names in (("tools", role.tools), ("disallowedTools", role.disallowed)):
         for name in names or ():
             refuse_value(role.name, field, name)
+    limits = bounds(role.name)
     argv = [*LAUNCHER, "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
-            "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
-            "--model", role.model, "--effort", role.effort]
+            "--resume" if resume else "--session-id", session, "--strict-mcp-config",
+            "--permission-mode", "dontAsk",
+            "--model", role.model, "--effort", role.effort,
+            "--max-turns", str(limits.turns), "--max-budget-usd", f"{limits.spend_usd:.2f}"]
     disallowed = list(role.disallowed or ())
     if role.tools is not None:
         allowed = [entry for name in role.tools
@@ -243,56 +384,13 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) 
     return (*argv, "--append-system-prompt-file", str(system_prompt))
 
 
-_TYPES: dict[str, Callable[[object], bool]] = {
-    "object": lambda v: isinstance(v, dict),
-    "array": lambda v: isinstance(v, list),
-    "string": lambda v: isinstance(v, str),
-    "boolean": lambda v: isinstance(v, bool),
-    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
-    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
-    "null": lambda v: v is None,
-}
-
-
-def reply_problem(schema: Mapping, value: object, where: str = "reply") -> str | None:
-    """The first way `value` breaks `schema`, or None when it conforms."""
-    kind = schema.get("type")
-    if kind is not None:
-        kinds = kind if isinstance(kind, list) else [kind]
-        if not any(name in _TYPES and _TYPES[name](value) for name in kinds):
-            return f"{where} is not of type {kind}"
-    if "enum" in schema and not any(value == item and type(value) is type(item)
-                                    for item in schema["enum"]):
-        return f"{where} is {value!r}, not one of {schema['enum']}"
-    if "const" in schema and not (value == schema["const"]
-                                  and type(value) is type(schema["const"])):
-        return f"{where} is not {schema['const']!r}"
-    if isinstance(value, dict):
-        for name in schema.get("required", ()):
-            if name not in value:
-                return f"{where} lacks the required {name!r}"
-        properties = schema.get("properties", {})
-        for name, member in value.items():
-            if name in properties:
-                problem = reply_problem(properties[name], member, f"{where}.{name}")
-                if problem:
-                    return problem
-            elif schema.get("additionalProperties") is False:
-                return f"{where} has the member {name!r} the schema does not allow"
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for index, member in enumerate(value):
-            problem = reply_problem(schema["items"], member, f"{where}[{index}]")
-            if problem:
-                return problem
-    return None
-
-
 @dataclass(frozen=True)
 class Launched:
     exit_code: int
     stdout: bytes
     stderr: bytes
     wall_seconds: float
+    timed_out: bool = False
 
 
 def diagnostic(stderr: bytes) -> str:
@@ -306,90 +404,127 @@ def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
-def _converse(process: subprocess.Popen, prompt: bytes) -> tuple[bytes, bytes]:
-    """Write `prompt` to the session and read its stdout and stderr until it ends.
+def session_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """The environment of a session: the caller's, without its config dir, with the host-settings switch."""
+    env = {key: value for key, value in environ.items() if key != "CLAUDE_CONFIG_DIR"}
+    env[HOST_SETTINGS_SWITCH] = "required"
+    return env
 
-    The session's end is its exit, polled every `EXIT_POLL_SECONDS`, never the end of its pipes: a
-    descendant that outlives the session and holds a pipe open would keep a read-to-EOF waiting for
-    as long as it lives. After the exit the pipes are read for at most `DRAIN_SECONDS` more, then
-    closed, and what was read is returned.
-    """
-    chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
-    selector = selectors.DefaultSelector()
-    pending = memoryview(prompt)
+
+def _group_alive(pid: int) -> bool:
     try:
-        for name in chunks:
-            stream = getattr(process, name)
-            os.set_blocking(stream.fileno(), False)
-            selector.register(stream, selectors.EVENT_READ, name)
-        if pending:
-            os.set_blocking(process.stdin.fileno(), False)
-            selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
-        else:
-            process.stdin.close()
-        deadline = None
-        while selector.get_map():
-            if deadline is None and process.poll() is not None:
-                deadline = time.monotonic() + DRAIN_SECONDS
-            wait = EXIT_POLL_SECONDS if deadline is None else min(
-                EXIT_POLL_SECONDS, deadline - time.monotonic())
-            if wait <= 0:
-                break
-            for key, _ in selector.select(wait):
-                stream = key.fileobj
-                try:
-                    if key.data == "stdin":
-                        pending = pending[os.write(stream.fileno(), pending[:READ_BYTES]):]
-                        done = not pending
-                    else:
-                        data = os.read(stream.fileno(), READ_BYTES)
-                        chunks[key.data].append(data)
-                        done = not data
-                except BlockingIOError:
-                    continue
-                except BrokenPipeError:
-                    done = True
-                if done:
-                    selector.unregister(stream)
-                    stream.close()
-    finally:
-        selector.close()
-        for stream in (process.stdin, process.stdout, process.stderr):
-            stream.close()
-    return b"".join(chunks["stdout"]), b"".join(chunks["stderr"])
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _kill_group(pid: int, signum: int) -> None:
+    try:
+        os.killpg(pid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def _signal_overrun(process: subprocess.Popen) -> None:
+    """Signal a session past its wall bound: TERM to its group, the grace, then KILL to the group."""
+    pid = process.pid
+    _kill_group(pid, signal.SIGTERM)
+    grace_end = time.monotonic() + GRACE_SECONDS
+    while process.poll() is None and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    while _group_alive(pid) and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    _kill_group(pid, signal.SIGKILL)  # a member that outlived the launcher and the grace
+
+
+def _collect(process: subprocess.Popen) -> tuple[bytes, bytes]:
+    """What an ended session printed, the drain bounded by `DRAIN_SECONDS`."""
+    try:
+        return process.communicate(timeout=DRAIN_SECONDS)
+    except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
+        stdout, stderr = late.output or b"", late.stderr or b""
+        process.stdout.close(), process.stderr.close(), process.wait()
+        return stdout, stderr
+
+
+def _end_overrun(process: subprocess.Popen) -> tuple[bytes, bytes]:
+    """End a session past its wall bound: TERM to its group, the grace, then KILL to the group."""
+    pid = process.pid
+    _kill_group(pid, signal.SIGTERM)
+    grace_end = time.monotonic() + GRACE_SECONDS
+    try:
+        stdout, stderr = process.communicate(timeout=max(0.0, grace_end - time.monotonic()))
+    except subprocess.TimeoutExpired:  # the launcher ignores TERM, or a member holds a pipe
+        _kill_group(pid, signal.SIGKILL)
+        return _collect(process)
+    while _group_alive(pid) and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    _kill_group(pid, signal.SIGKILL)  # a member that outlived the launcher and the grace
+    return stdout, stderr
 
 
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
-           on_start: Callable[[int], None]) -> Launched:
-    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written."""
+           on_start: Callable[[int], None], timeout: float | None = None,
+           env: Mapping[str, str] | None = None,
+           stop: Callable[[], bool] | None = None) -> Launched:
+    """Run one session to its end; `on_start(pid)` is called once, before the prompt is written.
+
+    With a `timeout` the session is ended at `started + timeout` (see the module docstring)
+    and the result has `timed_out` set.
+    A `stop` that is true before the launcher starts, or turns true while it runs or by the time
+    it ended, raises `Stopped` (after the group is killed, once it started).
+    """
     started = time.monotonic()
-    try:
-        previous = signal.signal(signal.SIGTERM, _terminate)
+    deferred: list[int] = []
+    try:  # before the spawn: the session's own group exists from the spawn on
+        previous = signal.signal(signal.SIGTERM, lambda signum, frame: deferred.append(signum))
     except ValueError:  # not the main thread: no handler can be installed
         previous = None
     process = None
+    timed_out = False
     try:
+        if stop is not None and stop():
+            raise engine_stop.Stopped
         try:
             process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       start_new_session=True)
+                                       start_new_session=True,
+                                       env=session_environment(os.environ if env is None else env))
         except OSError as error:
+            if deferred:  # no group to end, but the engine was told to stop
+                raise SystemExit(128 + deferred[0])
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)
-        on_start(process.pid)
-        stdout, stderr = _converse(process, prompt.encode("utf-8"))
-        process.wait()
+        if previous is not None:  # the deferred signals end here: from now on the group is owned
+            signal.signal(signal.SIGTERM, _terminate)
+            if deferred:
+                raise SystemExit(128 + deferred[0])
+        guard = None if timeout is None else Watchdog(
+            started + timeout - time.monotonic(), lambda: _signal_overrun(process)).start()
+        try:
+            on_start(process.pid)
+        finally:  # the deadline is armed before `on_start` runs and is waited out here
+            overran = guard is not None and guard.stop()
+        if overran:
+            timed_out = True
+            stdout, stderr = _collect(process)
+        else:
+            remaining = None if timeout is None else started + timeout - time.monotonic()
+            try:
+                if remaining is not None and remaining <= 0:
+                    raise subprocess.TimeoutExpired(list(argv), 0)
+                stdout, stderr = engine_stop.communicate(
+                    process, prompt.encode("utf-8"), stop=stop, timeout=remaining,
+                    drain=DRAIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                stdout, stderr = _end_overrun(process)
     except BaseException:
         if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            for stream in (process.stdin, process.stdout, process.stderr):
-                stream.close()
-            process.wait()
+            engine_stop.end_group(process)
         raise
     finally:
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
-    return Launched(process.returncode, stdout, stderr, time.monotonic() - started)
+    return Launched(process.returncode, stdout, stderr, time.monotonic() - started, timed_out)

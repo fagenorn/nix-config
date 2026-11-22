@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
-  "platform_version": "2.0.0",
+  "platform_version": "2.2.0",
   "project_schema_versions": [
-    2
+    2,
+    3
   ],
   "resolved_schema_version": 2,
   "migrations": [
@@ -10,9 +11,23 @@
       "id": "bindings-deploy.retire",
       "from_schema": 1,
       "to_schema": 2
+    },
+    {
+      "id": "platform-constants.retire",
+      "from_schema": 2,
+      "to_schema": 3
     }
   ],
-  "deprecations": [],
+  "deprecations": [
+    {
+      "id": "platform-constants",
+      "kind": "project_schema",
+      "subject": "2",
+      "since": "2.2.0",
+      "successor": "project schema 3",
+      "migration": "platform-constants.retire"
+    }
+  ],
   "removals": [
     {
       "id": "legacy-skills-config",
