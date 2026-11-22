@@ -1,4 +1,4 @@
-# ADR-project-contract-018 — Ruff findings are judged through a platform adapter
+# ADR-project-contract-020 — Ruff findings are judged through a platform adapter
 
 - **Status:** accepted
 - **Decided in:** #1460 (per #1414, #1415, #1420)

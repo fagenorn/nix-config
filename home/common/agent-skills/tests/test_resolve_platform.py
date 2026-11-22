@@ -373,6 +373,81 @@ class PlatformRootTest(ResolverTestCase):
             self.assertEqual(agent_platform.standards_dir(),
                              Path("/home/t/.agents/standards"))
 
+    REVISION = {"type": "github", "owner": "fixture", "repo": "platform",
+                "rev": "0f" * 20, "narHash": "sha256-" + "A" * 43 + "=",
+                "lastModified": 1700000000}
+
+    def write_revision(self, directory: Path, record: object) -> None:
+        raw = record if isinstance(record, bytes) else json.dumps(record).encode()
+        (directory / "platform-revision.json").write_bytes(raw)
+
+    def test_a_named_root_supplies_the_platform_revision(self):
+        root = self.make_dir()
+        self.write_revision(root, {"schema_version": 1, **self.REVISION})
+        with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(root),
+                                          "HOME": "/nonexistent-home"}):
+            self.assertEqual(agent_platform.platform_revision(), self.REVISION)
+            self.assertEqual(agent_platform.revision_path(),
+                             root / "platform-revision.json")
+
+    def test_the_platform_revision_falls_back_to_home_only_without_a_root(self):
+        home = self.make_dir()
+        (home / ".agents/share").mkdir(parents=True)
+        self.write_revision(home / ".agents/share", {"schema_version": 1, **self.REVISION})
+        with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": "", "HOME": str(home)}):
+            self.assertEqual(agent_platform.platform_revision(), self.REVISION)
+        with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(self.make_dir()),
+                                          "HOME": str(home)}):
+            self.assertIsNone(agent_platform.platform_revision())
+
+    def test_valid_revision_is_the_one_shape_rule(self):
+        self.assertTrue(agent_platform.valid_revision(dict(self.REVISION)))
+        for bad in ({**self.REVISION, "rev": None},
+                    {**self.REVISION, "url": "x"},
+                    {**self.REVISION, "lastModified": True},
+                    [self.REVISION]):
+            with self.subTest(bad=bad):
+                self.assertFalse(agent_platform.valid_revision(bad))
+
+    def test_a_platform_revision_out_of_shape_is_unknown(self):
+        good = {"schema_version": 1, **self.REVISION}
+        without_repo = {k: v for k, v in good.items() if k != "repo"}
+        cases = {
+            "rev null": {**good, "rev": None},
+            "rev 39 hex": {**good, "rev": "0f" * 19 + "0"},
+            "rev upper-case": {**good, "rev": "0F" * 20},
+            "type git": {**good, "type": "git"},
+            "schema 2": {**good, "schema_version": 2},
+            "schema true": {**good, "schema_version": True},
+            "lastModified true": {**good, "lastModified": True},
+            "lastModified -1": {**good, "lastModified": -1},
+            "narHash sha1": {**good, "narHash": "sha1-x"},
+            "owner empty": {**good, "owner": ""},
+            "extra member": {**good, "url": "x"},
+            "repo missing": without_repo,
+            "not json": b"not json",
+            "invalid utf-8": b"\xff",
+            "array": [good],
+            "too deep": b"[" * 100000,
+        }
+        for name, record in cases.items():
+            with self.subTest(name):
+                root = self.make_dir()
+                self.write_revision(root, record)
+                with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(root),
+                                                  "HOME": "/nonexistent-home"}):
+                    self.assertIsNone(agent_platform.platform_revision())
+        with self.subTest("a directory"):
+            root = self.make_dir()
+            (root / "platform-revision.json").mkdir()
+            with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(root),
+                                              "HOME": "/nonexistent-home"}):
+                self.assertIsNone(agent_platform.platform_revision())
+        with self.subTest("absent"):
+            with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(self.make_dir()),
+                                              "HOME": "/nonexistent-home"}):
+                self.assertIsNone(agent_platform.platform_revision())
+
     def test_an_explicit_manifest_ignores_the_root(self):
         root = self.make_platform_root({**committed_manifest(), "platform_version": "9.0.0"})
         other = self.make_dir() / "other.json"
@@ -695,12 +770,17 @@ class CommittedManifestTest(ResolverTestCase):
         manifest = committed_manifest()
         self.assertEqual(sorted(manifest), sorted(MANIFEST_MEMBERS))
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["platform_version"], "2.1.0")
+        self.assertEqual(manifest["platform_version"], "2.2.0")
         self.assertEqual(manifest["project_schema_versions"], [2, 3])
         self.assertEqual(manifest["resolved_schema_version"], 2)
         self.assertEqual(manifest["migrations"], [
-            {"id": "bindings-deploy.retire", "from_schema": 1, "to_schema": 2}])
-        self.assertEqual(manifest["deprecations"], [])
+            {"id": "bindings-deploy.retire", "from_schema": 1, "to_schema": 2},
+            {"id": "platform-constants.retire", "from_schema": 2, "to_schema": 3}])
+        self.assertEqual(manifest["deprecations"], [
+            {"id": "platform-constants", "kind": "project_schema",
+             "subject": "2", "since": "2.2.0",
+             "successor": "project schema 3",
+             "migration": "platform-constants.retire"}])
 
     def test_it_declares_the_bridge_deprecations_as_removals(self):
         """The candidate removes what the 1.x bridge deprecated, entry for entry."""
@@ -828,7 +908,7 @@ class PlatformRangeTest(ResolverTestCase):
 
     def test_a_schema_absent_from_the_manifest_set_is_unsupported(self):
         contract = source_contract()
-        # Platform 2.1.0 reads schemas 2 and 3; 4 is an unsupported integer.
+        # Platform 2.2.0 reads schemas 2 and 3; 4 is an unsupported integer.
         contract["schema_version"] = 4
         code, payload, _ = self.resolve(self.make_root(contract))
         self.assert_unsupported(code, payload, "project_schema_unsupported",
@@ -911,7 +991,7 @@ class ReasonCodePositionTest(ResolverTestCase):
         closed = ("platform_too_old", "platform_too_new",
                   "project_schema_unsupported")
         contract = source_contract()
-        # Platform 2.1.0 reads schemas 2 and 3; 4 is an unsupported integer.
+        # Platform 2.2.0 reads schemas 2 and 3; 4 is an unsupported integer.
         contract["schema_version"] = 4
         errors = [self.refusal("resolve", "--repo-root",
                                str(self.make_root(contract)))]

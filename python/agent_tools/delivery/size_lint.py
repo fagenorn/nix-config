@@ -18,8 +18,9 @@ on the merge base through git renames. That check, not this command's exit, is
 the gate.
 
 The command `size-lint --repo-root <absolute directory> [--revision <rev>]`
-prints every over-budget file at the revision (default `HEAD`), one line each on
-stdout, `<rule> <path>:<line>` with the path escaped as
+prints every over-budget file at the revision (default `HEAD`) that no reasoned
+suppression marker of the rule covers, and one line for each bare marker of the rule
+(`agent_tools.delivery.never_rise.counted`, #1459), one line each on stdout, `<rule> <path>:<line>` with the path escaped as
 `agent_tools.delivery.never_rise.Violation.text` defines. It exits 1 when it
 printed any and 0 when none. It exits 2 with `size-lint: <reason>` on stderr for
 a relative or missing root, a root below the repository's top level, an
@@ -80,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
     if snapshot is None:
         print(f"{COMMAND}: cannot read {args.revision} in {root}", file=sys.stderr)
         return 2
-    found = find(snapshot)
+    kept, marked = never_rise.counted(ENFORCER, snapshot)
+    found = sorted(kept + marked, key=lambda v: (v.path, v.line))
     for violation in found:
         print(violation.text())
     return 1 if found else 0

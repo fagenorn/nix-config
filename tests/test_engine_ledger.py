@@ -266,10 +266,15 @@ class SessionFileTest(unittest.TestCase):
             with self.assertRaises(LedgerError):
                 engine_ledger.store_session_file(run, "draft.1.json", b"[]")
             self.assertEqual(path.read_bytes(), b"{}")
-            for name in ("../x.1.json", "draft.0.json", "draft.1.txt"):
+            for name in ("draft.1.resume.json", "draft.1.resume.prompt.md"):
+                with self.subTest(name=name):
+                    self.assertEqual(engine_ledger.store_session_file(run, name, b"x"),
+                                     run / "sessions" / name)
+            for name in ("../x.1.json", "draft.0.json", "draft.1.txt", "draft.1.resume.txt"):
                 with self.subTest(name=name), self.assertRaises(LedgerError):
                     engine_ledger.store_session_file(run, name, b"x")
-            self.assertEqual([p.name for p in (run / "sessions").iterdir()], ["draft.1.json"])
+            self.assertEqual(sorted(p.name for p in (run / "sessions").iterdir()),
+                             ["draft.1.json", "draft.1.resume.json", "draft.1.resume.prompt.md"])
 
     def test_creating_sessions_fsyncs_the_run_directory(self):
         synced: list[Path] = []
