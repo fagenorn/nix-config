@@ -5,13 +5,13 @@ end of that claim. A delivered attempt ended with its change merged into the
 integration branch; its duration runs from the claim's creation to that merge. An
 attempt that stopped or still runs has no merge and is not delivered.
 
-The rule: take the `WINDOW` (20) delivered attempts with the latest merge; the
+The rule (ADR-project-contract-016): take the `WINDOW` (20) delivered attempts with the latest merge; the
 budget is 1.5 times the nearest-rank 90th percentile of their durations, in whole
 minutes rounded up and at least 1. With fewer than `WINDOW` delivered attempts the
 budget is `FALLBACK_MINUTES` (240). The nearest rank of `n` durations is the
 `ceil(9n/10)`th smallest.
 
-The history lives in one file beside the repository's git config, in the common git
+The history (ADR-project-contract-016) lives in one file beside the repository's git config, in the common git
 directory a linked worktree shares: `<git dir>/agent-platform/attempt-history.json`.
 Its wire format is exactly this object, written with `json.dumps(indent=1,
 sort_keys=True)` and a final newline:

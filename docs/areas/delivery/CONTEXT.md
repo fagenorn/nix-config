@@ -10,7 +10,7 @@ Delivery turns one tracker issue into a merged change through the agent skills, 
 ## Language
 
 **Attempt**:
-One try at delivering an issue, from the claim that starts it to the end of that claim. A delivered attempt ended with its change merged into the integration branch, and its duration runs from the claim's creation to that merge, both read on the tracker; an attempt that stopped or still runs is not delivered. A schema-3 project's attempt budget is 1.5 times the 90th percentile of its last 20 delivered attempts' durations, or 240 minutes until it has 20.
+One try at delivering an issue, from the claim that starts it to the end of that claim. A delivered attempt ended with its change merged into the integration branch, and its duration runs from the claim's creation to that merge, both read on the tracker; an attempt that stopped or still runs is not delivered. A schema-3 project's attempt budget is 1.5 times the 90th percentile of its last 20 delivered attempts' durations, or 240 minutes until it has 20 (ADR-project-contract-016).
 _Avoid_: run (a run is the engine's)
 
 **Awaiting look**:
