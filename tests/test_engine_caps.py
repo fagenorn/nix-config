@@ -75,7 +75,7 @@ def chain(n: int) -> dict:
                 "kind": "command",
                 "command": "diff-scope",
                 "in": ["run.range"],
-                "on": {"ok": nxt, "failed": nxt},
+                "on": {"ok": nxt, "failed": nxt, "refused": nxt},
             }
         )
     return {
@@ -94,7 +94,7 @@ def toy_with(extra: int, directory: Path) -> None:
     doc = json.loads((directory / "toy.json").read_text(encoding="utf-8"))
     scope = next(item for item in doc["steps"] if item["id"] == "scope")
     for i in range(1, extra + 1):
-        copy = dict(scope, id=f"pad-{i}", on={"ok": "done", "failed": "done"})
+        copy = dict(scope, id=f"pad-{i}", on={"ok": "done", "failed": "done", "refused": "done"})
         doc["steps"].append(copy)
     write_json(directory, "toy", doc)
 
