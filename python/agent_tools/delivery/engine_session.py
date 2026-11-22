@@ -53,6 +53,10 @@ other exception both do. A launcher that cannot start gives exit 127 and the
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line.
 
+A session ended by a bound has no reply: its result subtype is `error_max_turns` (the bound
+`turns`) or `error_max_budget_usd` (the bound `spend`), named by `CAP_SUBTYPES`; `WALL_TIME`
+names the bound the engine's own clock fires.
+
 This module imports no `engine_core`.
 """
 
@@ -82,6 +86,9 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 )
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
+WALL_TIME = "wall-time"
+CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
+    {"error_max_turns": "turns", "error_max_budget_usd": "spend"})
 NOT_STARTED = 127
 READ_ONLY_BASH: tuple[str, ...] = tuple(
     f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",

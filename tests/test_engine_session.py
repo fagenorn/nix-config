@@ -36,6 +36,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 STUB = REPO_ROOT / "tests/fixtures/engine-session/claude_stub.py"
 RESULT_NORMAL = REPO_ROOT / "tests/fixtures/engine-session/result-normal.json"
+RESULT_MAX_TURNS = REPO_ROOT / "tests/fixtures/engine-session/result-max-turns.json"
+RESULT_MAX_BUDGET = REPO_ROOT / "tests/fixtures/engine-session/result-max-budget.json"
 ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 DENIAL = {"tool_name": "Write", "tool_use_id": "toolu_01",
           "tool_input": {"file_path": "/etc/hosts"}}
@@ -461,8 +463,9 @@ def agent_step(id: str, role: str, on: dict, **members) -> dict:
     return document
 
 
-def write_procedures(project: EngineProject, steps: list[dict], files: dict | None = None) -> Path:
-    directory = project.procedures(steps)
+def write_procedures(project: EngineProject, steps: list[dict], files: dict | None = None,
+                     stops: dict | None = None) -> Path:
+    directory = project.procedures(steps, stops=stops)
     for name, text in (files or {"draft.md": "Draft issue {{run.issue}}.\n",
                                  "draft.reply.json": json.dumps(DRAFT_REPLY)}).items():
         (directory / name).write_text(text, encoding="utf-8")
@@ -701,6 +704,62 @@ class DeliverSessionTest(unittest.TestCase):
                          "tool_input": {"file_path": "/etc/hosts"}}],
             "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
             "session": self.starting()["session"], "subtype": "success"})
+
+    def capped_procedures(self) -> Path:
+        copy_roles(self.project, "implementer")
+        step = agent_step("draft", "implementer", {"drafted": "done", "stuck": "needs-owner",
+                                                   "out-of-bounds": "step-failed"})
+        return write_procedures(self.project, [step], stops={
+            "needs-owner": {"need": "owner-decision", "reenter": "draft"},
+            "step-failed": {"need": "retry", "reenter": "draft"}})
+
+    def test_a_turn_cap_or_a_spend_cap_is_out_of_bounds_naming_the_bound_with_no_second_session(self):
+        for fixture, bound, turns, spend in ((RESULT_MAX_TURNS, "turns", 300, 1.25),
+                                             (RESULT_MAX_BUDGET, "spend", 42, 20.01)):
+            with self.subTest(bound=bound):
+                self.setUp()
+                log = install_stub(self.project, fixture, exit=1)
+                done = self.project.deliver(self.capped_procedures(), issue=1520)
+                self.assertEqual(done.returncode, 3, done.stderr)
+                self.assertEqual(json.loads(done.stdout)["end"], "step-failed")
+                self.assertEqual(json.loads(done.stdout)["need"], "retry")
+                run = self.run_dir()
+                self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+                    encoding="utf-8")), {"bound": bound})
+                events = self.project.events(run)
+                (stored,) = [e for e in events if e["event"] == "result_stored"]
+                self.assertEqual((stored["turns"], stored["spend_usd"], stored["wall_seconds"]),
+                                 (turns, spend, 54.321))
+                self.assertEqual(stored["tokens"],
+                                 {"input": 1, "cache_write": 2, "cache_read": 3, "output": 4})
+                self.assertEqual([e["outcome"] for e in events if e["event"] == "outcome_graded"],
+                                 ["out-of-bounds"])
+                self.assertEqual([e["to"] for e in events if e["event"] == "transition_taken"],
+                                 ["step-failed"])
+                (line,) = log.read_text(encoding="utf-8").splitlines()
+                self.assertNotIn("--resume", line)
+                self.assertNotIn("--continue", line)
+
+    def test_a_capped_session_denied_a_shell_command_is_still_out_of_bounds(self):
+        document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
+        document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_03",
+                                           "tool_input": {"command": "make build"}}]
+        install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
+        done = self.project.deliver(self.capped_procedures(), issue=1520)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        run = self.run_dir()
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
+            encoding="utf-8")), {"bound": "turns"})
+
+    def test_a_session_ending_with_an_error_subtype_that_is_no_cap_is_still_a_fault(self):
+        document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
+        document["subtype"] = "error_during_execution"
+        install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
+        done = self.project.deliver(self.capped_procedures(), issue=1520)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(len(done.stderr.strip().splitlines()), 1)
+        self.assertEqual([e for e in self.project.events(self.run_dir())
+                          if e["event"] == "outcome_graded"], [])
 
     def test_a_denied_shell_command_is_a_fault_not_a_graded_reply(self):
         denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
