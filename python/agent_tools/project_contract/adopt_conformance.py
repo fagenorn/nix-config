@@ -54,7 +54,12 @@ bytes of each of the three files that change are `contents`, their base bytes
 `before`, and `projection` says whether the contract gains the workflow's entry.
 `outstanding` is whether the repository still has conformance work: the plan
 writes something, or the one committed evidence record does not carry the
-member the plan would write.
+member the plan would write. The member is computed whenever the lock parses and
+the tracker is named, even when a later cause fails; a repository whose kept
+lock entry, declaration, projection and record are all in place is settled
+despite a cause that is about the host or the clone (an unknown revision, an
+`origin` that is not the tracker's slug, a pin that differs from the running
+revision), so those causes never block it behind a repair it does not need.
 """
 
 from __future__ import annotations
@@ -154,13 +159,19 @@ def _kept_entry(nodes: dict, reference: object) -> tuple[dict, str]:
     return locked, reference
 
 
-def lock_with_platform(data: bytes, revision: dict) -> LockEntry:
-    """The lock with the platform's node and root input added, or its kept entry."""
+def lock_with_platform(data: bytes, revision: dict | None) -> LockEntry:
+    """The lock with the platform's node and root input added, or its kept entry.
+
+    A kept entry needs no installed revision; adding one without a revision is
+    the refusal `adopt.conformance.revision_unknown`.
+    """
     document, nodes, root = _parse_lock(data)
     inputs = root.get("inputs", {})
     if INPUT in inputs:
         locked, node = _kept_entry(nodes, inputs[INPUT])
         return LockEntry(None, node, locked, True)
+    if revision is None:
+        raise Undeclarable(REVISION_UNKNOWN)
     node = INPUT
     suffix = 2
     while node in nodes:
@@ -437,63 +448,81 @@ def plan_conformance(root: Path, base_revision: str, contract_source: dict | Non
     def inputs(path: str, entry: tuple[str, bytes | None]) -> bytes:
         return reference_after.get(path, entry[1])
 
-    candidate: dict | None = None
-    lock_after: bytes | None = None
-    repair: str | None = None
-    contents: dict[str, bytes] = {}
-    before: dict[str, bytes] = {}
-    projection = False
-    try:
-        revision = agent_platform.platform_revision()
-        if revision is None:
-            raise Undeclarable(REVISION_UNKNOWN)
-        named = _tracker(contract_source)
-        if named is None:
-            raise Undeclarable(TRACKER_UNNAMED)
-        slug, branch = named
+    revision = agent_platform.platform_revision()
+    named = _tracker(contract_source)
+    collides, declared = (_projection_state(contract_source)
+                          if named is not None and isinstance(contract_source, dict)
+                          else (False, False))
+    # Every stage runs even after an earlier one failed: the first cause is the
+    # plan's repair, but whether the repository is settled depends on the work
+    # each stage would still plan, which a failing environment cause (an unknown
+    # revision, a foreign origin, a pin that differs) does not change.
+    causes: list[str] = []
+    if revision is None:
+        causes.append(REVISION_UNKNOWN)
+    if named is None:
+        causes.append(TRACKER_UNNAMED)
+    else:
         try:
             origin = derived_values.remote_slug(root)
         except derived_values.Underivable:
             origin = None
-        if origin != slug:
-            raise Undeclarable(ORIGIN_MISMATCH)
-        collides, declared = _projection_state(contract_source)
+        if origin != named[0]:
+            causes.append(ORIGIN_MISMATCH)
         if collides:
-            raise Undeclarable(PROJECTION_COLLIDES)
+            causes.append(PROJECTION_COLLIDES)
+    entry: LockEntry | None = None
+    try:
         if lock[1] is None:
             raise Undeclarable(LOCK_UNREADABLE)
         entry = lock_with_platform(inputs(LOCK_FILE, lock), revision)
+    except Undeclarable as refused:
+        causes.append(refused.repair_id)
+    candidate: dict | None = None
+    if entry is not None and named is not None:
         candidate = {
             "revision": entry.locked,
             "lock": {"path": LOCK_FILE, "input": INPUT, "node": entry.node},
             "workflow": WORKFLOW_TARGET,
-            "required_check": {"repo": slug, "branch": branch, "context": CONTEXT},
+            "required_check": {"repo": named[0], "branch": named[1], "context": CONTEXT},
         }
-        if entry.kept and (entry.locked["rev"] != revision["rev"]
-                           or entry.locked["narHash"] != revision["narHash"]):
-            raise Undeclarable(PIN_INCOMPATIBLE)
-        declaration = base_entry(root, base_revision, INPUT_FILE)
-        if declaration is None or declaration[1] is None:
-            raise Undeclarable(INPUT_UNDECLARABLE)
-        declared_after = declare_input(
-            inputs(INPUT_FILE, declaration), entry.locked["owner"], entry.locked["repo"])
-        protection = base_entry(root, base_revision, PROTECTION_FILE)
-        protection_after = None
+        if entry.kept and revision is not None and (
+                entry.locked["rev"] != revision["rev"]
+                or entry.locked["narHash"] != revision["narHash"]):
+            causes.append(PIN_INCOMPATIBLE)
+    declared_after: bytes | None = None
+    declaration = base_entry(root, base_revision, INPUT_FILE)
+    if entry is not None:
+        try:
+            if declaration is None or declaration[1] is None:
+                raise Undeclarable(INPUT_UNDECLARABLE)
+            declared_after = declare_input(
+                inputs(INPUT_FILE, declaration), entry.locked["owner"], entry.locked["repo"])
+        except Undeclarable as refused:
+            causes.append(refused.repair_id)
+    protection = base_entry(root, base_revision, PROTECTION_FILE)
+    protection_after: bytes | None = None
+    try:
         if protection is not None:
             if protection[1] is None:
                 raise Undeclarable(PROTECTION_FILE_UNREQUIRED)
             protection_after = require_in_protection_file(inputs(PROTECTION_FILE, protection))
-        for path, source, after in ((PROTECTION_FILE, protection, protection_after),
-                                    (LOCK_FILE, lock, entry.after),
-                                    (INPUT_FILE, declaration, declared_after)):
-            if after is not None:
-                contents[path] = after
-                before[path] = source[1]
-        projection = not declared
     except Undeclarable as refused:
-        repair = refused.repair_id
-        contents, before, projection = {}, {}, False
+        causes.append(refused.repair_id)
+    contents: dict[str, bytes] = {}
+    before: dict[str, bytes] = {}
+    for path, source, after in ((PROTECTION_FILE, protection, protection_after),
+                                (LOCK_FILE, lock, entry.after if entry is not None else None),
+                                (INPUT_FILE, declaration, declared_after)):
+        if after is not None:
+            contents[path] = after
+            before[path] = source[1]
+    projection = not declared
+    repair = causes[0] if causes else None
     settled = (candidate is not None and not contents and not projection
+               and set(causes) <= {REVISION_UNKNOWN, ORIGIN_MISMATCH, PIN_INCOMPATIBLE}
                and _settled(root, base_revision, candidate))
+    if repair is not None:
+        contents, before, projection = {}, {}, False
     return ConformancePlan(True, not settled, repair,
                            candidate if repair is None else None, contents, before, projection)

@@ -4295,6 +4295,28 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
             commit(root, "record the conformance work")
             doc = self.ready_plan(root)
             self.assertEqual(doc["plan"]["outcome"], "no_change")
+        for label, record in (("no installed revision", None),
+                              ("a dirty build", {**FIXTURE_REVISION, "rev": None})):
+            with self.subTest(f"a settled repository on a host with {label}"):
+                other = make_home()
+                install_platform_revision(other, record)
+                code, doc, err = self.plan(root, home=other)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(doc["plan"]["outcome"], "no_change", doc["plan"])
+        with self.subTest("a settled repository cloned from a fork"):
+            git(root, "remote", "set-url", "origin", "https://github.com/fork/target.git")
+            doc = self.ready_plan(root)
+            self.assertEqual(doc["plan"]["outcome"], "no_change", doc["plan"])
+        with self.subTest("an unsettled repository keeps its cause when the revision is unknown"):
+            git(root, "remote", "set-url", "origin", "https://github.com/fixture/target.git")
+            git(root, "rm", "--quiet", "devenv.yaml")
+            commit(root, "drop the yaml")
+            other = make_home()
+            install_platform_revision(other, None)
+            code, doc, err = self.plan(root, home=other)
+            self.assertEqual(code, 0, err)
+            self.assertNotEqual(doc["plan"]["outcome"], "no_change")
+            self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.revision_unknown")])
 
 
 if __name__ == "__main__":
