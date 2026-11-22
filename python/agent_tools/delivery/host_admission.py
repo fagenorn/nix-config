@@ -8,8 +8,10 @@ evaluator, never run, so it carries no entry point.
 The declaration is authored host policy installed at exactly
 `$HOME/.agents/share/host-declaration.json` (D2). It declares, per route,
 whether the route is supported and, when it is, the agent slots one root
-session may hold at once. Nothing else is declared: admission reasons over
-declared `agent_slots` only, never CPU, memory or load.
+session may hold at once. It also states, optionally, the host's verify slot
+count (`verify_slots`), which `agent_tools.delivery.verify_slot` reads. Nothing
+else is declared: admission reasons over declared `agent_slots` only, never CPU,
+memory or load.
 """
 from __future__ import annotations
 
@@ -45,7 +47,10 @@ REASON_CODES = (
 )
 UNSUPPORTED_ALTERNATIVE = "/deliver-standard <issue>"
 
+DEFAULT_VERIFY_SLOTS = 1
+
 _DECLARATION_MEMBERS = frozenset({"schema_version", "routes"})
+_OPTIONAL_DECLARATION_MEMBERS = frozenset({"verify_slots"})
 _SUPPORTED_MEMBERS = frozenset({"support", "agent_slots"})
 _UNSUPPORTED_MEMBERS = frozenset({"support"})
 
@@ -91,14 +96,22 @@ def _reject_non_finite(token: str) -> object:
 def validate_declaration(value: object) -> dict:
     """Return `value` when it is a valid declaration; raise `DeclarationError`.
 
-    Exact members at every level (D2): the top is `{schema_version, routes}`;
+    Exact members at every level (D2): the top is `{schema_version, routes}`
+    plus the optional `verify_slots`, a plain int >= 1;
     `schema_version` is a plain int equal to 1; `routes` is a non-empty object
     whose keys match the route grammar and are not `direct`; a supported route
     is exactly `{"support": "supported", "agent_slots": <int >= floor>}` and an
     unsupported one exactly `{"support": "unsupported"}`.
     """
-    if not isinstance(value, dict) or set(value) != _DECLARATION_MEMBERS:
+    if not isinstance(value, dict):
         raise _invalid("declaration members")
+    if not (_DECLARATION_MEMBERS <= set(value)
+            <= _DECLARATION_MEMBERS | _OPTIONAL_DECLARATION_MEMBERS):
+        raise _invalid("declaration members")
+    if "verify_slots" in value:
+        count = value["verify_slots"]
+        if type(count) is not int or count < 1:
+            raise _invalid("verify_slots")
     version = value["schema_version"]
     if type(version) is not int or version != DECLARATION_SCHEMA_VERSION:
         raise _invalid("schema_version")
@@ -151,3 +164,11 @@ def load_declaration() -> dict:
         # Each is unparseable input, never a crash.
         raise _invalid(f"not JSON: {error}") from None
     return copy.deepcopy(validate_declaration(value))
+
+
+def verify_slots(declaration: dict) -> int:
+    """The host's verify slot count, or `DEFAULT_VERIFY_SLOTS` when undeclared.
+
+    `declaration` is one `validate_declaration` already accepted.
+    """
+    return declaration.get("verify_slots", DEFAULT_VERIFY_SLOTS)
