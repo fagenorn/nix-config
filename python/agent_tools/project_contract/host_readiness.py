@@ -152,6 +152,8 @@ PASS_THROUGH_PROGRAMS = frozenset({
 # Shells whose `-c` script is shell text whatever it holds (`sh -c deploy`).
 SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "yash", "busybox"})
 SCRIPT_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*$")
+# The long options of a shell that take the next word as their value.
+SHELL_LONG_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file"})
 BUDGET_EXIT = 3
 SCRATCH_PREFIX = "host-readiness-"
 READ_DEPTH = 4
@@ -271,13 +273,22 @@ def _script_texts(argv: Sequence[str]) -> list[str]:
             break
         if name not in SHELL_PROGRAMS:
             continue
+        # A shell reads every option before its first operand, and with `-c` that operand is the
+        # script: `--` ends the options, `-O extglob` and `--rcfile x` carry a value word.
         j = i + 1
-        while j < len(argv) and argv[j][:1] in "-+":
-            if SCRIPT_FLAG.match(argv[j]):
-                if j + 1 < len(argv):
-                    texts.append(argv[j + 1])
+        takes_script = False
+        while j < len(argv) and argv[j][:1] in ("-", "+") and argv[j] not in ("-", "+"):
+            word = argv[j]
+            if word == "--":
+                j += 1
                 break
-            j += 2 if argv[j] in ("-o", "+o") else 1
+            if word.startswith("--"):
+                j += 2 if word in SHELL_LONG_VALUE_OPTIONS else 1
+                continue
+            takes_script = takes_script or bool(SCRIPT_FLAG.match(word))
+            j += 1 + sum(word.count(letter) for letter in "oO")
+        if takes_script and j < len(argv):
+            texts.append(argv[j])
         break
     return texts
 

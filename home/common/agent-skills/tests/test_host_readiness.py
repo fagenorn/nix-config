@@ -677,6 +677,32 @@ class RefusalTest(ReadinessCase):
             with self.subTest(argv=argv):
                 self.assertIsNone(refusal(argv, snap))
 
+    def test_a_shell_script_is_read_past_options_written_around_its_c_flag(self):
+        guard = load_guard()
+        rules = {"fagenorn/ready": {
+            "changes": [{"id": "deploy", "argv": ["deploy"]}], "read_only": [],
+            "release_profile": "github-release"}}
+        snap = fake_snapshot(self.root, **{
+            "bindings.commands": {"deploy": {"argv": ["deploy"], "cwd": str(self.root), "env": []}},
+            "production.read_only": {"commands": [], "mcp_tools": []}})
+        production = "would run production command deploy"
+        for argv in (["sh", "-c", "--", "deploy"], ["bash", "-c", "-e", "deploy"],
+                     ["bash", "-O", "extglob", "-c", "deploy"], ["bash", "+O", "extglob", "-c", "deploy"],
+                     ["bash", "--rcfile", "x", "-c", "deploy"],
+                     ["bash", "--init-file", "x", "-c", "deploy"],
+                     ["bash", "--norc", "-c", "deploy"],
+                     ["bash", "-c", "-o", "pipefail", "-e", "--", "deploy"],
+                     ["bash", "-co", "pipefail", "deploy"], ["bash", "-e", "-c", "-u", "deploy"],
+                     ["env", "bash", "-O", "extglob", "-c", "--", "deploy"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(guard.production_hits(shlex.join(argv), rules)[0])
+                self.assertEqual(production, refusal(argv, snap))
+        for argv in (["bash", "-O", "extglob", "-c", "true"], ["bash", "-c", "--", "echo deploy"],
+                     ["bash", "-c", "-e", "echo", "deploy"], ["bash", "--rcfile", "deploy", "-c", "true"],
+                     ["bash", "-O", "deploy", "-c", "true"]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(refusal(argv, snap))
+
     def test_a_project_root_with_a_quote_or_a_space_is_a_plain_path_argument(self):
         base = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, base, True)
