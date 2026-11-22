@@ -14,9 +14,11 @@ import os
 import re
 import shutil
 import socketserver
+import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -260,6 +262,27 @@ def quick_serve_forever(server, poll_interval=SERVER_POLL_SECONDS):
     return socketserver.BaseServer.serve_forever(server, poll_interval)
 
 
+def awaited(svc, probe, bound: float, recheck: float):
+    """`probe()`'s first truthy answer, waiting on the console's publish between probes; None past `bound`.
+
+    The version is read before each probe, so a publish between the two wakes the next wait at once.
+    A closing console answers `wait_for_change` at once, so it is slept out instead of spun on.
+    """
+    end = time.monotonic() + bound
+    while time.monotonic() < end:
+        seen = svc.version
+        found = probe()
+        if found:
+            return found
+        wait = min(recheck, end - time.monotonic())
+        if wait > 0:
+            if svc.closing:
+                time.sleep(wait)
+            else:
+                svc.wait_for_change(seen, wait)
+    return None
+
+
 class ApproveCase(Case):
     def setUp(self):
         super().setUp()
@@ -326,13 +349,55 @@ class ApproveCase(Case):
         return self.approve({"plan_id": plan_id})
 
     def until(self, *steps, after=0, bound=120):
-        end = time.monotonic() + bound
-        while time.monotonic() < end:
-            found = self.steps()
-            if len(found) > after and found[-1] in steps and not self.svc._approving:
-                return self.view()["registration"]
-            time.sleep(0.05)
-        self.fail("the approval never reached the expected step")
+        def probe():
+            with self.svc._ingest:
+                found = self.steps()
+                busy = self.svc._approving
+                shown = self.view()["registration"]
+            return shown if len(found) > after and found[-1] in steps and not busy else None
+
+        found = awaited(self.svc, probe, bound, 0.05)
+        if found is None:
+            self.fail("the approval never reached the expected step")
+        return found
+
+    def wait_done(self, root, bound=120):
+        def probe():
+            found = self.view()["registration"]
+            if found is not None and found["root"] == str(root) and found["status"] == "done":
+                return found
+            return None
+
+        found = awaited(self.svc, probe, bound, 0.1)
+        if found is None:
+            self.fail("no registration result")
+        return found
+
+    def wait_for(self, predicate, bound=120):
+        def probe():
+            found = self.view()["registration"]
+            return found if found is not None and predicate(found) else None
+
+        found = awaited(self.svc, probe, bound, 0.1)
+        if found is None:
+            self.fail("the registration never reached the expected state")
+        return found
+
+    def settled_row(self, root, bound=120):
+        """The stored payload of the root's last ended registration, once the run has finished.
+
+        It observes completion through the log and the service's run mark, not through the view,
+        which a card or a registered project reduces or drops (ADR-console-035).
+        """
+        def probe():
+            found = [payload for _, payload in self.rows(event_log.REGISTRATION_ENDED)
+                     if payload.get("root") == str(root)]
+            return found[-1] if self.svc._registering is None and found else None
+
+        found = awaited(self.svc, probe, bound, 0.05)
+        if found is None:
+            self.fail("no registration result")
+        return found
 
     def run_approval(self, *steps, plan_id=PID_B):
         errors = io.StringIO()
@@ -451,15 +516,16 @@ class ApproveCase(Case):
         return [payload for _, payload in self.rows("adoption.deferred")]
 
     def settled(self, count, bound=120):
-        end = time.monotonic() + bound
-        while time.monotonic() < end:
+        def probe():
             found = self.registrations()
             with self.svc._ingest:
                 busy = PID_B in self.svc._enrolling
-            if len(found) >= count and not busy:
-                return found
-            time.sleep(0.05)
-        self.fail("the registration never settled")
+            return found if len(found) >= count and not busy else None
+
+        found = awaited(self.svc, probe, bound, 0.05)
+        if found is None:
+            self.fail("the registration never settled")
+        return found
 
 
 class QuickShutdownTest(ApproveCase):
@@ -516,6 +582,107 @@ class QuickShutdownPatchTest(unittest.TestCase):
         Probe("test_probe").run(result)
         self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
         self.assertIs(service.ConsoleServer.serve_forever, socketserver.BaseServer.serve_forever)
+
+
+class PublishWaitTest(ApproveCase):
+    def clock(self, sleeps, on_sleep=None):
+        """A stand-in `time` for both test modules' helpers: it records every sleep, then really sleeps."""
+        real_sleep = time.sleep
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if on_sleep is not None:
+                on_sleep()
+            real_sleep(seconds)
+        stand_in = types.SimpleNamespace(monotonic=time.monotonic, sleep=sleep)
+        for module in (sys.modules[__name__], sys.modules[Case.__module__]):
+            patcher = mock.patch.object(module, "time", stand_in)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return stand_in
+
+    def controlled(self, now):
+        """A stand-in `time` on a controlled clock, and a stand-in console whose waits advance it."""
+        def sleep(seconds):
+            raise AssertionError("slept")
+        waits = []
+
+        def wait(seen, timeout):
+            waits.append((seen, timeout))
+            now[0] += timeout
+            return None
+        patcher = mock.patch.object(
+            sys.modules[__name__], "time", types.SimpleNamespace(monotonic=lambda: now[0], sleep=sleep))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return types.SimpleNamespace(version=7, closing=False, wait_for_change=wait), waits
+
+    def test_registered_returns_on_the_publish_without_sleeping(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.start(Fake(plan=READY, block=gate))
+        repo = reconciled(self.parent, contract=True)
+        sleeps = []
+        self.clock(sleeps, on_sleep=gate.set)
+        real = self.svc.wait_for_change
+        with mock.patch.object(self.svc, "wait_for_change",
+                               side_effect=lambda seen, timeout: (gate.set(), real(seen, timeout))[1]) as spy:
+            shown = self.registered(repo)
+        self.assertEqual((shown["root"], shown["status"]), (str(repo), "done"))
+        self.assertEqual(sleeps, [])
+        self.assertTrue(spy.called)
+
+    def test_a_wait_on_a_closed_console_waits_out_its_recheck(self):
+        self.start(Fake(plan=READY))
+        self.svc.close()
+        sleeps = []
+        self.clock(sleeps)
+        found = awaited(self.svc, lambda: None, bound=0.12, recheck=0.05)
+        self.assertIsNone(found)
+        self.assertTrue(sleeps)
+        self.assertLessEqual(len(sleeps), 4)
+        self.assertTrue(all(s <= 0.05 for s in sleeps), sleeps)
+
+    def test_awaited_does_not_probe_once_its_deadline_has_passed(self):
+        now = [0.0]
+        svc, waits = self.controlled(now)
+        probes = []
+        found = awaited(svc, lambda: (probes.append(now[0]), "late" if now[0] >= 1.0 else None)[1],
+                        bound=1.0, recheck=0.5)
+        self.assertIsNone(found)
+        self.assertEqual(probes, [0.0, 0.5])
+        self.assertEqual(waits, [(7, 0.5), (7, 0.5)])
+
+    def test_awaited_returns_an_event_within_its_bound(self):
+        now = [0.0]
+        svc, waits = self.controlled(now)
+        probes = []
+        found = awaited(svc, lambda: (probes.append(now[0]), "on time" if now[0] >= 0.5 else None)[1],
+                        bound=1.0, recheck=0.5)
+        self.assertEqual(found, "on time")
+        self.assertEqual(probes, [0.0, 0.5])
+        self.assertEqual(waits, [(7, 0.5)])
+
+    def test_wait_done_fails_in_its_words_once_its_bound_passes(self):
+        self.start(Fake(plan=READY))
+        started = time.monotonic()
+        with self.assertRaises(AssertionError) as raised:
+            self.wait_done(self.parent / "never", bound=0.2)
+        self.assertIn("no registration result", str(raised.exception))
+        self.assertGreaterEqual(time.monotonic() - started, 0.2)
+
+    def test_until_reads_steps_and_view_under_the_ingest_lock(self):
+        self.opened()
+        held = []
+        real_steps, real_view = self.steps, self.view
+        with mock.patch.object(self, "steps", side_effect=lambda: (
+                held.append(self.svc._ingest.locked()), real_steps())[1]), \
+                mock.patch.object(self, "view", side_effect=lambda: (
+                    held.append(self.svc._ingest.locked()), real_view())[1]):
+            shown = self.until("opened")
+        self.assertEqual(shown, real_view()["registration"])
+        self.assertTrue(held)
+        self.assertTrue(all(held), held)
 
 
 class ApplyCardTest(ApproveCase):
