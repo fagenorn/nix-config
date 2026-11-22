@@ -28,7 +28,9 @@ HOSTING_LITERALS = ("fagenorn/nix-config", "nix-config", "origin/main", "--base 
 # A link to an issue on the hosting tracker is accepted in the global standards only (#1438).
 TRACKER_LINK_ROOT = "home/common/agent-skills/standards"
 URL_SPAN = re.compile(r"""https?://[^\s()<>\[\]"'`]+""")
-ANGLE_DESTINATION = re.compile(r"\]\(<(?P<url>[^<>\n]*)>")
+# An angle-bracket destination opens after `](`, after `]:` (a reference definition) or at a line start
+# (a definition's destination may sit on the line after its label).
+ANGLE_DESTINATION = re.compile(r"(?:\]\([ \t]*|\]:[ \t]*|^[ \t]*)<(?P<url>[^<>\n]*)>")
 AUTOLINK = re.compile(r"<(?P<url>https?://[^\s<>]*)>")
 TRACKER_ISSUE_LINK = re.compile(r"https://github\.com/fagenorn/nix-config/issues/[1-9][0-9]*")
 # Every exemption is one (file, token) pair with its reason; evals and LICENSE files are skipped by name.
@@ -57,14 +59,21 @@ def without_tracker_links(line: str) -> str:
     """The line with each tracker issue link blanked out, the whole destination being that link.
 
     A link destination is read as CommonMark reads it: `](<...>)` and `<...>` hold everything up to
-    the closing `>`, so each is blanked only when that is exactly the issue link; a `<...>` that
-    does not open a token (`opens_token`) is part of a longer destination and stays. Any other URL
+    the closing `>`, so each is blanked only when that is exactly the issue link, and a URL inside
+    one that is not stays, whatever surrounds it; an autolink `<...>` that does not open a token
+    (`opens_token`) is part of a longer destination and stays. Any other URL
     is a bare destination or prose: it is blanked (bar trailing punctuation) when it opens a token
     and is followed by whitespace, `)` or the end of the line. Anything else continues the
     destination, and the span stays.
     """
     def exact(match):
         return " " * len(match.group(0)) if TRACKER_ISSUE_LINK.fullmatch(match.group("url")) else match.group(0)
+
+    def angle(match):
+        if TRACKER_ISSUE_LINK.fullmatch(match.group("url")):
+            return " " * len(match.group(0))
+        kept.append(match.span("url"))
+        return match.group(0)
 
     def autolink(match):
         return exact(match) if opens_token(match.string, match.start()) else match.group(0)
@@ -73,10 +82,13 @@ def without_tracker_links(line: str) -> str:
         span = match.group(0)
         url = span.rstrip(".,;:!?")
         after = match.string[match.end():match.end() + 1]
+        if any(a <= match.start() < b for a, b in kept):
+            return span
         if not opens_token(match.string, match.start()) or (after and not (after.isspace() or after == ")")):
             return span
         return " " + span[len(url):] if TRACKER_ISSUE_LINK.fullmatch(url) else span
-    line = ANGLE_DESTINATION.sub(exact, line)
+    kept: list[tuple[int, int]] = []
+    line = ANGLE_DESTINATION.sub(angle, line)
     line = AUTOLINK.sub(autolink, line)
     return URL_SPAN.sub(blank, line)
 
