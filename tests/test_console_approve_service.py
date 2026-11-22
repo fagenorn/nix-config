@@ -25,7 +25,7 @@ from agent_tools.project_contract import adopt_apply, adopt_inspection
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
-from .approve_case_support import PublishWaits, quick_serve_forever, reconciled
+from .approve_case_support import PENDING, PublishWaits, awaited, reconciled
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .test_console_register_service import (
     A1, DRAFT, PID_A, PID_B, READ_NO_BUILD, READY, ROOT, CancelChecks, Case, DraftCase, Fake, Held,
@@ -225,9 +225,6 @@ class RegistryFake(Fake):
 class ApproveCase(PublishWaits, Case):
     def setUp(self):
         super().setUp()
-        patch = mock.patch.object(service.ConsoleServer, "serve_forever", quick_serve_forever)
-        patch.start()
-        self.addCleanup(patch.stop)
         self.forge = StandInForge()
         self.pusher = Pusher()
         self.fake = None
@@ -286,6 +283,16 @@ class ApproveCase(PublishWaits, Case):
 
     def approve_plan(self, plan_id=PID_B):
         return self.approve({"plan_id": plan_id})
+
+    def until(self, *steps, after=0, bound=120):
+        def probe():
+            with self.svc._ingest:
+                found, busy, shown = self.steps(), self.svc._approving, self.view()["registration"]
+            return shown if len(found) > after and found[-1] in steps and not busy else PENDING
+        found = awaited(self.svc, probe, bound, 0.05)
+        if found is PENDING:
+            self.fail("the approval never reached the expected step")
+        return found
 
     def run_approval(self, *steps, plan_id=PID_B):
         errors = io.StringIO()
@@ -402,6 +409,16 @@ class ApproveCase(PublishWaits, Case):
 
     def deferrals(self):
         return [payload for _, payload in self.rows("adoption.deferred")]
+
+    def settled(self, count, bound=120):
+        def probe():
+            with self.svc._ingest:
+                found, busy = self.registrations(), PID_B in self.svc._enrolling
+            return found if len(found) >= count and not busy else PENDING
+        found = awaited(self.svc, probe, bound, 0.05)
+        if found is PENDING:
+            self.fail("the registration never settled")
+        return found
 
 
 class ApplyCardTest(ApproveCase):

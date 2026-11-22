@@ -12,8 +12,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import event_log
+from agent_tools.console import event_log, service
 
 from .test_console_register_service import PID_B, git, reconcile_repository
 
@@ -86,20 +87,13 @@ def awaited(svc, probe, bound: float, recheck: float):
 
 
 class PublishWaits:
-    "The wait helpers of the approve case, each woken by the service's publish."
+    "The approve case's prompt shutdown and the wait helpers woken by the service's publish."
 
-    def until(self, *steps, after=0, bound=120):
-        def probe():
-            with self.svc._ingest:
-                found = self.steps()
-                busy = self.svc._approving
-                shown = self.view()["registration"]
-            return shown if len(found) > after and found[-1] in steps and not busy else PENDING
-
-        found = awaited(self.svc, probe, bound, 0.05)
-        if found is PENDING:
-            self.fail("the approval never reached the expected step")
-        return found
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(service.ConsoleServer, "serve_forever", quick_serve_forever)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def wait_done(self, root, bound=120):
         def probe():
@@ -139,16 +133,4 @@ class PublishWaits:
         found = awaited(self.svc, probe, bound, 0.05)
         if found is PENDING:
             self.fail("no registration result")
-        return found
-
-    def settled(self, count, bound=120):
-        def probe():
-            found = self.registrations()
-            with self.svc._ingest:
-                busy = PID_B in self.svc._enrolling
-            return found if len(found) >= count and not busy else PENDING
-
-        found = awaited(self.svc, probe, bound, 0.05)
-        if found is PENDING:
-            self.fail("the registration never settled")
         return found
