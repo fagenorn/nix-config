@@ -71,6 +71,12 @@ clone with a missing blob is no verdict instead of a network fetch, passes
 `merge-base`, `ls-tree`, `cat-file` and `diff-tree`. An argument git cannot be
 given (a NUL in a branch name) is a failed read, never an error.
 
+`read_blobs` gives an enforcer that needs file contents the committed bytes of the paths it
+selects, through the same read-only children; an enforcer whose tool fails raises
+`EnforcerFailure` with a reason from `FAILURE_REASONS`, which `judge` does not catch, so the
+caller fails closed; an enforcer whose git read fails raises `HistoryUnreadable`, which `judge`
+reports as no verdict. The list of git subcommands the module runs does not change.
+
 A file is text or binary by its committed bytes alone: a NUL among its first
 8,000 bytes makes it binary, as git decides it for `grep -I`, whatever a
 `diff` or `binary` attribute says, so no attribute hides a file from an
@@ -170,6 +176,28 @@ class Enforcer:
     per_file: bool = False
 
 
+FAILURE_REASONS = (
+    "record_unavailable", "not_started", "timed_out", "unexpected_exit", "unreadable_output")
+
+
+class EnforcerFailure(Exception):
+    """An enforcer's tool failed. `judge` and `compare` never catch it, so the caller fails closed.
+
+    `tool` and `reason` are literals the enforcer authors, `reason` one of `FAILURE_REASONS`;
+    `detail` may name a path and is for a command's stderr only, never a conformance fact.
+    """
+
+    def __init__(self, tool: str, reason: str, detail: str):
+        if reason not in FAILURE_REASONS:
+            raise ValueError(f"unknown failure reason: {reason!r}")
+        super().__init__(f"{tool}: {detail}")
+        self.tool, self.reason, self.detail = tool, reason, detail
+
+
+class HistoryUnreadable(Exception):
+    """An enforcer's own git read failed; `judge` reports no verdict, as for any failed read."""
+
+
 class Rise(NamedTuple):
     rule: str
     base_count: int
@@ -227,13 +255,10 @@ def in_subdirectory(root: Path, timeout: float | None) -> bool:
 BINARY_PROBE_BYTES = 8000
 
 
-def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
-    """Every text file's line count at a revision.
+def _blob_oids(root: Path, revision: str, timeout: float | None) -> dict[str, str] | None:
+    """Every blob path at a revision with its oid, in listing order, or None.
 
-    Lines are counted as `git grep -c` counts them: the newline-terminated lines
-    plus an unterminated last line, empty files not listed. A file with a NUL in
-    its first `BINARY_PROBE_BYTES` bytes is binary and not listed; a submodule is
-    no file. A blob that cannot be read is no snapshot.
+    The tree is listed NUL-delimited so every path name round-trips; a submodule is no blob.
     """
     listing = _git(root, ["ls-tree", "-r", "-z", "--full-tree", revision], timeout)
     if listing is None:
@@ -246,24 +271,65 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
         _, kind, oid = meta.decode("ascii").split(" ")
         if kind == "blob":
             paths[os.fsdecode(name)] = oid
-    if not paths:
-        return Snapshot(revision, {})
+    return paths
+
+
+def _read_by_oid(root: Path, oids: Sequence[str], timeout: float | None) -> list[bytes] | None:
+    """The bytes of each blob oid, in order, through one `cat-file --batch`; None on any failure."""
     out = _git(root, ["cat-file", "--batch"], timeout,
-               stdin="".join(f"{oid}\n" for oid in paths.values()).encode("ascii"))
+               stdin="".join(f"{oid}\n" for oid in oids).encode("ascii"))
     if out is None:
         return None
-    counts: dict[str, int] = {}
-    found: list[Suppression] = []
+    contents: list[bytes] = []
     position = 0
-    for path in paths:
+    for _ in oids:
         end = out.find(b"\n", position)
         header = out[position:end].split(b" ") if end >= 0 else []
         if len(header) != 3 or header[1] != b"blob":
             return None
         start = end + 1
         stop = start + int(header[2])
-        content = out[start:stop]
+        contents.append(out[start:stop])
         position = stop + 1
+    return contents
+
+
+def read_blobs(root: Path, revision: str, select: Callable[[str], bool],
+               timeout: float | None) -> dict[str, bytes] | None:
+    """The committed bytes of every blob path at `revision` that `select` accepts.
+
+    Keyed by path in listing order. Selecting nothing starts no `cat-file` child.
+    None only for a failed git read: either child failing, or a header that is no blob.
+    """
+    paths = _blob_oids(root, revision, timeout)
+    if paths is None:
+        return None
+    chosen = [path for path in paths if select(path)]
+    if not chosen:
+        return {}
+    contents = _read_by_oid(root, [paths[path] for path in chosen], timeout)
+    return None if contents is None else dict(zip(chosen, contents))
+
+
+def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
+    """Every text file's line count at a revision.
+
+    Lines are counted as `git grep -c` counts them: the newline-terminated lines
+    plus an unterminated last line, empty files not listed. A file with a NUL in
+    its first `BINARY_PROBE_BYTES` bytes is binary and not listed; a submodule is
+    no file. A blob that cannot be read is no snapshot.
+    """
+    paths = _blob_oids(root, revision, timeout)
+    if paths is None:
+        return None
+    if not paths:
+        return Snapshot(revision, {})
+    contents = _read_by_oid(root, list(paths.values()), timeout)
+    if contents is None:
+        return None
+    counts: dict[str, int] = {}
+    found: list[Suppression] = []
+    for path, content in zip(paths, contents):
         if content and b"\0" not in content[:BINARY_PROBE_BYTES]:
             counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
             if rule_ids.SUPPRESS.encode() in content:
@@ -490,6 +556,9 @@ def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
     changes = line_changes(root, base, head, timeout)
     if base_snapshot is None or branch_snapshot is None or renamed is None or changes is None:
         return None
+    try:
+        rises = compare(base_snapshot, branch_snapshot, renamed, enforcers)
+    except HistoryUnreadable:
+        return None
     return Verdict(
-        base, head, compare(base_snapshot, branch_snapshot, renamed, enforcers),
-        added_suppressions(base_snapshot, branch_snapshot, renamed, changes))
+        base, head, rises, added_suppressions(base_snapshot, branch_snapshot, renamed, changes))

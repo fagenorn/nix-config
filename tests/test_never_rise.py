@@ -452,6 +452,73 @@ class NeverRiseTest(unittest.TestCase):
                 self.assertEqual(len(text.splitlines()), 1)
 
 
+class BlobReadTest(unittest.TestCase):
+    def head(self, root):
+        return git(root, "rev-parse", "HEAD").strip()
+
+    def judged_failure(self, error):
+        def find(snapshot):
+            raise error
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.txt", "x\n")
+            commit_all(root)
+            mark_base(root)
+            return never_rise.judge(root, "main", [Enforcer("FX9", find)], 60)
+
+    def test_read_blobs_returns_the_committed_bytes_of_the_selected_paths_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.js", "one\n")
+            write(root, "b.txt", "two\n")
+            commit_all(root)
+            write(root, "a.js", "changed\n")
+            blobs = never_rise.read_blobs(
+                root, self.head(root), lambda p: p.endswith(".js"), 60)
+        self.assertEqual(blobs, {"a.js": b"one\n"})
+
+    def test_a_path_holding_a_newline_round_trips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a\nb.js", "x\n")
+            commit_all(root)
+            blobs = never_rise.read_blobs(
+                root, self.head(root), lambda p: p.endswith(".js"), 60)
+        self.assertEqual(blobs, {"a\nb.js": b"x\n"})
+
+    def test_read_blobs_of_an_unknown_revision_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.js", "x\n")
+            commit_all(root)
+            self.assertIsNone(never_rise.read_blobs(root, "0" * 40, lambda p: True, 60))
+
+    def test_read_blobs_selecting_nothing_starts_no_cat_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.js", "x\n")
+            commit_all(root)
+            with mock.patch.object(never_rise, "_git", wraps=never_rise._git) as spy:
+                blobs = never_rise.read_blobs(root, self.head(root), lambda p: False, 60)
+        self.assertEqual(blobs, {})
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(spy.call_args.args[1][0], "ls-tree")
+
+    def test_an_enforcer_failure_propagates_out_of_judge(self):
+        with self.assertRaises(never_rise.EnforcerFailure) as caught:
+            self.judged_failure(never_rise.EnforcerFailure("tool", "not_started", "broke"))
+        error = caught.exception
+        self.assertEqual((error.tool, error.reason, error.detail), ("tool", "not_started", "broke"))
+        self.assertEqual(str(error), "tool: broke")
+
+    def test_a_failure_reason_outside_the_closed_set_is_refused(self):
+        with self.assertRaises(ValueError):
+            never_rise.EnforcerFailure("tool", "/home/x/node-tools.json missing", "x")
+
+    def test_a_history_read_failure_in_an_enforcer_is_no_verdict(self):
+        self.assertIsNone(self.judged_failure(never_rise.HistoryUnreadable()))
+
+
 def numbered(count):
     return "".join(f"{i}\n" for i in range(count))
 
