@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -331,6 +332,44 @@ class LaunchTest(unittest.TestCase):
                 self.assertIn("No such file or directory", diagnostic(launched.stderr))
                 self.assertIn(word, diagnostic(launched.stderr))
                 self.assertEqual(started, [])
+
+    def test_a_sigterm_during_the_spawn_still_ends_the_launchers_group_and_restores_the_handler(self):
+        real = subprocess.Popen
+        pids: list[int] = []
+        started: list[int] = []
+
+        def spawn_then_term(*args, **kwargs):
+            child = real(*args, **kwargs)
+            pids.append(child.pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+
+        def kill_group() -> None:
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        self.addCleanup(kill_group)
+        before = lambda signum, frame: None  # noqa: E731
+        outer = signal.signal(signal.SIGTERM, before)
+        self.addCleanup(signal.signal, signal.SIGTERM, outer)
+        with mock.patch.object(engine_session.subprocess, "Popen", spawn_then_term):
+            with self.assertRaises(SystemExit) as raised:
+                launch([sys.executable, "-c", "import time; time.sleep(60)"],
+                       tempfile.gettempdir(), "p", on_start=started.append, timeout=30)
+        self.assertEqual(raised.exception.code, 143)
+        self.assertEqual(started, [])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pids[0], 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail("the launcher's group outlived the engine's SIGTERM")
 
     def test_a_sigterm_to_the_engine_ends_the_launchers_whole_group_and_restores_the_handler(self):
         with tempfile.TemporaryDirectory() as directory:

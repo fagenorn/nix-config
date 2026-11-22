@@ -404,8 +404,9 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
     and the result has `timed_out` set.
     """
     started = time.monotonic()
-    try:
-        previous = signal.signal(signal.SIGTERM, _terminate)
+    deferred: list[int] = []
+    try:  # before the spawn: the session's own group exists from the spawn on
+        previous = signal.signal(signal.SIGTERM, lambda signum, frame: deferred.append(signum))
     except ValueError:  # not the main thread: no handler can be installed
         previous = None
     process = None
@@ -416,8 +417,14 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        start_new_session=True)
         except OSError as error:
+            if deferred:  # no group to end, but the engine was told to stop
+                raise SystemExit(128 + deferred[0])
             return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
                             time.monotonic() - started)
+        if previous is not None:  # the deferred signals end here: from now on the group is owned
+            signal.signal(signal.SIGTERM, _terminate)
+            if deferred:
+                raise SystemExit(128 + deferred[0])
         guard = None if timeout is None else Watchdog(
             started + timeout - time.monotonic(), lambda: _signal_overrun(process)).start()
         try:
