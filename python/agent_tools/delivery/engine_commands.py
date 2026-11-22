@@ -14,13 +14,18 @@ result (`{}`).
 
 A command that cannot start (an `OSError` from the spawn) is `failed` with exit 127 and no pid, and
 `on_start` is not called. When `on_start` raises, the process is killed and reaped before the error
-propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group at
-the timeout and bounds the drain by `DRAIN_SECONDS`; the timeout counts from the spawn, `on_start`
-included, and a SIGTERM to the engine ends the group too. The deadline is armed (a `Watchdog`
-thread) before `on_start` runs, so a stalled `on_start` cannot keep the group past its bound; the
-SIGTERM handler is installed before the spawn and defers a signal until the group is owned, so a
-SIGTERM in the spawn interval still ends the group. `Ran.timed_out` says the timeout fired.
-`Ran.stdout`/`stderr` are what it printed (stderr is empty untimed).
+propagates. Every run is the leader of its own process group, and any exception while it waits (a
+SIGTERM to the engine, raised as `SystemExit`, and a failing `on_start` included) kills that group
+and closes its pipes without waiting for EOF. A timed run (`timeout` given) also has captured
+stderr, kills the group at the timeout and bounds the drain by `DRAIN_SECONDS`; the timeout counts
+from the spawn, `on_start` included. The deadline is armed (a `Watchdog` thread) before `on_start`
+runs, so a stalled `on_start` cannot keep the group past its bound; the SIGTERM handler is
+installed before the spawn, timed or not, and defers a signal until the group is owned, so a
+SIGTERM in the spawn interval still ends the group, and the previous handler returns with the run.
+`Ran.timed_out` says the timeout fired. A run given `stop` raises `Stopped` when it is true before
+the process starts, polls it while the process runs (`engine_stop.communicate`) and raises
+`Stopped` once it is true, also when the process has already ended. `Ran.stdout`/`stderr` are what
+it printed (stderr is empty untimed).
 
 The platform command table holds each platform id's wall bound (`PLATFORM_WALL_SECONDS`) and the one
 bound of every project command (`PROJECT_WALL_SECONDS`); the engine times every step run by it and
@@ -29,7 +34,8 @@ captures its stderr. The module runs processes, so the pure engine core never im
 Every command passes the lifecycle guard first, in the guard's accepted spelling (`command_text`),
 and runs marked as an agent session so the pre-push hook judges a push it makes (issue 1515). A
 refusal, a timeout or an unusable guard is the outcome `refused`, with the guard's reason as the
-result and no process.
+result and no process. A run given `stop` polls it while the guard runs and checks it before a
+refusal is returned: a stop raises `Stopped` there, the guard reaped, and no refusal is graded.
 """
 
 from __future__ import annotations
@@ -46,7 +52,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery import engine_guard, procedure_check
+from agent_tools.delivery import engine_guard, engine_stop, procedure_check
 from agent_tools.delivery.procedure_check import CommandDeclaration
 from agent_tools.system.siblings import sibling_argv
 
@@ -216,84 +222,81 @@ def _refused(reason: str, started: float) -> Ran:
 
 def run(table: CommandTable, command: str, subcommand: str | None,
         args: Sequence[tuple[str, object]], *, guard: engine_guard.Hook | engine_guard.Unavailable,
-        on_start: Callable[[int], None], timeout: float | None = None) -> Ran:
+        on_start: Callable[[int], None], timeout: float | None = None,
+        stop: Callable[[], bool] | None = None) -> Ran:
     """Run one command step to its end once the guard allows it; `on_start(pid)` is called once,
     before waiting."""
     invocation = table.invocation(command, subcommand, args)
     started = time.monotonic()
     text = command_text(invocation.argv)
     if shlex.split(text) != list(invocation.argv):
+        if stop is not None and stop():
+            raise engine_stop.Stopped
         return _refused(f"The command text {text} does not split back to its words.", started)
-    verdict = engine_guard.judge(guard, text, invocation.cwd)
+    verdict = engine_guard.judge(guard, text, invocation.cwd, stop)
+    if stop is not None and stop():  # a stop is honored before a refusal is returned
+        raise engine_stop.Stopped
     if not verdict.allowed:
         return _refused(verdict.reason or "The lifecycle guard refused.", started)
     started = time.monotonic()  # the wall bound counts from the spawn, not from the guard
     deferred: list[int] = []
     previous = None
-    if timeout is not None:  # before the spawn: the group exists from the spawn on
-        try:
-            previous = signal.signal(signal.SIGTERM, lambda signum, frame: deferred.append(signum))
-        except ValueError:  # not the main thread: no handler can be installed
-            pass
+    try:  # before the spawn: the group exists from the spawn on
+        previous = signal.signal(signal.SIGTERM, lambda signum, frame: deferred.append(signum))
+    except ValueError:  # not the main thread: no handler can be installed
+        pass
     try:
         try:
             process = subprocess.Popen(
                 shlex.split(text), cwd=invocation.cwd, stdin=subprocess.DEVNULL,
                 env={**os.environ, SESSION_MARKER: os.environ.get(SESSION_MARKER) or "1"},
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
-                start_new_session=timeout is not None)
+                start_new_session=True)
         except OSError:
             if deferred:  # no group to end, but the engine was told to stop
                 raise SystemExit(128 + deferred[0])
             return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
-        return _wait(process, on_start, started, timeout, deferred)
+        return _wait(process, on_start, started, timeout, deferred, stop)
     finally:
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
 
 
-def _kill(process: subprocess.Popen, timeout: float | None) -> None:
-    """End the command: its own group when it has one, else the leader alone."""
+def _kill(process: subprocess.Popen) -> None:
+    """End the command's own process group."""
     try:
-        if timeout is not None:
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
+        os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):  # gone, or a leader left unreaped as a zombie (macOS)
         pass
 
 
 def _wait(process: subprocess.Popen, on_start: Callable[[int], None], started: float,
-          timeout: float | None, deferred: list[int]) -> Ran:
+          timeout: float | None, deferred: list[int], stop: Callable[[], bool] | None) -> Ran:
     guard = None
     try:
+        try:  # the deferred signals end here: from now on the group is owned
+            signal.signal(signal.SIGTERM, _terminate)
+        except ValueError:
+            pass
+        if deferred:
+            raise SystemExit(128 + deferred[0])
         if timeout is not None:
-            try:  # the deferred signals end here: from now on the group is owned
-                signal.signal(signal.SIGTERM, _terminate)
-            except ValueError:
-                pass
-            if deferred:
-                raise SystemExit(128 + deferred[0])
             guard = Watchdog(started + timeout - time.monotonic(),
-                             lambda: _kill(process, timeout)).start()
+                             lambda: _kill(process)).start()
         on_start(process.pid)
     except BaseException:
         if guard is not None:
             guard.stop()
-        _kill(process, timeout)
-        process.communicate()
+        engine_stop.end_group(process)
         raise
     overran = guard is not None and guard.stop()
     try:
-        if timeout is None:
-            stdout, stderr = process.communicate()
-        else:
-            remaining = started + timeout - time.monotonic()
-            if overran or remaining <= 0:
-                raise subprocess.TimeoutExpired(process.args, timeout)
-            stdout, stderr = process.communicate(timeout=remaining)
+        remaining = None if timeout is None else started + timeout - time.monotonic()
+        if overran or (remaining is not None and remaining <= 0):
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        stdout, stderr = engine_stop.communicate(process, None, stop=stop, timeout=remaining)
     except subprocess.TimeoutExpired:
-        _kill(process, timeout)
+        _kill(process)
         try:
             stdout, stderr = process.communicate(timeout=DRAIN_SECONDS)
         except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
@@ -301,10 +304,8 @@ def _wait(process: subprocess.Popen, on_start: Callable[[int], None], started: f
             process.stdout.close(), process.stderr.close(), process.wait()
         return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr,
                    timed_out=True)
-    except BaseException:  # an interrupt must not leave a timed run's group alive
-        if timeout is not None:
-            _kill(process, timeout)
-            process.wait()
+    except BaseException:  # an interrupt, a SIGTERM or a stop must not leave the group alive
+        engine_stop.end_group(process)
         raise
     outcome, result = grade(stdout, process.returncode)
     return Ran(outcome, result, process.returncode, time.monotonic() - started,
