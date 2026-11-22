@@ -32,6 +32,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDIN = REPO_ROOT / "tests/fixtures/engine-deliver/standin.py"
 SHIPPED = REPO_ROOT / "python/agent_tools/delivery/procedures"
 
+LIFECYCLE_SPELLINGS: dict[str, list[str]] = {
+    "publish": ["git", "-C", ".", "push", "origin", "HEAD:refs/heads/issue-7-topic"],
+    "open-review": ["gh", "--repo", "example/engine", "pr", "create", "--title", "t", "--body", "b"],
+    "land": ["/usr/bin/env", "gh", "pr", "merge", "7", "--repo", "example/engine", "--merge",
+             "--delete-branch"],
+    "tidy": ["git", "branch", "--delete", "issue-7-topic"],
+    "cut": ["gh", "release", "new", "v1.0.0"],
+}
+
 
 def ANY_SENTENCE(test: unittest.TestCase, value: object) -> None:
     test.assertIsInstance(value, str)
@@ -75,6 +84,9 @@ class EngineProject:
             "release": entry("json", "0"),
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
         })
+        contract["bindings"]["commands"].update(
+            {name: {"argv": list(argv), "cwd": ".", "env": []}
+             for name, argv in LIFECYCLE_SPELLINGS.items()})
 
     def answer(self, *answers: dict) -> None:
         self.answers.write_text(json.dumps(list(answers)), encoding="utf-8")
@@ -136,9 +148,10 @@ class EngineProject:
 
 def step(id: str, command: str, ok: str | None, *, failed: str = "needs-owner",
          subcommand: str | None = None, on: dict | None = None, mutates: bool = False,
-         max_visits: int | None = None) -> dict:
+         max_visits: int | None = None, refused: str | None = None) -> dict:
     document = {"id": id, "stage": "setup", "kind": "command", "command": command,
-                "in": ["run.issue"], "on": on or {"ok": ok, "failed": failed}}
+                "in": ["run.issue"],
+                "on": on or {"ok": ok, "failed": failed, "refused": refused or failed}}
     if subcommand:
         document["subcommand"] = subcommand
     if mutates:
@@ -218,7 +231,7 @@ class DeliverTest(unittest.TestCase):
         procedures = project.procedures([step(
             "a", "forge-claim", None, subcommand="status",
             on={"free": "needs-owner", "held_by": "needs-owner", "stale": "needs-owner",
-                "error": "done"})])
+                "error": "done", "refused": "needs-owner"})])
         done = project.deliver(procedures)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         run = project.runs()[0]
@@ -241,7 +254,8 @@ class DeliverTest(unittest.TestCase):
     def test_the_reserved_exhausted_verdict_is_a_fault_with_no_outcome_or_transition(self):
         project = EngineProject(self)
         bounded = step("a", "standin-says-exhausted", None, on={
-            "ok": "done", "failed": "needs-owner", "exhausted": "needs-owner"})
+            "ok": "done", "failed": "needs-owner", "refused": "needs-owner",
+            "exhausted": "needs-owner"})
         bounded["max_visits"] = 2
         faulted = project.deliver(project.procedures([bounded]))
         self.assertEqual(faulted.returncode, 1)
@@ -337,6 +351,31 @@ class FindingsTest(unittest.TestCase):
         elsewhere = subprocess.run(argv, capture_output=True, timeout=120, **options)
         self.assertEqual(elsewhere.returncode, 1, elsewhere.stdout + elsewhere.stderr)
         self.assertIn("unknown_command", elsewhere.stdout)
+
+    def test_engine_check_refuses_each_lifecycle_spelling_that_does_not_map_refused(self):
+        project = EngineProject(self)
+        ids = list(LIFECYCLE_SPELLINGS)
+
+        def steps(*, mapped: bool) -> list[dict]:
+            return [{"id": name, "stage": "landing", "kind": "command", "command": name,
+                     "on": {"ok": ids[i + 1] if i + 1 < len(ids) else "done",
+                            "failed": "needs-owner",
+                            **({"refused": "needs-owner"} if mapped else {})}}
+                    for i, name in enumerate(ids)]
+
+        def check(directory: Path):
+            argv, options = project.command("check", "--procedures", str(directory))
+            return subprocess.run(argv, capture_output=True, timeout=120, **options)
+
+        unmapped = check(project.procedures(steps(mapped=False)))
+        self.assertEqual(unmapped.returncode, 1, unmapped.stdout + unmapped.stderr)
+        refusals = json.loads(unmapped.stdout)["refusals"]
+        self.assertEqual([(r["defect"], r["step"]) for r in refusals],
+                         [("unmapped_outcome", name) for name in ids])
+        for refusal in refusals:
+            self.assertIn("'refused'", refusal["detail"])
+        mapped = check(project.procedures(steps(mapped=True)))
+        self.assertEqual(mapped.returncode, 0, mapped.stdout + mapped.stderr)
 
 
 class RefusalTest(unittest.TestCase):

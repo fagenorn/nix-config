@@ -42,9 +42,9 @@ class KeepAliveTest(unittest.TestCase):
         procedures = project.procedures([
             step("a", "standin-record", "b"),
             step("b", "standin-record", None, mutates=True, max_visits=2,
-                 on={"ok": "c", "failed": "needs-owner", "exhausted": "d"}),
+                 on={"ok": "c", "failed": "needs-owner", "refused": "needs-owner", "exhausted": "d"}),
             step("c", "standin-record", None, max_visits=2,
-                 on={"ok": "b", "failed": "needs-owner", "exhausted": "d"}),
+                 on={"ok": "b", "failed": "needs-owner", "refused": "needs-owner", "exhausted": "d"}),
             step("d", "standin-record", "done", mutates=True)], keep_alive=KEEP_ALIVE)
         done = project.deliver(procedures)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
