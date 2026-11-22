@@ -27,6 +27,16 @@ settings or its permissions. The prompt is never in the argv: the tool options
 are variadic and would swallow a positional prompt, so `launch` writes it on
 stdin.
 
+A session that gave no usable structured answer is asked once more on the same
+session: with `resume=True` the argv is the same except `--session-id <id>`
+becomes `--resume <id>`, and `--fork-session` is never passed, so the id is kept.
+The prompt of that second launch is `REASK_PROMPT`. A miss is a reading with no
+reply that conforms to the schema (`engine_reply.reply_problem`) whose stdout is
+a JSON object of `type` `result` with a `subtype` in `MISS_SUBTYPES`: `success`
+(the model answered in prose or its answer broke the schema) or the client's own
+`error_max_structured_output_retries`. Any other reading without a usable reply
+is not a miss and is never resumed.
+
 The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
 permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
 shell command is denied, so a session cannot write to the worktree through it.
@@ -75,6 +85,11 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
 NOT_STARTED = 127
+MISS_SUBTYPES: tuple[str, ...] = ("success", "error_max_structured_output_retries")
+REASK_PROMPT = (
+    "Your last answer was not a valid structured answer. Reply again with only the structured "
+    "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
+    "other text.")
 READ_ONLY_BASH: tuple[str, ...] = tuple(
     f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
                                       "blame", "merge-base"))
@@ -171,6 +186,7 @@ class Reading:
     turns: int
     tokens: dict[str, int]
     spend_usd: float
+    is_result: bool = False
 
 
 def _count(value: object) -> int:
@@ -209,11 +225,16 @@ def read_result(stdout: bytes) -> Reading:
         wall_seconds=None if wall is None else wall / 1000,
         turns=_count(document.get("num_turns")),
         tokens={key: _count(usage.get(_USAGE_KEYS[key])) for key in TOKEN_COUNTS},
-        spend_usd=_amount(document.get("total_cost_usd")) or 0)
+        spend_usd=_amount(document.get("total_cost_usd")) or 0,
+        is_result=document.get("type") == "result")
 
 
-def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) -> tuple[str, ...]:
-    """The launcher argv of one session; no word of it is a prompt."""
+def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, *,
+                resume: bool = False) -> tuple[str, ...]:
+    """The launcher argv of one session; no word of it is a prompt.
+
+    With `resume` the session is the one already started: `--resume` replaces `--session-id`.
+    """
     refuse_value(role.name, "model", role.model)
     refuse_value(role.name, "effort", role.effort)
     for field, names in (("tools", role.tools), ("disallowedTools", role.disallowed)):
@@ -221,7 +242,8 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) 
             refuse_value(role.name, field, name)
     argv = [*LAUNCHER, "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
-            "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
+            "--resume" if resume else "--session-id", session, "--strict-mcp-config",
+            "--permission-mode", "dontAsk",
             "--model", role.model, "--effort", role.effort]
     disallowed = list(role.disallowed or ())
     if role.tools is not None:

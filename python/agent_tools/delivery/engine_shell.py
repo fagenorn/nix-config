@@ -18,9 +18,14 @@ An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
 run's `sessions/`, `session_starting` is on disk before the process is spawned,
 and only the `outcome_from` member of the session's structured reply grades the
-step. A session with no structured reply is a `Fault`, so neither the prose nor
-the exit code selects an outcome, and so is a session denied a shell command,
-whose reply may rest on a check it never ran.
+step, so neither the prose nor the exit code selects an outcome. A reading with no
+usable reply (none, or one that breaks the schema) is a miss when stdout is a
+result whose subtype is one of `engine_session.MISS_SUBTYPES`: the same session is
+then resumed once (`session_resuming`, `--resume <session>`) and asked again, and
+a second miss grades `no-reply` with `{}` as the stored result. Any other reading
+with no usable reply is a `Fault`, and so is a reading denied a shell command,
+whose reply may rest on a check it never ran. The stored result's measurements
+are the sums of the launches.
 
 Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
@@ -415,34 +420,61 @@ def _visit_session(run_dir: Path, root: str, step: dict,
                                              "step": name, "visit": visit, "pid": pid,
                                              "started": _now()})
 
-    launched = engine_session.launch(
-        engine_session.launch_argv(role, schema, session, system), root, prompt, on_start=started)
-    reading = engine_session.read_result(launched.stdout)
-    record = {"denials": reading.denials, "exit_code": launched.exit_code,
-              "prose": reading.prose, "session": session, "subtype": reading.subtype}
-    engine_ledger.store_session_file(
-        run_dir, f"{name}.{visit}.json",
-        json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    reply = reading.reply
-    denied = next((d for d in reading.denials
-                   if isinstance(d, dict) and d.get("tool_name") == "Bash"), None)
-    if denied is not None:
-        tool_input = denied.get("tool_input")
-        command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        raise Fault(f"step {name} was denied the shell command {str(command)[:200]!r}, so its "
-                    f"reply is not graded: list it in the role's tools as Bash(<prefix>:*)")
-    if reply is None:
-        reason = engine_session.diagnostic(launched.stderr)
-        raise Fault(f"step {name} gave no structured reply, exit {launched.exit_code}"
-                    + (f": {reason}" if reason else ""))
-    wall = reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds
-    engine_ledger.store_result(run_dir, step=name, visit=visit, result=reply, at=_now(),
-                               wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
-                               spend_usd=reading.spend_usd)
-    problem = engine_reply.reply_problem(schema, reply)
-    if problem is not None:
-        raise Fault(f"step {name} gave a reply that breaks its schema: {problem}")
-    outcome = reply.get(step["outcome_from"])
+    def launch(resume: bool, text: str) -> tuple[engine_session.Launched,
+                                                 engine_session.Reading, str | None]:
+        suffix = ".resume" if resume else ""
+        launched = engine_session.launch(
+            engine_session.launch_argv(role, schema, session, system, resume=resume),
+            root, text, on_start=started)
+        reading = engine_session.read_result(launched.stdout)
+        problem = ("no structured_output" if reading.reply is None
+                   else engine_reply.reply_problem(schema, reading.reply))
+        record = {"denials": reading.denials, "exit_code": launched.exit_code,
+                  "problem": problem, "prose": reading.prose, "session": session,
+                  "subtype": reading.subtype}
+        engine_ledger.store_session_file(
+            run_dir, f"{name}.{visit}{suffix}.json",
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        denied = next((d for d in reading.denials
+                       if isinstance(d, dict) and d.get("tool_name") == "Bash"), None)
+        if denied is not None:
+            tool_input = denied.get("tool_input")
+            command = tool_input.get("command") if isinstance(tool_input, dict) else None
+            raise Fault(f"step {name} was denied the shell command {str(command)[:200]!r}, so "
+                        f"its reply is not graded: list it in the role's tools as "
+                        f"Bash(<prefix>:*)")
+        if problem is not None and not (reading.is_result
+                                        and reading.subtype in engine_session.MISS_SUBTYPES):
+            reason = engine_session.diagnostic(launched.stderr)
+            raise Fault(f"step {name} gave no structured reply, exit {launched.exit_code}"
+                        + (f": {reason}" if reason else ""))
+        return launched, reading, problem
+
+    readings = []
+    reply: dict | None = None
+    for resume in (False, True):
+        if resume:
+            engine_ledger.store_session_file(
+                run_dir, f"{name}.{visit}.resume.prompt.md",
+                engine_session.REASK_PROMPT.encode("utf-8"))
+            engine_ledger.append_event(run_dir, {"event": "session_resuming", "at": _now(),
+                                                 "step": name, "visit": visit,
+                                                 "session": session})
+        launched, reading, problem = launch(resume, engine_session.REASK_PROMPT if resume
+                                            else prompt)
+        readings.append((launched, reading))
+        if problem is None:
+            reply = reading.reply
+            break
+    tokens = {key: sum(read.tokens[key] for _, read in readings)
+              for key in engine_ledger.TOKEN_COUNTS}
+    engine_ledger.store_result(
+        run_dir, step=name, visit=visit, result=reply if reply is not None else {}, at=_now(),
+        wall_seconds=sum(read.wall_seconds if read.wall_seconds is not None else ran.wall_seconds
+                         for ran, read in readings),
+        turns=sum(read.turns for _, read in readings), tokens=tokens,
+        spend_usd=sum(read.spend_usd for _, read in readings))
+    outcome = procedure_check.NO_REPLY if reply is None else reply.get(step["outcome_from"])
     if (not isinstance(outcome, str) or outcome == engine_core.EXHAUSTED
             or outcome not in step["on"]):
         raise Fault(f"step {name} has no mapping for the outcome {outcome}")

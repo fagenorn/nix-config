@@ -34,6 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 STUB = REPO_ROOT / "tests/fixtures/engine-session/claude_stub.py"
 RESULT_NORMAL = REPO_ROOT / "tests/fixtures/engine-session/result-normal.json"
+RESULT_MISSING = REPO_ROOT / "tests/fixtures/engine-session/result-missing.json"
+RESULT_INVALID = REPO_ROOT / "tests/fixtures/engine-session/result-invalid.json"
 ZERO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 DENIAL = {"tool_name": "Write", "tool_use_id": "toolu_01",
           "tool_input": {"file_path": "/etc/hosts"}}
@@ -60,7 +62,7 @@ class ReadResultTest(unittest.TestCase):
             prose="Status: stuck. I could not draft it.", denials=[DENIAL],
             subtype="success", wall_seconds=12.345, turns=7,
             tokens={"input": 11, "cache_write": 22, "cache_read": 33, "output": 44},
-            spend_usd=0.4321))
+            spend_usd=0.4321, is_result=True))
 
     def test_no_structured_output_gives_no_reply_but_keeps_prose_and_measurements(self):
         reading = read_result(raw(structured_output=...))
@@ -416,19 +418,28 @@ ROLE_NAMES = ("planner", "implementer", "reviewer", "reviewer-lite")
 
 
 def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
-                 diagnostic: str | None = None) -> Path:
-    """Put the stand-in launcher first on the project's PATH; return the log it appends to."""
+                 diagnostic: str | None = None, resumed: Path | bytes | None = None) -> Path:
+    """Put the stand-in launcher first on the project's PATH; return the log it appends to.
+
+    `resumed` is what the stub prints instead of `canned` when it is launched with `--resume`.
+    """
     log = project.tmp / "claude.log"
     if not isinstance(canned, Path):
         data, canned = canned, project.tmp / "canned.json"
         canned.write_bytes(data)
+    resumed_path = "-"
+    if resumed is not None:
+        resumed_path = str(resumed)
+        if not isinstance(resumed, Path):
+            resumed_path = str(project.tmp / "resumed.json")
+            Path(resumed_path).write_bytes(resumed)
     diagnostic_path = "-"
     if diagnostic is not None:
         diagnostic_path = str(project.tmp / "diagnostic.txt")
         Path(diagnostic_path).write_text(diagnostic, encoding="utf-8")
     launcher = project.bin / "claude-account"
-    launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {log} {canned} {exit} "
-                        f"{diagnostic_path} \"$@\"\n", encoding="utf-8")
+    launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {log} {canned} {resumed_path} "
+                        f"{exit} {diagnostic_path} \"$@\"\n", encoding="utf-8")
     launcher.chmod(0o755)
     return log
 
@@ -635,27 +646,6 @@ class DeliverSessionTest(unittest.TestCase):
             self.assertEqual([e["to"] for e in events if e["event"] == "transition_taken"],
                              ["needs-owner"])
 
-    def test_prose_with_no_structured_output_gives_no_outcome_and_no_transition(self):
-        install_stub(self.project, canned_result(
-            structured_output=..., result="Status: drafted. Done."),
-            diagnostic="claude-stub: the model answered in prose only\n")
-        done = self.project.deliver(one_step(self.project), issue=1514)
-        self.assertEqual(done.returncode, 1)
-        self.assertEqual(done.stdout, "")
-        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
-        self.assertIn("draft", done.stderr)
-        self.assertIn("claude-stub: the model answered in prose only", done.stderr)
-        run = self.run_dir()
-        kinds = [e["event"] for e in self.project.events(run)]
-        for kind in ("session_starting", "process_started"):
-            self.assertIn(kind, kinds)
-        for kind in ("result_stored", "outcome_graded", "transition_taken", "run_done",
-                     "stop_reached"):
-            self.assertNotIn(kind, kinds)
-        self.assertFalse((run / "results/draft.1.json").exists())
-        record = json.loads((run / "sessions/draft.1.json").read_text(encoding="utf-8"))
-        self.assertEqual(record["prose"], "Status: drafted. Done.")
-
     def test_the_result_event_carries_the_canned_measurements_and_the_step_its_denials(self):
         install_stub(self.project, RESULT_NORMAL)
         done = self.project.deliver(one_step(self.project), issue=1514)
@@ -671,7 +661,7 @@ class DeliverSessionTest(unittest.TestCase):
             "denials": [{"tool_name": "Write", "tool_use_id": "toolu_01",
                          "tool_input": {"file_path": "/etc/hosts"}}],
             "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
-            "session": self.starting()["session"], "subtype": "success"})
+            "problem": None, "session": self.starting()["session"], "subtype": "success"})
 
     def test_a_denied_shell_command_is_a_fault_not_a_graded_reply(self):
         denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
@@ -715,7 +705,7 @@ class DeliverSessionTest(unittest.TestCase):
 
     def test_an_unknown_account_is_one_fault_line_with_the_launchers_reason(self):
         self.project.env["CLAUDE_ACCOUNT"] = "work"
-        install_stub(self.project, b"", exit=1, diagnostic=(
+        log = install_stub(self.project, b"", exit=1, diagnostic=(
             "claude-account: no account 'work' (create it: /account add work, "
             "or claude-account add work)\n"))
         done = self.project.deliver(one_step(self.project), issue=1514)
@@ -724,58 +714,197 @@ class DeliverSessionTest(unittest.TestCase):
         self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
         for word in ("draft", "exit 1", "no account 'work'"):
             self.assertIn(word, done.stderr)
+        self.assertEqual(len(self.log(log)), 1)
 
-    def test_an_outcome_the_step_cannot_map_is_a_fault_after_its_result_is_stored(self):
+    def kinds(self, project: EngineProject | None = None) -> list[str]:
+        project = project or self.project
+        return [e["event"] for e in project.events(project.runs()[0])]
+
+    def test_a_missing_answer_then_a_valid_one_resumes_the_same_session_once(self):
+        log = install_stub(self.project, RESULT_MISSING, resumed=canned_result(
+            structured_output={"status": "stuck", "summary": "s", "items": []}))
+        procedures = one_step(self.project)
+        done = self.project.deliver(procedures, issue=1514)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        first, second = self.log(log)
+        run = self.run_dir()
+        session = after(first["argv"], "--session-id")
+        self.assertNotIn("--resume", first["argv"])
+        self.assertEqual(after(second["argv"], "--resume"), session)
+        self.assertNotIn("--session-id", second["argv"])
+        swapped = list(first["argv"])
+        swapped[swapped.index("--session-id")] = "--resume"
+        self.assertEqual(second["argv"], swapped)
+        self.assertTrue(second["announced"])
+        self.assertEqual(second["stdin"],
+                         (run / "sessions/draft.1.resume.prompt.md").read_text(encoding="utf-8"))
+        self.assertNotEqual(second["stdin"], first["stdin"])
+        events = self.project.events(run)
+        self.assertEqual(shape(events), [
+            ("step_entered", "draft", 1), ("session_starting", "draft", 1),
+            ("process_started", "draft", 1), ("session_resuming", "draft", 1),
+            ("process_started", "draft", 1), ("result_stored", "draft", 1),
+            ("outcome_graded", "draft", 1), ("transition_taken", "draft", 1),
+            ("stop_reached", "draft", None)])
+        self.assertEqual(self.kinds().count("step_entered"), 1)
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text()),
+                         {"status": "stuck", "summary": "s", "items": []})
+        self.assertFalse((run / "results/draft.2.json").exists())
+
+    def test_two_misses_give_no_reply_and_the_step_failed_stop_after_two_invocations(self):
+        log = install_stub(self.project, RESULT_MISSING, resumed=canned_result(
+            structured_output=..., result="Status: still prose.", duration_ms=1000, num_turns=2,
+            total_cost_usd=0.1,
+            usage={"input_tokens": 1, "cache_creation_input_tokens": 2,
+                   "cache_read_input_tokens": 3, "output_tokens": 4}))
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        stopped = json.loads(done.stdout)
+        self.assertEqual((stopped["end"], stopped["need"]), ("step-failed", "retry"))
+        first, second = self.log(log)
+        run = self.run_dir()
+        self.assertEqual(after(second["argv"], "--resume"), after(first["argv"], "--session-id"))
+        events = self.project.events(run)
+        (graded,) = [e for e in events if e["event"] == "outcome_graded"]
+        (taken,) = [e for e in events if e["event"] == "transition_taken"]
+        self.assertEqual((graded["outcome"], taken["to"]), ("no-reply", "step-failed"))
+        self.assertEqual(json.loads((run / "results/draft.1.json").read_text()), {})
+        for name, prose in (("draft.1.json", "Status: drafted. Done."),
+                            ("draft.1.resume.json", "Status: still prose.")):
+            record = json.loads((run / "sessions" / name).read_text(encoding="utf-8"))
+            self.assertEqual((record["prose"], record["problem"]),
+                             (prose, "no structured_output"))
+        (stored,) = [e for e in events if e["event"] == "result_stored"]
+        self.assertAlmostEqual(stored["wall_seconds"], 13.345)
+        self.assertEqual(stored["turns"], 9)
+        self.assertEqual(stored["tokens"], {"input": 12, "cache_write": 24, "cache_read": 36,
+                                            "output": 48})
+        self.assertAlmostEqual(stored["spend_usd"], 0.5321)
+
+    def test_the_clients_structured_output_retries_exhausted_is_a_miss(self):
+        exhausted = canned_result(
+            structured_output=..., subtype="error_max_structured_output_retries", is_error=True,
+            terminal_reason="structured_output_retry_exhausted", result="Status: drafted.")
+        log = install_stub(self.project, exhausted, exit=1)
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "step-failed")
+        first, second = self.log(log)
+        self.assertNotIn("--resume", first["argv"])
+        self.assertEqual(after(second["argv"], "--resume"), after(first["argv"], "--session-id"))
+        graded = [e for e in self.project.events(self.run_dir()) if e["event"] == "outcome_graded"]
+        self.assertEqual([e["outcome"] for e in graded], ["no-reply"])
+        with self.subTest("then valid"):
+            project = EngineProject(self)
+            project.env.pop("CLAUDE_ACCOUNT", None)
+            copy_roles(project, "implementer")
+            log = install_stub(project, exhausted, exit=1, resumed=canned_result(
+                structured_output={"status": "drafted", "summary": "s", "items": []}))
+            done = project.deliver(one_step(project), issue=1514)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(json.loads(done.stdout)["end"], "done")
+            self.assertEqual(len(self.log(log)), 2)
+
+    def test_a_reply_that_breaks_its_schema_is_a_miss_though_the_client_returned_it(self):
+        exhausted = {"on": {"drafted": "done", "stuck": "needs-owner", "exhausted": "needs-owner"},
+                     "max_visits": 2}
         cases = {
-            "maybe": ("maybe", {}),
-            "not a string": (["drafted"], {}),
-            "exhausted": ("exhausted", {
-                "on": {"drafted": "done", "stuck": "needs-owner", "exhausted": "needs-owner"},
-                "max_visits": 2}),
+            "extra member": (RESULT_INVALID, {}),
+            "value outside the enum": (canned_result(structured_output={
+                "status": "maybe", "summary": "s", "items": []}), {}),
+            "missing members": (canned_result(structured_output={"status": "drafted"}), {}),
+            "wrong member type": (canned_result(structured_output={
+                "status": "drafted", "summary": 3, "items": []}), {}),
+            "wrong item type": (canned_result(structured_output={
+                "status": "drafted", "summary": "s", "items": [1]}), {}),
+            "not a string": (canned_result(structured_output={
+                "status": ["drafted"], "summary": "s", "items": []}), {}),
+            "exhausted": (canned_result(structured_output={
+                "status": "exhausted", "summary": "s", "items": []}), exhausted),
         }
-        for name, (status, members) in cases.items():
+        for name, (canned, members) in cases.items():
             with self.subTest(name):
                 project = EngineProject(self)
                 project.env.pop("CLAUDE_ACCOUNT", None)
                 copy_roles(project, "implementer")
-                reply = {"status": status, "summary": "s", "items": []}
-                install_stub(project, canned_result(structured_output=reply))
+                log = install_stub(project, canned)
                 done = project.deliver(one_step(project, **members), issue=1514)
-                self.assertEqual(done.returncode, 1)
-                self.assertEqual(done.stdout, "")
-                self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
-                self.assertIn("draft", done.stderr)
-                (run,) = project.runs()
-                events = project.events(run)
-                self.assertEqual(json.loads((run / "results/draft.1.json").read_text()), reply)
-                self.assertEqual((events[-1]["event"], events[-1]["step"]),
-                                 ("result_stored", "draft"))
-                kinds = [e["event"] for e in events]
-                self.assertNotIn("outcome_graded", kinds)
-                self.assertNotIn("transition_taken", kinds)
+                self.assertEqual(done.returncode, 3, done.stderr)
+                self.assertEqual(json.loads(done.stdout)["end"], "step-failed")
+                self.assertEqual(len(self.log(log)), 2)
+                graded = [e for e in project.events(project.runs()[0])
+                          if e["event"] == "outcome_graded"]
+                self.assertEqual([e["outcome"] for e in graded], ["no-reply"])
 
-    def test_a_reply_that_breaks_its_schema_is_a_fault_before_any_grade(self):
-        cases = {"missing members": {"status": "drafted"},
-                 "wrong member type": {"status": "drafted", "summary": 3, "items": []},
-                 "wrong item type": {"status": "drafted", "summary": "s", "items": [1]},
-                 "extra member": {"status": "drafted", "summary": "s", "items": [],
-                                  "extra": 1}}
-        for name, reply in cases.items():
-            with self.subTest(name):
+    def test_a_usable_first_answer_launches_once(self):
+        log = install_stub(self.project, RESULT_NORMAL, resumed=RESULT_MISSING)
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.log(log)), 1)
+        self.assertNotIn("session_resuming", self.kinds())
+
+    def test_a_result_that_is_not_a_success_and_has_no_reply_is_a_fault_with_no_resume(self):
+        for subtype in ("error_max_turns", "error_during_execution"):
+            with self.subTest(subtype):
                 project = EngineProject(self)
                 project.env.pop("CLAUDE_ACCOUNT", None)
                 copy_roles(project, "implementer")
-                install_stub(project, canned_result(structured_output=reply))
+                log = install_stub(project, canned_result(
+                    structured_output=..., subtype=subtype, is_error=True), exit=1)
                 done = project.deliver(one_step(project), issue=1514)
                 self.assertEqual(done.returncode, 1)
                 self.assertEqual(done.stdout, "")
                 self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
                 self.assertIn("draft", done.stderr)
-                self.assertIn("schema", done.stderr)
-                kinds = [e["event"] for e in project.events(project.runs()[0])]
-                self.assertNotIn("outcome_graded", kinds)
-                self.assertNotIn("transition_taken", kinds)
-                self.assertNotIn("run_done", kinds)
+                self.assertEqual(len(self.log(log)), 1)
+                self.assertNotIn("session_resuming", self.kinds(project))
+
+    def test_an_object_that_is_not_a_result_is_a_fault_with_no_resume(self):
+        log = install_stub(self.project, canned_result(type="assistant", structured_output=...))
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        self.assertIn("draft", done.stderr)
+        self.assertEqual(len(self.log(log)), 1)
+        kinds = self.kinds()
+        for kind in ("session_resuming", "result_stored", "outcome_graded"):
+            self.assertNotIn(kind, kinds)
+
+    def test_a_denied_shell_command_on_the_resume_is_a_fault(self):
+        denial = {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm -rf x"}}
+        log = install_stub(self.project, RESULT_MISSING,
+                           resumed=canned_result(permission_denials=[denial]))
+        done = self.project.deliver(one_step(self.project), issue=1514)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        self.assertIn("draft", done.stderr)
+        self.assertEqual(len(self.log(log)), 2)
+        self.assertNotIn("outcome_graded", self.kinds())
+
+    def test_the_resume_is_on_disk_before_its_launch(self):
+        project = self.project
+        install_stub(project, RESULT_MISSING, resumed=canned_result(
+            structured_output={"status": "drafted", "summary": "s", "items": []}))
+        procedures = one_step(project)
+        real = engine_session.launch
+        seen: list[tuple] = []
+
+        def checking(argv, cwd, prompt, *, on_start):
+            (run,) = project.runs()
+            last = engine_ledger.replay(run / "events.jsonl")[-1]
+            seen.append((last["event"], last.get("session"), list(argv)))
+            return real(argv, cwd, prompt, on_start=on_start)
+
+        with project.inside(), mock.patch.object(engine_session, "launch", side_effect=checking):
+            code, line = engine_shell.deliver(1514, procedures)
+        self.assertEqual(code, 0, line)
+        self.assertEqual(len(seen), 2)
+        last, session, argv = seen[1]
+        self.assertEqual(last, "session_resuming")
+        self.assertEqual(session, after(argv, "--resume"))
 
     def test_a_role_file_that_does_not_read_refuses_the_run_before_any_session(self):
         for name in ("no file", "a model that is an option"):

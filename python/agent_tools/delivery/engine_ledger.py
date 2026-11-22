@@ -8,7 +8,7 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
     lock  the deliver process's exclusive flock and its {"pid","started"}
     results/<step>.<visit>.json
                         a step visit's stored result
-    sessions/<step>.<visit>.{system.md,prompt.md,json}
+    sessions/<step>.<visit>.{system.md,prompt.md,json,resume.json,resume.prompt.md}
                         an agent step visit's launch files and raw result,
                         created with the first one stored
 
@@ -66,6 +66,7 @@ TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
 EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
     "step_entered": frozenset(("step", "visit", "stage")),
     "session_starting": frozenset(("step", "visit", "session", "role", "account")),
+    "session_resuming": frozenset(("step", "visit", "session")),
     "process_started": frozenset(("step", "visit", "pid", "started")),
     "result_stored": frozenset(("step", "visit", "result", "wall_seconds", "turns",
                                 "tokens", "spend_usd")),
@@ -431,7 +432,7 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
     return path
 
 
-SESSION_FILE_RE = re.compile(r"[a-z][a-z0-9-]*\.[1-9][0-9]*\.(json|system\.md|prompt\.md)")
+SESSION_FILE_RE = re.compile(r"[a-z][a-z0-9-]*\.[1-9][0-9]*\.(json|system\.md|prompt\.md|resume\.json|resume\.prompt\.md)")
 
 
 def store_session_file(run_dir: Path, name: str, data: bytes) -> Path:

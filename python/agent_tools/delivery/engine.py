@@ -30,7 +30,8 @@ fold of the run's `events.jsonl` derives. It writes nothing and creates no direc
 `engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a procedure of
 `command`, `agent` and `decide` steps; an agent step runs as one headless session through the
 account launcher, graded only by its structured reply, its files kept under the run's
-`sessions/`; default: the package's `procedures` directory) for the issue, in the project the
+`sessions/`; a step with no valid structured answer is asked once more on the same session and
+then ends `no-reply`; default: the package's `procedures` directory) for the issue, in the project the
 current directory belongs to, to `done` or a stop, and prints one line of compact sorted-key
 JSON when it ends (`engine_shell` is the contract):
 
