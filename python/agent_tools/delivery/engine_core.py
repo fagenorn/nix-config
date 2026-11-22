@@ -31,12 +31,12 @@ Visits
     step grades `{path: value for path in in}` with `engine_graders.GRADERS[step["grader"]]` and
     follows the returned outcome; no event is involved.
 
-`CoreError` is raised for: an event that is not a dict or whose type is not in `EVENT_TYPES`, at any position; an `entered` naming a
-step but the pending one, or a second one for the same visit; an `outcome` naming a step but the pending one, or
-before its `entered`; any event once the run ended in a stop or `done`; an `outcome` reporting `exhausted`; any
-outcome (reported, graded or `exhausted`) the step's `on` does not map; a `result` that is not a dict; an `in` path
-with no value when the walk reaches the step; entry `max_visits + 2` of a step (a loop through `exhausted`); entering
-a `group` or `call` step.
+`CoreError` is raised for: an event that is not a dict or whose type is not in `EVENT_TYPES`, at any position;
+an `entered` naming a step but the pending one, or a second one for the same visit; an `outcome` naming a step
+but the pending one, or before its `entered`; any event once the run ended in a stop or `done`; an `outcome`
+reporting `exhausted`; any outcome (reported, graded or `exhausted`) the step's `on` does not map; a `result`
+that is not a dict; an `in` path with no value when the walk reaches the step; entry `max_visits + 2` of a
+step (a loop through `exhausted`); entering a `group` or `call` step.
 
 Later slices: `group` and `call` steps, waits and continuing a stopped run.
 """
