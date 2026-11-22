@@ -164,6 +164,7 @@ agent-workflow-tests *args:
     tests/test_engine_keep_alive.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
+    tests/test_engine_slots.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -242,6 +243,8 @@ agent-workflow-tests *args:
     tests/test_standards_lint.py \
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
+    tests/test_comment_lint.py \
+    tests/test_cleanup_issue.py \
     tests/test_ruff_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \

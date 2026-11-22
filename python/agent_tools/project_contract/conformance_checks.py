@@ -22,8 +22,8 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    context_map_lint, host_admission, never_rise, ruff_lint, size_lint,
-    standards_lint,
+    comment_lint, context_map_lint, host_admission, never_rise, ruff_lint,
+    size_lint, standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
@@ -777,7 +777,11 @@ def check_standards_lint(context: "Context") -> "Outcome":
     return Outcome("passed")
 
 
-NEVER_RISE_ENFORCERS = (size_lint.ENFORCER, *ruff_lint.ENFORCERS)
+def never_rise_enforcers(contract: dict) -> tuple[never_rise.Enforcer, ...]:
+    """The size rule, the ruff rules, then the comment rules judged against the
+    contract's own tracker repository when it authors one."""
+    repository = contract["bindings"].get("tracker", {}).get("repo_slug") or None
+    return (size_lint.ENFORCER, *ruff_lint.ENFORCERS, *comment_lint.enforcers(repository))
 
 
 def check_never_rise(context: "Context") -> "Outcome":
@@ -794,7 +798,8 @@ def check_never_rise(context: "Context") -> "Outcome":
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
     try:
-        verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
+        verdict = never_rise.judge(context.root, branch,
+                                   never_rise_enforcers(context.contract),
                                    CHILD_TIMEOUT_SECONDS)
     except never_rise.EnforcerFailed as error:
         return Outcome("failed", "enforcer_failed", "violations.enforcer.repair", {

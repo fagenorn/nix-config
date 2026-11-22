@@ -1,0 +1,39 @@
+# Fixture header, line one.
+# Fixture header, line two.
+# Header line three is wide: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+# Fixture header, line four.
+# Fixture header, line five.
+# Fixture header, line six.
+# Fixture header, line seven.
+{
+  a1 = 1;
+# Kept for ADR-fixture-001.
+  a2 = 2;
+# Remove once that ships: https://github.com/upstream-owner/upstream-repo/issues/42
+  a3 = 3;
+# Added to fix #12.
+  a4 = 4;
+# See https://github.com/fixture-owner/fixture-repo/issues/7
+  a5 = 5;
+# Five line block, row a.
+# Five line block, row b.
+# Five line block, row c.
+# Five line block, row d.
+# Five line block, row e.
+  a6 = 6;
+# Six line block, row a.
+# Six line block, row b.
+# Six line block, row c.
+# Six line block, row d.
+# Six line block, row e.
+# Six line block, row f.
+  a7 = 7;
+# zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+  a8 = 8;
+# zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+  a9 = 9;
+# TODO later
+  a10 = 10;
+  s = "TODO";
+  a11 = 11;
+}

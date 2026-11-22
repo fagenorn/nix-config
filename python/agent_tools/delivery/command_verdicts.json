@@ -6,6 +6,8 @@
   "attempt-budget": null,
   "bypass-proof": null,
   "cache-proxy": null,
+  "cleanup-issue": null,
+  "comment-lint": null,
   "conformance": null,
   "console": null,
   "context-map-lint": null,

@@ -26,6 +26,7 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "ci.yaml"
 BUDGET_WORKFLOW = WORKFLOWS / "instruction-budget.yaml"
 CONFORMANCE_WORKFLOW = WORKFLOWS / "conformance.yaml"
+CLEANUP_WORKFLOW = WORKFLOWS / "cleanup-issue.yaml"
 PROTECTION = REPO_ROOT / ".github" / "branch-protection.json"
 
 # The indentation convention that ci.yaml and instruction-budget.yaml share:
@@ -994,6 +995,93 @@ class ProtectionPayload(unittest.TestCase):
         # solo and unattended merge, which is the opposite of the issue's ask.
         self.assertIsNone(data["required_pull_request_reviews"])
         self.assertIsNone(data["restrictions"])
+
+
+class CleanupIssueWorkflowTest(unittest.TestCase):
+    """The push-to-main job that files cleanup issues (ADR-delivery-017)."""
+
+    def test_runs_on_push_to_main_only_with_issue_write_and_no_other_write(self):
+        triggers = [
+            line for line in _top_level_block("on", CLEANUP_WORKFLOW) if re.match(r"^  \S", line)
+        ]
+        self.assertEqual(["  push:"], triggers)
+        self.assertEqual(
+            ["    branches:", "      - main"],
+            [line for line in trigger_block("push", CLEANUP_WORKFLOW) if line.strip()],
+        )
+        self.assertEqual(["main"], trigger_branches("push", CLEANUP_WORKFLOW))
+        self.assertIsNone(job_if_expression("cleanup-issue", CLEANUP_WORKFLOW))
+        self.assertEqual(
+            {"contents": "read", "issues": "write"}, workflow_permissions(CLEANUP_WORKFLOW)
+        )
+        overrides = {
+            key: job_permission_lines(block)
+            for key, block in job_blocks(CLEANUP_WORKFLOW).items()
+            if job_permission_lines(block)
+        }
+        self.assertEqual({}, overrides)
+
+    def test_pushes_run_one_after_another(self):
+        self.assertEqual(
+            ["  group: cleanup-issue", "  cancel-in-progress: false", "  queue: max"],
+            [line for line in _top_level_block("concurrency", CLEANUP_WORKFLOW) if line.strip()],
+        )
+
+    def test_the_job_stores_the_token_then_files_through_the_command(self):
+        self.assertEqual({"Cleanup Issue": "cleanup-issue"}, job_names(CLEANUP_WORKFLOW))
+        steps = step_blocks("cleanup-issue", CLEANUP_WORKFLOW)
+        self.assertEqual(
+            ["Checkout", "Install Nix", "Store the workflow token for gh",
+             "File the next cleanup issue"],
+            list(steps),
+        )
+        self.assertEqual(
+            ["      - name: Install Nix", "        uses: DeterminateSystems/nix-installer-action@v4"],
+            [line for line in steps["Install Nix"] if line.strip()],
+        )
+        # Each step is exactly its lines: an added `shell:`, `if:`, `working-directory:`
+        # or `continue-on-error:` would change what the command does or whether it runs.
+        token_step = steps["Store the workflow token for gh"]
+        self.assertEqual(
+            [
+                "      - name: Store the workflow token for gh",
+                "        env:",
+                "          TOKEN: ${{ github.token }}",
+                "        run: printf '%s\\n' \"$TOKEN\" | gh auth login --with-token --insecure-storage",
+            ],
+            [line for line in token_step if line.strip()],
+        )
+        file_step = steps["File the next cleanup issue"]
+        self.assertEqual(
+            [
+                "      - name: File the next cleanup issue",
+                "        run: |",
+                "          tools=\"$(nix build --no-link --print-out-paths '.#agent-platform.tools')\"",
+                "          test -n \"$tools\"",
+                "          AGENT_PLATFORM_TOOLS=\"$tools/bin\" PYTHONPATH=python python3 -m"
+                " agent_tools.delivery.cleanup_issue file"
+                " --repo-root \"$GITHUB_WORKSPACE\" --repo \"$GITHUB_REPOSITORY\""
+                " --branch \"$GITHUB_REF_NAME\"",
+            ],
+            [line for line in file_step if line.strip()],
+        )
+        # No `env:` on the filing step: no token reaches the command.
+        self.assertIsNone(step_env(file_step))
+        # No default shell, working directory or job-level condition changes the commands.
+        text = CLEANUP_WORKFLOW.read_text(encoding="utf-8")
+        for key in ("defaults:", "shell:", "working-directory:", "continue-on-error:"):
+            self.assertNotIn(key, text)
+        self.assertEqual(
+            ["    name: Cleanup Issue", "    runs-on: ubuntu-24.04", "    timeout-minutes: 10",
+             "    steps:"],
+            [line for line in job_blocks(CLEANUP_WORKFLOW)["cleanup-issue"]
+             if line.startswith("    ") and not line.startswith("     ")],
+        )
+        self.assertEqual([], green_without_work(job_blocks(CLEANUP_WORKFLOW)["cleanup-issue"], None))
+
+    def test_the_job_is_not_a_required_context(self):
+        self.assertNotIn("Cleanup Issue", required_contexts())
+        self.assertEqual(CLEANUP_WORKFLOW, required_jobs()["Cleanup Issue"][0])
 
 
 if __name__ == "__main__":
