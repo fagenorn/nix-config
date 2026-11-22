@@ -17,7 +17,9 @@ never is, and every measurement that is absent or invalid reads as zero.
 `launch_argv` builds the one launch form: the account launcher's print mode
 (`claude-account run -p`) with the role handed over by flags (`--model`,
 `--effort`, `--tools` with `--allowedTools`, or `--disallowedTools`, and the
-role body as `--append-system-prompt-file`), the reply schema as
+role body as `--append-system-prompt-file`), the bounds `--max-turns` and
+`--max-budget-usd` from the platform's role table (`ROLE_BOUNDS`, which no
+procedure, project or environment variable changes), the reply schema as
 `--json-schema`, the session id first fixed by the engine, and the permission
 mode `dontAsk`, so a tool the role does not allow is denied rather than asked
 about. The engine never passes `--agent`, `--bare`, `--setting-sources`,
@@ -65,6 +67,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
@@ -102,6 +105,26 @@ class Role:
     tools: tuple[str, ...] | None
     disallowed: tuple[str, ...] | None
     body: str
+
+
+@dataclass(frozen=True)
+class Bounds:
+    wall_seconds: float
+    turns: int
+    spend_usd: float
+
+
+ROLE_BOUNDS: Mapping[str, Bounds] = MappingProxyType({
+    "planner": Bounds(1800, 150, 15.0), "implementer": Bounds(3600, 300, 20.0),
+    "reviewer": Bounds(1800, 150, 15.0), "reviewer-lite": Bounds(900, 80, 3.0)})
+
+
+def bounds(role: str) -> Bounds:
+    """The wall-time, turn and spend bounds of `role`; a role the table lacks is refused."""
+    found = ROLE_BOUNDS.get(role)
+    if found is None:
+        raise RoleError(f"role {role}: no bounds")
+    return found
 
 
 def refuse_value(role: str, field: str, value: str) -> None:
@@ -224,10 +247,12 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path) 
     for field, names in (("tools", role.tools), ("disallowedTools", role.disallowed)):
         for name in names or ():
             refuse_value(role.name, field, name)
+    limits = bounds(role.name)
     argv = [*LAUNCHER, "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
             "--session-id", session, "--strict-mcp-config", "--permission-mode", "dontAsk",
-            "--model", role.model, "--effort", role.effort]
+            "--model", role.model, "--effort", role.effort,
+            "--max-turns", str(limits.turns), "--max-budget-usd", f"{limits.spend_usd:.2f}"]
     disallowed = list(role.disallowed or ())
     if role.tools is not None:
         allowed = [entry for name in role.tools

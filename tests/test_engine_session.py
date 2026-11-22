@@ -21,9 +21,11 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_ledger, engine_session, engine_shell
+from agent_tools.delivery import (
+    engine, engine_ledger, engine_session, engine_shell, procedure_check,
+)
 from agent_tools.delivery.engine_session import (
-    NOT_STARTED, Reading, Role, RoleError, diagnostic, launch, launch_argv, read_result,
+    NOT_STARTED, ROLE_BOUNDS, Bounds, Reading, Role, RoleError, diagnostic, launch, launch_argv, read_result,
     read_role, render_prompt,
 )
 from tests.test_engine_deliver import EngineProject, shape
@@ -243,9 +245,20 @@ class LaunchArgvTest(unittest.TestCase):
             '"required":["verdict"],"type":"object"}',
             "--session-id", "0b0b8a8e-6f0e-4d47-9d6a-3f1f2b9c1a11", "--strict-mcp-config",
             "--permission-mode", "dontAsk", "--model", "opus", "--effort", "high",
+            "--max-turns", "150", "--max-budget-usd", "15.00",
             "--tools", "Read,Bash", "--allowedTools", f"Read,{GIT_READ_ONLY}",
             "--disallowedTools", GIT_WRITING,
             "--append-system-prompt-file", "/run/sessions/review.1.system.md"))
+
+    def test_the_role_bounds_table_is_the_issue_table(self):
+        self.assertEqual(dict(ROLE_BOUNDS), {
+            "planner": Bounds(1800, 150, 15.0), "implementer": Bounds(3600, 300, 20.0),
+            "reviewer": Bounds(1800, 150, 15.0), "reviewer-lite": Bounds(900, 80, 3.0)})
+        self.assertEqual(set(ROLE_BOUNDS), set(procedure_check.ROLES))
+
+    def test_a_role_with_no_bounds_is_refused(self):
+        with self.assertRaises(RoleError):
+            launch_argv(Role("stranger", "opus", "high", None, None, ""), SCHEMA, SESSION, SYSTEM)
 
     def test_a_role_with_disallowed_tools_passes_only_disallowed_tools(self):
         argv = launch_argv(IMPLEMENTER, SCHEMA, SESSION, SYSTEM)
@@ -555,6 +568,24 @@ class DeliverSessionTest(unittest.TestCase):
                 self.assertNotIn(word, argv)
             self.assertEqual(event["account"], "console")
         self.assertEqual(len(set(ids)), 4)
+
+    def test_each_role_reaches_the_stub_with_its_turn_and_spend_bounds(self):
+        project = self.project
+        log = install_stub(project, RESULT_NORMAL)
+        steps = [agent_step(name[0] if name != "reviewer-lite" else "l", name,
+                            {"drafted": nxt, "stuck": "needs-owner"})
+                 for name, nxt in zip(ROLE_NAMES, ("i", "r", "l", "done"))]
+        procedures = write_procedures(project, steps)
+        done = project.deliver(procedures, issue=1520)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = self.log(log)
+        self.assertEqual(len(lines), 4)
+        expected = (("150", "15.00"), ("300", "20.00"), ("150", "15.00"), ("80", "3.00"))
+        for line, pair in zip(lines, expected):
+            argv = line["argv"]
+            self.assertEqual((after(argv, "--max-turns"), after(argv, "--max-budget-usd")), pair)
+            self.assertEqual(argv.count("--max-turns"), 1)
+            self.assertEqual(argv.count("--max-budget-usd"), 1)
 
     def test_the_session_is_recorded_before_its_process_starts(self):
         log = install_stub(self.project, RESULT_NORMAL)
