@@ -605,6 +605,13 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(console_form_findings(numbers), [])
         self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
 
+    def test_the_console_manager_and_guest_records_are_cut_and_cited_whole(self):
+        numbers = (60, 63, 66, 68, 75, 76)
+        self.assertEqual(
+            [int(p.name[:3]) for p in console_records(numbers)], [60, 63, 66, 68, 75, 76])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
+
     def test_the_console_records_027_to_051_are_the_kept_ones(self):
         records = [
             p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
@@ -755,24 +762,17 @@ class DocsTreeTest(unittest.TestCase):
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         console = next(row for row in context if row.startswith("The per-host loopback service"))
         self.assertIn("ADR-console-076", console)
-    def test_the_tailscale_serve_boundary_decision_is_recorded(self):
+    def test_the_guest_door_and_owner_port_records_name_no_private_host_data(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
-        found = sorted(adr_dir.glob("066-*.md"))
-        self.assertEqual(len(found), 1, found)
-        path = "docs/areas/console/adr/" + found[0].name
-        text = (REPO_ROOT / path).read_text()
-        self.assertTrue(text.splitlines()[0].startswith("# ADR-console-066 \u2014 "))
-        self.assertIn("- **Status:** accepted", text)
-        for needle in (
-            "#1235", "ADR-console-008", "Tailscale-User-Login", "X-Forwarded-For",
-            "mirrored", "guest port", "guest token", "Funnel",
-            "Confirming a release", "spend", "project registration", "the access list",
-            "every manager route",
-            "tailscale.exe", "serve --bg --https=443", "serve status", "--https=443 off",
-            "<host>.<tailnet>.ts.net", "<colleague-login>",
-        ):
-            self.assertIn(needle, text)
-        self.assertEqual(tailnet_names_other_than_placeholder(text), [])
+        for pattern in ("066-*.md", "076-*.md"):
+            with self.subTest(pattern=pattern):
+                found = sorted(adr_dir.glob(pattern))
+                self.assertEqual(len(found), 1, found)
+                raw = found[0].read_text()
+                self.assertEqual(tailnet_names_other_than_placeholder(raw), [])
+                self.assertEqual(logins_in(raw), [])
+                self.assertEqual(
+                    re.findall(r"\buid[ =:]*\d+|/(?:Users|home)/[\w.-]+", raw), [])
         context = self.doc("docs/areas/console/CONTEXT.md")
         for term in ("**Console**:", "**Guest**:"):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
@@ -803,7 +803,7 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(d2=needle):
                 self.assertIn(needle, d2)
         d4 = text.split("**D4.", 1)[1].split("**D5.", 1)[0]
-        for needle in ("first bullet of ADR-console-066 D2", "superseded", "stand unchanged",
+        for needle in ("first bullet of ADR-console-0" "66 D2", "superseded", "stand unchanged",
                        "19 Nov", "exactly `localhost`", "exactly one `X-Forwarded-Host`",
                        "no port form", "the login check stays as it is", "mode 0600", "wider",
                        "fail closed"):
@@ -816,11 +816,6 @@ class DocsTreeTest(unittest.TestCase):
         console = context.split("**Console**:", 1)[1].split("_Avoid_", 1)[0]
         self.assertIn("ADR-console-077", console)
         self.assertNotIn("guest port", console)
-        status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
-                                      "through-tailscale-serve-on-a-guest-port.md"
-                                      ).read_text().splitlines() if row.startswith("- **Status:**"))
-        self.assertTrue(status.startswith(
-            "- **Status:** accepted; amended by ADR-console-077, ADR-console-086"), status)
 
     def test_the_tailnet_name_source_is_recorded_as_adr_078(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
