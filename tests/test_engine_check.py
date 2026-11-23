@@ -426,7 +426,7 @@ CASES = [
     Case("command_without_declared_verdicts", editing("toy", _undeclared_command),
          [("toy", "scope", "undeclared_verdicts")]),
     Case("subcommand_without_declared_verdicts",
-         editing("toy-child", _set(lambda toy: step(toy, "claim"), "subcommand", "acquire")),
+         editing("toy-child", _set(lambda toy: step(toy, "claim"), "subcommand", "release")),
          [("toy-child", "claim", "undeclared_verdicts")]),
     Case("unknown_role",
          editing("toy", _set(lambda toy: step(toy, "review-b"), "role", "auditor")),
@@ -1096,11 +1096,16 @@ class DeclarationTest(unittest.TestCase):
     def test_the_toy_commands_declare_their_verdicts(self):
         commands = load_commands()
         self.assertEqual(commands["forge-claim"], CommandDeclaration(None, {
+            "acquire": ("acquired", "already_held", "held_by", "lost_to", "error"),
             "renew": ("renewed", "not_held", "error"),
             "status": ("free", "held_by", "stale", "error")}))
         self.assertEqual(commands["diff-scope"].outcomes(None), ("ok", "failed"))
         self.assertIsNone(commands["diff-scope"].outcomes("x"))
-        self.assertIsNone(commands["forge-claim"].outcomes("acquire"))
+        self.assertEqual(commands["forge-claim"].outcomes("acquire"),
+                         ("acquired", "already_held", "held_by", "lost_to", "error"))
+        self.assertEqual(commands["look-approval"].outcomes("marked"),
+                         ("marked", "unmarked", "error"))
+        self.assertEqual(commands["resolve-project"].outcomes("resolve"), ("ok", "failed"))
         self.assertIsNone(commands["engine"])
 
     def test_a_malformed_declaration_is_refused(self):

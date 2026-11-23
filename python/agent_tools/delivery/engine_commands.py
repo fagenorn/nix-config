@@ -3,9 +3,10 @@
 A `command` step names an id, looked up in the platform table (`PLATFORM_MODULES`) first, then in the
 snapshot's project commands; an id in neither is an `UnknownCommand` that starts no process. A
 platform id runs as its packaged sibling module (`siblings.sibling_argv`, agent-helpers rule 3) in
-the snapshot's project root, with its subcommand then its arguments; a project id runs its snapshot
-argv then its arguments, in the entry's own cwd, with no subcommand. `PLATFORM_MODULES` mirrors the
-`lib/agent-tools.nix` rows of the commands that have a declaration in `command_verdicts.json`;
+the snapshot's project root, with its subcommand then its arguments, each as the flag its member
+names (`run.repo_root` is `--repo-root`) except an id in `POSITIONAL`, whose arguments are bare
+words; a project id runs its snapshot argv then its arguments, in the entry's own cwd, with no
+subcommand. `PLATFORM_MODULES` mirrors the `lib/agent-tools.nix` rows of the commands that have a declaration in `command_verdicts.json`;
 tests/test_engine_commands.py pins the mirror.
 
 Grading: stdout is parsed strictly as one JSON document; the outcome is its `verdict` when that is a
@@ -59,10 +60,15 @@ from agent_tools.system.siblings import sibling_argv
 PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "diff-scope": "delivery.diff_scope",
     "forge-claim": "claims.forge_claim",
+    "look-approval": "delivery.look_approval",
+    "resolve-project": "project_contract.resolve_project",
 })
+POSITIONAL: frozenset[str] = frozenset({"diff-scope"})
 PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
     "diff-scope": 300,
     "forge-claim": 1200,
+    "look-approval": 300,
+    "resolve-project": 300,
 })
 PROJECT_WALL_SECONDS = 3600
 PROJECT_DECLARATION = CommandDeclaration((), {})
@@ -140,6 +146,9 @@ class CommandTable:
                    args: Sequence[tuple[str, object]]) -> Invocation:
         words = tuple(argument(value) for _, value in args)
         if command in self.platform:
+            if command not in POSITIONAL:
+                words = tuple(word for path, value in args for word in (
+                    "--" + path.split(".", 1)[1].replace("_", "-"), argument(value)))
             return Invocation(
                 (*sibling_argv(self.platform[command]),
                  *([subcommand] if subcommand else []), *words),
