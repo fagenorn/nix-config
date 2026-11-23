@@ -315,6 +315,25 @@ class NeverRiseTest(unittest.TestCase):
                 self.assertEqual(
                     never_rise.compare(base, branch, renamed, [enforcer]), expected)
 
+    def test_a_rule_that_follows_no_renames_matches_each_violation_by_path(self):
+        total = lambda snap: [Violation("FX6", "surface/total", sum(snap.line_counts.values()))]
+        by_path = Enforcer("FX6", total, per_file=True, follows_renames=False)
+        through_renames = Enforcer("FX6", total, per_file=True)
+        base = Snapshot("a" * 40, {"notes.txt": 5})
+        renamed = {"surface/total": "notes.txt"}
+        rows = (
+            (by_path, {"surface/total": 5}, ()),
+            (by_path, {"surface/total": 6},
+             (Rise("FX6", 1, 1, (Violation("FX6", "surface/total", 6),)),)),
+            (through_renames, {"surface/total": 5},
+             (Rise("FX6", 1, 1, (Violation("FX6", "surface/total", 5),)),)),
+        )
+        for enforcer, counts, expected in rows:
+            with self.subTest(follows=enforcer.follows_renames, counts=counts):
+                self.assertEqual(
+                    never_rise.compare(base, Snapshot("b" * 40, counts), renamed, [enforcer]),
+                    expected)
+
     def test_an_enforcer_emitting_another_rule_is_refused(self):
         snapshot = Snapshot("a" * 40, {"a": 1})
         stray = Enforcer("FX1", lambda snap: [Violation("FX9", "a", 1)])

@@ -1717,7 +1717,7 @@ class ContractDraftTest(AdoptTestCase):
 
 class CommitEnvironmentPlanTest(AdoptTestCase):
     """`plan --commit-environment` adds the environment to a contract that
-    names none (ADR-project-contract-009)."""
+    names none (ADR-project-contract-008)."""
 
     COMMAND = "devenv shell --"
     ARGV = ["devenv", "shell", "--"]

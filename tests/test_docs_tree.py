@@ -199,6 +199,9 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
     return [(path, lines) for path, lines in tracked_text(archived_dirs) if path != ADOPTION_MAP]
 
 
+RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
+
+
 class DocsTreeTest(unittest.TestCase):
     def test_the_index_routes_each_working_artifact_off_the_tree(self):
         lines = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8").splitlines()
@@ -262,6 +265,69 @@ class DocsTreeTest(unittest.TestCase):
             text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_project_contract_records_001_to_009_keep_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/project-contract/adr").glob("00[1-9]-*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = [violation.text() for violation in
+                     record_violations(relative, path.read_bytes())]
+            if found:
+                breaches[relative] = found
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_project_contract_record(self):
+        # The patterns are built here so this file holds no citation they match.
+        numbers = ("001", "002", "003", "006", "009")
+        retired = ("ADR-project-contract-(" + "|".join(numbers) + ")([^0-9]|$)"
+                   + "|project-contract/adr/(" + "|".join(numbers) + ")-")
+        sub = "ADR-project-contract-" + "00[1-9] D[0-9]"
+        for pattern in (retired, sub):
+            result = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(result.stdout, "")
+        for number in numbers:
+            found = sorted((REPO_ROOT / "docs/areas/project-contract/adr").glob(f"{number}-*.md"))
+            self.assertEqual(found, [])
+
+    def test_every_hosts_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/hosts/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.text() for violation in found]
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_hosts_record(self):
+        numbers = ("001", "002", "003", "004")
+        pattern = "ADR-hosts-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            self.assertEqual(sorted((REPO_ROOT / "docs/areas/hosts/adr").glob(f"{number}-*.md")), [])
+
+    def test_every_guard_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/guard/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.rule for violation in found]
+        self.assertEqual(breaches, {})
 
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
@@ -473,6 +539,34 @@ class DocsTreeTest(unittest.TestCase):
             if "ADR-delivery-005" in line
         ]
         self.assertEqual(hits, [])
+
+    def test_the_delivery_records_001_to_011_keep_the_record_form(self):
+        records = [
+            p for p in sorted((REPO_ROOT / "docs/areas/delivery/adr").glob("[0-9][0-9][0-9]-*.md"))
+            if 1 <= int(p.name[:3]) <= 11
+        ]
+        found = [
+            (p.name, v.rule, v.line)
+            for p in records
+            for v in record_violations(f"docs/areas/delivery/adr/{p.name}", p.read_bytes())
+        ]
+        self.assertTrue(records)
+        self.assertEqual(found, [])
+
+    def test_the_retired_delivery_records_are_gone_and_cited_nowhere(self):
+        for n in RETIRED_DELIVERY_RECORDS:
+            with self.subTest(number=n):
+                pattern = re.compile(rf"\bADR-delivery-{n:03d}(?!\d)|delivery/adr/{n:03d}-")
+                files = sorted(
+                    p.name for p in (REPO_ROOT / "docs/areas/delivery/adr").glob(f"{n:03d}-*.md"))
+                hits = [
+                    f"{path}:{number}"
+                    for path, lines in tracked_text(())
+                    for number, line in enumerate(lines, start=1)
+                    if pattern.search(line)
+                ]
+                self.assertEqual(files, [])
+                self.assertEqual(hits, [])
 
     def test_no_area_numbers_two_adrs_alike(self):
         shared = []
@@ -826,8 +920,7 @@ class DocsTreeTest(unittest.TestCase):
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                       "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                       "docs/areas/console/CONTEXT.md",
-                      "docs/areas/hosts/CONTEXT.md",
-                      "docs/areas/hosts/adr/005-account-profiles-link-shared-config.md"):
+                      "docs/areas/hosts/CONTEXT.md"):
             self.assertIn("ADR-console-025", self.doc(older))
         self.assertIn("claude-account add", self.doc("docs/areas/hosts/CONTEXT.md"))
         self.assertIn("POST /api/account-add", self.doc(
@@ -912,7 +1005,7 @@ class DocsTreeTest(unittest.TestCase):
                        "--setting-sources", "--tools", "300", "production.read_only.commands",
                        "project_question_hook",
                        "Production cannot be read for this project", "ADR-console-008",
-                       "ADR-console-011", "ADR-console-023", "ADR-guard-011"):
+                       "ADR-console-011", "ADR-console-023", "ADR-guard-009"):
             self.assertIn(needle, adr)
         adr008 = self.doc(
             "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
@@ -1298,11 +1391,7 @@ class DocsTreeTest(unittest.TestCase):
         for older in ("docs/areas/console/adr/043-a-merged-console-change-not-active-on-this-"
                       "host-is-one-line-in-the-work-column.md",
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-"
-                      "origin.md",
-                      "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-"
-                      "outside-its-release-path.md",
-                      "docs/areas/project-contract/adr/007-a-contract-declares-its-production-"
-                      "rules-or-that-it-has-none.md"):
+                      "origin.md"):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             with self.subTest(older):
@@ -1311,6 +1400,20 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(context):
                 self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
         self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
+
+    def test_no_tracked_file_cites_a_retired_guard_record(self):
+        # The pattern is built at run time, so this file holds no retired citation itself.
+        numbers = ("005", "011", "012")
+        pattern = "ADR-guard-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            with self.subTest(number):
+                self.assertEqual(sorted((REPO_ROOT / "docs/areas/guard/adr").glob(f"{number}-*.md")), [])
 
 
 if __name__ == "__main__":
