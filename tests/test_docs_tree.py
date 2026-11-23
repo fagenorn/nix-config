@@ -614,15 +614,29 @@ class DocsTreeTest(unittest.TestCase):
     def doc(self, path):
         return " ".join((REPO_ROOT / path).read_text().split())
 
-    def test_adr_verification_008_records_the_boot_host_amendment(self):
-        path = "docs/areas/verification/adr/008-macs-verify-only-while-logged-in.md"
-        raw = (REPO_ROOT / path).read_text()
-        doc = self.doc(path)
-        self.assertIn("\n- **Status:** accepted; amended in #1290\n", raw)
-        for needle in ("ownerServices.atBoot", "eleven-m5", "system/org.nixos.verify-pending",
-                       "hosts file", "mbp"):
-            self.assertIn(needle, doc)
-        self.assertNotIn("There is no LaunchDaemon form and no credential outside the keychain.", doc)
+    def test_every_verification_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/verification/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [v.text() for v in found]
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_deleted_verification_record(self):
+        numbers = ("001", "005", "006", "007")
+        # The pattern is built at run time so this file holds no deleted citation itself.
+        pattern = "ADR-verification-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            with self.subTest(number):
+                self.assertEqual(
+                    sorted((REPO_ROOT / "docs/areas/verification/adr").glob(f"{number}-*.md")), [])
 
     def test_the_cache_proxy_readme_names_the_boot_daemon(self):
         doc = self.doc("home/common/claude-code/README.md")

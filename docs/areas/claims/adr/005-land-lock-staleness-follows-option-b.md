@@ -1,17 +1,3 @@
 # ADR-claims-005 — Only a waiting acquirer takes over an idle land lock, after 45 minutes
 
-- **Status:** accepted
-- **Decided in:** issue 629 D3, D4, D8; https://github.com/fagenorn/nix-config/issues/629#issuecomment-6693579241
-
-## Context
-
-A holder that dies mid-landing leaves a lock at a head that never merges. Reading event timestamps to detect idleness needs a wall clock and a persisted record, and an unattended takeover of a live landing would merge two branches at once. The owner chose option B on issue 629.
-
-## Decision
-
-A one-shot `status` or `acquire` treats only the lock of a merged or closed pull request as stale, takes only that over, and reads no event timestamps. Only `acquire --wait` takes over a held lock, after watching the same oid unchanged for 45 minutes on its own monotonic clock, counted from its first observation of that oid. No wall clock is read and nothing is persisted, so every `--wait` invocation starts a fresh watch. Every completed ref observation feeds the watch, so an interrupted watch restarts when the oid changes. `--wait` attempts every 120 seconds up to 3000 seconds and then answers `land-contended` (3600 seconds until issue 941: one invocation must end by itself inside a 60-minute Bash call).
-
-## Consequences
-
-- Accepted residual: a holder whose landing keeps the same sha for more than 45 minutes can lose the lock to a waiter, and its later `release` then answers `not_held` and cannot delete the new holder's lock.
-- A dead holder blocks one-shot acquirers until a waiter's 45 minutes pass or its pull request closes.
+A holder that dies mid-landing leaves its lock at a head that never merges. On issue 629 the owner chose option B: a one-shot `status` or `acquire` takes over only the lock of a merged or closed pull request, and only `acquire --wait` takes over a held lock, once it has itself watched the lock unchanged for 45 minutes on its own monotonic clock, with nothing persisted. A holder whose lock stays at one sha through a long wait keeps that watch from running out by moving a second ref, the beat `refs/agent-locks/land-beat/<branch>`, and a waiter restarts its watch when the lock or the beat changes (issue 971). The rejected alternatives were judging idleness from event timestamps, which needs a wall clock and a persisted record, an unattended one-shot takeover, which could merge two branches at once, and a holder releasing and retaking its lock to show it is alive, which hands the lock to any waiter in between. The cost is that a dead holder blocks one-shot acquirers until a waiter's 45 minutes pass, and that a holder which keeps one sha for 45 minutes without refreshing loses its lock.
