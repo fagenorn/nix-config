@@ -1,4 +1,4 @@
-"""The engine run history: one line per run end, kept 180 days (#1519).
+"""The engine run history: one line per run end, kept 180 days.
 
 Layout, under `~/.agents/state/engine/` (mode 0700):
 

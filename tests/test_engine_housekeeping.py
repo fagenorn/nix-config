@@ -1,4 +1,4 @@
-"""Contract tests for the engine run history (`agent_tools.delivery.engine_housekeeping`, #1519).
+"""Contract tests for the engine run history (`agent_tools.delivery.engine_housekeeping`).
 
 Covers the per-step summaries `engine_ledger.fold` derives, the history line built from a finished run,
 the append-only history file and its 180-day prune, and the sweep of expired run directories.
