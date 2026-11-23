@@ -10,6 +10,7 @@ it is removed only by a restart that succeeded, so a deferral and a failure both
 """
 
 import argparse
+import http.client
 import json
 from pathlib import Path
 import subprocess
@@ -18,6 +19,8 @@ import urllib.error
 import urllib.request
 
 HEALTH_TIMEOUT_SECONDS = 5
+# The server is on this host: a proxy from the environment must never answer for it.
+DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 UNRECORDED = "unrecorded change"
 
 
@@ -32,7 +35,7 @@ def read_reasons(marker):
 def read_health(url):
     """Return (status, body) of the health answer; a refused connection is (None, None)."""
     try:
-        with urllib.request.urlopen(url, timeout=HEALTH_TIMEOUT_SECONDS) as response:
+        with DIRECT.open(url, timeout=HEALTH_TIMEOUT_SECONDS) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         with error:
@@ -56,7 +59,7 @@ def classify(url):
         if status is None:
             return None
         body = json.loads(raw)
-    except (OSError, ValueError, urllib.error.URLError) as error:
+    except (OSError, ValueError, http.client.HTTPException) as error:
         return f"server state unknown: {error}"
     if not isinstance(body, dict):
         return "server state unknown: health answer is not an object"

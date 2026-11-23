@@ -288,6 +288,7 @@ class RestartGateTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}/health"
         self.extra = []
+        self.env = {}
 
     def answer(self, status, body):
         self.server.status = status
@@ -301,7 +302,22 @@ class RestartGateTest(unittest.TestCase):
             "--health-url", url or self.url,
             *self.extra,
         ]
-        return subprocess.run(command, text=True, capture_output=True)
+        return subprocess.run(command, text=True, capture_output=True, env={**os.environ, **self.env})
+
+    def raw_server(self, reply):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+
+        def answer_once():
+            connection, _ = listener.accept()
+            with connection:
+                connection.recv(4096)
+                connection.sendall(reply)
+
+        threading.Thread(target=answer_once, daemon=True).start()
+        return f"http://127.0.0.1:{listener.getsockname()[1]}/health"
 
     def stub_calls(self):
         return len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
@@ -362,6 +378,42 @@ class RestartGateTest(unittest.TestCase):
         self.answer(200, "not json")
         before = self.marker_bytes()
         result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertEqual(self.marker_bytes(), before)
+        (line,) = self.deferral_lines(result)
+        self.assertIn("server state unknown", line)
+
+    def test_a_proxy_in_the_environment_never_stands_in_for_the_server(self):
+        self.answer(200, serving(1))
+        self.env = {
+            "http_proxy": "http://127.0.0.1:9",
+            "HTTP_PROXY": "http://127.0.0.1:9",
+            "no_proxy": "",
+            "NO_PROXY": "",
+        }
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertEqual(self.marker_bytes(), before)
+        (line,) = self.deferral_lines(result)
+        self.assertIn("1 model loaded", line)
+
+    def test_an_answer_cut_off_mid_body_defers(self):
+        url = self.raw_server(b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n" + b"x" * 53)
+        before = self.marker_bytes()
+        result = self.run_gate(url=url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertEqual(self.marker_bytes(), before)
+        (line,) = self.deferral_lines(result)
+        self.assertIn("server state unknown", line)
+
+    def test_a_port_that_does_not_speak_http_defers(self):
+        url = self.raw_server(b"SSH-2.0-OpenSSH_9.9\r\n")
+        before = self.marker_bytes()
+        result = self.run_gate(url=url)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.stub_calls(), 0)
         self.assertEqual(self.marker_bytes(), before)
