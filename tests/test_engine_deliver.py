@@ -63,6 +63,7 @@ class EngineProject:
         self.record = self.tmp / "record.log"
         self.guard_log = self.tmp / "guard.log"
         self.release = self.tmp / "release"
+        self.stamps = self.tmp / "stamps.log"
         self.renewals = self.tmp / "renewals.log"
         self.answers = self.tmp / "answers.json"
         self.hold = self.tmp / "hold.pid"
@@ -133,6 +134,23 @@ class EngineProject:
             "standin-says-out-of-bounds": entry("verdict", "out-of-bounds", "0"),
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
+            "standin-stamp": entry("stamp", str(self.stamps), "1.0", "0"),
+            "standin-stamp-fail": entry("stamp", str(self.stamps), "1.0", "1"),
+            "standin-items": entry("json", "0", "approve", "approve", "approve"),
+            "standin-items-mixed": entry("json", "0", "approve", "nope", "approve"),
+            "standin-items-hold": entry("json", "0", "hold", "maybe", "approve"),
+            "standin-items-object": entry("emit", "0", '{"argv":["approve",{"id":2}]}'),
+            "count-a": entry("record", str(self.tmp / "a.log")),
+            "count-b": entry("record", str(self.tmp / "b.log")),
+            "count-c": entry("record", str(self.tmp / "c.log")),
+            "count-d": entry("record", str(self.tmp / "d.log")),
+            "standin-gate": entry("gate", str(self.tmp / "gate.log"),
+                                  str(self.tmp / "gate-open")),
+            "standin-effect": entry("effect", str(self.tmp / "effect.log"),
+                                    str(self.tmp / "kill-before"), str(self.tmp / "kill-after")),
+            "standin-effect-check": entry("effect-check", str(self.tmp / "effect.log"),
+                                          str(self.tmp / "checks.log")),
+            "standin-parity": entry("parity", str(self.tmp / "parity.log")),
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
             "standin-hold": entry("hold", str(self.hold), "0"),
         })
@@ -147,6 +165,15 @@ class EngineProject:
             {name: {"argv": list(argv), "cwd": ".", "env": []}
              for name, argv in LIFECYCLE_SPELLINGS.items()})
 
+    def calls(self, name: str) -> int:
+        log = self.tmp / f"{name}.log"
+        return len(log.read_text().splitlines()) if log.exists() else 0
+
+    def argvs(self, name: str) -> list:
+        log = self.tmp / f"{name}.log"
+        return [json.loads(line)["argv"] for line in log.read_text().splitlines()] \
+            if log.exists() else []
+
     def answer(self, *answers: dict) -> None:
         self.answers.write_text(json.dumps(list(answers)), encoding="utf-8")
 
@@ -156,18 +183,25 @@ class EngineProject:
         return [json.loads(line) for line in self.renewals.read_text(encoding="utf-8").splitlines()]
 
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None,
-                   keep_alive: dict | None = None) -> Path:
+                   keep_alive: dict | None = None,
+                   children: dict[str, dict] | None = None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
-        default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
-        if keep_alive:
-            default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
-        document = {"format": 1,
-                    "inputs": list(inputs),
-                    "stops": stops or default,
-                    "steps": steps}
-        if keep_alive:
-            document["keep_alive"] = keep_alive
-        (directory / "deliver.json").write_text(json.dumps(document), encoding="utf-8")
+
+        def write(name: str, steps: list[dict], inputs, stops) -> None:
+            default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
+            if keep_alive:
+                default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
+            document = {"format": 1,
+                        "inputs": list(inputs),
+                        "stops": stops or default,
+                        "steps": steps}
+            if keep_alive:
+                document["keep_alive"] = keep_alive
+            (directory / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+
+        write("deliver", steps, inputs, stops)
+        for name, child in (children or {}).items():
+            write(name, child["steps"], child["inputs"], child["stops"])
         return directory
 
     def command(self, *words: str, cwd: Path | None = None, **kwargs):
@@ -207,14 +241,16 @@ class EngineProject:
 
 def step(id: str, command: str, ok: str | None, *, failed: str = "needs-owner",
          subcommand: str | None = None, on: dict | None = None, mutates: bool = False,
-         max_visits: int | None = None, refused: str | None = None) -> dict:
+         max_visits: int | None = None, refused: str | None = None,
+         holds: str = "run") -> dict:
     document = {"id": id, "stage": "setup", "kind": "command", "command": command,
-                "in": ["run.issue"],
-                "on": on or {"ok": ok, "failed": failed, "refused": refused or failed}}
+                "holds": holds, "in": ["run.issue"],
+                "on": {"refused": refused or failed, **(on or {"ok": ok, "failed": failed})}}
     if subcommand:
         document["subcommand"] = subcommand
     if mutates:
         document["mutates"] = True
+        document["check"] = {"command": command}
     if max_visits is not None:
         document["max_visits"] = max_visits
     return document
@@ -222,6 +258,60 @@ def step(id: str, command: str, ok: str | None, *, failed: str = "needs-owner",
 
 def shape(events: list[dict]) -> list[tuple]:
     return [(e["event"], e.get("step"), e.get("visit")) for e in events]
+
+
+def start_deliver(test: unittest.TestCase, project: EngineProject,
+                  procedures: Path) -> subprocess.Popen:
+    argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(argv, **options)
+    test.addCleanup(process.communicate)
+    test.addCleanup(process.kill)
+    test.addCleanup(project.release.write_text, "go", encoding="utf-8")
+    return process
+
+
+def wait_for_process_started(project: EngineProject) -> Path:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        runs = project.runs()
+        if runs and any(e["event"] == "process_started" for e in project.events(runs[0])):
+            return runs[0]
+        time.sleep(0.05)
+    raise AssertionError("the run never started its step process")
+
+
+LAUNCH = """
+import os, runpy, shutil, sys
+from agent_tools.delivery import engine_shell
+real = engine_shell._validate
+edited, source = sys.argv[1], sys.argv[-1]
+
+def wrapper(directory, table):
+    result = real(directory, table)
+    engine_shell._validate = real
+    shutil.copyfile(edited, os.path.join(source, "deliver.json"))
+    return result
+
+engine_shell._validate = wrapper
+sys.argv = ["engine"] + sys.argv[2:]
+runpy.run_module("agent_tools.delivery.engine", run_name="__main__")
+"""
+
+
+def heads(events: list[dict], step_id: str) -> list:
+    return [e.get("head") for e in events
+            if e["event"] == "result_stored" and e["step"] == step_id]
+
+
+def run_continued(events: list[dict]) -> list[dict]:
+    return [e for e in events if e["event"] == "run_continued"]
+
+
+def mutating(project: EngineProject) -> Path:
+    m = step("m", "standin-effect", "b")
+    m.update({"mutates": True, "check": {"command": "standin-effect-check"}})
+    return project.procedures([step("a", "count-a", "m"), m, step("b", "count-b", "done")])
 
 
 class DeliverTest(unittest.TestCase):
@@ -388,7 +478,7 @@ class DeliverTest(unittest.TestCase):
         procedures = project.procedures([
             step("a", "standin-json", "gate"),
             {"id": "gate", "stage": "setup", "kind": "decide", "grader": "toy-tally",
-             "on": {"accept": "b", "revise": "needs-owner"}},
+             "holds": "run", "on": {"accept": "b", "revise": "needs-owner"}},
             step("b", "standin-json", "done")])
         done = project.deliver(procedures, issue=1519)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -612,6 +702,7 @@ class FindingsTest(unittest.TestCase):
 
         def steps(*, mapped: bool) -> list[dict]:
             return [{"id": name, "stage": "landing", "kind": "command", "command": name,
+                     "holds": "run",
                      "on": {"ok": ids[i + 1] if i + 1 < len(ids) else "done",
                             "failed": "needs-owner",
                             **({"refused": "needs-owner"} if mapped else {})}}
@@ -635,7 +726,7 @@ class FindingsTest(unittest.TestCase):
 def literal(name: str, on: dict, command: str | None = None) -> dict:
     """A command step with no `in`, so the judged text carries no issue number."""
     return {"id": name, "stage": "landing", "kind": "command", "command": command or name,
-            "on": on}
+            "holds": "run", "on": on}
 
 
 ALLOW_ON = {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}
@@ -912,10 +1003,15 @@ class RefusalTest(unittest.TestCase):
                 [step("a", "standin-record", "done")], keep_alive=keep_alive,
                 stops={"needs-owner": {"need": "owner-decision", "reenter": "a"}})
 
+        def with_mutation(project: EngineProject) -> Path:
+            first = step("a", "standin-record", "done", mutates=True)
+            del first["check"]
+            return project.procedures([first])
+
         def mutating_decide(project: EngineProject) -> Path:
             return project.procedures([{
                 "id": "d", "stage": "setup", "kind": "decide", "grader": "toy-tally",
-                "mutates": True, "on": {"accept": "done", "revise": "needs-owner"}}],
+                "holds": "run", "mutates": True, "on": {"accept": "done", "revise": "needs-owner"}}],
                 keep_alive=keep_alive)
 
         def empty(project: EngineProject) -> Path:
@@ -925,9 +1021,10 @@ class RefusalTest(unittest.TestCase):
             "an undeclared input": (
                 "repo", lambda p: p.procedures([step("a", "standin-record", "done")],
                                                inputs=("issue", "repo"))),
+            "a mutating step without a check": ("check", with_mutation),
             "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
             "a mutating decide step": ("marked mutates", mutating_decide),
-            "a group step": ("group", shipped),
+            "the shipped toy, whose agent step is marked mutates": ("marked mutates", shipped),
             "no deliver.json": ("deliver.json", empty),
         }
         for name, (word, build) in cases.items():
@@ -944,13 +1041,7 @@ class RefusalTest(unittest.TestCase):
 
 class LockTest(unittest.TestCase):
     def start(self, project: EngineProject, procedures: Path) -> subprocess.Popen:
-        argv, options = project.command("deliver", "1512", "--procedures", str(procedures),
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        process = subprocess.Popen(argv, **options)
-        self.addCleanup(process.communicate)
-        self.addCleanup(process.kill)
-        self.addCleanup(project.release.write_text, "go", encoding="utf-8")
-        return process
+        return start_deliver(self, project, procedures)
 
     def test_a_second_deliver_during_a_run_exits_already_running_and_appends_nothing(self):
         project = EngineProject(self)
@@ -1018,27 +1109,52 @@ class LockTest(unittest.TestCase):
         project.release.write_text("go", encoding="utf-8")
         self.assertEqual(first.wait(60), 0)
 
-    def test_the_procedure_that_runs_is_the_one_checked_when_the_source_changes_meanwhile(self):
+    def test_the_procedure_that_runs_is_the_one_checked_when_the_source_changes_after_its_check(self):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-record", "done")])
-        root = project.world.home / ".agents/state/engine/runs"
-        root.mkdir(parents=True, mode=0o700)
-        descriptor = os.open(creation_lock_path(root, 1512), os.O_RDWR | os.O_CREAT, 0o600)
-        self.addCleanup(os.close, descriptor)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        process = self.start(project, procedures)
-        time.sleep(1.0)
-        self.assertIsNone(process.poll())
         edited = json.loads((procedures / "deliver.json").read_text())
         edited["steps"][0]["on"]["ok"] = "b"
         edited["steps"].append(step("b", "no-such-command", "done"))
-        (procedures / "deliver.json").write_text(json.dumps(edited), encoding="utf-8")
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        stdout, stderr = process.communicate(timeout=60)
-        self.assertEqual(process.returncode, 2, stdout + stderr)
-        self.assertIn("unknown_command", stderr)
+        edited_path = project.tmp / "edited.json"
+        edited_path.write_text(json.dumps(edited), encoding="utf-8")
+        _, options = project.command()
+        process = subprocess.run(
+            [sys.executable, "-c", LAUNCH, str(edited_path), "deliver", "1512",
+             "--procedures", str(procedures)], capture_output=True, timeout=120, **options)
+        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+        self.assertIn("unknown_command", process.stderr)
         self.assertFalse(project.record.exists())
         self.assertEqual(project.runs(), [])
+
+    def test_a_continuer_waits_for_a_lock_renewal_and_reports_the_renewed_holder(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-fail", "done")])
+        self.assertEqual(project.deliver(procedures).returncode, 3)
+        run = project.runs()[0]
+        root = project.world.home / ".agents/state/engine/runs"
+        creation = os.open(creation_lock_path(root, 1512), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, creation)
+        fcntl.flock(creation, fcntl.LOCK_EX)
+        held = os.open(run / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        os.ftruncate(held, 0)
+        before = (run / "events.jsonl").read_bytes()
+        runs_before = project.runs()
+        process = self.start(project, procedures)
+        time.sleep(1.0)
+        self.assertIsNone(process.poll())
+        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+        os.write(held, json.dumps({"pid": os.getpid(),
+                                   "started": "2026-11-21T00:00:00Z"}).encode("utf-8"))
+        fcntl.flock(creation, fcntl.LOCK_UN)
+        stdout, stderr = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 4, stdout + stderr)
+        line = json.loads(stdout)
+        self.assertEqual(line["process"]["pid"], os.getpid())
+        self.assertEqual(line["run"], run.name)
+        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+        self.assertEqual(project.runs(), runs_before)
 
     def test_status_reports_the_later_run_of_a_second_not_the_one_with_the_greater_token(self):
         project = EngineProject(self)
@@ -1048,18 +1164,17 @@ class LockTest(unittest.TestCase):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(json.loads(status.stdout)["run"], later.name)
 
-    def test_a_stopped_run_is_not_joined_by_a_new_run(self):
+    def test_a_stopped_run_is_continued_not_joined_by_a_new_run(self):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-fail", "done")])
         self.assertEqual(project.deliver(procedures).returncode, 3)
-        run = project.runs()[0]
-        before = (run / "events.jsonl").read_bytes()
         again = project.deliver(procedures)
-        self.assertEqual(again.returncode, 2, again.stdout + again.stderr)
-        self.assertEqual(again.stdout, "")
-        self.assertEqual(len(again.stderr.splitlines()), 1, again.stderr)
+        self.assertEqual(again.returncode, 3, again.stdout + again.stderr)
         self.assertEqual(len(project.runs()), 1)
-        self.assertEqual((run / "events.jsonl").read_bytes(), before)
+        events = project.events(project.runs()[0])
+        self.assertEqual([(e["step"], e["visit"]) for e in run_continued(events)], [("a", 1)])
+        self.assertEqual([e["visit"] for e in events
+                          if e["event"] == "step_entered" and e["step"] == "a"], [1, 2])
 
     def test_a_done_run_lets_the_next_deliver_start_a_new_run(self):
         project = EngineProject(self)
@@ -1098,14 +1213,14 @@ class LockTest(unittest.TestCase):
         self.assertEqual(json.loads(second.stdout)["run"], running.name)
         self.assertEqual(project.runs(), runs_before)
 
-    def test_a_done_run_never_hides_a_stopped_run_started_in_the_same_second(self):
+    def test_a_done_run_never_hides_an_open_run_started_in_the_same_second(self):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-json", "done")])
-        stopped = self.seed_runs(project, procedures, done="zzzz", other="aaaa")
+        open_run = self.seed_runs(project, procedures, done="zzzz", other="aaaa")
         runs_before = project.runs()
         second = project.deliver(procedures)
-        self.assertEqual(second.returncode, 2, second.stdout + second.stderr)
-        self.assertIn(stopped.name, second.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["run"], open_run.name)
         self.assertEqual(project.runs(), runs_before)
 
     def test_lock_holder_reads_only_a_held_lock(self):

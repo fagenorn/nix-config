@@ -420,7 +420,7 @@ class ConformanceAdoptionApplyTest(ApplyTestCase):
             "another plan id": {**original, "plan_id": "sha256:" + "0" * 64},
             "a result of another commit": {
                 **original, "result": {**original["result"], "commit": base}},
-            "a commit with no evidence of the plan": foreign,
+            "a commit that is not the plan's adoption commit": foreign,
         }
         for name, record in variants.items():
             with self.subTest(name):
@@ -650,14 +650,13 @@ class ConformanceAdoptionApplyTest(ApplyTestCase):
         self.assertFalse(log.exists() and log.read_text("utf-8"))
         self.assertFalse(self.pending(plan_id).exists())
 
-    def test_an_adoption_without_a_devenv_lock_keeps_its_evidence_record(self):
+    def test_an_adoption_without_a_devenv_lock_plans_no_conformance_member(self):
         root = apply_repo(self.home)
-        result = self.succeed(root, self.ready_plan(root)["plan"]["plan_id"])
-        record = json.loads(git(
-            root, "show", f"{result['branch']}:{result['evidence_record']}"))
-        self.assertEqual([check["id"] for check in record["checks"]],
-                         list(adopt_inspection.READY_GATES[:-1]))
-        self.assertNotIn("conformance", record)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        result = self.succeed(root, plan_id)
+        stored = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
+        self.assertNotIn("conformance", stored["plan"])
+        self.assertNotIn("required_check", result)
 
 
 if __name__ == "__main__":

@@ -94,18 +94,8 @@ VERIFY_CHECKS = (
     "contract-resolves",
     "projections-in-sync",
     "no-unclassified-agent-path",
-    "adoption-evidence-record",
     "adoption-commit-derived",
-    "path-migration-map",
 )
-
-# The adoption evidence record's members, per the spec. A committed file under
-# the evidence directory is the adoption record only if it carries all of them
-# (D34): the record is discovered rather than named, so its shape is the only
-# thing that identifies it.
-EVIDENCE_RECORD_MEMBERS = ("schema_version", "plan_id", "outcome",
-                           "base_revision", "platform", "decisions_accepted",
-                           "sources", "checks", "path_migration_map")
 
 # The path-migration record's members, per #72 and D36. The record the
 # evidence names has to be one of these, not merely a file that parses.
@@ -180,7 +170,6 @@ RUNTIME_SENTINEL_BYTES = b"*\n"
 RUNTIME_IGNORE_PATTERN = ".agents/runtime/"
 GITIGNORE = ".gitignore"
 MIGRATION_MAP_DIR = ".agents/knowledge/archive/path-migrations"
-EVIDENCE_RECORD_DIR = ".agents/artifacts/evidence"
 
 # The one closed list of ignored paths the inspection may look at. A bare
 # ignored-tree walk is never performed: the outer half of the defence in depth
@@ -233,16 +222,13 @@ CLASSIFICATION_RULES = (
      None),
     (".agents/runtime", "prefix", "ignored-runtime", "retain-product", None),
     (".agents", "prefix", "canonical-tracked", "retain-product", None),
-    (".claude/specs", "prefix", "durable-artifact", "move-canonical",
-     ".agents/artifacts/specs"),
-    (".claude/plans", "prefix", "durable-artifact", "move-canonical",
-     ".agents/artifacts/plans"),
-    (".claude/handoffs", "prefix", "durable-artifact", "move-canonical",
-     ".agents/artifacts/handoffs"),
-    (".claude/notes", "prefix", "durable-artifact", "move-canonical",
-     ".agents/artifacts/notes"),
-    (".claude/research", "prefix", "durable-artifact", "move-canonical",
-     ".agents/artifacts/specs"),
+    # Adoption leaves the legacy record trees where they are (#1456): moving
+    # them into the artifacts directory would commit files conformance refuses.
+    (".claude/specs", "prefix", "durable-artifact", "retain-product", None),
+    (".claude/plans", "prefix", "durable-artifact", "retain-product", None),
+    (".claude/handoffs", "prefix", "durable-artifact", "retain-product", None),
+    (".claude/notes", "prefix", "durable-artifact", "retain-product", None),
+    (".claude/research", "prefix", "durable-artifact", "retain-product", None),
     (".out-of-scope", "prefix", "canonical-tracked", "move-canonical",
      ".agents/knowledge/rejections"),
     (".claude/skills.config.json", "exact", "legacy-native-store",
@@ -716,7 +702,7 @@ def split_nul(data: bytes) -> list[str]:
 # ignored paths, two metadata-only trees, registered worktree names, and
 # untracked files overlapping an inspected source or a planned destination.
 # Beside them sit the queries `verify` reads a pinned revision with (its tree
-# inventory, its blobs and evidence records, and their ancestry) and the
+# inventory, its blobs and adoption commits, and their ancestry) and the
 # operations `--register` reaches `origin` through: `has_remote`,
 # `remote_heads`'s one listing, `fetch_pinned`'s pinned fetch, `pin_listed`'s
 # pin of a listed commit and `export_commit`'s `git archive` export. Only
@@ -988,50 +974,6 @@ def blob_at(root: Path, revision: str, relative: str) -> bytes | None:
     return out if code == 0 else None
 
 
-def evidence_records_at(root: Path, revision: str) -> list[str]:
-    """Every `.agents/artifacts/evidence/*.json` path in the tree at `revision`.
-
-    Listed from the commit named by `revision`, not walked on disk, and one
-    level deep exactly as the glob reads: a nested file is not one of the
-    candidates D34 counts.
-    """
-    out = git_or_fail(root, "ls-tree", "-r", "--name-only", "-z", revision,
-                      "--", EVIDENCE_RECORD_DIR)
-    return sorted(path for path in split_nul(out)
-                  if is_evidence_record_path(path))
-
-
-def is_evidence_record_path(relative: str) -> bool:
-    """Whether `relative` is one of the candidates D34 counts.
-
-    The path predicate both sides share. `verify` narrows these paths to the
-    ones that parse as an adoption record (#586); a re-adoption plan still
-    supersedes every one of them.
-    """
-    prefix = EVIDENCE_RECORD_DIR + "/"
-    return (relative.startswith(prefix) and relative.endswith(".json")
-            and "/" not in relative[len(prefix):])
-
-
-def parses_as_evidence_record(data: bytes | None) -> dict | None:
-    """The record `data` holds, or None when it is not one.
-
-    Membership is the whole test: an adoption record is identified by carrying
-    every member the spec fixes, because nothing else in the repository names
-    it.
-    """
-    if data is None:
-        return None
-    try:
-        source = json.loads(data)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    if not isinstance(source, dict) or any(
-            member not in source for member in EVIDENCE_RECORD_MEMBERS):
-        return None
-    return source
-
-
 def parses_as_migration_map(data: bytes | None) -> dict | None:
     """The path-migration map `data` holds, or None when it is not one."""
     if data is None:
@@ -1046,23 +988,55 @@ def parses_as_migration_map(data: bytes | None) -> dict | None:
     return source
 
 
-def introducing_commit(root: Path, revision: str,
-                       relative: str) -> str | None:
-    """The commit that added `relative` in the history of `revision`, or None.
+ADOPTION_SUBJECT_PREFIX = "chore(adopt): adopt "
 
-    Read from the commit named by `revision`, never the working tree, so an
-    untracked file cannot answer for a record the history does not carry.
 
-    The adoption record carries no commit identity and cannot — it is created
-    *by* the commit that would name it — so the introducing commit is the only
-    identity git already holds (D34).
+def adoption_subject(project_id: str, digest: str) -> str:
+    """The subject of an adoption commit, a pure function of the plan (D28).
+
+    `digest` is the 64-hex plan digest; the subject names its first twelve.
     """
-    code, out = run_git(root, "log", "--diff-filter=A", "--format=%H", "-1",
-                        revision, "--", relative)
+    return f"{ADOPTION_SUBJECT_PREFIX}{project_id} at plan {digest[:12]}"
+
+
+def plan_id_digest(plan_id: str) -> str | None:
+    """The 64 lowercase hex of `sha256:<hex>` or a bare `<hex>`, else None."""
+    text = plan_id.strip()
+    if text.startswith("sha256:"):
+        text = text[len("sha256:"):]
+    return text if re.fullmatch(r"[0-9a-f]{64}", text) else None
+
+
+def adoption_commit_at(root: Path, revision: str,
+                       project_id: str | None = None,
+                       digest: str | None = None) -> str | None:
+    """The newest commit reachable from `revision` carrying an adoption subject.
+
+    With `digest` the subject must be exactly `adoption_subject(project_id,
+    digest)`; without it, any plan's subject for `project_id` matches, and with
+    no `project_id` either, any project's. Read from git history, never the
+    working tree, so no file the checkout holds can answer for an adoption the
+    history does not carry. A failing `git log` is no adoption.
+    """
+    if digest is not None and project_id is None:
+        raise ValueError("a plan digest needs the project id it belongs to")
+    if digest is not None:
+        wanted = re.compile(re.escape(adoption_subject(project_id, digest)))
+    else:
+        named = r"\S+" if project_id is None else re.escape(project_id)
+        wanted = re.compile(
+            re.escape(ADOPTION_SUBJECT_PREFIX) + named
+            + r" at plan [0-9a-f]{12}")
+    code, out = run_git(root, "log", "--fixed-strings",
+                        f"--grep={ADOPTION_SUBJECT_PREFIX}",
+                        "--format=%H%x09%s", revision)
     if code != 0:
         return None
-    text = out.decode("utf-8", "surrogateescape").strip()
-    return text.splitlines()[0] if text else None
+    for line in out.decode("utf-8", "surrogateescape").splitlines():
+        commit, _, subject = line.partition("\t")
+        if wanted.fullmatch(subject):
+            return commit
+    return None
 
 
 def commit_is_ancestor(root: Path, commit: str, revision: str) -> bool:
@@ -1260,7 +1234,7 @@ def overlap_targets(found: Candidates) -> list[str]:
             targets.add(group)
         if info["target"]:
             targets.add(info["target"])
-    targets.update((MIGRATION_MAP_DIR, EVIDENCE_RECORD_DIR))
+    targets.add(MIGRATION_MAP_DIR)
     return sorted(targets)
 
 
