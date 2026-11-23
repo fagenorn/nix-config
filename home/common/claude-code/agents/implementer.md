@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: Implements one planned task from its self-contained brief.
-model: opus
+model: sonnet
 effort: high
 disallowedTools: Artifact, ArtifactComments, ArtifactData, Workflow, ScheduleWakeup, AskUserQuestion, SendFeedback, ReportFindings, CronCreate, CronDelete, CronList, RemoteTrigger, mcp__claude_ai_Claude_Docs
 ---
