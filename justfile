@@ -139,6 +139,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_node_lint.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_conformance_ruff.py \
+    home/common/agent-skills/tests/test_conformance_lint_times.py \
     home/common/agent-skills/tests/test_adopt_project.py \
     home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
@@ -165,6 +166,7 @@ agent-workflow-tests *args:
     tests/test_engine_session.py \
     tests/test_engine_session_limits.py \
     tests/test_engine_keep_alive.py \
+    tests/test_engine_continue.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
@@ -249,6 +251,7 @@ agent-workflow-tests *args:
     tests/test_never_rise.py \
     tests/test_comment_lint.py \
     tests/test_cleanup_issue.py \
+    tests/test_lint_time.py \
     tests/test_ruff_lint.py \
     tests/test_suite_source.py \
     tests/test_skipped_test_lint.py \

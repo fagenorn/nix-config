@@ -39,6 +39,7 @@
   "host-readiness": null,
   "instruction-surface-lint": null,
   "issue-branch": null,
+  "lint-time": null,
   "look-approval": null,
   "look-lint": null,
   "node-lint": null,
