@@ -1,4 +1,4 @@
-"""The console's event log (ADR-console-001, ADR-console-009).
+"""The console's event log (ADR-console-001).
 
 The store is one SQLite file. Its table is `events(seq INTEGER PRIMARY KEY
 AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, payload TEXT
