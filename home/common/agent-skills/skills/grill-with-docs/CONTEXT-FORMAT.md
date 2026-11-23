@@ -104,7 +104,7 @@ Mark an open ambiguity inline on the disputed term and delete the marker in the 
 _Ambiguous_: used for both **Customer** and **User**. Unresolved.
 ```
 
-Over budget, a writer consolidates or splits in the same commit, per [SKILL.md](./SKILL.md).
+Over budget, a writer consolidates or splits in the same commit, per [SKILL.md](./SKILL.md). A split is four edits in one commit: create the new area file with front-matter (`area:`, `budget:`), a short purpose and the moving terms copied verbatim; delete those terms from the old file; add a `## Areas` row (name, link, one-line gist, `governs:` globs) and narrow the old area's globs; repoint the moved terms' `## Terms` rows and add any new cross-area edge to `## Relationships`.
 
 ## Repos without a map yet
 

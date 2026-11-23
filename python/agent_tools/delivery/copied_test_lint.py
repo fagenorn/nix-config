@@ -1,4 +1,4 @@
-"""The copied-test enforcer: no two tests share a body (rule standard:B19, #1464).
+"""The copied-test enforcer: no two tests share a body (rule standard:B24).
 
 A test whose body repeats another test's is one violation. Test files and tests
 are read by `agent_tools.delivery.suite_source`, which gives each test's body as
@@ -19,17 +19,21 @@ exceed the merge base's, wherever a copy moves to.
 
 The command `copied-test-lint --repo-root <absolute directory> [--revision <rev>]`
 prints every violation at the revision (default `HEAD`), one line each on stdout,
-`<rule> <path>:<line>`. Its exits (1 when it printed any, 0 when none, 2 with
+`<rule> <path>:<line>`, those a reasoned suppression marker of the rule does not
+cover and one line for each bare marker of the rule (`agent_tools.delivery.never_rise.counted`).
+It exits 1 when it printed any, 0 when none and 2 with one line
 `copied-test-lint: <reason>` on stderr when the root or revision cannot be
-read) are those of `agent_tools.delivery.never_rise.run_lint`.
+read.
 """
+
+import argparse
 
 from agent_tools.delivery import never_rise
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.delivery.suite_source import read_test_files, test_functions
 
 COMMAND = "copied-test-lint"
-RULE_ID = "B19"
+RULE_ID = "B24"
 
 
 def find(snapshot: Snapshot) -> list[Violation]:
@@ -50,7 +54,18 @@ ENFORCER = Enforcer(RULE_ID, find)
 
 
 def main(argv: list[str] | None = None) -> int:
-    return never_rise.run_lint(COMMAND, ENFORCER, argv)
+    parser = argparse.ArgumentParser(prog=COMMAND)
+    parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--revision", default="HEAD")
+    args = parser.parse_args(argv)
+    snapshot = never_rise.command_snapshot(COMMAND, args.repo_root, args.revision)
+    if snapshot is None:
+        return 2
+    kept, marked = never_rise.counted(ENFORCER, snapshot)
+    found = sorted(kept + marked, key=lambda v: (v.path, v.line))
+    for violation in found:
+        print(violation.text())
+    return 1 if found else 0
 
 
 if __name__ == "__main__":

@@ -170,6 +170,25 @@ class PromptCardTest(unittest.TestCase):
         self.assertFalse(prompt_card.active(sprint(stop_at=AT)))
         self.assertFalse(prompt_card.active(sprint(brief=None)))
 
+    def test_a_reason_is_any_non_blank_description_and_a_refusal_comes_first(self):
+        for description in (None, "", "  \n\t"):
+            self.assertFalse(prompt_card.has_reason(description), description)
+        for description in ("Create it", "\n  why\n"):
+            self.assertTrue(prompt_card.has_reason(description), description)
+        self.assertIsNone(prompt_card.ask_refusal(sprint(), "s-1", "why"))
+        self.assertEqual(prompt_card.ask_refusal(sprint(), "s-1", None), prompt_card.UNEXPLAINED)
+        self.assertEqual(prompt_card.ask_refusal(sprint(), "s-1", " "), prompt_card.UNEXPLAINED)
+        self.assertEqual(prompt_card.ask_refusal(sprint(), "s-2", None), prompt_card.REFUSED)
+        self.assertEqual(prompt_card.ask_refusal(sprint(stop_at=AT), "s-1", None), prompt_card.REFUSED)
+        self.assertEqual(prompt_card.ask_refusal(sprint(brief=None), "s-1", "why"), prompt_card.REFUSED)
+        self.assertEqual(prompt_card.UNEXPLAINED, "unexplained")
+        self.assertNotIn(prompt_card.NO_REASON_TEXT, (
+            manager.REFUSAL, prompt_card.OWNER_REFUSED_TEXT, prompt_card.EXPIRED_TEXT,
+            prompt_card.ENDED_TEXT, prompt_card.SANDBOX_TEXT))
+        said = prompt_card.NO_REASON_TEXT.lower()
+        for part in ("description", "why", "run it again"):
+            self.assertIn(part, said)
+
     def test_each_module_imports_first_in_a_fresh_interpreter(self):
         for name in ("manager", "prompt_card", "sprints", "sprint", "service"):
             with self.subTest(name):

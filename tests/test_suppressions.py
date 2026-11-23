@@ -378,15 +378,15 @@ class TestLintSuppressionTest(unittest.TestCase):
 
     def test_skipped_test_lint_omits_a_suppressed_test_and_prints_a_bare_marker(self):
         text = ("import pytest\n@pytest.mark.skip\n"
-                "def test_a():  # " + suppress("B18", "waits on upstream") + "\n    assert 1\n"
-                "@pytest.mark.skip\ndef test_b():  # " + suppress("B18") + "\n    assert 2\n")
+                "def test_a():  # " + suppress("B23", "waits on upstream") + "\n    assert 1\n"
+                "@pytest.mark.skip\ndef test_b():  # " + suppress("B23") + "\n    assert 2\n")
 
         self.assertEqual(self.run_lint("skipped_test_lint", {"tests/test_a.py": text}),
-                         (1, "B18 tests/test_a.py:6\nB18 tests/test_a.py:6\n"))
+                         (1, "B23 tests/test_a.py:6\nB23 tests/test_a.py:6\n"))
 
     def test_copied_test_lint_omits_a_suppressed_copy(self):
         text = ("def test_a():\n    assert run(1)\n"
-                "def test_b():  # " + suppress("B19", "same case on purpose") + "\n    assert run(1)\n")
+                "def test_b():  # " + suppress("B24", "same case on purpose") + "\n    assert run(1)\n")
 
         self.assertEqual(self.run_lint("copied_test_lint", {"tests/test_a.py": text}), (0, ""))
 

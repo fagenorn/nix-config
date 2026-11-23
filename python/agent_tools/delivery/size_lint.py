@@ -20,13 +20,14 @@ the gate.
 The command `size-lint --repo-root <absolute directory> [--revision <rev>]`
 prints every over-budget file at the revision (default `HEAD`) that no reasoned
 suppression marker of the rule covers, and one line for each bare marker of the rule
-(`agent_tools.delivery.never_rise.counted`, #1459), one line each on stdout,
-`<rule> <path>:<line>` with the path escaped as
-`agent_tools.delivery.never_rise.Violation.text` defines. Its exits (1 when it
-printed any, 0 when none, 2 with `size-lint: <reason>` on stderr when the root
-or revision cannot be read) are those of `agent_tools.delivery.never_rise.run_lint`.
+(`agent_tools.delivery.never_rise.counted`, #1459), one line each on stdout, `<rule> <path>:<line>` with the path escaped as
+`agent_tools.delivery.never_rise.Violation.text` defines. It exits 1 when it
+printed any and 0 when none. It exits 2 with `size-lint: <reason>` on stderr for
+a relative or missing root, a root below the repository's top level, an
+unresolvable revision or a failed git read.
 """
 
+import argparse
 from pathlib import PurePosixPath
 
 from agent_tools.delivery import never_rise
@@ -56,7 +57,18 @@ ENFORCER = Enforcer(RULE_ID, find, per_file=True)
 
 
 def main(argv: list[str] | None = None) -> int:
-    return never_rise.run_lint(COMMAND, ENFORCER, argv)
+    parser = argparse.ArgumentParser(prog=COMMAND)
+    parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--revision", default="HEAD")
+    args = parser.parse_args(argv)
+    snapshot = never_rise.command_snapshot(COMMAND, args.repo_root, args.revision)
+    if snapshot is None:
+        return 2
+    kept, marked = never_rise.counted(ENFORCER, snapshot)
+    found = sorted(kept + marked, key=lambda v: (v.path, v.line))
+    for violation in found:
+        print(violation.text())
+    return 1 if found else 0
 
 
 if __name__ == "__main__":

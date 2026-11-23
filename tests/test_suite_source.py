@@ -1,4 +1,4 @@
-"""The test sources `agent_tools.delivery.suite_source` reads for the stack rules (#1464).
+"""The test sources `agent_tools.delivery.suite_source` reads for the stack rules.
 
 Measures the library against source text: each family lexes to tokens with
 comments and whitespace dropped and strings kept whole (an interpolating string
@@ -148,7 +148,7 @@ class SelectionTest(unittest.TestCase):
             "tests/test_b.py": b"x = 1\n", "tests/test_a.py": b"y\n", "src/a.py": b"z\n",
             "tests/test_bad.py": b"\xff\xfe", "tests/test_tok.py": b'x = """\n'}
         snapshot = Snapshot("a" * 40, {path: 1 for path in texts_by_path},
-                            texts=texts_by_path)
+                            contents=texts_by_path)
 
         files = read_test_files(snapshot)
 

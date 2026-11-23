@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_commands, engine_ledger, engine_shell
+from agent_tools.delivery import engine, engine_commands, engine_core, engine_ledger, engine_shell
 from agent_tools.delivery.engine_commands import command_text
 from agent_tools.delivery.engine_guard import Hook, judge, payload
 from agent_tools.delivery.engine_ledger import RUN_ID_RE
@@ -65,6 +65,7 @@ class EngineProject:
         self.release = self.tmp / "release"
         self.renewals = self.tmp / "renewals.log"
         self.answers = self.tmp / "answers.json"
+        self.hold = self.tmp / "hold.pid"
         self.root = self.world.project("example/engine", "example/engine", register=False,
                                        mutate=self.add_standins)
         self.bin = self.tmp / "bin"
@@ -76,8 +77,23 @@ class EngineProject:
         self.env = {key: value for key, value in self.world.env.items()
                     if key != "AGENT_PLATFORM_ROOT"}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.world.env['PATH']}"
+        shutil.copy(REPO_ROOT / "home/common/agent-skills/host-declaration.json",
+                    self.declaration_path)
         write_settings(self.world.home, str(standin_guard(
             self.tmp, "allow-guard", "allow", str(self.guard_log))))
+
+    @property
+    def declaration_path(self) -> Path:
+        return self.world.home / ".agents/share/host-declaration.json"
+
+    def declare(self, value: object) -> None:
+        """Replace the host declaration: `None` removes it, a string is written as is."""
+        if value is None:
+            self.declaration_path.unlink(missing_ok=True)
+        elif isinstance(value, str):
+            self.declaration_path.write_text(value, encoding="utf-8")
+        else:
+            self.declaration_path.write_text(json.dumps(value), encoding="utf-8")
 
     def use_guard(self, command: Path | str, timeout: object = 30, **extra) -> None:
         write_settings(self.world.home, str(command), timeout, extra=extra or None)
@@ -118,6 +134,7 @@ class EngineProject:
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
+            "standin-hold": entry("hold", str(self.hold), "0"),
         })
         land = ["gh", "pr", "merge", "7", "--repo", "example/engine", "--merge"]
         contract["bindings"]["commands"].update(
@@ -360,6 +377,62 @@ class DeliverTest(unittest.TestCase):
         stdout, stderr = process.communicate(timeout=60)
         self.assertEqual(process.returncode, 0, stderr)
         self.assertEqual(json.loads(stdout)["end"], "done")
+
+    @staticmethod
+    def transitions(events: list[dict]) -> list[tuple]:
+        return [(e["step"], e["visit"], e["outcome"], e["to"])
+                for e in events if e["event"] == "transition_taken"]
+
+    def decide_run(self) -> tuple[EngineProject, Path]:
+        project = EngineProject(self)
+        procedures = project.procedures([
+            step("a", "standin-json", "gate"),
+            {"id": "gate", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+             "on": {"accept": "b", "revise": "needs-owner"}},
+            step("b", "standin-json", "done")])
+        done = project.deliver(procedures, issue=1519)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return project, project.runs()[0]
+
+    def test_a_decide_step_leaves_one_transition_taken_between_its_neighbours(self):
+        project, run = self.decide_run()
+        events = project.events(run)
+        self.assertEqual(self.transitions(events),
+                         [("a", 1, "ok", "gate"), ("gate", 1, "accept", "b"),
+                          ("b", 1, "ok", "done")])
+        first = next(i for i, e in enumerate(events)
+                     if e["event"] == "transition_taken" and e["step"] == "a")
+        gate = next(i for i, e in enumerate(events)
+                    if e["event"] == "transition_taken" and e["step"] == "gate")
+        self.assertGreater(gate, first)
+        self.assertLess(gate, next(i for i, e in enumerate(events)
+                                   if e["event"] == "step_entered" and e["step"] == "b"))
+        self.assertEqual([e["event"] for e in events
+                          if e.get("step") == "gate"], ["transition_taken"])
+
+    def test_an_exhausted_entry_leaves_one_transition_taken(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step(
+            "a", "standin-json", None, max_visits=1,
+            on={"ok": "a", "failed": "needs-owner", "exhausted": "done",
+                "refused": "needs-owner"})])
+        done = project.deliver(procedures, issue=1519)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        events = project.events(project.runs()[0])
+        self.assertEqual(self.transitions(events),
+                         [("a", 1, "ok", "a"), ("a", 2, "exhausted", "done")])
+        self.assertEqual([(e["step"], e["visit"]) for e in events if e["event"] == "step_entered"],
+                         [("a", 1)])
+
+    def test_a_recorded_core_transition_does_not_change_the_cores_replay(self):
+        project, run = self.decide_run()
+        events = project.events(run)
+        procedure = json.loads((run / "procedure" / "deliver.json").read_text())
+        walk = engine_core.replay(procedure, {"issue": 1519},
+                                  engine_shell.core_events(run, events))
+        self.assertEqual([(t.step, t.outcome, t.target) for t in walk.transitions],
+                         [(step_, outcome, to) for step_, _, outcome, to in self.transitions(events)])
+        self.assertEqual(walk.action, engine_core.Done())
 
 
 class BoundsTest(unittest.TestCase):

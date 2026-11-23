@@ -54,6 +54,7 @@ from agent_tools.project_contract.adopt_links import (
     Tree,
     broken_count,
     index_records,
+    is_point_in_time_record,
     markdown_texts,
     tree_records,
 )
@@ -78,6 +79,7 @@ from agent_tools.project_contract.adopt_inspection import (
     read_bytes_bounded,
     refuse,
     run_git,
+    seed_origin,
     sha256_hash,
     tracked_inventory,
 )
@@ -660,7 +662,8 @@ def new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]],
     base's tracked paths, the result's against the result's. A moved file is
     compared with the file it came from, through the plan's `git-mv`
     operations, and a result file with no base counterpart is compared with
-    zero. Sorted, so the gate and the post-commit proof — which both call this
+    zero. A point-in-time record no `git-mv` moved keeps its citations and is
+    not judged. Sorted, so the gate and the post-commit proof — which both call this
     — name the same files from the same records (D9).
     """
     origin = {operation["targets"][0]: operation["sources"][0]
@@ -670,7 +673,8 @@ def new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]],
     base_texts = markdown_texts(worktree, base)
     return sorted(
         path for path, text in markdown_texts(worktree, result).items()
-        if broken_count(path, text, result_tree) > (
+        if not (is_point_in_time_record(path) and path not in origin)
+        and broken_count(path, text, result_tree) > (
             broken_count(origin.get(path, path),
                          base_texts[origin.get(path, path)], base_tree)
             if origin.get(path, path) in base_texts else 0))
@@ -713,7 +717,9 @@ def gate_cold_clone_resolves(run: GateRun) -> bool:
     `git write-tree` over the index without committing, then `git archive` of
     that tree: what lands in the temporary directory is exactly what a fresh
     clone would see, so an adoption that only works because of an untracked
-    file cannot pass.
+    file cannot pass. A fresh clone has an origin, and a schema-3 contract
+    derives its identity from it, so the authored origin is seeded into the
+    export before it resolves.
     """
     tree = git_or_fail(
         run.worktree, "write-tree").decode("ascii", "strict").strip()
@@ -728,6 +734,7 @@ def gate_cold_clone_resolves(run: GateRun) -> bool:
                 bundle.extractall(export, filter="data")
         except (tarfile.TarError, OSError):
             return False
+        seed_origin(run.worktree, export)
         exit_code, payload = run.run_resolver(export, "resolve")
         if exit_code != 0 or not isinstance(payload, dict):
             return False
@@ -1308,6 +1315,7 @@ def prove_commit_content(worktree: Path, commit: str,
 
 
 CONFORMANCE_UNPROVED = "adopt.commit.conformance_unproved"
+CONVERSION_UNPROVED = "adopt.commit.conversion_unproved"
 
 
 def prove_conformance_bytes(worktree: Path, commit: str,

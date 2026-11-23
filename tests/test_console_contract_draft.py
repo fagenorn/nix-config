@@ -20,7 +20,7 @@ from pathlib import Path
 
 from agent_tools import canonical
 from agent_tools.console import contract_draft as cd
-from agent_tools.project_contract import resolve_project
+from agent_tools.project_contract import schema_three
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .console_test_support import PREK_HOOK
@@ -46,6 +46,23 @@ ROOT = Path(__file__).resolve().parent.parent
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 MANIFEST = ROOT / "home" / "common" / "agent-skills" / "platform-manifest.json"
 ID = "sample-owner/sample-app"
+PROTECTION = json.dumps({"required_status_checks": {"strict": True, "checks": [{"context": "CI"}]}})
+# An installed revision record, as the adoption tests write it (a valid locked platform revision).
+REVISION = {"type": "github", "owner": "fixture", "repo": "platform", "rev": "0f" * 20,
+            "narHash": "sha256-" + "A" * 43 + "=", "lastModified": 1700000000}
+DEVENV_YAML = "inputs:\n  nixpkgs:\n    url: github:cachix/devenv-nixpkgs/rolling\n"
+DEVENV_LOCK = json.dumps({"nodes": {"nixpkgs": {
+    "locked": {"lastModified": 1, "narHash": "sha256-" + "B" * 43 + "=", "owner": "cachix",
+               "repo": "devenv-nixpkgs", "rev": "ab" * 20, "type": "github"},
+    "original": {"owner": "cachix", "repo": "devenv-nixpkgs", "type": "github"}},
+    "root": {"inputs": {"nixpkgs": "nixpkgs"}}}, "root": "root", "version": 7}, indent=2, sort_keys=True)
+# The 27 field ids of the table the console drafted before the schema-3 draft.
+EARLIER = (
+    "project-id", "project-name", "default-branch", "integration-branch", "branch-pattern",
+    "worktree-root", "worktree-prefix", "commit-signed", "merge-strategy", "delete-branch", "tracker",
+    "specs-path", "plans-path", "docs-paths", "context-paths", "standards-paths", "hints-paths",
+    "operations-paths", "rejections-paths", "build-command", "test-command", "review-plan-command",
+    "review-code-command", "max-parallel", "attempt-budget", "projections", "release")
 
 
 def git(path, *arguments):
@@ -116,7 +133,7 @@ class ContractDraftTest(unittest.TestCase):
 
     def settled(self, fields, root, **values):
         for field, value in values.items():
-            fields, error = cd.set_value(fields, field.replace("_", "-"), value, entries=[], root=root)
+            fields, error = cd.set_value(fields, field.replace("_", "-"), value)
             self.assertIsNone(error)
         return fields
 
@@ -124,7 +141,6 @@ class ContractDraftTest(unittest.TestCase):
         root, fields = self.remote_fields()
         for table in (cd.FIELDS, cd.LABELS, cd.POINTERS, cd.OPTIONS, cd.TEXT, cd.STARTS, cd.REST_WORDS):
             self.assertNotIn("co-authored-by", table)
-        self.assertEqual(len(cd.FIELDS), 27)
         self.assertNotIn("co-authored-by", [f["field"] for f in fields])
         self.assertNotIn("co-authored-by", [q["subject"] for q in cd.questions(fields)])
         shown = cd.shown(fields)
@@ -132,16 +148,7 @@ class ContractDraftTest(unittest.TestCase):
         words.append(cd.more_line(fields))
         for word in words:
             self.assertNotIn("co-author", word.lower())
-        self.assertEqual(cd.set_value(fields, "co-authored-by", "yes", entries=[], root=root),
-                         (None, cd.UNKNOWN_FIELD))
-
-    def test_the_written_contract_fixes_the_co_author_member_false(self):
-        root, fields = self.remote_fields()
-        fields = self.settled(fields, root, build_command="none", test_command="none",
-                              commit_signed="yes")
-        commit = cd.contract(fields)["bindings"]["vcs"]["commit"]
-        self.assertEqual(commit, {**resolve_project.RETIRED_COMMIT_MEMBERS, "signed": True})
-        self.assertEqual(commit, {"co_authored_by": False, "signed": True})
+        self.assertEqual(cd.set_value(fields, "co-authored-by", "yes"), (None, cd.UNKNOWN_FIELD))
 
     def test_a_saved_draft_with_a_co_author_record_reads_back_without_it(self):
         root, fields = self.remote_fields()
@@ -153,109 +160,81 @@ class ContractDraftTest(unittest.TestCase):
         self.assertEqual(set(record), set(cd.FIELD_KEYS))
         saved.insert(8, record)
         refreshed = cd.refresh(root, saved)
-        self.assertEqual([f["field"] for f in refreshed], list(cd.FIELDS))
+        self.assertEqual([f["field"] for f in refreshed], [*cd.FIELDS, *cd.FACTS])
         self.assertNotIn("co-authored-by", [e["field"] for e in cd.shown(refreshed)])
-        settled = self.settled(refreshed, root, build_command="none", test_command="none")
-        self.assertIs(cd.contract(settled)["bindings"]["vcs"]["commit"]["co_authored_by"], False)
-        self.assertEqual(cd.set_value(refreshed, "co-authored-by", "no", entries=[], root=root),
-                         (None, cd.UNKNOWN_FIELD))
+        settled = self.settled(refreshed, root, lint_command="just lint", test_command="just test")
+        self.assertNotIn("commit", cd.contract(settled)["bindings"]["vcs"])
+        self.assertEqual(cd.set_value(refreshed, "co-authored-by", "no"), (None, cd.UNKNOWN_FIELD))
 
-    def test_a_github_remote_is_read_for_id_name_branch_and_tracker(self):
+    def test_a_github_remote_is_read_for_the_integration_branch_and_the_facts(self):
         root, fields = self.remote_fields()
-        self.assertEqual([f["field"] for f in fields], list(cd.FIELDS))
-        self.assertEqual(len(cd.FIELDS), 27)
+        self.assertEqual([f["field"] for f in fields], [*cd.FIELDS, *cd.FACTS])
         for record in fields:
             self.assertEqual(set(record), cd.FIELD_KEYS)
-        self.assertEqual(pair(fields, "project-id"), (ID, "remote"))
-        self.assertEqual(pair(fields, "project-name"), ("sample-app", "remote"))
-        self.assertEqual(pair(fields, "default-branch"), ("trunk", "remote"))
-        self.assertEqual(pair(fields, "tracker"), ("github", "remote"))
-        self.assertEqual(pair(fields, "docs-paths"), ("README.md", "files"))
+        self.assertEqual(pair(fields, "integration-branch"), ("trunk", "remote"))
+        self.assertEqual(pair(fields, "project-identity"), (ID, "remote"))
         self.assertEqual(pair(fields, "release"), ("unsupported", "start"))
-        self.assertEqual([f["field"] for f in cd.open_fields(fields)],
-                         ["build-command", "test-command"])
+        self.assertEqual(pair(fields, "production"), ("none", "start"))
+        self.assertEqual([f["field"] for f in cd.open_fields(fields)], ["lint-command", "test-command"])
 
-    def test_with_no_remote_the_id_is_a_text_card(self):
+    def test_with_no_remote_the_integration_branch_is_a_text_card(self):
         root = str(sample(self.parent, remote=False))
         fields = cd.draft(root, cd.read(root))
         question = cd.questions(fields)[0]
-        self.assertEqual(question["subject"], "project-id")
-        self.assertTrue(question["text"])
-        self.assertEqual(question["options"], [])
-        ask = ("Which project is this repository?\n"
-               "It has no remote that names it: type its id, as owner/name.")
-        self.assertEqual(question["ask"], ask)
-        self.assertEqual(pair(fields, "project-name"), ("sample-app", "folder"))
+        ask = ("Which branch does finished work of sample-app merge into?\n"
+               "It has no remote, so the console cannot tell: choose a branch or type its name.")
+        self.assertEqual((question["subject"], question["ask"], question["text"]),
+                         ("integration-branch", ask, True))
+        self.assertEqual(question["options"], [{"value": "trunk", "label": "trunk"}])
         self.assertEqual([f["field"] for f in cd.open_fields(fields)],
-                         ["project-id", "default-branch", "tracker", "build-command", "test-command"])
-        branch = by_field(fields)["default-branch"]
-        self.assertEqual(branch["options"], [{"value": "trunk", "label": "trunk"}])
-        new, _ = cd.set_value(fields, "tracker", "none", entries=[], root=root)
+                         ["integration-branch", "lint-command", "test-command"])
+        new, _ = cd.set_value(fields, "release", "unsupported")
         self.assertEqual(cd.questions(new)[0]["ask"], ask)
 
     def test_commands_are_found_in_tracked_files(self):
         root = sample(self.parent, remote=False)
-        commit(root, {"justfile": "build:\n\techo b\ntest:\n\techo t\n"})
+        commit(root, {"justfile": "lint:\n\techo b\ntest:\n\techo t\n"})
         fields = cd.draft(str(root), cd.read(str(root)))
-        self.assertEqual(pair(fields, "build-command"), ("just build", "files"))
+        self.assertEqual(pair(fields, "lint-command"), ("just lint", "files"))
         self.assertEqual(pair(fields, "test-command"), ("just test", "files"))
         other = sample(self.parent / "two", remote=False)
         commit(other, {"package.json": json.dumps({"scripts": {"test": "x"}})})
         fields = cd.draft(str(other), cd.read(str(other)))
         self.assertEqual(pair(fields, "test-command"), ("npm test", "files"))
-        self.assertEqual(pair(fields, "build-command"), (None, None))
+        self.assertEqual(pair(fields, "lint-command"), (None, None))
+        for name, lint in (("Cargo.toml", "cargo clippy"), ("go.mod", "go vet ./...")):
+            tool = sample(self.parent / name, remote=False)
+            commit(tool, {name: "x\n"})
+            self.assertEqual(pair(cd.draft(str(tool), cd.read(str(tool))), "lint-command"),
+                             (lint, "files"))
 
     def test_a_just_recipe_is_found_by_its_whole_name_and_runs_with_no_argument(self):
-        for index, (text, build, test) in enumerate((
-                ("build-release:\n\techo b\ntest-unit:\n\techo t\n", None, None),
-                ("build target:\n\techo b\ntest +files:\n\techo t\n", None, None),
-                ("build target='a:b' flag:\n\techo b\n", None, None),
-                ("build target='x' *rest:\n\techo b\ntest: build\n\techo t\n",
-                 "just build", "just test"),
-                ("build := 'x'\ntest $name=\"a b\":\n\techo t\n", None, "just test"))):
+        for index, (text, lint, test) in enumerate((
+                ("lint-release:\n\techo b\ntest-unit:\n\techo t\n", None, None),
+                ("lint target:\n\techo b\ntest +files:\n\techo t\n", None, None),
+                ("lint target='a:b' flag:\n\techo b\n", None, None),
+                ("lint target='x' *rest:\n\techo b\ntest: lint\n\techo t\n",
+                 "just lint", "just test"),
+                ("lint := 'x'\ntest $name=\"a b\":\n\techo t\n", None, "just test"))):
             root = sample(self.parent / f"j{index}", remote=False)
             commit(root, {"justfile": text})
             fields = cd.draft(str(root), cd.read(str(root)))
-            self.assertEqual(pair(fields, "build-command")[0], build, text)
+            self.assertEqual(pair(fields, "lint-command")[0], lint, text)
             self.assertEqual(pair(fields, "test-command")[0], test, text)
 
     def expected_contract(self):
+        unsupported = {"support": "unsupported"}
         return {
-            "schema_version": 2,
-            "project": {"id": ID, "name": "sample-app"},
-            "bindings": {
-                "vcs": {
-                    "kind": "git", "default_branch": "trunk", "integration_branch": "trunk",
-                    "branch_pattern": "issue-<num>-<slug>",
-                    "worktree": {"root": ".worktrees", "prefix": "worktree-"},
-                    "commit": {"co_authored_by": False, "signed": False},
-                    "merge": {"strategy": "merge", "delete_branch": True},
-                },
-                "tracker": {"kind": "github", "cli": "gh", "repo_slug": ID,
-                            "credential_env": {"unset_before_invocation": []}},
-                "paths": {
-                    "artifacts": {"specs": ".agents/artifacts/specs",
-                                  "plans": ".agents/artifacts/plans"},
-                    "context": [], "standards": [], "architecture": ["README.md"],
-                    "operations": [], "hints": [], "rejections": [],
-                },
-                "commands": {},
-                "workflow": {
-                    "verification": [],
-                    "orchestration": {"max_parallel": 1, "attempt_budget_minutes": 240},
-                    "review": {"plan": None, "code": None},
-                },
-            },
+            "schema_version": 3,
+            "bindings": {"vcs": {"integration_branch": "trunk"},
+                         "commands": {"lint": {"argv": ["just", "lint"]},
+                                      "test": {"argv": ["just", "test"]}}},
             "capabilities": {
-                "tracker": {"support": "supported"},
-                "worktrees": {"support": "supported"},
-                "knowledge.context": {"support": "unsupported"},
-                "knowledge.standards": {"support": "unsupported"},
-                "knowledge.architecture": {"support": "supported"},
-                "knowledge.hints": {"support": "unsupported"},
-                "verification": {"support": "unsupported"},
-                "review.plan": {"support": "unsupported"},
-                "review.code": {"support": "unsupported"},
+                "tracker": {"support": "supported"}, "worktrees": {"support": "supported"},
+                "knowledge.context": unsupported, "knowledge.standards": unsupported,
+                "knowledge.architecture": unsupported, "knowledge.hints": unsupported,
+                "verification": {"support": "supported"},
+                "review.plan": {"support": "supported"}, "review.code": {"support": "supported"},
             },
             "projections": [],
             "release": "unsupported",
@@ -263,132 +242,68 @@ class ContractDraftTest(unittest.TestCase):
 
     def test_the_drafted_contract_has_the_wire_format(self):
         root, fields = self.remote_fields()
-        fields = self.settled(fields, root, build_command="none", test_command="none")
+        fields = self.settled(fields, root, lint_command="just lint", test_command="just test")
         self.assertEqual(cd.contract(fields), self.expected_contract())
-        fields = self.settled(fields, root, review_plan_command="true")
-        drafted = cd.contract(fields)
-        self.assertEqual(drafted["bindings"]["commands"]["review-plan"],
-                         {"argv": ["true"], "cwd": ".", "env": []})
-        self.assertEqual(drafted["bindings"]["workflow"]["review"]["plan"], "review-plan")
-        self.assertEqual(drafted["capabilities"]["review.plan"], {"support": "supported"})
-        self.assertNotIn("light_lane", drafted["bindings"]["workflow"])
+        production = '{"none": true}'
+        drafted = cd.contract(self.settled(fields, root, production=production))
+        self.assertEqual(drafted["production"], {"none": True})
+        self.assertEqual(cd.contract(fields).get("production"), None)
+        drafted = cd.contract(self.settled(fields, root, release='{"kind": "x"}'))
+        self.assertEqual(drafted["release"], {"kind": "x"})
+        self.assertEqual(cd.contract([f for f in fields if f["field"] not in cd.FACTS]),
+                         self.expected_contract())
+
+    def test_the_knowledge_files_the_repository_holds_are_the_supported_capabilities(self):
+        root = sample(self.parent, remote=True)
+        for name in ("docs/standards", "docs"):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        commit(root, {"docs/CONTEXT-MAP.md": "x\n", "docs/standards/python.md": "x\n",
+                      "docs/guides-not-the-home.md": "x\n"})
+        fields = cd.draft(str(root), cd.read(str(root)))
+        self.assertEqual(pair(fields, "knowledge-homes"),
+                         ("docs/CONTEXT-MAP.md, docs/standards", "files"))
+        capabilities = cd.contract(fields)["capabilities"]
+        self.assertEqual({name: capabilities[name]["support"] for name in capabilities
+                          if name.startswith("knowledge.")},
+                         {"knowledge.context": "supported", "knowledge.standards": "supported",
+                          "knowledge.architecture": "unsupported", "knowledge.hints": "unsupported"})
+        self.assertEqual(len(capabilities), 9)
 
     def test_the_drafted_contract_asks_no_light_lane(self):
         root, fields = self.remote_fields()
-        fields = self.settled(fields, root, build_command="none", test_command="none")
+        fields = self.settled(fields, root, lint_command="just lint", test_command="just test")
         drafted = cd.contract(fields)
         refused = cd.set_value(
-            fields, "light-lane", '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
-            entries=[], root=root)
+            fields, "light-lane", '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}')
         for table in (cd.FIELDS, cd.LABELS, cd.STARTS, cd.REST_WORDS, cd.PLACEHOLDERS,
                       cd.JSON_FIELDS):
             self.assertNotIn("light-lane", table)
         for pointers in cd.POINTERS.values():
             self.assertNotIn("/bindings/workflow/light_lane", pointers)
         self.assertEqual(refused, (None, cd.UNKNOWN_FIELD))
-        self.assertEqual(sorted(drafted["bindings"]["workflow"]),
-                         ["orchestration", "review", "verification"])
+        self.assertNotIn("workflow", drafted["bindings"])
 
     def test_a_saved_draft_drops_the_retired_light_lane_field(self):
         root, fields = self.remote_fields()
-        kept = [f for f in fields if f["field"] != "light-lane"]
         light = {"field": "light-lane", "label": "light lane",
                  "value": '{"mode": "shadow", "budget_minutes": 90, "risk_paths": []}',
                  "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
                  "text": True, "reason": None, "ask": "What is the light lane of sample-app?"}
         self.assertEqual(set(light), cd.FIELD_KEYS)
-        at = [f["field"] for f in kept].index("attempt-budget") + 1
-        saved = [*kept[:at], light, *kept[at:]]
-        refreshed = cd.refresh(root, saved)
-        self.assertEqual([f["field"] for f in refreshed], [f["field"] for f in kept])
-        for new, old in zip(refreshed, kept):
+        refreshed = cd.refresh(root, [*fields[:3], light, *fields[3:]])
+        self.assertEqual([f["field"] for f in refreshed], [f["field"] for f in fields])
+        for new, old in zip(refreshed, fields):
             self.assertEqual((new["value"], new["source"], new["reason"]),
                              (old["value"], old["source"], old["reason"]))
         cd.shown(refreshed)
         cd.more_line(refreshed)
-        self.assertNotIn("light_lane", cd.contract(refreshed)["bindings"]["workflow"])
-
-    def test_the_drafted_contract_resolves(self):
-        root, fields = self.remote_fields()
-        fields = self.settled(fields, root, build_command="none", test_command="none")
-        version = json.loads(MANIFEST.read_text())["platform_version"]
-        major = int(version.split(".")[0])
-        drafted = cd.contract(fields)
-        drafted["platform"] = {"min_inclusive": version, "max_exclusive": f"{major + 1}.0.0"}
-        copy = self.parent / "copy"
-        shutil.copytree(root, copy)
-        (copy / ".agents").mkdir()
-        (copy / ".agents" / "project.json").write_text(json.dumps(drafted))
-        home = self.parent / "home"
-        (home / ".agents" / "share").mkdir(parents=True)
-        shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
-        env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT / "python")}
-        done = subprocess.run(
-            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
-             "--repo-root", str(copy)],
-            env=env, text=True, stdin=subprocess.DEVNULL, capture_output=True)
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("workflow", cd.contract(refreshed)["bindings"])
 
     def environment_checkout(self, parent=None):
         root = sample(parent or self.parent, remote=True)
         commit(root, {"devenv.nix": "{ ... }: { }\n"})
         install_hook(root)
         return root
-
-    def test_a_devenv_checkout_with_an_installed_hook_proposes_its_development_shell(self):
-        root = self.environment_checkout()
-        reading = cd.read(str(root))
-        fields = cd.draft(str(root), reading)
-        self.assertEqual(reading["hooks"], ["pre-commit"])
-        self.assertEqual(reading["environments"], ["devenv.nix"])
-        self.assertEqual([f["field"] for f in fields], [*cd.FIELDS, "commit-environment"])
-        self.assertEqual(pair(fields, "commit-environment"), ("devenv shell --", "files"))
-        self.assertNotIn("commit-environment", [f["field"] for f in cd.open_fields(fields)])
-        line = "commits run in its development shell: devenv shell (found in its files)"
-        entry = next(e for e in cd.shown(fields) if e["field"] == "commit-environment")
-        self.assertEqual(entry["line"], line)
-        self.assertIs(entry["more"], False)
-        self.assertEqual(entry["options"], [
-            {"value": "none", "label": "Commits run outside a development shell"}])
-        self.assertEqual(entry["placeholder"], "the development shell command")
-        self.assertEqual(cd.proposed_lines(fields), [line])
-        self.assertEqual(
-            by_field(fields)["commit-environment"]["ask"],
-            f"Which command opens the development shell the commits of {root.name} run in?\n"
-            "Its commit hooks need its development shell: type the command, or say they need none.")
-        self.assertEqual(cd.more_line(fields), "and 20 more settings at their usual values")
-        fields = self.settled(fields, str(root), build_command="none", test_command="none")
-        drafted = cd.contract(fields)
-        self.assertEqual(drafted["bindings"]["commands"]["commit-environment"],
-                         {"argv": ["devenv", "shell", "--"], "cwd": ".", "env": []})
-        self.assertEqual(drafted["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
-        del drafted["bindings"]["commands"]["commit-environment"]
-        del drafted["bindings"]["vcs"]["commit"]["environment"]
-        self.assertEqual(drafted, self.expected_contract())
-
-    def test_the_drafted_contract_with_a_commit_environment_resolves(self):
-        root = self.environment_checkout()
-        fields = cd.draft(str(root), cd.read(str(root)))
-        fields = self.settled(fields, str(root), build_command="none", test_command="none")
-        version = json.loads(MANIFEST.read_text())["platform_version"]
-        major = int(version.split(".")[0])
-        drafted = cd.contract(fields)
-        drafted["platform"] = {"min_inclusive": version, "max_exclusive": f"{major + 1}.0.0"}
-        copy = self.parent / "copy"
-        shutil.copytree(root, copy)
-        (copy / ".agents").mkdir()
-        (copy / ".agents" / "project.json").write_text(json.dumps(drafted))
-        home = self.parent / "home"
-        (home / ".agents" / "share").mkdir(parents=True)
-        shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
-        env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT / "python")}
-        done = subprocess.run(
-            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
-             "--repo-root", str(copy)],
-            env=env, text=True, stdin=subprocess.DEVNULL, capture_output=True)
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        resolved = json.loads(done.stdout)
-        self.assertEqual(resolved["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
 
     def global_hooks(self, parent):
         hooks = parent / "f-global-hooks"
@@ -402,50 +317,6 @@ class ContractDraftTest(unittest.TestCase):
         self.addCleanup(os.environ.pop if saved is None else os.environ.__setitem__,
                         "GIT_CONFIG_GLOBAL", *([] if saved is None else [saved]))
 
-    def test_without_a_committed_devenv_or_an_installed_commit_hook_the_draft_is_as_today(self):
-        def a(root):
-            commit(root, {"devenv.nix": "{ }\n"})
-            install_hook(root, "pre-commit.sample")
-
-        def b(root):
-            install_hook(root)
-
-        def c(root):
-            (root / "devenv.nix").write_text("{ }\n")
-            install_hook(root)
-
-        def d(root):
-            commit(root, {"devenv.nix": "{ }\n"})
-            install_hook(root, mode=0o644)
-
-        def e(root):
-            commit(root, {"devenv.nix": "{ }\n"})
-            install_hook(root, "pre-push")
-
-        def f(root):
-            commit(root, {"devenv.nix": "{ }\n"})
-            self.global_hooks(root.parent)
-
-        def h(root):
-            commit(root, {"devenv.nix": "{ }\n"})
-            install_hook(root, "post-commit", "#!/bin/sh\ngit lfs post-commit \"$@\"\n")
-
-        def i(root):
-            (root / "devenv.nix").write_text("{ }\n")
-            git(root, "add", "devenv.nix")
-            install_hook(root)
-
-        for letter, arrange in (("a", a), ("b", b), ("c", c), ("d", d), ("e", e), ("f", f),
-                                ("h", h), ("i", i)):
-            with self.subTest(case=letter):
-                root = sample(self.parent / letter, remote=True)
-                arrange(root)
-                fields = cd.draft(str(root), cd.read(str(root)))
-                self.assertEqual([x["field"] for x in fields], list(cd.FIELDS))
-                self.assertEqual(getattr(cd, "proposed_lines", lambda fs: [])(fields), [])
-                fields = self.settled(fields, str(root), build_command="none", test_command="none")
-                self.assertEqual(cd.contract(fields), self.expected_contract())
-
     def test_only_the_repository_s_own_hooks_directory_is_read(self):
         with self.subTest(case="g"):
             root = sample(self.parent / "g", remote=True)
@@ -455,15 +326,13 @@ class ContractDraftTest(unittest.TestCase):
             (root / "local-hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
             (root / "local-hooks" / "pre-commit").chmod(0o755)
             commit(root, {})
-            reading = cd.read(str(root))
+            reading = cd.read_hooks(str(root))
             self.assertEqual(reading["hooks"], ["pre-commit"])
-            fields = cd.draft(str(root), reading)
-            self.assertIn("commit-environment", [x["field"] for x in fields])
         with self.subTest(case="f-prime"):
             root = sample(self.parent / "f", remote=True)
             commit(root, {"devenv.nix": "{ }\n"})
             self.global_hooks(root.parent)
-            reading = cd.read(str(root))
+            reading = cd.read_hooks(str(root))
             self.assertEqual(reading["hooks"], [])
             self.assertEqual(reading["environments"], ["devenv.nix"])
 
@@ -480,10 +349,8 @@ class ContractDraftTest(unittest.TestCase):
                 (root / "local-hooks" / "pre-commit").chmod(mode)
                 if track:
                     commit(root, {})
-                reading = cd.read(str(root))
+                reading = cd.read_hooks(str(root))
                 self.assertEqual(reading["hooks"], wanted)
-                fields = cd.draft(str(root), reading)
-                self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
 
     def test_a_relative_hooks_path_that_leaves_the_checkout_or_cannot_be_verified_has_no_hooks(self):
         root = sample(self.parent / "outside", remote=True)
@@ -493,7 +360,7 @@ class ContractDraftTest(unittest.TestCase):
         (outside / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
         (outside / "pre-commit").chmod(0o755)
         git(root, "config", "core.hooksPath", "../../outside-hooks")
-        self.assertEqual(cd.read(str(root))["hooks"], [])
+        self.assertEqual(cd.read_hooks(str(root))["hooks"], [])
         untracked = sample(self.parent / "unprobed", remote=True)
         commit(untracked, {"devenv.nix": "{ }\n"})
         git(untracked, "config", "core.hooksPath", "local-hooks")
@@ -506,9 +373,7 @@ class ContractDraftTest(unittest.TestCase):
             return None if "--show-toplevel" in arguments else real(path, *arguments, **kwargs)
 
         with unittest.mock.patch.object(cd, "_git", without_toplevel):
-            self.assertEqual(cd.read(str(untracked))["hooks"], [])
-        fields = cd.draft(str(untracked), cd.read(str(untracked)))
-        self.assertNotIn("commit-environment", [x["field"] for x in fields])
+            self.assertEqual(cd.read_hooks(str(untracked))["hooks"], [])
 
     def test_a_tracked_hook_link_counts_only_when_it_resolves_to_a_tracked_executable(self):
         for letter, target, mode, wanted in (
@@ -525,9 +390,7 @@ class ContractDraftTest(unittest.TestCase):
                 (root / "local-hooks" / "real-hook").chmod(mode)
                 (root / "local-hooks" / "pre-commit").symlink_to(target)
                 commit(root, {"devenv.nix": "{ }\n"})
-                self.assertEqual(cd.read(str(root))["hooks"], wanted)
-                fields = cd.draft(str(root), cd.read(str(root)))
-                self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
+                self.assertEqual(cd.read_hooks(str(root))["hooks"], wanted)
 
     def test_a_hooks_path_through_a_tracked_directory_link_resolves_in_head(self):
         for letter, setting, links, wanted in (
@@ -547,10 +410,8 @@ class ContractDraftTest(unittest.TestCase):
                     (root / name).parent.mkdir(parents=True, exist_ok=True)
                     (root / name).symlink_to(target)
                 commit(root, {"devenv.nix": "{ }\n"})
-                reading = cd.read(str(root))
+                reading = cd.read_hooks(str(root))
                 self.assertEqual(reading["hooks"], wanted)
-                fields = cd.draft(str(root), reading)
-                self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
 
     def test_only_the_local_hooks_path_counts_never_a_worktree_scoped_one(self):
         for letter, common_hook, wanted in (("hides-nothing-real", False, []), ("hides-real", True, ["pre-commit"])):
@@ -566,10 +427,8 @@ class ContractDraftTest(unittest.TestCase):
                     install_hook(root)
                 git(root, "config", "extensions.worktreeConfig", "true")
                 git(root, "config", "--worktree", "core.hooksPath", str(scoped))
-                reading = cd.read(str(root))
+                reading = cd.read_hooks(str(root))
                 self.assertEqual(reading["hooks"], wanted)
-                fields = cd.draft(str(root), reading)
-                self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
 
     def test_a_looping_tracked_hook_link_has_no_hooks(self):
         root = sample(self.parent, remote=True)
@@ -577,7 +436,7 @@ class ContractDraftTest(unittest.TestCase):
         (root / "local-hooks").mkdir()
         (root / "local-hooks" / "pre-commit").symlink_to("pre-commit")
         commit(root, {"devenv.nix": "{ }\n"})
-        self.assertEqual(cd.read(str(root))["hooks"], [])
+        self.assertEqual(cd.read_hooks(str(root))["hooks"], [])
 
     def test_a_command_line_hooks_path_never_counts_as_the_repository_s_hooks(self):
         root = sample(self.parent / "shared", remote=True)
@@ -589,10 +448,8 @@ class ContractDraftTest(unittest.TestCase):
         self.scoped_environment({
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
             "GIT_CONFIG_VALUE_0": str(shared), "GIT_CONFIG_PARAMETERS": None})
-        reading = cd.read(str(root))
+        reading = cd.read_hooks(str(root))
         self.assertEqual(reading["hooks"], [])
-        fields = cd.draft(str(root), reading)
-        self.assertNotIn("commit-environment", [x["field"] for x in fields])
 
     def scoped_environment(self, values):
         """Set (a string) or remove (None) each named variable until the test ends."""
@@ -615,9 +472,9 @@ class ContractDraftTest(unittest.TestCase):
         config.write_text(f"[safe]\n\tdirectory = {root}\n")
         self.scoped_environment({
             **self.UNTRUSTED_HOST, "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_SYSTEM": os.devnull})
-        self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
+        self.assertEqual(cd.read_hooks(str(root))["hooks"], ["pre-commit"])
         config.write_text("")
-        self.assertEqual(cd.read(str(root))["hooks"], [])
+        self.assertEqual(cd.read_hooks(str(root))["hooks"], [])
 
     def test_the_hooks_are_found_in_a_checkout_trusted_only_through_the_system_configuration(self):
         root = self.environment_checkout()
@@ -625,9 +482,9 @@ class ContractDraftTest(unittest.TestCase):
         system.write_text(f"[safe]\n\tdirectory = {root}\n")
         self.scoped_environment({
             **self.UNTRUSTED_HOST, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": str(system)})
-        self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
+        self.assertEqual(cd.read_hooks(str(root))["hooks"], ["pre-commit"])
         system.write_text("")
-        self.assertEqual(cd.read(str(root))["hooks"], [])
+        self.assertEqual(cd.read_hooks(str(root))["hooks"], [])
 
     def test_a_scoped_environment_is_restored_after_the_test(self):
         self.scoped_environment({"GIT_CONFIG_COUNT": "0", "GIT_CONFIG_GLOBAL": "known"})
@@ -648,42 +505,8 @@ class ContractDraftTest(unittest.TestCase):
         (root / "devenv.nix").mkdir()
         commit(root, {"devenv.nix/README.md": "x\n"})
         install_hook(root)
-        reading = cd.read(str(root))
+        reading = cd.read_hooks(str(root))
         self.assertEqual(reading["environments"], [])
-        fields = cd.draft(str(root), reading)
-        self.assertNotIn("commit-environment", [x["field"] for x in fields])
-
-    def test_the_owner_can_change_or_drop_the_proposed_commit_environment(self):
-        root = self.environment_checkout()
-        fields = cd.draft(str(root), cd.read(str(root)))
-        fields = self.settled(fields, str(root), build_command="none", test_command="none")
-        dropped, error = cd.set_value(fields, "commit-environment", "none", entries=[], root=str(root))
-        self.assertIsNone(error)
-        line = "commits run in its development shell: none (set by you)"
-        self.assertEqual([e["line"] for e in cd.shown(dropped) if e["field"] == "commit-environment"],
-                         [line])
-        self.assertEqual(cd.proposed_lines(dropped), [line])
-        drafted = cd.contract(dropped)
-        self.assertNotIn("commit-environment", drafted["bindings"]["commands"])
-        self.assertNotIn("environment", drafted["bindings"]["vcs"]["commit"])
-        typed, error = cd.set_value(fields, "commit-environment", "nix develop --command",
-                                    entries=[], root=str(root))
-        self.assertIsNone(error)
-        self.assertEqual(cd.contract(typed)["bindings"]["commands"]["commit-environment"]["argv"],
-                         ["nix", "develop", "--command"])
-        self.assertEqual(cd.set_value(fields, "commit-environment", "devenv 'shell", entries=[],
-                                      root=str(root)), (None, cd.COMMAND_UNREADABLE))
-        again, _ = cd.set_value(fields, "commit-environment", "devenv shell --", entries=[],
-                                root=str(root))
-        self.assertEqual(
-            next(e["line"] for e in cd.shown(again) if e["field"] == "commit-environment"),
-            "commits run in its development shell: devenv shell (set by you)")
-        self.assertEqual(cd.contract(again)["bindings"]["commands"]["commit-environment"]["argv"],
-                         ["devenv", "shell", "--"])
-        plain = str(sample(self.parent / "plain", remote=True))
-        bare = cd.draft(plain, cd.read(plain))
-        self.assertEqual(cd.set_value(bare, "commit-environment", "devenv shell --", entries=[],
-                                      root=plain), (None, cd.UNKNOWN_FIELD))
 
     def test_a_refusal_of_the_commit_environment_reopens_its_field(self):
         wanted = ("commit-environment", "The plan refused the commits run in its development shell: m")
@@ -693,112 +516,86 @@ class ContractDraftTest(unittest.TestCase):
                      "violations": [{"pointer": pointer, "message": "m"}]}
             self.assertEqual(cd.refused_field(error), wanted)
         error = {"repair_id": "adopt.draft.invalid",
-                 "violations": [{"pointer": "/bindings/vcs/commit/signed", "message": "m"}]}
-        self.assertEqual(cd.refused_field(error)[0], "commit-signed")
-
-    def test_a_typed_id_is_checked_against_the_rule_and_the_registry(self):
-        root, fields = self.remote_fields()
-        before = json.dumps(fields)
-        self.assertEqual(cd.set_value(fields, "project-id", "not an id", entries=[], root=root),
-                         (None, cd.ID_RULE))
-        self.assertEqual(cd.set_value(fields, "project-id", "a/b/c", entries=[], root=root),
-                         (None, cd.ID_RULE))
-        self.assertEqual(cd.set_value(fields, "project-id", "  ", entries=[], root=root),
-                         (None, cd.EMPTY_VALUE))
-        entries = [{"project_id": "someone/taken", "root": "/elsewhere"}]
-        self.assertEqual(cd.set_value(fields, "project-id", "someone/taken", entries=entries, root=root),
-                         (None, "someone/taken is already registered for another checkout"))
-        here = [{"project_id": "someone/taken", "root": root}]
-        accepted, error = cd.set_value(fields, "project-id", "someone/taken", entries=here, root=root)
-        self.assertIsNone(error)
-        self.assertEqual(pair(accepted, "project-id"), ("someone/taken", "owner"))
-        new, error = cd.set_value(fields, "project-id", "sample-owner/other", entries=[], root=root)
-        self.assertIsNone(error)
-        self.assertEqual(pair(new, "project-id"), ("sample-owner/other", "owner"))
-        self.assertEqual(json.dumps(fields), before)
-
-    def test_a_read_id_registered_for_another_checkout_opens_its_card(self):
-        root = str(sample(self.parent, remote=True))
-        reading = cd.read(root)
-        entry = {"project_id": ID, "root": "/elsewhere"}
-        text = f"{ID} is already registered for another checkout"
-        fields = cd.draft(root, reading, entries=[entry])
-        record = by_field(fields)["project-id"]
-        self.assertEqual((record["value"], record["reason"]), (ID, text))
-        self.assertEqual(cd.open_fields(fields)[0]["field"], "project-id")
-        question = cd.questions(fields)[0]
-        self.assertEqual((question["why"], question["text"]), (text, True))
-        plain = cd.draft(root, reading)
-        self.assertEqual(cd.taken_id(plain, [entry], root), text)
-        self.assertIsNone(cd.taken_id(plain, [], root))
+                 "violations": [{"pointer": "/bindings/vcs/integration_branch", "message": "m"}]}
+        self.assertEqual(cd.refused_field(error)[0], "integration-branch")
 
     def test_choices_and_typed_values_are_checked_before_the_contract(self):
         root, fields = self.remote_fields()
 
         def put(field, value):
-            return cd.set_value(fields, field, value, entries=[], root=root)
+            return cd.set_value(fields, field, value)
 
-        self.assertEqual(put("tracker", "gitlab"), (None, cd.NOT_OFFERED))
         self.assertEqual(put("nonsense", "x"), (None, cd.UNKNOWN_FIELD))
-        for field, value in (("build-command", "none"), ("build-command", "make all"),
-                             ("release", "unsupported")):
+        self.assertEqual(put("project-identity", "a/b"), (None, cd.UNKNOWN_FIELD))
+        self.assertEqual(put("lint-command", "  "), (None, cd.EMPTY_VALUE))
+        for field, value in (("lint-command", "make all"), ("release", "unsupported"),
+                             ("production", "none"), ("integration-branch", "main")):
             new, error = put(field, value)
             self.assertIsNone(error)
             cd.contract(new)
-        for field, value in (("build-command", 'echo "unterminated'),
-                             ("build-command", "echo trailing\\"),
-                             ("review-code-command", 'say "x')):
+        for field, value in (("lint-command", 'echo "unterminated'),
+                             ("test-command", "echo trailing\\")):
             self.assertEqual(put(field, value), (None, cd.COMMAND_UNREADABLE))
-        for value in ('{"oops"', '{"a": 1, "a": 2}'):
-            self.assertEqual(put("release", value), (None, cd.NOT_JSON))
+        for field in ("release", "production"):
+            for value in ('{"oops"', '{"a": 1, "a": 2}'):
+                self.assertEqual(put(field, value), (None, cd.NOT_JSON))
 
     def test_a_resolver_refusal_maps_to_its_field_in_plain_words(self):
         root, fields = self.remote_fields()
-        message = "must be a non-empty repository-relative path with no '..' segment"
+        message = "must be a non-empty array of strings"
         error = {"code": "adopt_failure", "repair_id": "adopt.draft.invalid",
-                 "violations": [{"pointer": "/bindings/paths/architecture/0", "message": message}]}
+                 "violations": [{"pointer": "/bindings/commands/lint/argv", "message": message}]}
         refused = cd.refused_field(error)
-        text = f"The plan refused the documentation: {message}"
-        self.assertEqual(refused, ("docs-paths", text))
-        slug = {"repair_id": "adopt.draft.invalid",
-                "violations": [{"pointer": "/bindings/tracker/repo_slug", "message": "m  x"}]}
-        self.assertEqual(cd.refused_field(slug), ("project-id", "The plan refused the project id: m x"))
-        taken = {"repair_id": "adopt.draft.id_taken", "violations": [
-            {"pointer": "/project/id",
-             "message": "the project id is already registered for another checkout"}]}
-        self.assertEqual(cd.refused_field(taken), (
-            "project-id",
-            "The plan refused the project id: the project id is already registered for another checkout"))
-        self.assertIsNone(cd.refused_field({**taken, "repair_id": "adopt.other"}))
+        text = f"The plan refused the lint command: {message}"
+        self.assertEqual(refused, ("lint-command", text))
+        wider = {"repair_id": "adopt.draft.invalid",
+                 "violations": [{"pointer": "/production/none", "message": "m  x"}]}
+        self.assertEqual(cd.refused_field(wider), ("production", "The plan refused the production rules: m x"))
         self.assertIsNone(cd.refused_field({"repair_id": "adopt.draft.invalid", "violations": [
             {"pointer": "/schema_version", "message": "x"}]}))
+        for pointer in ("/project/id", "/platform", "/bindings/vcs/merge/required_checks"):
+            self.assertIsNone(cd.refused_field({"repair_id": "adopt.draft.invalid", "violations": [
+                {"pointer": pointer, "message": "x"}]}))
+        self.assertIsNone(cd.refused_field({**error, "repair_id": "adopt.draft.id_taken"}))
         marked = cd.mark_refused(fields, *refused)
-        docs = [q for q in cd.questions(marked) if q["subject"] == "docs-paths"][0]
-        self.assertEqual((docs["why"], docs["text"]), (text, True))
+        lint = [q for q in cd.questions(marked) if q["subject"] == "lint-command"][0]
+        self.assertEqual((lint["why"], lint["text"]), (text, True))
         for question in cd.questions(marked):
             for part in (question["ask"], question["why"] or ""):
                 for word in ("adopt.", "contract.", "/bindings"):
                     self.assertNotIn(word, part)
 
+    def test_a_refusal_naming_only_derived_values_or_the_project_id_is_a_fact_refusal(self):
+        def invalid(*pointers):
+            return {"repair_id": "adopt.draft.invalid",
+                    "violations": [{"pointer": p, "message": "m"} for p in pointers]}
+
+        self.assertTrue(cd.fact_refused({"repair_id": "adopt.draft.id_taken", "violations": []}))
+        for pointers in (("/platform",), ("/project/id", "/bindings/tracker/repo_slug"),
+                         ("/capabilities/knowledge.context",), ("/platform/min_inclusive",)):
+            self.assertTrue(cd.fact_refused(invalid(*pointers)), pointers)
+        for pointers in ((), ("/bindings/commands/lint/argv",), ("/platform", "/release"),
+                         ("/platformx",)):
+            self.assertFalse(cd.fact_refused(invalid(*pointers)), pointers)
+        self.assertFalse(cd.fact_refused({"repair_id": "adopt.other", "violations": [
+            {"pointer": "/platform", "message": "m"}]}))
+
     def test_every_settled_value_is_shown_with_its_source(self):
         root, fields = self.remote_fields()
         lines = cd.shown(fields)
-        self.assertEqual(len(lines), 25)
-        self.assertTrue(all(entry["field"] for entry in lines))
-        order = [entry["field"] for entry in lines]
-        self.assertEqual(order, [f for f in cd.FIELDS if f not in ("build-command", "test-command")])
+        self.assertEqual([entry["field"] for entry in lines],
+                         ["integration-branch", "release", "production", *cd.FACTS])
         self.assertEqual([e["field"] for e in lines if not e["more"]],
-                         ["project-id", "project-name", "default-branch", "tracker", "docs-paths"])
+                         ["integration-branch", *cd.FACTS])
         for entry in lines:
             self.assertEqual(set(entry),
-                             {"field", "line", "value", "options", "text", "more", "placeholder"})
+                             {"field", "line", "value", "options", "text", "more", "fact", "placeholder"})
         texts = [entry["line"] for entry in lines]
         for line in (
-            f"project id: {ID} (read from its remote)",
-            f"issue tracker: GitHub, as {ID} (read from its remote)",
-            "finished work merges into the default branch",
-            "work branches are named after their issue",
+            "branch finished work merges into: trunk (read from its remote)",
+            f"project id and issue tracker: GitHub, as {ID} (read from its remote)",
             "it makes no releases",
+            "it declares no production rules",
         ):
             self.assertIn(line, texts)
 
@@ -813,41 +610,40 @@ class ContractDraftTest(unittest.TestCase):
             for term in ("<num>", "<slug>", "light lane", "hint", "operations path",
                          "rejection path", "the console's starting value"):
                 self.assertNotIn(term, text.lower())
-        (projections,) = [e for e in shown if e["field"] == "projections"]
-        self.assertEqual([o["label"] for o in projections["options"]],
-                         ["It generates no agent instruction files"])
+        (production,) = [e for e in shown if e["field"] == "production"]
+        self.assertEqual([o["label"] for o in production["options"]],
+                         ["It declares no production rules"])
 
     def test_the_counted_line_says_how_many_and_whether_you_changed_any(self):
         root, fields = self.remote_fields()
-        count = len([f for f in cd.FIELDS if f not in cd.MAIN])
-        self.assertEqual(count, 20)
-        self.assertEqual(cd.more_line(fields), f"and {count} more settings at their usual values")
-        new, _ = cd.set_value(fields, "max-parallel", "2", entries=[], root=root)
-        self.assertEqual(cd.more_line(new), f"and {count} more settings, 1 of them set by you")
-        (line,) = [e["line"] for e in cd.shown(new) if e["field"] == "max-parallel"]
-        self.assertEqual(line, "deliveries at once: 2 (set by you)")
+        self.assertEqual(cd.more_line(fields), "and 2 more settings at their usual values")
+        new, _ = cd.set_value(fields, "release", '{"kind": "x"}')
+        self.assertEqual(cd.more_line(new), "and 2 more settings, 1 of them set by you")
+        (line,) = [e["line"] for e in cd.shown(new) if e["field"] == "release"]
+        self.assertEqual(line, 'how it is released: {"kind": "x"} (set by you)')
+        self.assertIsNone(cd.more_line(cd.reconcile_fields(root, {
+            "stranded": ["pre-commit"], "environments": ["devenv.nix"]})))
 
     def test_every_text_field_has_a_placeholder(self):
         root, fields = self.remote_fields()
-        for field in cd.FIELDS:
+        for field in (*cd.FIELDS, *cd.FACTS):
             if cd.TEXT[field]:
                 self.assertTrue(isinstance(cd.placeholder(field), str) and cd.placeholder(field))
             else:
                 self.assertIsNone(cd.placeholder(field))
-        self.assertEqual([f for f in cd.FIELDS if cd.placeholder(f) is None],
-                         ["commit-signed", "delete-branch", "tracker"])
-        self.assertEqual(cd.placeholder("project-id"), "owner/name")
-        self.assertEqual(cd.placeholder("build-command"), "the build command")
+        self.assertEqual([f for f in cd.FIELDS if cd.placeholder(f) is None], [])
+        self.assertEqual(cd.placeholder("lint-command"), "the lint command")
         self.assertEqual(cd.placeholder("test-command"), "the test command")
         for entry in cd.shown(fields):
             self.assertEqual(entry["placeholder"], cd.placeholder(entry["field"]))
 
-    def test_the_default_branch_ask_follows_the_remote_count(self):
+    def test_the_integration_branch_ask_follows_the_remote_count(self):
         def ask(remotes):
             reading = {"remotes": remotes, "default_branch": None, "branches": ["trunk"],
                        "files": [], "texts": {}}
-            return by_field(cd.draft("/x/sample-app", reading))["default-branch"]["ask"]
+            return by_field(cd.draft("/x/sample-app", reading))["integration-branch"]["ask"]
         none = ask([])
+        self.assertTrue(none.startswith("Which branch does finished work of sample-app merge into?\n"))
         self.assertTrue(none.endswith(
             "It has no remote, so the console cannot tell: choose a branch or type its name."))
         self.assertNotIn("Its remote", none)
@@ -859,9 +655,17 @@ class ContractDraftTest(unittest.TestCase):
     def test_reading_never_raises_or_writes(self):
         plain = self.parent / "plain"
         plain.mkdir()
-        self.assertEqual(cd.read(str(plain)),
+        empty = cd.read(str(plain))
+        self.assertEqual({key: empty[key] for key in ("remotes", "default_branch", "branches", "files",
+                                                      "texts", "tree_platform_version",
+                                                      "protection_after", "pins_platform")},
                          {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {},
-                          "hooks": [], "environments": []})
+                          "tree_platform_version": None, "protection_after": None,
+                          "pins_platform": False})
+        self.assertEqual(empty["attempt"], {"minutes": 240, "source": "fallback"})
+        self.assertEqual(set(empty), {"remotes", "default_branch", "branches", "files", "texts",
+                                      "platform_version", "tree_platform_version", "protection_after",
+                                      "pins_platform", "attempt"})
         root = str(sample(self.parent, remote=True))
         before = (git(root, "status", "--porcelain"), git(root, "rev-parse", "HEAD^{tree}"))
         cd.read(root)
@@ -911,15 +715,18 @@ class ContractDraftTest(unittest.TestCase):
         shim.write_text(f'#!/bin/sh\ntouch {marker}\nexec {shutil.which("git")} "$@"\n')
         shim.chmod(0o755)
         with unittest.mock.patch.dict(os.environ, {"PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}):
-            before = cd.read(str(root))
+            before = cd.read_hooks(str(root))
             self.assertEqual((before["hooks"], before["environments"]), (["pre-commit"], ["devenv.nix"]))
             self.assertTrue(marker.exists())
             marker.unlink()
             cancel = threading.Event()
             cancel.set()
-            reading = cd.read(str(root), cancel)
+            reading = cd.read_hooks(str(root), cancel)
+            drafted = cd.read(str(root), cancel)
         self.assertFalse(marker.exists(), "a git child started under a set cancel")
         self.assertEqual((reading["hooks"], reading["environments"]), ([], []))
+        self.assertEqual((drafted["files"], drafted["protection_after"], drafted["pins_platform"]),
+                         ([], None, False))
 
     def test_a_cancel_during_the_tracked_hook_probe_reads_no_hooks(self):
         root = sample(self.parent, remote=True)
@@ -938,9 +745,9 @@ class ContractDraftTest(unittest.TestCase):
             return real(path, *arguments, **kwargs)
 
         commit(root, {})
-        self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
+        self.assertEqual(cd.read_hooks(str(root))["hooks"], ["pre-commit"])
         with unittest.mock.patch.object(cd, "_git", probe):
-            reading = cd.read(str(root), cancel)
+            reading = cd.read_hooks(str(root), cancel)
         self.assertTrue(cancel.is_set())
         self.assertEqual(reading["hooks"], [])
 
@@ -1070,11 +877,10 @@ class ContractDraftTest(unittest.TestCase):
     def test_reconcile_fields_proposes_only_for_a_stranded_hook_and_an_environment(self):
         root = str(self.environment_checkout())
         reading = {"stranded": ["pre-commit"], "hooks": ["pre-commit"], "environments": ["devenv.nix"]}
-        drafted = cd.draft(root, {**cd.read("/nonexistent"), "hooks": ["pre-commit"],
-                                  "environments": ["devenv.nix"],
-                                  "remotes": [("origin", "https://github.com/o/r.git")]})
-        record = by_field(drafted)["commit-environment"]
-        self.assertEqual(cd.reconcile_fields(root, reading), [record])
+        (record,) = cd.reconcile_fields(root, reading)
+        self.assertEqual((record["field"], record["value"], record["source"]),
+                         ("commit-environment", "devenv shell --", "files"))
+        self.assertEqual(set(record), cd.FIELD_KEYS)
         self.assertEqual(cd.reconcile_fields(root, {**reading, "stranded": []}), [])
         self.assertEqual(cd.reconcile_fields(root, {**reading, "environments": []}), [])
 
@@ -1088,7 +894,7 @@ class ContractDraftTest(unittest.TestCase):
         self.assertFalse(cd.amends([]))
         self.assertFalse(cd.amends(None))
         self.assertEqual(cd.environment(fields), "devenv shell --")
-        none, error = cd.set_value(fields, "commit-environment", "none", entries=[], root=root)
+        none, error = cd.set_value(fields, "commit-environment", "none")
         self.assertIsNone(error)
         self.assertEqual(pair(none, "commit-environment"), ("none", "owner"))
         self.assertIsNone(cd.environment(none))
@@ -1106,15 +912,183 @@ class ContractDraftTest(unittest.TestCase):
         refreshed = cd.refresh(root, fields)
         self.assertEqual(pair(refreshed, "commit-environment"), ("devenv shell --", "files"))
         self.assertEqual(cd.open_fields(fields), [])
-        _, refused = cd.set_value(fields, "commit-environment", "devenv shell -- 'x", entries=[], root=root)
+        _, refused = cd.set_value(fields, "commit-environment", "devenv shell -- 'x")
         self.assertEqual(refused, cd.COMMAND_UNREADABLE)
 
     def test_the_draft_id_is_the_canonical_digest(self):
         root, fields = self.remote_fields()
         self.assertEqual(cd.draft_id(root, fields),
                          "draft:" + canonical.telemetry_digest({"root": root, "fields": fields}))
-        new = self.settled(fields, root, max_parallel="2")
+        new = self.settled(fields, root, lint_command="just lint")
         self.assertNotEqual(cd.draft_id(root, new), cd.draft_id(root, fields))
+
+
+    def install_platform(self):
+        """The platform this checkout of the code is: its manifest and a revision record, installed."""
+        installed = self.parent / "platform"
+        installed.mkdir()
+        shutil.copy(MANIFEST, installed / "platform-manifest.json")
+        (installed / "platform-revision.json").write_text(json.dumps({"schema_version": 1, **REVISION}))
+        patch = unittest.mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(installed)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return json.loads(MANIFEST.read_text())["platform_version"]
+
+    def devenv_checkout(self, parent=None, *, lock=DEVENV_LOCK):
+        root = sample(parent or self.parent, remote=True)
+        (root / ".github").mkdir()
+        commit(root, {"devenv.lock": lock, "devenv.yaml": DEVENV_YAML,
+                      ".github/branch-protection.json": PROTECTION})
+        return str(root)
+
+    def test_the_drafted_contract_is_schema_three_and_resolves(self):
+        root = sample(self.parent, remote=True)
+        (root / ".github").mkdir()
+        commit(root, {"justfile": "lint:\n\techo l\ntest:\n\techo t\n",
+                      ".github/branch-protection.json": PROTECTION})
+        fields = cd.draft(str(root), cd.read(str(root)))
+        self.assertEqual(cd.open_fields(fields), [])
+        drafted = cd.contract(fields)
+        self.assertEqual(drafted["schema_version"], 3)
+        copy = self.parent / "copy"
+        shutil.copytree(root, copy)
+        (copy / ".agents").mkdir()
+        (copy / ".agents" / "project.json").write_text(json.dumps(drafted))
+        tree = copy / "home" / "common" / "agent-skills"
+        tree.mkdir(parents=True)
+        shutil.copy(MANIFEST, tree / "platform-manifest.json")
+        home = self.parent / "home"
+        (home / ".agents" / "share").mkdir(parents=True)
+        shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
+        env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT / "python")}
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
+             "--repo-root", str(copy)],
+            env=env, text=True, stdin=subprocess.DEVNULL, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["project"]["id"], ID)
+
+    def test_the_field_table_names_only_schema_three_authored_members(self):
+        self.assertEqual(set(cd.FIELDS), {"integration-branch", "lint-command", "test-command",
+                                          "release", "production"})
+        self.assertTrue(all(schema_three.authored(p) for f in cd.FIELDS for p in cd.POINTERS[f]))
+
+    def test_the_draft_asks_for_lint_test_and_the_integration_branch(self):
+        root = str(sample(self.parent, remote=False))
+        fields = cd.draft(root, cd.read(root))
+        self.assertEqual([q["subject"] for q in cd.questions(fields)],
+                         ["integration-branch", "lint-command", "test-command"])
+        fields = self.settled(fields, root, integration_branch="trunk", lint_command="just lint",
+                              test_command="just test")
+        self.assertEqual(cd.contract(fields)["bindings"], {
+            "vcs": {"integration_branch": "trunk"},
+            "commands": {"lint": {"argv": ["just", "lint"]}, "test": {"argv": ["just", "test"]}}})
+
+    def derived(self, root):
+        return {f["field"]: (f["value"], f["source"]) for f in cd.facts(root, cd.read(root))}
+
+    def test_the_facts_cover_every_derived_value(self):
+        for pointer in schema_three.DERIVED:
+            if pointer != schema_three.ATTEMPT_BUDGET_BASIS:
+                self.assertEqual(sum(pointer in cd.FACT_POINTERS[f] for f in cd.FACTS), 1, pointer)
+        bare = str(sample(self.parent / "bare", remote=False))
+        facts = cd.facts(bare, cd.read(bare))
+        self.assertEqual([f["field"] for f in facts], list(cd.FACTS))
+        self.assertEqual([f["label"] for f in facts], [
+            "project id and issue tracker", "checks a pull request must pass",
+            "platform versions it runs on", "minutes per delivery attempt",
+            "agent knowledge files it holds"])
+        for record in facts:
+            self.assertEqual((record["options"], record["text"], record["reason"], record["ask"]),
+                             ([], False, None, ""))
+        self.assertEqual(self.derived(bare), {
+            "project-identity": ("cannot be derived until its origin remote names a GitHub repository", None),
+            "required-checks": ("cannot be derived until .github/branch-protection.json is in the repository",
+                                None),
+            "platform-range": ("cannot be derived until devenv.lock is in the repository", None),
+            "attempt-minutes": ("240", "platform"), "knowledge-homes": ("none", "files")})
+        version = self.install_platform()
+        self.assertEqual(self.derived(self.devenv_checkout()), {
+            "project-identity": (ID, "remote"), "required-checks": ("CI, Conformance", "files"),
+            "platform-range": (f"{version} up to {int(version.split('.')[0]) + 1}.0.0", "lock"),
+            "attempt-minutes": ("240", "platform"), "knowledge-homes": ("none", "files")})
+
+    def test_the_facts_follow_the_bytes_adoption_writes(self):
+        self.install_platform()
+        root = self.devenv_checkout(self.parent / "own")
+        (Path(root) / "home" / "common" / "agent-skills").mkdir(parents=True)
+        commit(Path(root), {"home/common/agent-skills/platform-manifest.json":
+                            json.dumps({"platform_version": "7.1.0"})})
+        facts = self.derived(root)
+        self.assertEqual(facts["platform-range"], ("7.1.0 up to 8.0.0", "files"))
+        self.assertEqual(facts["required-checks"], ("CI", "files"))
+        line = next(e["line"] for e in cd.shown(cd.draft(root, cd.read(root)))
+                    if e["field"] == "platform-range")
+        self.assertEqual(
+            line, "platform versions it runs on: 7.1.0 up to 8.0.0 (from its own platform manifest)")
+        facts = self.derived(self.devenv_checkout(self.parent / "broken", lock="not json"))
+        self.assertEqual(facts["platform-range"], (
+            "cannot be derived until devenv.lock can pin the agent platform", None))
+        self.assertEqual(facts["required-checks"], ("CI", "files"))
+
+    def test_no_drafted_record_is_a_commit_environment(self):
+        root = self.environment_checkout()
+        hooked = {"hooks": ["pre-commit"], "stranded": ["pre-commit"], "environments": ["devenv.nix"]}
+        for reading in (cd.read(str(root)), {**cd.read(str(root)), **hooked}):
+            fields = cd.draft(str(root), reading)
+            self.assertEqual([f["field"] for f in fields], [*cd.FIELDS, *cd.FACTS])
+            fields = self.settled(fields, str(root), lint_command="just lint", test_command="just test")
+            drafted = cd.contract(fields)
+            self.assertNotIn("commit", drafted["bindings"]["vcs"])
+            self.assertNotIn("commit-environment", drafted["bindings"]["commands"])
+
+    def test_a_saved_draft_of_the_earlier_table_is_refreshed_onto_the_new_one(self):
+        root, _ = self.remote_fields()
+
+        def earlier(**values):
+            records = []
+            for field in EARLIER:
+                value, source = values.get(field, ("x", "start"))
+                ask = "Its remote did not say" if field == "default-branch" else "old"
+                records.append({"field": field, "label": "old", "value": value, "source": source,
+                                "options": [{"value": "none", "label": "none"}], "text": True,
+                                "reason": None, "ask": ask})
+            return records
+
+        saved = earlier(**{"default-branch": ("trunk", "remote"), "integration-branch": (None, None),
+                           "test-command": ("make test", "files"), "release": ("unsupported", "start")})
+        self.assertEqual(len(saved), 27)
+        refreshed = cd.refresh(root, saved)
+        self.assertEqual([f["field"] for f in refreshed], list(cd.FIELDS))
+        self.assertEqual(
+            [pair(refreshed, f) for f in cd.FIELDS],
+            [("trunk", "remote"), (None, None), ("make test", "files"), ("unsupported", "start"),
+             ("none", "start")])
+        self.assertEqual(by_field(refreshed)["test-command"]["options"], [])
+        self.assertTrue(cd.retired_in_use(saved))
+        self.assertFalse(cd.retired_in_use(refreshed))
+        self.assertFalse(cd.retired_in_use(cd.reconcile_fields(root, {
+            "stranded": ["pre-commit"], "environments": ["devenv.nix"]})))
+        settled = self.settled(refreshed, root, lint_command="just lint")
+        self.assertEqual(cd.contract(settled)["schema_version"], 3)
+        self.assertEqual(cd.contract(settled)["bindings"]["commands"]["test"], {"argv": ["make", "test"]})
+        again = cd.replanned(settled)
+        self.assertEqual(cd.open_fields(again)[0]["field"], "integration-branch")
+        self.assertEqual(cd.open_fields(again)[0]["reason"], cd.PLAN_AGAIN)
+        kept = cd.refresh(root, earlier(**{"integration-branch": ("main", "owner")}))
+        self.assertEqual(pair(kept, "integration-branch"), ("main", "owner"))
+        facts = cd.facts(root, cd.read(root))
+        self.assertEqual([f["field"] for f in cd.refresh(root, [*refreshed, *facts])],
+                         [*cd.FIELDS, *cd.FACTS])
+        reopened = cd.refresh(root, earlier(**{"test-command": ("none", "files")}))
+        self.assertEqual(pair(reopened, "test-command"), (None, None))
+        self.assertIn("test-command", [f["field"] for f in cd.open_fields(reopened)])
+        refused = (None, "Every project has a test command: type the command that runs it.")
+        for value in ("none", " NONE "):
+            self.assertEqual(cd.set_value(settled, "test-command", value), refused)
+        self.assertEqual(cd.set_value(settled, "lint-command", "None"),
+                         (None, "Every project has a lint command: type the command that runs it."))
+        self.assertNotIn(["none"], [c["argv"] for c in cd.contract(settled)["bindings"]["commands"].values()])
 
 
 class StrandedHookTest(unittest.TestCase):

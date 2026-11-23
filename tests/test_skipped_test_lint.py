@@ -1,4 +1,4 @@
-"""The skipped-test rule of `agent_tools.delivery.skipped_test_lint` (#1464).
+"""The skipped-test rule of `agent_tools.delivery.skipped_test_lint`.
 
 Measures the rule against source text and real git worlds: every framework's
 skip, disable, focus and pending form is one violation at its test's line, a
@@ -7,7 +7,7 @@ once, a marker in a string, a comment or a non-test file counts nothing, a
 running test's lookalike counts nothing, and the project's count may not rise
 against the merge base whichever file holds the skip.
 
-The suite holds `standard:B18` by judging the enforcer
+The suite holds `standard:B23` by judging the enforcer
 `agent_tools.delivery.skipped_test_lint` on real git worlds, so the rule index
 lists this enforcer.
 """
@@ -47,7 +47,7 @@ def source(pairs):
 def snapshot(files):
     blobs = {path: text.encode("utf-8") for path, text in files.items()}
     return Snapshot("fixture", {path: text.count("\n") for path, text in files.items()},
-                    texts=blobs)
+                    contents=blobs)
 
 
 def found(files):
@@ -113,7 +113,7 @@ WEB = [
 
 
 def lines_of(path, pairs):
-    return [f"B18 {path}:{n}" for n in source(pairs)[1]]
+    return [f"B23 {path}:{n}" for n in source(pairs)[1]]
 
 
 class SkippedTestLintTest(unittest.TestCase):
@@ -261,7 +261,7 @@ class SkippedNeverRiseTest(unittest.TestCase):
             write(root, "tests/test_b.py", source(added)[0])
             commit_all(root)
             self.assertEqual(self.judge(root), (
-                Rise("B18", 1, 2, (Violation("B18", "tests/test_b.py", source(added)[1][0]),)),))
+                Rise("B23", 1, 2, (Violation("B23", "tests/test_b.py", source(added)[1][0]),)),))
 
     def test_an_unchanged_branch_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -282,7 +282,7 @@ class SkippedNeverRiseTest(unittest.TestCase):
             write(root, "tests/test_a.py", source(grown)[0])
             commit_all(root)
             self.assertEqual(self.judge(root), (
-                Rise("B18", 1, 2, (Violation("B18", "tests/test_a.py", source(grown)[1][1]),)),))
+                Rise("B23", 1, 2, (Violation("B23", "tests/test_a.py", source(grown)[1][1]),)),))
 
     def test_a_skip_moved_to_another_file_keeps_the_count(self):
         both = [ok("import unittest"), ok("class A(unittest.TestCase):"), ok('    @unittest.skip("x")'),
@@ -353,7 +353,7 @@ class SkipRecognitionTest(unittest.TestCase):
             write(root, "tests/test_a.py", world("True"))
             commit_all(root)
             rises = never_rise.judge(root, "main", [skipped_test_lint.ENFORCER], timeout=60).rises
-        self.assertEqual(rises, (Rise("B18", 0, 1, (Violation("B18", "tests/test_a.py", 3),)),))
+        self.assertEqual(rises, (Rise("B23", 0, 1, (Violation("B23", "tests/test_a.py", 3),)),))
 
     def test_an_nunit_ignore_named_argument_of_a_test_case_disables_the_test(self):
         cases = [ok("public class T {"), ok('[TestCase(1, Ignore = "maintenance")]'),

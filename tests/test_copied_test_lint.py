@@ -1,4 +1,4 @@
-"""The copied-test rule of `agent_tools.delivery.copied_test_lint` (#1464).
+"""The copied-test rule of `agent_tools.delivery.copied_test_lint`.
 
 Measures the rule against source text and real git worlds: tests sharing a body,
 once comments and whitespace are removed, are one violation each beyond the
@@ -7,7 +7,7 @@ bodies of different families and bodies a token apart never match; a JavaScript
 declaration with no callback is never a copy; and the project's count may not
 rise against the merge base whichever file holds the copy.
 
-The suite holds `standard:B19` by judging the enforcer
+The suite holds `standard:B24` by judging the enforcer
 `agent_tools.delivery.copied_test_lint` on real git worlds, so the rule index
 lists this enforcer.
 """
@@ -47,7 +47,7 @@ def source(pairs):
 def snapshot(files):
     blobs = {path: text.encode("utf-8") for path, text in files.items()}
     return Snapshot("fixture", {path: text.count("\n") for path, text in files.items()},
-                    texts=blobs)
+                    contents=blobs)
 
 
 def found(files):
@@ -116,7 +116,7 @@ class CopiedTestLintTest(unittest.TestCase):
             other = self.committed(tmp, "differing", {"tests/test_c.py": DIFFERING})
             apart = self.run_command("--repo-root", str(other))
         expected = "".join(
-            f"B19 {path}:{n}\n" for path in sorted(shared) for n in source(shared[path])[1])
+            f"B24 {path}:{n}\n" for path in sorted(shared) for n in source(shared[path])[1])
         self.assertEqual((copies.returncode, copies.stdout), (1, expected))
         self.assertEqual((apart.returncode, apart.stdout), (0, ""))
 
@@ -210,7 +210,7 @@ class CopiedNeverRiseTest(unittest.TestCase):
             write(root, "tests/test_b.py", source(added)[0])
             commit_all(root)
             self.assertEqual(self.judge(root), (
-                Rise("B19", 1, 2, (Violation("B19", "tests/test_b.py", source(added)[1][0]),)),))
+                Rise("B24", 1, 2, (Violation("B24", "tests/test_b.py", source(added)[1][0]),)),))
 
     def test_an_unchanged_branch_passes(self):
         with tempfile.TemporaryDirectory() as tmp:

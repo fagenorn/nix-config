@@ -2,10 +2,14 @@
 
 Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
 
-    run.json            the run's identity: exactly `RUN_MEMBERS`
+    run.json            the run's identity: exactly `RUN_MEMBERS`, plus `tracker` (the identity of the
+                        tracker its issue lives in) when the run was created with one
     procedure/          a byte copy of the entry procedure directory's `*.json`, `*.md`, `SHA256SUMS`
     events.jsonl        one compact JSON event per line, appended and fsynced
     lock  the deliver process's exclusive flock and its {"pid","started"}
+    slots/slot-<i>.lock the run's agent slots, each an exclusive flock held while a session runs
+                        (`engine_slots`)
+    stop-request   a pending stop request for the lock holder it names (engine_stop)
     results/<step>.<visit>.json
                         a step visit's stored result
     sessions/<step>.<visit>.{system.md,prompt.md,json,resume.json,resume.prompt.md}
@@ -43,7 +47,7 @@ import os
 import re
 import secrets
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -60,6 +64,7 @@ RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 TOKEN_RE = re.compile(r"^[a-z0-9]{4}$")
 RUN_MEMBERS = ("host", "inputs", "issue", "platform_revision", "procedure", "project",
                "run", "sequence", "started")
+OPTIONAL_RUN_MEMBERS = ("tracker",)
 WAITS = ("usage-limit", "host-slot", "lock")
 TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
@@ -169,7 +174,7 @@ def _check_inputs(inputs: Mapping[str, str | int]) -> None:
 def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path,
                platform_revision: str, host: str, inputs: Mapping[str, str | int],
                now: datetime, token: str | None = None, root: Path | None = None,
-               before_publish: Callable[[Path], None] | None = None) -> Path:
+               tracker: str | None = None, before_publish: Callable[[Path], None] | None = None) -> Path:
     """Create the run directory and return its path; a `before_publish(staged)` raise leaves no run."""
     for label, value in (("project", project), ("platform_revision", platform_revision),
                          ("host", host)):
@@ -201,6 +206,8 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
                     "platform_revision": platform_revision, "procedure": procedure,
                     "project": project, "run": run_id, "sequence": sequence,
                     "started": started}
+        if tracker is not None:
+            document["tracker"] = tracker
         _write_file(temporary / "run.json", _compact(document).encode("utf-8"))
         copied = temporary / "procedure"
         os.mkdir(copied, 0o700)
@@ -233,14 +240,17 @@ def _strict_load(path: Path) -> object:
         return json.loads(path.read_text(encoding="utf-8"),
                           object_pairs_hook=reject_duplicate_keys,
                           parse_constant=reject_nonfinite_literal)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         raise LedgerError(f"cannot read {path.name}: {error}") from error
 
 
 def read_run(run_dir: Path) -> dict:
     document = _strict_load(Path(run_dir) / "run.json")
-    if not isinstance(document, dict) or set(document) != set(RUN_MEMBERS):
+    if (not isinstance(document, dict) or not set(RUN_MEMBERS) <= set(document)
+            or not set(document) <= set(RUN_MEMBERS + OPTIONAL_RUN_MEMBERS)):
         raise LedgerError("run.json does not have exactly the run members")
+    if "tracker" in document and not (isinstance(document["tracker"], str) and document["tracker"]):
+        raise LedgerError("run.json tracker is not a non-empty string")
     if not isinstance(document["project"], str):
         raise LedgerError("run.json project is not a string")
     if not _is_int(document["sequence"]) or document["sequence"] < 1:
@@ -248,6 +258,10 @@ def read_run(run_dir: Path) -> dict:
     if document["run"] != Path(run_dir).name:
         raise LedgerError("run.json run is not the name of its run directory")
     return document
+
+
+def creation_lock_path(root: Path, issue: int) -> Path:
+    return Path(root) / f".{issue}.deliver.lock"
 
 
 def _issue_runs(root: Path, issue: int) -> list[tuple[Path, dict]]:
@@ -260,7 +274,12 @@ def _issue_runs(root: Path, issue: int) -> list[tuple[Path, dict]]:
         match = RUN_ID_RE.match(entry.name)
         if match is None or match.group(1) != str(issue) or not entry.is_dir():
             continue
-        document = read_run(entry)
+        try:
+            document = read_run(entry)
+        except LedgerError:
+            if not entry.exists():
+                continue  # renamed away by a housekeeping sweep after the listing
+            raise
         if document["issue"] == issue:
             found.append((entry, document))
     return found
@@ -496,6 +515,7 @@ class RunState:
     last_event: str | None
     process: dict | None
     alive: bool
+    steps: tuple[dict, ...] = field(default=(), hash=False)
 
     def as_json(self) -> dict:
         return {"run": self.run, "project": self.project, "issue": self.issue,
@@ -508,27 +528,62 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
          alive: Callable[[int, str], bool]) -> RunState:
     """Derive a run's state from its events in one pass; no file, clock or process.
 
-    `process` is the last recorded process whose step visit has no stored result, and `alive` is
-    the probe's answer for it, whatever the stop or done state: reading those first is the caller's.
+    `process` is the last recorded process whose step visit has no stored result, `alive` the probe's answer
+    for it, whatever the stop or done state (reading those first is the caller's); `steps` is one per visit.
     """
     stage = step = last_event = None
     wait = stop = None
     open_processes: dict[tuple[str, int], dict] = {}
     done = False
+    entries: dict[tuple[str, int], dict] = {}
+    graded: set[tuple[str, int]] = set()
+    current: tuple[str, int] | None = None
+    open_waits: list[tuple[dict, str]] = []
+
+    def close_waits(at: str, kind: str | None) -> None:
+        """Close the first open wait of `kind`, or every open wait when `kind` is None."""
+        for pair in list(open_waits):
+            summary, started = pair
+            if kind is None or summary["wait"] == kind:
+                summary["seconds"] = (parse_rfc3339_utc(at)
+                                      - parse_rfc3339_utc(started)).total_seconds()
+                open_waits.remove(pair)
+                if kind is not None:
+                    return
+
     for event in events:
         kind = event["event"]
         last_event = event["at"]
+        visit = (event["step"], event["visit"]) if "visit" in event else None
+        if kind in ("step_entered", "transition_taken") and visit not in entries:
+            entries[visit] = {"step": visit[0], "visit": visit[1], "outcome": None,
+                              "wall_seconds": None, "waits": [], "tokens": None,
+                              "spend_usd": None, "account": None}
+            current = visit
         if kind == "step_entered":
             stage, step = event["stage"], event["step"]
+        elif kind in ("session_starting", "session_answered") and visit in entries:
+            entries[visit]["account"] = event["account"]  # the last launch's answer wins
+        elif kind == "outcome_graded" and visit in entries:
+            entries[visit]["outcome"] = event["outcome"]
+            graded.add(visit)
+        elif kind == "transition_taken" and visit not in graded:
+            entries[visit]["outcome"] = event["outcome"]
         elif kind == "wait_started":
             wait = {"wait": event["wait"], "since": event["at"], "until": event["until"]}
+            if current is not None:
+                summary = {"wait": event["wait"], "seconds": None}
+                entries[current]["waits"].append(summary)
+                open_waits.append((summary, event["at"]))
         elif kind == "wait_ended":
+            close_waits(event["at"], event["wait"])
             if wait is not None and wait["wait"] == event["wait"]:
                 wait = None
         elif kind == "stop_reached":
             stop = {"name": event["stop"], "need": event["need"]}
         elif kind == "run_continued":
             wait = stop = None
+            close_waits(event["at"], None)
         elif kind == "run_done":
             done = True
         elif kind == "process_started":
@@ -538,11 +593,15 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
                                    "step": event["step"], "visit": event["visit"]}
         elif kind == "result_stored":
             open_processes.pop((event["step"], event["visit"]), None)
+            if visit in entries:
+                entries[visit].update(wall_seconds=event["wall_seconds"],
+                                      tokens=dict(event["tokens"]), spend_usd=event["spend_usd"])
     process = list(open_processes.values())[-1] if open_processes else None
     running = alive(process["pid"], process["started"]) if process is not None else False
     return RunState(run=run["run"], project=run["project"], issue=run["issue"],  # type: ignore[arg-type]
                     stage=stage, step=step, wait=wait, stop=stop, done=done,
-                    last_event=last_event, process=process, alive=running)
+                    last_event=last_event, process=process, alive=running,
+                    steps=tuple(entries.values()))
 
 
 def process_alive(pid: int, started: str) -> bool:

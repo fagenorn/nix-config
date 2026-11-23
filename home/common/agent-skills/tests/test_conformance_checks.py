@@ -21,7 +21,7 @@ from agent_tools.delivery import context_map_lint, standards_lint
 from agent_tools.project_contract import resolve_project
 
 from .conformance_test_support import (
-    CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
+    CLEAN_AREA, CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
     commit_all, doctor, fixture, git, load_module, make_root, platform_env, run,
     write_clean_map,
 )
@@ -542,50 +542,87 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
                               len(facts["violations"])], [0, 9, 8])
             self.assert_validates(report)
 
-    def test_one_more_skipped_test_turns_ci_red_naming_its_rule(self):
-        with fixture() as tmp:
-            root = make_root(tmp)
-            write_file(root, "tests/test_a.py", "\n".join([
-                "import unittest", "class A(unittest.TestCase):", '    @unittest.skip("x")',
-                "    def test_a(self):", "        self.assertEqual(1, 1)", ""]))
-            commit_all(root, "base")
-            git(root, "update-ref", INTEGRATION_REF, "HEAD")
-            base = git(root, "rev-parse", "HEAD").strip()
-            write_file(root, "tests/test_b.py", "\n".join([
-                "import unittest", "class B(unittest.TestCase):", '    @unittest.skip("x")',
-                "    def test_b(self):", "        self.assertTrue(True)", ""]))
-            commit_all(root, "one more")
-            code, report, by_id = self.ci(root)
-            self.assertEqual(code, 1)
-            self.assertEqual(
-                self.summary(by_id[self.CHECK_ID]),
-                ["failed", "violation_count_rose", "violations.never_rise.reduce",
-                 {"merge_base": base, "rule": "B18", "base_count": 1, "branch_count": 2,
-                  "violations": ["B18 tests/test_b.py:4"], "rules": ["B18"]}])
-            self.assert_validates(report)
+    def red(self, root: Path) -> dict:
+        code, report, by_id = self.ci(root)
+        self.assertEqual(code, 1)
+        self.assert_validates(report)
+        return by_id[self.CHECK_ID]
 
-    def test_one_more_copied_body_turns_ci_red_naming_its_rule(self):
+    def test_a_committed_todo_comment_turns_ci_red_naming_b20(self):
         with fixture() as tmp:
             root = make_root(tmp)
-            write_file(root, "tests/test_a.py", "\n".join([
-                "import unittest", "class A(unittest.TestCase):",
-                "    def test_a(self):", "        self.assertEqual(compute(5), 6)",
-                "    def test_b(self):", "        self.assertEqual(compute(5), 6)", ""]))
+            base = git(root, "rev-parse", "refs/remotes/origin/main").strip()
+            write_file(root, "src/todo.py", "x = 1\n# TODO: finish\n")
+            commit_all(root, "todo")
+            self.assertEqual(
+                self.summary(self.red(root)),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B20", "base_count": 0,
+                  "branch_count": 1, "violations": ["B20 src/todo.py:2"],
+                  "rules": ["B20"]}])
+
+    def test_a_long_block_holding_a_fixme_turns_ci_red_naming_b19_and_b20(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = git(root, "rev-parse", "refs/remotes/origin/main").strip()
+            write_file(root, "src/long.py",
+                       "x = 1\n# a\n# FIXME: b\n# c\n# d\n# e\n# f\n")
+            commit_all(root, "long")
+            self.assertEqual(
+                self.summary(self.red(root)),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B19", "base_count": 0,
+                  "branch_count": 1, "violations": ["B19 src/long.py:2"],
+                  "rules": ["B19", "B20"]}])
+
+    def test_a_link_to_the_contracts_own_tracker_turns_ci_red_naming_b18(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            other = authored["bindings"]["tracker"]["repo_slug"]
+            authored["bindings"]["tracker"]["repo_slug"] = "fixture-owner/fixture-repo"
+            targets = authored["release"]["profiles"]["github-release"]["bindings"]["targets"]
+            targets["repository"]["repository"] = "fixture-owner/fixture-repo"
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            write_file(root, "src/ref.py",
+                       "x = 1\n# https://github.com/fixture-owner/fixture-repo/issues/7\n"
+                       + f"# https://github.com/{other}/issues/7\n")
+            commit_all(root, "ref")
+            facts = self.red(root)["facts"]
+            self.assertEqual(facts["rule"], "B18")
+            self.assertEqual(facts["violations"], ["B18 src/ref.py:2"])
+
+    def rise(self, base_files: dict, added: dict, rule: str, line: int) -> None:
+        with fixture() as tmp:
+            root = make_root(tmp)
+            for path, text in base_files.items():
+                write_file(root, path, text)
             commit_all(root, "base")
             git(root, "update-ref", INTEGRATION_REF, "HEAD")
             base = git(root, "rev-parse", "HEAD").strip()
-            write_file(root, "tests/test_b.py", "\n".join([
-                "import unittest", "", "class B(unittest.TestCase):", "    # a third copy",
-                "    def test_c(self):", "        self.assertEqual(compute(5), 6)", ""]))
-            commit_all(root, "a copy more")
-            code, report, by_id = self.ci(root)
-            self.assertEqual(code, 1)
+            for path, text in added.items():
+                write_file(root, path, text)
+            commit_all(root, "one more")
             self.assertEqual(
-                self.summary(by_id[self.CHECK_ID]),
+                self.summary(self.red(root)),
                 ["failed", "violation_count_rose", "violations.never_rise.reduce",
-                 {"merge_base": base, "rule": "B19", "base_count": 1, "branch_count": 2,
-                  "violations": ["B19 tests/test_b.py:5"], "rules": ["B19"]}])
-            self.assert_validates(report)
+                 {"merge_base": base, "rule": rule, "base_count": 1, "branch_count": 2,
+                  "violations": [f"{rule} tests/test_b.py:{line}"], "rules": [rule]}])
+
+    def test_one_more_skipped_test_turns_ci_red_naming_b23(self):
+        skipped = "import unittest\nclass T(unittest.TestCase):\n    @unittest.skip('x')\n"
+        self.rise({"tests/test_a.py": skipped + "    def test_a(self):\n        self.assertEqual(1, 1)\n"},
+                  {"tests/test_b.py": skipped + "    def test_b(self):\n        self.assertTrue(1)\n"},
+                  "B23", 4)
+
+    def test_one_more_copied_body_turns_ci_red_naming_b24(self):
+        head = "import unittest\nclass T(unittest.TestCase):\n"
+        body = "        self.assertEqual(compute(5), 6)\n"
+        self.rise({"tests/test_a.py": head + "    def test_a(self):\n" + body
+                   + "    def test_b(self):\n" + body},
+                  {"tests/test_b.py": head + "    # a third copy\n    def test_c(self):\n" + body},
+                  "B24", 4)
 
 
 class LintChecksTest(ReportAssertions, unittest.TestCase):

@@ -1,4 +1,4 @@
-"""The test sources of each stack, read as tokens for the stack rules (#1464).
+"""The test sources of each stack, read as tokens for the stack rules.
 
 A library with no command. It names the stacks of the standards, picks a
 snapshot's test files by each stack's rules and lexes them, so a rule counts
@@ -428,12 +428,12 @@ class TestFile(NamedTuple):
 def read_test_files(snapshot: Snapshot) -> list[TestFile]:
     """Every test file of the snapshot that decodes as UTF-8 and lexes, by path."""
     files = []
-    for path in sorted(snapshot.texts):
+    for path in sorted(snapshot.contents):
         family = family_of(path)
         if family is None:
             continue
         try:
-            text = snapshot.texts[path].decode("utf-8-sig")
+            text = snapshot.contents[path].decode("utf-8-sig")
         except UnicodeDecodeError:
             continue
         lexed = lex_file(family, text)

@@ -14,9 +14,21 @@ failed git read is no verdict (`None`), never a pass.
 Both sides are judged by the enforcers passed in, so a rule introduced by the
 branch itself is measured on the base by the same code and passes while its
 violations only persist. Each enforcer is a `rule` id and a `find` function
-over a `Snapshot` (the revision and every tracked text file's line count and
-committed bytes, and the suppression markers); it
-may emit only its own rule id, else the comparison raises `ValueError`.
+over a `Snapshot` (the revision, every path, every tracked text file's line count and
+its committed bytes, and the committed bytes of each path an enforcer `reads`); it may
+emit only its own rule id, else the comparison raises `ValueError`.
+
+A `Snapshot` also carries `files` (path to blob oid for every regular text file,
+mode 100644 or 100755, an empty one included; a symlink, a submodule and a
+binary file are no file), the `root` of the repository and the `timeout` its
+reads use. `read_files(snapshot, paths)` returns the committed bytes of those
+paths, never the working tree's, through one `cat-file --batch`; it raises
+`ValueError` for a snapshot built by hand or a path that is no file of it, and
+`HistoryUnavailable` when the git read fails or answers something malformed.
+`judge` turns `HistoryUnavailable` from an enforcer into no verdict (`None`),
+like every other failed git read. An enforcer that cannot judge for a reason of
+its own raises `EnforcerFailed(enforcer, reason)`; `compare` and `judge` let it
+propagate, so such an enforcer is never a pass and never a verdict.
 
 The comparison, per enforcer in the order given. A count rule (the default)
 compares the project total: it rises when the branch has more violations than
@@ -26,8 +38,21 @@ multiset difference of `(path, line)` keys, branch minus base, in branch order.
 A per-file rule (`per_file=True`) compares each branch violation with the
 violation of the same file on the base, matched through git renames
 (`diff-tree -M`): it rises for a violation whose matched base path has no
-violation of that rule, or one with a smaller `line`. A move git does not pair
-is a new file.
+violation of that rule, or one whose measure is smaller: a violation's `measure`
+when it carries one, else its `line`. A rename git pairs carries the source's
+violation to the target unless the enforcer has a `carries` function and it
+refuses the pair's bytes (old, new); a refused target is judged as if the base
+held no violation for it. With `exempts_carried`, a rename the enforcer carries
+never rises, whatever its measure: a move that only adds bytes the rule does not
+judge (a header, a pointer line) cannot turn the rule red. An enforcer's
+`carries_from`, when set, names the source paths a rename may be carried from:
+a rename from any other path is judged as a new file, as no move of a file the
+rule never judged can be a migration. A move git does not pair is a new file.
+
+A `Verdict` also lists the blob paths the head adds over the base (`added`, a
+rename target included), the renames git pairs (`renamed`, new path to old
+path) and each pair's committed bytes (`rename_blobs`, base bytes of the source
+and head bytes of the target).
 
 Suppressions (#1459). A suppression marker (`agent_tools.delivery.rule_ids`) is read
 from every text file at a revision into `Snapshot.suppressions`, in path then line
@@ -60,9 +85,11 @@ end, the reason to what remains, so no field costs another its place.
 Output line, one per violation: `Violation.text()` is the rule id, one space,
 the repository-relative path escaped, a colon and the 1-based line. The escape
 doubles a backslash, writes a newline, carriage return and tab as `\\n`, `\\r`
-and `\\t`, any other C0 character and DEL as `\\xNN`, and the Unicode line
-separators U+0085, U+2028 and U+2029 as `\\uNNNN`, so a path never splits one
-violation across two physical lines.
+and `\\t`, any other C0 character and DEL as `\\xNN`, a byte of the name that
+is no UTF-8 (read back as a surrogate U+DC80 to U+DCFF) as the `\\xNN` of that
+byte, and the Unicode line separators U+0085, U+2028 and U+2029 as `\\uNNNN`, so
+a path never splits one violation across two physical lines and is always valid
+UTF-8.
 
 Every git child is read-only, never fetches and is bounded by the caller's
 `timeout`: it drops the variables that select a repository other than the one
@@ -75,29 +102,23 @@ given (a NUL in a branch name) is a failed read, never an error.
 A file is text or binary by its committed bytes alone: a NUL among its first
 8,000 bytes makes it binary, as git decides it for `grep -I`, whatever a
 `diff` or `binary` attribute says, so no attribute hides a file from an
-enforcer. A snapshot holds each text file's line count and its committed
-bytes, never the working tree's, so a file is in `line_counts` and in `texts`
-or in neither.
+enforcer.
 
-The command core `run_lint(command, enforcer, argv)` is the contract every enforcer
-command shares: `<command> --repo-root <absolute directory> [--revision <rev>]`
-prints each violation of `counted(enforcer, snapshot)` at the revision (default
-`HEAD`), the findings left and the bare markers, one `Violation.text()` line on stdout
-in `(path, line)` order. It exits 1 when it printed any and 0 when none. It exits 2 with one line `<command>: <reason>`
-on stderr and nothing on stdout for a relative or missing root, a root below the
-repository's top level, an unresolvable revision or a failed git read.
+`command_snapshot(command, repo_root, revision)` is the preamble the registered
+never-rise commands share: it prints `<command>: <reason>` on stderr and returns
+`None` for a relative root, a root that is not a directory, a root below the
+repository's top level, or a revision it cannot resolve or read.
 """
 
-import argparse
 import os
 import re
 import subprocess
 import sys
-import types
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import NamedTuple
 
 from agent_tools.delivery import rule_ids
@@ -124,6 +145,8 @@ def escape_path(path: str) -> str:
             pieces.append(escape)
         elif character < " " or character == "\x7f":
             pieces.append(f"\\x{ord(character):02x}")
+        elif "\udc80" <= character <= "\udcff":
+            pieces.append(f"\\x{ord(character) - 0xDC00:02x}")
         elif character in UNICODE_LINE_SEPARATORS:
             pieces.append(f"\\u{ord(character):04x}")
         else:
@@ -135,6 +158,10 @@ class Violation(NamedTuple):
     rule: str
     path: str
     line: int
+    measure: int | None = None
+
+    def magnitude(self) -> int:
+        return self.line if self.measure is None else self.measure
 
     def text(self) -> str:
         return f"{self.rule} {escape_path(self.path)}:{self.line}"
@@ -174,8 +201,13 @@ class Hunk(NamedTuple):
 class Snapshot(NamedTuple):
     revision: str
     line_counts: Mapping[str, int]
+    files: Mapping[str, str] = MappingProxyType({})
+    root: Path | None = None
+    timeout: float | None = None
     suppressions: tuple[Suppression, ...] = ()
-    texts: Mapping[str, bytes] = types.MappingProxyType({})
+    contents: Mapping[str, bytes] = MappingProxyType({})
+    blobs: Mapping[str, bytes] = MappingProxyType({})
+    paths: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -183,6 +215,23 @@ class Enforcer:
     rule: str
     find: Callable[[Snapshot], list[Violation]]
     per_file: bool = False
+    carries: Callable[[bytes, bytes], bool] | None = None
+    exempts_carried: bool = False
+    carries_from: Callable[[str], bool] | None = None
+    reads: Callable[[str], bool] | None = None
+
+
+class HistoryUnavailable(Exception):
+    """A git read of committed history failed or answered something malformed."""
+
+
+class EnforcerFailed(Exception):
+    """An enforcer could not judge; the check fails closed instead of passing."""
+
+    def __init__(self, enforcer: str, reason: str) -> None:
+        super().__init__(f"{enforcer}: {reason}")
+        self.enforcer = enforcer
+        self.reason = reason
 
 
 class Rise(NamedTuple):
@@ -197,6 +246,9 @@ class Verdict(NamedTuple):
     head: str
     rises: tuple[Rise, ...]
     suppressions: tuple[Suppression, ...] = ()
+    added: tuple[str, ...] = ()
+    renamed: Mapping[str, str] = MappingProxyType({})
+    rename_blobs: Mapping[str, tuple[bytes, bytes]] = MappingProxyType({})
 
 
 def _git(root: Path, args: Sequence[str], timeout: float | None,
@@ -240,47 +292,74 @@ def in_subdirectory(root: Path, timeout: float | None) -> bool:
 
 
 BINARY_PROBE_BYTES = 8000
+REGULAR_MODES = frozenset({"100644", "100755"})
 
 
-def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
-    """Every text file's line count and committed bytes at a revision.
+def _read_blobs(root: Path, oids: Sequence[str], timeout: float | None) -> list[bytes] | None:
+    """The bytes of each blob, in order, from one `cat-file --batch`; None when malformed."""
+    if not oids:
+        return []
+    out = _git(root, ["cat-file", "--batch"], timeout,
+               stdin="".join(f"{oid}\n" for oid in oids).encode("ascii"))
+    if out is None:
+        return None
+    contents: list[bytes] = []
+    position = 0
+    for oid in oids:
+        end = out.find(b"\n", position)
+        header = out[position:end].split(b" ") if end >= 0 else []
+        if (len(header) != 3 or header[0].decode("ascii", "replace") != oid
+                or header[1] != b"blob" or not header[2].isdigit()):
+            return None
+        start = end + 1
+        size = int(header[2])
+        if out[start + size:start + size + 1] != b"\n":
+            return None
+        contents.append(out[start:start + size])
+        position = start + size + 1
+    if position != len(out):
+        return None
+    return contents
+
+
+def read_snapshot(root: Path, revision: str, timeout: float | None,
+                  keep: Callable[[str], bool] | None = None) -> Snapshot | None:
+    """Every path, every text file's line count and committed bytes, every regular text
+    file and the kept blobs' bytes at a revision.
 
     Lines are counted as `git grep -c` counts them: the newline-terminated lines
-    plus an unterminated last line, empty files not listed. A file with a NUL in
-    its first `BINARY_PROBE_BYTES` bytes is binary and not listed; a submodule is
-    no file. A blob that cannot be read is no snapshot.
+    plus an unterminated last line, empty files not counted. A file with a NUL in
+    its first `BINARY_PROBE_BYTES` bytes is binary and in none of `line_counts`,
+    `contents` and `files`; a submodule is no file; a symlink is counted but is no
+    regular file, so it is not in `files`. `paths` holds every blob's path and
+    `blobs` the bytes of each blob `keep` accepts (every blob when `keep` is None),
+    empty and binary ones included. A blob that cannot be read is no snapshot.
     """
     listing = _git(root, ["ls-tree", "-r", "-z", "--full-tree", revision], timeout)
     if listing is None:
         return None
-    paths: dict[str, str] = {}
+    paths: dict[str, tuple[str, str]] = {}
     for entry in listing.split(b"\0"):
         if not entry:
             continue
         meta, _, name = entry.partition(b"\t")
-        _, kind, oid = meta.decode("ascii").split(" ")
+        mode, kind, oid = meta.decode("ascii").split(" ")
         if kind == "blob":
-            paths[os.fsdecode(name)] = oid
-    if not paths:
-        return Snapshot(revision, {}, types.MappingProxyType({}))
-    out = _git(root, ["cat-file", "--batch"], timeout,
-               stdin="".join(f"{oid}\n" for oid in paths.values()).encode("ascii"))
-    if out is None:
+            paths[os.fsdecode(name)] = (mode, oid)
+    contents = _read_blobs(root, [oid for _, oid in paths.values()], timeout)
+    if contents is None:
         return None
     counts: dict[str, int] = {}
     texts: dict[str, bytes] = {}
+    files: dict[str, str] = {}
+    blobs: dict[str, bytes] = {}
     found: list[Suppression] = []
-    position = 0
-    for path in paths:
-        end = out.find(b"\n", position)
-        header = out[position:end].split(b" ") if end >= 0 else []
-        if len(header) != 3 or header[1] != b"blob":
-            return None
-        start = end + 1
-        stop = start + int(header[2])
-        content = out[start:stop]
-        position = stop + 1
-        if content and b"\0" not in content[:BINARY_PROBE_BYTES]:
+    for (path, (mode, oid)), content in zip(paths.items(), contents):
+        if keep is None or keep(path):
+            blobs[path] = content
+        if b"\0" in content[:BINARY_PROBE_BYTES]:
+            continue
+        if content:
             counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
             texts[path] = content
             if rule_ids.SUPPRESS.encode() in content:
@@ -288,8 +367,46 @@ def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot 
                     Suppression(m.rule, path, m.line, m.reason)
                     for m in rule_ids.markers(content.decode("utf-8", errors="replace"),
                                               rule_ids.is_python(path)))
+        if mode in REGULAR_MODES:
+            files[path] = oid
     found.sort(key=lambda s: (s.path, s.line))
-    return Snapshot(revision, counts, tuple(found), texts)
+    return Snapshot(revision, counts, MappingProxyType(files), root, timeout, tuple(found),
+                    MappingProxyType(texts), MappingProxyType(blobs), frozenset(paths))
+
+
+def read_files(snapshot: Snapshot, paths: Sequence[str]) -> dict[str, bytes]:
+    """The committed bytes of each path of a snapshot, never the working tree's."""
+    if not paths:
+        return {}
+    if snapshot.root is None:
+        raise ValueError("the snapshot was not read from a repository")
+    missing = [path for path in paths if path not in snapshot.files]
+    if missing:
+        raise ValueError(f"not a regular text file of the snapshot: {missing[0]}")
+    contents = _read_blobs(
+        snapshot.root, [snapshot.files[path] for path in paths], snapshot.timeout)
+    if contents is None:
+        raise HistoryUnavailable()
+    return dict(zip(paths, contents))
+
+
+def command_snapshot(command: str, repo_root: str, revision: str) -> Snapshot | None:
+    """The snapshot a never-rise command judges, or None after one stderr line `<command>: <reason>`."""
+    root = Path(repo_root)
+    if not root.is_absolute():
+        reason = f"--repo-root must be absolute: {root}"
+    elif not root.is_dir():
+        reason = f"not a directory: {root}"
+    elif in_subdirectory(root, timeout=None):
+        reason = f"--repo-root is not the repository top level: {root}"
+    else:
+        sha = resolve_commit(root, revision, timeout=None)
+        snapshot = read_snapshot(root, sha, timeout=None) if sha else None
+        if snapshot is not None:
+            return snapshot
+        reason = f"cannot read {revision} in {root}"
+    print(f"{command}: {reason}", file=sys.stderr)
+    return None
 
 
 def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str, str] | None:
@@ -381,7 +498,7 @@ def holding(line: int, hunks: Sequence[Hunk]) -> int | None:
     return None
 
 
-def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
+def violations(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     found = enforcer.find(snapshot)
     for violation in found:
         if violation.rule != enforcer.rule:
@@ -390,9 +507,31 @@ def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     return found
 
 
+def _carried_source(enforcer: Enforcer, base: Snapshot, branch: Snapshot,
+                    renamed: Mapping[str, str], path: str) -> str | None:
+    """The source a rename to `path` carries violations from, or None when it carries none."""
+    source = renamed.get(path)
+    if source is None or (enforcer.carries_from is not None
+                          and not enforcer.carries_from(source)):
+        return None
+    if enforcer.carries is not None and not enforcer.carries(
+            base.blobs.get(source, b""), branch.blobs.get(path, b"")):
+        return None
+    return source
+
+
+def _base_measure(enforcer: Enforcer, base: Snapshot, branch: Snapshot,
+                  renamed: Mapping[str, str], base_measure: Mapping[str, int],
+                  violation: Violation) -> int:
+    if violation.path not in renamed:
+        return base_measure.get(violation.path, 0)
+    source = _carried_source(enforcer, base, branch, renamed, violation.path)
+    return 0 if source is None else base_measure.get(source, 0)
+
+
 def counted(enforcer: Enforcer, snapshot: Snapshot) -> tuple[list[Violation], list[Violation]]:
     """The findings left after reasoned suppressions, and the violations of bare markers."""
-    found = _found(enforcer, snapshot)
+    found = violations(enforcer, snapshot)
     suppressed = {(s.path, s.line) for s in snapshot.suppressions
                   if s.reasoned and s.rule == enforcer.rule}
     on_finding = {(v.path, v.line) for v in found}
@@ -433,9 +572,12 @@ def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
         after = len(kept_after) + len(marked_after)
         new: list[Violation] = []
         if enforcer.per_file:
-            base_lines = {v.path: v.line for v in kept_before}
+            base_measure = {v.path: v.magnitude() for v in kept_before}
             new = [v for v in kept_after
-                   if base_lines.get(renamed.get(v.path, v.path), 0) < v.line]
+                   if not (enforcer.exempts_carried
+                           and _carried_source(enforcer, base, branch, renamed, v.path) is not None)
+                   and _base_measure(enforcer, base, branch, renamed, base_measure, v)
+                   < v.magnitude()]
             if len(marked_after) > len(marked_before):
                 new += _added(marked_after, marked_before)
         elif after > before:
@@ -501,41 +643,23 @@ def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
     if pair is None:
         return None
     base, head = pair
-    base_snapshot = read_snapshot(root, base, timeout)
-    branch_snapshot = read_snapshot(root, head, timeout)
+    def keep(path: str) -> bool:
+        return any(e.reads is not None and e.reads(path) for e in enforcers)
+
+    base_snapshot = read_snapshot(root, base, timeout, keep)
+    branch_snapshot = read_snapshot(root, head, timeout, keep)
     renamed = renames(root, base, head, timeout)
     changes = line_changes(root, base, head, timeout)
     if base_snapshot is None or branch_snapshot is None or renamed is None or changes is None:
         return None
+    added = tuple(sorted(branch_snapshot.paths - base_snapshot.paths))
+    rename_blobs = {new: (base_snapshot.blobs.get(old, b""), branch_snapshot.blobs.get(new, b""))
+                    for new, old in renamed.items()}
+    try:
+        rises = compare(base_snapshot, branch_snapshot, renamed, enforcers)
+    except HistoryUnavailable:
+        return None
     return Verdict(
-        base, head, compare(base_snapshot, branch_snapshot, renamed, enforcers),
-        added_suppressions(base_snapshot, branch_snapshot, renamed, changes))
-
-
-def run_lint(command: str, enforcer: Enforcer,
-             argv: Sequence[str] | None = None) -> int:
-    """Print the counted violations of `enforcer` at a revision and exit 0, 1 or 2 as the module docstring says."""
-    parser = argparse.ArgumentParser(prog=command)
-    parser.add_argument("--repo-root", required=True)
-    parser.add_argument("--revision", default="HEAD")
-    args = parser.parse_args(argv)
-    root = Path(args.repo_root)
-    if not root.is_absolute():
-        print(f"{command}: --repo-root must be absolute: {root}", file=sys.stderr)
-        return 2
-    if not root.is_dir():
-        print(f"{command}: not a directory: {root}", file=sys.stderr)
-        return 2
-    if in_subdirectory(root, timeout=None):
-        print(f"{command}: --repo-root is not the repository top level: {root}", file=sys.stderr)
-        return 2
-    sha = resolve_commit(root, args.revision, timeout=None)
-    snapshot = read_snapshot(root, sha, timeout=None) if sha else None
-    if snapshot is None:
-        print(f"{command}: cannot read {args.revision} in {root}", file=sys.stderr)
-        return 2
-    kept, marked = counted(enforcer, snapshot)
-    found = sorted(kept + marked, key=lambda v: (v.path, v.line))
-    for violation in found:
-        print(violation.text())
-    return 1 if found else 0
+        base, head, rises,
+        added_suppressions(base_snapshot, branch_snapshot, renamed, changes),
+        added, renamed, rename_blobs)

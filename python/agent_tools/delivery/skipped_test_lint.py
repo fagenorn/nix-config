@@ -1,4 +1,4 @@
-"""The skipped-test enforcer: no skipped or disabled test is added (rule standard:B18, #1464).
+"""The skipped-test enforcer: no skipped or disabled test is added (rule standard:B23).
 
 A test its framework skips, disables, focuses away or excludes from the run is
 counted by the project's total, one violation per test, and that total may not
@@ -47,10 +47,14 @@ exceed the merge base's, wherever a skip moves to.
 
 The command `skipped-test-lint --repo-root <absolute directory> [--revision <rev>]`
 prints every violation at the revision (default `HEAD`), one line each on stdout,
-`<rule> <path>:<line>`. Its exits (1 when it printed any, 0 when none, 2 with
+`<rule> <path>:<line>`, those a reasoned suppression marker of the rule does not
+cover and one line for each bare marker of the rule (`agent_tools.delivery.never_rise.counted`).
+It exits 1 when it printed any, 0 when none and 2 with one line
 `skipped-test-lint: <reason>` on stderr when the root or revision cannot be
-read) are those of `agent_tools.delivery.never_rise.run_lint`.
+read.
 """
+
+import argparse
 
 from agent_tools.delivery import never_rise
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
@@ -59,7 +63,7 @@ from agent_tools.delivery.suite_source import (
     bracket_pairs, javascript_chain, read_test_files, test_functions)
 
 COMMAND = "skipped-test-lint"
-RULE_ID = "B18"
+RULE_ID = "B23"
 
 PYTEST_OWNERS = frozenset({"pytest", "mark"})
 PYTEST_NAMES = frozenset({"skip", "skipif", "importorskip"})
@@ -276,7 +280,18 @@ ENFORCER = Enforcer(RULE_ID, find)
 
 
 def main(argv: list[str] | None = None) -> int:
-    return never_rise.run_lint(COMMAND, ENFORCER, argv)
+    parser = argparse.ArgumentParser(prog=COMMAND)
+    parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--revision", default="HEAD")
+    args = parser.parse_args(argv)
+    snapshot = never_rise.command_snapshot(COMMAND, args.repo_root, args.revision)
+    if snapshot is None:
+        return 2
+    kept, marked = never_rise.counted(ENFORCER, snapshot)
+    found = sorted(kept + marked, key=lambda v: (v.path, v.line))
+    for violation in found:
+        print(violation.text())
+    return 1 if found else 0
 
 
 if __name__ == "__main__":
