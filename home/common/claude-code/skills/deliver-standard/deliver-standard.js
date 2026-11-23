@@ -227,6 +227,7 @@ const SETUP_SCHEMA = {
     review_state: { type: 'object', properties: { code: REVIEW_STATE, plan: REVIEW_STATE } },
     knowledge: { type: 'object', properties: { standards: STRS, hints: STRS, rejections: STRS } },
     verification: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' }, when_changed: STRS, skip_reason: { type: 'string' }, pre_commit: { type: 'boolean' } }, required: ['id', 'argv', 'cwd'] } },
+    verification_before_pull_request: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' }, when_changed: STRS, skip_reason: { type: 'string' } }, required: ['id', 'argv', 'cwd'] } },
     look: LOOK_SCHEMA,
     live_fault: LIVE_READ,
   },
@@ -495,6 +496,7 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - review: the command ids at bindings.workflow.review.code and .plan (omit an absent one); review_state: for code and plan, the state of the capability review.code and review.plan (available, blocked or unsupported; absent if the capability is missing).
 - knowledge: bindings.paths.standards, bindings.paths.hints and bindings.paths.rejections, each as given (empty when absent).
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).
+- verification_before_pull_request: only when bindings.workflow.verification_before_pull_request is a list, for each of its ids its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry for that id (when_changed globs, skip_reason); omit verification_before_pull_request when the binding is absent or null.
 Then run alone and exactly: look-approval marked --repo <slug> --issue ${ISSUE} and return its verdict (marked or unmarked), covers and acs (the array of its acs, [] when it names none) as look; on a non-zero exit return look with verdict error and the error and detail of its JSON line as detail.`
 const LIVE_STEP = LIVE_READING ? `
 Also run alone and exactly: sprint recap, before you return any refusal, and return live_fault on every reply, a refusal included. When it exits 0 its one JSON line gives sprint_id: return verdict declared, that sprint_id and fault (the entry of its live_faults whose issue is ${ISSUE}, every member as printed) when there is one, and verdict none when it lists none for issue ${ISSUE}. When it exits 2 printing sprint: no sprint id, return verdict no-sprint; on any other non-zero exit return verdict error and the stderr line as detail. Change nothing.` : ''
@@ -1000,6 +1002,14 @@ const RULES_FOR = (W, extra = GRANTS) => `${BASE_RULES}
 // An unattended evidence run is a command outside the harness's verification ids: it can never complete.
 // Defined before closeOut: a merged-PR resume calls closeOut before the plan section runs.
 const VERIFY_IDS = setup.verification.map(e => e.id)
+// Before a pull request exists, every local verification runs the pre-pull-request list when the contract sets one;
+// the pull request's required checks gate landing. VERIFY_IDS and PRE_COMMIT keep reading the declared verification.
+// A missing, empty or non-array member is absent, so the declared verification runs.
+const BEFORE_PR = Array.isArray(setup.verification_before_pull_request) && setup.verification_before_pull_request.length > 0
+const LOCAL = BEFORE_PR ? setup.verification_before_pull_request : setup.verification
+const LOCAL_IDS = LOCAL.map(e => e.id)
+// The same text in deliver-batch.js.
+const PRE_PR_EVIDENCE = 'the verification above ran the pre-pull-request list, and CI on this pull request runs the full declared verification'
 const commandOutside = c => {
   if (!c || typeof c !== 'object' || c.kind !== 'evidence' || !c.run || typeof c.run !== 'object') return false
   const command = typeof c.run.command === 'string' ? c.run.command : (c.run.then && typeof c.run.then.command === 'string' ? c.run.then.command : null)
@@ -1437,7 +1447,7 @@ const LINT_FIX = {
 // A code criterion whose every word is a declared verification id, a word of its argv or filler names no test of its
 // own: the verify step already runs and proves it, and reviewers asked to show it ran the whole suite again. Anything
 // else is left to review.
-const VERIFY_NAMES = setup.verification.flatMap(e => [e.id].concat(Array.isArray(e.argv) ? e.argv : [])).filter(v => typeof v === 'string' && v).map(v => v.toLowerCase())
+const VERIFY_NAMES = (BEFORE_PR ? [...setup.verification, ...LOCAL] : setup.verification).flatMap(e => [e.id].concat(Array.isArray(e.argv) ? e.argv : [])).filter(v => typeof v === 'string' && v).map(v => v.toLowerCase())
 const VERIFY_FILLER = ['a', 'all', 'and', 'are', 'at', 'both', 'branch', 'check', 'checks', 'clean', 'command', 'commands', 'declared', 'exit', 'exits', 'green', 'head', 'in', 'is', 'of', 'on', 'or', 'pass', 'passes', 'passing', 'run', 'runs', 'still', 'succeed', 'succeeds', 'suite', 'the', 'tip', 'verification', 'with', 'zero', '0']
 const restatesVerify = text => {
   const words = (typeof text === 'string' ? text : '').toLowerCase().split(/[^a-z0-9:_./-]+/).map(w => w.replace(/^[.:/-]+|[.:/-]+$/g, '')).filter(w => w !== '')
@@ -1628,7 +1638,7 @@ if (!SKIP_REVIEW && !SKIP_FINAL) finalReviewed = null
 let tip = setup.head || null
 // The verification contract as freshly resolved, key order aside: cached results answer only this contract.
 const canon = v => Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v)
-const VERIFY_CONTRACT = canon(setup.verification)
+const VERIFY_CONTRACT = canon(LOCAL)
 let VERIFY_CACHED = SKIP_REVIEW && verified.contract === VERIFY_CONTRACT
 const DIRECT_IMPL = { ...IMPL, properties: { ...IMPL.properties, acceptance: PLAN_SCHEMA.properties.acceptance, sensitive: { type: 'boolean' }, ineligible: { type: 'boolean' } } }
 const GRADED_FINDINGS = {
@@ -2664,7 +2674,7 @@ const slotted = e => ({ ...e, argv: ['verify-slot', 'run', '--wait-limit', Strin
 const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries.map(slotted))}. Run each argv with <worktree>/<its cwd> as working directory. Each argv runs its declared command inside one of the host's verify slots: verify-slot run holds the slot while the command runs and gives it back when it ends. An attempt that prints verify-slot: no verify slot came free within ${SLOT_WAIT_SECONDS}s; nothing ran and exits 75 ran nothing and does not count as a run of that command: run the same argv again, up to ${SLOT_ATTEMPTS} attempts in all, and after the last return that id as fail with the summary no verify slot came free in ${SLOT_ATTEMPTS} attempts and no_slot: true (no_slot is true on that result only, never on a command that ran). Every other exit is the command's own result. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. On each failure also return outside_diff: true only when no failing test file and no erroring file is in that git diff --name-only list, else false. When a command's output names image files it wrote as before or after pictures of the change, return them as pictures, one {kind: before or after, path: its absolute path} each; otherwise return no pictures. Do not change any file.
 ${RULES}`
 const noSlot = v => !!v && Array.isArray(v.results) && v.results.some(r => isEntry(r) && r.status === 'fail' && r.no_slot === true)
-const verifyBody = verifyBodyFor(setup.verification)
+const verifyBody = verifyBodyFor(LOCAL)
 const verifyPrompt = `${CTX}\n${verifyBody}`
 // The first verification also renews the claim; the reruns do not.
 const verifyFirst = `${CTX}\n${RENEW_FIRST}\n${verifyBody}`
@@ -2673,7 +2683,7 @@ const verifyFirst = `${CTX}\n${RENEW_FIRST}\n${verifyBody}`
 const verifyProblems = v => {
   if (!v) return [{ id: '?', summary: 'verification returned nothing' }]
   const out = v.results.filter(r => r.status === 'fail')
-  for (const e of setup.verification) {
+  for (const e of LOCAL) {
     const rs = v.results.filter(r => r.id === e.id)
     if (rs.length !== 1) out.push({ id: e.id, summary: `expected exactly one result, got ${rs.length}` })
     else if (rs[0].status === 'skipped' && !(e.when_changed && e.when_changed.length)) out.push({ id: e.id, summary: 'skipped without when_changed globs' })
@@ -2690,10 +2700,10 @@ const wsOnly = c => !!c && c.whitespace_exit === 0 && Array.isArray(c.changed_pa
 const attested = fr => !!fr && fr.whitespace_insignificant === true && typeof fr.whitespace_evidence === 'string' && fr.whitespace_evidence.trim().length > 0
 const rerunIds = (v, fix) => {
   if (!v || !v.clean || !sameSha(v.head, fix.start_head)) return null
-  if (!verifyProblems(v).every(p => p.status === 'fail' && VERIFY_IDS.includes(p.id))) return null
+  if (!verifyProblems(v).every(p => p.status === 'fail' && LOCAL_IDS.includes(p.id))) return null
   const statusOf = id => { const rs = v.results.filter(r => r.id === id); return rs.length === 1 ? rs[0].status : null }
-  if (!VERIFY_IDS.some(id => statusOf(id) === 'pass')) return null
-  return VERIFY_IDS.filter(id => statusOf(id) !== 'pass')
+  if (!LOCAL_IDS.some(id => statusOf(id) === 'pass')) return null
+  return LOCAL_IDS.filter(id => statusOf(id) !== 'pass')
 }
 const carry = (prev, next, rerun) => {
   const carried = prev.results.filter(r => r.status === 'pass' && !rerun.includes(r.id) && !next.results.some(n => n.id === r.id)).map(r => ({ ...r, carried_from: r.carried_from || prev.head }))
@@ -2718,10 +2728,10 @@ const rerunOnce = async (v, n) => {
   rerunFailed = false
   if (!v || !v.clean || !Array.isArray(v.results) || noSlot(v)) return v
   const fails = verifyProblems(v)
-  if (!fails.length || !fails.every(p => p.status === 'fail' && p.outside_diff === true && VERIFY_IDS.includes(p.id))) return v
+  if (!fails.length || !fails.every(p => p.status === 'fail' && p.outside_diff === true && LOCAL_IDS.includes(p.id))) return v
   const ids = fails.map(p => p.id)
   log(`verify: ${ids.join(', ')} failed outside the branch's changed files; one rerun before any fix`)
-  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun each failed command below once, whole and exactly as its argv below is written, and never a second time once it has run, whatever its outcome; an attempt that exits 75 with the no-slot line ran nothing, so it is not that rerun and is retried as below.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun each failed command below once, whole and exactly as its argv below is written, and never a second time once it has run, whatever its outcome; an attempt that exits 75 with the no-slot line ran nothing, so it is not that rerun and is retried as below.\n${verifyBodyFor(LOCAL.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
   // A rerun that never started is not a reproduced failure: the verification stops on it, with no fix step.
   if (complete(again, VERIFY) && noSlot(again)) return { ...v, results: v.results.map(r => again.results.find(a => a.id === r.id && a.status === 'fail' && a.no_slot === true) || r) }
   if (!complete(again, VERIFY) || !again.clean || !Array.isArray(again.results) || !sameSha(again.head, v.head)) return v
@@ -2891,7 +2901,7 @@ while (verify && !noSlot(verify) && verifyProblems(verify).length && vRounds < 2
   const fr = await readReview(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.${outside.length ? ` It edits files outside the branch's diff, each for a stated cause: ${JSON.stringify(outside)}; a cause the code or the failure does not bear out is an Important defect.` : ''}${asked ? wsAsk(ws) : ''}`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: asked ? WS_REVIEW : FINDINGS })
   if (!fr || findingsOf(fr).length) return stop('verify-fix-review', { review: fr })
   const rerun = asked && attested(fr) ? asked : null
-  const next = await call(rerun ? `${CTX}\nA whitespace-only fix followed the verification at ${verify.head}; the declared ids not listed below passed there and are carried forward, so run only the listed ones.\n${verifyBodyFor(setup.verification.filter(e => rerun.includes(e.id)))}` : verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  const next = await call(rerun ? `${CTX}\nA whitespace-only fix followed the verification at ${verify.head}; the declared ids not listed below passed there and are carried forward, so run only the listed ones.\n${verifyBodyFor(LOCAL.filter(e => rerun.includes(e.id)))}` : verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
   if (rerun && next && !sameSha(next.head, fix.commit)) return stop('verify', { verify: next, problems: [{ id: '?', summary: `the narrowed verification ran at ${next.head}, not at the whitespace-only fix ${fix.commit}, so no result was carried` }] })
   verify = await rerunOnce(rerun && next && Array.isArray(next.results) ? carry(verify, next, rerun) : next, vRounds + 1)
 }
@@ -2908,7 +2918,7 @@ if (untested) {
 }
 if (MODE === 'ready') {
   verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap(), ...(PICTURES.length ? { pictures: PICTURES } : {}) }
-  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, look: { verdict: LOOK.verdict, covers: COVERS }, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
+  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, ...(BEFORE_PR ? { verify_scope: 'before_pull_request' } : {}), look: { verdict: LOOK.verdict, covers: COVERS }, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
 }
 
 // ---------------- Ship ----------------
@@ -3069,7 +3079,7 @@ const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, reb
   const review = await readReview(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
   return { fix, review, moved, ok: true }
 }
-const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : LANE === 'live' ? 'live-fault lane review: one reviewer, no plan' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}${LANE === 'live' && LIVE_REC ? `; the Evidence section also holds, on a line of its own, exactly: ${LIVE_LINE()}` : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
+const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${BEFORE_PR ? `; ${PRE_PR_EVIDENCE}` : ''}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : LANE === 'live' ? 'live-fault lane review: one reviewer, no plan' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}${LANE === 'live' && LIVE_REC ? `; the Evidence section also holds, on a line of its own, exactly: ${LIVE_LINE()}` : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
 const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // A landing resync that moved a marked head past the owner's approved head. LOOK_CARRY_VERIFY adds merge_only to the
 // verification reply; the carry command's JSON line is LOOK_CARRY_SCHEMA.
@@ -3739,3 +3749,4 @@ try {
   released = await unlock()
 }
 return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...released } : { ...finished, ...released }
+// suppress-standard:B17 the delivery program's phases share module state (setup, verify, the look loop), so the program stays one file
