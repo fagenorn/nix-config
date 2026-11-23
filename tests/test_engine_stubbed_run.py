@@ -1,4 +1,4 @@
-"""Scenario tests for the shipped `deliver` procedure on the fixture project (#1526).
+"""Scenario tests for the shipped `deliver` procedure on the fixture project.
 
 Each case runs `engine deliver` as a child process against a built fixture project, a fake tracker
 and a stubbed launcher (`tests/engine_stubbed_world.py`), and reads what the run left.

@@ -1,4 +1,4 @@
-"""The engine's fixture project (#1526), built in a temporary directory and adopted with the adoption command.
+"""The engine's fixture project, built in a temporary directory and adopted with the adoption command.
 
 `FixtureProject(test_case, world)` copies `tests/fixtures/engine-fixture-project/` into a new
 checkout on `main`, drafts a contract for it from `GuardPolicyWorld.contract`, publishes it to a

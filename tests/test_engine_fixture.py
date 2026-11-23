@@ -1,4 +1,4 @@
-"""Contract tests for the engine's fixture project (#1526): it is built locally and adopted with the adoption command."""
+"""Contract tests for the engine's fixture project: it is built locally and adopted with the adoption command."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Contract tests for `issue-setup` (`agent_tools.delivery.issue_setup`, issue 1526).
+"""Contract tests for `issue-setup` (`agent_tools.delivery.issue_setup`).
 
 The policy functions are imported; each command runs as a child process
 (`python -m agent_tools.delivery.issue_setup`) against a real git project with a local bare

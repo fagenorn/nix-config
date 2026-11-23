@@ -1,4 +1,4 @@
-"""A stubbed `engine deliver` run on the fixture project (#1526).
+"""A stubbed `engine deliver` run on the fixture project.
 
 `StubbedRun(test_case, ...)` builds the adopted fixture project, a fake tracker (`ForgeWorld`) that
 answers every `gh` call the run makes from the one scenario given to the constructor, and a

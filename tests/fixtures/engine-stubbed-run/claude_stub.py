@@ -1,4 +1,4 @@
-"""A stand-in for the account launcher in the engine's stubbed runs (#1526).
+"""A stand-in for the account launcher in the engine's stubbed runs.
 
 Run as `python claude_stub.py <scenario.json> <log> <launcher args...>`. It reads stdin (the
 prompt) and takes the value after `--json-schema`. The scenario file is one JSON object of replies

@@ -1,4 +1,4 @@
-"""`issue-setup`: the reads and writes an engine setup of one issue makes (issue 1526).
+"""`issue-setup`: the reads and writes an engine setup of one issue makes.
 
 Every call prints exactly one compact JSON object on one stdout line with a `verdict`.
 Exit 0 carries any verdict but `error`; exit 1 is `error` (`{verdict, error, transient,
