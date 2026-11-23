@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery.record_lint import record_violations
 from agent_tools.project_contract.adopt_inspection import (
     blob_at,
     parses_as_evidence_record,
@@ -261,6 +262,17 @@ class DocsTreeTest(unittest.TestCase):
             text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_every_guard_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/guard/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.rule for violation in found]
+        self.assertEqual(breaches, {})
 
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
@@ -911,7 +923,7 @@ class DocsTreeTest(unittest.TestCase):
                        "--setting-sources", "--tools", "300", "production.read_only.commands",
                        "project_question_hook",
                        "Production cannot be read for this project", "ADR-console-008",
-                       "ADR-console-011", "ADR-console-023", "ADR-guard-011"):
+                       "ADR-console-011", "ADR-console-023", "ADR-guard-009"):
             self.assertIn(needle, adr)
         adr008 = self.doc(
             "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
@@ -1264,8 +1276,6 @@ class DocsTreeTest(unittest.TestCase):
                       "host-is-one-line-in-the-work-column.md",
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-"
                       "origin.md",
-                      "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-"
-                      "outside-its-release-path.md",
                       "docs/areas/project-contract/adr/007-a-contract-declares-its-production-"
                       "rules-or-that-it-has-none.md"):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
