@@ -65,7 +65,9 @@ stored `prompt.md`. The launch's prompt is stored as `sessions/<step>.<visit>.co
 absent, and each record as `.continue-<attempt>.json`. The continued launches are not re-asked, so a miss is
 `no-reply`; every later launch of the visit resumes. A visit with a stored result (with or without its outcome) or
 a recorded stop after its entry (`quota-wait`, `stopped-by-request`) is not resumed but rewound to a new visit as
-before, its `run_continued` clearing the stop and closing an open usage-limit wait.
+before, its `run_continued` clearing the stop and closing an open usage-limit wait. A resumed visit
+appends no `run_continued`, so the continuing call closes every wait the killed engine left open with a
+`wait_ended` of its kind (a usage-limit or `host-slot` wait) before the visit launches.
 
 Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
@@ -520,11 +522,26 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     if (isinstance(action, engine_core.StartSession)
             and (action.step, action.visit) == (point.step, point.visit)
             and _resumed(run_dir, ledger, action.step, action.visit) is not None):
+        for wait in _open_waits(ledger):  # no run_continued closes what the killed engine left open
+            engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(), "wait": wait})
         return  # the interrupted visit resumes its own session: no rewind, no new visit
     event = {"event": "run_continued", "at": _now(), "step": point.step}
     if point.visit is not None:
         event["visit"] = point.visit
     engine_ledger.append_event(run_dir, event)
+
+
+def _open_waits(ledger: list[dict]) -> list[str]:
+    """The kinds of the waits the ledger leaves open, oldest first (a `run_continued` closes all)."""
+    open_kinds: list[str] = []
+    for e in ledger:
+        if e["event"] == "wait_started":
+            open_kinds.append(e["wait"])
+        elif e["event"] == "wait_ended" and e["wait"] in open_kinds:
+            open_kinds.remove(e["wait"])
+        elif e["event"] == "run_continued":
+            open_kinds.clear()
+    return open_kinds
 
 
 @dataclass(frozen=True)

@@ -23,7 +23,7 @@ from tests.process_liveness import process_alive
 from tests.test_engine_continue import gated
 from tests.test_engine_deliver import EngineProject, run_continued, shape, start_deliver, step
 from tests.test_engine_session import (
-    RESULT_MISSING, RESULT_NORMAL, after, agent_step, copy_roles, install_answers, one_step,
+    RESULT_LIMIT, RESULT_MISSING, RESULT_NORMAL, after, agent_step, copy_roles, install_answers, one_step,
     write_procedures,
 )
 from tests.test_engine_stop import gone, reap
@@ -331,6 +331,29 @@ class ResumeTest(unittest.TestCase):
         self.assertTrue((run / "results/draft.1.json").exists())
         self.assertFalse((run / "results/draft.2.json").exists())
         self.assertTrue((run / "sessions/draft.1.continue-2.json").exists())
+
+    def test_a_resumed_visit_closes_the_usage_limit_wait_the_killed_engine_left_open(self):
+        limit = {"stdout": str(RESULT_LIMIT), "exit": 1, "account": "p1"}
+        log = install_answers(self.project, [limit, self.hang(), self.normal()])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 2)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        (run,) = self.project.runs()
+        events = self.project.events(run)
+        self.assertEqual(run_continued(events), [])
+        started = [e for e in events if e["event"] == "wait_started"]
+        ended = [e for e in events if e["event"] == "wait_ended"]
+        self.assertEqual([e["wait"] for e in started], ["usage-limit"])
+        self.assertEqual([e["wait"] for e in ended], ["usage-limit"])
+        self.assertLess(events.index(started[0]), events.index(ended[0]))
+        self.assertLess(events.index(ended[0]),
+                        next(i for i, e in enumerate(events) if e["event"] == "run_done"))
+        self.assertIsNone(json.loads(self.project.status(1512).stdout)["wait"])
+        (line,) = [entry for entry in history(self.project) if entry["run"] == run.name]
+        (visit,) = [entry for entry in line["steps"] if entry["step"] == "draft"]
+        self.assertIsNotNone(visit["waits"][0]["seconds"])
 
     def test_a_session_recorded_but_never_started_is_launched_with_its_recorded_id(self):
         procedures, log, run, session = self.delivered_once()
