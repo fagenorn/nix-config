@@ -680,7 +680,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
             leases = [w for w in read_leases(args.repo, args.branch) if w.pr == pr]
         except forge_api.ForgeError:
             return None
-        live = trusted(leases, queue.now)
+        live = trusted([w for w in leases if w.oid == lock], queue.now)  # D4: `hold` beats only these
         if not live:
             return None
         lease = max(live, key=lambda w: (w.since, w.beat))

@@ -2320,6 +2320,13 @@ class LeaseTest(QueueTest):
         self.assertGreaterEqual(out["waited_s"], 2000)
         self.assertEqual(self.lock_swaps(), [])
 
+    def test_a_lease_left_at_an_older_sha_never_lapses_the_lock_that_moved_past_it(self):
+        self.lease(12, 0, 0, sha=E)  # the moved lock's lease create failed, so this one stayed behind
+        code, out = self.leased(self.clock(self.live_holder(self.release_at(2000), lease=False)))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", None))
+        self.assertGreaterEqual(out["waited_s"], 2000)
+        self.assertEqual([a for a in self.lock_swaps() if a[-3] == f"before={B}"], [])
+
     def test_a_release_holder_is_never_taken_over_by_the_lapse_or_the_bound(self):
         self.world.respond("gh", DEFAULT_READ, stdout=DEFAULT + "\n")
         self.pulls(B, release_pull(20, sha=B))
