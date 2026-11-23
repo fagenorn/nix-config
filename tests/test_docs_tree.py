@@ -1287,6 +1287,20 @@ class DocsTreeTest(unittest.TestCase):
                 self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
         self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
 
+    def test_no_tracked_file_cites_a_retired_guard_record(self):
+        # The pattern is built at run time, so this file holds no retired citation itself.
+        numbers = ("005", "011", "012")
+        pattern = "ADR-guard-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            with self.subTest(number):
+                self.assertEqual(sorted((REPO_ROOT / "docs/areas/guard/adr").glob(f"{number}-*.md")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

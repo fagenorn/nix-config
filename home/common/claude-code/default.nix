@@ -390,7 +390,7 @@ let
       command = "${agentTools.launchers.owner-actions} statusline";
     };
 
-    # The same guard serves Bash and, since issue 1150 (ADR-guard-012), file
+    # The same guard serves Bash and, since issue 1150 (ADR-guard-009), file
     # edits and MCP tools: it refuses a write to a declared production key file
     # and a call to a declared production MCP tool, and nothing else. MultiEdit
     # is listed because the pinned Claude Code still names it among its
