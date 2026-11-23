@@ -278,6 +278,24 @@ def forge(runs, jobs, logs, listing=LISTING):
     return api_get, run_gh, asked
 
 
+ESC = "\x1b"
+REFUSAL = ("the response contains terminal escape sequences; "
+           "pass --allow-escape-sequences to output it anyway")
+
+
+def refused_without_flag(stub):
+    """A `run_gh` that refuses every log read lacking the flag, and answers a flagged one from `stub`."""
+    calls = []
+
+    def run_gh(argv, allow=()):
+        calls.append(list(argv))
+        if "--allow-escape-sequences" not in argv:
+            raise lint_time.forge_api.ForgeError("gh_failed", REFUSAL)
+        return stub([a for a in argv if a != "--allow-escape-sequences"], allow)
+
+    return run_gh, calls
+
+
 class GitHubLintTimeTest(unittest.TestCase):
     def test_runs_without_a_record_are_skipped_and_reading_stops_at_twenty(self):
         runs = [{"id": n, "created_at": f"2026-11-{n:02d}T00:00:00Z"} for n in range(1, 26)]
@@ -297,6 +315,42 @@ class GitHubLintTimeTest(unittest.TestCase):
         self.assertEqual(len(records), 20)
         self.assertEqual(len(asked), 21)
         self.assertNotIn(f"repos/{SLUG}/actions/jobs/1003/logs", asked)
+
+    def test_a_log_gh_refuses_for_terminal_escape_sequences_is_read_with_the_flag(self):
+        runs = [{"id": 1, "created_at": "2026-11-01T00:00:00Z"}]
+        jobs = {1: [{"id": 1001, "name": "Conformance"}]}
+        api_get, stub, _ = forge(runs, jobs, {1001: (0, log_of(1))})
+        run_gh, _ = refused_without_flag(stub)
+
+        with mock.patch.object(lint_time.forge_api, "api_get", api_get), \
+                mock.patch.object(lint_time.forge_api, "run_gh", run_gh):
+            records = lint_time.GitHubLintTime(SLUG, "main").records()
+
+        self.assertEqual([r.total_ms for r in records], [1000])
+
+    def test_a_log_wrapped_in_terminal_escape_sequences_reads_to_the_same_records_as_the_plain_log(self):
+        runs = [{"id": n, "created_at": f"2026-11-{n:02d}T00:00:00Z"} for n in (1, 2)]
+        jobs = {n: [{"id": 1000 + n, "name": "Conformance"}] for n in (1, 2)}
+        plain_logs = {1001: (0, log_of(1)), 1002: (0, log_of(2))}
+        coloured_logs = {
+            1001: (0, f"{ESC}[36;1mPYTHONPATH=python python3 -m agent_tools.delivery.lint_time{ESC}[0m\n"
+                      f"2026-11-22T10:00:00.0000000Z {ESC}[33m"
+                      + record_line(Record((LintTime("A", 1000, 0),))) + f"{ESC}[0m{ESC}]8;;\x07\n"),
+            1002: (0, f"{ESC}[0m2026-11-22T10:00:00.0000000Z "
+                      + record_line(Record((LintTime("A", 2000, 0),))) + f"{ESC}[0m\n"),
+        }
+        api_get, plain_gh, _ = forge(runs, jobs, plain_logs)
+        api_get, coloured_stub, _ = forge(runs, jobs, coloured_logs)
+        coloured_gh, _ = refused_without_flag(coloured_stub)
+
+        with mock.patch.object(lint_time.forge_api, "api_get", api_get):
+            with mock.patch.object(lint_time.forge_api, "run_gh", plain_gh):
+                plain = lint_time.GitHubLintTime(SLUG, "main").records()
+            with mock.patch.object(lint_time.forge_api, "run_gh", coloured_gh):
+                coloured = lint_time.GitHubLintTime(SLUG, "main").records()
+
+        self.assertEqual(coloured, plain)
+        self.assertEqual([r.total_ms for r in plain], [2000, 1000])
 
     def test_a_gone_log_is_skipped(self):
         runs = [{"id": n, "created_at": f"2026-11-{n:02d}T00:00:00Z"} for n in (1, 2)]
@@ -333,6 +387,58 @@ class CommandTest(unittest.TestCase):
         self.assertTrue(err.startswith("lint-time: "))
         self.assertEqual(out, "")
         create.assert_not_called()
+
+    def test_a_malformed_record_wrapped_in_terminal_escape_sequences_exits_2_with_payload_invalid(self):
+        runs = [{"id": 1, "created_at": "2026-11-01T00:00:00Z"}]
+        bad = f'{ESC}[0mlint-times v1 {{"lints":[],"total_ms":0}}{ESC}[0m\n'
+        api_get, stub, _ = forge(runs, {1: [{"id": 11, "name": "Conformance"}]}, {11: (0, bad)})
+        run_gh, _ = refused_without_flag(stub)
+
+        code, out, err, create = self.call(
+            ["file", "--repo", SLUG, "--branch", "main"], api_get, run_gh)
+
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("lint-time: payload_invalid: "))
+        self.assertEqual(out, "")
+        create.assert_not_called()
+
+    def test_a_refusal_the_flag_does_not_lift_exits_2_with_gh_failed(self):
+        runs = [{"id": 1, "created_at": "2026-11-01T00:00:00Z"}]
+        api_get, _, _ = forge(runs, {1: [{"id": 11, "name": "Conformance"}]}, {})
+        calls = []
+
+        def run_gh(argv, allow=()):
+            calls.append(list(argv))
+            raise lint_time.forge_api.ForgeError("gh_failed", REFUSAL)
+
+        code, out, err, create = self.call(
+            ["file", "--repo", SLUG, "--branch", "main"], api_get, run_gh)
+
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("lint-time: gh_failed: "))
+        self.assertEqual(out, "")
+        create.assert_not_called()
+        path = f"repos/{SLUG}/actions/jobs/11/logs"
+        self.assertEqual(calls, [["api", path], ["api", "--allow-escape-sequences", path]])
+
+    def test_a_gh_failure_that_does_not_name_the_flag_is_not_retried(self):
+        runs = [{"id": 1, "created_at": "2026-11-01T00:00:00Z"}]
+        api_get, _, _ = forge(runs, {1: [{"id": 11, "name": "Conformance"}]}, {})
+        calls = []
+
+        def run_gh(argv, allow=()):
+            calls.append(list(argv))
+            raise lint_time.forge_api.ForgeError(
+                "gh_failed", "HTTP 403: Resource not accessible by integration")
+
+        code, out, err, create = self.call(
+            ["file", "--repo", SLUG, "--branch", "main"], api_get, run_gh)
+
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("lint-time: gh_failed: HTTP 403"))
+        self.assertEqual(out, "")
+        create.assert_not_called()
+        self.assertEqual(calls, [["api", f"repos/{SLUG}/actions/jobs/11/logs"]])
 
     def test_file_files_one_issue_and_prints_the_outcome(self):
         runs = [{"id": n, "created_at": f"2026-11-{n:02d}T00:00:00Z"} for n in range(1, 21)]
@@ -379,6 +485,23 @@ class CommandTest(unittest.TestCase):
                 self.assertEqual(code, want_code)
                 self.assertEqual(len(out.splitlines()), 1)
                 self.assertEqual(json.loads(out)["state"], want_state)
+
+    def test_observed_reads_an_output_line_wrapped_in_terminal_escape_sequences(self):
+        listing = (f"repos/{SLUG}/actions/workflows/lint-time.yaml/runs"
+                   "?branch=main&event=push&status=completed&per_page=1")
+        within = json.dumps({"action": "within", "issue": None, "runs": 20, "median_seconds": 12.5,
+                             "slowest": {"lint": "PY6", "median_seconds": 8.25}})
+        text = f"2026-11-22T10:00:00.0000000Z {ESC}[32m{within}{ESC}[0m\n"
+        api_get, stub, _ = forge(
+            [{"id": 5, "created_at": "2026-11-01T00:00:00Z"}],
+            {5: [{"id": 55, "name": "Lint Time"}]}, {55: (0, text)}, listing)
+        run_gh, _ = refused_without_flag(stub)
+
+        code, out, _, _ = self.call(["observed", "--repo", SLUG, "--branch", "main"], api_get, run_gh)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), {
+            "state": "met", "run": 5, "median_seconds": 12.5, "slowest": "PY6"})
 
     def test_observed_met_prints_the_median_and_the_slowest_lint(self):
         listing = (f"repos/{SLUG}/actions/workflows/lint-time.yaml/runs"
