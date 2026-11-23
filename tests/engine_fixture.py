@@ -5,7 +5,9 @@ checkout on `main`, drafts a contract for it from `GuardPolicyWorld.contract`, p
 local bare `origin`, and runs `adopt-project plan` then `apply` on it exactly as any project is
 adopted: no contract is written by hand and nothing is registered. `review_code=True` makes the
 independent code review supported through the `codex-companion` command, and `conditions` is the
-contract's `verification_conditions`. When the adoption cannot reach
+contract's `verification_conditions`. `required_checks` is the draft's `merge.required_checks`; an empty
+one deletes the member, since the resolver refuses an empty list and an absent member means none
+declared. When the adoption cannot reach
 a ready plan and a commit, the build fails with the command's own output.
 """
 
@@ -35,8 +37,10 @@ class FixtureProject:
 
     def __init__(self, test_case: unittest.TestCase, world: GuardPolicyWorld, *,
                  slug: str = "example/fixture", review_code: bool = False,
-                 conditions: dict | None = None) -> None:
+                 conditions: dict | None = None,
+                 required_checks=REQUIRED_CHECKS) -> None:
         self.world = world
+        self.required_checks = list(required_checks)
         self.slug = slug
         self.review_code = review_code
         self.conditions = conditions
@@ -80,7 +84,11 @@ class FixtureProject:
         draft["bindings"]["vcs"]["commit"].update(signed=False)
         del draft["bindings"]["vcs"]["commit"]["environment"]
         draft["bindings"]["workflow"]["verification"] = list(self.VERIFICATION)
-        draft["bindings"]["vcs"]["merge"]["required_checks"] = list(self.REQUIRED_CHECKS)
+        merge = draft["bindings"]["vcs"]["merge"]
+        if self.required_checks:
+            merge["required_checks"] = list(self.required_checks)
+        else:
+            merge.pop("required_checks", None)
         return draft
 
     def _commit_source(self, draft: dict) -> None:
