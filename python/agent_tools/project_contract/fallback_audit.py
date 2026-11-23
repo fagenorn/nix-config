@@ -14,7 +14,9 @@ manifest (`--manifest`, else the repository's committed
 `platform-manifest.json`). `NON_LADDER_SITES` is the closed exemption table,
 and it belongs to nix-config: it applies only when the root's
 `.agents/project.json` declares `project.id` `fagenorn/nix-config`
-(`NON_LADDER_PROJECT_ID`, read through `resolve_project.declared_facts`), so
+(`NON_LADDER_PROJECT_ID`, the one `resolve_project.declared_facts` reads from the
+contract's view, `load_contract_view`, so a schema-3 contract's is the id derived
+from its origin remote; ADR-project-contract-014), so
 another project's audit has no exemption rows and no `stale_exemption` finding,
 and a root whose contract is missing or unreadable has none either (#763). A
 row `(path, marker_id, reason)` moves every hit of exactly that marker in
@@ -191,13 +193,13 @@ def _probe() -> dict[str, Any]:
 
 
 def _declared_project_id(root: Path) -> str | None:
-    """The `project.id` the root's contract declares, or None when it declares
+    """The `project.id` the root's contract view declares, or None when it declares
     none it can be read as: an unreadable or malformed contract owns no exemption."""
     try:
-        source = resolve_project.load_contract(root)
+        view = resolve_project.load_contract_view(root)
     except resolve_project.ContractError:
         return None
-    return resolve_project.declared_facts(source)["project_id"]
+    return resolve_project.declared_facts(view)["project_id"]
 
 
 def _exemption_sites(root: Path) -> tuple[tuple[str, str, str], ...]:

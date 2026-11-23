@@ -25,11 +25,11 @@ from agent_tools.project_contract import adopt_apply, adopt_inspection
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
+from .approve_case_support import PENDING, PublishWaits, awaited, reconciled
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .test_console_register_service import (
-    A1, DRAFT, PID_A, PID_B, READ_NO_BUILD, READY, ROOT, CancelChecks, Case, DraftCase, Fake, Held,
-    answer_of, assert_freed, assert_held, closing, git, git_repo, real_home_state, reconcile_repository,
-    sample_repository)
+    A1, DRAFT, PID_A, PID_B, READ_NO_LINT, READY, ROOT, CancelChecks, Case, DraftCase, Fake, Held,
+    answer_of, assert_freed, assert_held, closing, git, git_repo, real_home_state, sample_repository)
 
 PATH = "/api/plan-approve"
 MERGE_PATH = "/api/adoption-merge"
@@ -222,7 +222,7 @@ class RegistryFake(Fake):
         return self.report
 
 
-class ApproveCase(Case):
+class ApproveCase(PublishWaits, Case):
     def setUp(self):
         super().setUp()
         self.forge = StandInForge()
@@ -244,7 +244,7 @@ class ApproveCase(Case):
     def ready(self, plan=READY, fake_class=Fake, **fake_arguments):
         fake = fake_class(plan=plan, **fake_arguments)
         self.start(fake)
-        self.repo = reconcile_repository(self.parent, contract=True)
+        self.repo = reconciled(self.parent, contract=True)
         self.shown = self.registered(self.repo)
         self.planned = self.settled_row(self.repo)
         return fake
@@ -285,13 +285,14 @@ class ApproveCase(Case):
         return self.approve({"plan_id": plan_id})
 
     def until(self, *steps, after=0, bound=120):
-        end = time.monotonic() + bound
-        while time.monotonic() < end:
-            found = self.steps()
-            if len(found) > after and found[-1] in steps and not self.svc._approving:
-                return self.view()["registration"]
-            time.sleep(0.05)
-        self.fail("the approval never reached the expected step")
+        def probe():
+            with self.svc._ingest:
+                found, busy, shown = self.steps(), self.svc._approving, self.view()["registration"]
+            return shown if len(found) > after and found[-1] in steps and not busy else PENDING
+        found = awaited(self.svc, probe, bound, 0.05)
+        if found is PENDING:
+            self.fail("the approval never reached the expected step")
+        return found
 
     def run_approval(self, *steps, plan_id=PID_B):
         errors = io.StringIO()
@@ -410,15 +411,14 @@ class ApproveCase(Case):
         return [payload for _, payload in self.rows("adoption.deferred")]
 
     def settled(self, count, bound=120):
-        end = time.monotonic() + bound
-        while time.monotonic() < end:
-            found = self.registrations()
+        def probe():
             with self.svc._ingest:
-                busy = PID_B in self.svc._enrolling
-            if len(found) >= count and not busy:
-                return found
-            time.sleep(0.05)
-        self.fail("the registration never settled")
+                found, busy = self.registrations(), PID_B in self.svc._enrolling
+            return found if len(found) >= count and not busy else PENDING
+        found = awaited(self.svc, probe, bound, 0.05)
+        if found is PENDING:
+            self.fail("the registration never settled")
+        return found
 
 
 class ApplyCardTest(ApproveCase):
@@ -561,14 +561,13 @@ class ApplyCardTest(ApproveCase):
         for text in (card["headline"], card["why"], *card["lines"], shown["line"]):
             self.assertIsNone(raw.search(text), text)
 
-    def test_turn_signed_commits_off_after_a_kept_copy_leaves_nothing_of_the_old_plan(self):
+    def test_a_draft_answer_after_a_kept_copy_leaves_nothing_of_the_old_plan(self):
         later = {**READY, "plan": {**READY["plan"], "plan_id": PID_A}}
         fake = Fake(plan=[READY, later], apply_result=SIGNING)
-        self.start(fake, draft_reader=lambda root: READ_NO_BUILD)
-        self.repo = reconcile_repository(self.parent)
+        self.start(fake, draft_reader=lambda root: READ_NO_LINT)
+        self.repo = reconciled(self.parent)
         drafting = self.registered(self.repo)
-        for field, value in (("commit-signed", "yes"), ("build-command", "none"),
-                             ("test-command", "none")):
+        for field, value in (("lint-command", "true"), ("test-command", "true")):
             before = drafting["plan_id"]
             errors = io.StringIO()
             with contextlib.redirect_stderr(errors):
@@ -581,21 +580,20 @@ class ApplyCardTest(ApproveCase):
         self.run_approval("apply_failed")
         self.kept(PID_B)
         (card,) = self.apply_cards()
-        self.assertEqual(card["questions"][0]["options"],
-                         ["Apply it again", "Turn signed commits off", "Not now"])
-        self.assertEqual(card["values"], ["apply", "signing_off", "not_now"])
+        self.assertEqual(card["questions"][0]["options"], ["Apply it again", "Not now"])
+        self.assertEqual(card["values"], ["apply", "not_now"])
         before_tree = self.repository_state()
         planned = len(fake.order)
         errors = io.StringIO()
         with contextlib.redirect_stderr(errors):
             status, _, _ = self.answer(answer_of(PID_B, {
-                "id": "contract-draft", "subject": "commit-signed", "value": "no"}))
+                "id": "contract-draft", "subject": "release", "value": "unsupported"}))
             self.assertEqual(status, 204)
             self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_A)
         self.assertEqual(fake.order[planned:], [("discard", PID_B), ("plan", str(self.repo))])
         last = self.rows(event_log.REGISTRATION_ENDED)[-1][1]
-        fields = {f["field"]: f["value"] for f in last["draft"]}
-        self.assertEqual(fields["commit-signed"], "no")
+        fields = {f["field"]: f["source"] for f in last["draft"]}
+        self.assertEqual(fields["release"], "owner")
         self.assertEqual(self.repository_state(), before_tree)
 
     def repository_state(self):
@@ -727,7 +725,7 @@ class PlanApproveRefusalTest(ApproveCase):
     def test_without_a_forge_the_host_refuses(self):
         fake = Fake(plan=READY, apply_result=APPLIED)
         self.start(fake, forge=None)
-        self.shown = self.registered(reconcile_repository(self.parent, contract=True))
+        self.shown = self.registered(reconciled(self.parent, contract=True))
         self.refused(PID_B, approve.UNAVAILABLE)
         self.assertEqual(approve.UNAVAILABLE,
                          "approving an adoption is not available on this host")
@@ -909,7 +907,7 @@ class PlanApproveRunTest(ApproveCase):
         reading = {"remotes": [], "default_branch": "develop", "branches": ["develop"],
                    "files": [], "texts": {}}
         fields = contract_draft.draft(str(self.repo), reading)
-        at = [f["field"] for f in fields].index("attempt-budget") + 1
+        at = [f["field"] for f in fields].index("test-command") + 1
         return {**row, "draft": [*fields[:at], light, *fields[at:]]}
 
     def test_an_upgraded_ready_row_with_a_resumable_adoption_still_resumes_it(self):
@@ -2618,15 +2616,14 @@ class RetiredCoAuthorPlanTest(ApproveCase):
     def test_approving_it_plans_again_from_the_refreshed_draft_and_applies_nothing(self):
         repo = sample_repository(self.parent, remote=True)
         fields = contract_draft.draft(str(repo), contract_draft.read(str(repo)))
-        for field in ("build-command", "test-command"):
-            fields, error = contract_draft.set_value(
-                fields, field, "none", entries=[], root=str(repo))
+        for field in ("lint-command", "test-command"):
+            fields, error = contract_draft.set_value(fields, field, "true")
             self.assertIsNone(error)
         record = {"field": "co-authored-by", "label": "co-author lines in commits", "value": "yes",
                   "source": "owner",
                   "options": [{"value": "yes", "label": "yes"}, {"value": "no", "label": "no"}],
                   "text": False, "reason": None, "ask": "Should its commits carry co-author lines?"}
-        row = register.summary(str(repo), READY, draft=[*fields[:8], record, *fields[8:]])
+        row = register.summary(str(repo), READY, draft=[*fields[:3], record, *fields[3:]])
         self.assertEqual((row["plan_id"], row["state"]), (PID_B, "ready"))
         log = event_log.EventLog(self.store)
         try:
@@ -2646,7 +2643,8 @@ class RetiredCoAuthorPlanTest(ApproveCase):
         self.assertEqual((again["plan_id"], again["state"]), (PID_C, "ready"))
         self.assertEqual(fake.applied, [])
         self.assertEqual(fake.calls, [("plan", str(repo))])
-        self.assertIs(fake.drafted["bindings"]["vcs"]["commit"]["co_authored_by"], False)
+        self.assertEqual(fake.drafted["schema_version"], 3)
+        self.assertNotIn("commit", fake.drafted["bindings"]["vcs"])
         self.refused(PID_B, approve.STALE)
 
 

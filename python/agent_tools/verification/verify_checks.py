@@ -28,6 +28,20 @@ host's registry entries one for one by `project_id`, so a dropped or duplicated 
 manifest or the registry will not read. An empty fleet is met with no row, which a block's
 `min_len` judges. It only reads.
 
+`attempt-budget-tracker --repo-root R` (`verify_checks.attempt_budget_tracker`, issue 1466) runs
+the real `attempt-budget report` against R and compares its 20 attempts with the tracker, read here
+by `gh pr list` and `gh issue view` rather than the command's REST reads. The repository, the
+integration branch and the branch pattern come from R's resolved project, never from the report.
+It is met (0, `green`) when the report is built from history, lists the 20 latest delivered
+attempts and names the same pulls as the tracker's own pairing of claims with merges, each claim
+and merge time within 60 s and each duration within a minute, and its `budget_minutes` and
+percentile (`basis.percentile_90_seconds`, `percentile_90_minutes`) are those of the tracker's 20
+deliveries within the same tolerance; not met (1, `red`, with `mismatches`
+of `pull` and `field`) otherwise, a fallback report included; and 2 (`unreadable`) when the
+command, the forge or the contract will not read, when the report lacks a figure it must carry or
+carries a non-finite one, or when the merged listing reaches its limit and may be truncated. Issues
+are read newest merge first, and reading stops once the 20 latest deliveries cannot be displaced. Everything after the report's `recorded_at` is ignored. It only reads.
+
 `platform-status` runs the installed `resolve-project platform-status` (from `~/.agents/bin`,
 prepended to `PATH`) and passes its output and exit through, so a block judges it with `expect`.
 
@@ -358,6 +372,7 @@ import functools
 import http.client
 import io
 import json
+import math
 import os
 import pwd
 import re
@@ -378,6 +393,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+from agent_tools.delivery import issue_branch
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.project_contract import agent_platform, fleet_preflight, resolve_project
 from agent_tools.project_contract.adopt_apply import run_leashed
@@ -2947,6 +2963,213 @@ def fleet_preflight_check(manifest: Path = Path(MANIFEST_PATH)) -> tuple[int, di
     return fleet_preflight_verdict(report, entries)
 
 
+ATTEMPT_LISTING_LIMIT = 10000
+ATTEMPT_WINDOW = 20
+ATTEMPT_TIME_TOLERANCE = 60  # seconds
+ATTEMPT_DURATION_TOLERANCE = 1  # minutes
+ATTEMPT_BUDGET_TOLERANCE = 2  # minutes: 1.5 times the duration tolerance, rounded up
+_COMMENT_ID = re.compile(r"#issuecomment-(\d+)$")
+
+
+def _attempt_budget_report(repo_root: Path) -> dict:
+    """The `attempt-budget report` of `repo_root`, from the command's own argv."""
+    argv = siblings.sibling_argv("delivery.attempt_budget") + ["report", "--repo-root", str(repo_root)]
+    try:
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=600, cwd=repo_root)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise _invalid(f"attempt-budget did not run: {error}") from None
+    if done.returncode != 0:
+        raise _invalid(f"attempt-budget exited {done.returncode}")
+    try:
+        report = json.loads(done.stdout)
+    except ValueError:
+        raise _invalid("attempt-budget printed no JSON") from None
+    if not isinstance(report, dict):
+        raise _invalid("attempt-budget did not print one object")
+    return report
+
+
+def _branch_issue(pattern: str, ref: str) -> int | None:
+    """The issue whose branch `ref` is under `pattern`, decided by the delivery rule's own matcher."""
+    for run in re.finditer(r"\d+", ref):
+        number = int(run.group())
+        match = issue_branch.matcher(pattern, number)
+        if match is not None and match.fullmatch(ref):
+            return number
+    return None
+
+
+def _tracker_merges(slug: str, branch: str, pattern: str, cutoff: datetime) -> dict[int, list[tuple[int, str, datetime]]]:
+    """The same-repository merges into `branch` by `cutoff`, per issue, as (pull, head, merged_at)."""
+    listing = forge_api.gh_json([
+        "pr", "list", "--repo", slug, "--state", "merged", "--base", branch,
+        "--limit", str(ATTEMPT_LISTING_LIMIT),
+        "--json", "number,headRefName,mergedAt,isCrossRepository"])
+    if not isinstance(listing, list):
+        raise _invalid("merged pull listing is not a list")
+    merges: dict[int, list[tuple[int, str, datetime]]] = {}
+    for entry in listing:
+        if (not isinstance(entry, dict) or not _is_int(entry.get("number"))
+                or not isinstance(entry.get("headRefName"), str)
+                or not isinstance(entry.get("isCrossRepository"), bool)):
+            raise _invalid("merged pull entry is malformed")
+        merged = _forge_time(entry.get("mergedAt"), "mergedAt")
+        if entry["isCrossRepository"] or merged > cutoff:
+            continue
+        issue = _branch_issue(pattern, entry["headRefName"])
+        if issue is not None:
+            merges.setdefault(issue, []).append((entry["number"], entry["headRefName"], merged))
+    if len(listing) >= ATTEMPT_LISTING_LIMIT:
+        raise _Truncated("merged listing may be truncated")
+    return merges
+
+
+class _Truncated(Exception):
+    """The merged listing reached its limit, so the window cannot be judged complete."""
+
+
+def _tracker_claims(slug: str, issue: int, cutoff: datetime) -> list[tuple[datetime, int, datetime | None, str | None]]:
+    """The claims of `issue` by `cutoff` as (created, id, earliest end by cutoff, branch)."""
+    view = forge_api.gh_json(["issue", "view", str(issue), "--repo", slug, "--json", "comments"])
+    if not isinstance(view, dict) or not isinstance(view.get("comments"), list):
+        raise _invalid(f"issue {issue} has no comments list")
+    claims: dict[int, tuple[datetime, str | None]] = {}
+    ends: dict[str, datetime] = {}
+    for comment in view["comments"]:
+        if not isinstance(comment, dict):
+            raise _invalid(f"issue {issue} comment is not an object")
+        url = comment.get("url")
+        found = _COMMENT_ID.search(url) if isinstance(url, str) else None
+        if found is None:
+            raise _invalid(f"issue {issue} comment has no #issuecomment id")
+        created = _forge_time(comment.get("createdAt"), "createdAt")
+        marker = forge_markers.parse({"id": int(found.group(1)), "body": comment.get("body"),
+                                      "updated_at": comment.get("createdAt")})
+        if marker is None or created > cutoff:
+            continue
+        if marker.kind == "claim" and marker.fields.get("issue") == str(issue):
+            claims[marker.comment_id] = (created, marker.fields.get("branch"))
+        elif marker.kind == forge_markers.END_KIND and "of" in marker.fields:
+            earlier = ends.get(marker.fields["of"])
+            if earlier is None or created < earlier:
+                ends[marker.fields["of"]] = created
+    return [(created, claim_id, ends.get(str(claim_id)), branch)
+            for claim_id, (created, branch) in claims.items()]
+
+
+def _tracker_deliveries(slug: str, branch: str, pattern: str, cutoff: datetime) -> list[tuple[int, datetime, datetime, int]]:
+    """The window's deliveries as (pull, claimed, merged, claim id), latest merge first."""
+    merges = _tracker_merges(slug, branch, pattern, cutoff)
+    paired: list[tuple[int, datetime, datetime, int]] = []
+    newest = sorted(merges, key=lambda issue: max(m[2] for m in merges[issue]), reverse=True)
+    for issue in newest:
+        candidates = merges[issue]
+        if len(paired) >= ATTEMPT_WINDOW:
+            paired.sort(key=lambda d: (d[2], d[1], d[0]), reverse=True)
+            if max(m[2] for m in candidates) < paired[ATTEMPT_WINDOW - 1][2]:
+                break  # this issue and every older one merged before the window's earliest merge
+            del paired[ATTEMPT_WINDOW:]
+        ordered = sorted(_tracker_claims(slug, issue, cutoff), key=lambda c: (c[0], c[1]))
+        by_merge = sorted(candidates, key=lambda m: (m[2], m[0]))
+        for index, (created, claim_id, ended, named) in enumerate(ordered):
+            following = ordered[index + 1][0] if index + 1 < len(ordered) else None
+            taken = next((m for m in by_merge
+                          if m[2] >= created and (following is None or m[2] < following)
+                          and (ended is None or m[2] <= ended)
+                          and (named is None or m[1] == named)), None)
+            if taken is not None:
+                paired.append((taken[0], created, taken[2], claim_id))
+    paired.sort(key=lambda d: (d[2], d[1], d[0]), reverse=True)
+    return paired[:ATTEMPT_WINDOW]
+
+
+def _seconds_apart(left: datetime, right: datetime) -> float:
+    return abs((left - right).total_seconds())
+
+
+def _finite(value: object, what: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise _invalid(f"{what} is not a finite number")
+    return value
+
+
+def _expected_budget(deliveries: list[tuple[int, datetime, datetime, int]]) -> tuple[int, int]:
+    """The nearest-rank 90th percentile in seconds and 1.5 times it in whole minutes, rounded up, at least 1."""
+    seconds = sorted(int((merged - claimed).total_seconds()) for _, claimed, merged, _ in deliveries)
+    percentile = seconds[(9 * len(seconds) + 9) // 10 - 1]
+    return percentile, max(1, (3 * percentile + 119) // 120)
+
+
+def _compare_attempts(report: dict, deliveries: list[tuple[int, datetime, datetime, int]]) -> list[dict]:
+    mismatches: list[dict] = []
+    if report["basis"]["source"] != "history":
+        mismatches.append({"pull": None, "field": "basis"})
+    reported = {}
+    for row in report["attempts"]:
+        reported[row["pull"]] = row
+    if len(report["attempts"]) != len(deliveries) or len(deliveries) != ATTEMPT_WINDOW:
+        mismatches.append({"pull": None, "field": "count"})
+    tracker = {pull: (claimed, merged) for pull, claimed, merged, _ in deliveries}
+    for pull in sorted(set(tracker) - set(reported)):
+        mismatches.append({"pull": pull, "field": "missing"})
+    for pull in sorted(set(reported) - set(tracker)):
+        mismatches.append({"pull": pull, "field": "extra"})
+    for pull in sorted(set(tracker) & set(reported)):
+        claimed, merged = tracker[pull]
+        row = reported[pull]
+        said_claimed = _forge_time(row["claimed_at"], "claimed_at")
+        said_merged = _forge_time(row["merged_at"], "merged_at")
+        if _seconds_apart(said_claimed, claimed) > ATTEMPT_TIME_TOLERANCE:
+            mismatches.append({"pull": pull, "field": "claimed_at"})
+        if _seconds_apart(said_merged, merged) > ATTEMPT_TIME_TOLERANCE:
+            mismatches.append({"pull": pull, "field": "merged_at"})
+        if abs(_finite(row["duration_minutes"], "duration_minutes")
+               - (merged - claimed).total_seconds() / 60) > ATTEMPT_DURATION_TOLERANCE:
+            mismatches.append({"pull": pull, "field": "duration_minutes"})
+    if report["basis"]["source"] != "history":
+        return mismatches
+    reported_percentile = _finite(report["basis"]["percentile_90_seconds"], "percentile_90_seconds")
+    reported_minutes = _finite(report["percentile_90_minutes"], "percentile_90_minutes")
+    reported_budget = _finite(report["budget_minutes"], "budget_minutes")
+    if len(deliveries) == ATTEMPT_WINDOW:
+        percentile, budget = _expected_budget(deliveries)
+        if abs(reported_percentile - percentile) > ATTEMPT_DURATION_TOLERANCE * 60:
+            mismatches.append({"pull": None, "field": "percentile_90_seconds"})
+        if abs(reported_minutes - percentile / 60) > ATTEMPT_DURATION_TOLERANCE:
+            mismatches.append({"pull": None, "field": "percentile_90_minutes"})
+        if abs(reported_budget - budget) > ATTEMPT_BUDGET_TOLERANCE:
+            mismatches.append({"pull": None, "field": "budget_minutes"})
+    return mismatches
+
+
+def attempt_budget_tracker(repo_root: Path) -> tuple[int, dict]:
+    """The `attempt-budget report` of `repo_root` compared with the tracker's own pairing of claims and merges."""
+    try:
+        bindings = resolve_project.resolve(str(repo_root))["bindings"]
+        slug = bindings["tracker"]["repo_slug"]
+        branch = bindings["vcs"]["integration_branch"]
+        pattern = bindings["vcs"]["branch_pattern"]
+        report = _attempt_budget_report(repo_root)
+        if report["repo"] != slug:
+            return 1, {"verdict": "red", "mismatches": [{"pull": None, "field": "repo"}]}
+        if report["integration_branch"] != branch:
+            return 1, {"verdict": "red", "mismatches": [{"pull": None, "field": "integration_branch"}]}
+        cutoff = _forge_time(report["recorded_at"], "recorded_at")
+        mismatches = _compare_attempts(report, _tracker_deliveries(slug, branch, pattern, cutoff))
+    except resolve_project.ContractError as error:
+        return 2, {"verdict": "unreadable", "detail": f"{error.code}: {error.repair_id}"}
+    except forge_api.ForgeError as error:
+        return 2, {"verdict": "unreadable", "detail": f"{error.code}: {error.detail}"}
+    except _Truncated as error:
+        return 2, {"verdict": "unreadable", "detail": str(error)}
+    except (KeyError, TypeError, ValueError) as error:
+        return 2, {"verdict": "unreadable", "detail": f"malformed input: {error!r}"}
+    if mismatches:
+        return 1, {"verdict": "red", "mismatches": mismatches}
+    return 0, {"verdict": "green", "attempts": ATTEMPT_WINDOW}
+
+
 def _merge_sha(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise argparse.ArgumentTypeError("must be a 40-character lowercase hex sha")
@@ -3099,7 +3322,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     checks.add_parser(
         "fleet-preflight",
         help="issue 1451: the candidate's fleet preflight passes and covers every registered project")
+    tracker = checks.add_parser(
+        "attempt-budget-tracker",
+        help="issue 1466: the attempt-budget report names the tracker's 20 latest delivered attempts")
+    tracker.add_argument("--repo-root", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.check == "attempt-budget-tracker":
+        code, report = attempt_budget_tracker(args.repo_root.resolve())
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "fleet-preflight":
         code, report = fleet_preflight_check()
         print(json.dumps(report, sort_keys=True))

@@ -2,9 +2,11 @@
 
 `export_contract` writes the contract file and the regular-blob projection
 files a resolution reads (`resolve_project.projection_paths`) of one commit
-into a new directory. Every other path is left absent, and so is any symlink,
-tree or submodule at a listed path, so the resolver refuses it as missing and
-no link is ever created in the destination. A listed path is looked up under
+into a new directory. A schema-3 contract also reads the files its derived
+values come from (`derived_values.INPUT_PATHS`; ADR-project-contract-014), so
+those regular blobs are exported with it. Every other path is left absent, and
+so is any symlink, tree or submodule at a listed path, so the resolver refuses
+it as missing and no link is ever created in the destination. A listed path is looked up under
 its normalized spelling (`CLAUDE.md/` as `CLAUDE.md`), the file the resolver
 reads through `Path`, and written under its authored spelling. A listed path
 git cannot take as an argument (one holding a NUL, or a character the file
@@ -53,10 +55,13 @@ def export_contract(root: Path, commit: str, destination: Path) -> None:
         return
     _write(destination, [contract_path], _read_blobs(root, [found[contract_path]]))
     try:
-        paths = resolve_project.projection_paths(
-            resolve_project.load_contract(destination))
+        source = resolve_project.load_contract(destination)
+        paths = resolve_project.projection_paths(source)
     except (resolve_project.ContractError, ValueError, RecursionError):
         return
+    if resolve_project.schema_three.declares(source):
+        paths = [*paths, *(path for path in resolve_project.derived_values.INPUT_PATHS
+                           if path not in paths)]
     found = _regular_blobs(root, commit, paths)
     ordered = [path for path in paths if path in found]
     _write(destination, ordered, _read_blobs(root, [found[path] for path in ordered]))

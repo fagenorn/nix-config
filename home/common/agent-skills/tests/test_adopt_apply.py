@@ -34,8 +34,11 @@ import unittest
 from pathlib import Path, PurePosixPath
 from unittest import mock
 
+from agent_tools.delivery import standards_lint
 from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
                                           adopt_planning, resolve_project)
+
+from . import _inprocess_cli
 
 from .test_adopt_project import (
     CHECK_LINKS,
@@ -187,7 +190,7 @@ def readoption_repo(home: Path) -> tuple[Path, dict]:
         raise AssertionError(f"the first apply failed: {err or out}")
     first = json.loads(out)
     git(root, "merge", "--ff-only", "--quiet", first["branch"])
-    write(root, "AGENTS.md", "hand-edited\n")
+    write(root, "AGENTS.md", (root / "AGENTS.md").read_text() + "hand-edited\n")
     commit(root, "drift a projection")
     return root, first
 
@@ -1286,321 +1289,6 @@ class DepthPolicyApplyTest(ApplyTestCase):
                     git(root, "rev-parse", f"HEAD:{DEPTH_DIR}/{name}"))
 
 
-# #376 D15: the fixture's own lint and formatter, standard-library scripts
-# that walk `*.py` from their working directory, so the same lint runs in
-# the adoption worktree and on an export of the adoption commit.
-LINT = "tools/lint.py"
-FORMATTER = "tools/format.py"
-LINT_TEXT = (
-    "import pathlib\n"
-    "import sys\n"
-    "\n"
-    "LIMIT = 60\n"
-    "long = []\n"
-    'for path in sorted(pathlib.Path(".").rglob("*.py")):\n'
-    '    text = path.read_text(encoding="utf-8")\n'
-    "    for number, line in enumerate(text.splitlines(), 1):\n"
-    "        if len(line) > LIMIT:\n"
-    '            long.append(f"{path}:{number}")\n'
-    'print("\\n".join(long))\n'
-    "sys.exit(1 if long else 0)\n")
-# Rewraps a `name = value` line over the limit and strips trailing
-# whitespace in the files it is given; `--fail` exits non-zero and each
-# `--touch PATH` appends a line to PATH first.
-FORMATTER_TEXT = (
-    "import sys\n"
-    "\n"
-    "LIMIT = 60\n"
-    "args = sys.argv[1:]\n"
-    'if args[:1] == ["--fail"]:\n'
-    "    sys.exit(3)\n"
-    'while args[:1] == ["--touch"]:\n'
-    '    with open(args[1], "a", encoding="utf-8") as handle:\n'
-    '        handle.write("# touched\\n")\n'
-    "    args = args[2:]\n"
-    "\n"
-    "\n"
-    "def wrapped(line):\n"
-    '    head, sep, tail = line.partition(" = ")\n'
-    "    if len(line) <= LIMIT or not sep:\n"
-    "        return [line]\n"
-    '    return [head + " = (", "    " + tail, ")"]\n'
-    "\n"
-    "\n"
-    "for name in args:\n"
-    '    with open(name, encoding="utf-8") as handle:\n'
-    "        lines = handle.read().splitlines()\n"
-    "    out = []\n"
-    "    for line in lines:\n"
-    "        out.extend(wrapped(line.rstrip()))\n"
-    '    with open(name, "w", encoding="utf-8") as handle:\n'
-    '        handle.write("".join(x + "\\n" for x in out))\n')
-ANALYZER = "tests/test_analyzer.py"
-ANALYZER_SUBJECT = f"{ANALYZER}:1:34"
-ANALYZER_TEXT = 'ANALYZER_SPEC_PATH_UNDER_TEST = ".claude/specs/x.md"\n'
-ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".claude/specs",
-                                           ".agents/artifacts/specs")
-# #376 COR-001: a `generated_file` projection rendered from the analyzer.
-PROJECTED_ANALYZER = "generated/analyzer.txt"
-# #376 COR-PROJECTION-KIND: a `managed_import` naming the analyzer by path.
-IMPORTED_ANALYZER = "generated/analyzer-import.txt"
-ANALYZER_FORMATTED = ('ANALYZER_SPEC_PATH_UNDER_TEST = (\n'
-                      '    ".agents/artifacts/specs/x.md"\n'
-                      ')\n')
-CLEAN = "tests/clean.py"
-CLEAN_TEXT = "VALUE = 1   \n"
-# A moved file no link rewrite edits: its last operation is the `git-mv`.
-SHIFTED = ".agents/artifacts/plans/y.md"
-FORMAT_COMMANDS = {
-    "format": [sys.executable, FORMATTER],
-    "broken": [sys.executable, FORMATTER, "--fail"],
-    "meddle": [sys.executable, FORMATTER, "--touch", ".gitignore"],
-    # #376 D17: a move-only destination (a `git-mv` whose `after` is a
-    # `git-object:` hash), edited on disk and never staged.
-    "shift": [sys.executable, FORMATTER, "--touch", SHIFTED],
-    "spill": [sys.executable, FORMATTER, "--touch", CLEAN],
-    "litter": [sys.executable, FORMATTER, "--touch", "stray.txt"],
-}
-ARCHIVED_LINK_SOURCE = ".claude/odd-link.md"
-ARCHIVED_LINK = ".agents/knowledge/archive/adopted/.claude/odd-link.md"
-REWRITE_ANALYZER = ("path-reference", ANALYZER_SUBJECT, "rewrite")
-
-
-def formatting_repo(home: Path) -> Path:
-    """`apply_repo` whose verification command is the line-limit lint, with
-    the formatter commands, #345's linked tree (a moved Markdown file whose
-    link is rewritten), a reference whose rewrite crosses the limit and a
-    second Python file that is not format-clean."""
-    root = apply_repo(home, verification=(sys.executable, LINT),
-                      commands=FORMAT_COMMANDS)
-    for path, text in ((LINT, LINT_TEXT), (FORMATTER, FORMATTER_TEXT),
-                       (ANALYZER, ANALYZER_TEXT), (CLEAN, CLEAN_TEXT)):
-        write(root, path, text)
-    commit(root, "add a lint, a formatter and two Python files")
-    write_linked_tree(root)
-    return root
-
-
-class ReferenceFormattingApplyTest(ApplyTestCase):
-    """#376 AC1, AC4: the declared formatter runs over the reference-edited
-    files inside `apply`, confined, before the commit gates."""
-
-    def planned(self, root: Path, *triples: tuple[str, str, str]) -> dict:
-        code, out, err = run("plan", "--repo-root", str(root),
-                             *answer_args(*triples), home=self.home)
-        self.assertEqual(code, 0, err or out)
-        document = json.loads(out)
-        self.assertEqual(document["plan"]["state"], "ready",
-                         document["plan"]["blockers"])
-        return document
-
-    def lint(self, root: Path, revision: str) -> int:
-        export = Path(tempfile.mkdtemp()) / "tree"
-        adopt_inspection.export_commit(root, revision, export)
-        return subprocess.run([sys.executable, LINT], cwd=export,
-                              capture_output=True, timeout=120).returncode
-
-    def test_the_formatted_rewrite_commits_and_passes_the_lint(self):
-        self.assertLessEqual(len(ANALYZER_TEXT) - 1, 60)
-        self.assertGreater(len(ANALYZER_REWRITTEN) - 1, 60)
-        root = formatting_repo(self.home)
-        base = git(root, "rev-parse", "HEAD").strip()
-        self.assertEqual(self.lint(root, "HEAD"), 0)
-        document = self.planned(root, REWRITE_ANALYZER,
-                                ("reference-format", ".py", "format"))
-        self.assertEqual(document["reference_formatting"], [
-            {"class": ".py", "command": "format", "files": [ANALYZER]}])
-        (write_op,) = [op for op in document["changes"]
-                       if op["op"] == "write-file"
-                       and op["targets"] == [ANALYZER]]
-        self.assertEqual(write_op["after"], adopt_inspection.sha256_hash(
-            ANALYZER_REWRITTEN.encode("utf-8")))
-        moved = {op["targets"][0] for op in document["changes"]
-                 if op["op"] == "git-mv"}
-        self.assertTrue(any(
-            op["op"] == "write-file" and op["targets"][0] in moved
-            and adopt_links.is_markdown_path(op["targets"][0])
-            for op in document["changes"]))
-        result = self.succeed(root, document["plan"]["plan_id"])
-        branch = result["branch"]
-        self.assertEqual(git(root, "show", f"{branch}:{ANALYZER}"),
-                         ANALYZER_FORMATTED)
-        self.assertEqual(git(root, "rev-parse", f"{branch}:{CLEAN}"),
-                         git(root, "rev-parse", f"HEAD:{CLEAN}"))
-        self.assertEqual(self.lint(root, branch), 0)
-        required, optional = adopt_apply.expected_commit_paths(
-            document["changes"])
-        changed = set(git(root, "diff", "--name-only", "--no-renames",
-                          base, branch).splitlines())
-        self.assertTrue(required <= changed <= required | optional,
-                        changed ^ required)
-        git(root, "merge", "--ff-only", "--quiet", branch)
-        code, out, err = run("verify", "--repo-root", str(root),
-                             home=self.home)
-        self.assertEqual(code, 0, err or out)
-        (check,) = [entry for entry in json.loads(out)["checks"]
-                    if entry["id"] == "adoption-commit-derived"]
-        self.assertEqual(check["status"], "passed")
-
-    def test_without_a_format_answer_the_lint_gate_refuses(self):
-        root = formatting_repo(self.home)
-        base = git(root, "rev-parse", "HEAD").strip()
-        document = self.planned(root, REWRITE_ANALYZER)
-        self.assertEqual(document["reference_formatting"], [
-            {"class": ".py", "command": None, "files": [ANALYZER]}])
-        self.assert_retained(root, document["plan"]["plan_id"], base,
-                             "adopt.gate.workflow-verification-commands")
-
-    def test_an_unconfined_or_failing_formatter_is_refused(self):
-        for command, repair_id in (
-                ("broken", "adopt.format.failed"),
-                ("meddle", "adopt.format.unplanned_content"),
-                ("shift", "adopt.format.unplanned_content"),
-                ("spill", "adopt.gate.worktree-status-matches-operations"),
-                ("litter", "adopt.gate.worktree-status-matches-operations")):
-            with self.subTest(command=command):
-                root = formatting_repo(self.home)
-                base = git(root, "rev-parse", "HEAD").strip()
-                plan_id = self.planned(
-                    root, REWRITE_ANALYZER,
-                    ("reference-format", ".py", command))["plan"]["plan_id"]
-                if command == "shift":
-                    stored = json.loads(
-                        self.stored_plan(plan_id).read_text("utf-8"))
-                    (last,) = [op for op in stored["changes"]
-                               if op["targets"][:1] == [SHIFTED]][-1:]
-                    self.assertEqual(last["op"], "git-mv")
-                    self.assertTrue(last["after"].startswith("git-object:"))
-                payload = self.assert_retained(root, plan_id, base, repair_id)
-                record = json.loads(self.state(
-                    "adopt", "worktrees",
-                    self.digest(plan_id) + ".failure.json").read_text("utf-8"))
-                if command == "broken":
-                    # The refusal names the command and its exit status (the
-                    # fixture formatter's `--fail` exits 3).
-                    (violation,) = payload["error"]["violations"]
-                    self.assertEqual(violation["pointer"],
-                                     "/reference_formatting")
-                    self.assertIn("'broken'", violation["message"])
-                    self.assertIn(" 3;", violation["message"])
-                if repair_id.startswith("adopt.format."):
-                    self.assertEqual(
-                        {gate["status"] for gate in record["gates"]},
-                        {"not_run"})
-
-    def test_a_formatted_projection_source_is_refused_before_formatting(self):
-        """A reference-edited file whose `generated_file` projection was
-        regenerated from its bytes before formatting would change them is
-        refused, rather than left to strand a stale target. The contract may
-        spell the source with a `./` or a repeated `/` (COR-002), and the
-        refusal still holds."""
-        for source in (ANALYZER, "./" + ANALYZER,
-                       ANALYZER.replace("/", "//", 1)):
-            with self.subTest(source=source):
-                self.assert_projection_source_refused(source)
-
-    def assert_projection_source_refused(self, source: str) -> None:
-        root = formatting_repo(self.home)
-        contract = json.loads((root / CONTRACT).read_text("utf-8"))
-        entry = {"id": "codex.analyzer", "agent": "codex",
-                 "kind": "generated_file", "target": PROJECTED_ANALYZER,
-                 "source": source}
-        contract["projections"].append(entry)
-        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
-        # Rendered by the resolver's own function, so the target starts in
-        # sync: the fixture contract has no `platform`, which the
-        # `write-projections` verb would refuse.
-        write(root, PROJECTED_ANALYZER, resolve_project.render_projection(
-            entry, (root / ANALYZER).read_bytes(),
-            contract["schema_version"]).decode("utf-8"))
-        commit(root, "project the analyzer")
-        base = git(root, "rev-parse", "HEAD").strip()
-        document = self.planned(root, REWRITE_ANALYZER,
-                                ("reference-format", ".py", "format"))
-        self.assertEqual(document["reference_formatting"], [
-            {"class": ".py", "command": "format", "files": [ANALYZER]}])
-        self.assertIn(
-            [PROJECTED_ANALYZER],
-            [op["targets"] for op in document["changes"]
-             if op["op"] == "regenerate-projection"])
-        plan_id = document["plan"]["plan_id"]
-        payload = self.assert_retained(root, plan_id, base,
-                                       "adopt.format.failed")
-        self.assertEqual([v["pointer"] for v in payload["error"]["violations"]],
-                         ["/reference_formatting"])
-        record = json.loads(self.state(
-            "adopt", "worktrees",
-            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
-        self.assertEqual({gate["status"] for gate in record["gates"]},
-                         {"not_run"})
-        # The formatter never ran: the file holds the rewrite it was given.
-        self.assertEqual(
-            (self.worktree(plan_id) / ANALYZER).read_text("utf-8"),
-            ANALYZER_REWRITTEN)
-
-    def test_a_managed_import_source_is_formatted(self):
-        """A `managed_import` line names its source by path alone, so
-        formatting that source leaves the projection in sync and is not
-        refused."""
-        root = formatting_repo(self.home)
-        contract = json.loads((root / CONTRACT).read_text("utf-8"))
-        entry = {"id": "codex.analyzer", "agent": "codex",
-                 "kind": "managed_import", "target": IMPORTED_ANALYZER,
-                 "source": ANALYZER}
-        contract["projections"].append(entry)
-        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
-        write(root, IMPORTED_ANALYZER, resolve_project.render_projection(
-            entry, (root / ANALYZER).read_bytes(),
-            contract["schema_version"]).decode("utf-8"))
-        commit(root, "import the analyzer")
-        document = self.planned(root, REWRITE_ANALYZER,
-                                ("reference-format", ".py", "format"))
-        self.assertIn(
-            ([ANALYZER], [IMPORTED_ANALYZER]),
-            [(op["sources"], op["targets"]) for op in document["changes"]
-             if op["op"] == "regenerate-projection"])
-        result = self.succeed(root, document["plan"]["plan_id"])
-        self.assertEqual(git(root, "show", f"{result['branch']}:{ANALYZER}"),
-                         ANALYZER_FORMATTED)
-
-    def test_an_archived_contained_symlink_is_not_an_unplanned_change(self):
-        """`git add` stores a symlink's target text, so the confinement proof
-        hashes that text, not the file the link points to."""
-        root = formatting_repo(self.home)
-        (root / ARCHIVED_LINK_SOURCE).symlink_to("../README.md")
-        git(root, "add", ARCHIVED_LINK_SOURCE)
-        commit(root, "track a contained agent link")
-        document = self.planned(
-            root, REWRITE_ANALYZER, ("reference-format", ".py", "format"),
-            ("candidate-class", ARCHIVED_LINK_SOURCE, "archive-history"))
-        (last,) = [op for op in document["changes"]
-                   if op["targets"][:1] == [ARCHIVED_LINK]][-1:]
-        self.assertEqual(last["op"], "git-mv")
-        self.assertTrue(last["after"].startswith("git-object:"))
-        result = self.succeed(root, document["plan"]["plan_id"])
-        self.assertEqual(
-            git(root, "ls-tree", result["branch"], ARCHIVED_LINK).split()[0],
-            "120000")
-
-    def test_the_evidence_record_lists_the_format_answer_and_rows(self):
-        root = formatting_repo(self.home)
-        answers = (REWRITE_ANALYZER, ("reference-format", ".py", "format"))
-        document = self.planned(root, *answers)
-        result = self.succeed(root, document["plan"]["plan_id"])
-        record = json.loads(git(
-            root, "show", f"{result['branch']}:{result['evidence_record']}"))
-        for question, subject, value in answers:
-            with self.subTest(subject=subject):
-                self.assertIn(
-                    {"id": question, "subject": subject, "value": value},
-                    record["decisions_accepted"])
-        for member in ("reference_formatting", "reference_policies",
-                       "path_references"):
-            with self.subTest(member=member):
-                self.assertEqual(record[member], document[member])
-        self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
-
-
 class CommitLinkProofTest(ApplyTestCase):
     """#345 D17: a broken link staged after the gates, into a file the plan
     already writes, changes no planned path set — only the commit's own
@@ -2527,6 +2215,263 @@ class CommitContentTest(ApplyTestCase):
         self.assertTrue(required)
         self.assertTrue(required <= changed, required - changed)
         self.assertTrue(changed <= required | optional, changed - required)
+
+
+# --------------------------------------------------------------------------
+# #1468: the hints move to where the delivery phases read them
+# --------------------------------------------------------------------------
+
+HINT_DIR = ".agents/knowledge/hints"
+HINTS = {
+    ".claude/hints/planning.md": ".agents/knowledge/hints/planning.md",
+    ".claude/hints/building.md": ".agents/knowledge/hints/building.md",
+}
+ORPHAN_HINTS = {
+    ".claude/hints/deploy.md": ".agents/knowledge/hints/deploy.md",
+    ".claude/hints/archive/old.md": ".agents/knowledge/hints/archive/old.md",
+}
+HINT_GUIDE = "docs/guide.md"
+HINT_GUIDE_BEFORE = "# guide\n\nSee [the planning hint](../.claude/hints/planning.md).\n"
+HINT_GUIDE_AFTER = (
+    "# guide\n\nSee [the planning hint](../.agents/knowledge/hints/planning.md).\n")
+HINT_RECORD = "docs/adr/001-hints.md"
+HINT_RECORD_TEXT = (
+    "# ADR 001\n\nDecided from [the planning hint](../../.claude/hints/planning.md).\n")
+
+
+class CleanApplyTestCase(ApplyTestCase):
+    """`ApplyTestCase` whose homes, repositories and exports are removed (B16)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+
+    def owned(self, root: Path) -> Path:
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    def exported(self, root: Path, revision: str) -> Path:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        tree = Path(scratch.name) / "tree"
+        adopt_inspection.export_commit(root, revision, tree)
+        return tree
+
+
+def hinted_apply_repo(home: Path, *, orphans: bool = False) -> Path:
+    """`apply_repo` plus tracked hints, a `paths.hints` binding and two links."""
+    root = apply_repo(home)
+    contract = json.loads((root / CONTRACT).read_text("utf-8"))
+    contract["bindings"]["paths"]["hints"] = [
+        ".claude/hints", ".claude/hints/planning.md"]
+    contract["capabilities"]["knowledge.hints"] = {"support": "supported"}
+    write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+    for path in (*HINTS, *(ORPHAN_HINTS if orphans else ())):
+        write(root, path, f"# {path}\n")
+    write(root, HINT_GUIDE, HINT_GUIDE_BEFORE)
+    write(root, HINT_RECORD, HINT_RECORD_TEXT)
+    commit(root, "add hints")
+    return root
+
+
+class HintMoveApplyTest(CleanApplyTestCase):
+    def adopt_hints(self, **options) -> tuple[Path, dict, dict]:
+        root = self.owned(hinted_apply_repo(self.home, **options))
+        document = self.ready_plan(root)
+        return root, document, self.succeed(root, document["plan"]["plan_id"])
+
+    def test_every_hint_moves_through_git_mv_with_its_history(self):
+        root = self.owned(hinted_apply_repo(self.home))
+        base = git(root, "rev-parse", "HEAD").strip()
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        self.assertEqual(
+            [(op["sources"], op["targets"]) for op in document["changes"]
+             if op["op"] == "git-mv"
+             and op["sources"][0].startswith(".claude/hints/")],
+            [([old], [new]) for old, new in sorted(HINTS.items())])
+        tracked = self.branch_files(root, result["branch"])
+        self.assertEqual(
+            [path for path in tracked if path.startswith(".claude/hints/")], [])
+        for old, new in HINTS.items():
+            with self.subTest(old=old):
+                self.assertIn(new, tracked)
+                self.assertEqual(self.show(root, f"{result['branch']}:{new}"),
+                                 self.show(root, f"HEAD:{old}"))
+                history = git(root, "log", "--follow", "--format=%H",
+                              result["branch"], "--", new).split()
+                self.assertEqual(len(history), 2, history)
+                self.assertEqual(history[1], base)
+
+    def test_a_document_linking_the_old_hint_path_links_the_new_one(self):
+        root, document, result = self.adopt_hints()
+        self.assertEqual(
+            self.show(root, f"{result['branch']}:{HINT_GUIDE}"), HINT_GUIDE_AFTER)
+        files = document["link_rewrites"]["inbound"]["files"]
+        self.assertIn(HINT_GUIDE, files)
+        self.assertNotIn(HINT_RECORD, files)
+        self.assertEqual(
+            self.show(root, f"{result['branch']}:{HINT_RECORD}"), HINT_RECORD_TEXT)
+
+    def test_the_standards_lint_finds_no_hint_problem_on_the_adopted_fixture(self):
+        root, document, result = self.adopt_hints()
+        export = self.exported(
+            root, git(root, "rev-parse", result["branch"]).strip())
+        self.assertEqual(sorted(p.name for p in (export / HINT_DIR).iterdir()),
+                         ["building.md", "planning.md"])
+        self.assertEqual(standards_lint.hint_problems(export), [])
+        self.assertNotIn("open_items", document["plan"])
+
+    def test_a_hint_no_phase_reads_is_an_open_item_of_a_ready_plan(self):
+        root = self.owned(hinted_apply_repo(self.home, orphans=True))
+        document = self.ready_plan(root)
+        code, out, err = run("plan", "--repo-root", str(root), "--format",
+                             "human", home=self.home)
+        self.assertEqual(document["plan"]["state"], "ready")
+        self.assertEqual(document["plan"]["open_items"], [
+            {"id": "hint-without-reader",
+             "path": ".agents/knowledge/hints/archive/old.md"},
+            {"id": "hint-without-reader",
+             "path": ".agents/knowledge/hints/deploy.md"}])
+        self.assertEqual(code, 0, err or out)
+        self.assertIn(
+            "open item hint-without-reader: .agents/knowledge/hints/deploy.md",
+            out.splitlines())
+
+
+BOOTSTRAP = ".agents/instructions/bootstrap.md"
+MANAGED_LINE = "@.agents/instructions/bootstrap.md\n"
+ENTRY_AGENTS = "# Agents\n\nRun the tests before you push.\n"
+ENTRY_CLAUDE = "# Claude\n\nPrefer small commits.\n" + MANAGED_LINE
+ENTRY_SOURCE = (
+    "<!-- adopted from AGENTS.md -->\n# Agents\n\nRun the tests before you push.\n"
+    "\n<!-- adopted from CLAUDE.md -->\n# Claude\n\nPrefer small commits.\n")
+
+
+def entry_apply_repo(home: Path, *, agents: str | bytes | None = ENTRY_AGENTS,
+                     claude: str | None = ENTRY_CLAUDE, source: str | None = None,
+                     declared: bool = False) -> Path:
+    """`apply_repo` whose root entry files are hand-written (#1468)."""
+    root = apply_repo(home)
+    if not declared:
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        contract["projections"] = []
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+    if source is None:
+        (root / BOOTSTRAP).unlink()
+    else:
+        write(root, BOOTSTRAP, source)
+    for name, text in (("AGENTS.md", agents), ("CLAUDE.md", claude)):
+        if text is None:
+            (root / name).unlink()
+        elif isinstance(text, bytes):
+            (root / name).write_bytes(text)
+        else:
+            write(root, name, text)
+    commit(root, "hand-write the entry files")
+    return root
+
+
+class EntryConversionApplyTest(CleanApplyTestCase):
+    def test_the_bootstrap_source_holds_every_authored_line_of_the_root_entry_files(self):
+        root = self.owned(entry_apply_repo(self.home))
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        source = self.show(root, f"{result['branch']}:{BOOTSTRAP}")
+        self.assertEqual(source, ENTRY_SOURCE)
+        for line in (*ENTRY_AGENTS.splitlines(), *ENTRY_CLAUDE.splitlines()):
+            if line != MANAGED_LINE.strip():
+                self.assertIn(line, source.splitlines())
+
+    def test_the_plan_lists_the_entry_file_conversion(self):
+        root = self.owned(entry_apply_repo(self.home))
+        document = self.ready_plan(root)
+        actions = {entry["path"]: (entry["action"], entry["target"])
+                   for entry in document["evidence"]
+                   if entry["path"] in ("AGENTS.md", "CLAUDE.md")}
+        self.assertEqual(actions, {name: ("convert-to-source", BOOTSTRAP)
+                                   for name in ("AGENTS.md", "CLAUDE.md")})
+        writes = [(op["targets"], op["before"]) for op in document["changes"]
+                  if op["op"] == "write-file"]
+        self.assertIn(([BOOTSTRAP], None), writes)
+        self.assertIn(["CLAUDE.md"], [targets for targets, _ in writes])
+        self.assertEqual(
+            [op["targets"] for op in document["changes"]
+             if op["op"] == "regenerate-projection"],
+            [["AGENTS.md"], ["CLAUDE.md"]])
+
+
+NESTED = "docs/AGENTS.md"
+NESTED_TEXT = "# Docs\n\nKeep pages short.\n"
+DEMO_SOURCE = ENTRY_SOURCE + "\n<!-- adopted from docs/AGENTS.md -->\n" + NESTED_TEXT
+
+
+def demo_repo(home: Path) -> Path:
+    """The issue's demo: hints under `.claude/hints`, hand-written entry files
+    at the root and one nested, and no projection declared."""
+    root = hinted_apply_repo(home)
+    (root / BOOTSTRAP).unlink()
+    contract = json.loads((root / CONTRACT).read_text("utf-8"))
+    contract["projections"] = []
+    write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+    write(root, "AGENTS.md", ENTRY_AGENTS)
+    write(root, "CLAUDE.md", ENTRY_CLAUDE)
+    write(root, NESTED, NESTED_TEXT)
+    commit(root, "hand-write the entry files")
+    return root
+
+
+class AdoptedFixtureTest(CleanApplyTestCase):
+    def ci_run(self, root: Path) -> dict:
+        done = _inprocess_cli.run_module(
+            "agent_tools.project_contract.conformance",
+            ("run", "--purpose", "ci", "--repo-root", str(root)),
+            env={**os.environ, "HOME": str(self.home)})
+        return json.loads(done.stdout)
+
+    def test_the_fixture_plan_lists_the_entry_file_conversion_and_the_hint_move(self):
+        document = self.ready_plan(self.owned(demo_repo(self.home)))
+        self.assertEqual(
+            [(op["sources"], op["targets"]) for op in document["changes"]
+             if op["op"] == "git-mv" and op["sources"][0].startswith(".claude/hints/")],
+            [([old], [new]) for old, new in sorted(HINTS.items())])
+        self.assertEqual(
+            {entry["path"]: (entry["action"], entry["target"])
+             for entry in document["evidence"]
+             if entry["path"] in ("AGENTS.md", "CLAUDE.md", NESTED)},
+            {path: ("convert-to-source", BOOTSTRAP)
+             for path in ("AGENTS.md", "CLAUDE.md", NESTED)})
+        self.assertEqual(
+            [op["before"] for op in document["changes"]
+             if op["op"] == "write-file" and op["targets"] == [BOOTSTRAP]], [None])
+        self.assertEqual([op["sources"] for op in document["changes"]
+                          if op["op"] == "delete-file"], [[NESTED]])
+
+    def test_the_adopted_fixture_has_generated_entry_files_no_nested_one_and_fresh_projections(self):
+        root = self.owned(demo_repo(self.home))
+        document = self.ready_plan(root)
+        result = self.succeed(
+            root, document["plan"]["plan_id"], "--acknowledge-deletions")
+        git(root, "merge", "--ff-only", "--quiet", result["branch"])
+        report = self.ci_run(root)
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        self.assertEqual(
+            (root / "AGENTS.md").read_bytes(),
+            resolve_project.render_projection(
+                dict(adopt_inspection.ENTRY_PROJECTIONS[0]),
+                (root / BOOTSTRAP).read_bytes(), contract["schema_version"]))
+        self.assertEqual((root / "CLAUDE.md").read_text(), MANAGED_LINE)
+        self.assertFalse((root / NESTED).exists())
+        (fresh,) = [check for check in report["checks"]
+                    if check["id"] == "repository.projection.fresh"]
+        self.assertEqual(fresh["status"], "passed", report)
+        self.assertEqual((root / BOOTSTRAP).read_text(), DEMO_SOURCE)
+        for new in HINTS.values():
+            self.assertTrue((root / new).is_file(), new)
+        self.assertEqual(
+            [p for p in (root / ".claude/hints").rglob("*") if p.is_file()], [])
+        self.assertEqual((root / HINT_GUIDE).read_text(), HINT_GUIDE_AFTER)
+        self.assertEqual((root / HINT_RECORD).read_text(), HINT_RECORD_TEXT)
 
 
 # --------------------------------------------------------------------------

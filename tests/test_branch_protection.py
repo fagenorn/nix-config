@@ -5,9 +5,10 @@ reports are the same string held in two files that GitHub will never reconcile f
 us — and once `just protect-main` has been applied, a rename on
 either side raises no error anywhere: it leaves `main` waiting forever on a context
 that never reports, with nothing in the UI pointing at the cause. These tests are
-the only offline place that failure can surface. `ci.yaml` and
-`instruction-budget.yaml` share one indentation convention, so every helper reads
-either through a trailing `path` parameter that defaults to `ci.yaml`.
+the only offline place that failure can surface. `ci.yaml`,
+`instruction-budget.yaml` and the generated `conformance.yaml` share one indentation
+convention, so every helper reads any of them through a trailing `path` parameter that
+defaults to `ci.yaml`.
 """
 
 import json
@@ -24,6 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "ci.yaml"
 BUDGET_WORKFLOW = WORKFLOWS / "instruction-budget.yaml"
+CONFORMANCE_WORKFLOW = WORKFLOWS / "conformance.yaml"
+CLEANUP_WORKFLOW = WORKFLOWS / "cleanup-issue.yaml"
 PROTECTION = REPO_ROOT / ".github" / "branch-protection.json"
 
 # The indentation convention that ci.yaml and instruction-budget.yaml share:
@@ -96,6 +99,13 @@ REQUIRED_PAYLOAD_KEYS = {
 }
 
 EXPECTED_WORKFLOW_PERMISSIONS = {"contents": "read"}
+# The one command the Conformance job exists to run, and the whole of its step: the
+# non-blank lines of the step are exactly these, so no `shell:`, `env:`,
+# `working-directory:` or `if:` can ride on it.
+CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run --purpose ci"
+CONFORMANCE_STEP = ["      - name: Run conformance",
+                    f"        run: {CONFORMANCE_INVOCATION}"]
+CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
 BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")
 BUDGET_INVOCATION = 'PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"'
 EXPECTED_PROTECTION_PAYLOAD = {
@@ -320,6 +330,43 @@ def forwards_budget_args(body):
     """
     calls = [line.strip() for line in body.splitlines() if BUDGET_COMMAND_RE.search(line)]
     return calls == [BUDGET_INVOCATION]
+
+
+def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
+    """Why the Conformance job could report green without running its command, or [].
+
+    Beyond the keys `green_without_work` finds, the job must keep its three steps, the
+    exact command step, the runner's default shell (a `defaults:` block anywhere would
+    swap the interpreter that reads the command line) and its one job name. The
+    never-rise check needs the merge base and the branch head, so the checkout keeps
+    full history and the pull request's head commit.
+    """
+    problems = []
+    if job_names(path) != {"Conformance": "conformance"}:
+        problems.append(f"job names are {job_names(path)}, not Conformance only")
+    steps = step_blocks("conformance", path)
+    if list(steps) != ["Checkout", "Install Nix", "Run conformance"]:
+        problems.append(f"steps are {list(steps)}")
+    elif [line for line in steps["Run conformance"] if line.strip()] != CONFORMANCE_STEP:
+        problems.append(f"the command step is {steps['Run conformance']}")
+    else:
+        if "          fetch-depth: 0" not in steps["Checkout"]:
+            problems.append("the checkout does not fetch the full history")
+        if CONFORMANCE_CHECKOUT_REF not in steps["Checkout"]:
+            problems.append("the checkout does not judge the pull request's head")
+    if any(re.match(r"^defaults:", line) for line in workflow_lines(path)):
+        problems.append("a workflow-level defaults: block")
+    job = job_blocks(path)["conformance"]
+    if any(re.match(r"^    defaults:", line) for line in job):
+        problems.append("a job-level defaults: block")
+    offenders = green_without_work(job, None)
+    if offenders:
+        problems.append(f"green without work: {offenders}")
+    if job_if_expression("conformance", path) is not None:
+        problems.append("a job-level if:")
+    if any(RENAMING_KEY_RE.match(line) for line in job):
+        problems.append("a job-level strategy: or uses:")
+    return problems
 
 
 BUDGET_STEP = "Check the instruction budget"
@@ -828,6 +875,53 @@ class BudgetWorkflowShape(unittest.TestCase):
                 self.assertNotEqual([], budget_step_problems(mutated.splitlines()))
 
 
+class ConformanceWorkflowShape(unittest.TestCase):
+    def test_the_conformance_job_runs_the_command_and_cannot_report_green_without_it(self):
+        self.assertEqual([], conformance_job_problems())
+
+    def test_a_mutated_job_is_caught(self):
+        lines = workflow_lines(CONFORMANCE_WORKFLOW)
+        name = "    name: Conformance"
+        run = f"        run: {CONFORMANCE_INVOCATION}"
+        step = "      - name: Run conformance"
+        shell = "        shell: python {0}"
+        mutations = {
+            "job if": (name, [name, "    if: false"]),
+            "needs": (name, [name, "    needs: other"]),
+            "continue-on-error": (name, [name, "    continue-on-error: true"]),
+            "step if": (step, [step, "        if: always()"]),
+            "run replaced": (run, ["        run: true"]),
+            "job renamed": (name, ["    name: Conformance check"]),
+            "step shell": (run, [run, shell]),
+            "workflow defaults": ("jobs:", ["defaults:", "  run:", "    shell: python {0}", "jobs:"]),
+            "job defaults": (name, [name, "    defaults:", "      run:", shell]),
+            "shallow checkout": ("          fetch-depth: 0", []),
+            "merge-commit checkout": (CONFORMANCE_CHECKOUT_REF, []),
+        }
+        for label, (anchor, replacement) in mutations.items():
+            with self.subTest(mutation=label):
+                index = lines.index(anchor)
+                mutated = lines[:index] + replacement + lines[index + 1:]
+                with mock.patch(f"{__name__}.workflow_lines", lambda path=None: mutated):
+                    self.assertNotEqual([], conformance_job_problems())
+
+    def test_pull_request_and_push_to_main_are_its_triggers(self):
+        for trigger in ("pull_request", "push"):
+            with self.subTest(trigger=trigger):
+                self.assertEqual(['"main"'], trigger_branches(trigger, CONFORMANCE_WORKFLOW))
+                for line in trigger_block(trigger, CONFORMANCE_WORKFLOW):
+                    self.assertFalse(line.startswith(("    paths", "    branches-ignore",
+                                                      "    types")), line)
+        keys = [line.strip()[:-1] for line in _top_level_block("on", CONFORMANCE_WORKFLOW)
+                if re.match(r"^  \S", line)]
+        self.assertEqual(["pull_request", "push"], keys)
+
+    def test_minimum_permissions_and_no_job_override(self):
+        self.assertEqual(EXPECTED_WORKFLOW_PERMISSIONS, workflow_permissions(CONFORMANCE_WORKFLOW))
+        self.assertEqual(
+            [], job_permission_lines(job_blocks(CONFORMANCE_WORKFLOW)["conformance"]))
+
+
 class RequiredContexts(unittest.TestCase):
     def test_every_required_context_is_a_job_name(self):
         contexts = required_contexts()
@@ -901,6 +995,93 @@ class ProtectionPayload(unittest.TestCase):
         # solo and unattended merge, which is the opposite of the issue's ask.
         self.assertIsNone(data["required_pull_request_reviews"])
         self.assertIsNone(data["restrictions"])
+
+
+class CleanupIssueWorkflowTest(unittest.TestCase):
+    """The push-to-main job that files cleanup issues (ADR-delivery-017)."""
+
+    def test_runs_on_push_to_main_only_with_issue_write_and_no_other_write(self):
+        triggers = [
+            line for line in _top_level_block("on", CLEANUP_WORKFLOW) if re.match(r"^  \S", line)
+        ]
+        self.assertEqual(["  push:"], triggers)
+        self.assertEqual(
+            ["    branches:", "      - main"],
+            [line for line in trigger_block("push", CLEANUP_WORKFLOW) if line.strip()],
+        )
+        self.assertEqual(["main"], trigger_branches("push", CLEANUP_WORKFLOW))
+        self.assertIsNone(job_if_expression("cleanup-issue", CLEANUP_WORKFLOW))
+        self.assertEqual(
+            {"contents": "read", "issues": "write"}, workflow_permissions(CLEANUP_WORKFLOW)
+        )
+        overrides = {
+            key: job_permission_lines(block)
+            for key, block in job_blocks(CLEANUP_WORKFLOW).items()
+            if job_permission_lines(block)
+        }
+        self.assertEqual({}, overrides)
+
+    def test_pushes_run_one_after_another(self):
+        self.assertEqual(
+            ["  group: cleanup-issue", "  cancel-in-progress: false", "  queue: max"],
+            [line for line in _top_level_block("concurrency", CLEANUP_WORKFLOW) if line.strip()],
+        )
+
+    def test_the_job_stores_the_token_then_files_through_the_command(self):
+        self.assertEqual({"Cleanup Issue": "cleanup-issue"}, job_names(CLEANUP_WORKFLOW))
+        steps = step_blocks("cleanup-issue", CLEANUP_WORKFLOW)
+        self.assertEqual(
+            ["Checkout", "Install Nix", "Store the workflow token for gh",
+             "File the next cleanup issue"],
+            list(steps),
+        )
+        self.assertEqual(
+            ["      - name: Install Nix", "        uses: DeterminateSystems/nix-installer-action@v4"],
+            [line for line in steps["Install Nix"] if line.strip()],
+        )
+        # Each step is exactly its lines: an added `shell:`, `if:`, `working-directory:`
+        # or `continue-on-error:` would change what the command does or whether it runs.
+        token_step = steps["Store the workflow token for gh"]
+        self.assertEqual(
+            [
+                "      - name: Store the workflow token for gh",
+                "        env:",
+                "          TOKEN: ${{ github.token }}",
+                "        run: printf '%s\\n' \"$TOKEN\" | gh auth login --with-token --insecure-storage",
+            ],
+            [line for line in token_step if line.strip()],
+        )
+        file_step = steps["File the next cleanup issue"]
+        self.assertEqual(
+            [
+                "      - name: File the next cleanup issue",
+                "        run: |",
+                "          tools=\"$(nix build --no-link --print-out-paths '.#agent-platform.tools')\"",
+                "          test -n \"$tools\"",
+                "          AGENT_PLATFORM_TOOLS=\"$tools/bin\" PYTHONPATH=python python3 -m"
+                " agent_tools.delivery.cleanup_issue file"
+                " --repo-root \"$GITHUB_WORKSPACE\" --repo \"$GITHUB_REPOSITORY\""
+                " --branch \"$GITHUB_REF_NAME\"",
+            ],
+            [line for line in file_step if line.strip()],
+        )
+        # No `env:` on the filing step: no token reaches the command.
+        self.assertIsNone(step_env(file_step))
+        # No default shell, working directory or job-level condition changes the commands.
+        text = CLEANUP_WORKFLOW.read_text(encoding="utf-8")
+        for key in ("defaults:", "shell:", "working-directory:", "continue-on-error:"):
+            self.assertNotIn(key, text)
+        self.assertEqual(
+            ["    name: Cleanup Issue", "    runs-on: ubuntu-24.04", "    timeout-minutes: 10",
+             "    steps:"],
+            [line for line in job_blocks(CLEANUP_WORKFLOW)["cleanup-issue"]
+             if line.startswith("    ") and not line.startswith("     ")],
+        )
+        self.assertEqual([], green_without_work(job_blocks(CLEANUP_WORKFLOW)["cleanup-issue"], None))
+
+    def test_the_job_is_not_a_required_context(self):
+        self.assertNotIn("Cleanup Issue", required_contexts())
+        self.assertEqual(CLEANUP_WORKFLOW, required_jobs()["Cleanup Issue"][0])
 
 
 if __name__ == "__main__":

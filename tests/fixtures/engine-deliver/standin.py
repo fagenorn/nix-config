@@ -20,8 +20,9 @@ prints at most one compact JSON line.
                                  <pidfile>, sleeps 60 s, exits 0
   answers <log> <answers.json> rest... appends {"argv": rest} to <log>; takes answer
                                  min(lines already in <log>, last) of <answers.json> (a list of
-                                 {"stdout", "stderr"?, "exit", "sleep"?}), writes its stdout and
-                                 stderr, flushes, sleeps "sleep" seconds, exits "exit"
+                                 {"stdout", "stderr"?, "exit", "sleep"?, "pidfile"?}), writes its
+                                 stdout and stderr, flushes, writes its pid to "pidfile" when the
+                                 answer names one, sleeps "sleep" seconds, exits "exit"
 """
 
 import json
@@ -105,6 +106,9 @@ def main(argv: list[str]) -> int:
         if "stderr" in answer:
             sys.stderr.write(answer["stderr"])
             sys.stderr.flush()
+        if "pidfile" in answer:
+            with open(answer["pidfile"], "w", encoding="utf-8") as handle:
+                handle.write(str(os.getpid()))
         time.sleep(answer.get("sleep", 0))
         return answer["exit"]
     return 2

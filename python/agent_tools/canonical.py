@@ -49,4 +49,7 @@ def parse_rfc3339_utc(value: str) -> datetime:
         raise ValueError("invalid RFC3339 timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must include an offset")
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except OverflowError as error:  # 0001-01-01T00:00:00+01:00 has no UTC instant
+        raise ValueError("RFC3339 timestamp outside the UTC range") from error

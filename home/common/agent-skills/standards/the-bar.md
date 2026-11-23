@@ -8,7 +8,7 @@ Every trust boundary is checked on both sides. The outer check exists for experi
 
 ### B2. Production-grade by default
 
-Committed code carries no `TODO`, no `FIXME`, no placeholder waiting to be filled, no half-wired path. Incomplete work is finished or deleted before commit; a deliberate stub is *visibly* a stub and is named in the architecture doc. Known limitations belong in docs, never in source.
+Committed code carries no placeholder waiting to be filled, no half-wired path. Incomplete work is finished or deleted before commit; a deliberate stub is *visibly* a stub and is named in the architecture doc. Known limitations belong in docs, never in source.
 
 ### B3. Root causes
 
@@ -32,7 +32,7 @@ If the design starts with "we'll write a custom X that…", the framework probab
 
 ### B8. Maintainability over cleverness
 
-Name for intent, not implementation. Keep units short enough to read without scrolling. Comments say *why*; the code already says what.
+Name for intent, not implementation. Keep units short enough to read without scrolling.
 
 ### B9. Moves keep their history
 
@@ -67,3 +67,27 @@ Run it and show the behaviour. Absence of an error is not evidence of success, a
 ### B16. Test runs leave nothing behind
 
 A test run creates what it uses and removes it when it ends, takes no fixed port, and leaves nothing behind. ([decision](https://github.com/fagenorn/nix-config/issues/1417))
+
+### B17. Files stay under 1,500 lines
+
+No source or test file is over 1,500 lines. A file already over it may not grow and a file under it may grow up to it, judged against the change's merge base, so a file over the limit stops growing without a hand-set exception. ([decision](https://github.com/fagenorn/nix-config/issues/1422))
+
+### B18. Comments say why the code is as it is
+
+A comment states in the present tense a constraint, an invariant or a consequence a reader would not guess; it does not restate the code, tell how the code came to be or name an issue or pull request. It may cite a decision-record id, a rule id in an enforcer or a suppression, and on a workaround an upstream bug link with the condition for removing it. ([decision](https://github.com/fagenorn/nix-config/issues/1420))
+
+### B19. Comments stay short
+
+A comment block is at most five lines, each at most 120 characters; a module docstring or file header is exempt from this cap but not from B18. A why that needs more room is a decision record, cited by its id. ([decision](https://github.com/fagenorn/nix-config/issues/1420))
+
+### B20. No TODO or FIXME
+
+Committed code carries no `TODO` and no `FIXME` comment: unfinished work is an issue on the tracker. ([decision](https://github.com/fagenorn/nix-config/issues/1420))
+
+### B21. Decision records stay under 1,500 bytes
+
+A decision record is at most 1,500 bytes. A record already over it may not grow, judged against the change's merge base, so a carried record stops growing without a hand-set exception. ([decision](https://github.com/fagenorn/nix-config/issues/1428))
+
+### B22. A decision record is a title and one paragraph
+
+After its title header a decision record holds one paragraph and nothing else: no section heading, no status line, no list, no second paragraph or numbered sub-decision. Each record's breaches are judged against the change's merge base, which carries the records written before the rule; an added record has none to carry. ([decision](https://github.com/fagenorn/nix-config/issues/1428))

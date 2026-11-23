@@ -59,7 +59,7 @@ def child(steps: list[dict], inputs=("issue", "item")) -> dict:
 def FAN(items_command: str, parallel: int) -> list[dict]:
     return [
         {"id": "list", "stage": "setup", "kind": "command", "command": items_command,
-         "on": {"ok": "fan", "failed": "needs-owner"}},
+         "on": {"ok": "fan", "failed": "needs-owner", "refused": "needs-owner"}},
         {"id": "fan", "stage": "landing", "kind": "call", "procedure": "fan-child",
          "in": ["list.argv"], "each": "list.argv", "parallel": parallel,
          "on": {"done": "done", "child-stop": "needs-owner"}},
@@ -69,7 +69,7 @@ def FAN(items_command: str, parallel: int) -> list[dict]:
 def fan_children(work: str = "standin-stamp") -> dict[str, dict]:
     return {"fan-child": child([
         {"id": "work", "stage": "building", "kind": "command", "command": work,
-         "in": ["run.item"], "on": {"ok": "judge", "failed": "child-stop"}},
+         "in": ["run.item"], "on": {"ok": "judge", "failed": "child-stop", "refused": "child-stop"}},
         {"id": "judge", "stage": "building", "kind": "decide", "grader": "toy-tally",
          "in": ["run.item"], "on": {"accept": "done", "revise": "child-stop"}}])}
 
@@ -84,10 +84,10 @@ class WalkSpy:
         self.records: list[tuple[str, bool]] = []
         self.met: list[bool] = []
 
-    def __call__(self, run_dir: Path, table) -> tuple[int, dict]:
+    def __call__(self, run_dir: Path, table, *rest) -> tuple[int, dict]:
         run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         if "parent" not in run:
-            return self.real(run_dir, table)
+            return self.real(run_dir, table, *rest)
         parent = engine_ledger.replay(run_dir.parent / run["parent"] / "events.jsonl")
         seen = any(e["event"] == "call" and e["child"] == run_dir.name for e in parent)
         with self.condition:
@@ -103,7 +103,7 @@ class WalkSpy:
         try:
             if self.before is not None:
                 self.before(run["inputs"].get("item"))
-            return self.real(run_dir, table)
+            return self.real(run_dir, table, *rest)
         finally:
             with self.condition:
                 self.active -= 1
@@ -245,9 +245,9 @@ class GroupTest(unittest.TestCase):
                          [(1, "blocked"), (2, "blocked")])
         self.assertEqual([(e["visit"], e["outcome"], e["to"]) for e in events
                           if e["event"] == "transition_taken" and e["step"] == "checks"],
-                         [(1, "blocked", "checks"), (2, "blocked", "checks")])
-        self.assertFalse([e for e in events
-                          if e.get("step") == "checks" and e.get("outcome") == "exhausted"])
+                         [(1, "blocked", "checks"), (2, "blocked", "checks"),
+                          (3, "exhausted", "needs-owner")])
+        self.assertFalse([e for e in graded(events, "checks") if e["outcome"] == "exhausted"])
         self.assertEqual(len(stamps(project)), 4)
 
     def test_a_group_of_decide_members_records_its_grade(self):
@@ -275,7 +275,7 @@ class GroupTest(unittest.TestCase):
         project = EngineProject(self)
         steps = [
             {"id": "prepare", "stage": "setup", "kind": "command", "command": "standin-json",
-             "in": ["run.issue"], "on": {"ok": "checks", "failed": "needs-owner"}},
+             "in": ["run.issue"], "on": {"ok": "checks", "failed": "needs-owner", "refused": "needs-owner"}},
             *GROUP("standin-stamp")]
         steps[1]["in"] = ["prepare.ticket"]
         done = project.deliver(project.procedures(steps), issue=1517)
@@ -571,7 +571,7 @@ class ChildKeepAliveTest(unittest.TestCase):
         steps = FAN("standin-items", 1)
         steps[1]["on"]["claim-lost"] = "needs-owner"
         work = {"id": "work", "stage": "building", "kind": "command", "command": "standin-stamp",
-                "in": ["run.item"], "mutates": True, "on": {"ok": "done", "failed": "child-stop"}}
+                "in": ["run.item"], "mutates": True, "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}
         document = child([work])
         document["stops"]["claim-lost"] = {"need": "retry", "reenter": "work"}
         done = project.deliver(
@@ -654,7 +654,9 @@ class RefusalTest(unittest.TestCase):
             directory = project.procedures([call], children={"solo": child([
                 {"id": "look", "stage": "building", "kind": "agent", "role": "reviewer",
                  "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
-                 "in": ["run.issue"], "on": {"drafted": "done", "stuck": "child-stop"}}],
+                 "in": ["run.issue"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}],
                 inputs=("issue",))})
             (directory / "draft.md").write_text("Draft issue {{run.issue}}.\n", encoding="utf-8")
             (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
@@ -688,7 +690,9 @@ class ChildSessionTest(unittest.TestCase):
             "fan-child": child([
                 {"id": "look", "stage": "building", "kind": "agent", "role": "reviewer",
                  "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
-                 "in": ["run.item"], "on": {"drafted": "done", "stuck": "child-stop"}}])})
+                 "in": ["run.item"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}])})
         (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
         (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
 
@@ -767,19 +771,20 @@ class GroupSessionTest(unittest.TestCase):
         self.assertEqual([e["outcome"] for e in graded(project.events(run), "reviews")],
                          ["blocked"])
 
-    def test_a_member_session_with_no_structured_reply_faults_the_group(self):
+    def test_a_member_session_with_no_structured_reply_is_no_reply_and_blocks_the_group(self):
         project = session_project(self, hold=0,
                                   canned=canned_result(structured_output=...))
         directory = with_session_files(project.procedures(REVIEWS()))
 
         done = project.deliver(directory, issue=1517)
 
-        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertEqual(done.stdout, "")
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
         (run,) = project.runs()
+        events = project.events(run)
         for name in ("ra", "rb"):
             self.assertTrue((run / "sessions" / f"{name}.1.json").is_file(), name)
-        self.assertEqual(graded(project.events(run), "reviews"), [])
+            self.assertEqual([e["outcome"] for e in graded(events, name)], ["no-reply"])
+        self.assertEqual([e["outcome"] for e in graded(events, "reviews")], ["blocked"])
 
 
 def alive(pid: int) -> bool:
@@ -849,7 +854,7 @@ class SigtermTest(unittest.TestCase):
     def test_a_sigterm_during_a_call_admits_no_further_child(self):
         project, engine, _ = self.call_during_work([
             {"id": "work", "stage": "building", "kind": "command", "command": "standin-block",
-             "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop"}}])
+             "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}])
 
         self.assertEqual(engine.returncode, 143)
         self.assertEqual(len(children_of(project)), 1)
@@ -859,9 +864,9 @@ class SigtermTest(unittest.TestCase):
     def test_a_sigterm_during_a_call_starts_no_later_step_of_the_running_child(self):
         project, engine, kid = self.call_during_work([
             {"id": "work", "stage": "building", "kind": "command", "command": "standin-block",
-             "in": ["run.item"], "on": {"ok": "after", "failed": "child-stop"}},
+             "in": ["run.item"], "on": {"ok": "after", "failed": "child-stop", "refused": "child-stop"}},
             {"id": "after", "stage": "building", "kind": "command", "command": "standin-stamp",
-             "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop"}}])
+             "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}])
 
         self.assertEqual(engine.returncode, 143)
         self.assertFalse(project.stamps.exists())
@@ -951,8 +956,8 @@ class ShutdownTest(unittest.TestCase):
         project = EngineProject(self)
         real_walk = engine_shell._walk
 
-        def walk(run_dir, table):
-            outcome = real_walk(run_dir, table)
+        def walk(run_dir, table, *rest):
+            outcome = real_walk(run_dir, table, *rest)
             if "parent" in json.loads((run_dir / "run.json").read_text(encoding="utf-8")):
                 engine_session._closed = True  # another thread's `reaping` closed the registry
             return outcome

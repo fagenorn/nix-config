@@ -49,11 +49,12 @@ import subprocess
 import tarfile
 import tempfile
 
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import adopt_conformance, agent_platform
 from agent_tools.project_contract.adopt_links import (
     Tree,
     broken_count,
     index_records,
+    is_point_in_time_record,
     markdown_texts,
     tree_records,
 )
@@ -70,6 +71,7 @@ from agent_tools.project_contract.adopt_inspection import (
     contained_path,
     contained_relative,
     gate_entry,
+    blob_at,
     git_or_fail,
     is_agent_path,
     is_secret_path,
@@ -77,6 +79,7 @@ from agent_tools.project_contract.adopt_inspection import (
     read_bytes_bounded,
     refuse,
     run_git,
+    seed_origin,
     sha256_hash,
     tracked_inventory,
 )
@@ -659,7 +662,8 @@ def new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]],
     base's tracked paths, the result's against the result's. A moved file is
     compared with the file it came from, through the plan's `git-mv`
     operations, and a result file with no base counterpart is compared with
-    zero. Sorted, so the gate and the post-commit proof — which both call this
+    zero. A point-in-time record no `git-mv` moved keeps its citations and is
+    not judged. Sorted, so the gate and the post-commit proof — which both call this
     — name the same files from the same records (D9).
     """
     origin = {operation["targets"][0]: operation["sources"][0]
@@ -669,7 +673,8 @@ def new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]],
     base_texts = markdown_texts(worktree, base)
     return sorted(
         path for path, text in markdown_texts(worktree, result).items()
-        if broken_count(path, text, result_tree) > (
+        if not (is_point_in_time_record(path) and path not in origin)
+        and broken_count(path, text, result_tree) > (
             broken_count(origin.get(path, path),
                          base_texts[origin.get(path, path)], base_tree)
             if origin.get(path, path) in base_texts else 0))
@@ -712,7 +717,9 @@ def gate_cold_clone_resolves(run: GateRun) -> bool:
     `git write-tree` over the index without committing, then `git archive` of
     that tree: what lands in the temporary directory is exactly what a fresh
     clone would see, so an adoption that only works because of an untracked
-    file cannot pass.
+    file cannot pass. A fresh clone has an origin, and a schema-3 contract
+    derives its identity from it, so the authored origin is seeded into the
+    export before it resolves.
     """
     tree = git_or_fail(
         run.worktree, "write-tree").decode("ascii", "strict").strip()
@@ -727,6 +734,7 @@ def gate_cold_clone_resolves(run: GateRun) -> bool:
                 bundle.extractall(export, filter="data")
         except (tarfile.TarError, OSError):
             return False
+        seed_origin(run.worktree, export)
         exit_code, payload = run.run_resolver(export, "resolve")
         if exit_code != 0 or not isinstance(payload, dict):
             return False
@@ -994,11 +1002,20 @@ def discard_retained(root: Path, digest: str) -> None:
     `adopt-<digest[:12]>` and the failure record, and nothing else. There is
     no `git worktree prune` on purpose (see the module docstring). With
     nothing retained it changes nothing. A step that fails is refused as
-    `adopt.discard.failed`.
+    `adopt.discard.failed`; a plan whose pending required-check record exists
+    is refused as `adopt.required_check.pending` before any step, unless its
+    branch no longer exists, which makes the record stale and removes it.
     """
     home = agent_platform.state_root() / "adopt" / "worktrees"
     worktree = home / digest
     branch = f"adopt-{digest[:12]}"
+    adopt_conformance.drop_stale_pending(root, digest)
+    if adopt_conformance.pending_path(digest).exists():
+        # The branch is the commit the pending required-check record names (P6):
+        # removing one without the other leaves a plan that can never be applied.
+        raise refuse("adopt_failure", adopt_conformance.REQUIRED_PENDING, "",
+                     "the required check of this plan is still to settle; apply "
+                     "the plan again to settle it before discarding anything")
     failed = refuse("adopt_failure", "adopt.discard.failed", "",
                     "the retained worktree of this plan could not be removed")
     code, listing = run_git(root, "worktree", "list", "--porcelain")
@@ -1295,6 +1312,49 @@ def prove_commit_content(worktree: Path, commit: str,
             "verification_failed", "adopt.commit.unplanned_content", "",
             "the adoption commit does not change exactly the paths the "
             "plan's operations declare")
+
+
+CONFORMANCE_UNPROVED = "adopt.commit.conformance_unproved"
+CONVERSION_UNPROVED = "adopt.commit.conversion_unproved"
+
+
+def prove_conformance_bytes(worktree: Path, commit: str,
+                            operations: list[dict], member: dict | None = None) -> None:
+    """Each conformance file the plan writes is committed with the planned bytes.
+
+    `prove_commit_content` compares path names only, so a hook or a verification
+    command that edits the lock, the input declaration or the protection file
+    after the gates passed leaves it satisfied. The forge write that follows is
+    irreversible without a rollback, so the committed blob of each planned
+    conformance target must hash to its operation's `after` first, and so must the
+    amended contract of a plan with a conformance `member`, which declares the
+    workflow's projection. `devenv.yaml` is the exception: an approved reference
+    formatter may rewrite its whitespace after planning, so its committed blob
+    must instead still declare the platform input as planned. The worktree is
+    retained as for the other proofs and no forge request is made.
+    """
+    proved = adopt_conformance.CONFORMANCE_TARGETS + (
+        (CONTRACT_FILENAME,) if member is not None else ())
+    for operation in operations:
+        if operation.get("op") != "write-file":
+            continue
+        for target in operation["targets"]:
+            if target not in proved:
+                continue
+            blob = blob_at(worktree, commit, target)
+            if blob is not None and target == adopt_conformance.INPUT_FILE and member is not None:
+                locked = member["revision"]
+                try:
+                    ok = adopt_conformance.declare_input(
+                        blob, locked["owner"], locked["repo"]) is None
+                except adopt_conformance.Undeclarable:
+                    ok = False
+            else:
+                ok = blob is not None and sha256_hash(blob) == operation["after"]
+            if not ok:
+                raise refuse(
+                    "verification_failed", CONFORMANCE_UNPROVED, "",
+                    f"the adoption commit does not carry the planned bytes of {target}")
 
 
 def prove_commit_links(worktree: Path, commit: str,

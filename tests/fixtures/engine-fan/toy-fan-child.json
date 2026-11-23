@@ -7,6 +7,7 @@
   "steps": [
     {"id": "claim", "stage": "building", "kind": "command", "command": "forge-claim", "subcommand": "status",
      "in": ["run.repo", "run.issue", "run.holder"], "mutates": true,
-     "on": {"free": "done", "held_by": "done", "stale": "child-stop", "error": "child-stop"}}
+     "on": {"free": "done", "held_by": "done", "stale": "child-stop", "error": "child-stop",
+             "refused": "child-stop"}}
   ]
 }

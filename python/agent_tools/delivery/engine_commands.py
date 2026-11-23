@@ -14,24 +14,45 @@ result (`{}`).
 
 A command that cannot start (an `OSError` from the spawn) is `failed` with exit 127 and no pid, and
 `on_start` is not called. When `on_start` raises, the process is killed and reaped before the error
-propagates. A timed run (`timeout` given) has its own session and captured stderr, kills the group at
-the timeout and bounds the drain by `DRAIN_SECONDS`. `Ran.stdout`/`stderr` are what it printed
-(stderr is empty untimed). The module runs processes, so the pure engine core never imports it.
+propagates. Every run is the leader of its own process group, and any exception while it waits (a
+SIGTERM to the engine, raised as `SystemExit`, and a failing `on_start` included) kills that group
+and closes its pipes without waiting for EOF. A timed run (`timeout` given) also has captured
+stderr, kills the group at the timeout and bounds the drain by `DRAIN_SECONDS`; the timeout counts
+from the spawn, `on_start` included. The deadline is armed (a `Watchdog` thread) before `on_start`
+runs, so a stalled `on_start` cannot keep the group past its bound; the SIGTERM handler is
+installed before the spawn, timed or not, and defers a signal until the group is owned, so a
+SIGTERM in the spawn interval still ends the group, and the previous handler returns with the run.
+`Ran.timed_out` says the timeout fired. A run given `stop` raises `Stopped` when it is true before
+the process starts, polls it while the process runs (`engine_stop.communicate`) and raises
+`Stopped` once it is true, also when the process has already ended. `Ran.stdout`/`stderr` are what
+it printed (stderr is empty untimed).
+
+The platform command table holds each platform id's wall bound (`PLATFORM_WALL_SECONDS`) and the one
+bound of every project command (`PROJECT_WALL_SECONDS`); the engine times every step run by it and
+captures its stderr. The module runs processes, so the pure engine core never imports it.
+
+Every command passes the lifecycle guard first, in the guard's accepted spelling (`command_text`),
+and runs marked as an agent session so the pre-push hook judges a push it makes (issue 1515). A
+refusal, a timeout or an unusable guard is the outcome `refused`, with the guard's reason as the
+result and no process. A run given `stop` polls it while the guard runs and checks it before a
+refusal is returned: a stop raises `Stopped` there, the guard reaped, and no refusal is graded.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.delivery import procedure_check
+from agent_tools.delivery import engine_guard, engine_stop, procedure_check
 from agent_tools.delivery.procedure_check import CommandDeclaration
 from agent_tools.system.siblings import sibling_argv
 
@@ -39,10 +60,18 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "diff-scope": "delivery.diff_scope",
     "forge-claim": "claims.forge_claim",
 })
+PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
+    "diff-scope": 300,
+    "forge-claim": 1200,
+})
+PROJECT_WALL_SECONDS = 3600
 PROJECT_DECLARATION = CommandDeclaration((), {})
 NOT_STARTED = 127
 TIMED_OUT = "timeout"
 DRAIN_SECONDS = 5
+TEXT_VALUE_FLAGS = ("--body", "--subject", "--title")
+SHELL_ACTIVE = frozenset('"\\$`!')
+SESSION_MARKER = "CLAUDECODE"
 
 
 class UnknownCommand(LookupError):
@@ -56,6 +85,29 @@ def argument(value: object) -> str:
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def command_text(argv: Sequence[str]) -> str:
+    """The argv in the guard's accepted spelling, words joined by one space (issue 1515, D6)."""
+    def bare_or_double(word: str) -> str:
+        if shlex.quote(word) == word:
+            return word
+        if not SHELL_ACTIVE.intersection(word):
+            return f'"{word}"'
+        return shlex.quote(word)
+
+    words: list[str] = []
+    index = 0
+    while index < len(argv):
+        word = argv[index]
+        words.append(bare_or_double(word))
+        if word in TEXT_VALUE_FLAGS and index + 1 < len(argv):
+            value = argv[index + 1]
+            words.append(shlex.quote(value) if SHELL_ACTIVE.intersection(value)
+                         else f'"{value}"')
+            index += 1
+        index += 1
+    return " ".join(words)
 
 
 @dataclass(frozen=True)
@@ -99,6 +151,14 @@ class CommandTable:
             raise UnknownCommand(f"{command}: a project command takes no subcommand")
         raise UnknownCommand(f"{command}: not a platform or project command")
 
+    def wall_seconds(self, command: str) -> float:
+        """The wall bound of a command step: its platform row, else the project bound."""
+        if command in self.platform:
+            return PLATFORM_WALL_SECONDS[command]
+        if command in self.project:
+            return PROJECT_WALL_SECONDS
+        raise UnknownCommand(f"{command}: not a platform or project command")
+
 
 def grade(stdout: bytes, exit_code: int) -> tuple[str, dict]:
     """The outcome and the result object of a finished command."""
@@ -119,48 +179,133 @@ def grade(stdout: bytes, exit_code: int) -> tuple[str, dict]:
 class Ran:
     outcome: str
     result: dict
-    exit_code: int
+    exit_code: int | None
     wall_seconds: float
     stdout: bytes = b""
     stderr: bytes = b""
+    timed_out: bool = False
+
+
+def _terminate(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
+class Watchdog:
+    """Runs `end` once at a deadline from its own thread, so a stall in the caller cannot outlast it."""
+
+    def __init__(self, seconds: float, end: Callable[[], None]) -> None:
+        self.fired = False
+        self._end = end
+        self._timer = threading.Timer(max(0.0, seconds), self._fire)
+        self._timer.daemon = True
+
+    def _fire(self) -> None:
+        self.fired = True
+        self._end()
+
+    def start(self) -> Watchdog:
+        self._timer.start()
+        return self
+
+    def stop(self) -> bool:
+        """Disarm the deadline, waiting for an ending already begun; whether the deadline passed."""
+        self._timer.cancel()
+        if self._timer.is_alive():
+            self._timer.join()
+        return self.fired
+
+
+def _refused(reason: str, started: float) -> Ran:
+    return Ran("refused", {"reason": reason, "verdict": "refused"}, None,
+               time.monotonic() - started)
 
 
 def run(table: CommandTable, command: str, subcommand: str | None,
-        args: Sequence[tuple[str, object]], *, on_start: Callable[[int], None],
-        timeout: float | None = None) -> Ran:
-    """Run one command step to its end; `on_start(pid)` is called once, before waiting."""
+        args: Sequence[tuple[str, object]], *, guard: engine_guard.Hook | engine_guard.Unavailable,
+        on_start: Callable[[int], None], timeout: float | None = None,
+        stop: Callable[[], bool] | None = None) -> Ran:
+    """Run one command step to its end once the guard allows it; `on_start(pid)` is called once,
+    before waiting."""
     invocation = table.invocation(command, subcommand, args)
     started = time.monotonic()
+    text = command_text(invocation.argv)
+    if shlex.split(text) != list(invocation.argv):
+        if stop is not None and stop():
+            raise engine_stop.Stopped
+        return _refused(f"The command text {text} does not split back to its words.", started)
+    verdict = engine_guard.judge(guard, text, invocation.cwd, stop)
+    if stop is not None and stop():  # a stop is honored before a refusal is returned
+        raise engine_stop.Stopped
+    if not verdict.allowed:
+        return _refused(verdict.reason or "The lifecycle guard refused.", started)
+    started = time.monotonic()  # the wall bound counts from the spawn, not from the guard
+    deferred: list[int] = []
+    previous = None
+    try:  # before the spawn: the group exists from the spawn on
+        previous = signal.signal(signal.SIGTERM, lambda signum, frame: deferred.append(signum))
+    except ValueError:  # not the main thread: no handler can be installed
+        pass
     try:
-        process = subprocess.Popen(
-            invocation.argv, cwd=invocation.cwd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
-            start_new_session=timeout is not None)
-    except OSError:
-        return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
+        try:
+            process = subprocess.Popen(
+                shlex.split(text), cwd=invocation.cwd, stdin=subprocess.DEVNULL,
+                env={**os.environ, SESSION_MARKER: os.environ.get(SESSION_MARKER) or "1"},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE if timeout is not None else None,
+                start_new_session=True)
+        except OSError:
+            if deferred:  # no group to end, but the engine was told to stop
+                raise SystemExit(128 + deferred[0])
+            return Ran("failed", {}, NOT_STARTED, time.monotonic() - started)
+        return _wait(process, on_start, started, timeout, deferred, stop)
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _kill(process: subprocess.Popen) -> None:
+    """End the command's own process group."""
     try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):  # gone, or a leader left unreaped as a zombie (macOS)
+        pass
+
+
+def _wait(process: subprocess.Popen, on_start: Callable[[int], None], started: float,
+          timeout: float | None, deferred: list[int], stop: Callable[[], bool] | None) -> Ran:
+    guard = None
+    try:
+        try:  # the deferred signals end here: from now on the group is owned
+            signal.signal(signal.SIGTERM, _terminate)
+        except ValueError:
+            pass
+        if deferred:
+            raise SystemExit(128 + deferred[0])
+        if timeout is not None:
+            guard = Watchdog(started + timeout - time.monotonic(),
+                             lambda: _kill(process)).start()
         on_start(process.pid)
     except BaseException:
-        process.kill()
-        process.communicate()
+        if guard is not None:
+            guard.stop()
+        engine_stop.end_group(process)
         raise
+    overran = guard is not None and guard.stop()
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        remaining = None if timeout is None else started + timeout - time.monotonic()
+        if overran or (remaining is not None and remaining <= 0):
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        stdout, stderr = engine_stop.communicate(process, None, stop=stop, timeout=remaining)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill(process)
         try:
             stdout, stderr = process.communicate(timeout=DRAIN_SECONDS)
         except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
             stdout, stderr = late.output or b"", late.stderr or b""
             process.stdout.close(), process.stderr.close(), process.wait()
-        return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr)
-    except BaseException:  # an interrupt must not leave a timed run's group alive
-        if timeout is not None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
+        return Ran(TIMED_OUT, {}, process.returncode, time.monotonic() - started, stdout, stderr,
+                   timed_out=True)
+    except BaseException:  # an interrupt, a SIGTERM or a stop must not leave the group alive
+        engine_stop.end_group(process)
         raise
     outcome, result = grade(stdout, process.returncode)
     return Ran(outcome, result, process.returncode, time.monotonic() - started,

@@ -1,0 +1,41 @@
+# Fixture header, line one.
+# Fixture header, line two.
+# Header line three is wide: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+# Fixture header, line four.
+# Fixture header, line five.
+# Fixture header, line six.
+# Fixture header, line seven.
+k1: 1
+# Kept for ADR-fixture-001.
+k2: 2
+# Remove once that ships: https://github.com/upstream-owner/upstream-repo/issues/42
+k3: 3
+# Added to fix #12.
+k4: 4
+# See https://github.com/fixture-owner/fixture-repo/issues/7
+k5: 5
+# Five line block, row a.
+# Five line block, row b.
+# Five line block, row c.
+# Five line block, row d.
+# Five line block, row e.
+k6: 6
+# Six line block, row a.
+# Six line block, row b.
+# Six line block, row c.
+# Six line block, row d.
+# Six line block, row e.
+# Six line block, row f.
+k7: 7
+# zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+k8: 8
+# zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+k9: 9
+# TODO later
+k10: 10
+name: "TODO later"
+k11: 11
+steps:
+  - name: Download this run's suite timing
+    # TODO later
+    run: "true"

@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-five screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-seven screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -85,7 +85,23 @@ Contract:
   question back with three choices; on a page with the reading panel (`READING_PANEL`) the
   Questions fold and the thread's line are clicked, so the answer reads in the main column, and
   on a page without it the fold and the thread's summary are clicked, which is the before
-  picture, its reading None). `activation-tooling` and `activation-host` are the desk with no sprint and an
+  picture, its reading None).
+  `deeper-offer` and `deeper-answer` seed the same desk, `owner/web` with no sprint and two
+  threads: thread `DEEPER_THREAD`, a light answer (asked 40 minutes ago) and the Dig deeper
+  answer to the same question on a stronger model (asked 30, answered 12), each with its own
+  `Spent ...` line from a seeded transcript; and thread `DEEPER_OFFER_THREAD`, a light answer
+  (asked 10 minutes ago) whose Dig deeper is still offered, so its estimate is the first
+  thread's deeper spend (the spend before). On a page with the reading panel `deeper-answer`
+  clicks the Questions fold and the first thread's line, then reads `DEEPER_READING` (the panel,
+  each row's answer and spend line, Make it a goal; `DEEPER_ROWS` holds the seeded phrase and
+  spend of each), and
+  `deeper-offer` clicks the fold and the second thread's line and its Dig deeper (`DEEP_OPEN`,
+  never Start, which alone posts), waits for the estimate, then reads `OFFER_READING` (the same, and the estimate's text, which
+  must carry the deeper row's tokens and dollars, `DEEPER_ESTIMATE`); on a page without the panel
+  each clicks the fold and its thread's summary (`DEEPER_BASE_THREAD`), which is the before
+  picture, its `deeper` None; `main` prints `does not show` for a shot for which `deeper_shows`
+  is false (`DEEPER_SAID`), a None reading passing only when `serves_reading_panel` is false.
+  `activation-tooling` and `activation-host` are the desk with no sprint and an
   activation reading of merged changes this host is built from, none a console file: the first
   changes only agent tooling (a `python/` file and a skill), so its one line reads the
   agent-tooling wording; the second also changes the host configuration, so its line reads the
@@ -148,13 +164,13 @@ Contract:
   `SprintState` having no `started_by`) those waits are skipped, so a base run still writes every
   file and the pictures are the before pictures of the actors.
   `register-apply` and `register-draft` are the console's registration of `sample-app`, a
-  repository with no contract whose ready plan proposes the command its adoption commit runs
-  through (`PROPOSAL_LINE`, #1268), served with a stand-in adopter and forge so the plan can be
-  applied: `register-apply` is the ready Apply card, its first line the proposal and then the
-  plan's own lines (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
+  repository with no contract whose ready plan is drafted in schema 3 (`FACT_LINE`),
+  served with a stand-in adopter and forge so the plan can be
+  applied: `register-apply` is the ready Apply card, its lines the plan's own
+  (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
   and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
   `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
-  the proposal as a main line beside its Change control. `register-reconcile-apply` and
+  the project id as a fact line with no Change control. `register-reconcile-apply` and
   `register-reconcile-draft` are the same two screens for a repository that already has a contract
   and pending adoption work, a `reconcile` plan (#1333): the row seeds the reading the console takes
   of a pre-commit hook whose runner is not on the plain PATH and of a `devenv.nix`, so the plan
@@ -162,12 +178,13 @@ Contract:
   `REGISTER_READING` reads the card's first
   line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
   holds what each state must read on a page that proposes it (`proposes(state)`, which is
-  `proposes_environment()` for the first two and `proposes_reconcile()` for the reconcile pair); on
+  `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on
   a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
-  picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
-  card opens on the plan's own first line and its draft shows nothing.
+  picture, and any other reading fails. The base commit's register-draft has no facts and drafts the
+  commit environment as a main row with a Change button, so that row is its reading; its reconcile
+  row has no draft, so its Apply card opens on the plan's own first line and shows nothing.
   `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 106 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 114 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -196,7 +213,10 @@ Contract:
   panel in the main column at the column's full width, the question once (counted from the question the shot was seeded with, an argument of
   the script), the answer holding bold,
   a list, inline code and a block of code, the call-out last in its row after the answer, three
-  choices visible); or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
+  choices visible); or when a `deeper-offer` or `deeper-answer` shot on a page with the panel does not read as
+  `deeper_shows` says (each row's seeded answer phrase and exact spend line, Make it a goal and,
+  for the offer, the estimate holding the deeper row's figures), a None reading failing on a
+  page that has the panel; or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
   opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page
   without the fold that still lists the follow-up and its answer, the before picture), or when a `question-words` or `question-refused` shot's reading is not its `WORDS_CARD` or
   `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
@@ -277,7 +297,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
-          "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
+          "ask-goal", "question-read", "deeper-offer", "deeper-answer", "activation-tooling", "activation-host", "register-apply",
           "register-draft", "register-reconcile-apply", "register-reconcile-draft", "adoption-merge", "adoption-moved", "adoption-failed", "sharing-panel",
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors",
           "owner-accounts")
@@ -317,12 +337,11 @@ REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
 PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
-REGISTER_SHOWN = {"register-apply": (PROPOSAL_LINE, None, False),
-                  "register-draft": (None, PROPOSAL_LINE, True),
+FACT_LINE = "project id and issue tracker: GitHub, as owner/sample-app (read from its remote)"
+REGISTER_SHOWN = {"register-draft": (None, FACT_LINE, False),
                   "register-reconcile-apply": (PROPOSAL_LINE, None, False),
                   "register-reconcile-draft": (None, PROPOSAL_LINE, True)}
-REGISTER_BASE = {"register-apply": (REGISTER_PLAN_LINES[0], None, False),
-                 "register-draft": (None, None, False),
+REGISTER_BASE = {"register-draft": (None, PROPOSAL_LINE, True),
                  "register-reconcile-apply": (REGISTER_PLAN_LINES[0], None, False),
                  "register-reconcile-draft": (None, None, False)}
 # The first line of the Apply card's list, the proposal's draft row and whether that row carries a
@@ -332,7 +351,7 @@ REGISTER_READING = """(() => {
   const first = document.querySelector('.apply-lines li');
   const row = Array.from(document.querySelectorAll('ul.register-draft > li')).find((item) => {
     const line = item.querySelector('.draft-line');
-    return shown(line) && line.textContent.trim().startsWith('commits run in its development shell');
+    return shown(line) && /^(commits run in its development shell|project id and issue tracker)/.test(line.textContent.trim());
   });
   const change = row ? row.querySelector('button.draft-change') : null;
   return [shown(first) ? first.textContent.trim() : null,
@@ -374,6 +393,7 @@ PERMISSION_PROMPT = "/api/permission-prompt"
 PERMISSION_COMMAND = "git worktree add ../.worktrees/issue-12"
 PERMISSION_WORDS = "Create the delivery's worktree"
 READING_PANEL = "section#reading"
+READING_PANEL_ID = b'id="reading"'
 ACTIVATION_COMMIT = "1258" * 10
 ACTIVATION_PATHS = {
     "activation-tooling": ("python/agent_tools/system/util.py",
@@ -492,6 +512,111 @@ REFUSED_CARD = ("Ask for changes", "", True, "Say what to change.")
 # look-check question is seeded with it only where the service keeps it (the base commit's is not).
 NEEDS_WORDS_KEPT = "needs_words" in {field.name for field in fields(Question)}
 READ_SESSION = "7c2f9d4e-1a8b-4e63-b5d0-9f3a6c1e8b27"
+# The Dig deeper states (#1435): thread 1 holds a light answer and its deeper answer, thread 2 a
+# light answer whose Dig deeper is still offered, so its estimate is thread 1's deeper spend.
+DEEPER_STATES = ("deeper-offer", "deeper-answer")
+# The panel's reading of the deeper thread: whether the panel shows, each shown row's answer and
+# spend line text (whitespace collapsed), and whether the last row shows Make it a goal.
+DEEPER_READING = """(() => {
+  const shown = (node) => Boolean(node && node.getClientRects().length > 0);
+  const text = (node) => (node && shown(node) ? node.textContent.replace(/\\s+/g, ' ').trim() : '');
+  const panel = document.querySelector('#reading');
+  if (!shown(panel)) return [false, [], false];
+  const rows = Array.from(panel.querySelectorAll('ol.ask-list > li.ask')).filter(shown);
+  const last = rows.length ? rows[rows.length - 1] : null;
+  return [true,
+          rows.map((row) => [text(row.querySelector('.ask-answer')), text(row.querySelector('p.ask-spend'))]),
+          Boolean(last && shown(last.querySelector('button.ask-goal')))];
+})()"""
+# The panel's reading of the Dig deeper offer once its confirmation is open: the same three members
+# and, last, the text of the estimate the confirmation shows ('' when it shows none).
+OFFER_READING = """(() => {
+  const shown = (node) => Boolean(node && node.getClientRects().length > 0);
+  const text = (node) => (node && shown(node) ? node.textContent.replace(/\\s+/g, ' ').trim() : '');
+  const panel = document.querySelector('#reading');
+  if (!shown(panel)) return [false, [], false, ''];
+  const rows = Array.from(panel.querySelectorAll('ol.ask-list > li.ask')).filter(shown);
+  return [true,
+          rows.map((row) => [text(row.querySelector('.ask-answer')), text(row.querySelector('p.ask-spend'))]),
+          shown(panel.querySelector('button.ask-goal')), text(panel.querySelector('p.ask-deep-estimate'))];
+})()"""
+# What each picture must read, from the seed: per row a phrase its answer holds and its spend line
+# exactly (the figures follow from the seeded transcripts at the published per-million rates).
+DEEPER_LIGHT_SNIPPET = "do not say which parts of an issue take long"
+DEEPER_SNIPPET = "Review and planning take most of the time; the tasks take most of the tokens."
+DEEPER_OFFER_SNIPPET = "The test check fails most often: 9 of the last 40 pull requests"
+DEEPER_ESTIMATE = "Earlier deeper answers here spent about 2,184,000 tokens, $2.76 each."
+DEEPER_ROWS = {
+    "deeper-answer": ((DEEPER_LIGHT_SNIPPET, "Spent 544,000 tokens, about $0.38"),
+                      (DEEPER_SNIPPET, "Spent 2,184,000 tokens, about $2.76")),
+    "deeper-offer": ((DEEPER_OFFER_SNIPPET, "Spent 362,000 tokens, about $0.25"),)}
+# The least a finished reading holds, and the reading a page without the panel gives (None).
+DEEPER_SHOWN = {"deeper-answer": (True, DEEPER_ROWS["deeper-answer"], True),
+                "deeper-offer": (True, DEEPER_ROWS["deeper-offer"], True, DEEPER_ESTIMATE)}
+
+
+def _frozen(value):
+    """A reading from the page (nested lists) as nested tuples."""
+    return tuple(_frozen(item) for item in value) if isinstance(value, list) else value
+
+
+def deeper_shows(state: str, deeper) -> bool:
+    """Whether a deeper state's reading is its seeded rows (answer phrase and exact spend), Make it a goal and, for the offer, the deeper row's figures."""
+    want = DEEPER_ROWS[state]
+    if not isinstance(deeper, tuple) or len(deeper) != (4 if state == "deeper-offer" else 3):
+        return False
+    panel, rows, goal = deeper[:3]
+    if panel is not True or goal is not True or len(rows) != len(want):
+        return False
+    for (answer, spend), (snippet, spent) in zip(rows, want):
+        if snippet not in answer or spend != spent:
+            return False
+    return state != "deeper-offer" or DEEPER_ESTIMATE in deeper[3]
+
+
+DEEPER_SAID = {
+    "deeper-offer": "the Dig deeper estimate with the answer's spend line and Make it a goal",
+    "deeper-answer": "the deeper answer with its spend lines and Make it a goal"}
+DEEP_OPEN = "#reading button.ask-deep"
+DEEP_ESTIMATE = "#reading p.ask-deep-estimate"
+DEEPER_BASE_THREAD = {
+    "deeper-offer": 'details[data-key="thread:owner/web:1435b1"] > summary',
+    "deeper-answer": 'details[data-key="thread:owner/web:1435a1"] > summary'}
+DEEPER_THREAD = "1435a1"
+DEEPER_ID = "1435a2"
+DEEPER_QUESTION = "Where do agents spend time and tokens on issues, and which parts take long?"
+DEEPER_LIGHT_SESSION = "4a8e2c61-9d3f-4b70-8e15-c2f6a9d4b183"
+DEEPER_SESSION = "b7d14e93-2a6c-4f85-9b30-e8c5f1a27d46"
+DEEPER_LIGHT_ANSWER = (
+    "Answer: The console's records hold spend by day and project, not by phase or issue, so they "
+    "do not say which parts of an issue take long.\n"
+    "Read: the console's records\n"
+    "Ran: none\n"
+    "Could not find out: the time and tokens of each phase\n"
+    "Question for you: none")
+DEEPER_ANSWER = "\n".join((
+    "Answer: **Review and planning take most of the time; the tasks take most of the tokens.** "
+    "Over the last 30 days, 14 delivery runs:",
+    "",
+    "- Plan: 31% of the agent-seconds, 18% of the tokens",
+    "- Tasks: 44% of the agent-seconds, 61% of the tokens",
+    "- Review: 25% of the agent-seconds, 21% of the tokens",
+    "",
+    "Issue 12 took longest: 3 runs and 2 h 10 min, most of it in review.",
+    "Read: the transcripts part of the console's records",
+    "Ran: none",
+    "Could not find out: none",
+    "Question for you: none"))
+DEEPER_OFFER_THREAD = "1435b1"
+DEEPER_OFFER_QUESTION = "Which checks fail most often on this project's pull requests?"
+DEEPER_OFFER_SESSION = "e3c95a07-6b2d-4e18-a4f9-0d7b3c58e912"
+DEEPER_OFFER_ANSWER = (
+    "Answer: The test check fails most often: 9 of the last 40 pull requests, then the lint "
+    "check on 4.\n"
+    "Read: the console's records\n"
+    "Ran: none\n"
+    "Could not find out: none\n"
+    "Question for you: none")
 
 
 def thread_line(qid: str) -> str:
@@ -1968,6 +2093,17 @@ def style_applies(served: Path | None = None) -> bool:
     return True
 
 
+def serves_reading_panel(served: Path | None = None) -> bool:
+    """Whether the page served has the reading panel (a base run may serve one without it: the before picture)."""
+    if served is None:
+        import agent_tools.console
+        served = Path(next(iter(agent_tools.console.__path__)))
+    try:
+        return READING_PANEL_ID in (Path(served) / "page.html").read_bytes()
+    except OSError:
+        return False
+
+
 @dataclass(frozen=True)
 class Shot:
     state: str
@@ -1990,6 +2126,7 @@ class Shot:
     style: tuple[str, ...] = ()
     checked: tuple[str, ...] = ()
     broke: tuple[str, ...] = ()
+    deeper: tuple | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -2228,11 +2365,11 @@ class _Seed:
 
 
 def _seed_registration(seed: _Seed, state: str, root: str) -> None:
-    """A ready plan of `root`, a repository with no contract whose draft proposes a commit environment.
+    """A ready plan of `root`, a repository with no contract whose draft is in schema 3 (five fields, then the facts).
 
-    The reading names one GitHub remote, so the draft has no open question; its hook and
-    environment file are what a checkout with a devenv and installed commit hooks reads. The base
-    commit's draft ignores both and proposes nothing (the before picture).
+    The reading names one GitHub remote, so the draft has no open question and its project id is
+    a fact line with no Change. The base commit's draft has no such row; it drafts the commit
+    environment as a changeable main-group row instead (the before picture).
     """
     if state.startswith("register-reconcile"):
         fields = (contract_draft.reconcile_fields(root, {
@@ -2499,6 +2636,22 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "profile": "work-main", "session_id": READ_SESSION})
         seed.put(4 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
             "question_id": "1226a1", "outcome": "answered", "answer": read[1]})
+    elif state in DEEPER_STATES:
+        seed.put(40 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
+            "question_id": DEEPER_THREAD, "question": DEEPER_QUESTION,
+            "profile": "work-main", "session_id": DEEPER_LIGHT_SESSION})
+        seed.put(38 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
+            "question_id": DEEPER_THREAD, "outcome": "answered", "answer": DEEPER_LIGHT_ANSWER})
+        seed.put(30 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
+            "question_id": DEEPER_ID, "question": DEEPER_QUESTION, "thread_id": DEEPER_THREAD,
+            "deep": True, "profile": "work-main", "session_id": DEEPER_SESSION})
+        seed.put(12 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
+            "question_id": DEEPER_ID, "outcome": "answered", "answer": DEEPER_ANSWER})
+        seed.put(10 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
+            "question_id": "1435b1", "question": DEEPER_OFFER_QUESTION,
+            "profile": "work-main", "session_id": DEEPER_OFFER_SESSION})
+        seed.put(8 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
+            "question_id": "1435b1", "outcome": "answered", "answer": DEEPER_OFFER_ANSWER})
     elif state == "spend-page":
         return (seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
                             report=2 * MINUTE)[0],)
@@ -2527,12 +2680,13 @@ class _Assistant:
         self.now_s = now_s
         self.count = 0
 
-    def __call__(self, sid: str, cwd: str, days_ago: int, input: int, output: int) -> dict:
+    def __call__(self, sid: str, cwd: str, days_ago: int, input: int, output: int,
+                 model: str = "claude-sonnet-4-6") -> dict:
         self.count += 1
         when = datetime.fromtimestamp(self.now_s, timezone.utc) - timedelta(days=days_ago)
         return {"type": "assistant", "sessionId": sid, "cwd": cwd,
                 "timestamp": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-                "message": {"id": f"msg-{self.count:04d}", "model": "claude-sonnet-4-6",
+                "message": {"id": f"msg-{self.count:04d}", "model": model,
                             "usage": {"input_tokens": input, "cache_creation_input_tokens": 0,
                                       "cache_read_input_tokens": input * 8,
                                       "output_tokens": output}}}
@@ -2595,6 +2749,25 @@ def _write_desk_spend(fixture: Fixture, now_s: float, running: str, ended: str) 
         assistant(DESK_OUTSIDE, web, ago, 50_000, 4_000) for ago in (0, 2)]))
     (run / "agent-q1.jsonl").write_bytes(_transcript([
         assistant(DESK_OUTSIDE, web, ago, 80_000, 6_000) for ago in (0, 1, 3)]))
+
+
+def _write_deeper(fixture: Fixture, now_s: float) -> None:
+    """Transcripts for the Dig deeper states: each question's session, written today.
+
+    The light sessions total 544,000 and 362,000 tokens; the deeper one runs on `claude-opus-4-6`
+    and totals 2,184,000, so its dollars per token are the dearer.
+    """
+    web = str(fixture.projects[0])
+    assistant = _Assistant(now_s)
+    slug = fixture.config / "projects" / "-web"
+    slug.mkdir(parents=True, exist_ok=True)
+    (slug / f"{DEEPER_LIGHT_SESSION}.jsonl").write_bytes(_transcript([
+        assistant(DEEPER_LIGHT_SESSION, web, 0, 30_000, 2_000) for _ in range(2)]))
+    (slug / f"{DEEPER_SESSION}.jsonl").write_bytes(_transcript([
+        assistant(DEEPER_SESSION, web, 0, 60_000, 6_000, model="claude-opus-4-6")
+        for _ in range(4)]))
+    (slug / f"{DEEPER_OFFER_SESSION}.jsonl").write_bytes(_transcript([
+        assistant(DEEPER_OFFER_SESSION, web, 0, 20_000, 1_000) for _ in range(2)]))
 
 
 def _write_held_manager(fixture: Fixture, now_s: float) -> None:
@@ -2707,6 +2880,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         _write_spend(fixture, now_s, sprint_ids[0])
     elif state == "desk-spend":
         _write_desk_spend(fixture, now_s, *sprint_ids)
+    elif state in DEEPER_STATES:
+        _write_deeper(fixture, now_s)
     return fixture
 
 
@@ -2788,9 +2963,9 @@ class _Inert:
     """A stand-in adopter or forge: its presence lets a ready plan be applied, nothing calls it."""
 
 
-def proposes_environment() -> bool:
-    """Whether this page's drafted contract can propose the command the adoption commit runs through."""
-    return hasattr(contract_draft, "proposed_lines")
+def shows_facts() -> bool:
+    """Whether this page's drafted contract shows its derived values as fact lines with no Change."""
+    return hasattr(contract_draft, "FACTS")
 
 
 def proposes_reconcile() -> bool:
@@ -2800,7 +2975,7 @@ def proposes_reconcile() -> bool:
 
 def proposes(state: str) -> bool:
     """Whether this page proposes the commit environment in the register state `state`."""
-    return proposes_reconcile() if state.startswith("register-reconcile") else proposes_environment()
+    return proposes_reconcile() if state.startswith("register-reconcile") else shows_facts()
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -3300,7 +3475,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.click("button.tell-open")
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
-        paneled = (state in ("ask-box", "ask-goal", "questions-open", "question-read")
+        paneled = (state in ("ask-box", "ask-goal", "questions-open", "question-read",
+                             *DEEPER_STATES)
                    and page.query_selector(READING_PANEL) is not None)
         ask = None
         if state == "ask-box" and page.query_selector(ASK_OPEN):
@@ -3348,6 +3524,22 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
                 reading = tuple(page.evaluate(READ_READING, question))
             elif page.query_selector(ASK_FOLD):
                 for selector in (ASK_FOLD, READ_BASE_THREAD):
+                    page.click(selector)
+        deeper = None
+        if state in DEEPER_STATES:
+            if paneled:
+                thread_id = DEEPER_THREAD if state == "deeper-answer" else DEEPER_OFFER_THREAD
+                for selector in (ASK_FOLD, thread_line(thread_id)):
+                    page.click(selector)
+                if state == "deeper-answer":
+                    deeper = _frozen(page.evaluate(DEEPER_READING))
+                else:
+                    if page.query_selector(DEEP_OPEN):
+                        page.click(DEEP_OPEN)
+                        page.wait_for_selector(DEEP_ESTIMATE)
+                    deeper = _frozen(page.evaluate(OFFER_READING))
+            elif page.query_selector(ASK_FOLD):
+                for selector in (ASK_FOLD, DEEPER_BASE_THREAD[state]):
                     page.click(selector)
         activation = None
         if state in ACTIVATION_PATHS:
@@ -3397,7 +3589,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                card=card, activation=activation, register=register, style=style, checked=checked, broke=broke)
+                card=card, activation=activation, register=register, style=style, checked=checked, broke=broke,
+                deeper=deeper)
 
 
 def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
@@ -3514,6 +3707,12 @@ def main(argv: list[str] | None = None) -> int:
                    else shot.reading not in shown)]
     for shot in unread:
         print(f"console-screenshots: {shot.path.name} does not show the answer in the main column")
+    paneled_page = serves_reading_panel()
+    undeep = [shot for shot in taken if shot.state in DEEPER_ROWS
+              and not (deeper_shows(shot.state, shot.deeper)
+                       or (shot.deeper is None and not paneled_page))]
+    for shot in undeep:
+        print(f"console-screenshots: {shot.path.name} does not show {DEEPER_SAID[shot.state]}")
     unlined = [shot for shot in taken if shot.state in ACTIVATION_SHOWN
                and shot.activation not in (
                    (ACTIVATION_SHOWN[shot.state],) if reads_other()
@@ -3549,7 +3748,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} breaks a page style "
               f"({'; '.join(shot.style)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or unlined or proposals or uncarded or offrow or scrolled or short or broken) else 0
+                 or undeep or unlined or proposals or uncarded or offrow or scrolled or short or broken) else 0
 
 
 if __name__ == "__main__":

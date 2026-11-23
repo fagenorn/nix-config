@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (account_add, capacity, console, deliveries, exclusion, guest, manager, nudge,
-                                 permission, permit, pin, probe, service, sessions, signin, sprint, sprints)
+                                 permission, permit, pin, probe, service, sessions, signin, sprints)
 from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_SENT, GOAL_STATED, MANAGER_STARTED,
                                            MANAGER_WAITING, SESSION_SEEN, SPRINT_REPORTED,
@@ -99,6 +99,31 @@ class ManagerPermissionTest(Case):
         self.assertEqual(kind, "manager.started")
         self.assertEqual(json.loads(payload)["permission"], {
             "mode": "bypassPermissions", "reason": "production rules in place"})
+
+    def test_a_launch_and_a_wake_write_the_projects_allow_rules(self):
+        support.write_registry(self.registry, support.entries(2))
+        support.sign_in(self.store, "work")
+        launches = support.Launches()
+        binding = [("merge", True)]
+        svc = self.svc = self.start(
+            launcher=launches, session_poll_seconds=3600,
+            profile_dirs=[support.profile_dir(self.store, "work")],
+            slug_of=lambda root: "o/r", merge_binding_of=lambda root: binding[0])
+        svc.state_goal("owner/p01", "make the importer resumable")
+        [launch] = launches.calls
+        self.assertEqual(launch.allow, manager.allow_rules("o/r", "merge", True))
+        binding[0] = ("merge", False)
+        svc._refresh_settings(launch.sprint_id, "/srv/p01")
+        written = json.loads(manager.settings_path(svc._sprint_secrets, launch.sprint_id).read_text())
+        self.assertEqual(written["permissions"]["allow"],
+                         list(manager.allow_rules("o/r", "merge", False)))
+
+    def test_a_wake_writes_the_projects_root_into_the_settings(self):
+        svc, launches = self.launch(lambda project_id, root: permission.FALLBACK)
+        sid = launches.calls[0].sprint_id
+        svc._refresh_settings(sid, "/srv/p01")
+        written = json.loads(manager.settings_path(svc._sprint_secrets, sid).read_text())
+        self.assertEqual(written["env"][manager.ROOT_ENV], "/srv/p01")
 
     def test_a_reader_that_fails_launches_in_auto(self):
         def reader(project_id, root):
@@ -213,8 +238,8 @@ class ManagerServiceTest(Case):
             "The goal: make the importer resumable"))
         self.assertEqual(launch.settings,
                          self.store.parent / "sprint-secrets" / (sid + ".settings.json"))
-        self.assertEqual(dict(launch.env), {"CONSOLE_SPRINT_ID": sid,
-                                            "CONSOLE_SPRINT_SECRET": self.secret(sid)})
+        self.assertEqual(dict(launch.env), {"CONSOLE_SPRINT_ID": sid, "CONSOLE_SPRINT_SECRET": self.secret(sid),
+                                            "CONSOLE_SPRINT_ROOT": "/srv/p01"})
         _, _, kind, project, payload = support.log_rows(self.store)[-1]
         self.assertEqual((kind, project, json.loads(payload)), (
             "manager.started", "owner/p01",
@@ -682,6 +707,59 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(body, b'{"profile":"work"}')
+
+    ALL_OUT = "/api/profile?all_out=1"
+
+    def every_account_out(self):
+        dirs = self.profiles(work=0, home=0)
+        self.seed_readings({"work": self.exhausted(FAR), "home": self.exhausted(FAR + 3600)})
+        return self.start(profile_dirs=list(dirs.values()), clock=lambda: NOW)
+
+    def test_the_all_out_question_answers_no_profile_and_the_earliest_reset(self):
+        svc = self.every_account_out()
+        status, headers, body = support.request(svc.address, "GET", self.ALL_OUT)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(
+            body, b'{"all_out":true,"profile":null,"resumes_at":"2030-03-17T17:46:40Z"}')
+
+    def test_the_plain_question_is_unchanged_when_every_profile_is_out(self):
+        svc = self.every_account_out()
+        body = self.ask(svc)[2].decode()
+        self.assertRegex(body, r'^\{"profile":(null|"[a-z]+")\}$')
+        self.assertNotIn("all_out", body)
+
+    def test_the_all_out_question_with_room_answers_the_choice(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(support.request(svc.address, "GET", self.ALL_OUT)[2],
+                         b'{"profile":"work"}')
+
+    def test_the_all_out_question_writes_the_choice_file_like_the_plain_one(self):
+        self.seed_readings({"work": self.weekly(0.6), "home": self.weekly(0.1)})
+        dirs = [support.profile_dir(self.store, "work")]
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.assertEqual(self.choice.read_text(), "work\n")
+        dirs.append(support.profile_dir(self.store, "home"))
+        self.assertEqual(support.request(svc.address, "GET", self.ALL_OUT)[2],
+                         b'{"profile":"home"}')
+        self.assertEqual(self.choice.read_text(), "home\n")
+
+    def test_the_all_out_question_with_no_known_reset_answers_null(self):
+        dirs = self.profiles(work=0)
+        self.seed_readings({"work": self.exhausted(None)})
+        svc = self.start(profile_dirs=list(dirs.values()), clock=lambda: NOW)
+        capacity_now = json.loads(svc.view_bytes)["capacity"]
+        self.assertTrue(capacity_now["all_out"])
+        self.assertIsNone(capacity_now["resumes_at"])
+        self.assertEqual(support.request(svc.address, "GET", self.ALL_OUT)[2],
+                         b'{"all_out":true,"profile":null,"resumes_at":null}')
+
+    def test_another_query_answers_as_the_plain_question(self):
+        svc = self.every_account_out()
+        plain = self.ask(svc)[2]
+        for query in ("?all_out=0", "?x=1"):
+            self.assertEqual(support.request(svc.address, "GET", self.PROFILE + query)[2], plain)
 
     def test_the_route_breaks_a_weekly_tie_on_five_hour_allowance(self):
         dirs = self.two_profiles({"work": self.both(0.5, 0.7), "home": self.both(0.5, 0.1)})
@@ -1654,6 +1732,15 @@ class PermitServiceTest(PermitCase):
                                "verb": "merge", "decision": "allow", "reason": "",
                                "target": {"pr": 7, "head": SHA}})
 
+    def test_a_merge_behind_the_documented_prefix_is_allowed_and_lands(self):
+        svc, sid = self.boot()
+        command = "env -u GITHUB_TOKEN -u GH_TOKEN " + MERGE
+        verdict = self.judge(svc, sid, command)
+        self.assertEqual(verdict.decision, permit.ALLOW)
+        self.assertIs(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", command), True)
+        (landed,) = self.rows("permit.landed")
+        self.assertEqual(landed["target"], {"pr": 7, "head": SHA})
+
     def test_a_reported_issue_no_manager_delivery_carries_is_refused(self):
         svc, sid = self.boot()
         svc.send_report(sid, self.secret(sid), issues_report(12, 40))
@@ -1884,30 +1971,6 @@ class PermitHookTest(PermitCase):
         self.assertEqual(len(self.rows("permit.judged")), 2)
         self.assertEqual(self.rows("permit.landed"), [])
         self.assertEqual(self.hook(svc, sid, post["command"], call(MERGE)), "")
-        self.assertEqual(len(self.rows("permit.landed")), 1)
-
-
-class PermitWireTest(PermitCase):
-    def test_the_command_and_the_route_agree(self):
-        svc, sid = self.boot()
-        hook = {"session_id": "s-1", "tool_use_id": "t-1", "tool_name": "Bash",
-                "tool_input": {"command": MERGE}}
-        out = io.StringIO()
-        with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
-                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \
-                contextlib.redirect_stdout(out):
-            code = sprint.main(["permit", "--port", str(svc.address[1])])
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out.getvalue()), {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "allow",
-            "permissionDecisionReason": ""}})
-        self.assertEqual(len(out.getvalue().splitlines()), 1)
-        out = io.StringIO()
-        with mock.patch.dict(os.environ, {manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}), \
-                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))), \
-                contextlib.redirect_stdout(out):
-            code = sprint.main(["permit", "--landed", "--port", str(svc.address[1])])
-        self.assertEqual((code, out.getvalue()), (0, ""))
         self.assertEqual(len(self.rows("permit.landed")), 1)
 
 

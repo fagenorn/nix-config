@@ -17,13 +17,19 @@ import fnmatch
 import hashlib
 import json
 import os
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath
 import subprocess
 
-from agent_tools.delivery import host_admission
+from agent_tools.delivery import (
+    comment_lint, context_map_lint, host_admission, never_rise, record_lint, ruff_lint,
+    size_lint, standards_lint,
+)
+from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
 from agent_tools.project_contract.conformance_registry import (
-    CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER,
+    CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER, MAX_FACT_LIST,
+    MAX_FACT_STRING,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
     PROMOTED_DUPLICATE_DRIFTED, PROMOTED_DUPLICATE_FINDINGS,
     PROMOTED_DUPLICATE_PRESENT, PROMOTION_CANDIDATE_KIND,
@@ -178,19 +184,20 @@ def check_contract_resolvable(context: Context) -> Outcome:
             source, violations, manifest["project_schema_versions"])
 
         stage = "valid"
-        violations += resolver.validate_contract(source, manifest)
+        derived = resolver.derive_for(root, source)
+        violations += resolver.validate_contract(source, manifest, derived)
         resolver.raise_for_violations(dedup_violations(violations))
         # Later checks read the filled view, where a schema-3 contract's
-        # constants are present at their schema-2 pointers; for schema 2 it is
-        # `source` itself.
-        context.contract = resolver.contract_view(source)
+        # constants and derived values are present at their schema-2 pointers;
+        # for schema 2 it is `source` itself.
+        context.contract = resolver.contract_view(source, derived)
         context.stages["valid"] = Outcome("passed")
 
         stage = "schema_supported"
         resolver.raise_for_platform_range(
-            source["platform"], manifest["platform_version"])
+            context.contract["platform"], manifest["platform_version"])
         context.stages["schema_supported"] = Outcome(
-            "passed", facts=compatibility_facts(resolver, manifest, source))
+            "passed", facts=compatibility_facts(resolver, manifest, context.contract))
 
         stage = "projection_fresh"
         context.bindings = resolver.normalize_bindings(
@@ -284,7 +291,8 @@ def declared_policy_paths(contract: dict) -> list[str]:
     """
     paths = contract["bindings"]["paths"]
     subjects = {entry for member in POLICY_PATH_MEMBERS for entry in paths[member]}
-    subjects.update(projection["source"] for projection in contract["projections"])
+    subjects.update(projection["source"] for projection in contract["projections"]
+                    if "source" in projection)
     return sorted(subjects)
 
 
@@ -623,6 +631,207 @@ def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
         return Outcome("passed")
     return Outcome("failed", "shell_indirection", "contract.commands.destructure",
                    {"commands": bound_facts(offending), "count": len(offending)})
+
+
+def check_conformance_workflow_fresh(context: "Context") -> "Outcome":
+    """Contract: failed when the committed conformance workflow differs from
+    the renderer's bytes for the contract's integration branch, schema version
+    and form (the platform's own tree's, or the locked one every other tree
+    gets), or when that branch cannot be rendered; passed when the file is
+    absent or exact.
+
+    Interim: it judges the file whether or not the contract declares a
+    `conformance_workflow` projection, until the contract declares one and the
+    projection check owns it. Only an absent entry is tolerated; an entry that
+    is not a regular file (a symlink included) is stale, and any other read
+    error reaches the engine boundary.
+    """
+    resolver = context.resolver
+    target = resolver.CONFORMANCE_WORKFLOW_TARGET
+    path = context.root / target
+    try:
+        entry_mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return Outcome("passed")
+    # Judged on the entry itself: a symlink, dangling or not, is not the
+    # rendered file even when what it points at matches the bytes.
+    if not stat.S_ISREG(entry_mode):
+        return Outcome("failed", "conformance_workflow_stale",
+                       "conformance.workflow.regenerate",
+                       {"target": bound_fact(target), "state": "stale"})
+    committed = path.read_bytes()
+    try:
+        expected = resolver.render_conformance_workflow(
+            context.contract["bindings"]["vcs"]["integration_branch"],
+            context.contract["schema_version"],
+            locked=resolver.conformance_workflow_locked(context.root))
+    except ValueError:
+        return Outcome("failed", "conformance_workflow_stale",
+                       "conformance.workflow.regenerate",
+                       {"target": bound_fact(target), "state": "unrenderable"})
+    if committed == expected:
+        return Outcome("passed")
+    return Outcome("failed", "conformance_workflow_stale",
+                   "conformance.workflow.regenerate",
+                   {"target": bound_fact(target), "state": "stale"})
+
+
+CONTEXT_MAP_NAME = "CONTEXT-MAP.md"
+CONTEXT_MAP_LINT_COMMAND = "context-map-lint"
+PLATFORM_STANDARDS_ANCHOR = "the-bar.md"
+
+
+def select_context_map(entries: list[str]) -> list[str]:
+    """Contract: the authored entries whose basename is exactly
+    `CONTEXT-MAP.md`, in authored order.
+
+    The skills' selection rule: none is no map and no lint, several is an
+    invalid contract. Unlike a skill's reader this returns every match and
+    lets the evaluator report several as a finding instead of raising.
+    """
+    return [entry for entry in entries
+            if PurePosixPath(entry).name == CONTEXT_MAP_NAME]
+
+
+def lint_facts(problems: list[str]) -> dict:
+    """Contract: `{"paths": <labels>, "count": <problems>}` for a lint's
+    diagnostics, and nothing else of them.
+
+    A diagnostic is raw text that can carry an absolute path or an authored
+    line, so only its label, the text before the first `": "`, may become a
+    fact, and only when it reads as a repo-relative path.
+    """
+    labels = []
+    for problem in problems:
+        label, separator, _ = problem.partition(": ")
+        if (separator and label and not any(c.isspace() for c in label)
+                and not Path(label).is_absolute()
+                and ".." not in Path(label).parts):
+            labels.append(label)
+    return {"paths": bound_facts(labels), "count": len(problems)}
+
+
+def check_context_map_lint(context: "Context") -> "Outcome":
+    """Contract: the selected context map judged by the built-in lint, or a
+    finding when the contract's map cannot be judged.
+
+    Order: no map passes (an area `CONTEXT.md` is never a map), several maps
+    are ambiguous, a declared `context-map-lint` command is only reported
+    (the engine starts no repository-authored child, so its environment, cwd
+    and exit status never enter a report), a map resolving outside the root is
+    not read, an unreadable map is a finding. Authored contract, not
+    `context.bindings`, as for the other verification checks.
+    """
+    bindings = context.contract["bindings"]
+    matches = select_context_map(bindings["paths"]["context"])
+    if not matches:
+        return Outcome("passed")
+    if len(matches) > 1:
+        return Outcome("failed", "context_map_ambiguous", "docs.context_map.repair",
+                       {"paths": bound_facts(matches), "count": len(matches)})
+    entry = matches[0]
+    if CONTEXT_MAP_LINT_COMMAND in bindings["commands"]:
+        return Outcome("warning", "context_map_lint_delegated",
+                       "docs.context_map.run_repository_lint",
+                       {"command": CONTEXT_MAP_LINT_COMMAND})
+    root = context.root.resolve()
+    map_path = (context.root / entry).resolve()
+    if not map_path.is_relative_to(root):
+        return Outcome("failed", "context_map_outside_root",
+                       "docs.context_map.repair",
+                       {"paths": [bound_fact(entry)], "count": 1})
+    try:
+        problems = context_map_lint.check(context.root, map_path)
+    except (UnicodeDecodeError, OSError):
+        return Outcome("failed", "context_map_unreadable",
+                       "docs.context_map.repair",
+                       {"paths": [bound_fact(entry)], "count": 1})
+    if problems:
+        return Outcome("failed", "context_map_lint_failed",
+                       "docs.context_map.repair", lint_facts(problems))
+    return Outcome("passed")
+
+
+def check_standards_lint(context: "Context") -> "Outcome":
+    """Contract: the repository's standards tree judged by the built-in lint
+    against the installed platform standards.
+
+    The platform directory is the installation's, so its absence is its own
+    finding; an unreadable shard, or a repository git cannot list, names the
+    authored standards paths, never the shard or the text that failed to decode.
+    A suppression naming a rule id in no layer is a finding of the lint.
+    """
+    platform = agent_platform.standards_dir()
+    if not (platform / PLATFORM_STANDARDS_ANCHOR).is_file():
+        return Outcome("failed", "platform_standards_missing",
+                       "platform.standards.install", {})
+    try:
+        problems = standards_lint.lint(context.root, platform)
+    except (ValueError, OSError):
+        authored = context.contract["bindings"]["paths"]["standards"]
+        return Outcome("failed", "standards_unreadable", "docs.standards.repair",
+                       {"paths": bound_facts(authored), "count": 1})
+    if problems:
+        return Outcome("failed", "standards_lint_failed", "docs.standards.repair",
+                       lint_facts(problems))
+    return Outcome("passed")
+
+
+def never_rise_enforcers(contract: dict) -> tuple[never_rise.Enforcer, ...]:
+    """The size rule, the ruff rules, the comment rules judged against the
+    contract's own tracker repository when it authors one, then the record rules."""
+    repository = contract["bindings"].get("tracker", {}).get("repo_slug") or None
+    return (size_lint.ENFORCER, *ruff_lint.ENFORCERS, *comment_lint.enforcers(repository),
+            *record_lint.RECORD_ENFORCERS)
+
+
+def check_never_rise(context: "Context") -> "Outcome":
+    """Contract: no registered enforcer's violation count rises between the
+    merge base with the authored integration branch and the committed head.
+
+    It starts only read-only, bounded git children, which read committed
+    history and never the working tree; the authored contract supplies the
+    branch. No readable merge base is a failed check, never a pass, and an
+    enforcer that cannot judge is a failed check, never a pass. A reasoned
+    suppression the branch adds is listed in the facts, passed or failed, and
+    never fails the check (ADR-project-contract-019). Each listed line holds its
+    rule, path, line and reason within the fact string bound (`Suppression.text`).
+
+    The record enforcers judge both sides. The facts list each record the
+    branch adds, for the reviewer to judge against the gate: at most
+    `MAX_FACT_LIST` paths, with the true count beside them. The membership is
+    `record_lint.added_records`'s: each path `git diff-tree -r -M
+    --diff-filter=AR --name-status <merge_base> HEAD` names as added or as a
+    rename target that `record_lint.is_record_path` accepts, less each
+    rename whose source is a record path and whose pair
+    `record_lint.is_record_migration` accepts (a migration).
+    """
+    branch = context.contract["bindings"]["vcs"]["integration_branch"]
+    try:
+        verdict = never_rise.judge(context.root, branch,
+                                   never_rise_enforcers(context.contract),
+                                   CHILD_TIMEOUT_SECONDS)
+    except never_rise.EnforcerFailed as error:
+        return Outcome("failed", "enforcer_failed", "violations.enforcer.repair", {
+            "enforcer": bound_fact(error.enforcer),
+            "reason": bound_fact(error.reason)})
+    if verdict is None:
+        return Outcome("failed", "history_unavailable", "violations.history.fetch",
+                       {"integration_branch": bound_fact(branch)})
+    added = record_lint.added_records(verdict)
+    listed = ({"added_records": bound_facts(added), "added_record_count": len(added)}
+              if added else {})
+    suppressed = verdict.suppressions
+    extra = ({"suppressions": bound_facts([s.text(MAX_FACT_STRING) for s in suppressed]),
+              "suppression_count": len(suppressed)} if suppressed else {})
+    if not verdict.rises:
+        return Outcome("passed", facts={"merge_base": verdict.merge_base, **listed, **extra})
+    first = verdict.rises[0]
+    return Outcome("failed", "violation_count_rose", "violations.never_rise.reduce", {
+        "merge_base": verdict.merge_base, "rule": first.rule,
+        "base_count": first.base_count, "branch_count": first.branch_count,
+        "violations": [bound_fact(v.text()) for v in first.new[:MAX_FACT_LIST]],
+        "rules": bound_facts([r.rule for r in verdict.rises]), **listed, **extra})
 
 
 # --------------------------------------------------------------------------

@@ -957,10 +957,10 @@ class SprintCommandTest(Case):
     def test_the_contract_says_a_bash_prompt_waits_for_the_owner_and_a_worktree_is_never_entered(self):
         section = run_sprint("contract").stdout.split("\n## ", 2)[1]
         self.assertTrue(section.startswith("Contract\n"), section)
-        self.assertIn("- A permission prompt for a Bash command in this session waits up to ten "
-                      "minutes for the owner to allow it once or refuse it on the console; any "
-                      "other prompt is refused at once. Never wait for a prompt any other way.",
-                      section)
+        self.assertIn("- Give every Bash call a description that says why you run the command, on the first attempt. "
+                      "A permission prompt for a Bash command in this session waits up to ten minutes for the owner to allow it once or refuse it on the console, "
+                      "and only when the call's description says why you run the command: such a prompt whose call has no description, or a blank one, is refused at once, "
+                      "so describe the call and run it again. Any other prompt is refused at once. Never wait for a prompt any other way.", section)
         self.assertIn("- Never enter or create a worktree yourself, because a delivery makes its "
                       "own.", section)
 
@@ -1695,7 +1695,7 @@ class PromptCommandTest(unittest.TestCase):
         with mock.patch.object(sprint, "ask", side_effect=fake), \
                 mock.patch.dict(os.environ, environment), \
                 mock.patch.object(sys, "stdin", StringIO(stdin)), redirect_stdout(out):
-            for name in (manager.ID_ENV, manager.SECRET_ENV):
+            for name in (manager.ID_ENV, manager.SECRET_ENV, manager.ROOT_ENV):
                 if name not in environment:
                     os.environ.pop(name, None)
             args = sprint.build_parser().parse_args(["permit", "--prompt"])

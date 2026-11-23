@@ -7,7 +7,8 @@
   "steps": [
     {"id": "draft", "stage": "building", "kind": "agent", "role": "implementer",
      "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
-     "in": ["run.issue"], "on": {"drafted": "checks", "stuck": "needs-owner"}},
+     "in": ["run.issue"], "on": {"drafted": "checks", "stuck": "needs-owner", "no-reply": "needs-owner",
+            "out-of-bounds": "needs-owner"}},
     {"id": "checks", "stage": "final review", "kind": "group",
      "members": [{"step": "lint", "pass": ["ok"]}, {"step": "claim", "pass": ["free", "held_by"]}],
      "max_visits": 2, "on": {"pass": "fan", "blocked": "checks", "exhausted": "needs-owner"}},
