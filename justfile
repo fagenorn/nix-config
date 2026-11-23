@@ -173,6 +173,9 @@ agent-workflow-tests *args:
     tests/test_engine_caps.py \
     tests/test_engine_fanout.py \
     tests/test_engine_slots.py \
+    tests/test_engine_fixture.py \
+    tests/test_engine_stubbed_run.py \
+    tests/test_issue_setup.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \

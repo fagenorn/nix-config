@@ -1,0 +1,1 @@
+{"type": "object", "properties": {"verdict": {"enum": ["applies", "no-longer-applies"]}, "details": {"type": "string"}, "evidence": {"type": "string"}}, "required": ["verdict", "details", "evidence"], "additionalProperties": false}
