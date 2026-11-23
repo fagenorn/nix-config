@@ -3095,10 +3095,10 @@ const CLEAN_MERGE = `a clean two-parent merge, meaning git -C ${W} merge-tree --
 const onlyMerges = (from, to) => `git -C ${W} rev-list --no-merges ${from}..${to} ^origin/${INT} prints nothing, and every merge in git -C ${W} rev-list --merges ${from}..${to} ^origin/${INT} is ${CLEAN_MERGE}`
 // A sync that moved the head without touching any file of the pull request needs no new local verification: the
 // reply says so with merge_only and untouched together, and the earlier results then carry to the new head, named
-// by carried_from, with no pictures.
+// by carried_from, and so do the pictures the earlier verification wrote: the owner still has them to look at.
 const UNTOUCHED = (from, to) => `untouched is true only when merge_only is true and no path that git -C ${W} diff --no-renames --name-only ${from} ${to} prints is among the paths git -C ${W} diff --no-renames --name-only origin/${INT}...${to} prints (the pull request's files); else false. When untouched is true, run no verification command and return results [].`
 const skipsVerify = (lv, at) => !!lv && lv.merge_only === true && lv.untouched === true && lv.clean === true && Array.isArray(lv.results) && lv.results.length === 0 && !!verify && Array.isArray(verify.results) && sameSha(verify.head, at)
-const carriedTo = head => ({ head, clean: true, results: verify.results.map(r => ({ ...r, carried_from: r.carried_from || verify.head })) })
+const carriedTo = head => ({ head, clean: true, results: verify.results.map(r => ({ ...r, carried_from: r.carried_from || verify.head })), ...(picturesOf(verify).length ? { pictures: picturesOf(verify) } : {}) })
 // A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry
 // line). since is the head the worktree was last verified at, and how names what brought the PR to H. The verification
 // of H always runs. outside is true when H was not made by this delivery: H is then recorded as verified only when it
@@ -3136,7 +3136,7 @@ The owner approved head ${S} of PR #${pr}; ${how} brought it to ${H}. Run only g
     lookWhy = `the approval of ${S} does not carry to ${H}: it adds commits that are not clean merges of ${INT}`
     return lookWaitStop(pr, H)
   }
-  const pics = skipped ? [] : picturesOf(lv)
+  const pics = skipped ? picturesOf(verify) : picturesOf(lv)
   if (pics.some(x => !USABLE_PICTURE.test(x.path))) {
     lookWhy = `the approval of ${S} does not carry to ${H}: the verification wrote no pictures it can compare`
     return lookWaitStop(pr, H)

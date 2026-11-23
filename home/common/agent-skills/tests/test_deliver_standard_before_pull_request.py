@@ -215,6 +215,26 @@ class UntouchedSyncTest(unittest.TestCase):
             self.assertEqual(r["carried_from"], program.SHA)
         self.assertNotIn("pictures", verified)
 
+    def test_a_moved_look_head_that_is_not_reverified_keeps_the_pictures_the_owner_looks_at(self):
+        pics = program.LookStopTest.PICS
+        result, calls = program.run(
+            patch={"setup": {"look": program.MARKED}, "verify": {"pictures": pics}, "look-pr": {"behind": True},
+                   "sync-1": {"merge_commit": program.D, "head": program.D}, "look-reverify": self.MOVED})
+        self.assertEqual(result["stage"], "awaiting-look", program.labels(calls))
+        self.assertIn("look-reverify", program.labels(calls))
+        self.assertEqual(result["head"], program.D)
+        self.assertEqual(result["pictures"], pics)
+        self.assertEqual(result["cont"]["verified"]["pictures"], pics)
+
+    def test_an_untouched_landing_sync_carries_the_approval_by_the_pictures_rule(self):
+        pics = program.LookCarryLandingTest.PICS
+        first, _ = program.run(patch={"setup": {"look": program.MARKED}, "verify": {"pictures": pics}})
+        result, calls = program.LookCarryLandingTest().approve(
+            cont=first["cont"], replies={"look-carry-verify": self.UNTOUCHED, "look-carry": self.CARRY.CARRIED})
+        self.assertEqual(result["stage"], "done", program.labels(calls))
+        self.assertIn("--match-head-commit " + program.D, program.prompt(calls, "merge"))
+        self.assertIn(" --before /r/pics/before.png --after /r/pics/after.png", program.prompt(calls, "look-carry"))
+
 
 if __name__ == "__main__":
     unittest.main()
