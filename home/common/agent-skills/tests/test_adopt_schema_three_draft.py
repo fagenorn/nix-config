@@ -104,9 +104,8 @@ class SchemaThreeDraftPlanTest(AdoptTestCase):
     def answering(self, verb: str, document: dict, *, scratch_only: bool = False):
         """The in-process resolver child, except that `verb` answers `document` (exit 2).
 
-        `adopt_project` runs as `__main__` in these cases, so the seam is the child process the
-        `run` helper patches in, not `run_resolver` of the imported module. `scratch_only` leaves
-        a resolver run on the checkout itself alone.
+        The seam is the child process the `run` helper patches in, not `run_resolver`;
+        `scratch_only` leaves a resolver run on the checkout itself alone.
         """
         prefix = sibling_argv("project_contract.resolve_project")
 

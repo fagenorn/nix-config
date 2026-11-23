@@ -6734,9 +6734,8 @@ class ConsoleService:
                     *, refusals: bool = False) -> dict:
         """The row of a drafted checkout: its open cards, else its plan (ADR-console-031).
 
-        A saved draft without facts gets them from a fresh reading first. With `refusals`, a plan
-        error that names no drafted value and no derived one is returned as the plan document,
-        not as a failed row.
+        A saved draft without facts gets them from a fresh reading first. With `refusals`, a plan error
+        that names no drafted or derived value is the plan document, not a failed row.
         """
         if contract_draft.open_fields(fields):
             return register.drafting(root, fields, answers)

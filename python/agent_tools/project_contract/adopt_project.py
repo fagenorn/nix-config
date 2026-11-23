@@ -813,12 +813,10 @@ def refusal_violations(payload: object) -> list[dict]:
 def resolve_scratch(root: Path, base_revision: str, written: bytes | None,
                     extra: dict[str, bytes] | None, *,
                     strict: bool = False) -> tuple[int, object]:
-    """The resolver's verdict on the base revision's tree with `written` as its
-    contract (kept as it is when None) and each `extra` file placed in it.
-
-    A contract that declares schema 3 gets the checkout's authored origin, which
-    its derived values read. With `strict` the tree's projections are generated
-    first and a refusal to generate them is the draft's.
+    """The resolver's verdict on the base revision's tree with `written` as its contract
+    (kept as it is when None) and each `extra` file placed in it. A schema-3 contract gets the
+    checkout's authored origin, which its derived values read. With `strict` the tree's
+    projections are generated first and a refusal to generate them is the draft's.
     """
     with tempfile.TemporaryDirectory() as scratch:
         tree = Path(scratch) / "tree"
