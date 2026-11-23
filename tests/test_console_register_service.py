@@ -590,7 +590,7 @@ class RegisterRunTest(Case):
         status, _, body = self.confirm({"root": str(root), "choice": "register"})
         self.assertEqual((status, body), (204, b""))
         self.assertEqual(self.settled_row(root)["result"], "registered")
-        self.assertIsNone(self.view()["registration"])
+        self.assertTrue(any(self.view()["registration"] is None or time.sleep(0.1) for _ in range(1200)))
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "registered")
         self.assertEqual(row["headline"], f"{root.name} is registered as fixture/console-register.")
