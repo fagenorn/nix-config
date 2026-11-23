@@ -329,6 +329,18 @@ def _exhausted_reply_value(schema: dict) -> None:
     schema["properties"]["status"]["enum"].append("exhausted")
 
 
+def _each_over(path: str) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        children = step(toy, "children")
+        children["in"] = [path]
+        children["each"] = path
+    return change
+
+
+def _drop_first_pass_set(toy: dict) -> None:
+    del step(toy, "review")["members"][0]["pass"]
+
+
 def _no_reply_reaches_the_reviewers(toy: dict) -> None:
     step(toy, "draft")["on"]["no-reply"] = "review"
 
@@ -520,6 +532,27 @@ CASES = [
           ("toy", "review-b", "unproduced_input")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
+    Case("each_over_a_string", editing("toy", _each_over("draft.summary")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_run_input", editing("toy", _each_over("run.issue")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_decide_verdict", editing("toy", _each_over("tally.verdict")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_command_string", editing("toy", _each_over("scope.range")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_missing_member", editing("toy", _each_over("draft.missing")),
+         [("toy", "children", "unknown_member")]),
+    Case("group_pass_unmapped",
+         editing("toy", _without(lambda toy: step(toy, "review")["on"], "pass")),
+         [("toy", "review", "unmapped_outcome")]),
+    Case("call_done_unmapped",
+         editing("toy", _set(lambda toy: step(toy, "children"), "on", {"child-stop": "done"})),
+         [("toy", "children", "unmapped_outcome")]),
+    Case("group_member_without_a_pass_set", editing("toy", _drop_first_pass_set),
+         [("toy", "review", "invalid_field")]),
+    Case("parallel_below_one",
+         editing("toy", _set(lambda toy: step(toy, "children"), "parallel", 0)),
+         [("toy", "children", "invalid_field")]),
     Case("step_without_holds",
          editing("toy", _without(lambda toy: step(toy, "scope"), "holds")),
          [("toy", "scope", "invalid_field")]),
@@ -911,6 +944,11 @@ class DataFlowTest(unittest.TestCase):
         self.assertEqual((code, out), (0, compact(
             {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
 
+    def test_an_each_over_the_list_a_platform_command_publishes_is_accepted(self):
+        directory = broken_copy(editing("toy", _each_over("scope.files")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, compact(
+            {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
 
     def test_a_no_reply_route_bypasses_its_step_whatever_order_the_steps_are_listed_in(self):
         def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
