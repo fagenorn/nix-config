@@ -1,1 +1,0 @@
-{"type": "object", "properties": {"lane": {"enum": ["direct", "standard", "needs-design"]}, "why": {"type": "string"}}, "required": ["lane", "why"], "additionalProperties": false}

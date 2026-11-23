@@ -96,6 +96,9 @@ class FixtureProject:
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text("# knowledge\n", "utf-8")
+        (self.root / ".github").mkdir(exist_ok=True)
+        (self.root / ".github/lane-paths.json").write_text(
+            json.dumps({"version": 1, "sets": {"secrets": ["secrets/"]}}), "utf-8")
         self.world.git(self.root, "add", "-A")
         self.world.git(self.root, "commit", "--quiet", "-m", "fixture source")
 

@@ -252,9 +252,26 @@ class ForgeCommandTest(unittest.TestCase):
         self.forge.comment_store(SLUG, 7, [{"id": 1, "body": "c1", "created_at": "2026-11-06T10:00:00Z",
                                             "updated_at": "2026-11-06T10:00:00Z"}], labels=[])
         self.forge.respond_json("gh", ISSUE_READ, {"number": 7, "title": "T", "body": "B"})
-        code, report = run_setup(self.env, "read", "--repo", SLUG, "--issue", "7")
+        code, report = run_setup(self.env, "read", "--repo-root", str(self.root), "--repo", SLUG,
+                                 "--issue", "7")
         self.assertEqual((code, report["verdict"]), (0, "read"), report)
         self.assertTrue(report["text"].endswith("## Comment 1\n\nc1"), report["text"])
+        self.assertEqual(report["body"], "B")
+        self.assertIs(report["marked"], False)
+        self.assertIsNone(report["lane_paths"])
+
+    def test_read_reports_the_marker_and_the_lane_paths(self):
+        marker = "- [ ] [human] before merge: the text \u2014 measured: the owner, on the pull request\n"
+        target = self.root / ".github" / "lane-paths.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"version": 1, "sets": {"secrets": ["secrets/"]}}))
+        self.forge.comment_store(SLUG, 7, [], labels=[])
+        self.forge.respond_json("gh", ISSUE_READ, {"number": 7, "title": "T", "body": LANE_BODY + marker})
+        code, report = run_setup(self.env, "read", "--repo-root", str(self.root), "--repo", SLUG,
+                                 "--issue", "7")
+        self.assertEqual((code, report["verdict"]), (0, "read"), report)
+        self.assertIs(report["marked"], True)
+        self.assertEqual(report["lane_paths"], {"secrets": ["secrets/"]})
 
     def lane(self, body, lane_paths=None):
         if lane_paths is not None:
@@ -319,6 +336,8 @@ class ForgeCommandTest(unittest.TestCase):
 
     def test_a_missing_flag_is_a_usage_error(self):
         code, report = run_setup(self.env, "read", "--repo", SLUG)
+        self.assertEqual((code, report["verdict"], report["error"]), (2, "error", "usage"))
+        code, report = run_setup(self.env, "read", "--repo", SLUG, "--issue", "7")
         self.assertEqual((code, report["verdict"], report["error"]), (2, "error", "usage"))
         code, report = run_setup(self.env, "lane", "--repo", SLUG, "--issue", "7")
         self.assertEqual((code, report["verdict"], report["error"]), (2, "error", "usage"))

@@ -60,6 +60,10 @@ def settled(verdict, findings):
     return {"lite-rereview.verdict": verdict, "lite-rereview.findings": findings}
 
 
+LANE_RESULTS = {"issue.body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "issue.marked": False,
+                "issue.lane_paths": {"s": ["secrets/"]}}
+
+
 class GraderTest(unittest.TestCase):
     GRADER_CASES = [
         ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "approve"}, "accept"),
@@ -97,7 +101,24 @@ class GraderTest(unittest.TestCase):
         ("direct-settled", settled("findings", [MINOR]), "clean"),
         ("direct-settled", settled("findings", [NAMED]), "findings"),
         ("direct-settled", settled("findings", [UNNAMED]), "unusable"),
+        ("lane-rule", LANE_RESULTS, "direct"),
+        ("lane-rule", dict(LANE_RESULTS, **{"issue.marked": True}), "standard"),
     ]
+
+    def test_the_lane_rule_grader_reads_the_issue_step(self):
+        grader = GRADERS["lane-rule"]
+        self.assertEqual(grader.outcomes, ("direct", "standard"))
+        body = "x\n\n## Acceptance criteria\n\n- [ ] a\n"
+        paths = {"s": ["secrets/"]}
+
+        def grade(**members):
+            return grader.grade({"issue.body": body, "issue.marked": False, "issue.lane_paths": paths,
+                                 **members})
+
+        self.assertEqual(grade(), "direct")
+        self.assertEqual(grade(**{"issue.marked": None}), "standard")
+        self.assertEqual(grade(**{"issue.marked": True}), "standard")
+        self.assertEqual(grade(**{"issue.lane_paths": None}), "standard")
 
     def test_each_grader_case_grades_its_outcome(self):
         for name, results, expected in self.GRADER_CASES:

@@ -30,8 +30,12 @@ change: `absent`, `adopted`, `dirty` or `mismatch`. A clean detached HEAD at the
 `note --repo <owner/name> --issue <n> --evidence <text>` posts `<text>` as one issue
 comment: `{verdict: "posted", comment_id}`.
 
-`read --repo <owner/name> --issue <n>` prints `{verdict: "read", text}`, `text` being
-`issue_text(issue, comments)`: the title, the body and every comment in order.
+`read --repo-root <path> --repo <owner/name> --issue <n>` prints
+`{verdict: "read", text, body, marked, lane_paths}`: `text` is `issue_text(issue, comments)`
+(the title, the body and every comment in order), `body` the issue body (`""` when null),
+`marked` whether the body carries a look marker (`look_marker`), and `lane_paths` the
+repository's lane path sets (`lane_paths`, null when none are declared). The engine's lane
+step grades these members by the lane rule.
 
 `lane --repo-root <path> --repo <owner/name> --issue <n>` prints `{verdict, reason}`, `verdict`
 `direct` or `standard`: the lane rule (`lane_rule`) applied to the issue body, the look marker
@@ -173,10 +177,13 @@ def preflight(args: argparse.Namespace) -> dict:
 
 def read(args: argparse.Namespace) -> dict:
     try:
-        return {"verdict": "read", "text": issue_text(_issue(args.repo, args.issue),
-                                                       _comments(args.repo, args.issue))}
+        issue = _issue(args.repo, args.issue)
+        text = issue_text(issue, _comments(args.repo, args.issue))
     except forge_api.ForgeError as error:
         raise _forge_failure(error) from None
+    body = issue.get("body") or ""
+    return {"verdict": "read", "text": text, "body": body, "marked": look_marker.read_look(body).marked,
+            "lane_paths": lane_paths(args.repo_root)}
 
 
 def lane_paths(repo_root: str) -> dict[str, list[str]] | None:
@@ -362,6 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--issue", required=True, type=number)
     sub.add_argument("--evidence", required=True)
     sub = commands.add_parser("read")
+    sub.add_argument("--repo-root", required=True)
     sub.add_argument("--repo", required=True)
     sub.add_argument("--issue", required=True, type=number)
     sub = commands.add_parser("lane")

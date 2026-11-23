@@ -1095,7 +1095,9 @@ SHIPPED_MEMBERS = {
     "contract": ({"capabilities": {"review.code": {"state": "available"}, "review.plan": {"state": "available"}}},
                  {"capabilities": {"review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}),
     "preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
-    "issue": ({"text": "t"},),
+    "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
+               "lane_paths": {"secrets": ["secrets/"]}},
+              {"text": "t", "body": "", "marked": True, "lane_paths": None}),
     "implement": ({}, {"ineligible": True}, {"sensitive": True}, {"acceptance": []}),
     "lite-review": ({}, {"escalate": True}, CLEAN, UNNAMED),
     "full-review": ({}, CLEAN, UNNAMED),
@@ -1137,7 +1139,7 @@ class ShippedProcedureTest(unittest.TestCase):
                     self.assertTrue(walk.end == "done" or walk.end in stops, (walk.edge, walk.end))
 
     def test_no_shipped_prompt_asks_for_a_forge_command(self):
-        names = ["setup-applies.md", "lane.md"] + [
+        names = ["setup-applies.md"] + [
             f"direct-{kind}.md" for kind in (
                 "implement", "review-lite", "review", "fix-lite", "fix-escalated", "fix-full",
                 "rereview-lite", "rereview-escalated", "rereview-full")]
@@ -1173,9 +1175,9 @@ class ShippedProcedureTest(unittest.TestCase):
         self.assertEqual(step(deliver, "start")["on"]["done"], "issue")
         self.assertEqual(step(deliver, "issue")["on"],
                          {"read": "lane", "error": "no-lane", "refused": "no-lane"})
-        self.assertEqual(step(deliver, "lane")["on"], {
-            "direct": "direct-lane", "standard": "standard-not-on-engine", "needs-design": "needs-design",
-            "no-reply": "no-lane", "out-of-bounds": "no-lane"})
+        self.assertEqual(step(deliver, "issue")["in"], ["run.repo_root", "run.repo", "run.issue"])
+        self.assertEqual(step(deliver, "lane")["on"],
+                         {"direct": "direct-lane", "standard": "standard-not-on-engine"})
         for name in setup["stops"]:
             self.assertEqual(step(deliver, "start")["on"][name], name)
         for called, procedure in (("direct-lane", "direct"), ("verification", "verify")):
@@ -1187,7 +1189,9 @@ class ShippedProcedureTest(unittest.TestCase):
         self.assertEqual(step(deliver, "verification")["on"]["done"], "done")
         for name in ("ineligible", "task", "direct-review", "direct-fix", "codex-unavailable", "verify"):
             self.assertIn(name, deliver["stops"])
-        self.assertEqual(deliver["stops"]["needs-design"]["need"], "owner-decision")
+        self.assertNotIn("needs-design", deliver["stops"])
+        for name in ("standard-not-on-engine", "no-lane", "ineligible"):
+            self.assertEqual(deliver["stops"][name]["reenter"], "issue", name)
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
         coverage = shipped_coverage("setup")
@@ -1200,9 +1204,11 @@ class ShippedProcedureTest(unittest.TestCase):
         self.assertEqual(mismatch.end, "setup")
         self.assertNotIn("acquire", [t.step for t in mismatch.transitions])
 
-    def test_the_applies_and_lane_steps_run_under_reviewer_lite(self):
+    def test_the_applies_step_runs_under_reviewer_lite_and_the_lane_is_decided_by_the_rule(self):
         self.assertEqual(step(load(PROCEDURES, "setup"), "applies")["role"], "reviewer-lite")
-        self.assertEqual(step(load(PROCEDURES, "deliver"), "lane")["role"], "reviewer-lite")
+        lane = step(load(PROCEDURES, "deliver"), "lane")
+        self.assertEqual((lane["kind"], lane["grader"], lane["in"]),
+                         ("decide", "lane-rule", ["issue.body", "issue.marked", "issue.lane_paths"]))
 
 
 class DeclarationTest(unittest.TestCase):
