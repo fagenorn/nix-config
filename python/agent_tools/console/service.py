@@ -519,7 +519,7 @@ registered); and, under the ingest lock, a second registration while one runs
 (`register.running`). With `"unless_open": true`, under the same lock, a registration the owner's view
 shows open (`register.open_shown` of `derive_view` of the inputs `_publish` uses: not null and not
 dismissed; a card that reduces the entry makes it open) is refused with `register.OPEN_SHOWN` (#1334,
-ADR-console-084 D2); the page never sends the member. Otherwise the answer is an empty `204` at once
+ADR-console-084); the page never sends the member. Otherwise the answer is an empty `204` at once
 and the run is dispatched: the adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
 ADR-console-070): a checkout behind a remote's default branch is one `behind` row (`register.behind`)
 and the `register_behind` card, with no plan, no draft and no child; an unreadable remote runs today's
@@ -563,7 +563,7 @@ register_confirm_failed <Type>` and 500 `registering failed`.
 `POST /api/register-cancel` (#1088, ADR-console-037) is the owner's Cancel registration of the shown
 registration, which was not applied yet or whose apply failed. It takes `{"root"}`, or `{"root", "restore":
 true}` (#1334): a restoring Cancel writes the shown plan's row with `"restore": true` and gives the page
-back the registration shown before the cancelled one (ADR-console-084 D2) instead of none; the page sends
+back the registration shown before the cancelled one (ADR-console-084) instead of none; the page sends
 only `{"root"}`. The body has `MAX_REGISTER_CANCEL_BYTES` (4096) and goes through
 `register.parse_cancel_request`: 400 `bad registration cancel`.
 The service refuses, each as 409 with the text, one stderr line `console: register_cancel_refused
@@ -5600,7 +5600,7 @@ class ConsoleService:
         return sprint_id
 
     def _admit_run(self, root: str) -> None:
-        """Reserve the run of `root`, or refuse once the console stops (ADR-console-081 D3); `_ingest` held."""
+        """Reserve the run of `root`, or refuse once the console stops (ADR-console-028); `_ingest` held."""
         if self._stop.is_set():
             raise sprints.Refused(register.STOPPING)
         self._registering = root
@@ -5628,7 +5628,7 @@ class ConsoleService:
         return contract_draft.read_hooks(root, cancel=self._stop)
 
     def _end_run(self) -> None:
-        """Release the reservation and wake the drain of `close` (ADR-console-081 D3); `_ingest` held."""
+        """Release the reservation and wake the drain of `close` (ADR-console-028); `_ingest` held."""
         self._registering = None
         self._runs_done.notify_all()
 

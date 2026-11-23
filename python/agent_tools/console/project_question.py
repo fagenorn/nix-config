@@ -119,7 +119,7 @@ stderr to a temporary file; `TimeoutExpired` (`TIMED_OUT`); a missing `claude-ac
 stdout: not an object with a string `result` (`UNREADABLE_TEXT`), `is_error` true (the result text),
 else `ANSWERED` with `answer_text`, which adds `NO_PRODUCTION_LINE` when no route is declared (D5).
 `asker_for(platform)` is `run_question` on Linux and macOS (what `manager.supported` admits), else None
-(ADR-console-081: a project question runs wherever a manager does).
+(ADR-console-058: a project question runs wherever a manager does).
 
 Fold and answer shape (#1177). `asked_questions(events, known)` folds the two row kinds into each
 project's questions, a tuple of `AskedQuestion` in ascending `seq`. An asked row counts only with

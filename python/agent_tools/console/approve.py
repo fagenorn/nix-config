@@ -158,7 +158,7 @@ and the values `[apply | retry, not_now]`) that action asks, else `[]`: none whe
 action is None or when `latest["plan_id"]` is in `deferred`. A ready plan with no adoption asks
 `Apply this adoption?` with `Apply it` (key `register-apply/<plan_id>/<latest at>`, the proposed
 commit environment's line of a drafted or a reconcile plan (`contract_draft.proposed_lines`,
-ADR-console-082, ADR-console-083), then the plan's lines,
+ADR-console-083), then the plan's lines,
 as `lines`, and `folder_trust.TRUST_SENTENCE` as `why`: approving also grants the folder's client
 trust, #1078, ADR-console-034); with an adoption the ask is the entry's headline and its note is `why` (key
 `.../<adoption at>`), the option `Apply it again` for `approve` (waiting since the pull request's
@@ -204,7 +204,7 @@ as `checks_error` (None otherwise) so the head and target it saw are not lost),
 `merge_pull_request(slug, number, head, cancel=None)` (a merge of that head only, with the merge
 method, refusing a head that is not 40 lowercase hex before any call); the link of a pull request is
 built here from the slug and number, never read from the forge's answer. `forge_for(platform)` is
-`GitHubForge()` on Linux and macOS (what `manager.supported` admits), else None (ADR-console-081:
+`GitHubForge()` on Linux and macOS (what `manager.supported` admits), else None (ADR-console-028:
 the adoption it serves runs wherever a manager does).
 """
 

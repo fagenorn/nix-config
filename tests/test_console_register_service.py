@@ -2076,7 +2076,7 @@ class PlanAnswerSecretTest(Case):
 
 
 class RegisterCloseTest(Case):
-    """Close drains every run that starts an adoption child (#1330, ADR-console-081 D3)."""
+    """Close drains every run that starts an adoption child (#1330, ADR-console-028)."""
 
     def held_run(self, held):
         self.begin(held, dispatch=None)
