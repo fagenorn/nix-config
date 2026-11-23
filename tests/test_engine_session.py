@@ -1443,5 +1443,6 @@ class DeliverSessionTest(unittest.TestCase):
 
     def test_the_deliver_help_names_agent_steps(self):
         text = " ".join(engine.build_parser().format_help().split())
-        self.assertIn("run a procedure of command, agent and decide steps to done or a stop", text)
-
+        self.assertIn(
+            "run a procedure of command, agent, decide, group and call steps to done or a stop",
+            text)

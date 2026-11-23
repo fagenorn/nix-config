@@ -118,6 +118,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_eval_sandboxes.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
+    home/common/agent-skills/tests/test_instruction_surface_lint.py \
     home/common/agent-skills/tests/test_skill_lint.py \
     home/common/agent-skills/tests/test_agnostic_lint.py \
     home/common/agent-skills/tests/test_diff_scope.py \
@@ -164,11 +165,13 @@ agent-workflow-tests *args:
     tests/test_engine_deliver.py \
     tests/test_engine_session.py \
     tests/test_engine_session_limits.py \
+    tests/test_engine_reaping.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
+    tests/test_engine_fanout.py \
     tests/test_engine_slots.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
