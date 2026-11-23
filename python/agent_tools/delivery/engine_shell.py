@@ -878,29 +878,35 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
     entries: dict[int, dict] = {}
     errors: dict[int, Exception] = {}
 
-    def worker() -> None:
-        while (index := admission.take()) is not None:
-            try:
-                entries[index] = _child(run_dir, table, run, step, action, items[index],
-                                        index, len(items), scope)
-            except Exception as error:
-                errors[index] = error
-                admission.fail()
+    def worker(ended: threading.Event) -> None:
+        try:
+            while (index := admission.take()) is not None:
+                try:
+                    entries[index] = _child(run_dir, table, run, step, action, items[index],
+                                            index, len(items), scope)
+                except Exception as error:
+                    errors[index] = error
+                    admission.fail()
+        finally:
+            ended.set()
 
-    threads = [threading.Thread(target=worker) for _ in range(min(action.parallel, len(items)))]
-    running: list[threading.Thread] = []
+    finished = [threading.Event() for _ in range(min(action.parallel, len(items)))]
+    threads = [threading.Thread(target=worker, args=(ended,)) for ended in finished]
+    running: list[threading.Event] = []
 
     def drain() -> None:
-        for thread in running:
-            thread.join()
+        # An event, not `Thread.join`: before Python 3.13 a join a stop interrupted marks its thread
+        # ended though it still runs, so the join in `finally` would return at once.
+        for ended in running:
+            ended.wait()
 
     try:
         with engine_session.reaping():
             try:
                 try:
-                    for thread in threads:
+                    for thread, ended in zip(threads, finished):
                         thread.start()
-                        running.append(thread)
+                        running.append(ended)
                 except RuntimeError as error:
                     raise Fault(f"step {action.step} could not start a child worker: "
                                 f"{error}") from error
