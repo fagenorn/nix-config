@@ -69,7 +69,7 @@ The order of an apply is:
    is never reached (apply reconciles first), so the branch and the record are
    only ever kept or removed together. The record is bound to the plan first: its
    plan id, branch name (`adopt-<digest[:12]>`), repository and integration branch
-   must be the plan's and its commit must carry the plan's evidence record, else
+   must be the plan's and its commit's subject must be the plan's adoption subject, else
    `adopt.required_check.pending_mismatch`, so a misplaced record can never name
    another branch for the rollback to delete. A record whose branch no longer
    exists (deleted by hand after `adopt.required_check.rollback_failed`) is stale:
@@ -94,17 +94,19 @@ revision, an unnamed tracker (not `github`, a slug that is not `owner/repo`, or 
 integration branch), an `origin` that is not the tracker's slug, a projection of
 another kind that holds the workflow's id or target, a lock or `devenv.yaml` that
 cannot take its edit, a kept lock entry that is not the installed revision, a
-branch protection file that cannot take the check. With no cause the plan carries
+branch protection file that cannot take the check, a base commit that tracks any
+file under the artifacts directory (the lock would pin a revision whose own
+Conformance check refuses it; a kept pin that differs from the installed
+revision is judged first, by its own cause). With no cause the plan carries
 a `member`, the one record of what the adoption locks and requires, which the plan
-document publishes as `plan.conformance` and the evidence record repeats; the new
-bytes of each of the three files that change are `contents`, their base bytes
-`before`, and `projection` says whether the contract gains the workflow's entry.
+document publishes as `plan.conformance`; the new bytes of each of the three
+files that change are `contents`, their base bytes `before`, and `projection` says whether the contract gains the workflow's entry.
 `outstanding` is whether the repository still has conformance work: the plan
-writes something, or the one committed evidence record does not carry the
-member the plan would write. The member is computed whenever the lock parses and
-the tracker is named, even when a later cause fails; a repository whose kept
-lock entry, declaration, projection and record are all in place is settled
-despite a cause that is about the host or the clone (an unknown revision, an
+writes something, or the history of the base commit holds no adoption commit.
+The member is computed whenever the lock parses and the
+tracker is named, even when a later cause fails; a repository whose kept lock
+entry, declaration and projection are all in place and whose history holds an
+adoption commit is settled despite a cause that is about the host or the clone (an unknown revision, an
 `origin` that is not the tracker's slug, a pin that differs from the running
 revision), so those causes never block it behind a repair it does not need.
 """
@@ -150,6 +152,7 @@ PIN_INCOMPATIBLE = "adopt.conformance.pin_incompatible"
 INPUT_UNDECLARABLE = "adopt.conformance.input_undeclarable"
 INPUT_INCOMPATIBLE = "adopt.conformance.input_incompatible"
 PROTECTION_FILE_UNREQUIRED = "adopt.conformance.protection_file_unrequired"
+TRACKED_ARTIFACT = "adopt.conformance.tracked_artifact"
 CONTRACT_REFUSED = "adopt.conformance.contract_refused"
 
 REQUIRED_ORIGIN_MISMATCH = "adopt.required_check.origin_mismatch"
@@ -509,17 +512,9 @@ def _projection_state(contract_source: dict) -> tuple[bool, bool]:
     return collides, declared
 
 
-def _settled(root: Path, base_revision: str, candidate: dict) -> bool:
-    """Whether the one committed evidence record carries exactly `candidate`."""
-    records = adopt_inspection.evidence_records_at(root, base_revision)
-    if len(records) != 1:
-        return False
-    data = adopt_inspection.blob_at(root, base_revision, records[0])
-    try:
-        record = json.loads(data.decode("utf-8")) if data is not None else None
-    except (ValueError, UnicodeDecodeError, RecursionError):
-        return False
-    return isinstance(record, dict) and record.get("conformance") == candidate
+def _settled(root: Path, base_revision: str) -> bool:
+    """Whether the history of `base_revision` holds an adoption commit."""
+    return adopt_inspection.adoption_commit_at(root, base_revision) is not None
 
 
 def plan_conformance(root: Path, base_revision: str, contract_source: dict | None,
@@ -598,6 +593,17 @@ def plan_conformance(root: Path, base_revision: str, contract_source: dict | Non
             protection_after = require_in_protection_file(inputs(PROTECTION_FILE, protection))
     except Undeclarable as refused:
         causes.append(refused.repair_id)
+    if PIN_INCOMPATIBLE not in causes:
+        # The lock this plan commits pins the installed revision, whose
+        # Conformance check refuses every tracked file under the artifacts
+        # directory; a differing kept pin is judged by its own revision instead.
+        code, tracked = adopt_inspection.run_git(
+            root, "ls-tree", "-r", "--name-only", "-z", base_revision, "--", ".agents/artifacts",
+            local_only=True)
+        if code != 0:
+            raise _git_failed()
+        if tracked:
+            causes.append(TRACKED_ARTIFACT)
     contents: dict[str, bytes] = {}
     before: dict[str, bytes] = {}
     for path, source, after in ((PROTECTION_FILE, protection, protection_after),
@@ -610,7 +616,7 @@ def plan_conformance(root: Path, base_revision: str, contract_source: dict | Non
     repair = causes[0] if causes else None
     settled = (candidate is not None and not contents and not projection
                and set(causes) <= {REVISION_UNKNOWN, ORIGIN_MISMATCH, PIN_INCOMPATIBLE}
-               and _settled(root, base_revision, candidate))
+               and _settled(root, base_revision))
     if repair is not None:
         contents, before, projection = {}, {}, False
     return ConformancePlan(True, not settled, repair,
@@ -798,29 +804,25 @@ def bind_pending(root: Path, digest: str, record: dict, document: dict) -> None:
     """The pending record belongs to this plan, or the refusal `pending_mismatch`.
 
     Its plan id, branch name, repository and integration branch are the stored
-    plan's, and the commit it names carries the plan's evidence record with the
-    plan's conformance member, so a misplaced or edited record can never make
+    plan's, and the commit it names has the plan's adoption subject, so a
+    misplaced or edited record can never make
     the settlement delete a branch that is not this adoption's.
     """
     plan = document["plan"]
     member = plan.get("conformance")
     target = member.get("required_check") if isinstance(member, dict) else None
-    evidence = document["handoff"]["evidence_record"]
     result = record["result"]
     branch = f"adopt-{digest[:12]}"
     bound = (isinstance(target, dict) and record["plan_id"] == plan["plan_id"]
              and record["branch"] == branch and record["repo"] == target["repo"]
              and record["integration_branch"] == target["branch"]
              and result.get("plan_id") == plan["plan_id"] and result.get("branch") == branch
-             and result.get("commit") == record["commit"]
-             and result.get("evidence_record") == evidence)
+             and result.get("commit") == record["commit"])
     if bound:
-        data = adopt_inspection.blob_at(root, record["commit"], evidence)
-        try:
-            committed = json.loads(data.decode("utf-8")) if data is not None else None
-        except (ValueError, UnicodeDecodeError, RecursionError):
-            committed = None
-        bound = isinstance(committed, dict) and committed.get("conformance") == member
+        code, subject = adopt_inspection.run_git(
+            root, "log", "-1", "--format=%s", record["commit"])
+        bound = code == 0 and subject.decode("utf-8", "surrogateescape").rstrip("\n") == \
+            adopt_inspection.adoption_subject(plan["project_id"], digest)
     if not bound:
         raise _required_failure(
             REQUIRED_PENDING_MISMATCH,
