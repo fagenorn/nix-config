@@ -319,42 +319,30 @@ def reconcile_repo(home: Path, *,
     return root
 
 
-EVIDENCE_RECORD_MEMBERS = ("schema_version", "plan_id", "outcome",
-                           "base_revision", "platform", "decisions_accepted",
-                           "sources", "checks", "path_migration_map")
-
-
-def write_adoption_records(root: Path, digest: str = "a1" * 32) -> str:
-    """The two records an adoption commits, as `apply` writes them.
+def commit_adoption(root: Path, project_id: str = "fixture/target",
+                    digest: str = "a1" * 32) -> str:
+    """The commit an adoption makes, as `apply` makes it, and its id.
 
     Authored here rather than produced by a run, so a fixture that must
-    already *be* adopted needs no apply: `verify` discovers the record by
-    listing the tree at `HEAD` (D34) and never by being told its name.
+    already *be* adopted needs no apply: `verify` finds the adoption by the
+    subject of a commit in the history and by nothing in the tree.
     """
-    migration_map = f".agents/knowledge/archive/path-migrations/{digest}.json"
-    write(root, migration_map, json.dumps({
-        "schema_version": 1, "migration_id": f"sha256:{digest}",
-        "moves": []}) + "\n")
-    write(root, f".agents/artifacts/evidence/{digest}.json", json.dumps({
-        "schema_version": 1, "plan_id": f"sha256:{digest}",
-        "outcome": "no_change", "base_revision": git(
-            root, "rev-parse", "HEAD").strip(),
-        "platform": {"platform_version": "1.0.0",
-                     "project_schema_versions": [1],
-                     "resolved_schema_version": 1},
-        "decisions_accepted": [], "sources": [], "checks": [],
-        "path_migration_map": migration_map}) + "\n")
-    return migration_map
+    write(root, f".agents/knowledge/archive/path-migrations/{digest}.json",
+          json.dumps({"schema_version": 1, "migration_id": f"sha256:{digest}",
+                      "moves": []}) + "\n")
+    commit(root, adopt_inspection.adoption_subject(project_id, digest))
+    return git(root, "rev-parse", "HEAD").strip()
 
 
 @templated
-def adopted_repo(home: Path, *, records: bool = True, schema: int = 2) -> Path:
+def adopted_repo(home: Path, *, adoption: bool = True, schema: int = 2) -> Path:
     """A conformant checkout: valid contract, sentinel present, nothing legacy.
 
-    The two adoption records a real apply commits are present by default, in
-    a commit of their own: without them the checkout carries no adoption
-    commit for `verify` to find, so it cannot legitimately verify as adopted
-    (D34). `records=False` is the fixture the discovery negatives start from.
+    The adoption commit a real apply makes is present by default, on top of
+    the fixture commit: without it the checkout carries no commit with the
+    adoption subject for `verify` to find, so it cannot legitimately verify
+    as adopted. `adoption=False` is the fixture the discovery negatives
+    start from.
     """
     root = init_repo()
     contract = host_independent(fixture_contract())
@@ -369,9 +357,8 @@ def adopted_repo(home: Path, *, records: bool = True, schema: int = 2) -> Path:
     git(root, "remote", "add", "origin",
         "https://github.com/fixture/target.git")
     commit(root)
-    if records:
-        write_adoption_records(root)
-        commit(root, "adopt")
+    if adoption:
+        commit_adoption(root)
     return root
 
 

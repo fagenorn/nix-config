@@ -2565,7 +2565,7 @@ class MergedRegistrationTest(ApproveCase):
 
     def test_a_report_that_failed_its_checks_is_refused_and_logged_in_full(self):
         checks = [adopt_inspection.verify_check_entry(
-            "path-migration-map", "failed", "the evidence record names no path migration map")]
+            "adoption-commit-derived", "failed", "no commit has the adoption subject of o/r")]
         self.merged({"registered": False, "result": "not_conformant", "project_id": "o/r",
                      "checks": checks, "blockers": []})
         errors = self.captured(lambda: self.poll("merged"))
@@ -2577,7 +2577,7 @@ class MergedRegistrationTest(ApproveCase):
         record = json.loads(lines[0][len(REGISTER_ERROR):])
         self.assertEqual((record["plan_id"], record["stage"]), (PID_B, "register"))
         self.assertEqual(record["report"]["checks"], checks)
-        self.assertNotIn("the evidence record names no path migration map",
+        self.assertNotIn("no commit has the adoption subject of o/r",
                          f"{row['reason']} {row['note']}")
 
     def test_a_retry_that_meets_the_same_refusal_appends_a_row_and_a_fresh_card(self):
@@ -2649,7 +2649,7 @@ class RetiredCoAuthorPlanTest(ApproveCase):
 
 
 class MergedRealCase(ApproveCase):
-    evidence_plan = PID_B
+    adopted_plan = PID_B
 
     def setUp(self):
         super().setUp()
@@ -2658,11 +2658,8 @@ class MergedRealCase(ApproveCase):
         self.repo = register_check.adopted_repository(
             self.parent / "merged", "fixture/console-merged", ROOT / register_check.CONTRACT_SOURCE)
         self.remote = self.parent / "merged" / "origin.git"
-        evidence = next((self.repo / ".agents/artifacts/evidence").glob("*.json"))
-        record = json.loads(evidence.read_text())
-        evidence.write_text(json.dumps({**record, "plan_id": self.evidence_plan}) + "\n")
-        git(self.repo, "add", str(evidence))
-        git(self.repo, "commit", "-q", "--amend", "--no-edit")
+        git(self.repo, "commit", "-q", "--amend", "-m", adopt_inspection.adoption_subject(
+            "fixture/console-merged", adopt_apply.plan_digest(self.adopted_plan)))
         self.tip = git(self.repo, "rev-parse", "HEAD").strip()
         git(self.repo, "push", "--quiet", "--force", "origin", "HEAD~1:refs/heads/main")
         planned = {
@@ -2716,7 +2713,7 @@ class MergedRegistrationRealTest(MergedRealCase):
 
 
 class MergedReadoptionRealTest(MergedRealCase):
-    evidence_plan = PID_A
+    adopted_plan = PID_A
 
     def test_the_remote_carrying_an_earlier_adoption_does_not_register_the_new_plan(self):
         self.settled(1)

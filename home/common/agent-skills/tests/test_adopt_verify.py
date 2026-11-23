@@ -2,8 +2,8 @@
 
 `verify` is the read-only conformance verb and, with `--register`, the one
 writer of `~/.agents/state/fleet/registry.json`. The cases below are therefore
-two suites in one: the conformance report and its evidence-record discovery
-(D34), and the locked registration transaction whose far side is
+two suites in one: the conformance report and its adoption-commit discovery
+(the commit subject `adopt_apply` writes), and the locked registration transaction whose far side is
 `resolve-project platform-status --fleet` (D18, D19).
 
 They live beside `test_adopt_project.py` rather than inside it because that
@@ -34,9 +34,9 @@ from agent_tools.project_contract.adopt_inspection import AdoptError
 
 from .test_adopt_project import (
     DEPTH_REWRITE_ANSWERS,
-    EVIDENCE_RECORD_MEMBERS,
     answer_args,
     commit,
+    commit_adoption,
     adopted_repo,
     fixture_contract,
     git,
@@ -48,24 +48,22 @@ from .test_adopt_project import (
     scaffold,
     tree_snapshot,
     write,
-    write_adoption_records,
     write_depth_tree,
 )
 from ._inprocess_cli import run_module
 from .test_adopt_apply import apply_repo, readoption_repo
 
-VERIFY_MEMBERS = ["adoption_commit", "blockers", "checks", "evidence_record",
-                  "migration_map", "project_id", "registered", "result",
-                  "revision", "root", "schema_version"]
+VERIFY_MEMBERS = ["adoption_commit", "blockers", "checks", "project_id",
+                  "registered", "result", "revision", "root",
+                  "schema_version"]
 CHECK_IDS = ["contract-resolves", "projections-in-sync",
-             "no-unclassified-agent-path", "adoption-evidence-record",
-             "adoption-commit-derived", "path-migration-map"]
+             "no-unclassified-agent-path", "adoption-commit-derived"]
 
 
 def verifiable_repo(home: Path, *, project_id: str = "fixture/target",
                     tracker_cli: str = "gh",
                     integration_branch: str = "main") -> Path:
-    """A conformant checkout carrying the two adoption records, on `main`.
+    """A conformant checkout carrying its adoption commit, on `main`.
 
     The identity, the tracker binary and the declared integration branch are
     the knobs the cases below need: distinct ids for the registry, a tracker
@@ -85,8 +83,7 @@ def verifiable_repo(home: Path, *, project_id: str = "fixture/target",
     for standards in contract["bindings"]["paths"]["standards"]:
         write(root, f"{standards}/bar.md", "# the bar\n")
     commit(root)
-    write_adoption_records(root)
-    commit(root, "adopt")
+    commit_adoption(root, project_id)
     return root
 
 
@@ -168,13 +165,12 @@ class VerifyReadOnlyTest(VerifyTestCase):
     def test_plain_verify_reads_the_committed_head_not_the_index(self):
         root = adopted_repo(self.home)
         head = git(root, "rev-parse", "HEAD").strip()
-        record = f".agents/artifacts/evidence/{'a1' * 32}.json"
-        git(root, "rm", "--quiet", "--cached", record)
+        git(root, "rm", "--quiet", "--cached", "AGENTS.md")
         report = self.report(root)
         self.assertEqual(report["revision"]["commit"], head)
-        self.assertEqual(report["evidence_record"], record)
+        self.assertEqual(report["adoption_commit"], head)
         self.assertEqual(
-            self.check(report, "adoption-evidence-record")["status"], "passed")
+            self.check(report, "adoption-commit-derived")["status"], "passed")
 
     def test_a_conformant_checkout_is_adopted_and_writes_nothing(self):
         root = adopted_repo(self.home)
@@ -183,7 +179,7 @@ class VerifyReadOnlyTest(VerifyTestCase):
         report = self.report(root)
         self.assertEqual(report["result"], "adopted", report)
         self.assertEqual(sorted(report), VERIFY_MEMBERS)
-        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["schema_version"], 3)
         self.assertEqual(report["revision"], {
             "ref": "HEAD",
             "commit": git(root, "rev-parse", "HEAD").strip(),
@@ -203,20 +199,29 @@ class VerifyReadOnlyTest(VerifyTestCase):
         self.assertEqual(tree_snapshot(root), before_tree)
         self.assertFalse(self.registry_path().exists())
 
-    def test_the_adoption_commit_is_the_commit_that_added_the_record(self):
+    def test_an_adopted_checkout_with_no_evidence_file_verifies_as_adopted(self):
         root = adopted_repo(self.home)
-        introduced = git(root, "rev-parse", "HEAD").strip()
+        self.assertEqual(git(root, "ls-files", "--", ".agents/artifacts"), "")
+        report = self.report(root)
+        self.assertEqual(report["result"], "adopted", report)
+        self.assertEqual(report["schema_version"], 3)
+        self.assertEqual([entry["id"] for entry in report["checks"]],
+                         CHECK_IDS)
+        self.assertEqual(
+            sorted({entry["status"] for entry in report["checks"]}),
+            ["passed"])
+        self.assertEqual(report["adoption_commit"],
+                         git(root, "rev-parse", "HEAD").strip())
+
+    def test_the_adoption_commit_is_the_commit_carrying_its_subject(self):
+        root = adopted_repo(self.home)
+        adopted = git(root, "rev-parse", "HEAD").strip()
         write(root, "later.md", "# later\n")
         commit(root, "unrelated")
         report = self.report(root)
-        self.assertEqual(report["adoption_commit"], introduced)
+        self.assertEqual(report["adoption_commit"], adopted)
         self.assertNotEqual(report["adoption_commit"],
                             git(root, "rev-parse", "HEAD").strip())
-        self.assertEqual(report["evidence_record"],
-                         f".agents/artifacts/evidence/{'a1' * 32}.json")
-        self.assertEqual(
-            report["migration_map"],
-            f".agents/knowledge/archive/path-migrations/{'a1' * 32}.json")
 
     def test_a_drifted_projection_is_not_conformant_and_names_it(self):
         root = adopted_repo(self.home)
@@ -261,90 +266,45 @@ class VerifyReadOnlyTest(VerifyTestCase):
 
 
 # --------------------------------------------------------------------------
-# Evidence-record discovery (D34)
+# Adoption-commit discovery
 # --------------------------------------------------------------------------
 
 
-class EvidenceDiscoveryTest(VerifyTestCase):
+class AdoptionCommitDiscoveryTest(VerifyTestCase):
     def not_conformant(self, root: Path) -> dict:
         report = self.report(root)
         self.assertEqual(report["result"], "not_conformant", report)
         return report
 
-    def test_no_record_at_all_names_the_absence(self):
-        report = self.not_conformant(adopted_repo(self.home, records=False))
-        entry = self.check(report, "adoption-evidence-record")
+    def test_no_adoption_commit_names_the_absence(self):
+        report = self.not_conformant(adopted_repo(self.home, adoption=False))
+        entry = self.check(report, "adoption-commit-derived")
         self.assertEqual(entry["status"], "failed")
-        self.assertIn("no adoption evidence record", entry["detail"])
-        self.assertIsNone(report["adoption_commit"])
-        self.assertEqual(
-            self.check(report, "adoption-commit-derived")["status"], "not_run")
-
-    def test_a_record_that_is_not_valid_json_is_not_conformant(self):
-        root = adopted_repo(self.home, records=False)
-        write(root, ".agents/artifacts/evidence/broken.json", "{not json")
-        commit(root, "broken record")
-        report = self.not_conformant(root)
-        self.assertIn("does not parse",
-                      self.check(report, "adoption-evidence-record")["detail"])
-
-    def test_a_record_missing_a_required_member_is_not_conformant(self):
-        root = adopted_repo(self.home, records=False)
-        record = {name: None for name in EVIDENCE_RECORD_MEMBERS}
-        del record["path_migration_map"]
-        write(root, ".agents/artifacts/evidence/partial.json",
-              json.dumps(record) + "\n")
-        commit(root, "partial record")
-        report = self.not_conformant(root)
-        self.assertIn("does not parse",
-                      self.check(report, "adoption-evidence-record")["detail"])
-
-    def test_two_committed_records_name_the_ambiguity(self):
-        root = adopted_repo(self.home)
-        write_adoption_records(root, digest="b2" * 32)
-        commit(root, "a second adoption record")
-        report = self.not_conformant(root)
-        entry = self.check(report, "adoption-evidence-record")
-        self.assertIn("more than one", entry["detail"])
+        self.assertIn("adoption subject", entry["detail"])
         self.assertIsNone(report["adoption_commit"])
 
-    def test_a_gate_bundle_beside_the_record_is_not_a_second_record(self):
-        root = adopted_repo(self.home)
-        write(root, ".agents/artifacts/evidence/promotion-1-bundle.json",
-              json.dumps({"bundle_id": "sha256:x", "diagnostics": []}) + "\n")
-        write(root, ".agents/artifacts/evidence/promotion-1-trials.json",
-              "[]\n")
-        commit(root, "gate bundle and trials")
-        report = self.report(root)
-        self.assertEqual(report["result"], "adopted", report)
+    def test_another_projects_adoption_subject_is_no_adoption(self):
+        root = adopted_repo(self.home, adoption=False)
+        commit_adoption(root, "fixture/other")
+        report = self.not_conformant(root)
         self.assertEqual(
-            self.check(report, "adoption-evidence-record")["status"], "passed")
-        self.assertIsNotNone(report["adoption_commit"])
+            self.check(report, "adoption-commit-derived")["status"], "failed")
+        self.assertIsNone(report["adoption_commit"])
 
-    def test_a_broken_file_beside_a_real_record_is_not_counted(self):
-        root = adopted_repo(self.home)
-        write(root, ".agents/artifacts/evidence/broken.json", "{not json")
-        commit(root, "unrelated broken json")
-        report = self.report(root)
-        self.assertEqual(report["result"], "adopted", report)
-
-    def test_an_untracked_record_is_not_the_adoption_record(self):
-        root = adopted_repo(self.home, records=False)
-        write_adoption_records(root)
+    def test_a_committed_evidence_file_alone_is_no_adoption(self):
+        root = adopted_repo(self.home, adoption=False)
+        write(root, f".agents/artifacts/evidence/{'a1' * 32}.json", json.dumps({
+            "schema_version": 1, "plan_id": f"sha256:{'a1' * 32}",
+            "outcome": "no_change", "base_revision": "0" * 40,
+            "platform": {"platform_version": "1.0.0",
+                         "project_schema_versions": [1],
+                         "resolved_schema_version": 1},
+            "decisions_accepted": [], "sources": [], "checks": [],
+            "path_migration_map": ".agents/knowledge/archive/path-migrations/"
+                                  f"{'a1' * 32}.json"}) + "\n")
+        commit(root, "adopt")
         report = self.not_conformant(root)
-        self.assertIn("no adoption evidence record",
-                      self.check(report, "adoption-evidence-record")["detail"])
-
-    def test_a_record_naming_an_absent_migration_map_is_not_conformant(self):
-        root = adopted_repo(self.home, records=False)
-        write_adoption_records(root)
-        (root / ".agents" / "knowledge" / "archive" / "path-migrations"
-         / f"{'a1' * 32}.json").unlink()
-        commit(root, "record without its map")
-        report = self.not_conformant(root)
-        entry = self.check(report, "path-migration-map")
-        self.assertEqual(entry["status"], "failed")
-        self.assertIn("path migration map", entry["detail"])
+        self.assertIsNone(report["adoption_commit"])
 
 
 class AnsweredCandidateVerifyTest(VerifyTestCase):
@@ -412,8 +372,7 @@ class RegistrationTest(VerifyTestCase):
         })
 
     def test_a_merged_readoption_is_still_adopted_and_registers(self):
-        """A second adoption supersedes the first record rather than adding a
-        second one, so D34's exactly-one discovery still answers."""
+        """The newest adoption commit answers, not the first one."""
         root, first = readoption_repo(self.home)
         code, out, err = run("plan", "--repo-root", str(root), home=self.home)
         self.assertEqual(code, 0, err or out)
@@ -426,9 +385,6 @@ class RegistrationTest(VerifyTestCase):
         publish(root)
         report = self.report(root, "--register")
         self.assertEqual(report["result"], "adopted", report["checks"])
-        self.assertEqual(report["evidence_record"], second["evidence_record"])
-        self.assertNotEqual(report["evidence_record"],
-                            first["evidence_record"])
         self.assertEqual(report["adoption_commit"], second["commit"])
         self.assertIs(report["registered"], True)
 
@@ -452,8 +408,8 @@ class RegistrationTest(VerifyTestCase):
 
     def test_registration_needs_a_conformant_checkout(self):
         root = verifiable_repo(self.home)
-        write(root, "AGENTS.md", "hand-edited\n")
-        commit(root, "drift a projection")
+        write(root, ".claude/odd.md", "# odd\n")
+        commit(root, "an unclassified agent path")
         publish(root)
         report = self.report(root, "--register")
         self.assertEqual(report["result"], "not_conformant", report)
@@ -538,7 +494,7 @@ class RemoteRegistrationTest(VerifyTestCase):
         self.assertEqual(self.registry()["projects"], [
             {"project_id": "fixture/target", "root": str(root)}])
 
-    def test_the_named_plan_registers_when_its_evidence_record_is_on_the_remote(self):
+    def test_the_named_plan_registers_when_its_adoption_commit_is_on_the_remote(self):
         root = verifiable_repo(self.home)
         publish(root)
         report = self.report(root, "--register", "--plan-id", "sha256:" + "a1" * 32)
@@ -547,7 +503,7 @@ class RemoteRegistrationTest(VerifyTestCase):
         self.assertEqual(self.registry()["projects"], [
             {"project_id": "fixture/target", "root": str(root)}])
 
-    def test_another_plans_evidence_record_refuses_before_anything_is_written(self):
+    def test_another_plans_adoption_commit_refuses_before_anything_is_written(self):
         root = verifiable_repo(self.home)
         publish(root)
         payload = self.refuse(root, "not_integrated", "--register",
@@ -598,9 +554,7 @@ class RemoteRegistrationTest(VerifyTestCase):
         write(root, ".agents/runtime/.gitignore", "*\n")
         git(root, "add", "-f", ".agents/runtime/.gitignore")
         commit(root, "contract")
-        write_adoption_records(root)
-        commit(root, "adopt")
-        adoption = git(root, "rev-parse", "HEAD").strip()
+        adoption = commit_adoption(root)
         # Freshness (PR-02): origin first holds only `base`, pushed from this
         # checkout, so its `refs/remotes/origin/main` is stale; the adoption
         # then advances on origin itself, never through a push that updates
@@ -628,8 +582,6 @@ class RemoteRegistrationTest(VerifyTestCase):
         self.assertEqual(report["revision"], {
             "ref": "refs/remotes/origin/main", "commit": adoption})
         self.assertEqual(report["adoption_commit"], adoption)
-        self.assertEqual(report["evidence_record"],
-                         f".agents/artifacts/evidence/{'a1' * 32}.json")
         self.assertEqual(report["root"], str(root))
         self.assertEqual(self.registry()["projects"], [
             {"project_id": "fixture/target", "root": str(root)}])
@@ -780,7 +732,7 @@ class RegisterProjectInnerCheckTest(VerifyTestCase):
             {"project_id": "fixture/target", "adoption_commit": adoption,
              "registered": False},
             {"bindings": {"vcs": {"integration_branch": contract_branch}}},
-            source, [f".agents/artifacts/evidence/{'a1' * 32}.json"])
+            source)
         with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
             with self.assertRaises(AdoptError) as caught:
                 adopt_verify.register_project(root, verification)
@@ -939,7 +891,7 @@ class IntegrationBranchOperandTest(VerifyTestCase):
         self.assertEqual(report["branch_override"], OVERRIDE)
         self.assertEqual(sorted(report),
                          sorted([*VERIFY_MEMBERS, "branch_override"]))
-        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["schema_version"], 3)
         self.assertEqual(self.registry(), {
             "schema_version": 1,
             "projects": [{"project_id": "fixture/target", "root": str(root),
@@ -1158,8 +1110,8 @@ class IntegrationBranchOperandLifecycleTest(VerifyTestCase):
 
     def test_a_non_conformant_operand_branch_reports_and_writes_nothing(self):
         root = stale_default_repo(self.home)
-        write_adoption_records(root, digest="b2" * 32)
-        commit(root, "a second adoption record")
+        write(root, ".claude/odd.md", "# odd\n")
+        commit(root, "an unclassified agent path")
         publish(root, ("stale:main", "main:dev"))
         report = self.register_through_the_operand(root)
         self.assertEqual(report["result"], "not_conformant", report)

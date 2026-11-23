@@ -220,10 +220,11 @@ required checks or merges a fresh adoption.
 
 `verify` answers the conformance question read-only against one pinned
 revision — the contract resolves, every projection is in sync, no agent path is
-unclassified, and exactly one adoption evidence record is discoverable in it
-with the migration map it names (D34). Plain `verify` reads `HEAD`: the
-resolver runs on the working tree, the inventory comes from the index, and
-records are read at the `HEAD` commit it pins (D10). All three answers are
+unclassified, and the history of the revision carries an adoption commit, the
+newest commit with the subject `adopt_apply.commit_message` derives for the
+project (D28). Plain `verify` reads `HEAD`: the resolver runs on the working
+tree, the inventory comes from the index, and the adoption commit is read from
+the history of the `HEAD` commit it pins (D10). All three answers are
 reports on exit 0. `--register` is the one write to the user-scope fleet
 registry, and it reads nothing from the checkout's branches or files: it lists
 `origin`, fetches the remote default branch and, when the contract there names
@@ -235,13 +236,14 @@ check there. When the default branch's contract does not resolve,
 `--integration-branch NAME` (accepted once, and only with `--register`) names
 the integration branch to read instead; `adopt_verify.remote_source` states
 its conditions, and the report then carries a `branch_override` member. It
-refuses `not_integrated` when that commit carries no evidence record or the
-adoption commit derived from it is not its ancestor (D19). What it stores is
+refuses `not_integrated` when that commit's history carries no adoption commit
+or the adoption commit is not its ancestor (D19). What it stores is
 `{project_id, root}` with the real root (#148 D18), plus the `branch_override`
 member when the operand selected the branch. `--plan-id ID` (accepted once,
 and only with `--register`) refuses `not_integrated` before any write when no
-evidence record on the pinned commit carries that plan id, so the adoption of
-one plan is never mistaken for an earlier adoption of the same project.
+commit in the pinned history carries that plan's adoption subject, so the
+adoption of one plan is never mistaken for an earlier adoption of the same
+project.
 
 `plan` converts hand-written root entry files (`adopt_entries`, ADR-021): with
 a contract or draft, their authored text joins `.agents/instructions/bootstrap.md`
@@ -1336,7 +1338,7 @@ def command_verify(args: argparse.Namespace) -> int:
             verification = adopt_verify.verify_repository(
                 root, source, run_resolver)
         adopt_verify.require_integrated(
-            verification, args.plan_id[0] if args.plan_id else None)
+            root, verification, args.plan_id[0] if args.plan_id else None)
         if adopt_verify.registration_allowed(verification.report["result"]):
             adopt_verify.register_project(root, verification)
     emit_json(verification.report)
@@ -1420,7 +1422,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --register, the plan whose adoption the "
                              "integration branch on origin must carry: "
                              "registration refuses not_integrated when no "
-                             "evidence record there names it")
+                             "commit there carries that plan's adoption "
+                             "subject")
     migrate = subparsers.add_parser(
         "migrate", help="execute one manifest migration on a checkout, "
                         "validated by the resolver")

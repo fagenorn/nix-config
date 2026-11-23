@@ -71,6 +71,7 @@ from agent_tools.project_contract.adopt_inspection import (
     contained_path,
     contained_relative,
     gate_entry,
+    adoption_subject,
     blob_at,
     git_or_fail,
     is_agent_path,
@@ -822,7 +823,7 @@ def run_commit_gates(run: GateRun) -> list[dict]:
 
 def commit_message(project_id: str, digest: str, records: dict) -> str:
     """D28's fixed message: a pure function of the plan, with no trailer."""
-    return (f"chore(adopt): adopt {project_id} at plan {digest[:12]}\n"
+    return (f"{adoption_subject(project_id, digest)}\n"
             "\n"
             f"path migration map: {records['migration_map']}\n"
             f"adoption evidence record: {records['evidence_record']}\n")

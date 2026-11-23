@@ -94,9 +94,7 @@ VERIFY_CHECKS = (
     "contract-resolves",
     "projections-in-sync",
     "no-unclassified-agent-path",
-    "adoption-evidence-record",
     "adoption-commit-derived",
-    "path-migration-map",
 )
 
 # The adoption evidence record's members, per the spec. A committed file under
@@ -1046,23 +1044,55 @@ def parses_as_migration_map(data: bytes | None) -> dict | None:
     return source
 
 
-def introducing_commit(root: Path, revision: str,
-                       relative: str) -> str | None:
-    """The commit that added `relative` in the history of `revision`, or None.
+ADOPTION_SUBJECT_PREFIX = "chore(adopt): adopt "
 
-    Read from the commit named by `revision`, never the working tree, so an
-    untracked file cannot answer for a record the history does not carry.
 
-    The adoption record carries no commit identity and cannot — it is created
-    *by* the commit that would name it — so the introducing commit is the only
-    identity git already holds (D34).
+def adoption_subject(project_id: str, digest: str) -> str:
+    """The subject of an adoption commit, a pure function of the plan (D28).
+
+    `digest` is the 64-hex plan digest; the subject names its first twelve.
     """
-    code, out = run_git(root, "log", "--diff-filter=A", "--format=%H", "-1",
-                        revision, "--", relative)
+    return f"{ADOPTION_SUBJECT_PREFIX}{project_id} at plan {digest[:12]}"
+
+
+def plan_id_digest(plan_id: str) -> str | None:
+    """The 64 lowercase hex of `sha256:<hex>` or a bare `<hex>`, else None."""
+    text = plan_id.strip()
+    if text.startswith("sha256:"):
+        text = text[len("sha256:"):]
+    return text if re.fullmatch(r"[0-9a-f]{64}", text) else None
+
+
+def adoption_commit_at(root: Path, revision: str,
+                       project_id: str | None = None,
+                       digest: str | None = None) -> str | None:
+    """The newest commit reachable from `revision` carrying an adoption subject.
+
+    With `digest` the subject must be exactly `adoption_subject(project_id,
+    digest)`; without it, any plan's subject for `project_id` matches, and with
+    no `project_id` either, any project's. Read from git history, never the
+    working tree, so no file the checkout holds can answer for an adoption the
+    history does not carry. A failing `git log` is no adoption.
+    """
+    if digest is not None and project_id is None:
+        raise ValueError("a plan digest needs the project id it belongs to")
+    if digest is not None:
+        wanted = re.compile(re.escape(adoption_subject(project_id, digest)))
+    else:
+        named = r"\S+" if project_id is None else re.escape(project_id)
+        wanted = re.compile(
+            re.escape(ADOPTION_SUBJECT_PREFIX) + named
+            + r" at plan [0-9a-f]{12}")
+    code, out = run_git(root, "log", "--fixed-strings",
+                        f"--grep={ADOPTION_SUBJECT_PREFIX}",
+                        "--format=%H%x09%s", revision)
     if code != 0:
         return None
-    text = out.decode("utf-8", "surrogateescape").strip()
-    return text.splitlines()[0] if text else None
+    for line in out.decode("utf-8", "surrogateescape").splitlines():
+        commit, _, subject = line.partition("\t")
+        if wanted.fullmatch(subject):
+            return commit
+    return None
 
 
 def commit_is_ancestor(root: Path, commit: str, revision: str) -> bool:

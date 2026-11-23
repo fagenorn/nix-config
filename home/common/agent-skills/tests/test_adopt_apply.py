@@ -392,6 +392,8 @@ class ApplySuccessTest(ApplyTestCase):
             subject,
             "chore(adopt): adopt fixture/target at plan "
             f"{self.digest(self.plan_id)[:12]}")
+        self.assertEqual(subject, adopt_inspection.adoption_subject(
+            "fixture/target", self.digest(self.plan_id)))
         self.assertIn(self.document["handoff"]["migration_map"], message)
         self.assertIn(self.document["handoff"]["evidence_record"], message)
         self.assertNotIn("Co-Authored-By", message)
