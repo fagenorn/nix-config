@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -22,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.claims import forge_claim
 from agent_tools.delivery import engine, engine_commands, engine_core, engine_ledger, engine_shell
 from agent_tools.delivery.engine_commands import command_text
 from agent_tools.delivery.engine_guard import Hook, judge, payload
@@ -63,6 +65,7 @@ class EngineProject:
         self.record = self.tmp / "record.log"
         self.guard_log = self.tmp / "guard.log"
         self.release = self.tmp / "release"
+        self.stamps = self.tmp / "stamps.log"
         self.renewals = self.tmp / "renewals.log"
         self.answers = self.tmp / "answers.json"
         self.hold = self.tmp / "hold.pid"
@@ -133,6 +136,12 @@ class EngineProject:
             "standin-says-out-of-bounds": entry("verdict", "out-of-bounds", "0"),
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
+            "standin-stamp": entry("stamp", str(self.stamps), "1.0", "0"),
+            "standin-stamp-fail": entry("stamp", str(self.stamps), "1.0", "1"),
+            "standin-items": entry("json", "0", "approve", "approve", "approve"),
+            "standin-items-mixed": entry("json", "0", "approve", "nope", "approve"),
+            "standin-items-hold": entry("json", "0", "hold", "maybe", "approve"),
+            "standin-items-object": entry("emit", "0", '{"argv":["approve",{"id":2}]}'),
             "count-a": entry("record", str(self.tmp / "a.log")),
             "count-b": entry("record", str(self.tmp / "b.log")),
             "count-c": entry("record", str(self.tmp / "c.log")),
@@ -176,18 +185,25 @@ class EngineProject:
         return [json.loads(line) for line in self.renewals.read_text(encoding="utf-8").splitlines()]
 
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None,
-                   keep_alive: dict | None = None) -> Path:
+                   keep_alive: dict | None = None,
+                   children: dict[str, dict] | None = None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
-        default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
-        if keep_alive:
-            default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
-        document = {"format": 1,
-                    "inputs": list(inputs),
-                    "stops": stops or default,
-                    "steps": steps}
-        if keep_alive:
-            document["keep_alive"] = keep_alive
-        (directory / "deliver.json").write_text(json.dumps(document), encoding="utf-8")
+
+        def write(name: str, steps: list[dict], inputs, stops) -> None:
+            default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
+            if keep_alive:
+                default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
+            document = {"format": 1,
+                        "inputs": list(inputs),
+                        "stops": stops or default,
+                        "steps": steps}
+            if keep_alive:
+                document["keep_alive"] = keep_alive
+            (directory / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+
+        write("deliver", steps, inputs, stops)
+        for name, child in (children or {}).items():
+            write(name, child["steps"], child["inputs"], child["stops"])
         return directory
 
     def command(self, *words: str, cwd: Path | None = None, **kwargs):
@@ -954,6 +970,49 @@ class GuardDeliverTest(unittest.TestCase):
         self.assertTrue(good.allowed, good.reason)
 
 
+class InputsTest(unittest.TestCase):
+    def test_a_new_run_supplies_its_issue_repo_root_and_a_holder_naming_the_run(self):
+        project = EngineProject(self)
+        one_step = {"id": "a", "stage": "setup", "kind": "command", "command": "standin-record",
+                    "holds": "run",
+                    "in": ["run.holder", "run.issue", "run.repo", "run.repo_root"],
+                    "on": {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}}
+        procedures = project.procedures([one_step],
+                                        inputs=("holder", "issue", "repo", "repo_root"))
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        run = project.runs()[0]
+        document = json.loads((run / "run.json").read_text())
+        holder = f"{document['host']}/{run.name}"
+        inputs = document["inputs"]
+        self.assertEqual(inputs, {"holder": holder, "issue": 1512, "repo": "example/engine",
+                                  "repo_root": inputs["repo_root"]})
+        self.assertEqual(os.path.realpath(inputs["repo_root"]), os.path.realpath(project.root))
+        self.assertEqual(project.argvs("record"),
+                         [[holder, "1512", "example/engine", inputs["repo_root"]]])
+        self.assertEqual(forge_claim.HOLDER(holder), holder)
+
+    def test_a_child_run_reads_the_root_runs_holder(self):
+        project = EngineProject(self)
+        call = {"id": "c", "stage": "setup", "kind": "call", "procedure": "kid", "holds": "run",
+                "on": {"done": "done", "needs-owner": "needs-owner"}}
+        read = {"id": "r", "stage": "setup", "kind": "command", "command": "standin-record",
+                "holds": "run", "in": ["run.holder"],
+                "on": {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}}
+        kid = {"steps": [read], "inputs": ["holder", "issue"],
+               "stops": {"needs-owner": {"need": "owner-decision", "reenter": "r"}}}
+        procedures = project.procedures([call], inputs=("holder", "issue"),
+                                        children={"kid": kid})
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        documents = {run: json.loads((run / "run.json").read_text()) for run in project.runs()}
+        roots = [run for run, document in documents.items() if "parent" not in document]
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(len(documents), 2)
+        root = roots[0]
+        self.assertEqual(project.argvs("record"), [[f"{documents[root]['host']}/{root.name}"]])
+
+
 class RefusalTest(unittest.TestCase):
     def assertRefused(self, project: EngineProject, done, word: str) -> None:
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
@@ -1005,12 +1064,12 @@ class RefusalTest(unittest.TestCase):
 
         cases = {
             "an undeclared input": (
-                "repo", lambda p: p.procedures([step("a", "standin-record", "done")],
-                                               inputs=("issue", "repo"))),
+                "branch", lambda p: p.procedures([step("a", "standin-record", "done")],
+                                                 inputs=("issue", "branch"))),
             "a mutating step without a check": ("check", with_mutation),
             "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
             "a mutating decide step": ("marked mutates", mutating_decide),
-            "a group step": ("group", shipped),
+            "the shipped toy, whose agent step is marked mutates": ("marked mutates", shipped),
             "no deliver.json": ("deliver.json", empty),
         }
         for name, (word, build) in cases.items():

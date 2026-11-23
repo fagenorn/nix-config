@@ -1,0 +1,1219 @@
+"""Contract tests for group and call steps in `engine deliver`.
+
+A group runs its members beside each other; a call runs a child procedure as runs of their
+own, one per item of its `each` list. Commands are the stand-ins of
+tests/fixtures/engine-deliver/standin.py in a hermetic project; the engine runs as a child
+process from source, or in process where a test needs to watch or fault a child's walk.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import threading
+import time
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest import mock
+
+from agent_tools.delivery import (
+    engine_commands, engine_ledger, engine_session, engine_shell, engine_stop,
+)
+from tests.test_engine_deliver import EngineProject, step
+from tests.test_engine_session import (
+    DRAFT_REPLY, RESULT_NORMAL, canned_result, copy_roles, install_stub,
+)
+from tests.test_engine_slots import held_slots
+
+TIER = "integration"
+
+REAL_WALK = engine_shell._walk
+
+
+def GROUP(b_command: str) -> list[dict]:
+    return [
+        {"id": "checks", "stage": "final review", "kind": "group", "holds": "run",
+         "members": [{"step": "a", "pass": ["ok"]}, {"step": "b", "pass": ["ok"]}],
+         "on": {"pass": "done", "blocked": "needs-owner"}},
+        {"id": "a", "stage": "final review", "kind": "command", "holds": "run", "command": "standin-stamp",
+         "in": ["run.issue"]},
+        {"id": "b", "stage": "final review", "kind": "command", "holds": "run", "command": b_command,
+         "in": ["run.issue"]},
+    ]
+
+
+def GROUP_LOOP() -> list[dict]:
+    steps = GROUP("standin-stamp-fail")
+    steps[0].update({"max_visits": 2,
+                     "on": {"pass": "done", "blocked": "checks", "exhausted": "needs-owner"}})
+    steps[1]["max_visits"] = 2
+    steps[2]["max_visits"] = 2
+    return steps
+
+
+def child(steps: list[dict], inputs=("issue", "item")) -> dict:
+    return {"steps": steps, "inputs": list(inputs),
+            "stops": {"child-stop": {"need": "retry", "reenter": steps[0]["id"]}}}
+
+
+def FAN(items_command: str, parallel: int) -> list[dict]:
+    return [
+        {"id": "list", "stage": "setup", "kind": "command", "holds": "run", "command": items_command,
+         "on": {"ok": "fan", "failed": "needs-owner", "refused": "needs-owner"}},
+        {"id": "fan", "stage": "landing", "kind": "call", "holds": "run", "procedure": "fan-child",
+         "in": ["list.argv"], "each": "list.argv", "parallel": parallel,
+         "on": {"done": "done", "child-stop": "needs-owner"}},
+    ]
+
+
+def fan_children(work: str = "standin-stamp") -> dict[str, dict]:
+    return {"fan-child": child([
+        {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": work,
+         "in": ["run.item"], "on": {"ok": "judge", "failed": "child-stop", "refused": "child-stop"}},
+        {"id": "judge", "stage": "building", "kind": "decide", "holds": "run", "grader": "toy-tally",
+         "in": ["run.item"], "on": {"accept": "done", "revise": "child-stop"}}])}
+
+
+class WalkSpy:
+    """Wraps the real `_walk`: a root run passes through, a child run is observed."""
+
+    def __init__(self, real, *, rendezvous: int = 0, before=None) -> None:
+        self.real, self.rendezvous, self.before = real, rendezvous, before
+        self.condition = threading.Condition()
+        self.active = self.peak = self.arrivals = 0
+        self.records: list[tuple[str, bool]] = []
+        self.met: list[bool] = []
+
+    def __call__(self, run_dir: Path, table, *rest) -> tuple[int, dict]:
+        run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        if "parent" not in run:
+            return self.real(run_dir, table, *rest)
+        parent = engine_ledger.replay(run_dir.parent / run["parent"] / "events.jsonl")
+        seen = any(e["event"] == "call" and e["child"] == run_dir.name for e in parent)
+        with self.condition:
+            self.records.append((run_dir.name, seen))
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            arrival = self.arrivals
+            self.arrivals += 1
+            self.condition.notify_all()
+            if arrival < self.rendezvous:
+                self.met.append(self.condition.wait_for(
+                    lambda: self.active >= self.rendezvous, timeout=30))
+        try:
+            if self.before is not None:
+                self.before(run["inputs"].get("item"))
+            return self.real(run_dir, table, *rest)
+        finally:
+            with self.condition:
+                self.active -= 1
+                self.condition.notify_all()
+
+
+def run_document(run: Path) -> dict:
+    return json.loads((run / "run.json").read_text(encoding="utf-8"))
+
+
+def roots(project: EngineProject) -> list[Path]:
+    return [run for run in project.runs() if "parent" not in run_document(run)]
+
+
+def children_of(project: EngineProject) -> list[Path]:
+    return [run for run in project.runs() if "parent" in run_document(run)]
+
+
+def stamps(project: EngineProject) -> list[dict]:
+    return [json.loads(line) for line in project.stamps.read_text(encoding="utf-8").splitlines()]
+
+
+def result(run: Path, name: str) -> dict:
+    return json.loads((run / "results" / name).read_text(encoding="utf-8"))
+
+
+def graded(events: list[dict], name: str) -> list[dict]:
+    return [e for e in events if e["event"] == "outcome_graded" and e["step"] == name]
+
+
+def REVIEWS(pass_b=("drafted",)) -> list[dict]:
+    def member(id: str, role: str) -> dict:
+        return {"id": id, "stage": "final review", "kind": "agent", "holds": "run", "role": role,
+                "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
+                "in": ["run.issue"]}
+    return [
+        {"id": "reviews", "stage": "final review", "kind": "group", "holds": "run",
+         "members": [{"step": "ra", "pass": ["drafted"]}, {"step": "rb", "pass": list(pass_b)}],
+         "on": {"pass": "done", "blocked": "needs-owner"}},
+        member("ra", "reviewer"), member("rb", "reviewer-lite")]
+
+
+def session_project(test: unittest.TestCase, hold: float, canned=RESULT_NORMAL) -> EngineProject:
+    project = EngineProject(test)
+    project.env.pop("CLAUDE_ACCOUNT", None)
+    copy_roles(project, "reviewer", "reviewer-lite")
+    install_stub(project, canned)
+    project.env["CLAUDE_STUB_HOLD"] = str(hold)
+    project.env["CLAUDE_STUB_STAMPS"] = str(project.tmp / "sessions.log")
+    return project
+
+
+def with_session_files(directory: Path) -> Path:
+    (directory / "draft.md").write_text("Draft issue {{run.issue}}.\n", encoding="utf-8")
+    (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+    return directory
+
+
+def started(project: EngineProject, run: Path, steps: set[str], count: int,
+            deadline: float = 30) -> list[int]:
+    """The pids of `count` `process_started` events of `steps` in `run`, once they exist."""
+    limit = time.monotonic() + deadline
+    while time.monotonic() < limit:
+        try:
+            events = project.events(run)
+        except (engine_ledger.LedgerError, FileNotFoundError):
+            events = []
+        pids = [e["pid"] for e in events if e["event"] == "process_started" and e["step"] in steps]
+        if len(pids) >= count:
+            return pids
+        time.sleep(0.05)
+    raise AssertionError(f"fewer than {count} of {sorted(steps)} started within {deadline}s")
+
+
+def wait_for_run(project: EngineProject, children: bool, deadline: float = 30) -> Path:
+    """The one root run, or the first child run, once its `run.json` exists."""
+    limit = time.monotonic() + deadline
+    while time.monotonic() < limit:
+        try:
+            found = children_of(project) if children else roots(project)
+        except (FileNotFoundError, ValueError):
+            found = []
+        if found:
+            return found[0]
+        time.sleep(0.05)
+    raise AssertionError("no run appeared")
+
+
+class GroupTest(unittest.TestCase):
+    def test_a_group_of_two_members_passes_and_both_ran_at_the_same_moment(self):
+        project = EngineProject(self)
+        procedures = project.procedures(GROUP("standin-stamp"))
+        done = project.deliver(procedures, issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        runs = project.runs()
+        self.assertEqual(len(runs), 1)
+        records = stamps(project)
+        self.assertEqual(len(records), 2)
+        self.assertLess(max(r["start"] for r in records), min(r["end"] for r in records))
+        self.assertTrue((runs[0] / "results/a.1.json").is_file())
+        self.assertTrue((runs[0] / "results/b.1.json").is_file())
+        self.assertFalse((runs[0] / "results/checks.1.json").exists())
+        events = project.events(runs[0])
+        self.assertEqual((events[0]["event"], events[0]["step"], events[0]["visit"]),
+                         ("step_entered", "checks", 1))
+        index = {}
+        for position, event in enumerate(events):
+            if event["event"] == "outcome_graded":
+                index[event["step"]] = position
+            if event["event"] == "transition_taken":
+                self.assertNotIn(event["step"], ("a", "b"))
+                if event["step"] == "checks":
+                    index["transition"] = position
+                    self.assertEqual(event["to"], "done")
+        self.assertEqual(graded(events, "checks")[0]["outcome"], "pass")
+        self.assertEqual(graded(events, "checks")[0]["visit"], 1)
+        self.assertGreater(index["checks"], max(index["a"], index["b"]))
+        self.assertGreater(index["transition"], index["checks"])
+
+    def test_a_member_outside_its_pass_set_blocks_the_group(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(GROUP("standin-stamp-fail")), issue=1517)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        events = project.events(project.runs()[0])
+        self.assertEqual([e["outcome"] for e in graded(events, "checks")], ["blocked"])
+        records = stamps(project)
+        self.assertEqual(len(records), 2)
+        self.assertLess(max(r["start"] for r in records), min(r["end"] for r in records))
+
+    def test_a_group_blocked_on_two_visits_records_each_grade_once(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(GROUP_LOOP()), issue=1517)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        events = project.events(project.runs()[0])
+        self.assertEqual([(e["visit"], e["outcome"]) for e in graded(events, "checks")],
+                         [(1, "blocked"), (2, "blocked")])
+        self.assertEqual([(e["visit"], e["outcome"], e["to"]) for e in events
+                          if e["event"] == "transition_taken" and e["step"] == "checks"],
+                         [(1, "blocked", "checks"), (2, "blocked", "checks"),
+                          (3, "exhausted", "needs-owner")])
+        self.assertFalse([e for e in graded(events, "checks") if e["outcome"] == "exhausted"])
+        self.assertEqual(len(stamps(project)), 4)
+
+    def test_a_group_of_decide_members_records_its_grade(self):
+        project = EngineProject(self)
+        procedures = project.procedures([
+            {"id": "checks", "stage": "final review", "kind": "group", "holds": "run",
+             "members": [{"step": "j", "pass": ["accept"]}],
+             "on": {"pass": "done", "blocked": "needs-owner"}},
+            {"id": "j", "stage": "final review", "kind": "decide", "holds": "run", "grader": "toy-tally",
+             "in": ["run.issue"]}])
+        done = project.deliver(procedures, issue=1517)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        events = project.events(project.runs()[0])
+        grades = graded(events, "checks")
+        self.assertEqual([(e["visit"], e["outcome"]) for e in grades], [(1, "blocked")])
+        transitions = [e for e in events
+                       if e["event"] == "transition_taken" and e["step"] == "checks"]
+        self.assertEqual([e["to"] for e in transitions], ["needs-owner"])
+        stop = next(i for i, e in enumerate(events) if e["event"] == "stop_reached")
+        self.assertLess(events.index(grades[0]), stop)
+        self.assertLess(events.index(transitions[0]), stop)
+
+    def test_a_group_whose_declared_input_has_no_value_starts_no_member(self):
+        project = EngineProject(self)
+        steps = [
+            {"id": "prepare", "stage": "setup", "kind": "command", "holds": "run", "command": "standin-json",
+             "in": ["run.issue"], "on": {"ok": "checks", "failed": "needs-owner", "refused": "needs-owner"}},
+            *GROUP("standin-stamp")]
+        steps[1]["in"] = ["prepare.ticket"]
+        done = project.deliver(project.procedures(steps), issue=1517)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+        self.assertFalse(project.stamps.exists())
+        events = project.events(project.runs()[0])
+        self.assertFalse([e for e in events if e.get("step") in ("a", "b")])
+
+    def test_a_completed_group_keeps_its_grade_when_its_successor_cannot_resolve_its_items(self):
+        project = EngineProject(self)
+        steps = GROUP("standin-stamp")
+        steps[0]["on"] = {"pass": "fan", "blocked": "needs-owner"}
+        steps[1]["command"] = "standin-items-object"
+        steps.append({"id": "fan", "stage": "landing", "kind": "call", "holds": "run", "procedure": "fan-child",
+                      "in": ["a.argv"], "each": "a.argv",
+                      "on": {"done": "done", "child-stop": "needs-owner"}})
+        done = project.deliver(project.procedures(steps, children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+        events = project.events(roots(project)[0])
+        self.assertEqual([(e["visit"], e["outcome"]) for e in graded(events, "checks")],
+                         [(1, "pass")])
+        self.assertEqual([(e["outcome"], e["to"]) for e in events
+                          if e["event"] == "transition_taken" and e["step"] == "checks"],
+                         [("pass", "fan")])
+
+
+class CallTest(unittest.TestCase):
+    def deliver_in_process(self, project: EngineProject, steps: list[dict], spy: WalkSpy,
+                           children: dict[str, dict] | None = None) -> tuple[int, dict]:
+        procedures = project.procedures(steps, children=children)
+        with project.inside(), mock.patch.object(engine_shell, "_walk", spy):
+            return engine_shell.deliver(1517, procedures)
+
+    def test_a_call_over_three_items_with_parallel_two_runs_three_child_runs_never_more_than_two_at_once(self):
+        project = EngineProject(self)
+        spy = WalkSpy(REAL_WALK, rendezvous=2)
+        code, line = self.deliver_in_process(project, FAN("standin-items", 2), spy,
+                                             fan_children())
+        self.assertEqual((code, line["end"]), (0, "done"))
+        self.assertEqual(len(project.runs()), 4)
+        (root,) = roots(project)
+        self.assertEqual(run_document(root)["procedure"], "deliver")
+        kids = children_of(project)
+        self.assertEqual(len(kids), 3)
+        for kid in kids:
+            document = run_document(kid)
+            self.assertEqual(document["parent"], root.name)
+            self.assertEqual(document["procedure"], "fan-child")
+            self.assertEqual(document["inputs"], {"issue": 1517, "item": "approve"})
+        self.assertEqual(spy.peak, 2)
+        self.assertEqual(spy.met, [True, True])
+        records = stamps(project)
+        self.assertEqual(len(records), 3)
+        self.assertTrue(all(r["argv"] == ["approve"] for r in records))
+        events = project.events(root)
+        calls = [e for e in events if e["event"] == "call"]
+        self.assertEqual(len(calls), 3)
+        for call in calls:
+            self.assertEqual((call["step"], call["visit"], call["items"]), ("fan", 1, 3))
+        self.assertEqual(sorted(c["index"] for c in calls), [0, 1, 2])
+        self.assertEqual({c["child"] for c in calls}, {kid.name for kid in kids})
+        self.assertEqual([e["outcome"] for e in graded(events, "fan")], ["done"])
+        items = result(root, "fan.1.json")["items"]
+        self.assertEqual(len(items), 3)
+        for entry in items:
+            self.assertEqual((entry["end"], entry["item"]), ("done", "approve"))
+        for call in calls:
+            self.assertEqual(items[call["index"]]["run"], call["child"])
+        for kid in kids:
+            self.assertEqual(project.events(kid)[-1]["event"], "run_done")
+
+    def test_the_parent_records_each_call_event_before_its_child_walks(self):
+        project = EngineProject(self)
+        spy = WalkSpy(REAL_WALK)
+        self.deliver_in_process(project, FAN("standin-items", 2), spy, fan_children())
+        self.assertEqual(len(spy.records), 3)
+        self.assertTrue(all(seen for _, seen in spy.records))
+
+    def test_a_child_that_ends_in_a_stop_makes_that_stop_the_call_outcome(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(FAN("standin-items-mixed", 2),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        (root,) = roots(project)
+        events = project.events(root)
+        self.assertEqual([e["outcome"] for e in graded(events, "fan")], ["child-stop"])
+        items = result(root, "fan.1.json")["items"]
+        self.assertEqual([entry["end"] for entry in items], ["done", "child-stop", "done"])
+        stopped = project.events(root.parent / items[1]["run"])[-1]
+        self.assertEqual((stopped["event"], stopped["stop"]), ("stop_reached", "child-stop"))
+
+    def test_a_call_without_each_runs_one_child(self):
+        project = EngineProject(self)
+        procedures = project.procedures(
+            [{"id": "once", "stage": "landing", "kind": "call", "holds": "run", "procedure": "solo",
+              "on": {"done": "done", "child-stop": "needs-owner"}}],
+            children={"solo": child([step("work", "standin-json", "done", failed="child-stop")],
+                                    inputs=("issue",))})
+        done = project.deliver(procedures, issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(project.runs()), 2)
+        (root,) = roots(project)
+        (kid,) = children_of(project)
+        calls = [e for e in project.events(root) if e["event"] == "call"]
+        self.assertEqual([(c["index"], c["items"], c["child"]) for c in calls],
+                         [(0, 1, kid.name)])
+        self.assertEqual(result(root, "once.1.json"),
+                         {"items": [{"end": "done", "item": None, "run": kid.name}]})
+        self.assertEqual(run_document(kid)["inputs"], {"issue": 1517})
+
+    def test_a_call_over_an_empty_list_runs_no_child_and_is_done(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(FAN("standin-json", 2),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(project.runs()), 1)
+        (root,) = roots(project)
+        events = project.events(root)
+        self.assertFalse([e for e in events if e["event"] == "call"])
+        self.assertEqual(result(root, "fan.1.json"), {"items": []})
+        self.assertEqual([e["outcome"] for e in graded(events, "fan")], ["done"])
+
+    def test_status_reports_the_root_run_not_a_child(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(FAN("standin-items", 2),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (root,) = roots(project)
+        status = project.status(1517)
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        state = json.loads(status.stdout)
+        self.assertEqual(state["run"], root.name)
+        self.assertIs(state["done"], True)
+
+    def test_a_faulting_child_starts_no_further_child_and_faults_the_parent(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(
+            FAN("standin-items", 1), children=fan_children("standin-says-maybe")), issue=1517)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(project.runs()), 2)
+        (root,) = roots(project)
+        events = project.events(root)
+        self.assertEqual(len([e for e in events if e["event"] == "call"]), 1)
+        self.assertEqual(graded(events, "fan"), [])
+
+    def test_a_fault_stops_admission_while_a_sibling_runs_on(self):
+        project = EngineProject(self)
+        fault_seen = threading.Event()
+        waited: list[bool] = []
+        real_fail = engine_shell._Admission.fail
+
+        def fail(admission) -> None:
+            real_fail(admission)
+            fault_seen.set()
+
+        def before(item) -> None:
+            if item == "maybe":
+                raise engine_shell.Fault("injected")
+            if item == "hold":
+                waited.append(fault_seen.wait(30))
+
+        spy = WalkSpy(REAL_WALK, before=before)
+        procedures = project.procedures(FAN("standin-items-hold", 2), children=fan_children())
+        with project.inside(), mock.patch.object(engine_shell, "_walk", spy), \
+                mock.patch.object(engine_shell._Admission, "fail", fail):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        self.assertEqual(waited, [True])
+        kids = children_of(project)
+        self.assertEqual(sorted(run_document(kid)["inputs"]["item"] for kid in kids),
+                         ["hold", "maybe"])
+        self.assertEqual(len(project.runs()), 3)
+        (root,) = roots(project)
+        events = project.events(root)
+        calls = [e for e in events if e["event"] == "call"]
+        self.assertEqual(sorted(c["index"] for c in calls), [0, 1])
+        held = next(kid for kid in kids if run_document(kid)["inputs"]["item"] == "hold")
+        self.assertEqual(project.events(held)[-1]["event"], "stop_reached")
+        self.assertEqual(graded(events, "fan"), [])
+        with project.inside():
+            for kid in kids:
+                self.assertIsNone(engine_shell.lock_holder(kid))
+
+    def test_a_child_whose_publication_faults_leaves_no_descriptor_open(self):
+        project = EngineProject(self)
+        real = engine_ledger.create_run
+
+        def create(**kwargs):
+            if kwargs.get("parent") is not None:
+                inner = kwargs["before_publish"]
+
+                def publish(staged: Path) -> None:
+                    inner(staged)
+                    raise OSError("injected")
+
+                kwargs["before_publish"] = publish
+            return real(**kwargs)
+
+        procedures = project.procedures(FAN("standin-items", 1), children=fan_children())
+        before = len(os.listdir("/dev/fd"))
+        with project.inside(), mock.patch.object(engine_ledger, "create_run", create):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
+        self.assertEqual(project.runs(), roots(project))
+        self.assertEqual(len(project.runs()), 1)
+        self.assertFalse([e for e in project.events(project.runs()[0]) if e["event"] == "call"])
+
+    def test_a_failed_call_event_leaves_no_child_the_parent_does_not_name(self):
+        project = EngineProject(self)
+        real = engine_ledger.append_event
+
+        def append(run_dir, event):
+            if event["event"] == "call" and event["index"] == 2:
+                raise OSError("injected")
+            return real(run_dir, event)
+
+        procedures = project.procedures(FAN("standin-items", 2), children=fan_children())
+        with project.inside(), mock.patch.object(engine_ledger, "append_event", append):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        (root,) = roots(project)
+        named = {e["child"] for e in project.events(root) if e["event"] == "call"}
+        self.assertEqual(len(named), 2)
+        self.assertEqual({kid.name for kid in children_of(project)}, named)
+        with project.inside():
+            for kid in children_of(project):
+                self.assertIsNone(engine_shell.lock_holder(kid))
+
+    def test_a_worker_that_cannot_start_is_a_fault_after_the_started_worker_is_drained(self):
+        project = EngineProject(self)
+        walking = threading.Event()
+        real_start = threading.Thread.start
+        starts: list[str] = []
+
+        def start(thread) -> None:
+            if getattr(thread._target, "__qualname__", "").endswith("worker"):
+                starts.append("worker")
+                if len(starts) == 2:
+                    walking.wait(30)
+                    raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        spy = WalkSpy(REAL_WALK, before=lambda item: walking.set())
+        procedures = project.procedures(FAN("standin-items", 2), children=fan_children())
+        with project.inside(), mock.patch.object(engine_shell, "_walk", spy), \
+                mock.patch.object(threading.Thread, "start", start):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        (kid,) = children_of(project)
+        self.assertEqual(project.events(kid)[-1]["event"], "run_done")
+        (root,) = roots(project)
+        self.assertEqual(len([e for e in project.events(root) if e["event"] == "call"]), 1)
+        with project.inside():
+            self.assertIsNone(engine_shell.lock_holder(kid))
+
+    def test_an_item_that_is_no_string_or_integer_faults_before_any_child(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(FAN("standin-items-object", 2),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(len(project.runs()), 1)
+        events = project.events(project.runs()[0])
+        self.assertFalse([e for e in events if e["event"] == "call"])
+        self.assertFalse([e for e in events
+                          if e["event"] == "step_entered" and e["step"] == "fan"])
+
+
+class PassThroughTest(unittest.TestCase):
+    def test_a_call_without_each_passes_the_parents_item_to_its_child(self):
+        project = EngineProject(self)
+        inner = {"id": "inner", "stage": "landing", "kind": "call", "holds": "run", "procedure": "grand",
+                 "on": {"done": "done", "child-stop": "child-stop"}}
+        children = {"fan-child": child([inner]),
+                    "grand": child([step("work", "standin-json", "done", failed="child-stop")])}
+        done = project.deliver(project.procedures(FAN("standin-items", 1), children=children),
+                               issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        by_run = {run.name: run_document(run) for run in children_of(project)}
+        grand = [doc for doc in by_run.values() if doc["procedure"] == "grand"]
+        self.assertEqual([doc["inputs"]["item"] for doc in grand], ["approve"] * 3)
+
+
+class ChildKeepAliveTest(unittest.TestCase):
+    def test_a_child_renews_the_claim_before_each_of_its_mutating_steps(self):
+        project = EngineProject(self)
+        project.answer({"stdout": '{"verdict":"renewed"}', "exit": 0})
+        steps = FAN("standin-items", 1)
+        steps[1]["on"]["claim-lost"] = "needs-owner"
+        work = {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": "standin-stamp",
+                "in": ["run.item"], "mutates": True, "check": {"command": "standin-stamp"},
+                "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}
+        document = child([work])
+        document["stops"]["claim-lost"] = {"need": "retry", "reenter": "work"}
+        done = project.deliver(
+            project.procedures(steps, keep_alive={"command": "standin-keep-alive",
+                                                  "in": ["run.issue"]},
+                               children={"fan-child": document}), issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(project.renewal_calls(), [{"argv": ["1517"]}] * 3)
+        for kid in children_of(project):
+            events = project.events(kid)
+            self.assertEqual([e["event"] for e in events if e["event"] in
+                              ("keep_alive_ran", "step_entered")],
+                             ["keep_alive_ran", "step_entered"])
+
+
+class PreflightTest(unittest.TestCase):
+    def test_a_child_reached_by_many_call_paths_is_validated_once_per_supplied_input_set(self):
+        project = EngineProject(self)
+        levels = 20
+
+        def calls(target: str, last: str) -> list[dict]:
+            return [{"id": name, "stage": "landing", "kind": "call", "holds": "run", "procedure": target,
+                     "on": {"done": "done", "child-stop": other}}
+                    for name, other in (("first", "second"), ("second", last))]
+
+        steps = calls("level1", "needs-owner")
+        children = {}
+        for level in range(1, levels):
+            target = f"level{level + 1}"
+            body = (calls(target, "child-stop") if level < levels - 1 else
+                    [step("work", "standin-json", "done", failed="child-stop")])
+            children[f"level{level}"] = child(body, inputs=("issue",))
+        procedures = project.procedures(steps, children=children)
+        loads = []
+        real = engine_shell._load
+
+        def load(path):
+            loads.append(path.name)
+            self.assertLess(len(loads), 500, "the preflight reloads a child for every call path")
+            return real(path)
+
+        with project.inside(), mock.patch.object(engine_shell, "_load", load):
+            engine_shell._validate(procedures, engine_shell._resolve()[1])
+        self.assertLessEqual(len(loads), 2 * levels)
+
+
+class RefusalTest(unittest.TestCase):
+    def test_a_call_the_engine_cannot_run_is_refused(self):
+        solo = child([step("work", "standin-json", "done", failed="child-stop")],
+                     inputs=("issue",))
+        call = {"id": "once", "stage": "landing", "kind": "call", "holds": "run", "procedure": "solo",
+                "on": {"done": "done", "child-stop": "needs-owner"}}
+
+        def undeclared(project: EngineProject) -> Path:
+            return project.procedures([call], children={"solo": child(
+                [step("work", "standin-json", "done", failed="child-stop")],
+                inputs=("issue", "repo"))})
+
+        def itself(project: EngineProject) -> Path:
+            return project.procedures([{
+                "id": "loop", "stage": "landing", "kind": "call", "holds": "run", "procedure": "deliver",
+                "on": {"done": "done", "needs-owner": "needs-owner"}}])
+
+        def member(project: EngineProject) -> Path:
+            return project.procedures([
+                {"id": "checks", "stage": "final review", "kind": "group", "holds": "run",
+                 "members": [{"step": "c", "pass": ["done"]}],
+                 "on": {"pass": "done", "blocked": "needs-owner"}},
+                {"id": "c", "stage": "final review", "kind": "call", "holds": "run", "procedure": "solo"}],
+                children={"solo": solo})
+
+        def mutating(project: EngineProject) -> Path:
+            return project.procedures([call], children={"solo": child([
+                {"id": "j", "stage": "building", "kind": "decide", "holds": "run", "grader": "toy-tally",
+                 "in": ["run.issue"], "mutates": True,
+                 "on": {"accept": "done", "revise": "child-stop"}}], inputs=("issue",))})
+
+        def unread_role(project: EngineProject) -> Path:
+            copy_roles(project, "implementer")
+            directory = project.procedures([call], children={"solo": child([
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
+                 "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.issue"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}],
+                inputs=("issue",))})
+            (directory / "draft.md").write_text("Draft issue {{run.issue}}.\n", encoding="utf-8")
+            (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+            return directory
+
+        cases = {
+            "a child input the parent does not supply": ("repo", undeclared),
+            "a procedure that calls itself": ("calls", itself),
+            "a call member of a group": ("group", member),
+            "a mutating child step": ("mutates", mutating),
+            "a child agent step whose role file does not read": ("role reviewer", unread_role),
+        }
+        for name, (word, build) in cases.items():
+            with self.subTest(name):
+                project = EngineProject(self)
+                done = project.deliver(build(project), issue=1517)
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                self.assertIn(word, done.stderr)
+                self.assertEqual(project.runs(), [])
+
+
+class ChildSessionTest(unittest.TestCase):
+    def test_an_agent_step_of_each_child_run_runs_as_that_child_runs_session(self):
+        project = EngineProject(self)
+        project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project, "reviewer")
+        log = install_stub(project, RESULT_NORMAL)
+        directory = project.procedures(FAN("standin-items-mixed", 2), children={
+            "fan-child": child([
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
+                 "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.item"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}])})
+        (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
+        (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+
+        done = project.deliver(directory, issue=1517)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        kids = children_of(project)
+        self.assertEqual(len(kids), 3)
+        for kid in kids:
+            events = engine_ledger.replay(kid / "events.jsonl")
+            starts = [e for e in events if e["event"] == "session_starting"]
+            self.assertEqual([(e["step"], e["visit"]) for e in starts], [("look", 1)])
+            self.assertTrue((kid / "results" / "look.1.json").is_file())
+            for name in ("look.1.system.md", "look.1.prompt.md", "look.1.json"):
+                self.assertTrue((kid / "sessions" / name).is_file(), name)
+        (root,) = roots(project)
+        events = engine_ledger.replay(root / "events.jsonl")
+        self.assertEqual([e for e in events if e["event"] == "session_starting"], [])
+        self.assertFalse((root / "sessions").exists())
+        lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(sorted(line["stdin"] for line in lines),
+                         ["Review item approve.\n", "Review item approve.\n",
+                          "Review item nope.\n"])
+        self.assertTrue(all(line["announced"] for line in lines))
+        self.assertEqual([e["outcome"] for e in graded(events, "fan")], ["done"])
+
+
+class GroupSessionTest(unittest.TestCase):
+    def test_a_group_of_two_agent_members_runs_both_sessions_beside_each_other(self):
+        project = session_project(self, hold=1.0)
+        directory = with_session_files(project.procedures(REVIEWS()))
+
+        done = project.deliver(directory, issue=1517)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        (run,) = project.runs()
+        records = [json.loads(line) for line in
+                   (project.tmp / "sessions.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(records), 2)
+        self.assertLess(max(r["start"] for r in records), min(r["end"] for r in records))
+        events = project.events(run)
+        starts = [(e["step"], e["visit"]) for e in events if e["event"] == "session_starting"]
+        self.assertCountEqual(starts, [("ra", 1), ("rb", 1)])
+        for name in ("ra", "rb"):
+            self.assertTrue((run / "results" / f"{name}.1.json").is_file(), name)
+            self.assertTrue((run / "sessions" / f"{name}.1.json").is_file(), name)
+        self.assertFalse((run / "results" / "reviews.1.json").exists())
+        self.assertEqual([e for e in events if e["event"] == "transition_taken"
+                          and e["step"] in ("ra", "rb")], [])
+        order = [(e["event"], e["step"], e["outcome"]) for e in events
+                 if e["event"] in ("outcome_graded", "transition_taken")]
+        self.assertEqual(sorted(order[:2]), [("outcome_graded", "ra", "drafted"),
+                                             ("outcome_graded", "rb", "drafted")])
+        self.assertEqual(order[2:], [("outcome_graded", "reviews", "pass"),
+                                     ("transition_taken", "reviews", "pass")])
+        self.assertEqual([e["visit"] for e in graded(events, "reviews")], [1])
+        (taken,) = [e for e in events if e["event"] == "transition_taken"]
+        self.assertEqual(taken["to"], "done")
+
+    def test_an_agent_member_outside_its_pass_set_blocks_the_group(self):
+        project = session_project(self, hold=1.0)
+        directory = with_session_files(project.procedures(REVIEWS(pass_b=("stuck",))))
+
+        done = project.deliver(directory, issue=1517)
+
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "needs-owner")
+        records = [json.loads(line) for line in
+                   (project.tmp / "sessions.log").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(records), 2)
+        self.assertLess(max(r["start"] for r in records), min(r["end"] for r in records))
+        (run,) = project.runs()
+        self.assertEqual([e["outcome"] for e in graded(project.events(run), "reviews")],
+                         ["blocked"])
+
+    def test_a_member_session_with_no_structured_reply_is_no_reply_and_blocks_the_group(self):
+        project = session_project(self, hold=0,
+                                  canned=canned_result(structured_output=...))
+        directory = with_session_files(project.procedures(REVIEWS()))
+
+        done = project.deliver(directory, issue=1517)
+
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        (run,) = project.runs()
+        events = project.events(run)
+        for name in ("ra", "rb"):
+            self.assertTrue((run / "sessions" / f"{name}.1.json").is_file(), name)
+            self.assertEqual([e["outcome"] for e in graded(events, name)], ["no-reply"])
+        self.assertEqual([e["outcome"] for e in graded(events, "reviews")], ["blocked"])
+
+
+class GroupQuotaTest(unittest.TestCase):
+    """A member's `quota-wait` and an engine stop inside a group."""
+
+    def deliver_with(self, out: dict[str, str], *, publish: bool = False):
+        """Deliver REVIEWS in process; each member's launch is `fake`: the members named in
+        `out` find every account out, the rest answer after the quota members have returned
+        and a quarter second more, publishing an engine stop in that window when `publish`."""
+        project = EngineProject(self)
+        project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project, "reviewer", "reviewer-lite")
+        directory = with_session_files(project.procedures(REVIEWS()))
+        reply = canned_result()
+        returned, published = threading.Semaphore(0), []
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            name = "ra" if argv[-1].endswith("ra.1.system.md") else "rb"
+            on_start(os.getpid())
+            answer = Path(env[engine_session.ANSWER_ENV])
+            if name in out:
+                answer.write_text(json.dumps({"all_out": True, "resumes_at": out[name]}))
+                returned.release()
+                return engine_session.Launched(engine_session.ALL_OUT_EXIT, b"", b"", 0.0)
+            for _ in out:
+                returned.acquire()
+            time.sleep(0.25)
+            if publish:
+                (run,) = project.runs()
+                published.append(engine_shell.request_stop(run))
+                if stop():
+                    raise engine_stop.Stopped
+            answer.write_text(json.dumps({"account": "stub"}))
+            return engine_session.Launched(0, reply, b"", 0.1)
+
+        with project.inside(), mock.patch.object(engine_session, "launch", fake):
+            code, line = engine_shell.deliver(1517, directory)
+        (run,) = project.runs()
+        return code, line, project.events(run), run, published
+
+    def test_a_members_quota_wait_is_the_last_event_of_the_run_after_the_running_sibling_ends(self):
+        code, line, events, run, _ = self.deliver_with({"ra": "2030-03-17T17:46:40Z"})
+
+        self.assertEqual((code, line["end"]), (3, "quota-wait"))
+        stops = [e for e in events if e["event"] == "stop_reached"]
+        self.assertEqual([(e["step"], e["stop"]) for e in stops], [("ra", "quota-wait")])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+        self.assertIn("session_answered", [e["event"] for e in events[:-1] if e.get("step") == "rb"])
+
+    def test_two_members_out_of_every_account_record_one_quota_wait_stop(self):
+        code, line, events, run, _ = self.deliver_with({"ra": None, "rb": None})
+
+        self.assertEqual((code, line["end"]), (3, "quota-wait"))
+        self.assertEqual([e["step"] for e in events if e["event"] == "stop_reached"], ["ra"])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+
+    def test_a_stop_published_while_a_member_waits_on_quota_is_honored_once_and_leaves_no_request(self):
+        code, line, events, run, published = self.deliver_with({"ra": None}, publish=True)
+
+        self.assertEqual(len(published), 1)
+        self.assertIsNotNone(published[0], "the request was refused: the run had already ended")
+        self.assertEqual((code, line["end"]), (3, engine_stop.STOPPED_BY_REQUEST))
+        stops = [e for e in events if e["event"] == "stop_reached"]
+        self.assertEqual([e["stop"] for e in stops], [engine_stop.STOPPED_BY_REQUEST])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+        self.assertFalse(engine_stop.request_path(run).exists())
+
+
+class ScopeTest(unittest.TestCase):
+    """What a group's members and a call's child runs share with the root run: its stop request,
+    its agent slots, its tracker."""
+
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, "reviewer", "reviewer-lite")
+
+    def deliver_call(self, launch) -> tuple[int, dict]:
+        """Deliver a call of three one-session child runs in process, one at a time."""
+        directory = self.project.procedures(FAN("standin-items", 1), children={
+            "fan-child": child([
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
+                 "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.item"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}])})
+        (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
+        (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+        return self.deliver(directory, launch)
+
+    def deliver(self, directory: Path, launch) -> tuple[int, dict]:
+        with self.project.inside(), mock.patch.object(engine_session, "launch", launch):
+            return engine_shell.deliver(1517, directory)
+
+    @staticmethod
+    def answer(env, document: dict) -> None:
+        Path(env[engine_session.ANSWER_ENV]).write_text(json.dumps(document))
+
+    def test_a_child_that_ends_at_quota_wait_makes_the_call_stop_there_after_the_child_recorded_its_own(self):
+        def launch(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            on_start(os.getpid())
+            self.answer(env, {"all_out": True, "resumes_at": None})
+            return engine_session.Launched(engine_session.ALL_OUT_EXIT, b"", b"", 0.0)
+
+        code, line = self.deliver_call(launch)
+
+        self.assertEqual((code, line["end"]), (3, "quota-wait"))
+        (root,) = roots(self.project)
+        (kid,) = children_of(self.project)
+        events = self.project.events(root)
+        self.assertEqual([(e["step"], e["stop"]) for e in events if e["event"] == "stop_reached"],
+                         [("fan", "quota-wait")])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+        self.assertEqual([(e["step"], e["stop"]) for e in self.project.events(kid)
+                          if e["event"] == "stop_reached"], [("look", "quota-wait")])
+
+    def test_a_stop_published_while_a_child_runs_ends_the_child_and_the_call_once_and_leaves_no_request(self):
+        published = []
+
+        def launch(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            on_start(os.getpid())
+            (root,) = roots(self.project)
+            published.append(engine_shell.request_stop(root))
+            if stop():
+                raise engine_stop.Stopped
+            self.answer(env, {"account": "stub"})
+            return engine_session.Launched(0, canned_result(), b"", 0.1)
+
+        code, line = self.deliver_call(launch)
+
+        self.assertEqual(len(published), 1)
+        self.assertIsNotNone(published[0])
+        self.assertEqual((code, line["end"]), (3, engine_stop.STOPPED_BY_REQUEST))
+        (root,) = roots(self.project)
+        (kid,) = children_of(self.project)
+        for run in (root, kid):
+            events = self.project.events(run)
+            self.assertEqual([e["stop"] for e in events if e["event"] == "stop_reached"],
+                             [engine_stop.STOPPED_BY_REQUEST], run.name)
+            self.assertEqual(events[-1]["event"], "stop_reached", run.name)
+        self.assertFalse(engine_stop.request_path(root).exists())
+
+    def test_the_sessions_of_group_members_and_of_child_runs_hold_the_slots_of_the_root_run(self):
+        held: list[tuple[str, int, bool]] = []
+        both = threading.Barrier(2, timeout=30)
+        counted = threading.Barrier(2, timeout=30)
+
+        def launch(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            on_start(os.getpid())
+            member = argv[-1].endswith(("ra.1.system.md", "rb.1.system.md"))
+            if member:
+                both.wait()  # both members are in their launch at once
+                if argv[-1].endswith("rb.1.system.md"):
+                    time.sleep(0.5)  # the other member would finish first on a slow host
+            (root,) = roots(self.project)
+            held.append((argv[-1].rsplit("/", 1)[-1], held_slots(root),
+                         any((kid / "slots").exists() for kid in children_of(self.project))))
+            if member:
+                counted.wait()  # neither member ends, and frees its slot, before both have counted
+            self.answer(env, {"account": "stub"})
+            return engine_session.Launched(0, canned_result(), b"", 0.1)
+
+        code, line = self.deliver(with_session_files(self.project.procedures(REVIEWS())), launch)
+        self.assertEqual(code, 0, line)
+        self.assertEqual([count for _, count, _ in held], [2, 2])
+        self.assertFalse(any(kid for _, _, kid in held))
+
+        held.clear()
+        project = self.project = EngineProject(self)
+        project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project, "reviewer")
+        code, line = self.deliver_call(launch)
+        self.assertEqual(code, 0, line)
+        self.assertEqual([(count, kid) for _, count, kid in held], [(1, False)] * 3)
+
+    def test_a_child_run_records_the_tracker_of_its_root_run(self):
+        project = self.project
+        done = project.deliver(project.procedures(FAN("standin-items", 2),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (root,) = roots(project)
+        self.assertIn("tracker", run_document(root))
+        kids = children_of(project)
+        self.assertEqual(len(kids), 3)
+        for kid in kids:
+            self.assertEqual(run_document(kid)["tracker"], run_document(root)["tracker"])
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class SigtermTest(unittest.TestCase):
+    def start(self, project: EngineProject, directory: Path) -> subprocess.Popen:
+        argv, options = project.command("deliver", "1517", "--procedures", str(directory))
+        engine = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
+        self.addCleanup(self.reap, engine)
+        return engine
+
+    @staticmethod
+    def reap(engine: subprocess.Popen) -> None:
+        if engine.poll() is None:
+            engine.kill()
+        engine.wait()
+        for pipe in (engine.stdout, engine.stderr):
+            pipe.close()
+
+    def test_a_sigterm_during_a_group_ends_every_member_session_and_exits_143(self):
+        project = session_project(self, hold=60)
+        directory = with_session_files(project.procedures(REVIEWS()))
+        pids: list[int] = []
+        engine = self.start(project, directory)
+        try:
+            pids = started(project, wait_for_run(project, children=False), {"ra", "rb"}, 2)
+            os.kill(engine.pid, signal.SIGTERM)
+            engine.communicate(timeout=30)
+            self.assertEqual(engine.returncode, 143)
+            limit = time.monotonic() + 5
+            while any(alive(pid) for pid in pids) and time.monotonic() < limit:
+                time.sleep(0.05)
+            for pid in pids:
+                self.assertFalse(alive(pid), pid)
+        finally:
+            if engine.poll() is None:
+                engine.kill()
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def call_during_work(self, steps: list[dict]):
+        project = EngineProject(self)
+        directory = project.procedures(FAN("standin-items", 1),
+                                       children={"fan-child": child(steps)})
+        engine = self.start(project, directory)
+        try:
+            kid = wait_for_run(project, children=True)
+            started(project, kid, {"work"}, 1)
+            os.kill(engine.pid, signal.SIGTERM)
+            time.sleep(0.5)  # the engine takes the signal while the call still blocks, even under load
+            project.release.write_text("", encoding="utf-8")
+            engine.communicate(timeout=60)
+        finally:
+            if engine.poll() is None:
+                engine.kill()
+        return project, engine, kid
+
+    def test_a_sigterm_during_a_call_admits_no_further_child(self):
+        project, engine, _ = self.call_during_work([
+            {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": "standin-block",
+             "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}])
+
+        self.assertEqual(engine.returncode, 143)
+        self.assertEqual(len(children_of(project)), 1)
+        (root,) = roots(project)
+        self.assertEqual(len([e for e in project.events(root) if e["event"] == "call"]), 1)
+
+    def test_a_sigterm_during_a_call_starts_no_later_step_of_the_running_child(self):
+        project, engine, kid = self.call_during_work([
+            {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": "standin-block",
+             "in": ["run.item"], "on": {"ok": "after", "failed": "child-stop", "refused": "child-stop"}},
+            {"id": "after", "stage": "building", "kind": "command", "holds": "run", "command": "standin-stamp",
+             "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}])
+
+        self.assertEqual(engine.returncode, 143)
+        self.assertFalse(project.stamps.exists())
+        events = project.events(kid)
+        self.assertEqual(len(graded(events, "work")), 1)
+        self.assertEqual([e for e in events if e.get("step") == "after"
+                          and e["event"] in ("step_entered", "process_started")], [])
+        self.assertEqual(len(children_of(project)), 1)
+
+
+class ShutdownTest(unittest.TestCase):
+    """The engine ending while a group or a call is starting or walking (in process)."""
+
+    def test_a_sigterm_while_a_group_submits_its_members_ends_the_started_session(self):
+        project = session_project(self, hold=60)
+        directory = with_session_files(project.procedures(REVIEWS()))
+        real_submit = ThreadPoolExecutor.submit
+        pids: list[int] = []
+
+        def submit(pool, *args, **kwargs):
+            future = real_submit(pool, *args, **kwargs)
+            if not pids:
+                run = wait_for_run(project, children=False)
+                pids.extend(started(project, run, {"ra", "rb"}, 1))
+                self.assertIs(signal.getsignal(signal.SIGTERM), engine_session._terminate)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return future
+
+        began = time.monotonic()
+        try:
+            with project.inside(), mock.patch.object(engine_session, "_closed", False), \
+                    mock.patch.object(ThreadPoolExecutor, "submit", submit):
+                with self.assertRaises(SystemExit) as stopped:
+                    engine_shell.deliver(1517, directory)
+            self.assertEqual(stopped.exception.code, 143)
+            self.assertLess(time.monotonic() - began, 30)
+            for pid in pids:
+                self.assertFalse(alive(pid), pid)
+        finally:
+            for pid in pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_a_member_that_cannot_be_started_is_a_fault_after_the_started_member_is_drained(self):
+        project = EngineProject(self)
+        real_submit = ThreadPoolExecutor.submit
+        calls: list[int] = []
+
+        def submit(pool, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+            return real_submit(pool, *args, **kwargs)
+
+        with project.inside(), mock.patch.object(ThreadPoolExecutor, "submit", submit):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, project.procedures(GROUP("standin-stamp")))
+        self.assertEqual(len(stamps(project)), 1)
+
+    def test_a_claim_renewed_as_the_engine_ends_dispatches_no_mutating_step(self):
+        project = EngineProject(self)
+        project.answer({"stdout": '{"verdict":"renewed"}', "exit": 0})
+        real_run = engine_commands.run
+
+        def run(*args, **kwargs):
+            ran = real_run(*args, **kwargs)
+            if kwargs.get("timeout") is not None:
+                engine_session._closed = True  # what `reaping` does on a SIGTERM
+            return ran
+
+        procedures = project.procedures(
+            [step("work", "standin-stamp", "done", mutates=True)],
+            keep_alive={"command": "standin-keep-alive", "in": ["run.issue"]})
+        with project.inside(), mock.patch.object(engine_session, "_closed", False), \
+                mock.patch.object(engine_commands, "run", run):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        self.assertEqual(project.renewal_calls(), [{"argv": ["1517"]}])
+        self.assertFalse(project.stamps.exists())
+        (root,) = roots(project)
+        self.assertEqual([e for e in project.events(root)
+                          if e["event"] in ("step_entered", "process_started")], [])
+
+    def test_a_call_admits_no_item_once_the_engine_is_ending(self):
+        project = EngineProject(self)
+        real_walk = engine_shell._walk
+
+        def walk(run_dir, table, *rest):
+            outcome = real_walk(run_dir, table, *rest)
+            if "parent" in json.loads((run_dir / "run.json").read_text(encoding="utf-8")):
+                engine_session._closed = True  # another thread's `reaping` closed the registry
+            return outcome
+
+        procedures = project.procedures(FAN("standin-items", 1), children=fan_children())
+        with project.inside(), mock.patch.object(engine_session, "_closed", False), \
+                mock.patch.object(engine_shell, "_walk", walk):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        (root,) = roots(project)
+        self.assertEqual(len([e for e in project.events(root) if e["event"] == "call"]), 1)
+        self.assertEqual(len(children_of(project)), 1)
+
+    def test_a_call_event_that_failed_only_at_its_fsync_keeps_the_child_it_names(self):
+        project = EngineProject(self)
+        real_append = engine_ledger.append_event
+
+        def append(run_dir, event):
+            real_append(run_dir, event)
+            if event["event"] == "call" and event["index"] == 0:
+                raise OSError("fsync failed after the event was written")
+
+        procedures = project.procedures(FAN("standin-items", 1), children=fan_children())
+        with project.inside(), mock.patch.object(engine_ledger, "append_event", append):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1517, procedures)
+        (root,) = roots(project)
+        named = {e["child"] for e in project.events(root) if e["event"] == "call"}
+        self.assertEqual(len(named), 1)
+        self.assertEqual({kid.name for kid in children_of(project)}, named)
+
+
+class HandlerTest(unittest.TestCase):
+    def test_a_group_and_a_call_restore_the_sigterm_handler(self):
+        project = EngineProject(self)
+
+        def sentinel(signum, frame):
+            pass
+
+        previous = signal.signal(signal.SIGTERM, sentinel)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        seen: list[object] = []
+        real_member = engine_shell._member
+
+        def member(*args):
+            seen.append(signal.getsignal(signal.SIGTERM))
+            return real_member(*args)
+
+        spy = WalkSpy(engine_shell._walk,
+                      before=lambda item: seen.append(signal.getsignal(signal.SIGTERM)))
+        with project.inside(), mock.patch.object(engine_shell, "_member", member):
+            code, line = engine_shell.deliver(1517, project.procedures(GROUP("standin-stamp")))
+        after_group = signal.getsignal(signal.SIGTERM)
+        fan = EngineProject(self)
+        with fan.inside(), mock.patch.object(engine_shell, "_walk", spy):
+            fan_code, fan_line = engine_shell.deliver(
+                1517, fan.procedures(FAN("standin-items", 2), children=fan_children()))
+        after_call = signal.getsignal(signal.SIGTERM)
+
+        self.assertEqual((code, fan_code), (0, 0), (line, fan_line))
+        self.assertEqual(len(seen), 5)
+        for handler in seen:
+            self.assertIs(handler, engine_session._terminate)
+        self.assertIs(after_group, sentinel)
+        self.assertIs(after_call, sentinel)
+
+
+if __name__ == "__main__":
+    unittest.main()

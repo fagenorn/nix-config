@@ -35,7 +35,9 @@ path or lies under it, so `.claude/` counts when `.claude/specs` moves. A moved
 file, or a directory whose members all moved by the same relative tails under
 one new directory, has a single successor; a path that survives or dissolves
 maps to the successors of its wholly moved subtrees, carried only for an empty,
-`/` or `/**` tail.
+`/` or `/**` tail. The prefilter matches that first segment as written, so a
+spelling that escapes an interior dot of it with a backslash, as a regular
+expression would, is not found.
 
 An occurrence that no answer decides (its own, or its policy's, below) opens a
 `path-reference` question unless its policy's question is open, or its quoted
@@ -59,8 +61,8 @@ subject or a value the occurrence does not offer refuses
 through `no-open-decisions`; no gate and no `verify` check is added. Each file
 with an `extend` or `rewrite` answer is one `write-file` after the Markdown
 link rewrites and before the projection regenerations, in the same commit as
-the moves, unless another file is left at its `target`. The plan document and
-the adoption evidence record carry `path_references`, one row per occurrence
+the moves, unless another file is left at its `target`. The plan document
+carries `path_references`, one row per occurrence
 sorted by path, line and column (`subject`, `path`, `line`, `column`,
 `literal`, `answers`, `answer`, `additions`, `replacement`, `target`, `policy`,
 `decided_by`; `answer` is the effective answer), and the record's
@@ -138,7 +140,7 @@ or a subject answered twice refuses `adopt.decisions.invalid_answer`. The
 
 Each `path_references` row carries `target`, `policy` (null for a file the plan
 does not move) and `decided_by` (`occurrence`, `policy`, `line` or null), and the plan
-document and the adoption evidence record carry `reference_policies`, one row
+document carries `reference_policies`, one row
 per policy that has an occurrence, sorted by subject. A row has thirteen
 members: `subject`, `tree`, `class`, `recommended`, `answer` (the policy's
 answer or null), `files` (distinct base paths), `occurrences`, `rewritable`
@@ -258,7 +260,7 @@ record's `sources` with `after` null. The path literals inside it are ordinary
 occurrences: each may open a `path-reference` question, and an `extend` or
 `rewrite` answer produces one in-place `write-file` of the settings file.
 
-`reference_formatting`, in the plan document and the adoption evidence record,
+`reference_formatting`, in the plan document,
 is one `{class, command, files}` row, sorted by class, for each class with a
 file the `path-reference` answers edit, `files` being the edited files'
 destination paths and `command` the class's `reference-format` answer or null

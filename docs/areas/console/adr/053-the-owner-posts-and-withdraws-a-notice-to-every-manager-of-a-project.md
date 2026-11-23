@@ -23,7 +23,7 @@ ADR-console-044 let a manager post a notice for its project and ADR-console-046 
 
 **D7. The view.** Every notice entry carries `owner`, true for the owner's, with the poster shown as "You" and no sprint id, and every project entry carries `notice_post`, true when the project has an open sprint that takes notices, so the page offers the post. The notice is information and changes no count, statement or inbox (ADR-console-046).
 
-**D8. The page.** A project with a running sprint shows its "Notices" fold even with no notice, and holds a quiet "Post a notice" control: a one-line field with Send and Cancel, the draft and its focus surviving every frame and a refusal's reason beside it. The owner's notice reads "Heads-up, from You" with a quiet Withdraw (ADR-console-002).
+**D8. The page.** A project with a running sprint shows its "Notices" fold even with no notice, and holds a quiet "Post a notice" control: a one-line field with Send and Cancel, the draft and its focus surviving every frame and a refusal's reason beside it. The owner's notice reads "Heads-up, from You" with a quiet Withdraw.
 
 **D9. Never approval.** The owner's notice is information and never approval of a brief, a merge or anything else; a manager's contract says so, and a manager answers it by reading it, not by waiting for it.
 
@@ -33,4 +33,4 @@ ADR-console-044 let a manager post a notice for its project and ADR-console-046 
 - The owner's notice is held per project, so a sprint launched later reads it in its first prompt.
 - ADR-console-044 D9 and ADR-console-046 D1, "only a manager posts", no longer hold: the owner posts too. Their other rules are unchanged.
 - The manager contract is outside the instruction corpus, so no Instruction Budget raise follows.
-- Related: ADR-console-002, ADR-console-008, ADR-console-016, ADR-console-044, ADR-console-046.
+- Related: ADR-console-008, ADR-console-016, ADR-console-044, ADR-console-046.

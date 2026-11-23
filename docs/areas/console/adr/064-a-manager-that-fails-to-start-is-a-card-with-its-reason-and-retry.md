@@ -5,7 +5,7 @@
 
 ## Context
 
-On 16 Nov a sprint's first launch was refused with the client's words, "Workspace not trusted. Run `claude` in the project folder once and accept the trust prompt, then retry." The owner's desk showed a small red line inside the sprint block, the ball read "nothing running, may be stuck" and nothing asked the owner for anything, so the sprint sat for 45 minutes. A failed first launch has no brief behind it and no session to watch; only the owner can mend it, by trusting the folder or retrying, so it must be a card and not a line to find. ADR-console-015 made the failure a state inside the sprint with a retry, ADR-console-042 D4 gave it the ball "nothing running", and ADR-console-002 kept cards for a stall, progress and sign-in; none of them put the owner's attention on it, and the reason was the client's raw text, with host paths in it.
+On 16 Nov a sprint's first launch was refused with the client's words, "Workspace not trusted. Run `claude` in the project folder once and accept the trust prompt, then retry." The owner's desk showed a small red line inside the sprint block, the ball read "nothing running, may be stuck" and nothing asked the owner for anything, so the sprint sat for 45 minutes. A failed first launch has no brief behind it and no session to watch; only the owner can mend it, by trusting the folder or retrying, so it must be a card and not a line to find. ADR-console-015 made the failure a state inside the sprint with a retry, ADR-console-042 D4 gave it the ball "nothing running", and the desk page kept cards for a stall, progress and sign-in; none of them put the owner's attention on it, and the reason was the client's raw text, with host paths in it.
 
 ## Decision
 
@@ -23,7 +23,7 @@ On 16 Nov a sprint's first launch was refused with the client's words, "Workspac
 
 ## Consequences
 
-- This amends ADR-console-002: the Inbox rule names the card and its place. It amends ADR-console-015: a failure is also a card of its own. It amends ADR-console-042: a failed first launch with no brief is the owner's card, so its ball reads waiting on you and its line the failed start.
+- The Inbox rule names the card and its place. It amends ADR-console-015: a failure is also a card of its own. It amends ADR-console-042: a failed first launch with no brief is the owner's card, so its ball reads waiting on you and its line the failed start.
 - The owner sees why a launch was refused, in plain words, without a path or the client's text; the raw text is in the log and the journal for whoever debugs.
 - The page gains no write: Retry and "Drop the sprint" are the existing `/api/retry-manager` and withdrawal posts (ADR-console-008).
 - Related: ADR-console-034 documents `Workspace not trusted` as the client's `--bg` refusal.

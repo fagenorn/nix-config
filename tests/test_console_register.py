@@ -178,21 +178,17 @@ class LinesTest(unittest.TestCase):
         records = [
             {"op": "write-file", "sources": [],
              "targets": [f".agents/knowledge/archive/path-migrations/{digest}.json"]},
-            {"op": "write-file", "sources": [], "targets": [f".agents/artifacts/evidence/{digest}.json"]},
         ]
 
         def writes(*paths):
             return [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
 
         end = ", and records the adoption"
-        handoff = {"migration_map": records[0]["targets"][0],
-                   "evidence_record": records[1]["targets"][0]}
+        handoff = {"migration_map": records[0]["targets"][0]}
         cases = [
             (writes(".agents/runtime/.gitignore", ".gitignore") + records,
              [f"writes .agents/runtime/.gitignore and .gitignore{end}"]),
             (records, ["records the adoption"]),
-            (records[:1], ["records the adoption"]),
-            (records[1:], ["records the adoption"]),
             (writes("a", "b", "c", "d", "e") + records, [f"writes a, b, c and 2 more{end}"]),
             (writes("a", "b", "c") + records[:1], [f"writes a, b and c{end}"]),
             (writes("a") + records, [f"writes a{end}"]),
@@ -206,10 +202,9 @@ class LinesTest(unittest.TestCase):
 
     def test_an_ordinary_file_beside_the_adoptions_records_stays_named(self):
         digest = "50051d36e5e98d2b6d8b07c7417d1b1f666906b20ccc3dd6a96569665f4f0ade"
-        handoff = {"migration_map": f".agents/knowledge/archive/path-migrations/{digest}.json",
-                   "evidence_record": f".agents/artifacts/evidence/{digest}.json"}
+        handoff = {"migration_map": f".agents/knowledge/archive/path-migrations/{digest}.json"}
         paths = [".agents/artifacts/evidence/checklist.md",
-                 ".agents/knowledge/archive/path-migrations/notes.md", handoff["evidence_record"]]
+                 ".agents/knowledge/archive/path-migrations/notes.md", handoff["migration_map"]]
         changes = [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
         self.assertEqual(
             register.plan_lines(doc(changes=changes, handoff=handoff)),

@@ -165,13 +165,18 @@ agent-workflow-tests *args:
     tests/test_engine_deliver.py \
     tests/test_engine_session.py \
     tests/test_engine_session_limits.py \
+    tests/test_engine_reaping.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
     tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
+    tests/test_engine_fanout.py \
     tests/test_engine_slots.py \
+    tests/test_engine_fixture.py \
+    tests/test_engine_stubbed_run.py \
+    tests/test_issue_setup.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -189,6 +194,8 @@ agent-workflow-tests *args:
     tests/test_host_sudo.py \
     tests/test_runner_home.py \
     tests/test_verify_checks.py \
+    tests/test_cleanup_fix_check.py \
+    tests/test_suite_test_failures.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \

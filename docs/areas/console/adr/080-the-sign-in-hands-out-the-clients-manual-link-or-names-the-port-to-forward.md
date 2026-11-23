@@ -15,11 +15,11 @@ On 19 Nov the owner signed a profile in from the page on eleven-m5 while the bro
 
 **D3. A loopback-only run names its port.** When the client offers no manual link and the browser link returns to a loopback address, the answer is that link with route `loopback`, the port it names (80 when none is written) and the command `ssh -N -L <port>:localhost:<port> <host>`, with the console host's short name. A browser link whose return address cannot be read is handed out as route `unknown`, and the card says so.
 
-**D4. The answer shape.** This amends ADR-console-024 D1 and the add answer of ADR-console-025: the start, link and add answers carry `route` (`manual`, `loopback`, `unknown` or null), `port` and `forward` (null unless the route is `loopback`) beside `attempt` and `link`, and the add answer also `profile`. One link only is handed out.
+**D4. The answer shape.** This amends ADR-console-024 and its add answer: the start, link and add answers carry `route` (`manual`, `loopback`, `unknown` or null), `port` and `forward` (null unless the route is `loopback`) beside `attempt` and `link`, and the add answer also `profile`. One link only is handed out.
 
-**D5. Secrecy.** The client's output is read into memory only. A candidate that does not parse is dropped without a word. The port and the command appear only in those answers; no row, stderr line, view or stream frame carries them, the link or the code, and ADR-console-024 D7 stands.
+**D5. Secrecy.** The client's output is read into memory only. A candidate that does not parse is dropped without a word. The port and the command appear only in those answers; no row, stderr line, view or stream frame carries them, the link or the code, and ADR-console-024 stands.
 
-**D6. The page.** The page shows one sentence under the link naming its route. This amends ADR-console-024 D8; its wording is the page's.
+**D6. The page.** The page shows one sentence under the link naming its route. This amends ADR-console-024; its wording is the page's.
 
 ## Considered options
 
