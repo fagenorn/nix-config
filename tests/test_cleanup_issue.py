@@ -896,7 +896,7 @@ class FixCommandTest(ForgeWorld, unittest.TestCase):
     def registered_world(self, fixable: bool = True) -> tuple[Path, str]:
         root = self.fixable_world() if fixable else self.world()
         origin = Path(self.tmp.name) / "origin.git"
-        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True, timeout=60)
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True, timeout=60)
         git(root, "remote", "add", "origin", str(origin))
         git(root, "push", "-q", "origin", "main")
         return root, git(root, "rev-parse", "HEAD").strip()
