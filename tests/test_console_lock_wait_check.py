@@ -141,6 +141,14 @@ class LockWaitCheckTest(unittest.TestCase):
             code, printed = self.run_check(state=state_of(quiet_holder, sprint()))
             self.assertEqual((1, ["b" * 16]), (code, printed.get("stuck")))
 
+    def test_a_waiter_sprint_naming_its_position_is_met(self):
+        placed = sprint(now_text="waiting its turn to merge, position 1")
+        code, printed = self.run_check(state=state_of(placed))
+        self.assertEqual((0, "met"), (code, printed["status"]))
+        lookalike = sprint(now_text="waiting its turn to merge, positional")
+        code, printed = self.run_check(state=state_of(lookalike))
+        self.assertEqual((75, "no_wait_shown"), (code, printed["status"]))
+
     def test_a_waiter_sprint_moving_for_another_reason_is_not_yet(self):
         code, printed = self.run_check(
             state=state_of(sprint(now_text="building 1 of 2: Importer resumes")))

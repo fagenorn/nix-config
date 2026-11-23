@@ -8,14 +8,20 @@ updated open pull requests with the head commit's `committedDate` and its check 
 each one's `headRefOid`, `baseRefName` and `isCrossRepository`. The land lock is read by a second call, REST
 `git/matching-refs/agent-locks/land` (`locks_argv`), because GraphQL does not list `refs/agent-locks/`.
 `locks_from_answer` maps base branch name to lock oid from every item whose `ref` starts with
-`forge_land_lock.LOCK_PREFIX` (the branch is the rest of the ref); `land-wait/` and `land-beat/` refs are
-ignored; an answer that is not a list, or an item that is not an object with a str `ref` and an object
+`forge_land_lock.LOCK_PREFIX` (the branch is the rest of the ref); `land-beat/` refs are ignored there and
+`land-wait/` refs are read by `waiters_from_answer` (below); an answer that is not a list, or an item that is not an object with a str `ref` and an object
 `object` holding a str `sha`, raises `ForgeError("payload_invalid")`. A pull request is `holding` the lock
 (forge_land_lock D2) when the lock of its base branch is at its head oid, or, being a release pull request,
 when it is not cross-repository and the lock of its own head branch is at its head oid: a release's head is
 the locked integration branch itself, whatever its base, and a fork's branch of that name never holds. A
 node whose `headRefOid` or `baseRefName` is not a str or whose `isCrossRepository` is not a bool is
-payload_invalid. `read_pulls` makes two `call`s, `pulls_argv(slug)` then `locks_argv(slug)`, and asks
+payload_invalid. Its place in the queue (#1679): `waiters_from_answer` maps base branch to the `(since, pr)`
+pairs of every item whose ref starts with `forge_land_lock.WAIT_PREFIX`, the branch being the text up to the
+last `/` and the last segment matching `WAITER` entirely (others are skipped, shape errors as for the
+locks). A pull request's `queue_position` is its 1-based place among the pull requests of one read with the
+same base that have a registration and are not `holding`, ordered by `(smallest since, number)`; it is
+None otherwise, and a holder never has one. Display only: nothing is written and no call is added, the
+registrations come from the same answer. `read_pulls` makes two `call`s, `pulls_argv(slug)` then `locks_argv(slug)`, and asks
 `cancelled()` before each; when cancelled it raises `ForgeError("cancelled")` before that call, and a failed
 lock read fails the whole read. With no `call` the transport is
 `forge_api.gh_json(argv, cancelled=cancelled)`, which kills the `gh` process group in flight as soon
@@ -50,7 +56,8 @@ gates nothing), and each issue of `locking` (the issues whose journal sits at a 
 are seen no more and the sprint ages out to may be stuck (ADR-console-061 D1); its `locks` time
 becomes `max(now_ms, kept)`; an issue not seen keeps its time, never refreshed; `locks` is ascending by
 issue. A failed read sees nothing and keeps `locks` unchanged whatever `locking` holds, so a lock time ages
-out after the quiet window like every signal (ADR-console-050 D5), a journal lock step's included. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
+out after the quiet window like every signal (ADR-console-050 D5), a journal lock step's included. `positions` is each issue of a read pull with a `queue_position` mapped to its smallest, ascending by issue; a good read
+replaces it and a failed read keeps it (#1679). `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
 (a failed read) the result keeps `previous.pulls` and `previous.read_ms` unchanged. With `pulls` given,
 `read_ms = now_ms`, and each read pull becomes a `PullMovement` with its read `issues` and
 `committed_ms` (the larger of it and the previous pull's, so a rewritten head never moves it back,
@@ -120,13 +127,13 @@ import json
 import os
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from agent_tools.claims import owner_actions
-from agent_tools.claims.forge_land_lock import LOCK_PREFIX
+from agent_tools.claims.forge_land_lock import LOCK_PREFIX, WAIT_PREFIX, WAITER
 from agent_tools.console.deliveries import branch_issue
 from agent_tools.console.sessions import at_ms
 from agent_tools.release.transaction_history import STATES, TERMINALS
@@ -184,6 +191,7 @@ class PullRequest:
     running: bool
     committed_ms: int | None
     holding: bool = False
+    queue_position: int | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +220,7 @@ class ProjectMovement:
     locks: tuple[tuple[int, int], ...] = ()
     lock_held: bool = False
     sessions: tuple["SessionMovement", ...] = ()
+    positions: tuple[tuple[int, int], ...] = ()
 
 
 Cpu = tuple[tuple[tuple[int, str], int], ...]
@@ -328,6 +337,24 @@ def locks_from_answer(answer: object) -> dict[str, str]:
     return held
 
 
+def waiters_from_answer(answer: object) -> dict[str, tuple[tuple[int, int], ...]]:
+    """Base branch name -> the `(since, pr)` of its land-wait registrations in one matching-refs
+    answer; raises `ForgeError` as `locks_from_answer` does."""
+    found: dict[str, list[tuple[int, int]]] = {}
+    for item in _list(answer, "locks answer"):
+        item = _dict(item, "lock ref")
+        ref, target = item.get("ref"), _dict(item.get("object"), "lock ref object")
+        if not isinstance(ref, str) or not isinstance(target.get("sha"), str):
+            raise _invalid("lock ref has no ref and sha text")
+        if not ref.startswith(WAIT_PREFIX):
+            continue
+        branch, slash, name = ref[len(WAIT_PREFIX):].rpartition("/")
+        match = WAITER.fullmatch(name)
+        if slash and match:
+            found.setdefault(branch, []).append((int(match.group(1)), int(match.group(2))))
+    return {branch: tuple(pairs) for branch, pairs in found.items()}
+
+
 def _pull(node: object, pattern: str | None, held: Mapping[str, str]) -> PullRequest:
     node = _dict(node, "pull request")
     number = node.get("number")
@@ -358,14 +385,30 @@ def _pull(node: object, pattern: str | None, held: Mapping[str, str]) -> PullReq
 
 
 def pulls_from_answer(answer: object, pattern: str | None,
-                      locks: Mapping[str, str] | None = None) -> tuple[PullRequest, ...]:
-    """The open pull requests of one answer, ascending by number; raises `ForgeError`."""
+                      locks: Mapping[str, str] | None = None,
+                      waiters: Mapping[str, Iterable[tuple[int, int]]] | None = None,
+                      ) -> tuple[PullRequest, ...]:
+    """The open pull requests of one answer, ascending by number, each with its `queue_position`
+    among the registered waiters of its base; raises `ForgeError`."""
     held = locks or {}
     data = _dict(_dict(answer, "answer").get("data"), "data")
     repository = _dict(data.get("repository"), "repository")
     nodes = _list(_dict(repository.get("pullRequests"), "pullRequests").get("nodes"),
                   "pullRequests.nodes")
-    return tuple(sorted((_pull(node, pattern, held) for node in nodes), key=lambda p: p.number))
+    pulls = sorted(((_pull(node, pattern, held), node["baseRefName"]) for node in nodes),
+                   key=lambda pair: pair[0].number)
+    since: dict[tuple[str, int], int] = {}
+    for base, pairs in (waiters or {}).items():
+        for moment, number in pairs:
+            since[(base, number)] = min(moment, since.get((base, number), moment))
+    queue: dict[str, list[tuple[int, int]]] = {}
+    for pull, base in pulls:
+        if not pull.holding and (base, pull.number) in since:
+            queue.setdefault(base, []).append((since[(base, pull.number)], pull.number))
+    place = {(base, number): at for base, waiting in queue.items()
+             for at, (_, number) in enumerate(sorted(waiting), 1)}
+    return tuple(replace(pull, queue_position=place.get((base, pull.number)))
+                 for pull, base in pulls)
 
 
 def read_pulls(slug: str, pattern: str | None, *,
@@ -382,7 +425,8 @@ def read_pulls(slug: str, pattern: str | None, *,
     first = call(pulls_argv(slug))
     if cancelled():
         raise ForgeError("cancelled")
-    return pulls_from_answer(first, pattern, locks_from_answer(call(locks_argv(slug))))
+    refs = call(locks_argv(slug))
+    return pulls_from_answer(first, pattern, locks_from_answer(refs), waiters_from_answer(refs))
 
 
 def _last_reflog_ms(path: Path) -> int | None:
@@ -712,9 +756,15 @@ def merged(previous: ProjectMovement | None, pulls: tuple[PullRequest, ...] | No
     """Fold one reading into the last: every time kept is the last time its signal was seen."""
     before = previous or ProjectMovement()
     locks = dict(before.locks)
+    positions = dict(before.positions)
     if pulls is None:
         kept, read_ms, lock_held = before.pulls, before.read_ms, before.lock_held
     else:
+        positions = {}
+        for pull in pulls:
+            if pull.queue_position is not None:
+                for issue in pull.issues:
+                    positions[issue] = min(pull.queue_position, positions.get(issue, pull.queue_position))
         lock_held = any(pull.holding for pull in pulls)
         seen_locking = {issue for pull in pulls if pull.holding for issue in pull.issues
                         if live is None or issue in live}
@@ -740,4 +790,5 @@ def merged(previous: ProjectMovement | None, pulls: tuple[PullRequest, ...] | No
     return ProjectMovement(kept, read_ms, tuple(sorted(branches.items())),
                            now_ms if local.release else before.release_ms,
                            tuple(sorted(locks.items())), lock_held,
-                           _fold_sessions(before.sessions, local.sessions, at))
+                           _fold_sessions(before.sessions, local.sessions, at),
+                           tuple(sorted(positions.items())))

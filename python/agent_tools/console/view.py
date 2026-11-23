@@ -672,7 +672,8 @@ being one the client held and did not deliver), `NOW_DEAF_TEXT`; an open permiss
 wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock), `NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); an unread message the console delivered (`sprints.unread`, `delivered_at` set,
 #1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
 (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
-whose signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
+whose signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, in place of `NOW_LOCK_TEXT` when the sprint's smallest
+`ProjectMovement.positions` is known, #1679); no report, `NOW_STARTING_TEXT`; else a shown merge refusal
 (`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
 `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone
 (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
@@ -880,6 +881,7 @@ from agent_tools.console.sprints import (
     NOW_LOOK_RECORDING_TEXT,
     NOW_LOOK_RETRY_TEXT,
     NOW_FAILED_START_TEXT,
+    NOW_LOCK_POSITION_TEXT,
     NOW_LOCK_TEXT,
     NOW_NO_PROGRESS_TEXT,
     NOW_PAUSED_TEXT,
@@ -1382,6 +1384,7 @@ class WaitSignals:
     commit_ms: int | None = None
     release_ms: int | None = None
     lock_ms: int | None = None
+    lock_position: int | None = None
     output_ms: int | None = None
     check_ms: int | None = None
 
@@ -1486,6 +1489,7 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
     commits += [moved for issue, moved in movement.branches if issue in issues]
     locks = [moved for issue, moved in movement.locks if issue in issues]
+    places = [place for issue, place in movement.positions if issue in issues]
     nudged = None if state.idle_nudged_at is None else _millis(state.idle_nudged_at)
 
     def counted(own: SessionMovement, ms: int | None) -> int | None:
@@ -1499,8 +1503,8 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     outputs = [ms for own in mine if (ms := counted(own, own.output_ms)) is not None]
     checks = [ms for own in mine if (ms := counted(own, own.check_ms)) is not None]
     return WaitSignals(max(running, default=None), max(commits, default=None),
-                       movement.release_ms, max(locks, default=None), max(outputs, default=None),
-                       max(checks, default=None))
+                       movement.release_ms, max(locks, default=None), min(places, default=None),
+                       max(outputs, default=None), max(checks, default=None))
 
 
 def _utc(ms: int) -> str:
@@ -1576,10 +1580,13 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
 
 def fresh_wait(waits: WaitSignals, now_ms: int) -> str | None:
     """The first of CI, a committing delivery, a release step and the land lock whose signal is
-    inside `QUIET_AFTER_MS`. The idle hold of an in-progress run reads it too (#1381)."""
+    inside `QUIET_AFTER_MS`. The idle hold of an in-progress run reads it too (#1381). The land lock
+    reads `NOW_LOCK_POSITION_TEXT` when `lock_position` is known (#1679)."""
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
                      (waits.release_ms, NOW_RELEASE_TEXT), (waits.lock_ms, NOW_LOCK_TEXT)):
         if ms is not None and now_ms - ms < QUIET_AFTER_MS:
+            if text == NOW_LOCK_TEXT and waits.lock_position is not None:
+                return NOW_LOCK_POSITION_TEXT.format(n=waits.lock_position)
             return text
     return None
 

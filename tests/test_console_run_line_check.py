@@ -67,6 +67,15 @@ class RunLineCheckTest(unittest.TestCase):
         self.assertEqual([40, 41], printed["queued"])
         self.assertEqual([{"run_id": "wf_l1", "moved_text": LOCK_TEXT}], printed["runs"])
 
+    def test_a_waiting_sprint_naming_its_position_is_met(self):
+        placed = sprint(now_text=LOCK_TEXT + ", position 1")
+        code, printed = self.run_check(
+            state=state_of([placed], [run_entry(moved_text=LOCK_TEXT + ", position 1")]))
+        self.assertEqual((0, "met"), (code, printed["status"]))
+        lookalike = sprint(now_text=LOCK_TEXT + ", positional")
+        code, printed = self.run_check(state=state_of([lookalike], [run_entry()]))
+        self.assertEqual((75, "no_wait_shown"), (code, printed["status"]))
+
     def test_a_quiet_run_line_under_a_waiting_sprint_is_not_met(self):
         quiet = run_entry(quiet=True, moved_text="quiet for 45 min")
         code, printed = self.run_check(state=state_of([sprint()], [quiet]))
