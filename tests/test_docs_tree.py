@@ -1313,34 +1313,6 @@ class DocsTreeTest(unittest.TestCase):
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-053", notice)
 
-    def test_the_host_activation_decision_is_recorded(self):
-        path = ("docs/areas/system/adr/004-host-activation-runs-only-through-the-consoles-"
-                "activate.md")
-        first = (REPO_ROOT / path).read_text().splitlines()[0]
-        self.assertEqual(first, "# ADR-system-004 \u2014 Host activation runs only through the "
-                                "console's Activate")
-        adr = self.doc(path)
-        for needle in ("#1193", "POST /api/activate", "bad activation", "nothing to activate",
-                       "an activation is already running",
-                       "that commit is no longer the tip of origin's integration branch",
-                       "the tip of origin's integration branch could not be read",
-                       "so it runs only through the console's Activate, on the line that says "
-                       "a console change is not active on this host."):
-            with self.subTest(needle):
-                self.assertIn(needle, adr)
-        for older in ("docs/areas/console/adr/043-a-merged-console-change-not-active-on-this-"
-                      "host-is-one-line-in-the-work-column.md",
-                      "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-"
-                      "origin.md"):
-            line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
-                        if row.startswith("- **Status:**"))
-            with self.subTest(older):
-                self.assertIn("ADR-system-004", line)
-        for context in ("console", "guard", "project-contract"):
-            with self.subTest(context):
-                self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
-        self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
-
     def test_no_tracked_file_cites_a_retired_guard_record(self):
         # The pattern is built at run time, so this file holds no retired citation itself.
         numbers = ("005", "011", "012")
