@@ -48,7 +48,7 @@ count, and gives its slot back and waits otherwise. A count lowered while a high
 slot is still held therefore never admits a run beside that holder.
 
 Repositories. `verify-slot run` never admits two holders of one repository at once, since
-two suites of one project share resources such as a single test database (issue 1677). The
+two suites of one project share resources such as a single test database. The
 repository is the `origin` remote of the working directory, normalized to `owner/repo` and
 lowercased; a run outside a repository, or in one without `origin`, is its own group and is
 excluded by no other run. A holder takes an exclusive non-blocking `flock` on `repo-<digest>.lock`
