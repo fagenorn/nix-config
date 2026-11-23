@@ -37,6 +37,7 @@
   "guard-policy": null,
   "host-readiness": null,
   "issue-branch": null,
+  "lint-time": null,
   "look-approval": null,
   "look-lint": null,
   "owner-actions": null,
