@@ -435,91 +435,67 @@ GitHub stays the authority: it still compares `--match-head-commit` atomically
 with the merge and enforces its own up-to-date rule, which closes the window
 between this check and the merge.
 
-The look gate (issue 1138) holds a merge whose issues await the owner's look.
-Each merge arm runs it right after the mergeability check, so before the
-feature arm's integration-base exemption and protection lookup and before the
-release arm's rollup predicate, with the matched PR number (the release arm
-receives it as `validate_release_merge`'s last parameter).
-1. The guard reads the PR's title, body and linked issues, `gh pr view <n>
-   --repo <slug> --json title,body,closingIssuesReferences`, then every commit,
-   `gh api --paginate --slurp repos/<slug>/pulls/<n>/commits?per_page=100` (pages
-   flattened in order, each commit's `commit.message`).
-2. The PR's issues are the number in an `issue-<n>-` head branch, every issue
-   of this repository in `closingIssuesReferences` (the Development sidebar and
-   `gh issue develop` links), plus every closing keyword GitHub honours
-   (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`,
-   `resolved`) or `Refs` (any case, an optional colon) in the PR title or body, in a
-   commit message (headline and body), in the head branch name or in the merge's
-   `--subject` (GitHub closes on the merge commit too, whose default body is the PR
-   title) followed by `#<n>`, `<slug>#<n>` or
-   `https://github.com/<slug>/issues/<n>` for this repository's slug; a
-   reference naming another repository is ignored. A PR whose commit list reaches
-   `LOOK_COMMIT_LIMIT` (250) commits, the most GitHub lists, is refused as `unsafe merge:
-   cannot read every commit of the PR: GitHub listed <n> commits, its limit, so a later
-   commit may settle an issue unseen`. No issue: the merge is
-   judged exactly as before, with no further child.
-3. For each issue it reads `gh api repos/<slug>/issues/<n>` and
-   `gh api --paginate --slurp repos/<slug>/issues/<n>/comments?per_page=100`
-   (pages flattened in order), and takes the PR's `headRefOid` when it is 40
-   lowercase hex characters, else none.
-4. It runs the look check, the store script `--look-bin` names
-   (`look-approval judge`), with `{"pr", "head", "issues": [{"number", "body",
-   "comments"}]}` on stdin and the row check's scrubbed environment. Exit 0 with
-   verdict `admit` and a `marked` array of integers passes, except that when
-   `marked` is not empty the merge must carry `--match-head-commit` (held equal to
-   the PR head by the mergeability check, so GitHub's atomic head match decides
-   the head that merges): without it the merge is refused as `unsafe merge: issue
-   <n> awaits the owner's look, so the merge must carry --match-head-commit
-   <head>, the head the owner approved`. Exit 1 with verdict `refuse` and an integer `issue`
-   refuses as `unsafe merge: issue <n> needs the owner's look before merge, and
-   head <first seven characters> has no recorded approval; ask the owner and
-   record the answer`, or, with no readable head, as `unsafe merge: cannot read
-   the PR head commit`. Anything else (another exit, output that is not that
-   verdict) is `look check failed: <child diagnostic>`; a missing `--look-bin` is
-   `look check failed: no --look-bin was given`; a timeout is `look check timed
+The look gate (issue 1138) holds a merge whose issues await the owner's look. Each merge arm runs it right after the
+mergeability check, so before the feature arm's integration-base exemption and protection lookup and before the release
+arm's rollup predicate, with the matched PR number (the release arm receives it as `validate_release_merge`'s last
+parameter).
+1. The guard reads the PR's title, body and linked issues, `gh pr view <n> --repo <slug> --json
+   title,body,closingIssuesReferences`, then every commit, `gh api --paginate --slurp
+   repos/<slug>/pulls/<n>/commits?per_page=100` (pages flattened in order, each commit's `commit.message`).
+2. The PR's issues are the number in an `issue-<n>-` head branch, every issue of this repository in
+   `closingIssuesReferences` (the Development sidebar and `gh issue develop` links), plus every closing keyword GitHub
+   honours (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved`) or `Refs` (any
+   case, an optional colon) in the PR title or body, in a commit message (headline and body), in the head branch name or
+   in the merge's `--subject` (GitHub closes on the merge commit too, whose default body is the PR title) followed by
+   `#<n>`, `<slug>#<n>` or `https://github.com/<slug>/issues/<n>` for this repository's slug; a reference naming another
+   repository is ignored. A PR whose commit list reaches `LOOK_COMMIT_LIMIT` (250), the most GitHub lists, is refused as
+   `unsafe merge: cannot read every commit of the PR: GitHub listed <n> commits, its limit, so a later commit may settle
+   an issue unseen`. No issue: the merge is judged exactly as before, with no further child.
+3. For each issue it reads `gh api repos/<slug>/issues/<n>` and `gh api --paginate --slurp
+   repos/<slug>/issues/<n>/comments?per_page=100` (pages flattened in order), and takes the PR's `headRefOid` when it is
+   40 lowercase hex characters, else none.
+4. It runs the look check, the store script `--look-bin` names (`look-approval judge`), with `{"pr", "head", "issues":
+   [{"number", "body", "comments"}]}` on stdin and the row check's scrubbed environment. Exit 0 with verdict `admit` and
+   a `marked` array of integers passes, except that when `marked` is not empty the merge must carry
+   `--match-head-commit` (held equal to the PR head by the mergeability check, so GitHub's atomic head match decides the
+   head that merges): without it the merge is refused as `unsafe merge: issue <n> awaits the owner's look, so the merge
+   must carry --match-head-commit <head>, the head the owner approved`. Exit 1 with verdict `refuse` and an integer
+   `issue` refuses as `unsafe merge: issue <n> needs the owner's look before merge, and head <first seven characters>
+   has no recorded approval; ask the owner and record the answer`, or, with no readable head, as `unsafe merge: cannot
+   read the PR head commit`. Anything else (another exit, output that is not that verdict) is `look check failed: <child
+   diagnostic>`; a missing `--look-bin` is `look check failed: no --look-bin was given`; a timeout is `look check timed
    out`.
-5. A kept approval (issue 1211). When run one refuses with an integer `issue`, a readable
-   head and a non-empty `candidates` list of objects (each an integer `issue`, a 40
-   lowercase hex `head` and an `answer` of `approved` or `fix`), the guard reads the
-   base branch's tip once, `gh api repos/<slug>/branches/<baseRefName>` and its
-   `commit.sha` B (40 lowercase hex; a PR with no string `baseRefName` or a base it
-   cannot read has no carry). It then runs the look check up to `LOOK_CARRY_RUNS` (3)
-   more times with run one's payload plus `"carry": {"base": B, "reads": {<path>:
-   <JSON>}}`, `reads` empty at first. An admit passes under step 4's pinning rule. An exit 1
-   `refuse` whose `need` is a non-empty list of paths proceeds when this is not the last
-   run, no path was read already, every path is `compare/<sha>...<sha>` (full
-   lowercase shas, matched in full) or exactly `contents/.github/look-files.json?ref=<B>`,
-   and the reads so far plus `need` stay within `LOOK_READ_LIMIT` (48); the guard
-   reads each as `gh api repos/<slug>/<path>`, in order, and the next run gets the
-   answers. A path outside that grammar, a repeated path, a failed, timed-out or
-   unreadable read (a `404` included), any other refusal and a run left asking
-   after the last run refuse as step 4 does, `issue <n> needs the owner's look
-   before merge`, with the `<n>` of run one. Any other output of a carry run is
-   `look check failed: <child diagnostic>`. Nothing is read at a branch name after
-   B nor at the head. The look check also admits, through the same runs, an `approved`
-   approval carried by a trusted `look-carry` line naming the issue, the pull request,
-   the approved head, the current head and the approval's picture digest, when every
-   commit after the approved head is a two-parent merge whose second parent is no pull
-   request commit (issue 1566); that rule reads only compares, never the set file. An approval that records pictures is
-   kept by that line alone, never by the look file rule. An `approved` approval with no
-   `pictures` field is also carried by a `look-carry` line with `rule=look-files` when the
-   pull request's change to the look files is unchanged (issue 1597); that rule reads the set
-   file, the three compares and, when more than one merge came in, each merge's compare with
-   its first parent, and refuses when any of them lists a look file.
-Every lookup runs with the token variables scrubbed and the child timeout; a
-timed-out lookup is `PR body lookup timed out`, `PR commit lookup timed out`,
-`issue <n> lookup timed out` or `issue <n> comment lookup timed out`, a non-zero one
-`PR body lookup failed`, `PR commit lookup failed`, `issue <n> lookup failed` or
-`issue <n> comment lookup failed` with the child's diagnostic, and output that is not
-the expected shape is refused as `unsafe merge: cannot read the PR body`, `cannot read
-the PR commits`, `cannot read issue <n>` or `cannot read the comments of issue <n>`; an
-issue or PR object with no `body` key, a PR object with no string `title`, no
-`closingIssuesReferences` list, or an entry of it that is not readable, is unreadable,
-never an empty body or an empty list; so is a commit page that is not a list of objects,
-or a commit with no object `commit` holding a string `message`. Which issues are marked, and which approvals count
-(the owner's or a member's, naming this issue, this PR and this head, the
-latest answer deciding), is `look-approval`'s contract; `--admin` is in no merge
-form, so it is refused by the grammar before any lookup.
+5. A kept approval (issue 1211). When run one refuses with an integer `issue`, a readable head and a non-empty
+   `candidates` list of objects (each an integer `issue`, a 40 lowercase hex `head` and an `answer` of `approved` or
+   `fix`), the guard reads the base branch's tip once, `gh api repos/<slug>/branches/<baseRefName>` and its `commit.sha`
+   B (40 lowercase hex; a PR with no string `baseRefName` or a base it cannot read has no carry). It then runs the look
+   check up to `LOOK_CARRY_RUNS` (3) more times with run one's payload plus `"carry": {"base": B, "reads": {<path>:
+   <JSON>}}`, `reads` empty at first. An admit passes under step 4's pinning rule. An exit 1 `refuse` whose `need` is a
+   non-empty list of paths proceeds when this is not the last run, no path was read already, every path is
+   `compare/<sha>...<sha>` (full lowercase shas, matched in full) or exactly `contents/.github/look-files.json?ref=<B>`,
+   and the reads so far plus `need` stay within `LOOK_READ_LIMIT` (48); the guard reads each as `gh api
+   repos/<slug>/<path>`, in order, and the next run gets the answers. A path outside that grammar, a repeated path, a
+   failed, timed-out or unreadable read (a `404` included), any other refusal and a run left asking after the last run
+   refuse as step 4 does, `issue <n> needs the owner's look before merge`, with the `<n>` of run one. Any other output
+   of a carry run is `look check failed: <child diagnostic>`. Nothing is read at a branch name after B nor at the head.
+   The look check also admits, through the same runs, an `approved` approval carried by a trusted `look-carry` line
+   naming the issue, the pull request, the approved head, the current head and the approval's picture digest, when every
+   commit after the approved head is a two-parent merge whose second parent is no pull request commit (issue 1566); that
+   rule reads only compares, never the set file. An approval that records pictures is kept by that line alone, never by
+   the look file rule. An `approved` approval with no `pictures` field is also carried by a `look-carry` line with
+   `rule=look-files` when the pull request's change to the look files is unchanged (issue 1597); that rule reads the set
+   file, the three compares and, when more than one merge came in, each merge's compare with its first parent, and
+   refuses when any of them lists a look file.
+Every lookup runs with the token variables scrubbed and the child timeout; a timed-out lookup is `PR body lookup timed
+out`, `PR commit lookup timed out`, `issue <n> lookup timed out` or `issue <n> comment lookup timed out`, a non-zero one
+`PR body lookup failed`, `PR commit lookup failed`, `issue <n> lookup failed` or `issue <n> comment lookup failed` with
+the child's diagnostic, and output that is not the expected shape is refused as `unsafe merge: cannot read the PR body`,
+`cannot read the PR commits`, `cannot read issue <n>` or `cannot read the comments of issue <n>`; an issue or PR object
+with no `body` key, a PR object with no string `title`, no `closingIssuesReferences` list, or an entry of it that is not
+readable, is unreadable, never an empty body or an empty list; so is a commit page that is not a list of objects, or a
+commit with no object `commit` holding a string `message`. Which issues are marked, and which approvals count (the
+owner's or a member's, naming this issue, this PR and this head, the latest answer deciding), is `look-approval`'s
+contract; `--admin` is in no merge form, so it is refused by the grammar before any lookup.
 
 The plan-gated floor (issue 552) replaces that protection demand for one answer
 only. When the feature arm's protection read of the default branch exits
@@ -6376,9 +6352,7 @@ def look_pr_texts(pr, repository):
     if not isinstance(pr, dict) or "body" not in pr or not isinstance(pr.get("title"), str):
         return None, None
     body, references = pr["body"], pr.get("closingIssuesReferences")
-    if not (body is None or isinstance(body, str)):
-        return None, None
-    if not isinstance(references, list):
+    if not (body is None or isinstance(body, str)) or not isinstance(references, list):
         return None, None
     linked = []
     for reference in references:
@@ -6430,53 +6404,51 @@ def look_issue_facts(context, number):
         issue["body"] is None or isinstance(issue["body"], str)
     ):
         return None, refuse("merge", f"cannot read issue {number}")
-    pages, status = look_json(
-        context,
-        ["api", "--paginate", "--slurp", f"repos/{repository}/issues/{number}/comments?per_page=100"],
+    comments, status = look_pages(
+        context, f"issues/{number}/comments",
         f"issue {number} comment lookup timed out", f"issue {number} comment lookup failed",
         f"cannot read the comments of issue {number}")
+    if status is not None:
+        return None, status
+    return {"number": number, "body": issue.get("body"), "comments": comments}, None
+
+
+def look_pages(context, path, timed_out, failed, unreadable):
+    """`(entries, None)`, every object of a paginated list in order, or `(None, status)`."""
+    pages, status = look_json(
+        context, ["api", "--paginate", "--slurp", f"repos/{context.repository}/{path}?per_page=100"],
+        timed_out, failed, unreadable)
     if status is not None:
         return None, status
     if not isinstance(pages, list) or not all(
         isinstance(page, list) and all(isinstance(entry, dict) for entry in page)
         for page in pages
     ):
-        return None, refuse("merge", f"cannot read the comments of issue {number}")
-    comments = [entry for page in pages for entry in page]
-    return {"number": number, "body": issue.get("body"), "comments": comments}, None
+        return None, refuse("merge", unreadable)
+    return [entry for page in pages for entry in page], None
 
 
 def look_pr_commits(context, number):
     """`(messages, None)`, every commit message of the PR in order, or `(None, status)`.
 
-    Reads every page of the PR's commit list. A page that is not a list of objects, or
-    a commit with no object `commit` holding a string `message`, is unreadable, and so
-    is a list of `LOOK_COMMIT_LIMIT` commits or more, which may hide a later commit.
+    A commit with no object `commit` holding a string `message`, or `LOOK_COMMIT_LIMIT` commits
+    or more (a later one may be hidden), is unreadable.
     """
-    pages, status = look_json(
-        context,
-        ["api", "--paginate", "--slurp",
-         f"repos/{context.repository}/pulls/{number}/commits?per_page=100"],
+    entries, status = look_pages(
+        context, f"pulls/{number}/commits",
         "PR commit lookup timed out", "PR commit lookup failed", "cannot read the PR commits")
     if status is not None:
         return None, status
-    if not isinstance(pages, list) or not all(
-        isinstance(page, list)
-        and all(
-            isinstance(entry, dict)
-            and isinstance(entry.get("commit"), dict)
-            and isinstance(entry["commit"].get("message"), str)
-            for entry in page)
-        for page in pages
-    ):
+    commits = [entry.get("commit") for entry in entries]
+    if not all(isinstance(commit, dict) and isinstance(commit.get("message"), str)
+               for commit in commits):
         return None, refuse("merge", "cannot read the PR commits")
-    messages = [entry["commit"]["message"] for page in pages for entry in page]
-    if len(messages) >= LOOK_COMMIT_LIMIT:
+    if len(commits) >= LOOK_COMMIT_LIMIT:
         return None, refuse(
             "merge",
-            f"cannot read every commit of the PR: GitHub listed {len(messages)} commits, "
+            f"cannot read every commit of the PR: GitHub listed {len(commits)} commits, "
             "its limit, so a later commit may settle an issue unseen")
-    return messages, None
+    return [commit["message"] for commit in commits], None
 
 
 def look_problem(context, number, pr_facts, head_commit, subject=None):
