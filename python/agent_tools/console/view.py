@@ -267,17 +267,17 @@ The item is listed per `approve.inbox_entries`, and Merge is offered (`merge` tr
 `approve.merge_refusal`; otherwise `why` says in plain words why the card offers no Merge.
 
 A permission card (#1424, `prompt_card.inbox_entries`) arrives through the `prompt_items` argument, one mapping
-each, and is one entry of `inbox.open`, copied, right after the release entries, in the order given. It counts
-once in `inbox_items` and the headline, is not filtered by the registered projects, and its `sprint_id` marks
-that sprint `prompted` (its ball is `owner`, its now-sentence `NOW_PERMISSION_TEXT`, and it is never counted a
-second time). Its entry is
+each, and is one entry of `inbox.open`, copied, right after the release entries, in the order given. It counts once
+in `inbox_items` and the headline, is not filtered by the registered projects, and its `sprint_id` marks that sprint
+`prompted` (its ball is `owner`, its now-sentence `NOW_PERMISSION_TEXT`, and it is never counted a second time). A
+guest view never carries one. Its entry, whose `summary` is null for a short command and else what
+`command_summary.summarize` reads from the command against the project's root, is
 
     {"type": "inbox_item", "reason": "permission", "key": "permission/<prompt>", "project_id": "<project>",
      "sprint_id": "<sprint>", "prompt": <prompt number>, "title": "<sprint title>",
      "headline": "The manager of <title> asks to run a command", "words": "<what the command is for>",
-     "command": "<the command>", "answered": false, "waiting_since": "<time the prompt opened>"}
-
-A guest view never carries one.
+     "command": "<the command>", "summary": null | <summary>, "answered": false,
+     "waiting_since": "<time the prompt opened>"}
 
 A release card (#1401, `release_card.inbox_entries`) arrives through the `release_items` argument, one mapping each,
 and is one entry of `inbox.open`, copied, right after the adoption entries, in the order given. It counts in

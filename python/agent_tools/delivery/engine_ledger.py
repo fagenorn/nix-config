@@ -14,7 +14,9 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
     results/<step>.<visit>.json
                         a step visit's stored result
     sessions/<step>.<visit>.{system.md,prompt.md,json,resume.json,resume.prompt.md}
-                        an agent step visit's launch files and raw result,
+    sessions/<step>.<visit>.continue-<n>.{json,prompt.md}
+                        an agent step visit's launch files and raw result (the `continue-<n>` ones
+                        are a continued run's launch under attempt `n`, 2 or more),
                         created with the first one stored
 
 The run id is `<issue>-<UTC start as %Y%m%dT%H%M%SZ>-<four [a-z0-9]>`. It orders only to the second, so
@@ -31,7 +33,10 @@ a continued run re-enters and, when it rewinds, the `visit` it rewinds to; a rec
 read, but `append_event` writes none without a `step`. A `call` event records that a step started the child run `child` for item `index`
 of `items`. An agent step visit that hits a usage limit or an API error, or gives no valid
 answer, is launched again in the same visit: `session_resuming` records each such launch (its `attempt`, 2 or
-more) and `session_answered` the account the launcher answered for a launch whose process started.
+more) and `session_answered` the account the launcher answered for a launch whose process started. A
+continued run resumes an interrupted visit's recorded session in the same visit, so that visit holds one
+`step_entered` and one `session_starting` however many launches it took, and its `session_resuming`
+attempts count on from the earlier ones.
 
 Order rule: a result file is written to a writer-owned temporary file (fsynced), then linked into place,
 which refuses a result that exists, before its `result_stored` event is appended; `append_event` refuses
@@ -512,7 +517,10 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
     return path
 
 
-SESSION_FILE_RE = re.compile(r"[a-z][a-z0-9-]*\.[1-9][0-9]*\.(json|system\.md|prompt\.md|resume\.json|resume\.prompt\.md)")
+SESSION_FILE_RE = re.compile(
+    r"[a-z][a-z0-9-]*\.[1-9][0-9]*\."
+    r"(json|system\.md|prompt\.md|resume\.json|resume\.prompt\.md"
+    r"|continue-[1-9][0-9]*\.json|continue-[1-9][0-9]*\.prompt\.md)")
 
 
 def store_session_file(run_dir: Path, name: str, data: bytes) -> Path:

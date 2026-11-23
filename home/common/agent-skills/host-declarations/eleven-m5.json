@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "verify_slots": 2,
+  "routes": {
+    "claude-code": {
+      "support": "supported",
+      "agent_slots": 7
+    },
+    "engine": {
+      "support": "supported",
+      "agent_slots": 8
+    },
+    "codex": {
+      "support": "unsupported"
+    }
+  }
+}

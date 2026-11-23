@@ -70,6 +70,34 @@ id>"}, `fresh` exactly when `changed` is empty. It reads no project contract
 and takes no lock; a planned run's final review and conformance reviewer run it instead of
 judging a measured surface by hand (issue 477).
 
+`verified-tree run --worktree-path <path>` runs every declared verification id once, in
+that worktree, and prints one line of canonical JSON, {"clean": <bool>, "head": "<full
+sha>", "results": [<result>, ...], "tree": "<tree id>", "verdict": "passed" | "failed" |
+"dirty"}, exiting 0. The root is `git -C <path> rev-parse --show-toplevel`; the snapshot is
+`resolve_project.resolve(<root>, ["verification"])`, so each command's argv and cwd are the
+worktree's own contract (its cwd is absolute, rooted at the worktree). `results` holds exactly
+one entry per declared id, in declared order: `{"id", "status": "pass" | "fail" | "skipped",
+"summary"}`, plus `"exit": <int>` when the command ran, `"reason": <skip_reason>` when skipped
+(only an id the plan above skipped, with its `skip_reason`), and `"no_slot": true` only on a
+`fail` where no slot came free. A tree that is not clean before (`git status --porcelain`
+prints anything) runs nothing: verdict `dirty`, `results` empty. Each run id runs as
+`verify-slot run --wait-limit SLOT_WAIT_SECONDS -- <argv>` in its cwd, stdin closed and output
+captured: stdout carries only the one line, and each command's captured output goes to stderr
+after it ends. Exit 75 retries, `SLOT_ATTEMPTS` runs in all, then `fail` with `no_slot` and
+summary `no verify slot came free in <SLOT_ATTEMPTS> attempts`; a run past
+`COMMAND_TIMEOUT_SECONDS` is terminated and is `fail` with summary `timed out after <N> s`
+(`verify-slot` runs in its own session: the timeout sends SIGTERM to that whole process group,
+then SIGKILL to it after `TERMINATE_GRACE_SECONDS`, so a command that ignores SIGTERM or leaves
+descendants cannot outlive it; output is captured in a file, never a pipe, so a descendant
+that outlives the command and keeps its stdout open delays nothing);
+any other exit is the command's own (0 `pass`, else `fail` whose summary is the last
+`SUMMARY_LINES` non-blank output lines). Every id runs even after an earlier one failed. The
+verdict is `failed` when any result is `fail`, else `dirty` when the tree is not clean after
+the runs, else `passed`; `clean` reports the after state and `tree` the tree that was run.
+A usage error, a path that is not a git worktree, a resolver refusal or a missing
+`origin/<integration_branch>` when some id is conditional prints `{"detail": "<text>",
+"verdict": "error"}` and exits 1.
+
 The tree is what a Git-backed build sees: the index's entries, staged new
 files included, with tracked files' working-tree edits and deletions applied,
 built by `git add -u` and `git write-tree` against a temporary copy of the
@@ -111,12 +139,14 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 
 from agent_tools.project_contract import resolve_project
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.system.siblings import sibling_argv
 
 SCHEMA = "verified-tree/v1"
 RECORD_NAME = "verified-tree.json"
@@ -125,7 +155,14 @@ PLAN_NAME = "verified-tree-plan.json"
 PLAN_LOCK_NAME = "verified-tree-plan.lock"
 TREE_PATTERN = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
 ERROR_EXIT = 2
+NOT_STARTED_EXIT = 127
 REFUSED_EXIT = 3
+SLOT_WAIT_SECONDS = 600
+SLOT_ATTEMPTS = 12
+COMMAND_TIMEOUT_SECONDS = 3600
+SUMMARY_LINES = 20
+NO_SLOT_EXIT = 75
+TERMINATE_GRACE_SECONDS = 30
 
 
 class VerifiedTreeError(Exception):
@@ -273,18 +310,27 @@ def _write_atomically(path: Path, document: Mapping[str, object]) -> None:
                 pass
 
 
-def verification_policy(root: Path) -> dict:
-    """The declared ids, their conditions (`{}` when none) and the integration branch."""
+def _resolved(root: Path) -> dict:
+    """The `["verification"]` snapshot of `root`'s project contract."""
     try:
-        snapshot = resolve_project.resolve(str(root), ["verification"])
+        return resolve_project.resolve(str(root), ["verification"])
     except resolve_project.ContractError as error:
         raise VerifiedTreeError(
             f"resolve-project refused: {error.code} {error.repair_id}") from error
+
+
+def _policy(snapshot: Mapping) -> dict:
+    """The declared ids, their conditions (`{}` when none) and the integration branch."""
     bindings = snapshot["bindings"]
     workflow = bindings["workflow"]
     return {"verification": workflow["verification"],
             "conditions": workflow.get("verification_conditions") or {},
             "integration_branch": bindings["vcs"]["integration_branch"]}
+
+
+def verification_policy(root: Path) -> dict:
+    """The declared ids, their conditions (`{}` when none) and the integration branch."""
+    return _policy(_resolved(root))
 
 
 def _tree_diff(root: Path, left: str, right: str) -> list[str]:
@@ -316,9 +362,8 @@ def plan(verification: Sequence[str], conditions: Mapping[str, Mapping],
     return {"run": run, "skipped": skipped}
 
 
-def current_plan(root: Path, tree: str) -> dict:
-    """The plan for `tree`; the change is read only when some declared id is conditional."""
-    policy = verification_policy(root)
+def _plan_of(root: Path, tree: str, policy: Mapping) -> dict:
+    """The plan for `tree` under `policy`; the change is read only when some id is conditional."""
     conditions = policy["conditions"]
     conditional = any(
         verification_id in conditions
@@ -326,6 +371,11 @@ def current_plan(root: Path, tree: str) -> dict:
         for verification_id in policy["verification"])
     changed = (changed_paths(root, policy["integration_branch"], tree) if conditional else [])
     return plan(policy["verification"], conditions, changed)
+
+
+def current_plan(root: Path, tree: str) -> dict:
+    """The plan for `tree`; the change is read only when some declared id is conditional."""
+    return _plan_of(root, tree, verification_policy(root))
 
 
 def check() -> dict:
@@ -406,6 +456,109 @@ def fresh(since: str, record: str) -> dict:
             "status": "stale" if changed else "fresh", "tree": tree}
 
 
+def _clean(root: Path) -> bool:
+    """True when `git status --porcelain` prints nothing."""
+    return not _git(["status", "--porcelain"], root)
+
+
+def _output_summary(output: str) -> str:
+    """The last `SUMMARY_LINES` non-blank lines of `output`."""
+    lines = [line for line in output.splitlines() if line.strip()]
+    return "\n".join(lines[-SUMMARY_LINES:])
+
+
+def _signal_group(child: subprocess.Popen, number: int) -> None:
+    """Send `number` to the whole process group `child` leads (it was started in its own session)."""
+    try:
+        os.killpg(child.pid, number)
+    except ProcessLookupError:
+        pass
+
+
+def _slotted(argv: Sequence[str], cwd: str) -> tuple[int | None, str]:
+    """One `verify-slot run` of `argv` in `cwd`: (exit code, output), or (None, output) on timeout.
+    verify-slot leads its own session so a timeout reaches the command and its descendants, which
+    verify-slot's SIGKILL cannot forward. Output goes to a file, never a pipe, so a descendant
+    that outlives the command and holds its stdout cannot delay the exit code or hang a read.
+    """
+    command = [*sibling_argv("delivery.verify_slot"), "run", "--wait-limit",
+               str(SLOT_WAIT_SECONDS), "--", *argv]
+    with tempfile.TemporaryFile() as captured:
+        try:
+            child = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,
+                                     stdout=captured, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
+        except OSError as error:
+            return NOT_STARTED_EXIT, f"cannot start {argv[0]}: {error}"
+        code: int | None
+        try:
+            code = child.wait(timeout=COMMAND_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _signal_group(child, signal.SIGTERM)  # verify-slot also forwards it and gives the slot back
+            try:
+                child.wait(timeout=TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            _signal_group(child, signal.SIGKILL)  # whatever still holds the group, verify-slot included
+            child.wait()
+            code = None
+        captured.seek(0)
+        return code, os.fsdecode(captured.read())
+
+
+def _run_command(verification_id: str, command: Mapping) -> dict:
+    """The result of one declared id, retried while no verify slot comes free."""
+    code: int | None = None
+    for _ in range(SLOT_ATTEMPTS):
+        code, output = _slotted(command["argv"], command["cwd"])
+        if output:
+            sys.stderr.write(f"verified-tree: output of {verification_id}\n{output}")
+            if not output.endswith("\n"):
+                sys.stderr.write("\n")
+        if code != NO_SLOT_EXIT:
+            break
+    if code is None:
+        return {"id": verification_id, "status": "fail",
+                "summary": f"timed out after {COMMAND_TIMEOUT_SECONDS} s"}
+    if code == NO_SLOT_EXIT:
+        return {"id": verification_id, "status": "fail", "exit": code, "no_slot": True,
+                "summary": f"no verify slot came free in {SLOT_ATTEMPTS} attempts"}
+    status = "pass" if code == 0 else "fail"
+    summary = "passed" if code == 0 else _output_summary(output) or f"exit {code}"
+    return {"id": verification_id, "status": status, "exit": code, "summary": summary}
+
+
+def run(worktree: Path) -> tuple[int, dict]:
+    """Run every declared id once in `worktree`: (0, verdict document) or (1, error document)."""
+    try:
+        root = Path(_git(["rev-parse", "--show-toplevel"], worktree))
+        snapshot = _resolved(root)
+        policy = _policy(snapshot)
+        tree = current_tree(root)
+        head = _git(["rev-parse", "HEAD"], root)
+        if not _clean(root):
+            return 0, {"clean": False, "head": head, "results": [], "tree": tree,
+                       "verdict": "dirty"}
+        planned = _plan_of(root, tree, policy)
+        reasons = {entry["id"]: entry["reason"] for entry in planned["skipped"]}
+        commands = snapshot["bindings"]["commands"]
+        results = []
+        for verification_id in policy["verification"]:
+            if verification_id in reasons:
+                reason = reasons[verification_id]
+                results.append({"id": verification_id, "status": "skipped",
+                                "summary": reason, "reason": reason})
+            else:
+                results.append(_run_command(verification_id, commands[verification_id]))
+        clean = _clean(root)
+    except (VerifiedTreeError, OSError) as error:
+        return 1, {"detail": str(error), "verdict": "error"}
+    verdict = ("failed" if any(entry["status"] == "fail" for entry in results)
+               else "passed" if clean else "dirty")
+    return 0, {"clean": clean, "head": head, "results": results, "tree": tree,
+               "verdict": verdict}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="verified-tree", description=__doc__,
@@ -414,13 +567,40 @@ def _parser() -> argparse.ArgumentParser:
     verbs.add_parser("check", help="print the plan; is the current tree verified?")
     record_verb = verbs.add_parser("record", help="record a pass against a tree")
     record_verb.add_argument("--tree", required=True, help="the tree the pass verified")
+    run_verb = verbs.add_parser("run", help="run every declared id once in a worktree")
+    run_verb.add_argument("--worktree-path", required=True, help="the worktree to verify")
     fresh_verb = verbs.add_parser("fresh", help="has the tree changed since a commit?")
     fresh_verb.add_argument("--since", required=True, help="the commit the evidence measured")
     fresh_verb.add_argument("--record", required=True, help="the acceptance record's path")
     return parser
 
 
+class _UsageError(Exception):
+    """A usage error of `run`, which answers as an error verdict instead of exiting 2."""
+
+
+class _RunParser(argparse.ArgumentParser):
+    def error(self, message: str):
+        raise _UsageError(message)
+
+
+def _run_main(argv: Sequence[str]) -> int:
+    parser = _RunParser(prog="verified-tree run")
+    parser.add_argument("--worktree-path", required=True)
+    try:
+        args = parser.parse_args(argv)
+    except _UsageError as error:
+        status, result = 1, {"detail": f"usage: {error}", "verdict": "error"}
+    else:
+        status, result = run(Path(args.worktree_path))
+    print(_canonical(result))
+    return status
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["run"] and not {"-h", "--help"} & set(argv):
+        return _run_main(argv[1:])
     args = _parser().parse_args(argv)
     try:
         if args.verb == "check":

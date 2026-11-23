@@ -3,6 +3,7 @@
   lib,
   pkgs,
   agentTools,
+  hostname,
   ...
 }:
 let
@@ -20,6 +21,12 @@ let
   agentToolFiles = lib.mapAttrs' (
     name: launcher: lib.nameValuePair ".agents/bin/${name}" { source = launcher; }
   ) agentTools.launchers;
+
+  hostDeclaration =
+    let
+      perHost = ./host-declarations + "/${hostname}.json";
+    in
+    if builtins.pathExists perHost then perHost else ./host-declaration.json;
 in
 {
   # Claude Code consumes the authored skill sources through skillsDir
@@ -42,10 +49,12 @@ in
     # The revision the platform package was built from; adoption's lock entry reads it.
     ".agents/share/platform-revision.json".source = "${agentTools}/share/agent-platform/platform-revision.json";
 
-    # The host declaration: authored host policy -- per route, whether it is
-    # supported and how many agent slots one root session may hold -- read by
+    # The host declaration: authored host policy (per route, whether it is
+    # supported and how many agent slots one root session may hold), read by
     # the conformance check through `agent_tools.delivery.host_admission`.
-    ".agents/share/host-declaration.json".source = ./host-declaration.json;
+    # A file under host-declarations/ named for the hostname replaces the
+    # shared one: the shared declaration plus its `verify_slots`.
+    ".agents/share/host-declaration.json".source = hostDeclaration;
 
     # Claude accepts Home Manager's recursive file links, so its view of the
     # multi-file Impeccable skill uses that layout.

@@ -36,7 +36,9 @@ unknown, so a card never reappears). `POLL_SECONDS` is the hook's wait between p
 Entries (`inbox_entries`). One `inbox_item` of reason `permission` per open prompt whose sprint is
 known, keyed `permission/<id>`, with the sprint's title, the `HEADLINE`, `words` (the first line
 of the manager's own description, cut to `MAX_WORDS_CHARS`, else `NO_WORDS`, which now only
-renders an asked row recorded before #1622) and the command verbatim.
+renders an asked row recorded before #1622) and the command verbatim. A long command's entry also
+carries `summary`, what `command_summary` reads from its text against the project's root in
+`roots` (None for a short command).
 
 Wire. `parse_ask` reads the hook's body: strict JSON (a repeated key and NaN are refused),
 `phase` `ask` with exactly `{sprint_id, phase, session_id, command, nonce, auth}` and an optional
@@ -64,8 +66,8 @@ Constants live here except the hold, the poll and the hook's timeout, which `man
 (`PROMPT_HOLD_SECONDS`, `PROMPT_POLL_SECONDS`, `PROMPT_TIMEOUT`): `sprints` and `sprint` import
 `manager`, so `manager` must never import this module, which imports `sprints`.
 
-Imports. This module imports only `canonical`, `console.event_log`, `console.manager`,
-`console.sessions` and `console.sprints`.
+Imports. This module imports only `canonical`, `console.command_summary`,
+`console.event_log`, `console.manager`, `console.sessions` and `console.sprints`.
 """
 
 from __future__ import annotations
@@ -78,7 +80,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import event_log, manager
+from agent_tools.console import command_summary, event_log, manager
 from agent_tools.console import sprints as sprint_module
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState, at_ms
@@ -303,7 +305,8 @@ def words(description: str | None) -> str:
     return first
 
 
-def inbox_entries(open: Sequence[Prompt], sprints: Mapping[str, SprintState]) -> list[dict]:
+def inbox_entries(open: Sequence[Prompt], sprints: Mapping[str, SprintState],
+                  roots: Mapping[str, str]) -> list[dict]:
     """One `inbox_item` of reason `permission` per open prompt whose sprint is known."""
     entries = []
     for prompt in open:
@@ -315,8 +318,9 @@ def inbox_entries(open: Sequence[Prompt], sprints: Mapping[str, SprintState]) ->
             "type": "inbox_item", "reason": "permission", "key": f"permission/{prompt.prompt_id}",
             "project_id": prompt.project_id, "sprint_id": prompt.sprint_id,
             "prompt": prompt.prompt_id, "title": title, "headline": HEADLINE.format(title=title),
-            "words": words(prompt.description), "command": prompt.command, "answered": False,
-            "waiting_since": prompt.at})
+            "words": words(prompt.description), "command": prompt.command,
+            "summary": command_summary.summarize(prompt.command, roots.get(prompt.project_id)),
+            "answered": False, "waiting_since": prompt.at})
     return entries
 
 

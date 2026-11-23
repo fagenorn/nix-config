@@ -66,6 +66,29 @@ class GrammarTest(unittest.TestCase):
         self.assertEqual(fm.contest(markers, "claim", {"issue": "8"}), [])
 
 
+class BodyMarkerTest(unittest.TestCase):
+    def test_a_body_marker_is_a_whole_line_of_its_kind(self):
+        body = ("intro\n<!-- agent:cleanup-fix v1 rule=PY7 -->\r\n"
+                "see <!-- agent:cleanup-fix v1 rule=PY6 --> here\n<!-- agent:cleanup v1 rule=B17 -->\n")
+        self.assertEqual(fm.body_markers(body, "cleanup-fix"), [{"rule": "PY7"}])
+        self.assertEqual(fm.body_markers(body, "cleanup"), [{"rule": "B17"}])
+
+    def test_a_repeated_key_or_another_version_is_no_marker(self):
+        self.assertEqual(fm.body_markers("<!-- agent:cleanup v1 rule=A rule=B -->", "cleanup"), [])
+        self.assertEqual(fm.body_markers("<!-- agent:cleanup v2 rule=A -->", "cleanup"), [])
+
+
+class TrustedAuthorTest(unittest.TestCase):
+    def test_a_login_or_an_association_is_trusted(self):
+        logins = ("github-actions[bot]",)
+        self.assertTrue(fm.trusted_author(
+            {"user": {"login": "github-actions[bot]"}, "author_association": "NONE"}, logins, ()))
+        self.assertFalse(fm.trusted_author(
+            {"user": {"login": "mallory"}, "author_association": "NONE"}, logins, ("OWNER",)))
+        self.assertTrue(fm.trusted_author(
+            {"user": None, "author_association": "OWNER"}, logins, ("OWNER", "MEMBER")))
+
+
 class ReadWriteTest(unittest.TestCase):
     def setUp(self):
         self.world = ForgeWorld(self)

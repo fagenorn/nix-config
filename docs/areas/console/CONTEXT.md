@@ -54,7 +54,7 @@ The owner's approval of one release candidate, the pair of a commit and a versio
 _Avoid_: release permit, release authorization
 
 **Permission card**:
-A manager's held Bash permission prompt as a card the owner answers on the page with Allow once or Refuse; it names the command, shows the manager's stated reason and shows only while the manager's hook still waits for it, an unanswered prompt is refused after ten minutes, and a prompt with no stated reason is sent back to the manager for one and raises no card (ADR-console-100, ADR-console-104).
+A manager's held Bash permission prompt as a card the owner answers on the page with Allow once or Refuse; it names the command, shows the manager's stated reason and shows only while the manager's hook still waits for it, an unanswered prompt is refused after ten minutes, and a prompt with no stated reason is sent back to the manager for one and raises no card (ADR-console-100, ADR-console-104); a long command's card opens with a summary read from its text (what it writes and runs and anything outside the manager's worktree, or that it could not be read) and folds the full text (ADR-console-105).
 _Avoid_: terminal prompt, approval
 
 **Message**:
