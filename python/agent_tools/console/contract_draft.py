@@ -1,4 +1,4 @@
-"""The console's drafted project contract for a repository that has none (#1067, #1485).
+"""The console's drafted project contract for a repository that has none (#1067).
 
 Decided in ADR-console-031. The plain words and the main/more split are ADR-console-033. The reconcile
 proposal of a commit environment is ADR-console-083. A repository with no `.agents/project.json` is registered with
@@ -101,8 +101,8 @@ An amendment (a reconcile proposal) keeps its records. Any other saved draft is 
 one whose value is not `none`, or a refusal, and `replanned(fields)` opens the integration branch's card with
 `PLAN_AGAIN` so an answer plans again, unless a card is already open.
 
-Reconcile proposal. `PROPOSED` lists the one field a reconcile plan proposes alone (#1333), never drafted
-(#1485): `commit-environment` (`commits run in its development shell`), a typed choice with the one option
+Reconcile proposal. `PROPOSED` lists the one field a reconcile plan proposes alone (#1333), never drafted:
+`commit-environment` (`commits run in its development shell`), a typed choice with the one option
 `none`, never open. `reconcile_fields(root, reading)` is `[]` unless `reading["stranded"]` is not empty and an
 `ENVIRONMENTS` file is in `reading["environments"]`; otherwise it is that one record with the command of the first
 file (source `files`). `amends(fields)` is true for a non-empty list whose every record is a `PROPOSED` field,
@@ -207,7 +207,7 @@ RETIRED_FIELDS: tuple[str, ...] = (
     "attempt-budget", "projections", "light-lane")
 PLAN_AGAIN = ("The console now drafts fewer settings, so the plan is made again: choose the branch "
               "finished work merges into to go on.")
-# The field a reconcile plan proposes alone; `draft` never adds it (#1485).
+# The field a reconcile plan proposes alone; `draft` never adds it.
 _PROPOSED_TABLE = (
     (ENVIRONMENT_FIELD, "commits run in its development shell",
      ("/bindings/vcs/commit/environment", "/bindings/commands/commit-environment"),

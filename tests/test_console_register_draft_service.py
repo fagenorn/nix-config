@@ -1,4 +1,4 @@
-"""A drafted registration's derived values through the service (#1485).
+"""A drafted registration's derived values through the service.
 
 A refusal of a value the platform derives, or of the project id adoption derived, is the plan's
 failed row with its retry card, on the registration run and on the answer of the last question
@@ -17,7 +17,7 @@ import json
 
 from agent_tools.console import contract_draft, event_log, register
 
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_register_service import READ_ALL, DraftCase, Fake, answer_of, git_repo
 
 TIER = "integration"  # every case runs a real git repository and a started service

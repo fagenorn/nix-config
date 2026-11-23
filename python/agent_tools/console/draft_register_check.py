@@ -1,4 +1,4 @@
-"""`draft_register_check`: the verify check that a drafted registration ends on schema 3 and resolves (#1485).
+"""`draft_register_check`: the verify check that a drafted registration ends on schema 3 and resolves.
 
 `python -m agent_tools.console.draft_register_check [--url URL] [--token-file PATH] [--wait SECONDS]`
 exercises, on the host where it runs, the console's registration of a repository that has no project

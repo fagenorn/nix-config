@@ -1,4 +1,4 @@
-"""Contract tests for planning the adoption of a drafted schema-3 contract (#1485).
+"""Contract tests for planning the adoption of a drafted schema-3 contract.
 
 A schema-3 draft leaves the project id, the tracker slug, the required checks and the platform
 interval to the repository (ADR-project-contract-014), so the plan resolves it strictly: in a

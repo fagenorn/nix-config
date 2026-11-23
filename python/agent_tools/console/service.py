@@ -587,7 +587,7 @@ bring the cancelled card back. It writes no file of
 its own, grants no trust and reads no registry. Any other exception is `console: register_cancel_failed
 <Type>` and 500 `cancelling failed`.
 
-A checkout with no `.agents/project.json` (ADR-console-031, #1485) is drafted instead of planned: the run
+A checkout with no `.agents/project.json` (ADR-console-031) is drafted instead of planned: the run
 reads it (`draft_reader`, `contract_draft.read` by default), drafts the schema-3 contract and its facts,
 and, while any field of the draft is open, appends one `drafting` row and runs no child. When none is open
 the draft (given its facts from a fresh reading when it holds none and is no amendment) is written as JSON

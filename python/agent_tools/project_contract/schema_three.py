@@ -107,7 +107,7 @@ RETIRED = (
 
 NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow")
 
-# The members a schema-3 contract authors: the only ones a tool that drafts one may write (#1485).
+# The members a schema-3 contract authors: the only ones a tool that drafts one may write.
 AUTHORED = (
     "/bindings/vcs/integration_branch",
     "/bindings/commands",

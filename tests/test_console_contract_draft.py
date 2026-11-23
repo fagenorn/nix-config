@@ -56,7 +56,7 @@ DEVENV_LOCK = json.dumps({"nodes": {"nixpkgs": {
                "repo": "devenv-nixpkgs", "rev": "ab" * 20, "type": "github"},
     "original": {"owner": "cachix", "repo": "devenv-nixpkgs", "type": "github"}},
     "root": {"inputs": {"nixpkgs": "nixpkgs"}}}, "root": "root", "version": 7}, indent=2, sort_keys=True)
-# The 27 field ids of the table the console drafted before #1485.
+# The 27 field ids of the table the console drafted before the schema-3 draft.
 EARLIER = (
     "project-id", "project-name", "default-branch", "integration-branch", "branch-pattern",
     "worktree-root", "worktree-prefix", "commit-signed", "merge-strategy", "delete-branch", "tracker",

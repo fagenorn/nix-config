@@ -164,7 +164,7 @@ Contract:
   `SprintState` having no `started_by`) those waits are skipped, so a base run still writes every
   file and the pictures are the before pictures of the actors.
   `register-apply` and `register-draft` are the console's registration of `sample-app`, a
-  repository with no contract whose ready plan is drafted in schema 3 (`FACT_LINE`, #1485),
+  repository with no contract whose ready plan is drafted in schema 3 (`FACT_LINE`),
   served with a stand-in adopter and forge so the plan can be
   applied: `register-apply` is the ready Apply card, its lines the plan's own
   (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"

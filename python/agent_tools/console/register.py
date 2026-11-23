@@ -165,7 +165,7 @@ also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEY
 `ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
 `contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
 never shows, ADR-console-033 D2; a row whose draft held a retired field its plan may rest on, or whose last
-card was that field, reads back as a `drafting` row, with the plan id it was saved under, whose integration branch card plans again, #1445, #1485), else `state`: the view's `registration` member, folded by the service.
+card was that field, reads back as a `drafting` row, with the plan id it was saved under, whose integration branch card plans again, #1445), else `state`: the view's `registration` member, folded by the service.
 `fold(events, state=None)` is the `Fold` `(latest, before, roots)`: `before` the registrations shown
 before the current one, oldest first, one per root (an ended row naming another root pushes the
 current one and drops the new root's older entry), `roots` each registered project's root; a

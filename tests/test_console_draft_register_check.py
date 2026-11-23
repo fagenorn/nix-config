@@ -1,4 +1,4 @@
-"""The host check that a drafted registration ends on schema 3 and resolves (#1485).
+"""The host check that a drafted registration ends on schema 3 and resolves.
 
 Each case has its own HOME, so no case shares a registry, a plan store or an installed revision
 with another. The console and the resolver are injected; the fixture is built for real.
@@ -24,7 +24,7 @@ from agent_tools.console import draft_register_check, register
 from agent_tools.project_contract import agent_platform, derived_values, resolve_project
 
 from . import accounts_sandbox
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "integration"  # one case builds a real git repository and resolves it
 ROOT = Path(__file__).resolve().parent.parent

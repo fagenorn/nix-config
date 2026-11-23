@@ -1,4 +1,4 @@
-"""The drafted contract's derived values are fact lines with no Change control (#1485, ADR-console-033 D1)."""
+"""The drafted contract's derived values are fact lines with no Change control (ADR-console-033 D1)."""
 
 import json
 import unittest
@@ -6,7 +6,7 @@ import unittest
 from agent_tools.console import contract_draft, register
 from agent_tools.console.view import derive_view
 
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_page import ASKING, START, cards, full, has_class, nodes, registered, render
 
 TIER = "integration"  # the page cases run the page under node

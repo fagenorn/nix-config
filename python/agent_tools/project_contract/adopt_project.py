@@ -120,7 +120,7 @@ adoption does not write: the draft declares a supported schema below the one
 adoption writes, `adopt_planning.current_schema`) and
 `adopt.draft.id_taken` (the drafted project id is registered for another
 checkout). A draft of the adoption schema or a later one is planned; a schema-3
-draft leaves the derived values out, so it resolves strictly (#1485): in the
+draft leaves the derived values out, so it resolves strictly: in the
 scratch tree, with the checkout's origin, the conformance writes and the
 projections the contract generates, any refusal being `adopt.draft.invalid`,
 and it gains no interval. Its project id is the slug of the checkout's origin.
