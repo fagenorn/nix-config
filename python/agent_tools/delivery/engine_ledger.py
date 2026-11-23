@@ -528,9 +528,8 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
          alive: Callable[[int, str], bool]) -> RunState:
     """Derive a run's state from its events in one pass; no file, clock or process.
 
-    `process` is the last recorded process whose step visit has no stored result, and `alive` is
-    the probe's answer for it, whatever the stop or done state: reading those first is the caller's.
-    `steps` holds one summary per (step, visit), in the order the visits were first named.
+    `process` is the last recorded process whose step visit has no stored result, `alive` the probe's answer
+    for it, whatever the stop or done state (reading those first is the caller's); `steps` is one per visit.
     """
     stage = step = last_event = None
     wait = stop = None
