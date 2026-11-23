@@ -57,6 +57,10 @@ def _label_names(repo: str) -> list[str]:
     return names
 
 
+def _order(item: Requirement) -> tuple[str, bool, int]:
+    return (item[0], item[1] is not None, item[1] or 0)
+
+
 def protection_matches_tree(repo: str, base: str, root: Path,
                             absent_labels: Sequence[str]) -> tuple[int, dict]:
     """Met when the live required checks equal the tree's and no label is named in `absent_labels`."""
@@ -64,8 +68,7 @@ def protection_matches_tree(repo: str, base: str, root: Path,
     live = set(_required_checks(repo, base))
     gone = {name.casefold() for name in absent_labels}
     present = sorted(name for name in _label_names(repo) if name.casefold() in gone)
-    order = lambda item: (item[0], item[1] is not None, item[1] or 0)  # noqa: E731
-    missing, extra = sorted(wanted - live, key=order), sorted(live - wanted, key=order)
+    missing, extra = sorted(wanted - live, key=_order), sorted(live - wanted, key=_order)
     report = {"met": not (missing or extra or present), "missing": [list(r) for r in missing],
               "extra": [list(r) for r in extra], "labels_present": present}
     return (0 if report["met"] else 1), report
